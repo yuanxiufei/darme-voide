@@ -1,0 +1,473 @@
+<template>
+  <div class="lib-page">
+    <!-- 面包屑 -->
+    <div class="breadcrumb">
+      <NuxtLink to="/library" class="bc-link">资源库</NuxtLink>
+      <span class="bc-sep">/</span>
+      <span class="bc-current">角色库</span>
+    </div>
+
+    <!-- 标题栏 -->
+    <header class="page-header">
+      <div>
+        <h2>角色库</h2>
+        <p>视觉形象 + 声音配置，多维度标签分类管理</p>
+      </div>
+      <button class="btn-primary" @click="openCreate">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        新建角色
+      </button>
+    </header>
+
+    <!-- 搜索 + 筛选 -->
+    <div class="toolbar">
+      <div class="search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input v-model="search" @input="onSearch" placeholder="搜索角色名称、外貌、音色..." />
+        <button v-if="search" class="clear-btn" @click="search=''; onSearch()">×</button>
+      </div>
+      <div class="filter-row">
+        <select v-model="filterCategory" @change="onFilter" class="filter-select">
+          <option value="">全部分类</option>
+          <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <div class="tag-chips">
+          <button
+            v-for="t in allTags"
+            :key="t"
+            class="tag-chip"
+            :class="{ active: selectedTags.includes(t) }"
+            @click="toggleTag(t)"
+          >{{ t }}</button>
+        </div>
+        <button v-if="selectedItems.length" class="btn-danger-outline" @click="batchDelete">
+          删除 ({{ selectedItems.length }})
+        </button>
+      </div>
+    </div>
+
+    <!-- 列表 -->
+    <div class="card-grid" v-if="items.length">
+      <div
+        v-for="item in items" :key="item.id"
+        class="lib-card"
+        :class="{ selected: selectedItems.includes(item.id) }"
+        @click="toggleSelect(item.id)"
+      >
+        <div class="card-check">
+          <input type="checkbox" :checked="selectedItems.includes(item.id)" @click.stop />
+        </div>
+        <div class="card-avatar" :style="item.imageUrl ? { backgroundImage: `url(${item.imageUrl})` } : {}">
+          <span v-if="!item.imageUrl">{{ item.name?.charAt(0) || '?' }}</span>
+        </div>
+        <div class="card-body">
+          <div class="card-top">
+            <h4>{{ item.name }}</h4>
+            <span class="card-cat">{{ item.category }}</span>
+          </div>
+          <p class="card-desc">{{ truncate(item.appearance, 80) }}</p>
+          <div class="card-meta">
+            <div class="card-tags">
+              <span v-for="t in (item.tags || []).slice(0,3)" :key="t" class="mini-tag">{{ t }}</span>
+            </div>
+            <div class="card-actions" @click.stop>
+              <button class="action-btn" title="应用到项目" @click="openApply(item)">应用到项目</button>
+              <button class="action-btn" title="编辑" @click="openEdit(item)">编辑</button>
+              <button class="action-btn danger" title="删除" @click="deleteItem(item)">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="empty" v-else-if="!loading">
+      <p>暂无角色模板</p>
+      <button class="btn-secondary" @click="openCreate">创建第一个角色</button>
+    </div>
+
+    <!-- 分页 -->
+    <div class="pager" v-if="totalPages > 1">
+      <button :disabled="page <= 1" @click="page--; load()">上一页</button>
+      <span>第 {{ page }} / {{ totalPages }} 页 (共 {{ total }} 条)</span>
+      <button :disabled="page >= totalPages" @click="page++; load()">下一页</button>
+    </div>
+
+    <!-- 创建/编辑模态框 -->
+    <div class="modal-overlay" v-if="showForm" @click.self="showForm = false">
+      <div class="modal">
+        <h3>{{ editingItem ? '编辑角色' : '新建角色' }}</h3>
+        <div class="form-grid">
+          <label>名称 <input v-model="form.name" placeholder="角色名称" /></label>
+          <label>分类 <input v-model="form.category" placeholder="如: 主角、反派" /></label>
+          <label>性别 <select v-model="form.gender">
+            <option value="">不限</option><option value="男">男</option><option value="女">女</option>
+          </select></label>
+          <label>年龄段 <select v-model="form.ageGroup">
+            <option value="">不限</option><option value="少年">少年</option><option value="青年">青年</option><option value="中年">中年</option><option value="老年">老年</option>
+          </select></label>
+        </div>
+        <label>描述 <textarea v-model="form.description" rows="2" placeholder="角色简介" /></label>
+        <label>外貌特征 <textarea v-model="form.appearance" rows="3" placeholder="详细描述外貌、服装等视觉特征" /></label>
+        <label>性格 <input v-model="form.personality" placeholder="性格描述" /></label>
+        <label>服装风格 <input v-model="form.clothingStyle" placeholder="服装风格" /></label>
+        <label>表情特征 <input v-model="form.expression" placeholder="表情描述" /></label>
+        <label>头像URL <input v-model="form.imageUrl" placeholder="https://..." /></label>
+
+        <fieldset class="voice-section">
+          <legend>声音配置</legend>
+          <div class="form-grid">
+            <label>音色 <input v-model="form.voiceStyle" placeholder="如: 温柔女声" /></label>
+            <label>提供商 <input v-model="form.voiceProvider" placeholder="如: volcengine" /></label>
+            <label>语调 <input v-model="form.voiceTone" placeholder="如: 温柔" /></label>
+            <label>语速 <input v-model="form.voiceSpeed" placeholder="如: 1.0" /></label>
+          </div>
+        </fieldset>
+
+        <label>标签 <input v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="输入标签后按回车" />
+          <div class="chip-row">
+            <span v-for="(t,i) in form.tags" :key="i" class="chip">
+              {{ t }} <button @click="form.tags.splice(i,1)">×</button>
+            </span>
+          </div>
+        </label>
+
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showForm = false">取消</button>
+          <button class="btn-primary" @click="save" :disabled="saving">{{ saving ? '保存中...' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 应用到项目模态框 -->
+    <div class="modal-overlay" v-if="showApply" @click.self="showApply = false">
+      <div class="modal modal-sm">
+        <h3>应用到剧组</h3>
+        <p class="apply-desc">将 "{{ applyTarget?.name }}" 应用到以下剧组</p>
+        <select v-model="applyDramaId" class="full-select">
+          <option :value="null" disabled>选择剧组...</option>
+          <option v-for="d in dramas" :key="d.id" :value="d.id">{{ d.title }}</option>
+        </select>
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showApply = false">取消</button>
+          <button class="btn-primary" @click="doApply" :disabled="!applyDramaId">应用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { characterLibraryAPI, dramaAPI } from '~/composables/useApi'
+
+const search = ref('')
+const filterCategory = ref('')
+const selectedTags = ref([] as string[])
+const page = ref(1)
+const pageSize = 20
+
+const items = ref([] as any[])
+const total = ref(0)
+const totalPages = computed(() => Math.ceil(total.value / pageSize))
+const loading = ref(false)
+
+const categories = ref([] as string[])
+const allTags = ref([] as string[])
+const dramas = ref([] as any[])
+
+// 选择模式
+const selectedItems = ref([] as number[])
+function toggleSelect(id: number) {
+  const idx = selectedItems.value.indexOf(id)
+  if (idx >= 0) selectedItems.value.splice(idx, 1)
+  else selectedItems.value.push(id)
+}
+
+// 表单
+const showForm = ref(false)
+const editingItem = ref(null as any)
+const saving = ref(false)
+const form = reactive({
+  name: '', category: '', description: '', appearance: '', personality: '',
+  clothingStyle: '', expression: '', gender: '', ageGroup: '', imageUrl: '',
+  voiceStyle: '', voiceProvider: '', voiceTone: '', voiceSpeed: '',
+  tags: [] as string[],
+})
+const tagInput = ref('')
+
+function addTag() {
+  const t = tagInput.value.trim()
+  if (t && !form.tags.includes(t)) form.tags.push(t)
+  tagInput.value = ''
+}
+
+// 应用
+const showApply = ref(false)
+const applyTarget = ref(null as any)
+const applyDramaId = ref(null as number | null)
+
+// ===== 数据加载 =====
+async function load() {
+  loading.value = true
+  try {
+    const res = await characterLibraryAPI.list({
+      page: page.value, pageSize,
+      search: search.value || undefined,
+      category: filterCategory.value || undefined,
+      tags: selectedTags.value.join(',') || undefined,
+    })
+    items.value = res.items || []
+    total.value = res.total || 0
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadMeta() {
+  try {
+    const [cats, tags] = await Promise.all([characterLibraryAPI.categories(), characterLibraryAPI.tags()])
+    categories.value = cats || []
+    allTags.value = tags || []
+  } catch { /* silent */ }
+}
+
+function onSearch() { page.value = 1; load() }
+function onFilter() { page.value = 1; load() }
+function toggleTag(t: string) {
+  const i = selectedTags.value.indexOf(t)
+  if (i >= 0) selectedTags.value.splice(i, 1)
+  else selectedTags.value.push(t)
+  onFilter()
+}
+
+// ===== CRUD =====
+function openCreate() {
+  editingItem.value = null
+  Object.assign(form, {
+    name: '', category: '', description: '', appearance: '', personality: '',
+    clothingStyle: '', expression: '', gender: '', ageGroup: '', imageUrl: '',
+    voiceStyle: '', voiceProvider: '', voiceTone: '', voiceSpeed: '', tags: [],
+  })
+  showForm.value = true
+}
+
+function openEdit(item: any) {
+  editingItem.value = item
+  const vc = item.voiceConfig || {}
+  Object.assign(form, {
+    name: item.name, category: item.category, description: item.description,
+    appearance: item.appearance, personality: item.personality,
+    clothingStyle: item.clothingStyle, expression: item.expression,
+    gender: item.gender, ageGroup: item.ageGroup, imageUrl: item.imageUrl,
+    voiceStyle: item.voiceStyle, voiceProvider: item.voiceProvider,
+    voiceTone: vc.tone || '', voiceSpeed: vc.speed || '',
+    tags: Array.isArray(item.tags) ? [...item.tags] : [],
+  })
+  showForm.value = true
+}
+
+async function save() {
+  if (!form.name || !form.appearance) return
+  saving.value = true
+  try {
+    const payload = {
+      ...form,
+      voiceConfig: { tone: form.voiceTone, speed: form.voiceSpeed },
+      referenceImages: editingItem.value?.referenceImages || null,
+    }
+    if (editingItem.value) {
+      await characterLibraryAPI.update(editingItem.value.id, payload)
+    } else {
+      await characterLibraryAPI.create(payload)
+    }
+    showForm.value = false
+    await load()
+    await loadMeta()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function deleteItem(item: any) {
+  if (!confirm(`确认删除角色 "${item.name}"？`)) return
+  await characterLibraryAPI.del(item.id)
+  selectedItems.value = selectedItems.value.filter(id => id !== item.id)
+  await load()
+  await loadMeta()
+}
+
+async function batchDelete() {
+  if (!confirm(`确认删除 ${selectedItems.value.length} 个角色？`)) return
+  await characterLibraryAPI.batchDelete(selectedItems.value)
+  selectedItems.value = []
+  await load()
+  await loadMeta()
+}
+
+// ===== 应用到项目 =====
+async function openApply(item: any) {
+  applyTarget.value = item
+  applyDramaId.value = null
+  try {
+    const res = await dramaAPI.list()
+    dramas.value = res.items || []
+  } catch { dramas.value = [] }
+  showApply.value = true
+}
+
+async function doApply() {
+  if (!applyDramaId.value) return
+  await characterLibraryAPI.apply(applyTarget.value.id, applyDramaId.value)
+  showApply.value = false
+  await load()
+}
+
+onMounted(() => { load(); loadMeta() })
+
+function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, n) + '...' : s }
+</script>
+
+<style scoped>
+.lib-page {
+  height: 100%; overflow-y: auto;
+  padding: 24px 40px 40px;
+  max-width: 1200px; margin: 0 auto; width: 100%; box-sizing: border-box;
+}
+
+/* Breadcrumb */
+.breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); margin-bottom: 16px; }
+.bc-link { color: var(--accent-text); text-decoration: none; }
+.bc-link:hover { text-decoration: underline; }
+.bc-sep { color: var(--text-3); }
+.bc-current { color: var(--text-0); font-weight: 500; }
+
+/* Header */
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
+.page-header h2 { font-family: var(--font-display); font-size: 22px; font-weight: 700; color: var(--text-0); }
+.page-header p { font-size: 13px; color: var(--text-2); margin-top: 4px; }
+
+.btn-primary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 18px; background: var(--accent); color: #fff;
+  border: none; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary:disabled { opacity: 0.5; cursor: default; }
+.btn-secondary {
+  padding: 9px 18px; background: var(--bg-2); color: var(--text-1);
+  border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; cursor: pointer;
+}
+.btn-danger-outline {
+  padding: 7px 14px; background: transparent; color: var(--danger, #ef4444);
+  border: 1px solid var(--danger, #ef4444); border-radius: var(--radius); font-size: 12px; cursor: pointer;
+}
+
+/* Toolbar */
+.toolbar { margin-bottom: 20px; }
+.search-box {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+.search-box input {
+  flex: 1; background: none; border: none; outline: none;
+  font-size: 13px; color: var(--text-0);
+}
+.search-box input::placeholder { color: var(--text-3); }
+.clear-btn { background: none; border: none; color: var(--text-3); cursor: pointer; font-size: 16px; }
+
+.filter-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.filter-select {
+  padding: 7px 12px; background: var(--bg-1); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 13px; color: var(--text-0); outline: none;
+}
+.tag-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.tag-chip {
+  padding: 4px 10px; font-size: 12px; border-radius: 12px;
+  background: var(--bg-2); color: var(--text-2);
+  border: 1px solid var(--border); cursor: pointer; transition: all 0.15s;
+}
+.tag-chip.active { background: var(--accent-bg); color: var(--accent-text); border-color: rgba(76,125,255,0.3); }
+
+/* Card Grid */
+.card-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px;
+}
+.lib-card {
+  display: flex; gap: 14px;
+  padding: 16px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius);
+  cursor: pointer; transition: all 0.15s;
+}
+.lib-card:hover { border-color: var(--accent); }
+.lib-card.selected { border-color: var(--accent); background: var(--accent-bg); }
+.card-check { flex-shrink: 0; padding-top: 2px; }
+.card-avatar {
+  width: 56px; height: 56px; flex-shrink: 0;
+  border-radius: var(--radius); background: var(--bg-2);
+  background-size: cover; background-position: center;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 700; color: var(--text-3);
+  border: 1px solid var(--border);
+}
+.card-body { flex: 1; min-width: 0; }
+.card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.card-top h4 { font-size: 15px; font-weight: 600; color: var(--text-0); }
+.card-cat { font-size: 11px; padding: 1px 7px; background: var(--bg-2); border-radius: 8px; color: var(--text-2); }
+.card-desc { font-size: 12px; color: var(--text-2); line-height: 1.5; margin-bottom: 8px; }
+.card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.mini-tag { font-size: 10px; padding: 1px 6px; background: var(--bg-2); border-radius: 6px; color: var(--text-3); }
+.card-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.action-btn {
+  padding: 3px 8px; font-size: 11px; border-radius: 4px;
+  background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); cursor: pointer;
+}
+.action-btn:hover { color: var(--accent-text); border-color: var(--accent); }
+.action-btn.danger:hover { color: #ef4444; border-color: #ef4444; }
+
+/* Pager */
+.pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 24px; font-size: 13px; color: var(--text-2); }
+.pager button {
+  padding: 6px 14px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; color: var(--text-1); font-size: 13px;
+}
+.pager button:disabled { opacity: 0.4; cursor: default; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 28px; width: 640px; max-height: 80vh; overflow-y: auto;
+}
+.modal-sm { width: 400px; }
+.modal h3 { font-size: 17px; font-weight: 600; color: var(--text-0); margin-bottom: 20px; }
+.apply-desc { font-size: 13px; color: var(--text-2); margin-bottom: 14px; }
+.full-select { width: 100%; padding: 9px 12px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-0); font-size: 13px; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.modal label { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 10px; font-weight: 500; }
+.modal input, .modal textarea, .modal select {
+  display: block; width: 100%; margin-top: 4px;
+  padding: 8px 10px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 13px; color: var(--text-0); outline: none; box-sizing: border-box;
+  font-family: inherit;
+}
+.modal textarea { resize: vertical; }
+.modal input:focus, .modal textarea:focus, .modal select:focus { border-color: var(--accent); }
+
+.voice-section { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; }
+.voice-section legend { font-size: 12px; font-weight: 600; color: var(--text-2); padding: 0 6px; }
+
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.chip {
+  font-size: 12px; padding: 2px 8px; background: var(--accent-bg); color: var(--accent-text); border-radius: 10px;
+  display: flex; align-items: center; gap: 4px;
+}
+.chip button { background: none; border: none; color: var(--accent-text); cursor: pointer; font-size: 14px; padding: 0; }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+.empty { text-align: center; padding: 60px 20px; color: var(--text-3); }
+.empty p { margin-bottom: 16px; font-size: 14px; }
+</style>
