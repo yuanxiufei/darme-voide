@@ -2,7 +2,6 @@
  * 兵器库路由 - 管理兵器模板的 CRUD、搜索筛选
  */
 import { Hono } from 'hono'
-import { db } from '../db/index.js'
 import { qAll, qGet, qRun } from '../db/queryHelper.js'
 
 const Q_ALL = qAll as any

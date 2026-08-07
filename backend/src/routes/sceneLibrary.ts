@@ -2,7 +2,6 @@
  * 场景库路由 - 管理场景模板的 CRUD、搜索筛选、应用到项目
  */
 import { Hono } from 'hono'
-import { db } from '../db/index.js'
 import { qAll, qGet, qRun } from '../db/queryHelper.js'
 
 const Q_ALL = qAll as any

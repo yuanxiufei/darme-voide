@@ -5,9 +5,9 @@ import { Hono } from 'hono'
 import { db } from '../db/index.js'
 import { qAll, qGet, qRun } from '../db/queryHelper.js'
 
-const Q_ALL = qAll as any
-const Q_GET = qGet as any
-const Q_RUN = qRun as any
+const Q_ALL = (...args: any[]) => (qAll as any)(...args)
+const Q_GET = (...args: any[]) => (qGet as any)(...args)
+const Q_RUN = (...args: any[]) => (qRun as any)(...args)
 import { now } from '../utils/response.js'
 
 const router = new Hono()
