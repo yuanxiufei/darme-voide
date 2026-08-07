@@ -3,6 +3,11 @@
  */
 import { Hono } from 'hono'
 import { db } from '../db/index.js'
+import { qAll, qGet, qRun } from '../db/queryHelper.js'
+
+const Q_ALL = qAll as any
+const Q_GET = qGet as any
+const Q_RUN = qRun as any
 import { success, badRequest, now } from '../utils/response.js'
 
 const router = new Hono()
@@ -66,11 +71,11 @@ router.get('/', async (c) => {
     const sortField = allowedSorts.includes(q.sortBy) ? q.sortBy : 'updated_at'
     const sortDir = q.sortOrder === 'asc' ? 'ASC' : 'DESC'
 
-    const countResult = db.all(`SELECT COUNT(*) as total FROM character_templates ${where}`, ...params) as any[]
+    const countResult = Q_ALL(`SELECT COUNT(*) as total FROM character_templates ${where}`, ...params) as any[]
     const total = countResult[0]?.total ?? 0
     const offset = (q.page - 1) * q.pageSize
 
-    const items = db.all(
+    const items = Q_ALL(
       `SELECT * FROM character_templates ${where} ORDER BY ${sortField} ${sortDir} LIMIT ? OFFSET ?`,
       ...params, q.pageSize, offset,
     ) as any[]
@@ -92,7 +97,7 @@ router.get('/', async (c) => {
 // ====== GET /categories ======
 router.get('/categories', async (c) => {
   try {
-    const rows = db.all('SELECT DISTINCT category FROM character_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
+    const rows = Q_ALL('SELECT DISTINCT category FROM character_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
     return c.json({ code: 0, data: rows.map(r => r.category) })
   } catch (err: any) {
     return c.json({ code: 500, data: null, message: err.message })
@@ -102,7 +107,7 @@ router.get('/categories', async (c) => {
 // ====== GET /tags ======
 router.get('/tags', async (c) => {
   try {
-    const rows = db.all('SELECT tags FROM character_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
+    const rows = Q_ALL('SELECT tags FROM character_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
     const tagSet = new Set<string>()
     rows.forEach(r => {
       const parsed = safeParseJson(r.tags)
@@ -118,7 +123,7 @@ router.get('/tags', async (c) => {
 router.get('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
-    const row = db.get('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const row = Q_GET('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!row) return c.json({ code: 404, data: null, message: '角色模板不存在' })
     row.tags = safeParseJson(row.tags)
     row.voiceConfig = safeParseJson(row.voice_config)
@@ -141,7 +146,7 @@ router.post('/', async (c) => {
     if (!name || !appearance) return c.json({ code: 400, data: null, message: '名称和外貌描述为必填项' })
 
     const t = now()
-    const result = db.run(
+    const result = Q_RUN(
       `INSERT INTO character_templates
         (name, category, description, appearance, personality, clothing_style,
          expression, gender, age_group, image_url, reference_images,
@@ -165,7 +170,7 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
-    const existing = db.get('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const existing = Q_GET('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '角色模板不存在' })
 
     const body = await c.req.json()
@@ -174,7 +179,7 @@ router.put('/:id', async (c) => {
       voiceStyle, voiceProvider, voiceConfig, tags, metadata } = body
 
     const t = now()
-    db.run(
+    Q_RUN(
       `UPDATE character_templates SET
         name=?, category=?, description=?, appearance=?, personality=?,
         clothing_style=?, expression=?, gender=?, age_group=?,
@@ -205,7 +210,7 @@ router.delete('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
     const t = now()
-    const result = db.run('UPDATE character_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', t, id)
+    const result = Q_RUN('UPDATE character_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', t, id)
     if (result.changes === 0) return c.json({ code: 404, data: null, message: '角色模板不存在' })
     return c.json({ code: 0, data: { id }, message: '删除成功' })
   } catch (err: any) {
@@ -220,7 +225,7 @@ router.post('/batch-delete', async (c) => {
     if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
     const t = now()
     const placeholders = ids.map(() => '?').join(',')
-    const result = db.run(`UPDATE character_templates SET deleted_at = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`, t, ...ids)
+    const result = Q_RUN(`UPDATE character_templates SET deleted_at = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`, t, ...ids)
     return c.json({ code: 0, data: { deletedCount: result.changes }, message: `成功删除 ${result.changes} 个角色模板` })
   } catch (err: any) {
     return c.json({ code: 500, data: null, message: err.message || '批量删除失败' })
@@ -234,14 +239,14 @@ router.post('/:id/apply', async (c) => {
     const { dramaId } = await c.req.json()
     if (!dramaId) return c.json({ code: 400, data: null, message: '请提供目标剧组ID' })
 
-    const template = db.get('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const template = Q_GET('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!template) return c.json({ code: 404, data: null, message: '角色模板不存在' })
 
-    const drama = db.get('SELECT id FROM dramas WHERE id = ? AND deleted_at IS NULL', dramaId) as any
+    const drama = Q_GET('SELECT id FROM dramas WHERE id = ? AND deleted_at IS NULL', dramaId) as any
     if (!drama) return c.json({ code: 404, data: null, message: '剧组不存在' })
 
     const t = now()
-    const result = db.run(
+    const result = Q_RUN(
       `INSERT INTO characters
         (drama_id, name, role, description, appearance, personality,
          voice_style, voice_provider, image_url, reference_images, created_at, updated_at)
@@ -252,7 +257,7 @@ router.post('/:id/apply', async (c) => {
       template.voice_provider || '', template.image_url || '',
       template.reference_images || '', t, t,
     )
-    db.run('UPDATE character_templates SET usage_count = usage_count + 1 WHERE id = ?', id)
+    Q_RUN('UPDATE character_templates SET usage_count = usage_count + 1 WHERE id = ?', id)
     return c.json({ code: 0, data: { characterId: result.lastInsertRowid }, message: `角色 "${template.name}" 已应用到剧组` })
   } catch (err: any) {
     return c.json({ code: 500, data: null, message: err.message || '应用角色模板失败' })
@@ -263,11 +268,11 @@ router.post('/:id/apply', async (c) => {
 router.post('/from-character/:characterId', async (c) => {
   try {
     const charId = parseInt(c.req.param('characterId'))
-    const character = db.get('SELECT * FROM characters WHERE id = ? AND deleted_at IS NULL', charId) as any
+    const character = Q_GET('SELECT * FROM characters WHERE id = ? AND deleted_at IS NULL', charId) as any
     if (!character) return c.json({ code: 404, data: null, message: '角色不存在' })
 
     const t = now()
-    const result = db.run(
+    const result = Q_RUN(
       `INSERT INTO character_templates
         (name, category, description, appearance, personality,
          clothing_style, image_url, reference_images,

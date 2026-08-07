@@ -57,7 +57,7 @@
 </template>
 
 <script setup>
-import brandLogo from '~/assets/brand-logo.png'
+import brandLogo from '~/assets/brand-logo.svg'
 
 const route = useRoute()
 const showBrandImage = ref(true)

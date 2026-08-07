@@ -3,6 +3,11 @@
  */
 import { Hono } from 'hono'
 import { db } from '../db/index.js'
+import { qAll, qGet, qRun } from '../db/queryHelper.js'
+
+const Q_ALL = qAll as any
+const Q_GET = qGet as any
+const Q_RUN = qRun as any
 import { now } from '../utils/response.js'
 
 const router = new Hono()
@@ -59,10 +64,10 @@ router.get('/', async (c) => {
     const sf = allowedSorts.includes(q.sortBy) ? q.sortBy : 'updated_at'
     const sd = q.sortOrder === 'asc' ? 'ASC' : 'DESC'
 
-    const total = (db.all(`SELECT COUNT(*) as total FROM scene_templates ${where}`, ...params) as any[])[0]?.total ?? 0
+    const total = (Q_ALL(`SELECT COUNT(*) as total FROM scene_templates ${where}`, ...params) as any[])[0]?.total ?? 0
     const offset = (q.page - 1) * q.pageSize
 
-    const items = db.all(`SELECT * FROM scene_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
+    const items = Q_ALL(`SELECT * FROM scene_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
     const parsed = items.map(item => ({ ...item, tags: safeParseJson(item.tags), metadata: safeParseJson(item.metadata), referenceImages: safeParseJson(item.reference_images) }))
 
     return c.json({ code: 0, data: { items: parsed, total, page: q.page, pageSize: q.pageSize, totalPages: Math.ceil(total / q.pageSize) } })
@@ -72,18 +77,18 @@ router.get('/', async (c) => {
 })
 
 router.get('/categories', async (c) => {
-  const rows = db.all('SELECT DISTINCT category FROM scene_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
+  const rows = Q_ALL('SELECT DISTINCT category FROM scene_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
   return c.json({ code: 0, data: rows.map(r => r.category) })
 })
 
 router.get('/filter-options', async (c) => {
-  const timeOfDay = (db.all('SELECT DISTINCT time_of_day FROM scene_templates WHERE deleted_at IS NULL AND time_of_day IS NOT NULL ORDER BY time_of_day') as any[]).map(r => r.time_of_day)
-  const styles = (db.all('SELECT DISTINCT style FROM scene_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
+  const timeOfDay = (Q_ALL('SELECT DISTINCT time_of_day FROM scene_templates WHERE deleted_at IS NULL AND time_of_day IS NOT NULL ORDER BY time_of_day') as any[]).map(r => r.time_of_day)
+  const styles = (Q_ALL('SELECT DISTINCT style FROM scene_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
   return c.json({ code: 0, data: { timeOfDay, styles } })
 })
 
 router.get('/tags', async (c) => {
-  const rows = db.all('SELECT tags FROM scene_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
+  const rows = Q_ALL('SELECT tags FROM scene_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
   const tagSet = new Set<string>()
   rows.forEach(r => { const p = safeParseJson(r.tags); if (Array.isArray(p)) p.forEach((t: string) => tagSet.add(t)) })
   return c.json({ code: 0, data: [...tagSet].sort() })
@@ -91,7 +96,7 @@ router.get('/tags', async (c) => {
 
 router.get('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const row = db.get('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+  const row = Q_GET('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
   if (!row) return c.json({ code: 404, data: null, message: '场景模板不存在' })
   row.tags = safeParseJson(row.tags); row.metadata = safeParseJson(row.metadata); row.referenceImages = safeParseJson(row.reference_images)
   return c.json({ code: 0, data: row })
@@ -103,7 +108,7 @@ router.post('/', async (c) => {
     const { name, category, description, location, atmosphere, lighting, timeOfDay, style, season, weather, imageUrl, referenceImages, prompt, tags, metadata, sourceDramaId } = body
     if (!name) return c.json({ code: 400, data: null, message: '名称为必填项' })
     const t = now()
-    const r = db.run(
+    const r = Q_RUN(
       `INSERT INTO scene_templates (name,category,description,location,atmosphere,lighting,time_of_day,style,season,weather,image_url,reference_images,prompt,tags,metadata,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       name, category || '通用', description || '', location || '', atmosphere || '', lighting || '', timeOfDay || '', style || '', season || '', weather || '', imageUrl || '', safeStringify(referenceImages), prompt || '', safeStringify(tags), safeStringify(metadata), sourceDramaId || null, t, t,
     )
@@ -114,12 +119,12 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
-    const existing = db.get('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const existing = Q_GET('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '场景模板不存在' })
     const body = await c.req.json()
     const { name, category, description, location, atmosphere, lighting, timeOfDay, style, season, weather, imageUrl, referenceImages, prompt, tags, metadata } = body
     const t = now()
-    db.run(
+    Q_RUN(
       `UPDATE scene_templates SET name=?,category=?,description=?,location=?,atmosphere=?,lighting=?,time_of_day=?,style=?,season=?,weather=?,image_url=?,reference_images=?,prompt=?,tags=?,metadata=?,updated_at=? WHERE id=?`,
       name ?? existing.name, category ?? existing.category, description ?? existing.description, location ?? existing.location, atmosphere ?? existing.atmosphere, lighting ?? existing.lighting, timeOfDay ?? existing.time_of_day, style ?? existing.style, season ?? existing.season, weather ?? existing.weather, imageUrl ?? existing.image_url, referenceImages !== undefined ? safeStringify(referenceImages) : existing.reference_images, prompt ?? existing.prompt, tags !== undefined ? safeStringify(tags) : existing.tags, metadata !== undefined ? safeStringify(metadata) : existing.metadata, t, id,
     )
@@ -129,7 +134,7 @@ router.put('/:id', async (c) => {
 
 router.delete('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const r = db.run('UPDATE scene_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
+  const r = Q_RUN('UPDATE scene_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
   if (r.changes === 0) return c.json({ code: 404, data: null, message: '场景模板不存在' })
   return c.json({ code: 0, data: { id }, message: '删除成功' })
 })
@@ -138,7 +143,7 @@ router.post('/batch-delete', async (c) => {
   const { ids } = await c.req.json()
   if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
   const t = now(); const p = ids.map(() => '?').join(',')
-  const r = db.run(`UPDATE scene_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
+  const r = Q_RUN(`UPDATE scene_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
   return c.json({ code: 0, data: { deletedCount: r.changes }, message: `成功删除 ${r.changes} 个场景模板` })
 })
 
@@ -147,14 +152,14 @@ router.post('/:id/apply', async (c) => {
     const id = parseInt(c.req.param('id'))
     const { dramaId, episodeId } = await c.req.json()
     if (!dramaId) return c.json({ code: 400, data: null, message: '请提供目标剧组ID' })
-    const tpl = db.get('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const tpl = Q_GET('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!tpl) return c.json({ code: 404, data: null, message: '场景模板不存在' })
     const t = now()
-    const r = db.run(
+    const r = Q_RUN(
       `INSERT INTO scenes (drama_id,episode_id,location,time,prompt,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
       dramaId, episodeId || null, tpl.location || tpl.name, tpl.time_of_day || '白天', tpl.prompt || `${tpl.location}，${tpl.atmosphere}，${tpl.lighting}`, 'pending', t, t,
     )
-    db.run('UPDATE scene_templates SET usage_count = usage_count + 1 WHERE id = ?', id)
+    Q_RUN('UPDATE scene_templates SET usage_count = usage_count + 1 WHERE id = ?', id)
     return c.json({ code: 0, data: { sceneId: r.lastInsertRowid }, message: `场景 "${tpl.name}" 已应用到剧组` })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
@@ -162,10 +167,10 @@ router.post('/:id/apply', async (c) => {
 router.post('/from-scene/:sceneId', async (c) => {
   try {
     const sid = parseInt(c.req.param('sceneId'))
-    const sc = db.get('SELECT * FROM scenes WHERE id = ? AND deleted_at IS NULL', sid) as any
+    const sc = Q_GET('SELECT * FROM scenes WHERE id = ? AND deleted_at IS NULL', sid) as any
     if (!sc) return c.json({ code: 404, data: null, message: '场景不存在' })
     const t = now()
-    const r = db.run(`INSERT INTO scene_templates (name,category,location,time_of_day,prompt,image_url,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+    const r = Q_RUN(`INSERT INTO scene_templates (name,category,location,time_of_day,prompt,image_url,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
       sc.location || '未命名场景', '通用', sc.location, sc.time, sc.prompt, sc.image_url || '', sc.drama_id, t, t)
     return c.json({ code: 0, data: { templateId: r.lastInsertRowid }, message: '场景已保存到场景库' })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }

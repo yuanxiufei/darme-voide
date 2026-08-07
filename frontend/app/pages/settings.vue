@@ -430,7 +430,7 @@ import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, 
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, agentConfigAPI, skillsAPI } from '~/composables/useApi'
-import brandLogo from '~/assets/brand-logo.png'
+import brandLogo from '~/assets/brand-logo.svg'
 
 const showBrandImage = ref(true)
 const tab = ref('ai')

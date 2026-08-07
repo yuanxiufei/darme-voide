@@ -3,6 +3,11 @@
  */
 import { Hono } from 'hono'
 import { db } from '../db/index.js'
+import { qAll, qGet, qRun } from '../db/queryHelper.js'
+
+const Q_ALL = qAll as any
+const Q_GET = qGet as any
+const Q_RUN = qRun as any
 import { now } from '../utils/response.js'
 
 const router = new Hono()
@@ -59,29 +64,29 @@ router.get('/', async (c) => {
     const sf = allowedSorts.includes(q.sortBy) ? q.sortBy : 'updated_at'
     const sd = q.sortOrder === 'asc' ? 'ASC' : 'DESC'
 
-    const total = (db.all(`SELECT COUNT(*) as total FROM weapon_templates ${where}`, ...params) as any[])[0]?.total ?? 0
+    const total = (Q_ALL(`SELECT COUNT(*) as total FROM weapon_templates ${where}`, ...params) as any[])[0]?.total ?? 0
     const offset = (q.page - 1) * q.pageSize
-    const items = db.all(`SELECT * FROM weapon_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
+    const items = Q_ALL(`SELECT * FROM weapon_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
     const parsed = items.map(item => ({ ...item, tags: safeParseJson(item.tags), attributes: safeParseJson(item.attributes), metadata: safeParseJson(item.metadata), referenceImages: safeParseJson(item.reference_images) }))
     return c.json({ code: 0, data: { items: parsed, total, page: q.page, pageSize: q.pageSize, totalPages: Math.ceil(total / q.pageSize) } })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/filter-options', async (c) => {
-  const cats = (db.all('SELECT DISTINCT category FROM weapon_templates WHERE deleted_at IS NULL AND category IS NOT NULL ORDER BY category') as any[]).map(r => r.category)
-  const types = (db.all('SELECT DISTINCT type FROM weapon_templates WHERE deleted_at IS NULL AND type IS NOT NULL ORDER BY type') as any[]).map(r => r.type)
-  const ranks = (db.all('SELECT DISTINCT rank FROM weapon_templates WHERE deleted_at IS NULL AND rank IS NOT NULL ORDER BY rank') as any[]).map(r => r.rank)
+  const cats = (Q_ALL('SELECT DISTINCT category FROM weapon_templates WHERE deleted_at IS NULL AND category IS NOT NULL ORDER BY category') as any[]).map(r => r.category)
+  const types = (Q_ALL('SELECT DISTINCT type FROM weapon_templates WHERE deleted_at IS NULL AND type IS NOT NULL ORDER BY type') as any[]).map(r => r.type)
+  const ranks = (Q_ALL('SELECT DISTINCT rank FROM weapon_templates WHERE deleted_at IS NULL AND rank IS NOT NULL ORDER BY rank') as any[]).map(r => r.rank)
   return c.json({ code: 0, data: { categories: cats.length ? cats : WEAPON_CATEGORIES, types: types.length ? types : WEAPON_TYPES, ranks: ranks.length ? ranks : WEAPON_RANKS } })
 })
 
 router.get('/categories', async (c) => {
-  const rows = db.all('SELECT DISTINCT category FROM weapon_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
+  const rows = Q_ALL('SELECT DISTINCT category FROM weapon_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
   const cats = rows.map(r => r.category)
   return c.json({ code: 0, data: cats.length ? cats : WEAPON_CATEGORIES })
 })
 
 router.get('/tags', async (c) => {
-  const rows = db.all('SELECT tags FROM weapon_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
+  const rows = Q_ALL('SELECT tags FROM weapon_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
   const tagSet = new Set<string>()
   rows.forEach(r => { const p = safeParseJson(r.tags); if (Array.isArray(p)) p.forEach((t: string) => tagSet.add(t)) })
   return c.json({ code: 0, data: [...tagSet].sort() })
@@ -89,7 +94,7 @@ router.get('/tags', async (c) => {
 
 router.get('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const row = db.get('SELECT * FROM weapon_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+  const row = Q_GET('SELECT * FROM weapon_templates WHERE id = ? AND deleted_at IS NULL', id) as any
   if (!row) return c.json({ code: 404, data: null, message: '兵器模板不存在' })
   row.tags = safeParseJson(row.tags); row.attributes = safeParseJson(row.attributes); row.metadata = safeParseJson(row.metadata); row.referenceImages = safeParseJson(row.reference_images)
   return c.json({ code: 0, data: row })
@@ -101,7 +106,7 @@ router.post('/', async (c) => {
     const { name, category, type, description, appearance, material, attributes, rank, ownerCharacterName, imageUrl, referenceImages, tags, metadata, sourceDramaId } = body
     if (!name) return c.json({ code: 400, data: null, message: '名称为必填项' })
     const t = now()
-    const r = db.run(
+    const r = Q_RUN(
       `INSERT INTO weapon_templates (name,category,type,description,appearance,material,attributes,rank,owner_character_name,image_url,reference_images,tags,metadata,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       name, category || '剑', type || '', description || '', appearance || '', material || '', safeStringify(attributes), rank || '', ownerCharacterName || '', imageUrl || '', safeStringify(referenceImages), safeStringify(tags), safeStringify(metadata), sourceDramaId || null, t, t,
     )
@@ -112,12 +117,12 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
-    const existing = db.get('SELECT * FROM weapon_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const existing = Q_GET('SELECT * FROM weapon_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '兵器模板不存在' })
     const body = await c.req.json()
     const { name, category, type, description, appearance, material, attributes, rank, ownerCharacterName, imageUrl, referenceImages, tags, metadata } = body
     const t = now()
-    db.run(
+    Q_RUN(
       `UPDATE weapon_templates SET name=?,category=?,type=?,description=?,appearance=?,material=?,attributes=?,rank=?,owner_character_name=?,image_url=?,reference_images=?,tags=?,metadata=?,updated_at=? WHERE id=?`,
       name ?? existing.name, category ?? existing.category, type ?? existing.type, description ?? existing.description, appearance ?? existing.appearance, material ?? existing.material, attributes !== undefined ? safeStringify(attributes) : existing.attributes, rank ?? existing.rank, ownerCharacterName ?? existing.owner_character_name, imageUrl ?? existing.image_url, referenceImages !== undefined ? safeStringify(referenceImages) : existing.reference_images, tags !== undefined ? safeStringify(tags) : existing.tags, metadata !== undefined ? safeStringify(metadata) : existing.metadata, t, id,
     )
@@ -127,7 +132,7 @@ router.put('/:id', async (c) => {
 
 router.delete('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const r = db.run('UPDATE weapon_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
+  const r = Q_RUN('UPDATE weapon_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
   if (r.changes === 0) return c.json({ code: 404, data: null, message: '兵器模板不存在' })
   return c.json({ code: 0, data: { id }, message: '删除成功' })
 })
@@ -136,17 +141,17 @@ router.post('/batch-delete', async (c) => {
   const { ids } = await c.req.json()
   if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
   const t = now(); const p = ids.map(() => '?').join(',')
-  const r = db.run(`UPDATE weapon_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
+  const r = Q_RUN(`UPDATE weapon_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
   return c.json({ code: 0, data: { deletedCount: r.changes }, message: `成功删除 ${r.changes} 个兵器模板` })
 })
 
 router.post('/from-prop/:propId', async (c) => {
   try {
     const pid = parseInt(c.req.param('propId'))
-    const prop = db.get('SELECT * FROM props WHERE id = ? AND deleted_at IS NULL', pid) as any
+    const prop = Q_GET('SELECT * FROM props WHERE id = ? AND deleted_at IS NULL', pid) as any
     if (!prop) return c.json({ code: 404, data: null, message: '道具不存在' })
     const t = now()
-    const r = db.run(`INSERT INTO weapon_templates (name,category,description,appearance,image_url,reference_images,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+    const r = Q_RUN(`INSERT INTO weapon_templates (name,category,description,appearance,image_url,reference_images,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
       prop.name, prop.type || '其他', prop.description || '', prop.prompt || '', prop.image_url || '', prop.reference_images || '', prop.drama_id, t, t)
     return c.json({ code: 0, data: { templateId: r.lastInsertRowid }, message: `道具 "${prop.name}" 已保存到兵器库` })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }

@@ -3,6 +3,11 @@
  */
 import { Hono } from 'hono'
 import { db } from '../db/index.js'
+import { qAll, qGet, qRun } from '../db/queryHelper.js'
+
+const Q_ALL = qAll as any
+const Q_GET = qGet as any
+const Q_RUN = qRun as any
 import { now } from '../utils/response.js'
 
 const router = new Hono()
@@ -59,28 +64,28 @@ router.get('/', async (c) => {
     const sf = allowedSorts.includes(q.sortBy) ? q.sortBy : 'updated_at'
     const sd = q.sortOrder === 'asc' ? 'ASC' : 'DESC'
 
-    const total = (db.all(`SELECT COUNT(*) as total FROM costume_templates ${where}`, ...params) as any[])[0]?.total ?? 0
+    const total = (Q_ALL(`SELECT COUNT(*) as total FROM costume_templates ${where}`, ...params) as any[])[0]?.total ?? 0
     const offset = (q.page - 1) * q.pageSize
-    const items = db.all(`SELECT * FROM costume_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
+    const items = Q_ALL(`SELECT * FROM costume_templates ${where} ORDER BY ${sf} ${sd} LIMIT ? OFFSET ?`, ...params, q.pageSize, offset) as any[]
     const parsed = items.map(item => ({ ...item, tags: safeParseJson(item.tags), metadata: safeParseJson(item.metadata), referenceImages: safeParseJson(item.reference_images) }))
     return c.json({ code: 0, data: { items: parsed, total, page: q.page, pageSize: q.pageSize, totalPages: Math.ceil(total / q.pageSize) } })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/filter-options', async (c) => {
-  const styles = (db.all('SELECT DISTINCT style FROM costume_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
-  const bodyParts = (db.all('SELECT DISTINCT body_part FROM costume_templates WHERE deleted_at IS NULL AND body_part IS NOT NULL ORDER BY body_part') as any[]).map(r => r.body_part)
-  const seasons = (db.all('SELECT DISTINCT season FROM costume_templates WHERE deleted_at IS NULL AND season IS NOT NULL ORDER BY season') as any[]).map(r => r.season)
+  const styles = (Q_ALL('SELECT DISTINCT style FROM costume_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
+  const bodyParts = (Q_ALL('SELECT DISTINCT body_part FROM costume_templates WHERE deleted_at IS NULL AND body_part IS NOT NULL ORDER BY body_part') as any[]).map(r => r.body_part)
+  const seasons = (Q_ALL('SELECT DISTINCT season FROM costume_templates WHERE deleted_at IS NULL AND season IS NOT NULL ORDER BY season') as any[]).map(r => r.season)
   return c.json({ code: 0, data: { styles: styles.length ? styles : COSTUME_STYLES, bodyParts: bodyParts.length ? bodyParts : BODY_PARTS, seasons: seasons.length ? seasons : SEASONS } })
 })
 
 router.get('/categories', async (c) => {
-  const rows = db.all('SELECT DISTINCT category FROM costume_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
+  const rows = Q_ALL('SELECT DISTINCT category FROM costume_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
   return c.json({ code: 0, data: rows.map(r => r.category) })
 })
 
 router.get('/tags', async (c) => {
-  const rows = db.all('SELECT tags FROM costume_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
+  const rows = Q_ALL('SELECT tags FROM costume_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
   const tagSet = new Set<string>()
   rows.forEach(r => { const p = safeParseJson(r.tags); if (Array.isArray(p)) p.forEach((t: string) => tagSet.add(t)) })
   return c.json({ code: 0, data: [...tagSet].sort() })
@@ -88,7 +93,7 @@ router.get('/tags', async (c) => {
 
 router.get('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const row = db.get('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+  const row = qGet('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
   if (!row) return c.json({ code: 404, data: null, message: '服装模板不存在' })
   row.tags = safeParseJson(row.tags); row.metadata = safeParseJson(row.metadata); row.referenceImages = safeParseJson(row.reference_images)
   return c.json({ code: 0, data: row })
@@ -100,7 +105,7 @@ router.post('/', async (c) => {
     const { name, category, description, style, bodyPart, material, colorScheme, season, appearance, imageUrl, referenceImages, tags, metadata, sourceDramaId } = body
     if (!name) return c.json({ code: 400, data: null, message: '名称为必填项' })
     const t = now()
-    const r = db.run(
+    const r = Q_RUN(
       `INSERT INTO costume_templates (name,category,description,style,body_part,material,color_scheme,season,appearance,image_url,reference_images,tags,metadata,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       name, category || '通用', description || '', style || '', bodyPart || '', material || '', colorScheme || '', season || '', appearance || '', imageUrl || '', safeStringify(referenceImages), safeStringify(tags), safeStringify(metadata), sourceDramaId || null, t, t,
     )
@@ -111,12 +116,12 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
-    const existing = db.get('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
+    const existing = qGet('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '服装模板不存在' })
     const body = await c.req.json()
     const { name, category, description, style, bodyPart, material, colorScheme, season, appearance, imageUrl, referenceImages, tags, metadata } = body
     const t = now()
-    db.run(
+    Q_RUN(
       `UPDATE costume_templates SET name=?,category=?,description=?,style=?,body_part=?,material=?,color_scheme=?,season=?,appearance=?,image_url=?,reference_images=?,tags=?,metadata=?,updated_at=? WHERE id=?`,
       name ?? existing.name, category ?? existing.category, description ?? existing.description, style ?? existing.style, bodyPart ?? existing.body_part, material ?? existing.material, colorScheme ?? existing.color_scheme, season ?? existing.season, appearance ?? existing.appearance, imageUrl ?? existing.image_url, referenceImages !== undefined ? safeStringify(referenceImages) : existing.reference_images, tags !== undefined ? safeStringify(tags) : existing.tags, metadata !== undefined ? safeStringify(metadata) : existing.metadata, t, id,
     )
@@ -126,7 +131,7 @@ router.put('/:id', async (c) => {
 
 router.delete('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  const r = db.run('UPDATE costume_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
+  const r = Q_RUN('UPDATE costume_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
   if (r.changes === 0) return c.json({ code: 404, data: null, message: '服装模板不存在' })
   return c.json({ code: 0, data: { id }, message: '删除成功' })
 })
@@ -135,7 +140,7 @@ router.post('/batch-delete', async (c) => {
   const { ids } = await c.req.json()
   if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
   const t = now(); const p = ids.map(() => '?').join(',')
-  const r = db.run(`UPDATE costume_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
+  const r = Q_RUN(`UPDATE costume_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
   return c.json({ code: 0, data: { deletedCount: r.changes }, message: `成功删除 ${r.changes} 个服装模板` })
 })
 
