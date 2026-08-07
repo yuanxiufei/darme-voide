@@ -29,6 +29,9 @@ data/drama_generator.db-shm
 data/drama.db
 data/drama.db-wal
 data/drama.db-shm
+data/drama.db
+data/drama.db-wal
+data/drama.db-shm
 data/public.sql
 data/*.bak*
 data/static/
