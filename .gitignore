@@ -23,12 +23,6 @@ dist/
 Thumbs.db
 
 # Data (database and uploaded files)
-data/drama_generator.db
-data/drama_generator.db-wal
-data/drama_generator.db-shm
-data/drama.db
-data/drama.db-wal
-data/drama.db-shm
 data/drama.db
 data/drama.db-wal
 data/drama.db-shm

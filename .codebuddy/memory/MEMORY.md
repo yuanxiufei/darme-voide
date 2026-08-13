@@ -59,3 +59,35 @@
 - 服装库特有：风格/部位/材质/配色/季节/外观描述
 - 所有4张表共用：soft delete(via deleted_at)、usage_count 引用计数、source_drama_id 来源追溯、tags JSON数组、metadata JSON扩展
 - 导航栏新增"资源库"链接(书架图标)，位于设置下方
+
+## 全流程多模型 fallback 机制 (2026-08-10)
+- 配置表 `model` 字段为 JSON 数组，存储全部可用模型按优先级排序
+- `getActiveConfig()` 返回完整 `models: string[]` 数组
+- 各阶段遍历 models 数组，失败自动切换到下一个，全部失败才标记 failed
+- 图片/视频生成：每次切换自动释放旧 GPU 租约并获取新租约（不挤占 GPU 资源池）
+- Agent 文本生成：每次重试重新构建 Agent 实例（Mastra Agent 构造时绑定 model）
+- 日志埋点：每次 fallback 记录 attempt/totalModels/model 字段
+
+## AI 视频生成工作台编辑器系统 (2026-08-10)
+- 每阶段模型切换：ModelSelector 组件按 service_type 动态拉取模型列表
+- 角色编辑弹窗：CharacterEditor（4区块: 基本信息/形象设定/图片生成/声音配置）
+- 场景编辑弹窗：SceneEditor（3区块: 场景信息/环境设定/图片生成）
+- 视频编辑弹窗：VideoEditor（参考图/提示词/关联角色/模型选择）
+- 单镜头重新生成：POST /storyboards/:id/regenerate-image（支持自定义 prompt + model）
+- 视频重新生成：PUT /videos/:id（参数更新）+ POST /videos/:id/regenerate（重新生成）
+- TTS 增强：角色级 voiceSpeed/voiceEmotion/voicePitch/voiceModel → 通过 getCharacterVoiceParams() 注入 TTS 调用
+- emotion 标签映射：happy/sad/angry/excited/calm/serious→MiniMax 平台值
+- 角色扩展字段：clothing, weapons, customPrompt（图片生成 prompt 覆盖）
+- 场景扩展字段：description, atmosphere, lightning, weather, season, style, customPrompt
+
+## 通用预设框架 (2026-08-10)
+- 原"仙宫导览" Skill 已重构为通用预设框架，剥离全部领域内容
+- **Skill 模板**：`skills/preset-skill-template.md` — 含 5 阶段骨架、接口定义、Variation Card 算法伪码、复用指导
+- **后端服务**：`backend/src/services/preset-framework.ts` — 占位符数据池（THEME_FAMILY_A 等）+ Variation Card 引擎 + 管线编排
+- **后端路由**：`backend/src/routes/preset-framework.ts` — 6 端点（`/preset/framework/*`）
+- **前端页面**：`frontend/app/pages/preset/framework.vue` — 5 阶段 UI（Welcome→Preview→Confirm→Progress→Done）
+- **前端 API**：`presetFrameworkAPI`（generateCard/create/fullPipeline/status 等）
+- **prompt-utils**：`PRESET_STYLE_LOCK/IMAGE_NEGATIVE/VIDEO_NEGATIVE` — 均为 `{{PLACEHOLDER}}` 占位文本
+- **核心设计模式保留**：阶段化流水线 / Variation Card 多样性引擎 / 去重检查表 / Style Lock 固定风格块 / 三层空间公式 / 质量闸门 / 负向提示词清单
+- **扩展方式**：创建新 Skill 时，复制骨架 → 填充数据池 → 撰写 Style Lock → 注册路由+前端页面
+- 全项目 "仙宫/xian-gong/XianGong" 0 残留，清理日期 2026-08-10
