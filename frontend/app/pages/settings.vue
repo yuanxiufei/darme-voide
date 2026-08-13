@@ -526,8 +526,8 @@ function applyProviderPreset(type, provider) {
 }
 
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
-async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() }
-async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() }
+async function toggleCfg(c) { try { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() } catch (e: any) { toast.error(e?.message || '切换失败') } }
+async function delCfg(id) { try { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() } catch (e: any) { toast.error(e?.message || '删除失败') } }
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null

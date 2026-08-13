@@ -23,3 +23,10 @@ export function serverError(c: Context, message = 'internal error') {
 export function now() {
   return new Date().toISOString()
 }
+
+/** 安全解析路由参数 id，NaN 时返回 null */
+export function parseParamId(c: Context, paramName = 'id'): number | null {
+  const raw = c.req.param(paramName)
+  const id = Number(raw)
+  return Number.isFinite(id) && id > 0 ? id : null
+}

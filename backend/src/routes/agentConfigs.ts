@@ -1,29 +1,36 @@
 import { Hono } from 'hono'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, now } from '../utils/response.js'
+import { success, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
+import { logTaskError } from '../utils/task-logger.js'
 
 const app = new Hono()
 
 // GET /agent-configs
 app.get('/', async (c) => {
+  try {
   const rows = db.select().from(schema.agentConfigs)
     .where(isNull(schema.agentConfigs.deletedAt)).all()
   return success(c, toSnakeCaseArray(rows))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // GET /agent-configs/:id
 app.get('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
   const [row] = db.select().from(schema.agentConfigs)
-    .where(eq(schema.agentConfigs.id, id)).all()
-  if (!row) return badRequest(c, 'Not found')
+    .where(and(eq(schema.agentConfigs.id, id), isNull(schema.agentConfigs.deletedAt))).all()
+  if (!row) return notFound(c, 'Not found')
   return success(c, toSnakeCase(row))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // POST /agent-configs (upsert by agent_type)
 app.post('/', async (c) => {
+  try {
   const body = await c.req.json()
   if (!body.agent_type) return badRequest(c, 'agent_type required')
   const ts = now()
@@ -80,11 +87,14 @@ app.post('/', async (c) => {
   const [result] = db.select().from(schema.agentConfigs)
     .where(eq(schema.agentConfigs.id, Number(res.lastInsertRowid))).all()
   return success(c, toSnakeCase(result))
+  } catch (err: any) { logTaskError('AgentConfigsAPI', 'create', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // PUT /agent-configs/:id
 app.put('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
 
@@ -110,13 +120,18 @@ app.put('/:id', async (c) => {
   db.update(schema.agentConfigs).set(updates).where(eq(schema.agentConfigs.id, id)).run()
   const [row] = db.select().from(schema.agentConfigs).where(eq(schema.agentConfigs.id, id)).all()
   return success(c, toSnakeCase(row))
+  } catch (err: any) { logTaskError('AgentConfigsAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // DELETE /agent-configs/:id
 app.delete('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
-  db.update(schema.agentConfigs).set({ deletedAt: now() }).where(eq(schema.agentConfigs.id, id)).run()
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
+  db.update(schema.agentConfigs).set({ deletedAt: now() })
+    .where(and(eq(schema.agentConfigs.id, id), isNull(schema.agentConfigs.deletedAt))).run()
   return success(c)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 export default app

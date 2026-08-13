@@ -1,9 +1,11 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, created, now, badRequest } from '../utils/response.js'
+import { success, created, now, badRequest, notFound, parseParamId } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
+import { generateImage } from '../services/image-generation.js'
+import { buildStoryboardImagePrompt } from '../shared/prompt-utils.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import ffmpeg from 'fluent-ffmpeg'
 import fs from 'fs'
@@ -18,6 +20,21 @@ const app = new Hono()
 
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
+
+/** 获取角色个性化声音参数（emotion/speed/pitch/voiceModel） */
+function getCharacterVoiceParams(characterId: number | undefined, dramaId: number): {
+  speed?: number; emotion?: string; pitch?: number; model?: string
+} {
+  if (!characterId) return {}
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, characterId)).all()
+  if (!char) return {}
+  return {
+    speed: char.voiceSpeed ?? undefined,
+    emotion: char.voiceEmotion ?? undefined,
+    pitch: char.voicePitch ?? undefined,
+    model: char.voiceModel ?? undefined,
+  }
+}
 
 /**
  * 将一段包含多角色对话的文本拆分为多条独立对话行
@@ -178,6 +195,7 @@ function validateStoryboardBindings(episodeId: number, sceneId: number | null | 
 
 // POST /storyboards
 app.post('/', async (c) => {
+  try {
   const body = await c.req.json()
   const ts = now()
   logTaskStart('StoryboardAPI', 'create', {
@@ -212,14 +230,20 @@ app.post('/', async (c) => {
     ...toSnakeCase(result),
     character_ids: getStoryboardCharacterIds(result.id),
   })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'create', { error: err.message, stack: err.stack })
+    return badRequest(c, err.message || 'Failed to create storyboard')
+  }
 })
 
 // PUT /storyboards/:id
 app.put('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
   const body = await c.req.json()
   const [storyboard] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
-  if (!storyboard) return badRequest(c, '镜头不存在')
+  if (!storyboard) return notFound(c, '镜头不存在')
   logTaskStart('StoryboardAPI', 'update', {
     storyboardId: id,
     episodeId: storyboard.episodeId,
@@ -234,6 +258,7 @@ app.put('/:id', async (c) => {
     image_prompt: 'imagePrompt', scene_id: 'sceneId', location: 'location',
     time: 'time', atmosphere: 'atmosphere', result: 'result',
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
+    custom_image_prompt: 'customImagePrompt', custom_video_prompt: 'customVideoPrompt',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -276,13 +301,18 @@ app.put('/:id', async (c) => {
     dialogueValidation: dialogueValidation?.filter((v: any) => v.match_status !== 'matched' && v.match_status !== 'narrator'),
   })
   return success(c, dialogueValidation ? { dialogue_validation: dialogueValidation } : undefined)
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'update', { error: err.message, stack: err.stack })
+    return badRequest(c, err.message || 'Failed to update storyboard')
+  }
 })
 
 // POST /storyboards/:id/generate-tts
 app.post('/:id/generate-tts', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
-  if (!sb) return badRequest(c, '镜头不存在')
+  if (!sb) return notFound(c, '镜头不存在')
 
   const dialogueLines = parseDialogueLines(sb.dialogue)
   // fallback：拆分不出多角色对话行时，用旧的单人逻辑
@@ -321,9 +351,15 @@ app.post('/:id/generate-tts', async (c) => {
       }
 
       for (const val of validations) {
+        // 从角色记录中获取个性化声音参数
+        const charVoiceParams = getCharacterVoiceParams(val.character_id ?? undefined, ep?.dramaId ?? 0)
         const audioPath = await generateTTS({
           text: val.text,
           voice: val.voice_id,
+          speed: charVoiceParams.speed,
+          emotion: charVoiceParams.emotion,
+          pitch: charVoiceParams.pitch,
+          model: charVoiceParams.model,
           configId: ep?.audioConfigId || null,
         })
 
@@ -358,8 +394,13 @@ app.post('/:id/generate-tts', async (c) => {
       const speaker = parsed.speaker || parsed.pureText ? parsed.speaker : ''
       const text = parsed.pureText || (dialogueLines.length === 1 ? dialogueLines[0].text : '')
       const validation = validateTTSSpeaker(speaker, ep?.dramaId || 0)
+      const charVoiceParams = getCharacterVoiceParams(validation.characterId ?? undefined, ep?.dramaId ?? 0)
 
-      const audioPath = await generateTTS({ text: text, voice: validation.voiceId, configId: ep?.audioConfigId || null })
+      const audioPath = await generateTTS({
+        text, voice: validation.voiceId, configId: ep?.audioConfigId || null,
+        speed: charVoiceParams.speed, emotion: charVoiceParams.emotion, pitch: charVoiceParams.pitch,
+        model: charVoiceParams.model,
+      })
 
       db.update(schema.storyboards)
         .set({ ttsAudioUrl: audioPath, updatedAt: now() })
@@ -368,7 +409,7 @@ app.post('/:id/generate-tts', async (c) => {
 
       logTaskSuccess('StoryboardAPI', 'generate-tts', {
         storyboardId: id,
-        voiceId,
+        voiceId: validation.voiceId,
         path: audioPath,
         textLength: text.length,
       })
@@ -392,9 +433,10 @@ app.post('/:id/generate-tts', async (c) => {
 // GET /storyboards/:id/validate-dialogue
 // 验证分镜 dialogue 中所有角色台词行的匹配状态
 app.get('/:id/validate-dialogue', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
-  if (!sb) return badRequest(c, '镜头不存在')
+  if (!sb) return notFound(c, '镜头不存在')
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
 
@@ -454,9 +496,53 @@ app.get('/:id/validate-dialogue', async (c) => {
   })
 })
 
+// POST /storyboards/:id/regenerate-image — 单镜头图片重新生成（可选模型选择）
+app.post('/:id/regenerate-image', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  const body = await c.req.json()
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return notFound(c, '镜头不存在')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  try {
+    // 自定义 prompt 优先 → 分镜级 customImagePrompt → 标准构建器
+    const prompt = body.prompt
+      || sb.customImagePrompt
+      || buildStoryboardImagePrompt({
+        description: sb.description || body.character_description || '',
+        sceneDescription: body.scene_description || '',
+        shotType: sb.shotType || body.shot_type || '',
+        cameraAngle: sb.angle || body.camera_angle || '',
+        dramaStyle: body.style,
+      })
+
+    logTaskStart('StoryboardAPI', 'regenerate-image', {
+      storyboardId: id, episodeId: sb.episodeId, dramaId: ep.dramaId, model: body.model || 'default',
+    })
+
+    const genId = await generateImage({
+      storyboardId: id,
+      dramaId: ep.dramaId,
+      prompt,
+      model: body.model,
+      configId: ep.imageConfigId ?? undefined,
+    })
+
+    logTaskSuccess('StoryboardAPI', 'regenerate-image', { storyboardId: id, generationId: genId })
+    return success(c, { image_generation_id: genId })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'regenerate-image', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
 // DELETE /storyboards/:id
 app.delete('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
   logTaskStart('StoryboardAPI', 'delete', { storyboardId: id })
   db.delete(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, id)).run()
   db.delete(schema.storyboards).where(eq(schema.storyboards.id, id)).run()

@@ -1,13 +1,15 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, notFound, badRequest, now } from '../utils/response.js'
+import { success, notFound, badRequest, now, parseParamId } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
+import { logTaskError } from '../utils/task-logger.js'
 
 const app = new Hono()
 
 // POST /episodes — Create a new episode
 app.post('/', async (c) => {
+  try {
   const body = await c.req.json()
   if (!body.drama_id) return badRequest(c, 'drama_id required')
   if (!body.image_config_id || !body.video_config_id || !body.audio_config_id) {
@@ -42,14 +44,18 @@ app.post('/', async (c) => {
     video_config_id: ep.videoConfigId,
     audio_config_id: ep.audioConfigId,
   })
+  } catch (err: any) { logTaskError('EpisodesAPI', 'create', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // PUT /episodes/:id - Update episode fields
 app.put('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid episode id')
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status',
+    'image_config_id', 'video_config_id', 'audio_config_id']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -63,14 +69,20 @@ app.put('/:id', async (c) => {
   if ('title' in updates) drizzleUpdates.title = updates.title
   if ('description' in updates) drizzleUpdates.description = updates.description
   if ('status' in updates) drizzleUpdates.status = updates.status
+  if ('image_config_id' in updates) drizzleUpdates.imageConfigId = Number(updates.image_config_id)
+  if ('video_config_id' in updates) drizzleUpdates.videoConfigId = Number(updates.video_config_id)
+  if ('audio_config_id' in updates) drizzleUpdates.audioConfigId = Number(updates.audio_config_id)
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
+  } catch (err: any) { logTaskError('EpisodesAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // GET /episodes/:id/characters — characters linked to this episode
 app.get('/:id/characters', async (c) => {
-  const episodeId = Number(c.req.param('id'))
+  try {
+  const episodeId = parseParamId(c)
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const links = db.select().from(schema.episodeCharacters)
     .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
   const charIds = links.map(l => l.characterId)
@@ -78,11 +90,14 @@ app.get('/:id/characters', async (c) => {
   const allChars = db.select().from(schema.characters).all()
   const result = allChars.filter(ch => charIds.includes(ch.id) && !ch.deletedAt)
   return success(c, toSnakeCaseArray(result))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // GET /episodes/:id/scenes — scenes linked to this episode
 app.get('/:id/scenes', async (c) => {
-  const episodeId = Number(c.req.param('id'))
+  try {
+  const episodeId = parseParamId(c)
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const links = db.select().from(schema.episodeScenes)
     .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
   const sceneIds = links.map(l => l.sceneId)
@@ -90,11 +105,14 @@ app.get('/:id/scenes', async (c) => {
   const allScenes = db.select().from(schema.scenes).all()
   const result = allScenes.filter(sc => sceneIds.includes(sc.id) && !sc.deletedAt)
   return success(c, toSnakeCaseArray(result))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // GET /episodes/:episode_id/storyboards
 app.get('/:episode_id/storyboards', async (c) => {
-  const episodeId = Number(c.req.param('episode_id'))
+  try {
+  const episodeId = parseParamId(c, 'episode_id')
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const rows = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -120,11 +138,14 @@ app.get('/:episode_id/storyboards', async (c) => {
       .filter(ch => (charIdsByStoryboard.get(row.id) || []).includes(ch.id))
       .map(ch => toSnakeCase(ch)),
   })))
+  } catch (err: any) { logTaskError('EpisodesAPI', 'storyboards', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // GET /episodes/:id/pipeline-status — 流水线进度
 app.get('/:id/pipeline-status', async (c) => {
-  const episodeId = Number(c.req.param('id'))
+  try {
+  const episodeId = parseParamId(c)
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c, 'Episode not found')
 
@@ -161,6 +182,7 @@ app.get('/:id/pipeline-status', async (c) => {
       merge_episode: { status: latestMerge?.status === 'completed' ? 'done' : (latestMerge ? latestMerge.status : 'pending'), merged_url: latestMerge?.mergedUrl },
     },
   })
+  } catch (err: any) { logTaskError('EpisodesAPI', 'pipeline-status', { error: err.message }); return badRequest(c, err.message) }
 })
 
 export default app

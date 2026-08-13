@@ -2,7 +2,6 @@
  * 服装库路由 - 管理服装模板的 CRUD、搜索筛选
  */
 import { Hono } from 'hono'
-import { db } from '../db/index.js'
 import { qAll, qGet, qRun } from '../db/queryHelper.js'
 
 const Q_ALL = (...args: any[]) => (qAll as any)(...args)
@@ -73,30 +72,39 @@ router.get('/', async (c) => {
 })
 
 router.get('/filter-options', async (c) => {
+  try {
   const styles = (Q_ALL('SELECT DISTINCT style FROM costume_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
   const bodyParts = (Q_ALL('SELECT DISTINCT body_part FROM costume_templates WHERE deleted_at IS NULL AND body_part IS NOT NULL ORDER BY body_part') as any[]).map(r => r.body_part)
   const seasons = (Q_ALL('SELECT DISTINCT season FROM costume_templates WHERE deleted_at IS NULL AND season IS NOT NULL ORDER BY season') as any[]).map(r => r.season)
   return c.json({ code: 0, data: { styles: styles.length ? styles : COSTUME_STYLES, bodyParts: bodyParts.length ? bodyParts : BODY_PARTS, seasons: seasons.length ? seasons : SEASONS } })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/categories', async (c) => {
+  try {
   const rows = Q_ALL('SELECT DISTINCT category FROM costume_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
   return c.json({ code: 0, data: rows.map(r => r.category) })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/tags', async (c) => {
+  try {
   const rows = Q_ALL('SELECT tags FROM costume_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
   const tagSet = new Set<string>()
   rows.forEach(r => { const p = safeParseJson(r.tags); if (Array.isArray(p)) p.forEach((t: string) => tagSet.add(t)) })
   return c.json({ code: 0, data: [...tagSet].sort() })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/:id', async (c) => {
+  try {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
   const row = qGet('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
   if (!row) return c.json({ code: 404, data: null, message: '服装模板不存在' })
   row.tags = safeParseJson(row.tags); row.metadata = safeParseJson(row.metadata); row.referenceImages = safeParseJson(row.reference_images)
   return c.json({ code: 0, data: row })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.post('/', async (c) => {
@@ -116,13 +124,14 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
+    if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
     const existing = qGet('SELECT * FROM costume_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '服装模板不存在' })
     const body = await c.req.json()
     const { name, category, description, style, bodyPart, material, colorScheme, season, appearance, imageUrl, referenceImages, tags, metadata } = body
     const t = now()
     Q_RUN(
-      `UPDATE costume_templates SET name=?,category=?,description=?,style=?,body_part=?,material=?,color_scheme=?,season=?,appearance=?,image_url=?,reference_images=?,tags=?,metadata=?,updated_at=? WHERE id=?`,
+      `UPDATE costume_templates SET name=?,category=?,description=?,style=?,body_part=?,material=?,color_scheme=?,season=?,appearance=?,image_url=?,reference_images=?,tags=?,metadata=?,updated_at=? WHERE id=? AND deleted_at IS NULL`,
       name ?? existing.name, category ?? existing.category, description ?? existing.description, style ?? existing.style, bodyPart ?? existing.body_part, material ?? existing.material, colorScheme ?? existing.color_scheme, season ?? existing.season, appearance ?? existing.appearance, imageUrl ?? existing.image_url, referenceImages !== undefined ? safeStringify(referenceImages) : existing.reference_images, tags !== undefined ? safeStringify(tags) : existing.tags, metadata !== undefined ? safeStringify(metadata) : existing.metadata, t, id,
     )
     return c.json({ code: 0, data: { id }, message: '更新成功' })
@@ -130,18 +139,23 @@ router.put('/:id', async (c) => {
 })
 
 router.delete('/:id', async (c) => {
+  try {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
   const r = Q_RUN('UPDATE costume_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
   if (r.changes === 0) return c.json({ code: 404, data: null, message: '服装模板不存在' })
   return c.json({ code: 0, data: { id }, message: '删除成功' })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.post('/batch-delete', async (c) => {
+  try {
   const { ids } = await c.req.json()
   if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
   const t = now(); const p = ids.map(() => '?').join(',')
   const r = Q_RUN(`UPDATE costume_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
   return c.json({ code: 0, data: { deletedCount: r.changes }, message: `成功删除 ${r.changes} 个服装模板` })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 export default router

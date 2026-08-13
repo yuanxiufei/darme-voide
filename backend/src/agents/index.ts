@@ -8,7 +8,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
-import { logTaskProgress } from '../utils/task-logger.js'
+import { logTaskError, logTaskProgress } from '../utils/task-logger.js'
 import { createScriptTools } from './tools/script-tools.js'
 import { createExtractTools } from './tools/extract-tools.js'
 import { createStoryboardTools } from './tools/storyboard-tools.js'
@@ -172,48 +172,166 @@ function getAgentConfig(agentType: string) {
   const rows = db.select().from(schema.agentConfigs)
     .where(and(eq(schema.agentConfigs.agentType, agentType), isNull(schema.agentConfigs.deletedAt)))
     .all()
-  // Return active one, or first one
   return rows.find(r => r.isActive) || rows[0] || null
 }
 
-function getModel(dbConfig: any) {
-  const textConfig = getTextConfig()
-  const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
-  logTaskProgress('AIConfig', 'text-model-endpoint', {
-    provider: textConfig.provider,
-    baseUrl: resolvedBaseURL,
-    model: dbConfig?.model || textConfig.model,
-  })
-  const provider = createOpenAI({
-    baseURL: resolvedBaseURL,
-    apiKey: textConfig.apiKey,
-  } as any)
-  const modelName = dbConfig?.model || textConfig.model
-  return provider.chat(modelName)
+/** 获取 Agent 工具，供 createAgent 和 runAgentWithRetry 共用 */
+export function createAgentTools(
+  type: string,
+  episodeId: number,
+  dramaId: number,
+): Record<string, any> | null {
+  switch (type) {
+    case 'script_rewriter': return createScriptTools(episodeId)
+    case 'extractor': return createExtractTools(episodeId, dramaId)
+    case 'storyboard_breaker': return createStoryboardTools(episodeId, dramaId)
+    case 'voice_assigner': return createVoiceTools(episodeId, dramaId)
+    case 'grid_prompt_generator': return createGridPromptTools(episodeId, dramaId)
+    default: return null
+  }
 }
 
-export function createAgent(type: string, episodeId: number, dramaId: number): Agent | null {
+interface AgentConfig {
+  textConfig: ReturnType<typeof getTextConfig>
+  dbConfig: ReturnType<typeof getAgentConfig>
+  defaults: (typeof DEFAULT_PROMPTS)[string]
+  instructions: string
+  name: string
+  tools: Record<string, any>
+  resolvedBaseURL: string
+}
+
+function buildAgentConfig(type: string, episodeId: number, dramaId: number): AgentConfig | null {
   const defaults = DEFAULT_PROMPTS[type]
   if (!defaults) return null
 
   const dbConfig = getAgentConfig(type)
-  const model = getModel(dbConfig)
   const baseInstructions = dbConfig?.systemPrompt?.trim() || defaults.instructions
   const skillInstructions = loadAgentSkills(type, dbConfig?.skills)
   const instructions = skillInstructions
     ? [baseInstructions, '', skillInstructions].join('\n')
     : baseInstructions
   const name = dbConfig?.name || defaults.name
+  const tools = createAgentTools(type, episodeId, dramaId)
+  if (!tools) return null
 
-  let tools: Record<string, any> = {}
-  switch (type) {
-    case 'script_rewriter': tools = createScriptTools(episodeId); break
-    case 'extractor': tools = createExtractTools(episodeId, dramaId); break
-    case 'storyboard_breaker': tools = createStoryboardTools(episodeId, dramaId); break
-    case 'voice_assigner': tools = createVoiceTools(episodeId, dramaId); break
-    case 'grid_prompt_generator': tools = createGridPromptTools(episodeId, dramaId); break
-    default: return null
+  const textConfig = getTextConfig()
+  const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
+
+  return { textConfig, dbConfig, defaults, instructions, name, tools, resolvedBaseURL }
+}
+
+export function createAgent(type: string, episodeId: number, dramaId: number): Agent | null {
+  const built = buildAgentConfig(type, episodeId, dramaId)
+  if (!built) return null
+
+  const modelName = built.dbConfig?.model || built.textConfig.model
+  logTaskProgress('AIConfig', 'text-model-endpoint', {
+    provider: built.textConfig.provider,
+    baseUrl: built.resolvedBaseURL,
+    model: modelName,
+  })
+
+  const provider = createOpenAI({
+    baseURL: built.resolvedBaseURL,
+    apiKey: built.textConfig.apiKey,
+  } as any)
+
+  return new Agent({
+    id: type,
+    name: built.name,
+    instructions: built.instructions,
+    model: provider.chat(modelName),
+    tools: built.tools,
+  })
+}
+
+function normalizeToolNick(tc: any): string {
+  return tc?.toolName || tc?.tool?.toolName || tc?.tool?.id || tc?.name || tc?.type || null
+}
+
+function normalizeToolOutput(tr: any): string {
+  const out = tr?.result ?? tr?.output ?? tr?.data ?? null
+  return typeof out === 'string' ? out : JSON.stringify(out)
+}
+
+/**
+ * 带模型自动 fallback 的 Agent 执行
+ *
+ * 遍历 textConfig.models，任一模型成功即返回结果。
+ * 每次失败时重新创建 Agent，使用配置中下一个模型重试。
+ */
+export async function runAgentWithRetry(
+  type: string,
+  episodeId: number,
+  dramaId: number,
+  message: string,
+  options?: { maxSteps?: number },
+): Promise<{
+  text: string
+  toolCalls: Array<{ toolName: string; args: any }>
+  toolResults: Array<{ toolName: string; result: string }>
+}> {
+  const built = buildAgentConfig(type, episodeId, dramaId)
+  if (!built) throw new Error(`Invalid agent type: ${type}`)
+
+  // 构建模型列表：textConfig.models 为基础，dbConfig.model 作为最高优先级前置
+  const baseModels = built.textConfig.models?.length ? built.textConfig.models : [built.textConfig.model]
+  // 如果 dbConfig 有指定 model，将其作为首选（去重）
+  const models: string[] = built.dbConfig?.model
+    ? [built.dbConfig.model, ...baseModels.filter(m => m !== built.dbConfig!.model)]
+    : baseModels
+
+  if (models.length === 0) {
+    throw new Error(`No model configured for agent type ${type}`)
   }
 
-  return new Agent({ id: type, name, instructions, model, tools })
+  const maxSteps = options?.maxSteps ?? 20
+
+  let lastError: any = null
+
+  for (let attempt = 0; attempt < models.length; attempt++) {
+    const modelName = models[attempt]
+
+    logTaskProgress('Agent', 'model-fallback-attempt', {
+      agentType: type, attempt: attempt + 1, totalModels: models.length, model: modelName,
+    })
+
+    const provider = createOpenAI({ baseURL: built.resolvedBaseURL, apiKey: built.textConfig.apiKey } as any)
+    const agent = new Agent({
+      id: type, name: built.name, instructions: built.instructions,
+      model: provider.chat(modelName), tools: built.tools,
+    })
+
+    try {
+      const result = await agent.generate(
+        [{ role: 'user', content: message }],
+        { maxSteps },
+      )
+
+      const allToolCalls = result.toolCalls || []
+      const allToolResults = result.toolResults || []
+
+      return {
+        text: result.text || '',
+        toolCalls: allToolCalls.map((tc: any) => ({
+          toolName: normalizeToolNick(tc),
+          args: tc?.args ?? tc?.input ?? null,
+        })),
+        toolResults: allToolResults.map((tr: any) => ({
+          toolName: normalizeToolNick(tr),
+          result: normalizeToolOutput(tr),
+        })),
+      }
+    } catch (err: any) {
+      lastError = err
+      const isLast = attempt === models.length - 1
+      logTaskError('Agent', isLast ? 'all-models-failed' : 'model-fallback-error', {
+        agentType: type, attempt: attempt + 1, model: modelName, error: err.message,
+      })
+      if (isLast) throw err
+    }
+  }
+
+  throw lastError || new Error('All models failed')
 }

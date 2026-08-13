@@ -116,7 +116,9 @@ onMounted(async () => {
     ]
       .sort((a: any, b: any) => new Date(b.created_at || b.createdAt).getTime() - new Date(a.created_at || a.createdAt).getTime())
       .slice(0, 8)
-  } catch { /* 静默处理 */ }
+  } catch (err: any) {
+    console.error('[LibraryPage] Failed to load stats:', err?.message ?? err)
+  }
 })
 
 function formatDate(d: string) {

@@ -31,6 +31,7 @@ app.get('/', async (c) => {
 
 // POST /ai-voices/sync
 app.post('/sync', async (c) => {
+  try {
   // 从数据库获取 minimax 的音频配置
   const rows = db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.serviceType, 'audio'))
@@ -54,6 +55,7 @@ app.post('/sync', async (c) => {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ voice_type: 'all' }),
+    signal: AbortSignal.timeout(30_000),
   })
 
   if (!resp.ok) {
@@ -86,6 +88,10 @@ app.post('/sync', async (c) => {
   }
 
   return success(c, { count: insertRows.length, message: `Synced ${insertRows.length} voices` })
+  } catch (err: any) {
+    logTaskError('AiVoices', 'sync-minimax', { error: err.message, stack: err.stack })
+    return badRequest(c, err.message || 'Failed to sync voices')
+  }
 })
 
 /**

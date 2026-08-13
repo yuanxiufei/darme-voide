@@ -156,6 +156,7 @@
 </template>
 
 <script setup lang="ts">
+import { toast } from 'vue-sonner'
 import { characterLibraryAPI, dramaAPI } from '~/composables/useApi'
 
 const search = ref('')
@@ -216,6 +217,8 @@ async function load() {
     })
     items.value = res.items || []
     total.value = res.total || 0
+  } catch (e: any) {
+    toast.error(e?.message || '加载角色列表失败')
   } finally {
     loading.value = false
   }
@@ -226,7 +229,9 @@ async function loadMeta() {
     const [cats, tags] = await Promise.all([characterLibraryAPI.categories(), characterLibraryAPI.tags()])
     categories.value = cats || []
     allTags.value = tags || []
-  } catch { /* silent */ }
+  } catch (e: any) {
+    console.error('[CharacterLib] Failed to load meta:', e?.message ?? e)
+  }
 }
 
 function onSearch() { page.value = 1; load() }
@@ -281,6 +286,8 @@ async function save() {
     showForm.value = false
     await load()
     await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '保存失败')
   } finally {
     saving.value = false
   }
@@ -288,18 +295,26 @@ async function save() {
 
 async function deleteItem(item: any) {
   if (!confirm(`确认删除角色 "${item.name}"？`)) return
-  await characterLibraryAPI.del(item.id)
-  selectedItems.value = selectedItems.value.filter(id => id !== item.id)
-  await load()
-  await loadMeta()
+  try {
+    await characterLibraryAPI.del(item.id)
+    selectedItems.value = selectedItems.value.filter(id => id !== item.id)
+    await load()
+    await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '删除失败')
+  }
 }
 
 async function batchDelete() {
   if (!confirm(`确认删除 ${selectedItems.value.length} 个角色？`)) return
-  await characterLibraryAPI.batchDelete(selectedItems.value)
-  selectedItems.value = []
-  await load()
-  await loadMeta()
+  try {
+    await characterLibraryAPI.batchDelete(selectedItems.value)
+    selectedItems.value = []
+    await load()
+    await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '批量删除失败')
+  }
 }
 
 // ===== 应用到项目 =====
@@ -315,9 +330,13 @@ async function openApply(item: any) {
 
 async function doApply() {
   if (!applyDramaId.value) return
-  await characterLibraryAPI.apply(applyTarget.value.id, applyDramaId.value)
-  showApply.value = false
-  await load()
+  try {
+    await characterLibraryAPI.apply(applyTarget.value.id, applyDramaId.value)
+    showApply.value = false
+    await load()
+  } catch (e: any) {
+    toast.error(e?.message || '应用失败')
+  }
 }
 
 onMounted(() => { load(); loadMeta() })

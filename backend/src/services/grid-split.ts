@@ -16,6 +16,9 @@ export async function splitGridImage(
   rows: number,
   cols: number,
 ): Promise<SplitResult[]> {
+  if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+    throw new Error(`Invalid grid dimensions: rows=${rows}, cols=${cols}. Both must be positive integers.`)
+  }
   const absPath = imagePath.startsWith('/')
     ? imagePath
     : getAbsolutePath(imagePath)

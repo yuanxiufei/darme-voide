@@ -1,6 +1,7 @@
 /**
- * MiniMax 视频生成 Adapter
- * API 风格：OpenAI Chat Completions content 数组格式
+ * MiniMax H3 视频生成 Adapter
+ * MiniMax H3 是大模型，使用原生 API 格式：
+ *   POST /v1/video_generation  { model, prompt, aspect_ratio, duration, first_frame_image? }
  */
 import type {
   VideoProviderAdapter,
@@ -16,27 +17,20 @@ export class MiniMaxVideoAdapter implements VideoProviderAdapter {
   provider = 'minimax'
 
   buildGenerateRequest(config: AIConfig, record: VideoGenerationRecord): ProviderRequest {
-    let promptText = record.prompt || ''
-    promptText += `  --ratio ${record.aspectRatio || '16:9'}  --dur ${record.duration || 5}`
+    // MiniMax H3 原生 body：prompt 是纯字符串，不做 content 数组包装
+    const body: any = {
+      model: record.model || config.model,
+      prompt: record.prompt || '',
+      aspect_ratio: record.aspectRatio || '16:9',
+      duration: record.duration || 5,
+    }
 
-    const content: any[] = [{ type: 'text', text: promptText }]
-
+    // 参考图：MiniMax 原生字段 first_frame_image / last_frame_image
     if (record.referenceMode === 'single' && record.imageUrl) {
-      content.push({ type: 'image_url', image_url: { url: record.imageUrl }, role: 'reference_image' })
+      body.first_frame_image = record.imageUrl
     } else if (record.referenceMode === 'first_last') {
-      if (record.firstFrameUrl) {
-        content.push({ type: 'image_url', image_url: { url: record.firstFrameUrl }, role: 'first_frame' })
-      }
-      if (record.lastFrameUrl) {
-        content.push({ type: 'image_url', image_url: { url: record.lastFrameUrl }, role: 'last_frame' })
-      }
-    } else if (record.referenceMode === 'multiple' && record.referenceImageUrls) {
-      try {
-        const refs = JSON.parse(record.referenceImageUrls)
-        for (const url of refs) {
-          content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' })
-        }
-      } catch {}
+      if (record.firstFrameUrl) body.first_frame_image = record.firstFrameUrl
+      if (record.lastFrameUrl) body.last_frame_image = record.lastFrameUrl
     }
 
     return {
@@ -46,7 +40,7 @@ export class MiniMaxVideoAdapter implements VideoProviderAdapter {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${config.apiKey}`,
       },
-      body: { model: record.model || config.model, content },
+      body,
     }
   }
 

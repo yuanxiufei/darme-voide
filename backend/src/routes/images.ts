@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, created, now, badRequest } from '../utils/response.js'
+import { success, created, now, badRequest, notFound, parseParamId } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import {
@@ -89,30 +89,38 @@ app.post('/', async (c) => {
 
 // GET /images/:id
 app.get('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid image id')
   const [row] = db.select().from(schema.imageGenerations)
     .where(eq(schema.imageGenerations.id, id)).all()
   return success(c, row || null)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // GET /images — List by storyboard_id or drama_id
 app.get('/', async (c) => {
+  try {
   const storyboardId = c.req.query('storyboard_id')
   const dramaId = c.req.query('drama_id')
 
   let rows = db.select().from(schema.imageGenerations).all()
 
-  if (storyboardId) rows = rows.filter(r => r.storyboardId === Number(storyboardId))
-  if (dramaId) rows = rows.filter(r => r.dramaId === Number(dramaId))
+  if (storyboardId) { const sid = Number(storyboardId); if (Number.isFinite(sid)) rows = rows.filter(r => r.storyboardId === sid) }
+  if (dramaId) { const did = Number(dramaId); if (Number.isFinite(did)) rows = rows.filter(r => r.dramaId === did) }
 
   return success(c, rows)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // DELETE /images/:id
 app.delete('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid image id')
   db.delete(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).run()
   return success(c)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 export default app

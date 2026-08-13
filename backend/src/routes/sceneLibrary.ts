@@ -76,29 +76,38 @@ router.get('/', async (c) => {
 })
 
 router.get('/categories', async (c) => {
+  try {
   const rows = Q_ALL('SELECT DISTINCT category FROM scene_templates WHERE deleted_at IS NULL ORDER BY category') as any[]
   return c.json({ code: 0, data: rows.map(r => r.category) })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/filter-options', async (c) => {
+  try {
   const timeOfDay = (Q_ALL('SELECT DISTINCT time_of_day FROM scene_templates WHERE deleted_at IS NULL AND time_of_day IS NOT NULL ORDER BY time_of_day') as any[]).map(r => r.time_of_day)
   const styles = (Q_ALL('SELECT DISTINCT style FROM scene_templates WHERE deleted_at IS NULL AND style IS NOT NULL ORDER BY style') as any[]).map(r => r.style)
   return c.json({ code: 0, data: { timeOfDay, styles } })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/tags', async (c) => {
+  try {
   const rows = Q_ALL('SELECT tags FROM scene_templates WHERE deleted_at IS NULL AND tags IS NOT NULL') as any[]
   const tagSet = new Set<string>()
   rows.forEach(r => { const p = safeParseJson(r.tags); if (Array.isArray(p)) p.forEach((t: string) => tagSet.add(t)) })
   return c.json({ code: 0, data: [...tagSet].sort() })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.get('/:id', async (c) => {
+  try {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
   const row = Q_GET('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
   if (!row) return c.json({ code: 404, data: null, message: '场景模板不存在' })
   row.tags = safeParseJson(row.tags); row.metadata = safeParseJson(row.metadata); row.referenceImages = safeParseJson(row.reference_images)
   return c.json({ code: 0, data: row })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.post('/', async (c) => {
@@ -118,13 +127,14 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
+    if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
     const existing = Q_GET('SELECT * FROM scene_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '场景模板不存在' })
     const body = await c.req.json()
     const { name, category, description, location, atmosphere, lighting, timeOfDay, style, season, weather, imageUrl, referenceImages, prompt, tags, metadata } = body
     const t = now()
     Q_RUN(
-      `UPDATE scene_templates SET name=?,category=?,description=?,location=?,atmosphere=?,lighting=?,time_of_day=?,style=?,season=?,weather=?,image_url=?,reference_images=?,prompt=?,tags=?,metadata=?,updated_at=? WHERE id=?`,
+      `UPDATE scene_templates SET name=?,category=?,description=?,location=?,atmosphere=?,lighting=?,time_of_day=?,style=?,season=?,weather=?,image_url=?,reference_images=?,prompt=?,tags=?,metadata=?,updated_at=? WHERE id=? AND deleted_at IS NULL`,
       name ?? existing.name, category ?? existing.category, description ?? existing.description, location ?? existing.location, atmosphere ?? existing.atmosphere, lighting ?? existing.lighting, timeOfDay ?? existing.time_of_day, style ?? existing.style, season ?? existing.season, weather ?? existing.weather, imageUrl ?? existing.image_url, referenceImages !== undefined ? safeStringify(referenceImages) : existing.reference_images, prompt ?? existing.prompt, tags !== undefined ? safeStringify(tags) : existing.tags, metadata !== undefined ? safeStringify(metadata) : existing.metadata, t, id,
     )
     return c.json({ code: 0, data: { id }, message: '更新成功' })
@@ -132,18 +142,23 @@ router.put('/:id', async (c) => {
 })
 
 router.delete('/:id', async (c) => {
+  try {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
   const r = Q_RUN('UPDATE scene_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), id)
   if (r.changes === 0) return c.json({ code: 404, data: null, message: '场景模板不存在' })
   return c.json({ code: 0, data: { id }, message: '删除成功' })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.post('/batch-delete', async (c) => {
+  try {
   const { ids } = await c.req.json()
   if (!Array.isArray(ids) || ids.length === 0) return c.json({ code: 400, data: null, message: '请提供要删除的ID列表' })
   const t = now(); const p = ids.map(() => '?').join(',')
   const r = Q_RUN(`UPDATE scene_templates SET deleted_at = ? WHERE id IN (${p}) AND deleted_at IS NULL`, t, ...ids)
   return c.json({ code: 0, data: { deletedCount: r.changes }, message: `成功删除 ${r.changes} 个场景模板` })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 router.post('/:id/apply', async (c) => {

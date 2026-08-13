@@ -443,6 +443,28 @@ ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
 ensureColumn('agent_configs', 'skills', 'TEXT')
 
+// ====== v2 角色/场景/分镜/视频增强字段 ======
+ensureColumn('characters', 'voice_speed', 'REAL DEFAULT 1.0')
+ensureColumn('characters', 'voice_emotion', "TEXT DEFAULT 'happy'")
+ensureColumn('characters', 'voice_pitch', 'REAL DEFAULT 0')
+ensureColumn('characters', 'clothing', 'TEXT')
+ensureColumn('characters', 'weapons', 'TEXT')
+ensureColumn('characters', 'custom_prompt', 'TEXT')
+ensureColumn('characters', 'voice_model', "TEXT DEFAULT 'speech-2.8-hd'")
+
+ensureColumn('scenes', 'description', 'TEXT')
+ensureColumn('scenes', 'atmosphere', 'TEXT')
+ensureColumn('scenes', 'lighting', 'TEXT')
+ensureColumn('scenes', 'weather', 'TEXT')
+ensureColumn('scenes', 'season', 'TEXT')
+ensureColumn('scenes', 'style', 'TEXT')
+ensureColumn('scenes', 'custom_prompt', 'TEXT')
+
+ensureColumn('storyboards', 'custom_image_prompt', 'TEXT')
+ensureColumn('storyboards', 'custom_video_prompt', 'TEXT')
+
+ensureColumn('video_generations', 'character_ids', 'TEXT')
+
 export const db = drizzle(sqlite, { schema })
 export { schema }
 export type DB = typeof db

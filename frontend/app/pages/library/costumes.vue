@@ -124,6 +124,7 @@
 </template>
 
 <script setup lang="ts">
+import { toast } from 'vue-sonner'
 import { costumeLibraryAPI } from '~/composables/useApi'
 
 const search = ref('')
@@ -174,6 +175,8 @@ async function load() {
     })
     items.value = res.items || []
     total.value = res.total || 0
+  } catch (e: any) {
+    toast.error(e?.message || '加载服装列表失败')
   } finally { loading.value = false }
 }
 
@@ -189,7 +192,9 @@ async function loadMeta() {
       filterOpts.bodyParts = opts.bodyParts || []
       filterOpts.seasons = opts.seasons || []
     }
-  } catch { /* silent */ }
+  } catch (e: any) {
+    console.error('[CostumeLib] Failed to load meta:', e?.message ?? e)
+  }
 }
 
 function onSearch() { page.value = 1; load() }
@@ -226,20 +231,30 @@ async function save() {
     else await costumeLibraryAPI.create(payload)
     showForm.value = false
     await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '保存失败')
   } finally { saving.value = false }
 }
 
 async function deleteItem(item: any) {
   if (!confirm(`确认删除服装 "${item.name}"？`)) return
-  await costumeLibraryAPI.del(item.id)
-  selectedItems.value = selectedItems.value.filter(id => id !== item.id)
-  await load(); await loadMeta()
+  try {
+    await costumeLibraryAPI.del(item.id)
+    selectedItems.value = selectedItems.value.filter(id => id !== item.id)
+    await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '删除失败')
+  }
 }
 
 async function batchDelete() {
   if (!confirm(`确认删除 ${selectedItems.value.length} 个服装？`)) return
-  await costumeLibraryAPI.batchDelete(selectedItems.value)
-  selectedItems.value = []; await load(); await loadMeta()
+  try {
+    await costumeLibraryAPI.batchDelete(selectedItems.value)
+    selectedItems.value = []; await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '批量删除失败')
+  }
 }
 
 onMounted(() => { load(); loadMeta() })

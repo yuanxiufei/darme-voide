@@ -6,6 +6,10 @@ import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../
 import { getImageAdapter } from './adapters/registry'
 import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { gpuManager, type GpuLease, isLocalConfig } from './gpu-manager.js'
+
+/** 后台任务 GPU 租约映射（fire-and-forget 模式用 id 追踪租约） */
+const imageGpuLeases = new Map<number, GpuLease>()
 
 interface GenerateImageParams {
   storyboardId?: number
@@ -69,95 +73,117 @@ export async function generateImage(params: GenerateImageParams): Promise<number
   return lastId
 }
 
+/**
+ * 处理图片生成任务（含模型自动 fallback）
+ *
+ * 遍历 config.models 数组，任一模型成功即视为完成。
+ * 当前模型失败时自动释放 GPU 租约，切换到下一个模型重试。
+ */
 async function processImageGeneration(id: number, config: AIConfig) {
-  const adapter = getImageAdapter(config.provider)
+  // ── 预加载记录和参考图（所有模型尝试共享）──
+  const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  const record = rows[0]
+  if (!record) return
+  const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages)
 
-  try {
-    const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
-    const record = rows[0]
-    if (!record) return
-    logTaskProgress('ImageTask', 'build-request', {
-      id,
-      provider: config.provider,
-      storyboardId: record.storyboardId,
-      sceneId: record.sceneId,
-      characterId: record.characterId,
-      frameType: record.frameType,
-    })
+  const models = config.models?.length ? config.models : [config.model]
 
-    // 使用 Adapter 构建请求
-    const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages)
-    const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
-      id: record.id,
-      model: record.model,
-      prompt: record.prompt,
-      size: record.size,
-      frameType: record.frameType,
-      referenceImages: resolvedReferenceImages ? JSON.stringify(resolvedReferenceImages) : null,
-    })
-    logTaskProgress('ImageTask', 'request', {
-      id,
-      provider: config.provider,
-      method,
-      url: redactUrl(url),
-      model: record.model,
-    })
-    logTaskPayload('ImageTask', 'request payload', {
-      id,
-      method,
-      url,
-      headers,
-      body,
-    })
+  for (let attempt = 0; attempt < models.length; attempt++) {
+    const model = models[attempt]
+    const attemptConfig: AIConfig = { ...config, model }
 
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600_000),
-    })
+    // ── 更新 DB 当前使用的模型 ──
+    db.update(schema.imageGenerations)
+      .set({ model, updatedAt: now() })
+      .where(eq(schema.imageGenerations.id, id)).run()
 
-    if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
-    const result = await resp.json() as any
-    logTaskPayload('ImageTask', 'response payload', {
-      id,
-      provider: config.provider,
-      result,
-    })
+    // ── 非首次尝试：释放上一次的 GPU 租约 ──
+    if (attempt > 0) releaseImageGpuLease(id)
 
-    const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
-
-    if (!isAsync && imageUrl) {
-      logTaskProgress('ImageTask', 'sync-complete', { id, imageUrl })
-      // 同步模式：直接下载图片
-      await handleImageComplete(id, config.provider, imageUrl)
-      return
+    // ── 本地 GPU 模型：获取显存租约 ──
+    if (isLocalConfig(config.baseUrl, config.provider)) {
+      try {
+        const lease = await gpuManager.acquire('image', config.provider, model, config.baseUrl)
+        imageGpuLeases.set(id, lease)
+      } catch (err: any) {
+        logTaskWarn('ImageTask', 'gpu-acquire-failed', { id, model, error: err.message })
+      }
     }
 
-    if (!isAsync && !imageUrl) {
-      // 同步模式但无 URL（Gemini 等返回 base64）
-      const b64 = adapter.extractImageBase64(result)
-      if (b64) {
-        logTaskProgress('ImageTask', 'sync-base64-complete', { id, mimeType: b64.mimeType })
-        await handleImageCompleteBase64(id, config.provider, b64.data, b64.mimeType)
+    try {
+      logTaskProgress('ImageTask', 'build-request', {
+        id, provider: config.provider, model, attempt: attempt + 1,
+        storyboardId: record.storyboardId, sceneId: record.sceneId,
+        characterId: record.characterId, frameType: record.frameType,
+      })
+
+      const adapter = getImageAdapter(config.provider)
+      const { url, method, headers, body } = adapter.buildGenerateRequest(attemptConfig, {
+        id: record.id,
+        model,
+        prompt: record.prompt,
+        size: record.size,
+        frameType: record.frameType,
+        referenceImages: resolvedReferenceImages ? JSON.stringify(resolvedReferenceImages) : null,
+      })
+
+      logTaskProgress('ImageTask', 'request', {
+        id, provider: config.provider, method, url: redactUrl(url), model,
+      })
+      logTaskPayload('ImageTask', 'request payload', { id, method, url, headers, body })
+
+      const resp = await fetch(url, {
+        method, headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(600_000),
+      })
+
+      if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
+      const result = await resp.json() as any
+      logTaskPayload('ImageTask', 'response payload', { id, provider: config.provider, result })
+
+      const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
+
+      if (!isAsync && imageUrl) {
+        logTaskProgress('ImageTask', 'sync-complete', { id, model, imageUrl })
+        await handleImageComplete(id, config.provider, imageUrl)
         return
       }
-      throw new Error('No image URL or base64 data in response')
-    }
 
-    // 异步模式：更新 taskId，开始轮询
-    db.update(schema.imageGenerations)
-      .set({ taskId, status: 'processing', updatedAt: now() })
-      .where(eq(schema.imageGenerations.id, id))
-      .run()
-    logTaskProgress('ImageTask', 'poll-start', { id, taskId, provider: config.provider })
-    pollImageTask(id, config, taskId!)
-  } catch (err: any) {
-    logTaskError('ImageTask', 'process', { id, provider: config.provider, error: err.message })
-    db.update(schema.imageGenerations)
-      .set({ status: 'failed', errorMsg: err.message, updatedAt: now() })
-      .where(eq(schema.imageGenerations.id, id))
-      .run()
+      if (!isAsync && !imageUrl) {
+        const b64 = adapter.extractImageBase64(result)
+        if (b64) {
+          logTaskProgress('ImageTask', 'sync-base64-complete', { id, model, mimeType: b64.mimeType })
+          await handleImageCompleteBase64(id, config.provider, b64.data, b64.mimeType)
+          return
+        }
+        throw new Error('No image URL or base64 data in response')
+      }
+
+      // 异步模式：更新 taskId，阻塞等待轮询完成
+      db.update(schema.imageGenerations)
+        .set({ taskId, status: 'processing', updatedAt: now() })
+        .where(eq(schema.imageGenerations.id, id)).run()
+      logTaskProgress('ImageTask', 'poll-start', { id, taskId, provider: config.provider, model })
+
+      await pollImageTask(id, attemptConfig, taskId!)
+      return // 轮询成功完成
+    } catch (err: any) {
+      const isLastAttempt = attempt === models.length - 1
+      logTaskWarn('ImageTask', isLastAttempt ? 'all-models-failed' : 'model-fallback', {
+        id, attempt: attempt + 1, totalModels: models.length,
+        failedModel: model, error: err.message,
+        ...(isLastAttempt ? {} : { nextModel: models[attempt + 1] }),
+      })
+
+      if (isLastAttempt) {
+        releaseImageGpuLease(id)
+        logTaskError('ImageTask', 'process', { id, provider: config.provider, attemptedModels: models, error: err.message })
+        db.update(schema.imageGenerations)
+          .set({ status: 'failed', errorMsg: `All models failed. Last error: ${err.message}`, updatedAt: now() })
+          .where(eq(schema.imageGenerations.id, id)).run()
+      }
+    }
   }
 }
 
@@ -199,45 +225,31 @@ async function normalizeReferenceImages(raw: string | null | undefined): Promise
   return normalized.filter((item): item is string => !!item).slice(0, 6)
 }
 
-async function pollImageTask(id: number, config: AIConfig, taskId: string) {
+/**
+ * 轮询异步图片任务直到完成或失败。
+ * 成功时通过 handleImageComplete 保存图片并返回。
+ * 最终失败时 **抛出错误**，由外层 retry 循环捕获后切换到下一个模型。
+ */
+async function pollImageTask(id: number, config: AIConfig, taskId: string): Promise<void> {
   const adapter = getImageAdapter(config.provider)
   const startedAt = Date.now()
   const maxDurationMs = 600_000
 
   for (let i = 0; i < 120; i++) {
     if (Date.now() - startedAt >= maxDurationMs) {
-      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded 10 minutes' })
-      db.update(schema.imageGenerations)
-        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded 10 minutes', updatedAt: now() })
-        .where(eq(schema.imageGenerations.id, id))
-        .run()
-      return
+      throw new Error('Polling exceeded 10 minutes')
     }
     await new Promise(r => setTimeout(r, 5000))
     if (Date.now() - startedAt >= maxDurationMs) {
-      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded 10 minutes' })
-      db.update(schema.imageGenerations)
-        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded 10 minutes', updatedAt: now() })
-        .where(eq(schema.imageGenerations.id, id))
-        .run()
-      return
+      throw new Error('Polling exceeded 10 minutes')
     }
     try {
       const { url, method, headers } = adapter.buildPollRequest(config, taskId)
       logTaskProgress('ImageTask', 'poll-request', {
-        id,
-        taskId,
-        provider: config.provider,
-        method,
-        url: redactUrl(url),
-        attempt: i + 1,
+        id, taskId, provider: config.provider, method, url: redactUrl(url), attempt: i + 1,
       })
       const remainingMs = Math.max(1_000, maxDurationMs - (Date.now() - startedAt))
-      const resp = await fetch(url, {
-        method,
-        headers,
-        signal: AbortSignal.timeout(remainingMs),
-      })
+      const resp = await fetch(url, { method, headers, signal: AbortSignal.timeout(remainingMs) })
       if (!resp.ok) continue
       const result = await resp.json() as any
 
@@ -249,7 +261,6 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
         return
       }
       if (pollResp.status === 'completed' && adapter.provider === 'gemini') {
-        // Gemini 可能返回 base64
         const b64 = adapter.extractImageBase64(result)
         if (b64) {
           logTaskSuccess('ImageTask', 'poll-base64-complete', { id, taskId, mimeType: b64.mimeType })
@@ -263,19 +274,24 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
       }
     } catch (err: any) {
       if (i === 119 || Date.now() - startedAt >= maxDurationMs) {
-        logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: err.message })
-        db.update(schema.imageGenerations)
-          .set({ status: 'failed', errorMsg: `Timeout: ${err.message}`, updatedAt: now() })
-          .where(eq(schema.imageGenerations.id, id))
-          .run()
-        return
+        throw err // 重新抛出给外层 retry 循环
       }
       logTaskWarn('ImageTask', 'poll-retry', { id, taskId, attempt: i + 1, error: err.message })
     }
   }
 }
 
+/** 释放图片任务的 GPU 租约 */
+function releaseImageGpuLease(id: number): void {
+  const lease = imageGpuLeases.get(id)
+  if (lease) {
+    lease.release()
+    imageGpuLeases.delete(id)
+  }
+}
+
 async function handleImageComplete(id: number, provider: string, imageUrl: string) {
+  releaseImageGpuLease(id)
   const localPath = await downloadFile(imageUrl, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]
@@ -303,6 +319,7 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
 }
 
 async function handleImageCompleteBase64(id: number, provider: string, base64Data: string, mimeType: string) {
+  releaseImageGpuLease(id)
   const localPath = await saveBase64Image(base64Data, mimeType, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]

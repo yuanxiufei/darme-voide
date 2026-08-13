@@ -12,6 +12,7 @@ export interface TTSParams {
   speed?: number
   model?: string
   emotion?: string
+  pitch?: number
 }
 
 export interface TTSResult {
@@ -21,6 +22,21 @@ export interface TTSResult {
   bitrate: number
   format: string
   channel: number
+}
+
+/** 将通用 emotion 标签映射为 MiniMax 平台支持的 emotion 值 */
+function mapEmotion(emotion: string): string {
+  const map: Record<string, string> = {
+    happy: 'happy', joyful: 'happy',
+    sad: 'sad', sorrowful: 'sad',
+    angry: 'angry', furious: 'angry',
+    excited: 'surprised', surprised: 'surprised',
+    calm: 'calm', peaceful: 'calm',
+    serious: 'serious', solemn: 'serious',
+    fearful: 'sad', nervous: 'sad',
+    neutral: 'neutral',
+  }
+  return map[emotion.toLowerCase()] || 'happy'
 }
 
 export class MiniMaxTTSAdapter implements TTSProviderAdapter {
@@ -47,8 +63,8 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
         voice_id: params.voice,
         speed: params.speed ?? 1,
         vol: 1,
-        pitch: 0,
-        emotion: params.emotion || 'happy',
+        pitch: params.pitch ?? 0,
+        ...(params.emotion ? { emotion: mapEmotion(params.emotion) } : {}),
       },
       audio_setting: {
         sample_rate: 32000,

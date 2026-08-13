@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest } from '../utils/response.js'
+import { success, badRequest, notFound, parseParamId } from '../utils/response.js'
 import { composeStoryboard } from '../services/ffmpeg-compose.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { toSnakeCase } from '../utils/transform.js'
@@ -10,7 +10,8 @@ const app = new Hono()
 
 // POST /storyboards/:id/compose — 合成单个镜头
 app.post('/storyboards/:id/compose', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
   try {
     logTaskStart('ComposeAPI', 'single-compose', { storyboardId: id })
     const composedUrl = await composeStoryboard(id)
@@ -24,7 +25,9 @@ app.post('/storyboards/:id/compose', async (c) => {
 
 // POST /episodes/:id/compose-all — 批量合成全部镜头
 app.post('/episodes/:id/compose-all', async (c) => {
-  const episodeId = Number(c.req.param('id'))
+  try {
+  const episodeId = parseParamId(c)
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const storyboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -42,14 +45,17 @@ app.post('/episodes/:id/compose-all', async (c) => {
     .run()
 
   ;(async () => {
+    let ok = 0; let fail = 0
     for (const sb of withVideo) {
       try {
         await composeStoryboard(sb.id)
+        ok++
       } catch (err: any) {
+        fail++
         logTaskError('ComposeAPI', 'batch-item', { storyboardId: sb.id, episodeId, error: err.message })
       }
     }
-    logTaskSuccess('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length })
+    logTaskSuccess('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length, ok, fail })
   })()
 
   logTaskStart('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length })
@@ -57,11 +63,14 @@ app.post('/episodes/:id/compose-all', async (c) => {
     message: `Started composing ${withVideo.length} storyboards`,
     total: withVideo.length,
   })
+  } catch (err: any) { logTaskError('ComposeAPI', 'batch-compose', { episodeId: c.req.param('id'), error: err.message }); return badRequest(c, err.message) }
 })
 
 // GET /episodes/:id/compose-status — 查询批量合成状态
 app.get('/episodes/:id/compose-status', async (c) => {
-  const episodeId = Number(c.req.param('id'))
+  try {
+  const episodeId = parseParamId(c)
+  if (episodeId == null) return notFound(c, 'Invalid episode id')
   const storyboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -87,6 +96,7 @@ app.get('/episodes/:id/compose-status', async (c) => {
       errorMsg: sb.status === 'compose_failed' ? '视频合成失败，请检查视频、配音或字幕素材' : '',
     })),
   })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 export default app

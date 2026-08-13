@@ -6,6 +6,10 @@ import { downloadFile, readImageAsCompressedDataUrl } from '../utils/storage.js'
 import { getVideoAdapter } from './adapters/registry'
 import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { gpuManager, type GpuLease, isLocalConfig } from './gpu-manager.js'
+
+/** 后台任务 GPU 租约映射（fire-and-forget 模式用 id 追踪租约） */
+const videoGpuLeases = new Map<number, GpuLease>()
 
 interface GenerateVideoParams {
   storyboardId?: number
@@ -72,92 +76,114 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
   return lastId
 }
 
+/**
+ * 处理视频生成任务（含模型自动 fallback）
+ *
+ * 遍历 config.models 数组，任一模型成功即视为完成。
+ * Vidu 等无轮询端点的提供商，fetch 成功后返回（依赖 Webhook），失败则 fallback。
+ */
 async function processVideoGeneration(id: number, config: AIConfig) {
-  const adapter = getVideoAdapter(config.provider)
+  // ── 预加载记录和参考图 URL（所有模型尝试共享）──
+  const rows = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, id)).all()
+  const record = rows[0]
+  if (!record) return
+  const resolvedImageUrl = await normalizeVideoReferenceUrl(record.imageUrl)
+  const resolvedFirstFrameUrl = await normalizeVideoReferenceUrl(record.firstFrameUrl)
+  const resolvedLastFrameUrl = await normalizeVideoReferenceUrl(record.lastFrameUrl)
+  const resolvedReferenceImageUrls = await normalizeVideoReferenceUrls(record.referenceImageUrls)
 
-  try {
-    const rows = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, id)).all()
-    const record = rows[0]
-    if (!record) return
-    logTaskProgress('VideoTask', 'build-request', {
-      id,
-      provider: config.provider,
-      storyboardId: record.storyboardId,
-      referenceMode: record.referenceMode,
-    })
+  const models = config.models?.length ? config.models : [config.model]
 
-    const resolvedImageUrl = await normalizeVideoReferenceUrl(record.imageUrl)
-    const resolvedFirstFrameUrl = await normalizeVideoReferenceUrl(record.firstFrameUrl)
-    const resolvedLastFrameUrl = await normalizeVideoReferenceUrl(record.lastFrameUrl)
-    const resolvedReferenceImageUrls = await normalizeVideoReferenceUrls(record.referenceImageUrls)
+  for (let attempt = 0; attempt < models.length; attempt++) {
+    const model = models[attempt]
+    const attemptConfig: AIConfig = { ...config, model }
 
-    // 使用 Adapter 构建请求
-    const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
-      id: record.id,
-      model: record.model,
-      prompt: record.prompt,
-      referenceMode: record.referenceMode,
-      imageUrl: resolvedImageUrl,
-      firstFrameUrl: resolvedFirstFrameUrl,
-      lastFrameUrl: resolvedLastFrameUrl,
-      referenceImageUrls: resolvedReferenceImageUrls ? JSON.stringify(resolvedReferenceImageUrls) : null,
-      duration: record.duration,
-      aspectRatio: record.aspectRatio,
-    })
-    logTaskProgress('VideoTask', 'request', {
-      id,
-      provider: config.provider,
-      method,
-      url: redactUrl(url),
-      model: record.model,
-      referenceMode: record.referenceMode,
-    })
-    logTaskPayload('VideoTask', 'request payload', {
-      id,
-      method,
-      url,
-      headers,
-      body,
-    })
+    // ── 更新 DB 当前使用的模型 ──
+    db.update(schema.videoGenerations)
+      .set({ model, updatedAt: now() })
+      .where(eq(schema.videoGenerations.id, id)).run()
 
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-    })
+    // ── 非首次尝试：释放上一次的 GPU 租约 ──
+    if (attempt > 0) releaseVideoGpuLease(id)
 
-    if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
-    const result = await resp.json() as any
-
-    const { isAsync, taskId, videoUrl } = adapter.parseGenerateResponse(result)
-
-    if (!isAsync && videoUrl) {
-      logTaskProgress('VideoTask', 'sync-complete', { id, videoUrl })
-      // 同步模式
-      await handleVideoComplete(id, videoUrl, record.duration)
-      return
+    // ── 本地 GPU 模型：获取显存租约 ──
+    if (isLocalConfig(config.baseUrl, config.provider)) {
+      try {
+        const lease = await gpuManager.acquire('video', config.provider, model, config.baseUrl)
+        videoGpuLeases.set(id, lease)
+      } catch (err: any) {
+        logTaskWarn('VideoTask', 'gpu-acquire-failed', { id, model, error: err.message })
+      }
     }
 
-    // 异步模式：更新 taskId，开始轮询
-    db.update(schema.videoGenerations)
-      .set({ taskId, status: 'processing', updatedAt: now() })
-      .where(eq(schema.videoGenerations.id, id))
-      .run()
-    logTaskProgress('VideoTask', 'poll-start', { id, taskId, provider: config.provider })
+    try {
+      logTaskProgress('VideoTask', 'build-request', {
+        id, provider: config.provider, model, attempt: attempt + 1,
+        storyboardId: record.storyboardId, referenceMode: record.referenceMode,
+      })
 
-    // Vidu 没有轮询端点，跳过轮询（依赖 Webhook 回调）
-    if (adapter.provider === 'vidu') {
-      logTaskProgress('VideoTask', 'webhook-wait', { id, taskId, provider: adapter.provider })
+      const adapter = getVideoAdapter(config.provider)
+      const { url, method, headers, body } = adapter.buildGenerateRequest(attemptConfig, {
+        id: record.id,
+        model,
+        prompt: record.prompt,
+        referenceMode: record.referenceMode,
+        imageUrl: resolvedImageUrl,
+        firstFrameUrl: resolvedFirstFrameUrl,
+        lastFrameUrl: resolvedLastFrameUrl,
+        referenceImageUrls: resolvedReferenceImageUrls ? JSON.stringify(resolvedReferenceImageUrls) : null,
+        duration: record.duration,
+        aspectRatio: record.aspectRatio,
+      })
+
+      logTaskProgress('VideoTask', 'request', {
+        id, provider: config.provider, method, url: redactUrl(url), model, referenceMode: record.referenceMode,
+      })
+      logTaskPayload('VideoTask', 'request payload', { id, method, url, headers, body })
+
+      const resp = await fetch(url, { method, headers, body: JSON.stringify(body) })
+
+      if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
+      const result = await resp.json() as any
+
+      const { isAsync, taskId, videoUrl } = adapter.parseGenerateResponse(result)
+
+      if (!isAsync && videoUrl) {
+        logTaskProgress('VideoTask', 'sync-complete', { id, model, videoUrl })
+        await handleVideoComplete(id, videoUrl, record.duration)
+        return
+      }
+
+      // 异步模式：更新 taskId
+      db.update(schema.videoGenerations)
+        .set({ taskId, status: 'processing', updatedAt: now() })
+        .where(eq(schema.videoGenerations.id, id)).run()
+      logTaskProgress('VideoTask', 'poll-start', { id, taskId, provider: config.provider, model })
+
+      // Vidu 没有轮询端点，成功提交后返回（依赖 Webhook 回调完成）
+      if (adapter.provider === 'vidu') {
+        logTaskProgress('VideoTask', 'webhook-wait', { id, taskId, provider: adapter.provider })
+        return
+      }
+
+      await pollVideoTask(id, attemptConfig, taskId!, record.storyboardId)
       return
-    }
+    } catch (err: any) {
+      const isLastAttempt = attempt === models.length - 1
+      logTaskWarn('VideoTask', isLastAttempt ? 'all-models-failed' : 'model-fallback', {
+        id, attempt: attempt + 1, totalModels: models.length,
+        failedModel: model, error: err.message,
+        ...(isLastAttempt ? {} : { nextModel: models[attempt + 1] }),
+      })
 
-    pollVideoTask(id, config, taskId!, record.storyboardId)
-  } catch (err: any) {
-    logTaskError('VideoTask', 'process', { id, provider: config.provider, error: err.message })
-    db.update(schema.videoGenerations)
-      .set({ status: 'failed', errorMsg: err.message, updatedAt: now() })
-      .where(eq(schema.videoGenerations.id, id))
-      .run()
+      if (isLastAttempt) {
+        releaseVideoGpuLease(id)
+        logTaskError('VideoTask', 'process', { id, provider: config.provider, attemptedModels: models, error: err.message })
+        db.update(schema.videoGenerations)
+          .set({ status: 'failed', errorMsg: `All models failed. Last error: ${err.message}`, updatedAt: now() })
+          .where(eq(schema.videoGenerations.id, id)).run()
+      }
+    }
   }
 }
 
@@ -195,7 +221,12 @@ async function normalizeVideoReferenceUrls(raw: string | null | undefined): Prom
   return normalized.filter((item): item is string => !!item)
 }
 
-async function pollVideoTask(id: number, config: AIConfig, taskId: string, storyboardId?: number | null) {
+/**
+ * 轮询异步视频任务直到完成或失败。
+ * 成功时通过 handleVideoComplete 保存视频并返回。
+ * 最终失败时 **抛出错误**，由外层 retry 循环捕获后切换到下一个模型。
+ */
+async function pollVideoTask(id: number, config: AIConfig, taskId: string, storyboardId?: number | null): Promise<void> {
   const adapter = getVideoAdapter(config.provider)
 
   for (let i = 0; i < 300; i++) {
@@ -203,12 +234,7 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
     try {
       const { url, method, headers } = adapter.buildPollRequest(config, taskId)
       logTaskProgress('VideoTask', 'poll-request', {
-        id,
-        taskId,
-        provider: config.provider,
-        method,
-        url: redactUrl(url),
-        attempt: i + 1,
+        id, taskId, provider: config.provider, method, url: redactUrl(url), attempt: i + 1,
       })
       const resp = await fetch(url, { method, headers })
       if (!resp.ok) continue
@@ -227,19 +253,24 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
       }
     } catch (err: any) {
       if (i === 299) {
-        logTaskError('VideoTask', 'poll-timeout', { id, taskId, error: err.message })
-        db.update(schema.videoGenerations)
-          .set({ status: 'failed', errorMsg: `Timeout: ${err.message}`, updatedAt: now() })
-          .where(eq(schema.videoGenerations.id, id))
-          .run()
-        return
+        throw err // 重新抛出给外层 retry 循环
       }
       logTaskWarn('VideoTask', 'poll-retry', { id, taskId, attempt: i + 1, error: err.message })
     }
   }
 }
 
+/** 释放视频任务的 GPU 租约 */
+function releaseVideoGpuLease(id: number): void {
+  const lease = videoGpuLeases.get(id)
+  if (lease) {
+    lease.release()
+    videoGpuLeases.delete(id)
+  }
+}
+
 async function handleVideoComplete(id: number, videoUrl: string, duration: number | null | undefined, storyboardId?: number | null) {
+  releaseVideoGpuLease(id)
   const localPath = await downloadFile(videoUrl, 'videos')
   db.update(schema.videoGenerations)
     .set({ videoUrl, localPath, status: 'completed', completedAt: now(), updatedAt: now() })

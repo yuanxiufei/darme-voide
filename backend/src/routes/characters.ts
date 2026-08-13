@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, now } from '../utils/response.js'
+import { success, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
@@ -9,12 +9,30 @@ import { buildCharacterImagePrompt } from '../shared/prompt-utils.js'
 
 const app = new Hono()
 
+// GET /characters/:id
+app.get('/:id', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid character id')
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return notFound(c, 'Character not found')
+  return success(c, char)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
 // PUT /characters/:id
 app.put('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid character id')
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
-  for (const key of ['name', 'role', 'description', 'appearance', 'personality', 'voiceStyle', 'voiceProvider', 'imageUrl', 'localPath']) {
+  for (const key of [
+    'name', 'role', 'description', 'appearance', 'personality',
+    'voiceStyle', 'voiceProvider', 'voiceSpeed', 'voiceEmotion',
+    'voicePitch', 'voiceModel', 'clothing', 'weapons',
+    'customPrompt', 'imageUrl', 'localPath',
+  ]) {
     const snakeKey = key.replace(/[A-Z]/g, m => '_' + m.toLowerCase())
     if (snakeKey in body) updates[key] = body[snakeKey]
     else if (key in body) updates[key] = body[key]
@@ -23,19 +41,25 @@ app.put('/:id', async (c) => {
     updates.voiceSampleUrl = null
   }
   db.update(schema.characters).set(updates).where(eq(schema.characters.id, id)).run()
-  return success(c)
+  const [updated] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  return success(c, updated)
+  } catch (err: any) { logTaskError('CharacterAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // DELETE /characters/:id
 app.delete('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid character id')
   db.update(schema.characters).set({ deletedAt: now() }).where(eq(schema.characters.id, id)).run()
   return success(c)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // POST /characters/:id/generate-voice-sample — 生成角色音色试听
 app.post('/:id/generate-voice-sample', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid character id')
   const body = await c.req.json().catch(() => ({}))
   const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
   if (!char) return badRequest(c, 'Character not found')
@@ -61,7 +85,8 @@ app.post('/:id/generate-voice-sample', async (c) => {
 
 // POST /characters/:id/generate-image
 app.post('/:id/generate-image', async (c) => {
-  const id = Number(c.req.param('id'))
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid character id')
   const body = await c.req.json()
   const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
   if (!char) return badRequest(c, 'Character not found')
@@ -70,11 +95,20 @@ app.post('/:id/generate-image', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
 
-  // 自定义 prompt 优先；否则用统一 prompt 构建器
-  const prompt = body.prompt || buildCharacterImagePrompt(char)
+  // 自定义 prompt 优先 → 角色 customPrompt → 统一构建器
+  const prompt = body.prompt
+    || char.customPrompt
+    || buildCharacterImagePrompt({ ...char, ...body })
+
   try {
-    logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId })
-    const genId = await generateImage({ characterId: id, dramaId: char.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+    logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId, model: body.model || 'default' })
+    const genId = await generateImage({
+      characterId: id,
+      dramaId: char.dramaId,
+      prompt,
+      model: body.model,
+      configId: ep.imageConfigId ?? undefined,
+    })
     logTaskSuccess('CharacterImage', 'generate', { characterId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {

@@ -20,6 +20,7 @@ import compose from './routes/compose.js'
 import merge from './routes/merge.js'
 import grid from './routes/grid.js'
 import skills from './routes/skills.js'
+import presetFramework from './routes/preset-framework.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import characterLibrary from './routes/characterLibrary.js'
@@ -63,6 +64,7 @@ api.route('/merge', merge)
 api.route('/grid', grid)
 api.route('/skills', skills)
 api.route('/ai-voices', aiVoices)
+api.route('/preset/framework', presetFramework)
 api.route('/character-library', characterLibrary)
 api.route('/scene-library', sceneLibrary)
 api.route('/weapon-library', weaponLibrary)

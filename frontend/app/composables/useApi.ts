@@ -14,12 +14,25 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 
     if (!resp.ok || (json.code && json.code >= 400)) {
       console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', json.message || '')
-      throw new Error(json.message || `${resp.status}`)
+      // 增强错误信息：包含状态码和路径，便于调试
+      const error = new Error(json.message || `请求失败 (${resp.status})`)
+      ;(error as any).status = resp.status
+      ;(error as any).code = json.code
+      ;(error as any).path = path
+      throw error
     }
 
     console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#66bb6a', 'color:#66bb6a;font-weight:bold', 'color:#888')
     return json.data ?? json
   } catch (err: any) {
+    // 区分网络错误和业务错误
+    if (err.name === 'TypeError' && err.message.includes('fetch')) {
+      const ms = Math.round(performance.now() - start)
+      console.log(`%c[API] %c${method} ${path} %cNETWORK ERROR %c${ms}ms`, 'color:#888', 'color:#ff9800', 'color:#ff9800;font-weight:bold', 'color:#888', err.message)
+      const networkError = new Error('网络连接失败，请检查网络或服务器状态')
+      ;(networkError as any).isNetworkError = true
+      throw networkError
+    }
     if (!err.message?.match(/^\d{3}$/)) {
       const ms = Math.round(performance.now() - start)
       console.log(`%c[API] %c${method} ${path} %cERROR %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', err.message)
@@ -57,18 +70,24 @@ export const storyboardAPI = {
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   generateTTS: (id: number) => api.post(`/storyboards/${id}/generate-tts`),
   validateDialogue: (id: number) => api.get(`/storyboards/${id}/validate-dialogue`),
+  regenerateImage: (id: number, data: any) => api.post(`/storyboards/${id}/regenerate-image`, data),
   del: (id: number) => api.del(`/storyboards/${id}`),
 }
 
 export const characterAPI = {
+  get: (id: number) => api.get(`/characters/${id}`),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
   voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
-  generateImage: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-image`, { episode_id: episodeId }),
+  generateImage: (id: number, episodeId: number, data?: { prompt?: string; model?: string }) =>
+    api.post(`/characters/${id}/generate-image`, { episode_id: episodeId, ...data }),
   batchImages: (ids: number[], episodeId: number) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId }),
 }
 
 export const sceneAPI = {
-  generateImage: (id: number, episodeId: number) => api.post(`/scenes/${id}/generate-image`, { episode_id: episodeId }),
+  get: (id: number) => api.get(`/scenes/${id}`),
+  update: (id: number, data: any) => api.put(`/scenes/${id}`, data),
+  generateImage: (id: number, episodeId: number, data?: { prompt?: string; model?: string }) =>
+    api.post(`/scenes/${id}/generate-image`, { episode_id: episodeId, ...data }),
 }
 
 export const imageAPI = {
@@ -89,6 +108,8 @@ export const gridAPI = {
 export const videoAPI = {
   generate: (d: any) => api.post('/videos', d),
   get: (id: number) => api.get(`/videos/${id}`),
+  update: (id: number, d: any) => api.put(`/videos/${id}`, d),
+  regenerate: (id: number, d: any) => api.post(`/videos/${id}/regenerate`, d),
 }
 export const composeAPI = {
   shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),

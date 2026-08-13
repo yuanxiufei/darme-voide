@@ -73,6 +73,8 @@ export interface AIConfig {
   baseUrl: string
   apiKey: string
   model: string
+  /** 所有可用模型（按优先级排序），失败时自动 fallback */
+  models?: string[]
 }
 
 export interface ImageGenerationRecord {

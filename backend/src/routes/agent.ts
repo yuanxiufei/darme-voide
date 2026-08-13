@@ -1,26 +1,12 @@
 /**
- * Agent 聊天路由 — 非流式版本
+ * Agent 聊天路由 — 非流式版本，带多模型自动 fallback
  */
 import { Hono } from 'hono'
-import { createAgent, validAgentTypes } from '../agents/index.js'
+import { runAgentWithRetry, validAgentTypes } from '../agents/index.js'
 import { success, badRequest } from '../utils/response.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
-
-function normalizeToolName(entry: any) {
-  return entry?.toolName
-    || entry?.tool?.toolName
-    || entry?.tool?.id
-    || entry?.name
-    || entry?.type
-    || null
-}
-
-function normalizeToolResult(entry: any) {
-  const result = entry?.result ?? entry?.output ?? entry?.data ?? null
-  return typeof result === 'string' ? result : JSON.stringify(result)
-}
 
 // POST /agent/:type/chat — 非流式 Agent 对话
 app.post('/:type/chat', async (c) => {
@@ -44,52 +30,30 @@ app.post('/:type/chat', async (c) => {
     return badRequest(c, 'drama_id and episode_id are required')
   }
 
-  const agent = createAgent(agentType, episode_id, drama_id)
-  if (!agent) {
-    logTaskError('Agent', agentType, { reason: 'agent not found' })
-    return badRequest(c, 'Agent not found')
-  }
-
   const startTime = performance.now()
 
   try {
-    const result = await agent.generate(
-      [{ role: 'user', content: message }],
-      { maxSteps: 20 },
-    )
+    const result = await runAgentWithRetry(agentType, episode_id, drama_id, message, { maxSteps: 20 })
 
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)
     logTaskSuccess('Agent', agentType, { elapsedSeconds: elapsed })
 
-    // 收集所有 tool calls 和 results
-    const toolCalls = result.toolCalls || []
-    const toolResults = result.toolResults || []
-    const normalizedToolCalls = toolCalls.map((tc: any) => ({
-      toolName: normalizeToolName(tc),
-      args: tc?.args ?? tc?.input ?? null,
-    }))
-    const normalizedToolResults = toolResults.map((tr: any) => ({
-      toolName: normalizeToolName(tr),
-      result: normalizeToolResult(tr),
-    }))
-
     logTaskProgress('Agent', 'tool-summary', {
       agentType,
-      toolCalls: normalizedToolCalls.map((tc: any) => tc.toolName),
-      toolResults: normalizedToolResults.map((tr: any) => tr.toolName),
+      toolCalls: result.toolCalls.map((tc) => tc.toolName),
+      toolResults: result.toolResults.map((tr) => tr.toolName),
     })
-    logTaskPayload('Agent', `${agentType} tool-results`, normalizedToolResults)
+    logTaskPayload('Agent', `${agentType} tool-results`, result.toolResults)
 
     return success(c, {
       type: 'done',
-      text: result.text || '',
-      toolCalls: normalizedToolCalls,
-      toolResults: normalizedToolResults,
+      text: result.text,
+      toolCalls: result.toolCalls,
+      toolResults: result.toolResults,
     })
   } catch (err: any) {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)
-    logTaskError('Agent', agentType, { elapsedSeconds: elapsed, error: err.message })
-    console.error(err.stack || err)
+    logTaskError('Agent', agentType, { elapsedSeconds: elapsed, error: err.message, stack: err.stack })
     return badRequest(c, err.message || 'Agent execution failed')
   }
 })

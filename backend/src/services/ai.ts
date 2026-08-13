@@ -13,6 +13,8 @@ export interface AIConfig {
   baseUrl: string
   apiKey: string
   model: string
+  /** 所有可用模型（按优先级排序），失败时自动 fallback */
+  models: string[]
 }
 
 export function getTextProviderBaseUrl(config: AIConfig) {
@@ -46,7 +48,10 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
     return null
   }
 
-  const models = active.model ? JSON.parse(active.model) : []
+  let models: string[] = []
+  if (active.model) {
+    try { models = JSON.parse(active.model) } catch { /* keep empty array */ }
+  }
   logTaskProgress('AIConfig', 'active-config-selected', {
     serviceType,
     configId: active.id,
@@ -59,6 +64,7 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
     model: models[0] || '',
+    models: models.filter(Boolean),
   }
 }
 
@@ -89,7 +95,10 @@ export function getConfigById(id: number): AIConfig | null {
     logTaskWarn('AIConfig', 'config-by-id-missing', { configId: id })
     return null
   }
-  const models = row.model ? JSON.parse(row.model) : []
+  let models: string[] = []
+  if (row.model) {
+    try { models = JSON.parse(row.model) } catch { /* keep empty array */ }
+  }
   logTaskProgress('AIConfig', 'config-by-id-selected', {
     configId: id,
     provider: row.provider,
@@ -101,5 +110,6 @@ export function getConfigById(id: number): AIConfig | null {
     baseUrl: row.baseUrl,
     apiKey: row.apiKey,
     model: models[0] || '',
+    models: models.filter(Boolean),
   }
 }

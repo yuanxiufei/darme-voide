@@ -1,13 +1,15 @@
 import { Hono } from 'hono'
-import { eq, isNull, like, desc } from 'drizzle-orm'
+import { and, eq, isNull, like, desc } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, notFound, created, now } from '../utils/response.js'
+import { success, badRequest, notFound, created, now, parseParamId } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
+import { logTaskError } from '../utils/task-logger.js'
 
 const app = new Hono()
 
 // GET /dramas - List dramas
 app.get('/', async (c) => {
+  try {
   const page = Number(c.req.query('page') || 1)
   const pageSize = Number(c.req.query('page_size') || 20)
   const status = c.req.query('status')
@@ -46,10 +48,12 @@ app.get('/', async (c) => {
     items: enriched,
     pagination: { page, page_size: pageSize, total, total_pages: Math.ceil(total / pageSize) },
   })
+  } catch (err: any) { logTaskError('DramasAPI', 'list', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // POST /dramas - Create drama
 app.post('/', async (c) => {
+  try {
   const body = await c.req.json()
   const ts = now()
   const res = db.insert(schema.dramas).values({
@@ -81,11 +85,13 @@ app.post('/', async (c) => {
   }
 
   return created(c, toSnakeCase(result))
+  } catch (err: any) { logTaskError('DramasAPI', 'create', { error: err.message }); return badRequest(c, err.message) }
 })
 
 
 // GET /dramas/stats — must be before /:id
 app.get('/stats', async (c) => {
+  try {
   const all = db.select().from(schema.dramas).where(isNull(schema.dramas.deletedAt)).all()
   const byStatus = Object.entries(
     all.reduce((acc, d) => {
@@ -94,11 +100,14 @@ app.get('/stats', async (c) => {
     }, {} as Record<string, number>)
   ).map(([status, count]) => ({ status, count }))
   return success(c, { total: all.length, by_status: byStatus })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 // GET /dramas/:id - Get drama detail
 app.get('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid drama id')
   const [drama] = await db.select().from(schema.dramas).where(eq(schema.dramas.id, id))
   if (!drama) return notFound(c, '剧本不存在')
 
@@ -119,11 +128,17 @@ app.get('/:id', async (c) => {
     scenes: toSnakeCaseArray(scns),
     props: toSnakeCaseArray(prps),
   })
+  } catch (err: any) { logTaskError('DramasAPI', 'get', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // PUT /dramas/:id - Update drama
 app.put('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid drama id')
+  const [drama] = db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt))).all()
+  if (!drama) return notFound(c, 'Drama not found')
+
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
   if (body.title !== undefined) updates.title = body.title
@@ -135,18 +150,26 @@ app.put('/:id', async (c) => {
   if (body.metadata !== undefined) updates.metadata = body.metadata
   db.update(schema.dramas).set(updates).where(eq(schema.dramas.id, id)).run()
   return success(c)
+  } catch (err: any) { logTaskError('DramasAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // DELETE /dramas/:id - Soft delete
 app.delete('/:id', async (c) => {
-  const id = Number(c.req.param('id'))
-  await db.update(schema.dramas).set({ deletedAt: now() }).where(eq(schema.dramas.id, id))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid drama id')
+  const [drama] = db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt))).all()
+  if (!drama) return notFound(c, 'Drama not found')
+  db.update(schema.dramas).set({ deletedAt: now() }).where(eq(schema.dramas.id, id)).run()
   return success(c)
+  } catch (err: any) { logTaskError('DramasAPI', 'delete', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // PUT /dramas/:id/characters - Save characters
 app.put('/:id/characters', async (c) => {
-  const dramaId = Number(c.req.param('id'))
+  try {
+  const dramaId = parseParamId(c)
+  if (dramaId == null) return notFound(c, 'Invalid drama id')
   const body = await c.req.json()
   const chars = body.characters || []
   const ts = now()
@@ -159,11 +182,14 @@ app.put('/:id/characters', async (c) => {
     }
   }
   return success(c)
+  } catch (err: any) { logTaskError('DramasAPI', 'save-characters', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // PUT /dramas/:id/episodes - Save episodes
 app.put('/:id/episodes', async (c) => {
-  const dramaId = Number(c.req.param('id'))
+  try {
+  const dramaId = parseParamId(c)
+  if (dramaId == null) return notFound(c, 'Invalid drama id')
   const body = await c.req.json()
   const episodes = body.episodes || []
   const ts = now()
@@ -183,6 +209,7 @@ app.put('/:id/episodes', async (c) => {
     }
   }
   return success(c)
+  } catch (err: any) { logTaskError('DramasAPI', 'save-episodes', { error: err.message }); return badRequest(c, err.message) }
 })
 
 export default app

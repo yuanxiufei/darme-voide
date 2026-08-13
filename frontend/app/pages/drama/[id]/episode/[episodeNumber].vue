@@ -415,7 +415,9 @@
                 添加
               </button>
               <template v-if="!sbs.length">
-                <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
+                <select class="config-select" :value="lockedVideoConfigId" @change="switchEpisodeConfig('video', Number(($event.target as HTMLSelectElement).value))">
+                  <option v-for="c in videoConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+                </select>
               </template>
               <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
                 <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
@@ -675,6 +677,36 @@
                     </label>
                   </div>
                 </div>
+                <!-- v2: 图片/视频重新生成控制 -->
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">重新生成</span>
+                    <span class="detail-section-copy">模型选择 + 自定义 Prompt 覆盖</span>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">自定义图片 Prompt（留空自动生成）</span>
+                    <textarea
+                      :value="selectedSb.custom_image_prompt || selectedSb.customImagePrompt || ''"
+                      class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'custom_image_prompt', $event.target.value)"
+                      placeholder="手动覆盖图片 prompt" />
+                  </label>
+                  <div class="flex gap-2 items-center mt-2">
+                    <ModelSelector v-model="imageGenerationModel" service-type="image" label="图片模型" />
+                    <button
+                      class="btn btn-sm btn-primary"
+                      :disabled="regeneratingShotIds.includes(selectedSb?.id)"
+                      @click="regenerateShotImage(selectedSb, imageGenerationModel)">
+                      {{ regeneratingShotIds.includes(selectedSb?.id) ? '生成中...' : '重新生成图片' }}
+                    </button>
+                  </div>
+                  <div class="flex gap-2 items-center mt-2">
+                    <ModelSelector v-model="videoGenerationModel" service-type="video" label="视频模型" />
+                    <button class="btn btn-sm" @click="openVideoEditor(selectedSb)">
+                      视频参数编辑 / 生成
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -693,7 +725,12 @@
             </div>
             <div class="empty-title">将剧本拆解为分镜序列</div>
             <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
-            <div class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
+            <div class="locked-config-banner">
+              当前集视频模型：
+              <select class="config-select" :value="lockedVideoConfigId" @change="switchEpisodeConfig('video', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in videoConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+            </div>
             <button class="btn btn-primary" @click="doBreakdown">
               <Loader2 v-if="rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
               <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -742,7 +779,9 @@
           <div v-if="prodTab === 'chars'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchCharImages">
@@ -752,7 +791,7 @@
               </div>
             </div>
             <div class="asset-grid">
-              <div v-for="c in visualChars" :key="c.id" class="card asset-card">
+              <div v-for="c in visualChars" :key="c.id" class="card asset-card clickable" @click="$router.push(`/drama/${dramaId}/character/${c.id}`)">
                 <div class="asset-cover">
                   <img
                     v-if="c.image_url || c.imageUrl"
@@ -770,9 +809,18 @@
                   <div class="asset-meta dim">{{ c.role || '角色' }}</div>
                 </div>
                 <div class="asset-foot">
-                  <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
-                  <span class="dim" style="font-size:10px">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
-                  <button class="btn btn-sm ml-auto" :disabled="isPendingCharImage(c.id)" @click="genCharImg(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
+                  <div class="foot-left">
+                    <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
+                    <span class="dim foot-status">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
+                  </div>
+                  <div class="foot-right">
+                    <ModelSelector :model-value="charImageModels[c.id] || ''" service-type="image" placeholder="默认模型" @update:model-value="(v: string) => charImageModels[c.id] = v" @click.stop />
+                    <button class="btn btn-sm btn-edit" title="编辑角色详情" @click.stop="openCharEditor(c)">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      编辑
+                    </button>
+                    <button class="btn btn-sm btn-primary" :disabled="isPendingCharImage(c.id)" @click.stop="genCharImgWithModel(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -782,7 +830,9 @@
           <div v-else-if="prodTab === 'scenes'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ scenes.length }} 个场景</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchSceneImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
@@ -791,7 +841,7 @@
               </div>
             </div>
             <div class="asset-grid">
-              <div v-for="s in scenes" :key="s.id" class="card asset-card">
+              <div v-for="s in scenes" :key="s.id" class="card asset-card clickable" @click="$router.push(`/drama/${dramaId}/scene/${s.id}`)">
                 <div class="asset-cover wide">
                   <img
                     v-if="s.image_url || s.imageUrl"
@@ -809,9 +859,18 @@
                   <div class="asset-meta dim">{{ s.time || '—' }}</div>
                 </div>
                 <div class="asset-foot">
-                  <span :class="['dot', (s.image_url || s.imageUrl) && 'ok', isPendingSceneImage(s.id) && 'pending']" />
-                  <span class="dim" style="font-size:10px">{{ (s.image_url || s.imageUrl) ? '已生成' : (isPendingSceneImage(s.id) ? '生成中' : '待生成') }}</span>
-                  <button class="btn btn-sm ml-auto" :disabled="isPendingSceneImage(s.id)" @click="genSceneImg(s.id)">{{ isPendingSceneImage(s.id) ? '生成中' : '生成' }}</button>
+                  <div class="foot-left">
+                    <span :class="['dot', (s.image_url || s.imageUrl) && 'ok', isPendingSceneImage(s.id) && 'pending']" />
+                    <span class="dim foot-status">{{ (s.image_url || s.imageUrl) ? '已生成' : (isPendingSceneImage(s.id) ? '生成中' : '待生成') }}</span>
+                  </div>
+                  <div class="foot-right">
+                    <ModelSelector :model-value="sceneImageModels[s.id] || ''" service-type="image" placeholder="默认模型" @update:model-value="(v: string) => sceneImageModels[s.id] = v" @click.stop />
+                    <button class="btn btn-sm btn-edit" title="编辑场景详情" @click.stop="openSceneEditor(s)">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      编辑
+                    </button>
+                    <button class="btn btn-sm btn-primary" :disabled="isPendingSceneImage(s.id)" @click.stop="genSceneImgWithModel(s.id)">{{ isPendingSceneImage(s.id) ? '生成中' : '生成' }}</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -822,7 +881,9 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条可生成配音</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已生成</span>
-              <span class="tag">{{ lockedAudioConfigLabel }}</span>
+              <select class="config-select" :value="lockedAudioConfigId" @change="switchEpisodeConfig('audio', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in audioConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
@@ -909,7 +970,9 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotImgCount }}/{{ sbs.length }} 已有帧图</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
               <div class="ml-auto flex gap-1">
                 <BaseSelect v-model="frameMode" :options="frameModeOptions" placeholder="帧模式" searchable style="width:100px" />
                 <button v-if="gridImagePath" class="btn btn-sm" @click="reopenGridPreview">
@@ -1473,9 +1536,34 @@
     </main>
     </div>
   </div>
+
+  <!-- ====== v2 编辑器弹窗 ====== -->
+  <CharacterEditor
+    :visible="showCharEditor"
+    :character="editingChar"
+    :episode-id="epId"
+    @close="closeCharEditor"
+    @saved="refresh"
+  />
+  <SceneEditor
+    :visible="showSceneEditor"
+    :scene="editingScene"
+    :episode-id="epId"
+    @close="closeSceneEditor"
+    @saved="refresh"
+  />
+  <VideoEditor
+    :visible="showVideoEditor"
+    :storyboard="editingVideoStoryboard"
+    :video-record="editingVideo"
+    :characters="chars"
+    :config-id="lockedVideoConfigId ?? undefined"
+    @close="closeVideoEditor"
+    @regenerated="refresh"
+  />
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
@@ -1484,6 +1572,10 @@ import {
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import BaseSelect from '~/components/BaseSelect.vue'
+import ModelSelector from '~/components/ModelSelector.vue'
+import CharacterEditor from '~/components/CharacterEditor.vue'
+import SceneEditor from '~/components/SceneEditor.vue'
+import VideoEditor from '~/components/VideoEditor.vue'
 
 definePageMeta({ layout: 'studio' })
 
@@ -1522,6 +1614,45 @@ const fallbackVoiceProfiles = [
   { id: 'shimmer', label: 'Shimmer', gender: '女声', traits: '明亮、活泼、年轻', suitable: '少女、轻快角色、跳脱配角' },
 ]
 const voiceProfiles = ref(fallbackVoiceProfiles)
+
+// ====== v2: 编辑器状态 ======
+const editingChar = ref<any>(null)
+const showCharEditor = ref(false)
+const editingScene = ref<any>(null)
+const showSceneEditor = ref(false)
+const editingVideo = ref<any>(null)
+const editingVideoStoryboard = ref<any>(null)
+const showVideoEditor = ref(false)
+const imageGenerationModel = ref('')
+const videoGenerationModel = ref('')
+const regeneratingShotIds = ref<number[]>([])
+
+function openCharEditor(c: any) { useRouter().push(`/drama/${dramaId}/character/${c.id}`) }
+function closeCharEditor() { showCharEditor.value = false }
+function openSceneEditor(s: any) { useRouter().push(`/drama/${dramaId}/scene/${s.id}`) }
+function closeSceneEditor() { showSceneEditor.value = false }
+function openVideoEditor(sb: any, vr?: any) {
+  editingVideoStoryboard.value = sb
+  editingVideo.value = vr || null
+  showVideoEditor.value = true
+}
+function closeVideoEditor() { showVideoEditor.value = false }
+
+async function regenerateShotImage(sb: any, model?: string) {
+  if (!sb.id) return
+  regeneratingShotIds.value.push(sb.id)
+  try {
+    await storyboardAPI.regenerateImage(sb.id, {
+      prompt: sb.customImagePrompt || sb.custom_image_prompt || undefined,
+      model: model || undefined,
+    })
+    await refresh()
+  } catch (err: any) {
+    toast.error(err?.message || '生成失败')
+  } finally {
+    regeneratingShotIds.value = regeneratingShotIds.value.filter(id => id !== sb.id)
+  }
+}
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
 const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
   let modelName = ''
@@ -1536,16 +1667,16 @@ const gridLayoutOptions = [
   { label: '4x4', value: '4x4' },
   { label: '5x5', value: '5x5' },
 ]
-const imageConfigs = ref([])
-const videoConfigs = ref([])
-const audioConfigs = ref([])
-const pendingCharImageIds = ref([])
-const pendingSceneImageIds = ref([])
-const pendingShotFrameKeys = ref([])
-const pendingVideoIds = ref([])
-const pendingComposeIds = ref([])
-const failedVideoMessages = ref({})
-const failedComposeMessages = ref({})
+const imageConfigs = ref<any[]>([])
+const videoConfigs = ref<any[]>([])
+const audioConfigs = ref<any[]>([])
+const pendingCharImageIds = ref<number[]>([])
+const pendingSceneImageIds = ref<number[]>([])
+const pendingShotFrameKeys = ref<string[]>([])
+const pendingVideoIds = ref<number[]>([])
+const pendingComposeIds = ref<number[]>([])
+const failedVideoMessages = ref<Record<number, string>>({})
+const failedComposeMessages = ref<Record<number, string>>({})
 const imageViewer = ref({ open: false, src: '', title: '' })
 
 function configLabel(config) {
@@ -1576,8 +1707,12 @@ onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
 })
 
+const isMounted = ref(true)
+
 onBeforeUnmount(() => {
+  isMounted.value = false
   window.removeEventListener('keydown', handleImageViewerKeydown)
+  if (mergeIntervalId) clearInterval(mergeIntervalId)
 })
 
 function isPendingSceneImage(id) {
@@ -1622,6 +1757,23 @@ const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id ===
 const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.find(c => c.id === lockedImageConfigId.value)))
 const lockedVideoConfigLabel = computed(() => configLabel(videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)))
 const lockedAudioConfigLabel = computed(() => configLabel(audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)))
+
+// Episode 级模型配置切换
+async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: number) {
+  if (!epId) return
+  const field = `${type}_config_id`
+  try {
+    await episodeAPI.update(epId, { [field]: configId })
+    // 本地更新 episode 对象，避免全量 refresh
+    if (episode.value) {
+      if (type === 'image') episode.value.image_config_id = configId
+      else if (type === 'video') episode.value.video_config_id = configId
+      else if (type === 'audio') episode.value.audio_config_id = configId
+    }
+  } catch (e: any) {
+    toast.error(e?.message || '切换配置失败')
+  }
+}
 
 // Grid tool state
 const gridDialog = ref(false)
@@ -1872,7 +2024,11 @@ function persistGridImagePath(value) {
     activeImagePath: value,
     entries,
   }
-  window.localStorage.setItem(gridStorageKey.value, JSON.stringify(payload))
+  try {
+    window.localStorage.setItem(gridStorageKey.value, JSON.stringify(payload))
+  } catch (e) {
+    console.warn('[Grid] localStorage setItem failed:', e)
+  }
 }
 
 function restoreGridState() {
@@ -2022,6 +2178,7 @@ async function startGridGen() {
 async function pollGridStatus() {
   for (let i = 0; i < 120; i++) {
     await new Promise(r => setTimeout(r, 3000))
+    if (!isMounted.value) return
     try {
       const res = await gridAPI.status(gridGenId.value)
       gridStatusText.value = `状态: ${res.status}`
@@ -2549,6 +2706,28 @@ async function genCharImg(id) {
     toast.error(e.message)
   }
 }
+
+// 角色级图片模型选择（每个角色独立）
+const charImageModels = ref<Record<number, string>>({})
+
+async function genCharImgWithModel(id: number) {
+  try {
+    if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
+    const model = charImageModels.value[id] || undefined
+    await characterAPI.generateImage(id, epId.value, { prompt: undefined, model })
+    toast.success('角色图片生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const char = chars.value.find(c => c.id === id)
+      const done = !!(char?.image_url || char?.imageUrl)
+      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+      return done
+    })
+  } catch (e) {
+    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+    toast.error(e.message)
+  }
+}
 function batchCharImages() {
   const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
   if (!ids.length) { toast.info('所有角色图片已生成'); return }
@@ -2571,6 +2750,28 @@ async function genSceneImg(id) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     await sceneAPI.generateImage(id, epId.value)
+    toast.success('场景图片生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const scene = scenes.value.find(s => s.id === id)
+      const done = !!(scene?.image_url || scene?.imageUrl)
+      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      return done
+    })
+  } catch (e) {
+    pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+    toast.error(e.message)
+  }
+}
+
+// 场景级图片模型选择（每个场景独立）
+const sceneImageModels = ref<Record<number, string>>({})
+
+async function genSceneImgWithModel(id: number) {
+  try {
+    if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
+    const model = sceneImageModels.value[id] || undefined
+    await sceneAPI.generateImage(id, epId.value, { prompt: undefined, model })
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
@@ -3088,12 +3289,15 @@ async function batchCompose() {
   toast.success('批量合成已开始')
   pollComposeStatus()
 }
+let mergeIntervalId: ReturnType<typeof setInterval> | null = null
+
 async function doMerge() {
   await mergeAPI.merge(epId.value); toast.success('拼接中...')
-  const poll = setInterval(async () => {
+  if (mergeIntervalId) clearInterval(mergeIntervalId)
+  mergeIntervalId = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
     if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
-      clearInterval(poll)
+      if (mergeIntervalId) { clearInterval(mergeIntervalId); mergeIntervalId = null }
       mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error('拼接失败')
     }
   }, 3000)
@@ -3102,6 +3306,7 @@ async function doMerge() {
 async function pollComposeStatus() {
   for (let i = 0; i < 120; i++) {
     await sleep(3000)
+    if (!isMounted.value) return
     try {
       const res = await composeAPI.status(epId.value)
       await refresh()
@@ -3858,6 +4063,21 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   font-size: 11px;
   font-weight: 600;
 }
+.config-select {
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(100,120,180,0.18);
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: border-color .15s;
+}
+.config-select:hover { border-color: rgba(80,110,200,0.4); }
+.config-select:focus { border-color: rgba(60,90,180,0.5); box-shadow: 0 0 0 2px rgba(60,90,180,0.1); }
 .locked-config-banner {
   margin-bottom: 8px;
   font-size: 12px;
@@ -3934,12 +4154,14 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .dub-audio { flex: 1; min-width: 0; height: 30px; }
 
 /* Asset grid */
-.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
 .asset-card {
   display: flex; flex-direction: column; overflow: hidden;
   transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
 }
 .asset-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
+.asset-card.clickable { cursor: pointer; }
+.asset-card.clickable:hover { border-color: rgba(60,90,180,0.3); }
 .asset-cover { position: relative; aspect-ratio: 1; background: var(--bg-2); overflow: hidden; }
 .asset-cover.wide { aspect-ratio: 16/9; }
 .asset-cover img { width: 100%; height: 100%; object-fit: cover; }
@@ -3965,10 +4187,14 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   background: rgba(19, 51, 121, 0.92);
 }
 .asset-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
-.asset-body { padding: 8px 10px; }
-.asset-name { font-size: 13px; font-weight: 600; }
+.asset-body { padding: 10px 12px; }
+.asset-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .asset-meta { font-size: 11px; }
-.asset-foot { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
+.asset-foot { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-top: 1px solid var(--border); gap: 8px; }
+.foot-left { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.foot-status { font-size: 11px; white-space: nowrap; }
+.foot-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.foot-right :deep(.model-selector) { width: 100px !important; }
 
 /* Frame grid */
 .frame-grid { display: flex; flex-direction: column; gap: 8px; }
@@ -4620,5 +4846,130 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   .latest-grid-strip-actions {
     justify-content: flex-start;
   }
+}
+
+/* ====== v2: 弹窗 + 编辑组件样式 ====== */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.modal-panel {
+  background: var(--card-bg, #1e1e2e);
+  border: 1px solid var(--border, #2a2a3e);
+  border-radius: 12px;
+  width: min(600px, 92vw);
+  max-height: 85vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border, #2a2a3e);
+}
+.modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.btn-close {
+  background: none; border: none; color: #94a3b8;
+  font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
+}
+.btn-close:hover { color: #fff; }
+.modal-body {
+  padding: 16px 20px; overflow-y: auto;
+  flex: 1;
+}
+.modal-body .section {
+  margin-bottom: 20px;
+}
+.modal-body .section h4 {
+  margin: 0 0 10px; font-size: 13px;
+  color: var(--accent, #7c3aed); text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border, #2a2a3e);
+}
+.btn-save {
+  padding: 8px 20px; border-radius: 6px;
+  background: var(--accent, #7c3aed); color: #fff;
+  border: none; font-weight: 600; cursor: pointer;
+}
+.btn-save:hover { opacity: 0.9; }
+.btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-cancel {
+  padding: 8px 16px; border-radius: 6px;
+  background: transparent; color: #94a3b8;
+  border: 1px solid var(--border, #2a2a3e); cursor: pointer;
+}
+.btn-cancel:hover { color: #fff; }
+.btn-ghost {
+  background: transparent !important; border: 1px solid var(--border, #2a2a3e) !important;
+  color: #94a3b8 !important; padding: 2px 6px !important;
+  min-width: unset !important;
+}
+.btn-ghost:hover { color: #fff !important; border-color: #64748b !important; }
+.btn-edit {
+  background: transparent; border: 1px solid rgba(100,120,180,0.2);
+  color: #5a6a8a; padding: 4px 8px;
+  display: inline-flex; align-items: center; gap: 3px;
+  border-radius: 6px; cursor: pointer; font-size: 11px;
+  transition: all .15s; white-space: nowrap;
+}
+.btn-edit:hover { background: rgba(60,90,180,0.06); border-color: rgba(60,90,180,0.35); color: #3c5ab0; }
+.field {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
+}
+.field span { font-size: 11px; color: #94a3b8; }
+.input, .textarea {
+  padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border, #2a2a3e);
+  background: var(--input-bg, #16162a);
+  color: var(--text, #e2e8f0);
+  font-size: 13px; font-family: inherit;
+  resize: vertical;
+}
+.input:focus, .textarea:focus {
+  outline: none; border-color: var(--accent, #7c3aed);
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.flex { display: flex; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.items-center { align-items: center; }
+.ml-auto { margin-left: auto; }
+.mt-2 { margin-top: 8px; }
+.regenerate-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px;
+}
+.btn-primary {
+  padding: 6px 14px; border-radius: 6px;
+  background: var(--accent, #7c3aed); color: #fff;
+  border: none; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.btn-primary:hover { opacity: 0.9; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.error-msg {
+  margin-top: 6px; font-size: 12px; color: #ef4444;
+}
+.detail-section {
+  padding: 12px 16px;
+  background: var(--card-bg-secondary, #1a1a2e);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border, #2a2a3e);
+}
+.detail-section-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+}
+.detail-section-title {
+  font-size: 13px; font-weight: 600; color: var(--accent, #7c3aed);
+}
+.detail-section-copy {
+  font-size: 11px; color: #64748b;
 }
 </style>

@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, now } from '../utils/response.js'
+import { success, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { splitGridImage } from '../services/grid-split.js'
-import { createAgent } from '../agents/index.js'
+import { runAgentWithRetry } from '../agents/index.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
 import { buildCharacterAppearanceText, VISUAL_STYLE_MASTER } from '../shared/prompt-utils.js'
 
@@ -112,11 +112,11 @@ function collectGridReferenceAssets(storyboards: any[]) {
   const sceneIds = [...new Set(storyboards.map((sb) => sb.sceneId).filter(Boolean))]
   const characterIds = [...new Set([...storyboardCharacterIds.values()].flat().filter(Boolean))]
 
-  const scenes = sceneIds.length
-    ? db.select().from(schema.scenes).all().filter((scene) => sceneIds.includes(scene.id))
+  const scenes = sceneIds.length > 0
+    ? db.select().from(schema.scenes).where(inArray(schema.scenes.id, sceneIds)).all()
     : []
-  const characters = characterIds.length
-    ? db.select().from(schema.characters).all().filter((char) => characterIds.includes(char.id))
+  const characters = characterIds.length > 0
+    ? db.select().from(schema.characters).where(inArray(schema.characters.id, characterIds)).all()
     : []
 
   const assets: Array<{
@@ -201,6 +201,7 @@ function buildGridPrompt(
   referenceAssets: Array<{ path: string; label: string; kind: string; imageLabel: string }>,
 ): string {
   const style = dramaStyle || 'cinematic'
+  const legend = buildReferenceLegend(referenceAssets)
   const storyboardCharacterIds = getStoryboardCharacterIds(storyboards.map((sb) => sb.id))
 
   // 构建角色外观文本映射（用于注入到分镜描述中）
@@ -413,38 +414,33 @@ async function tryAgentGridPrompt(
   mode: string,
   referenceLegend: string,
 ) {
-  const agent = createAgent('grid_prompt_generator', episodeId, dramaId)
-  if (!agent) return null
+  const message = [
+    '请为宫格图生成提示词，并优先调用工具完成。',
+    `选中镜头ID：${JSON.stringify(storyboardIds)}`,
+    `行数：${rows}`,
+    `列数：${cols}`,
+    `模式：${mode}`,
+    referenceLegend ? `参考图映射：${referenceLegend}` : '',
+    '当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。',
+    `必须严格按 ${rows}x${cols} 生成，总共 exactly ${rows * cols} visible panels。不要合并格子，不要缺格。`,
+    '必须返回 JSON，结构为：{"grid_prompt":"...","cell_prompts":[{"shot_number":1,"frame_type":"first_frame","prompt":"..."}]}',
+  ].filter(Boolean).join('\n')
 
-  const result = await agent.generate(
-    [{
-      role: 'user',
-      content: [
-        '请为宫格图生成提示词，并优先调用工具完成。',
-        `选中镜头ID：${JSON.stringify(storyboardIds)}`,
-        `行数：${rows}`,
-        `列数：${cols}`,
-        `模式：${mode}`,
-        referenceLegend ? `参考图映射：${referenceLegend}` : '',
-        '当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。',
-        `必须严格按 ${rows}x${cols} 生成，总共 exactly ${rows * cols} visible panels。不要合并格子，不要缺格。`,
-        '必须返回 JSON，结构为：{"grid_prompt":"...","cell_prompts":[{"shot_number":1,"frame_type":"first_frame","prompt":"..."}]}',
-      ].join('\n'),
-    }],
-    { maxSteps: 10 },
-  )
-
-  const fromTools = findGridPayload(result.toolResults)
-  if (fromTools) return fromTools
-
-  const fromText = findGridPayload(result.text)
-  if (fromText) return fromText
-
-  return null
+  try {
+    const ret = await runAgentWithRetry('grid_prompt_generator', episodeId, dramaId, message, { maxSteps: 10 })
+    const fromTools = findGridPayload(ret.toolResults)
+    if (fromTools) return fromTools
+    const fromText = findGridPayload(ret.text)
+    if (fromText) return fromText
+    return null
+  } catch {
+    return null
+  }
 }
 
 // POST /grid/prompt
 app.post('/prompt', async (c) => {
+  try {
   const body = await c.req.json()
   const {
     storyboard_ids,
@@ -537,6 +533,7 @@ app.post('/prompt', async (c) => {
     storyboard_ids,
     mode,
   })
+  } catch (err: any) { logTaskError('GridPrompt', 'prompt', { error: err.message }); return badRequest(c, err.message) }
 })
 
 // POST /grid/generate
@@ -660,10 +657,12 @@ app.post('/split', async (c) => {
 
 // GET /grid/status/:id
 app.get('/status/:id', async (c) => {
-  const id = Number(c.req.param('id'))
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid image generation id')
   const [row] = db.select().from(schema.imageGenerations)
     .where(eq(schema.imageGenerations.id, id)).all()
-  if (!row) return badRequest(c, 'Not found')
+  if (!row) return notFound(c, 'Not found')
   return success(c, {
     id: row.id,
     status: row.status,
@@ -671,6 +670,7 @@ app.get('/status/:id', async (c) => {
     image_url: row.imageUrl,
     error_msg: row.errorMsg,
   })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
 export default app

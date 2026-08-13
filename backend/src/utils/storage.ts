@@ -21,10 +21,17 @@ export async function downloadFile(url: string, subDir: string): Promise<string>
   const filename = `${uuid()}${ext}`
   const filePath = path.join(dir, filename)
 
-  const resp = await fetch(url)
+  const resp = await fetch(url, { signal: AbortSignal.timeout(120_000) })
   if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
 
-  const buffer = Buffer.from(await resp.arrayBuffer())
+  // 限制下载文件大小上限 50MB，防止 OOM
+  const MAX_SIZE = 50 * 1024 * 1024
+  const arrayBuffer = await resp.arrayBuffer()
+  if (arrayBuffer.byteLength > MAX_SIZE) {
+    throw new Error(`Download exceeds size limit: ${arrayBuffer.byteLength} > ${MAX_SIZE}`)
+  }
+
+  const buffer = Buffer.from(arrayBuffer)
   fs.writeFileSync(filePath, buffer)
 
   // 返回相对路径（供 API 返回给前端）
@@ -56,13 +63,20 @@ function getExtFromUrl(url: string): string {
 }
 
 /**
- * 获取本地文件的绝对路径
+ * 获取本地文件的绝对路径（防路径穿越）
  */
 export function getAbsolutePath(relativePath: string): string {
-  if (relativePath.startsWith('static/')) {
-    return path.join(STORAGE_ROOT, '..', relativePath)
+  // 统一计算基础路径：去掉可能的 "static/" 前缀
+  const base = relativePath.startsWith('static/') || relativePath.startsWith('static\\')
+    ? path.resolve(STORAGE_ROOT, '..')
+    : STORAGE_ROOT
+  const resolved = path.resolve(base, relativePath)
+  // 路径穿越检查：最终路径必须在 storage 根目录内
+  const storageRoot = path.resolve(STORAGE_ROOT)
+  if (!resolved.startsWith(storageRoot + path.sep) && resolved !== storageRoot) {
+    throw new Error(`Path traversal blocked: ${relativePath}`)
   }
-  return path.join(STORAGE_ROOT, relativePath)
+  return resolved
 }
 
 /**

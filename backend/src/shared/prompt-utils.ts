@@ -11,7 +11,7 @@
  */
 
 import { db, schema } from '../db/index.js'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 
 // ============================================================
 // 风格预设常量（全域一致）
@@ -36,6 +36,76 @@ export const VISUAL_STYLE_SCENE = 'highly detailed cinematic environment, atmosp
  * 视频生成风格引导前缀
  */
 export const VISUAL_STYLE_VIDEO = 'cinematic motion, smooth camera movement, consistent character design, lighting continuity'
+
+// ============================================================
+// 通用预设类型定义（Preset Framework Types）
+// ============================================================
+
+/** Variation Card 的单个 Shot 配置 */
+export interface PresetVariationCardShot {
+  shotIndex: number
+  themeFamily: string
+  compositionPattern: string
+  spaceType: string
+  foregroundFrame: string
+  mainFocalPoint: string
+  thematicClue: string
+  activity: string
+  cameraPosition: string
+  windDirection: string
+  lightStructure: string
+  characterLayout: string
+  livingElement: string | null
+}
+
+/** Variation Card（5 镜配置） */
+export interface PresetVariationCard {
+  themeFamily: string
+  shots: PresetVariationCardShot[]
+}
+
+/** 预设图片负向提示词 */
+export const PRESET_IMAGE_NEGATIVE = 'text, watermark, signature, low quality, blurry, distorted, mutated body parts'
+
+/**
+ * 根据 Shot 配置构建预设图片生成 prompt
+ */
+export function buildPresetImagePrompt(shot: PresetVariationCardShot): string {
+  const parts = [
+    shot.themeFamily,
+    shot.compositionPattern,
+    shot.spaceType,
+    shot.foregroundFrame,
+    shot.mainFocalPoint,
+    shot.thematicClue,
+    shot.activity,
+    shot.characterLayout,
+    shot.lightStructure,
+    shot.windDirection,
+    shot.cameraPosition,
+  ]
+  if (shot.livingElement) parts.push(shot.livingElement)
+  parts.push(VISUAL_STYLE_MASTER)
+  return parts.join(', ')
+}
+
+/**
+ * 根据 Shot 配置 + 运镜方式构建预设视频生成 prompt
+ */
+export function buildPresetVideoPrompt(shot: PresetVariationCardShot, cameraMove: string): string {
+  const parts = [
+    shot.mainFocalPoint,
+    shot.activity,
+    shot.compositionPattern,
+    shot.spaceType,
+    shot.characterLayout,
+    cameraMove,
+    shot.lightStructure,
+    shot.windDirection,
+  ]
+  parts.push(VISUAL_STYLE_VIDEO, VISUAL_STYLE_MASTER)
+  return parts.join(', ')
+}
 
 // ============================================================
 // 角色视觉 Prompt 构建
@@ -219,15 +289,18 @@ export function buildStoryboardVideoPrompt(options: {
  */
 export function getStoryboardCharacterAppearances(storyboardId: number): string[] {
   const spChars = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
     .all()
-    .filter(link => link.storyboardId === storyboardId)
-  
+
   if (!spChars.length) return []
 
   const characterIds = spChars.map(link => link.characterId)
-  const characters = db.select().from(schema.characters)
-    .all()
-    .filter(char => characterIds.includes(char.id))
+  // 使用 inArray 替代内存过滤
+  const characters = characterIds.length > 0
+    ? db.select().from(schema.characters)
+        .where(inArray(schema.characters.id, characterIds))
+        .all()
+    : []
 
   return characters.map(char =>
     buildCharacterAppearanceText({
@@ -278,8 +351,8 @@ export function getCharacterImageUrls(characterIds: number[]): string[] {
  */
 export function getStoryboardCharacterImageUrls(storyboardId: number): string[] {
   const spChars = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
     .all()
-    .filter(link => link.storyboardId === storyboardId)
   
   const characterIds = spChars.map(link => link.characterId)
   return getCharacterImageUrls(characterIds)
@@ -319,16 +392,16 @@ export function validateDialogueCharacterConsistency(
 
   if (speakerNames.size === 0) return { mismatches: [], matchCount: 0, allMatch: true }
 
-  // 获取分镜关联的角色
+  // 获取分镜关联的角色（使用 WHERE 查询替代全表扫描）
   const spChars = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
     .all()
-    .filter(link => link.storyboardId === storyboardId)
 
   const characterIds = spChars.map(link => link.characterId)
-  const characters = characterIds.length
+  const characters = characterIds.length > 0
     ? db.select().from(schema.characters)
+        .where(inArray(schema.characters.id, characterIds))
         .all()
-        .filter(char => characterIds.includes(char.id))
     : []
 
   const charNames = new Set(characters.map(c => c.name))
@@ -366,3 +439,4 @@ function parseDialogueForTTSLocal(dialogue: string): { ignorable: boolean; speak
   }
   return { ignorable: false, speaker: '', pureText: text }
 }
+

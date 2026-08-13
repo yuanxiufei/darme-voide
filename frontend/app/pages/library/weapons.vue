@@ -132,6 +132,7 @@
 </template>
 
 <script setup lang="ts">
+import { toast } from 'vue-sonner'
 import { weaponLibraryAPI } from '~/composables/useApi'
 
 const weaponIcons: Record<string, string> = { '剑': '🗡', '刀': '🔪', '枪': '🔱', '棍': '🏏', '斧': '🪓', '锤': '🔨', '弓': '🏹', '弩': '🎯', '扇': '🪭', '鞭': '⛓', '杖': '🪄', '暗器': '💠', '法宝': '💎', '其他': '⚔' }
@@ -190,6 +191,8 @@ async function load() {
     })
     items.value = res.items || []
     total.value = res.total || 0
+  } catch (e: any) {
+    toast.error(e?.message || '加载兵器列表失败')
   } finally { loading.value = false }
 }
 
@@ -202,7 +205,9 @@ async function loadMeta() {
       filterOpts.types = opts.types || []
       filterOpts.ranks = opts.ranks || []
     }
-  } catch { /* silent */ }
+  } catch (e: any) {
+    console.error('[WeaponLib] Failed to load meta:', e?.message ?? e)
+  }
 }
 
 function onSearch() { page.value = 1; load() }
@@ -245,20 +250,30 @@ async function save() {
     else await weaponLibraryAPI.create(payload)
     showForm.value = false
     await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '保存失败')
   } finally { saving.value = false }
 }
 
 async function deleteItem(item: any) {
   if (!confirm(`确认删除兵器 "${item.name}"？`)) return
-  await weaponLibraryAPI.del(item.id)
-  selectedItems.value = selectedItems.value.filter(id => id !== item.id)
-  await load(); await loadMeta()
+  try {
+    await weaponLibraryAPI.del(item.id)
+    selectedItems.value = selectedItems.value.filter(id => id !== item.id)
+    await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '删除失败')
+  }
 }
 
 async function batchDelete() {
   if (!confirm(`确认删除 ${selectedItems.value.length} 个兵器？`)) return
-  await weaponLibraryAPI.batchDelete(selectedItems.value)
-  selectedItems.value = []; await load(); await loadMeta()
+  try {
+    await weaponLibraryAPI.batchDelete(selectedItems.value)
+    selectedItems.value = []; await load(); await loadMeta()
+  } catch (e: any) {
+    toast.error(e?.message || '批量删除失败')
+  }
 }
 
 onMounted(() => { load(); loadMeta() })

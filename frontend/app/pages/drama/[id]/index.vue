@@ -155,7 +155,7 @@ import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
 
 const route = useRoute()
 const drama = ref(null)
-const dramaId = Number(route.params.id)
+const dramaId = computed(() => Number(route.params.id))
 const addDialog = ref(false)
 const creatingEpisode = ref(false)
 const newEpisodeTitle = ref('')
@@ -182,7 +182,7 @@ const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newE
 
 async function load() {
   try {
-    drama.value = await dramaAPI.get(dramaId)
+    drama.value = await dramaAPI.get(dramaId.value)
   } catch (e) {
     toast.error(e.message)
   }
@@ -215,7 +215,7 @@ async function addEpisode() {
   try {
     creatingEpisode.value = true
     await episodeAPI.create({
-      drama_id: dramaId,
+      drama_id: dramaId.value,
       title: newEpisodeTitle.value || undefined,
       image_config_id: newEpisodeImageConfigId.value,
       video_config_id: newEpisodeVideoConfigId.value,
@@ -232,6 +232,7 @@ async function addEpisode() {
 }
 
 onMounted(() => { load(); loadConfigs() })
+watch(() => route.params.id, () => { load() })
 </script>
 
 <style scoped>

@@ -122,6 +122,7 @@ router.get('/tags', async (c) => {
 router.get('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
+    if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
     const row = Q_GET('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!row) return c.json({ code: 404, data: null, message: '角色模板不存在' })
     row.tags = safeParseJson(row.tags)
@@ -169,6 +170,7 @@ router.post('/', async (c) => {
 router.put('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
+    if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
     const existing = Q_GET('SELECT * FROM character_templates WHERE id = ? AND deleted_at IS NULL', id) as any
     if (!existing) return c.json({ code: 404, data: null, message: '角色模板不存在' })
 
@@ -208,6 +210,7 @@ router.put('/:id', async (c) => {
 router.delete('/:id', async (c) => {
   try {
     const id = parseInt(c.req.param('id'))
+    if (isNaN(id)) return c.json({ code: 400, data: null, message: '无效的ID参数' })
     const t = now()
     const result = Q_RUN('UPDATE character_templates SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', t, id)
     if (result.changes === 0) return c.json({ code: 404, data: null, message: '角色模板不存在' })

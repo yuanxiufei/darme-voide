@@ -223,6 +223,20 @@ onMounted(load)
 }
 .page-desc { font-size: 13px; color: var(--text-3); font-weight: 400; }
 
+/* Preset button */
+.preset-btn {
+  border: 1px dashed var(--border);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+.preset-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
 /* Grid */
 .grid {
   display: grid;

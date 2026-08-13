@@ -12,9 +12,19 @@ import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../u
 
 const app = new Hono()
 
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || ''
+
 // POST /webhooks/vidu
 // Vidu 回调格式: { task_id, state, video_url, ... }
 app.post('/vidu', async (c) => {
+  // 如果配置了共享密钥，则验证请求头
+  if (WEBHOOK_SECRET) {
+    const sig = c.req.header('x-webhook-secret')
+    if (sig !== WEBHOOK_SECRET) {
+      logTaskWarn('Webhook', 'vidu-auth-failed', { received: sig?.slice(0, 8) + '...' })
+      return badRequest(c, 'Unauthorized')
+    }
+  }
   const body = await c.req.json()
   const { task_id, state, video_url, error } = body
   logTaskProgress('Webhook', 'vidu-callback', {
