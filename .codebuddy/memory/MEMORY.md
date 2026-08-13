@@ -1,15 +1,15 @@
 # 项目长期记忆
 
-## 品牌标识 (2026-08-07)
-- **项目名称**：Drama Studio（短剧工坊），原"Drama Studio/Drama Drama"
-- **代码标识**：drama-studio / PRESET_*（原 drama / DRAMA）
-- **Logo 文件**：`frontend/app/assets/brand-logo.png`（原 drama-logo.png）
-- **数据库名**：`data/drama.db`（原 drama.db）
-- **localStorage key 前缀**：`drama:`（原 `drama:`）
-- **API 路由**：`/quick-preset`（原 `/quick-preset`）
+## 品牌标识 (2026-08-07，2026-08-13 复核)
+- **项目名称**：Drama Studio（短剧工坊）
+- **代码标识**：drama-studio / PRESET_*
+- **Logo 文件**：`frontend/app/assets/brand-logo.svg`
+- **数据库名**：`data/drama.db`
+- **localStorage key 前缀**：`drama:`
+- **API 路由**：`/quick-preset`
 - **npm 包名**：drama-studio-frontend
 - **Docker 容器名**：drama-studio
-- 全项目 0 残留Drama引用，清理日期 2026-08-07
+- 品牌标识统一为 Drama Studio，旧项目商标字样已彻底清除（避免侵权），2026-08-13 全项目复核 0 残留
 
 ## 统一视觉风格系统 (2026-08-07)
 - **`backend/src/shared/prompt-utils.ts`** 是全域 prompt 构建的唯一入口
