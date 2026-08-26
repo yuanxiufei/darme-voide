@@ -1,20 +1,25 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq, gt, inArray, isNull } from 'drizzle-orm'
+import ffmpeg from 'fluent-ffmpeg'
+import fs from 'fs'
+import path from 'path'
+import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
+import { getDataRoot, getStorageRoot } from '../config.js'
 import { success, created, now, badRequest, notFound, parseParamId } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
-import { buildStoryboardImagePrompt } from '../shared/prompt-utils.js'
+import { generateActionSuggestion, splitShotIntoSubShots, optimizeVideoPrompt } from '../services/text-generation.js'
+import {
+  buildStoryboardImagePrompt,
+  STORYBOARD_IMAGE_NEGATIVE,
+  getStoryboardCharacterAppearances,
+  getStoryboardSceneDescription,
+  getStoryboardReferenceImages,
+} from '../shared/prompt-utils.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import ffmpeg from 'fluent-ffmpeg'
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
-import { v4 as uuid } from 'uuid'
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
+import { scoreStoryboard } from '../services/qc-scoring.js'
 
 const app = new Hono()
 
@@ -26,7 +31,7 @@ function getCharacterVoiceParams(characterId: number | undefined, dramaId: numbe
   speed?: number; emotion?: string; pitch?: number; model?: string
 } {
   if (!characterId) return {}
-  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, characterId)).all()
+  const [char] = db.select().from(schema.characters).where(and(eq(schema.characters.id, characterId), isNull(schema.characters.deletedAt))).all()
   if (!char) return {}
   return {
     speed: char.voiceSpeed ?? undefined,
@@ -93,17 +98,23 @@ interface TTSLineValidation {
   warning?: string
 }
 
+interface TTSValidationResult {
+  match_status: TTSMatchStatus
+  voiceId: string
+  characterId?: number | null
+}
+
 /**
  * 验证单个台词行：角色名→剧组角色记录→音色配置 三连匹配
  */
-function validateTTSSpeaker(speaker: string, dramaId: number): TTSLineValidation['match_status'] & { voiceId: string; characterId?: number | null } {
+function validateTTSSpeaker(speaker: string, dramaId: number): TTSValidationResult {
   // 旁白/画外音直接视为通过
   if (/^(旁白|画外音|narrator)$/i.test(speaker)) {
-    return { match_status: 'narrator' as TTSLineValidation['match_status'], voiceId: 'alloy' }
+    return { match_status: 'narrator', voiceId: 'alloy' }
   }
 
   const chars = db.select().from(schema.characters)
-    .where(eq(schema.characters.dramaId, dramaId)).all()
+    .where(and(eq(schema.characters.dramaId, dramaId), isNull(schema.characters.deletedAt))).all()
   const found = chars.find((char) => char.name === speaker)
 
   if (!found) {
@@ -149,7 +160,7 @@ function validateDialogueLines(speakerLines: Array<{ speaker: string; text: stri
   })
 }
 
-function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
+function syncStoryboardCharacters(storyboardId: number, characterIds: number[], costumes?: Record<number, string>) {
   db.delete(schema.storyboardCharacters)
     .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
     .run()
@@ -161,6 +172,7 @@ function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) 
     db.insert(schema.storyboardCharacters).values({
       storyboardId,
       characterId,
+      costume: costumes?.[characterId] ?? null,
     }).run()
   }
 }
@@ -169,6 +181,17 @@ function getStoryboardCharacterIds(storyboardId: number) {
   return db.select().from(schema.storyboardCharacters)
     .where(eq(schema.storyboardCharacters.storyboardId, storyboardId)).all()
     .map(link => link.characterId)
+}
+
+/** 镜头级角色服装变体映射 { characterId: costume } */
+function getStoryboardCharacterCostumes(storyboardId: number): Record<number, string> {
+  const map: Record<number, string> = {}
+  const links = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId)).all()
+  for (const link of links) {
+    if (link.costume) map[link.characterId] = link.costume
+  }
+  return map
 }
 
 function validateStoryboardBindings(episodeId: number, sceneId: number | null | undefined, characterIds: number[] | undefined) {
@@ -259,6 +282,10 @@ app.put('/:id', async (c) => {
     time: 'time', atmosphere: 'atmosphere', result: 'result',
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
     custom_image_prompt: 'customImagePrompt', custom_video_prompt: 'customVideoPrompt',
+    negative_prompt: 'negativePrompt',
+    first_frame_prompt: 'firstFramePrompt', last_frame_prompt: 'lastFramePrompt',
+    transition_type: 'transitionType', transition_duration: 'transitionDuration',
+    first_frame_image: 'firstFrameImage', last_frame_image: 'lastFrameImage',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -278,7 +305,11 @@ app.put('/:id', async (c) => {
   )
 
   db.update(schema.storyboards).set(updates).where(eq(schema.storyboards.id, id)).run()
-  if ('character_ids' in body) syncStoryboardCharacters(id, body.character_ids || [])
+  if ('character_ids' in body || 'character_costumes' in body) {
+    const currentIds = 'character_ids' in body ? (body.character_ids || []) : getStoryboardCharacterIds(id)
+    const costumes: Record<number, string> = body.character_costumes ?? getStoryboardCharacterCostumes(id)
+    syncStoryboardCharacters(id, currentIds, costumes)
+  }
 
   // 对话角色名验证：保存时检测 dialogue 中的角色名是否存在于剧组角色列表
   let dialogueValidation: any = null
@@ -388,11 +419,16 @@ app.post('/:id/generate-tts', async (c) => {
       return success(c, { lines: results })
     } else {
       // 单人/无法拆分：用旧逻辑直接生成
-      const parsed = dialogueLines.length === 1
-        ? dialogueLines[0]
-        : parseDialogueForTTS(sb.dialogue)
-      const speaker = parsed.speaker || parsed.pureText ? parsed.speaker : ''
-      const text = parsed.pureText || (dialogueLines.length === 1 ? dialogueLines[0].text : '')
+      let speaker: string
+      let text: string
+      if (dialogueLines.length === 1) {
+        speaker = dialogueLines[0].speaker
+        text = dialogueLines[0].text
+      } else {
+        const parsed = parseDialogueForTTS(sb.dialogue)
+        speaker = parsed.speaker
+        text = parsed.pureText
+      }
       const validation = validateTTSSpeaker(speaker, ep?.dramaId || 0)
       const charVoiceParams = getCharacterVoiceParams(validation.characterId ?? undefined, ep?.dramaId ?? 0)
 
@@ -464,7 +500,7 @@ app.get('/:id/validate-dialogue', async (c) => {
           if (!line.voice_id || !line.speaker) continue
           // 查找当前角色的最新 voiceStyle
           const chars = db.select().from(schema.characters)
-            .where(eq(schema.characters.dramaId, ep?.dramaId || 0)).all()
+            .where(and(eq(schema.characters.dramaId, ep?.dramaId || 0), isNull(schema.characters.deletedAt))).all()
           const char = chars.find(c => c.name === line.speaker)
           if (char?.voiceStyle && char.voiceStyle !== line.voice_id) {
             ttsStaleCount++
@@ -508,12 +544,21 @@ app.post('/:id/regenerate-image', async (c) => {
   if (!ep) return badRequest(c, 'Episode not found')
 
   try {
+    // 注入角色外观 + 场景描述 + 角色/场景参考图，保证人物与场景一致
+    const charAppearances = getStoryboardCharacterAppearances(id)
+    const sceneDesc = getStoryboardSceneDescription(id)
+    const referenceImages = body.reference_images?.length
+      ? body.reference_images
+      : getStoryboardReferenceImages(id)
+
     // 自定义 prompt 优先 → 分镜级 customImagePrompt → 标准构建器
     const prompt = body.prompt
       || sb.customImagePrompt
       || buildStoryboardImagePrompt({
         description: sb.description || body.character_description || '',
-        sceneDescription: body.scene_description || '',
+        storyboardDescription: sb.description,
+        characterDescription: charAppearances.length ? charAppearances.join('；') : null,
+        sceneDescription: body.scene_description || sceneDesc || sb.location || '',
         shotType: sb.shotType || body.shot_type || '',
         cameraAngle: sb.angle || body.camera_angle || '',
         dramaStyle: body.style,
@@ -527,7 +572,9 @@ app.post('/:id/regenerate-image', async (c) => {
       storyboardId: id,
       dramaId: ep.dramaId,
       prompt,
+      negativePrompt: body.negative_prompt || sb.negativePrompt || STORYBOARD_IMAGE_NEGATIVE,
       model: body.model,
+      referenceImages,
       configId: ep.imageConfigId ?? undefined,
     })
 
@@ -535,6 +582,97 @@ app.post('/:id/regenerate-image', async (c) => {
     return success(c, { image_generation_id: genId })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'regenerate-image', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/regenerate-frame — 独立重新生成首帧/尾帧图（frame_type: first_frame | last_frame）
+app.post('/:id/regenerate-frame', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  const body = await c.req.json()
+  const frameType = body.frame_type === 'last_frame' ? 'last_frame' : 'first_frame'
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return notFound(c, '镜头不存在')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  try {
+    // 注入角色外观 + 场景描述 + 角色/场景参考图，保证首尾帧人物与场景一致
+    const charAppearances = getStoryboardCharacterAppearances(id)
+    const sceneDesc = getStoryboardSceneDescription(id)
+    const referenceImages = body.reference_images?.length
+      ? body.reference_images
+      : getStoryboardReferenceImages(id)
+
+    // 首/尾帧画面内容：优先请求体 prompt，其次分镜存库的首/尾帧 prompt
+    const frameContent = body.prompt
+      || (frameType === 'first_frame' ? sb.firstFramePrompt : sb.lastFramePrompt)
+
+    // 画面基底：标准构建器（始终注入角色外观 + 场景），首尾帧画面内容作为附加描述叠加
+    const basePrompt = buildStoryboardImagePrompt({
+      description: sb.description || body.character_description || '',
+      storyboardDescription: sb.description,
+      characterDescription: charAppearances.length ? charAppearances.join('；') : null,
+      sceneDescription: body.scene_description || sceneDesc || sb.location || '',
+      shotType: sb.shotType || body.shot_type || '',
+      cameraAngle: sb.angle || body.camera_angle || '',
+      dramaStyle: body.style,
+    })
+    const frameHint = frameType === 'first_frame'
+      ? 'opening frame, establishing the scene, subject at start position, beginning of the shot'
+      : 'closing frame, final composition, subject at end position, end of the shot'
+    const prompt = [basePrompt, frameContent, frameHint].filter(Boolean).join(', ')
+
+    logTaskStart('StoryboardAPI', 'regenerate-frame', {
+      storyboardId: id, episodeId: sb.episodeId, dramaId: ep.dramaId, frameType, model: body.model || 'default',
+    })
+
+    const genId = await generateImage({
+      storyboardId: id,
+      dramaId: ep.dramaId,
+      prompt,
+      negativePrompt: body.negative_prompt || sb.negativePrompt || STORYBOARD_IMAGE_NEGATIVE,
+      model: body.model,
+      frameType,
+      referenceImages,
+      configId: ep.imageConfigId ?? undefined,
+    })
+
+    logTaskSuccess('StoryboardAPI', 'regenerate-frame', { storyboardId: id, frameType, generationId: genId })
+    return success(c, { image_generation_id: genId, frame_type: frameType })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'regenerate-frame', { storyboardId: id, frameType, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/set-frame — 用户上传自定义图片/视频素材，自动匹配适配到首帧/尾帧
+app.post('/:id/set-frame', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  const body = await c.req.json()
+  const frameType = body.frame_type === 'last_frame' ? 'last_frame' : 'first_frame'
+  const sourceUrl: string = body.source_url || ''
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return notFound(c, '镜头不存在')
+  if (!sourceUrl) return badRequest(c, 'source_url required')
+
+  try {
+    // 视频素材：抽取首帧/尾帧作为该镜头的首/尾帧图；图片素材：直接使用
+    const isVideo = /\.(mp4|mov|webm|m4v|avi|mpeg|mkv)$/i.test(sourceUrl)
+    const frameUrl = isVideo ? await extractVideoFrame(sourceUrl, frameType) : sourceUrl
+
+    const update: Record<string, any> = { updatedAt: now() }
+    if (frameType === 'first_frame') update.firstFrameImage = frameUrl
+    else update.lastFrameImage = frameUrl
+    db.update(schema.storyboards).set(update).where(eq(schema.storyboards.id, id)).run()
+
+    logTaskSuccess('StoryboardAPI', 'set-frame', { storyboardId: id, frameType, sourceUrl, frameUrl, isVideo })
+    return success(c, { frame_type: frameType, frame_url: frameUrl })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'set-frame', { storyboardId: id, frameType, error: err.message })
     return badRequest(c, err.message)
   }
 })
@@ -549,5 +687,255 @@ app.delete('/:id', async (c) => {
   logTaskSuccess('StoryboardAPI', 'delete', { storyboardId: id })
   return success(c)
 })
+
+// POST /storyboards/:id/action-suggestion — AI 生成运镜/动作建议
+app.post('/:id/action-suggestion', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  try {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+    if (!sb) return notFound(c, '镜头不存在')
+
+    const suggestion = await generateActionSuggestion({
+      title: sb.title,
+      description: sb.description,
+      action: sb.action,
+      imagePrompt: sb.customImagePrompt || sb.imagePrompt,
+      atmosphere: sb.atmosphere,
+      shotType: sb.shotType,
+      movement: sb.movement,
+      angle: sb.angle,
+    })
+
+    return success(c, { suggestion })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'action-suggestion', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || 'Failed to generate action suggestion')
+  }
+})
+
+// POST /storyboards/:id/split — AI 拆分长镜头为多个子镜头（保留原镜头，追加新镜头）
+app.post('/:id/split', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  try {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+    if (!sb) return notFound(c, '镜头不存在')
+
+    // 视觉风格：storyboard → episode → drama
+    let visualStyle = ''
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+    if (ep) {
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+      if (drama) visualStyle = drama.style || ''
+    }
+
+    // 场景信息
+    let sceneInfo = { location: sb.location || '', time: sb.time || '', atmosphere: sb.atmosphere || '' }
+    if (sb.sceneId) {
+      const [sc] = db.select().from(schema.scenes).where(eq(schema.scenes.id, sb.sceneId)).all()
+      if (sc) sceneInfo = { location: sc.location, time: sc.time || '', atmosphere: sc.atmosphere || '' }
+    }
+
+    // 出场角色名
+    const charIds = getStoryboardCharacterIds(id)
+    let characterNames: string[] = []
+    if (charIds.length) {
+      characterNames = db.select().from(schema.characters)
+        .where(inArray(schema.characters.id, charIds)).all()
+        .map(ch => ch.name)
+    }
+
+    const subShots = await splitShotIntoSubShots({
+      title: sb.title,
+      action: sb.action,
+      description: sb.description,
+      shotType: sb.shotType,
+      atmosphere: sb.atmosphere,
+      dialogue: sb.dialogue,
+      sceneInfo,
+      characterNames,
+      visualStyle,
+    })
+
+    // 落库：保留原镜头 + 新子镜头追加在原镜头之后 + 后续分镜号顺延
+    const ts = now()
+    const baseNumber = sb.storyboardNumber
+
+    const shift = subShots.length
+    if (shift > 0) {
+      const later = db.select().from(schema.storyboards)
+        .where(and(eq(schema.storyboards.episodeId, sb.episodeId), gt(schema.storyboards.storyboardNumber, baseNumber))).all()
+      for (const s of later) {
+        db.update(schema.storyboards).set({ storyboardNumber: s.storyboardNumber + shift })
+          .where(eq(schema.storyboards.id, s.id)).run()
+      }
+    }
+
+    const createdShots = subShots.map((sub, i) => {
+      const res = db.insert(schema.storyboards).values({
+        episodeId: sb.episodeId,
+        sceneId: sb.sceneId,
+        storyboardNumber: baseNumber + 1 + i,
+        title: `${sb.title || '镜头'} · ${sub.shotSize}`,
+        description: sub.visualFocus || sub.actionSummary,
+        action: sub.actionSummary,
+        shotType: sub.shotSize,
+        movement: sub.cameraMovement || sb.movement,
+        atmosphere: sb.atmosphere,
+        dialogue: null,
+        duration: Math.max(2, Math.min(4, Math.round((sb.duration || 4) / subShots.length))),
+        status: 'pending',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const newId = Number(res.lastInsertRowid)
+      if (charIds.length) syncStoryboardCharacters(newId, charIds)
+      return {
+        id: newId,
+        storyboardNumber: baseNumber + 1 + i,
+        shotSize: sub.shotSize,
+        cameraMovement: sub.cameraMovement,
+        actionSummary: sub.actionSummary,
+        visualFocus: sub.visualFocus,
+      }
+    })
+
+    logTaskSuccess('StoryboardAPI', 'split', { storyboardId: id, count: createdShots.length })
+    return success(c, { subShots: createdShots })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'split', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || 'Failed to split shot')
+  }
+})
+
+// POST /storyboards/:id/optimize-prompt — AI 优化视频生成提示词（用户主动触发，对齐 gcc KeyframeEditor 的 AI 优化）
+app.post('/:id/optimize-prompt', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  try {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+    if (!sb) return notFound(c, '镜头不存在')
+
+    const body = await c.req.json()
+
+    // 视觉风格：storyboard → episode → drama
+    let visualStyle = ''
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+    if (ep) {
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+      if (drama) visualStyle = drama.style || ''
+    }
+
+    // 场景信息
+    let sceneInfo = { location: sb.location || '', time: sb.time || '', atmosphere: sb.atmosphere || '' }
+    if (sb.sceneId) {
+      const [sc] = db.select().from(schema.scenes).where(eq(schema.scenes.id, sb.sceneId)).all()
+      if (sc) sceneInfo = { location: sc.location, time: sc.time || '', atmosphere: sc.atmosphere || '' }
+    }
+
+    // 出场角色名
+    const charIds = getStoryboardCharacterIds(id)
+    let characterNames: string[] = []
+    if (charIds.length) {
+      characterNames = db.select().from(schema.characters)
+        .where(inArray(schema.characters.id, charIds)).all()
+        .map(ch => ch.name)
+    }
+
+    const optimizedPrompt = await optimizeVideoPrompt({
+      currentPrompt: body?.currentPrompt,
+      title: sb.title,
+      action: sb.action,
+      description: sb.description,
+      shotType: sb.shotType,
+      movement: sb.movement,
+      atmosphere: sb.atmosphere,
+      sceneInfo,
+      characterNames,
+      visualStyle,
+    })
+
+    logTaskSuccess('StoryboardAPI', 'optimize-prompt', { storyboardId: id })
+    return success(c, { optimizedPrompt })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'optimize-prompt', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || 'Failed to optimize prompt')
+  }
+})
+
+// POST /storyboards/:id/qc — 触发镜头级 QC 打分（唇形同步 / 角色一致性 / 连续性）
+app.post('/:id/qc', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  try {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+    if (!sb) return notFound(c, '镜头不存在')
+    const result = scoreStoryboard(id)
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'qc-score', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || 'Failed to score storyboard')
+  }
+})
+
+// GET /storyboards/:id/qc — 获取最近一次 QC 打分结果
+app.get('/:id/qc', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  const [record] = db
+    .select()
+    .from(schema.videoQualityChecks)
+    .where(eq(schema.videoQualityChecks.storyboardId, id))
+    .all()
+    .sort((a, b) => b.id - a.id)
+  if (!record) return success(c, { message: 'No QC record yet' })
+  return success(c, {
+    ...record,
+    issues: record.issues ? JSON.parse(record.issues) : [],
+    dimensions: record.dimensions ? JSON.parse(record.dimensions) : {},
+  })
+})
+
+/** 将相对媒体路径转为绝对路径 */
+function toAbsMediaPath(relativePath: string): string {
+  if (path.isAbsolute(relativePath)) return relativePath
+  if (relativePath.startsWith('static/')) return path.join(getDataRoot(), relativePath)
+  return path.join(getStorageRoot(), relativePath)
+}
+
+/**
+ * 从视频素材抽取首帧/尾帧，返回可访问的相对图片路径。
+ * 用于用户上传自定义视频素材后自动匹配适配到镜头首/尾帧。
+ */
+async function extractVideoFrame(sourceUrl: string, frameType: 'first_frame' | 'last_frame'): Promise<string> {
+  const absPath = toAbsMediaPath(sourceUrl)
+  if (!fs.existsSync(absPath)) throw new Error(`素材文件不存在: ${sourceUrl}`)
+
+  const duration = await new Promise<number>((resolve) => {
+    ffmpeg.ffprobe(absPath, (err, metadata) => {
+      if (err) { resolve(0); return }
+      resolve(metadata.format.duration || 0)
+    })
+  })
+
+  const outputDir = path.join(getStorageRoot(), 'frames')
+  fs.mkdirSync(outputDir, { recursive: true })
+  const filename = `${uuid()}.jpg`
+  const outPath = path.join(outputDir, filename)
+  const seek = frameType === 'first_frame' ? 0 : Math.max(0, duration - 0.2)
+
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(absPath)
+      .seekInput(seek)
+      .outputOptions(['-frames:v', '1', '-q:v', '2'])
+      .output(outPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+
+  return `static/frames/${filename}`
+}
 
 export default app

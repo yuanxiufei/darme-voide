@@ -1,8 +1,10 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { success, badRequest } from '../utils/response.js'
+import { parseSkill } from '../agents/skill-parser.js'
 
 const app = new Hono()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -32,10 +34,18 @@ function safeSkillDir(id: string): string {
   return path.join(SKILLS_DIR, id)
 }
 
+/** 从通配符路由提取匹配到的 skill id（从 routePath 动态推导挂载前缀，避免硬编码 '/api/v1/skills/'） */
+function wildcardId(c: Context): string {
+  const routePath = c.req.routePath // 形如 '/api/v1/skills/*'
+  const star = routePath.indexOf('*')
+  const prefix = star >= 0 ? routePath.slice(0, star) : ''
+  return c.req.path.slice(prefix.length)
+}
+
 // GET /skills — List all skills (recursive, supports nested dirs)
 app.get('/', async (c) => {
   try {
-  const skills: { id: string; name: string; description: string }[] = []
+  const skills: { id: string; name: string; description: string; preconditions: string[]; protocol: string[] }[] = []
 
   if (!fs.existsSync(SKILLS_DIR)) {
     return success(c, skills)
@@ -49,13 +59,14 @@ app.get('/', async (c) => {
       const skillPath = path.join(fullPath, 'SKILL.md')
       if (fs.existsSync(skillPath)) {
         const content = fs.readFileSync(skillPath, 'utf-8')
-        const nameMatch = content.match(/^name:\s*(.+)$/m)
-        const descMatch = content.match(/^description:\s*(.+)$/m)
+        const parsed = parseSkill(content, entry.name)
         const id = prefix ? `${prefix}/${entry.name}` : entry.name
         skills.push({
           id,
-          name: nameMatch ? nameMatch[1].trim() : entry.name,
-          description: descMatch ? descMatch[1].trim() : '',
+          name: parsed.metadata.name,
+          description: parsed.metadata.description,
+          preconditions: parsed.metadata.preconditions,
+          protocol: parsed.metadata.protocol,
         })
       }
       // Always recurse — nested skills may exist even if this dir has SKILL.md
@@ -71,7 +82,7 @@ app.get('/', async (c) => {
 // GET /skills/:id — Get skill content
 app.get('/*', async (c) => {
   try {
-  const rawId = c.req.path.slice('/api/v1/skills/'.length)
+  const rawId = wildcardId(c)
   const id = validateSkillId(rawId)
   if (!id) return badRequest(c, 'Invalid skill id')
   const skillPath = safeSkillPath(id)
@@ -84,7 +95,7 @@ app.get('/*', async (c) => {
 // PUT /skills/:id — Update skill content
 app.put('/*', async (c) => {
   try {
-  const rawId = c.req.path.slice('/api/v1/skills/'.length)
+  const rawId = wildcardId(c)
   const id = validateSkillId(rawId)
   if (!id) return badRequest(c, 'Invalid skill id')
   const body = await c.req.json()
@@ -112,6 +123,8 @@ app.post('/', async (c) => {
   const content = `---
 name: ${name || validId}
 description: ${description || ''}
+preconditions: []
+protocol: []
 ---
 
 # ${name || validId}
@@ -126,7 +139,7 @@ Write your skill content here.
 // DELETE /skills/:id — Delete skill directory
 app.delete('/*', async (c) => {
   try {
-  const rawId = c.req.path.slice('/api/v1/skills/'.length)
+  const rawId = wildcardId(c)
   const id = validateSkillId(rawId)
   if (!id) return badRequest(c, 'Invalid skill id')
   const skillDir = safeSkillDir(id)

@@ -75,12 +75,17 @@ export interface AIConfig {
   model: string
   /** 所有可用模型（按优先级排序），失败时自动 fallback */
   models?: string[]
+  /** 图片生成负面提示词（从配置 settings JSON 解析，可空） */
+  negativePrompt?: string | null
+  /** 配置原始 settings JSON 解析结果（含 checkpoint_map 等扩展配置，供 adapter 使用） */
+  settings?: Record<string, any> | null
 }
 
 export interface ImageGenerationRecord {
   id: number
   model?: string | null
   prompt?: string | null
+  negativePrompt?: string | null
   size?: string | null
   frameType?: string | null
   referenceImages?: string | null
@@ -91,11 +96,14 @@ export interface VideoGenerationRecord {
   id: number
   model?: string | null
   prompt?: string | null
+  negativePrompt?: string | null
   referenceMode?: string | null
   imageUrl?: string | null
   firstFrameUrl?: string | null
   lastFrameUrl?: string | null
   referenceImageUrls?: string | null
+  sceneType?: string | null
+  referenceAudioUrls?: string | null
   duration?: number | null
   aspectRatio?: string | null
   // ... 其他字段
@@ -142,4 +150,23 @@ export interface TTSProviderAdapter {
     format: string
     channel: number
   }
+}
+
+/**
+ * 文本生成 Provider Adapter
+ */
+export interface TextGenerateParams {
+  model: string
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+  temperature?: number
+  maxTokens?: number
+}
+
+export interface TextProviderAdapter {
+  provider: string
+
+  buildRequest(config: AIConfig, params: TextGenerateParams): ProviderRequest
+
+  /** 从响应中提取文本内容，返回空字符串表示无内容 */
+  parseResponse(result: any): string
 }

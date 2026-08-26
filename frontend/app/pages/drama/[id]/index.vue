@@ -3,7 +3,7 @@
     <!-- Header -->
     <div class="page-head">
       <div class="head-left">
-        <button class="back-btn" @click="navigateTo('/')">
+        <button class="back-btn" @click="goBack">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
           </svg>
@@ -26,12 +26,15 @@
           </div>
         </div>
       </div>
-      <button class="btn btn-primary" @click="openAddEpisode">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        添加集
-      </button>
+      <div class="head-actions">
+        <button class="btn btn-ghost" @click="navigateTo(`/drama/${drama.id}/prompts`)">提示词</button>
+        <button class="btn btn-primary" @click="openAddEpisode">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          添加集
+        </button>
+      </div>
     </div>
 
     <!-- Episode List -->
@@ -62,6 +65,18 @@
             <span class="status-text">{{ hasScript(ep) ? '已完成剧本' : '待编写' }}</span>
             <span v-if="ep.duration" class="ep-duration">{{ ep.duration }}s</span>
           </div>
+        </div>
+        <div class="ep-actions" @click.stop>
+          <button class="ep-action-btn" title="重命名" @click="openRenameEpisode(ep)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+          </button>
+          <button class="ep-action-btn ep-action-danger" title="删除" @click="delEpisode(ep)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+          </button>
         </div>
         <div class="ep-arrow">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -146,16 +161,56 @@
         </div>
       </div>
     </div>
+
+    <!-- Rename Episode Dialog -->
+    <div v-if="renameDialog" class="dialog-mask" @click.self="renameDialog = false">
+      <div class="card dialog rename-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Rename Episode</div>
+            <div class="dialog-title">重命名剧集</div>
+            <div class="dialog-sub">修改集标题，仅影响显示名称，不影响已生成的任何内容。</div>
+          </div>
+          <button class="back-btn" @click="renameDialog = false">取消</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">标题</span>
+            <input v-model="renameEpisodeTitle" class="input" placeholder="输入新的集标题" @keyup.enter="renameEpisode" />
+          </label>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy"></div>
+          <button class="btn btn-primary" :disabled="renamingEpisode || !renameEpisodeTitle.trim()" @click="renameEpisode">
+            {{ renamingEpisode ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import { useConfirm } from '~/composables/useConfirm'
+
+const { confirm } = useConfirm()
 
 const route = useRoute()
+const router = useRouter()
 const drama = ref(null)
 const dramaId = computed(() => Number(route.params.id))
+
+// 返回首页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
+function goBack() {
+  const state = window.history.state
+  if (state && state.back) {
+    router.back()
+  } else {
+    router.push('/')
+  }
+}
 const addDialog = ref(false)
 const creatingEpisode = ref(false)
 const newEpisodeTitle = ref('')
@@ -165,6 +220,10 @@ const audioConfigs = ref([])
 const newEpisodeImageConfigId = ref(null)
 const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
+const renameDialog = ref(false)
+const renamingEpisode = ref(false)
+const renameEpisodeId = ref(null)
+const renameEpisodeTitle = ref('')
 
 function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
 
@@ -231,6 +290,39 @@ async function addEpisode() {
   }
 }
 
+function openRenameEpisode(ep) {
+  renameEpisodeId.value = ep.id
+  renameEpisodeTitle.value = ep.title || ''
+  renameDialog.value = true
+}
+
+async function renameEpisode() {
+  const title = renameEpisodeTitle.value.trim()
+  if (!title || renameEpisodeId.value == null) return
+  try {
+    renamingEpisode.value = true
+    await episodeAPI.update(renameEpisodeId.value, { title })
+    toast.success('已重命名')
+    renameDialog.value = false
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    renamingEpisode.value = false
+  }
+}
+
+async function delEpisode(ep) {
+  if (!(await confirm({ message: `确定删除「${ep.title}」？该集的剧本、分镜、配音、图片与视频都将一并不可见，且不可恢复。`, danger: true }))) return
+  try {
+    await episodeAPI.del(ep.id)
+    toast.success('已删除')
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 onMounted(() => { load(); loadConfigs() })
 watch(() => route.params.id, () => { load() })
 </script>
@@ -251,6 +343,7 @@ watch(() => route.params.id, () => { load() })
   gap: 20px;
 }
 .head-left { display: flex; align-items: flex-start; gap: 12px; }
+.head-actions { display: flex; align-items: center; gap: 10px; }
 .head-info { display: flex; flex-direction: column; gap: 8px; }
 
 .back-btn {
@@ -275,7 +368,7 @@ watch(() => route.params.id, () => { load() })
   font-size: 11px; font-weight: 500;
   padding: 2px 8px;
   background: var(--accent-bg); color: var(--accent-text);
-  border-radius: 99px; border: 1px solid rgba(184,120,20,0.12);
+  border-radius: 99px; border: 1px solid rgba(13,148,136,0.18);
 }
 .meta-divider { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
 .meta-item {
@@ -321,7 +414,7 @@ watch(() => route.params.id, () => { load() })
 }
 .ep-card:hover .ep-number {
   background: var(--accent-bg);
-  border-color: rgba(184,120,20,0.2);
+  border-color: rgba(13,148,136,0.25);
   color: var(--accent);
 }
 
@@ -335,6 +428,35 @@ watch(() => route.params.id, () => { load() })
 .dot-pending { background: var(--text-3); }
 .status-text { font-size: 11px; color: var(--text-3); }
 .ep-duration { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); margin-left: 4px; }
+
+.ep-actions {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 0.18s, transform 0.18s;
+}
+.ep-card:hover .ep-actions { opacity: 1; transform: translateX(0); }
+.ep-action-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ep-action-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ep-action-danger:hover {
+  background: rgba(239,68,68,0.08);
+  border-color: var(--error, #ef4444);
+  color: var(--error, #ef4444);
+}
 
 .ep-arrow { color: var(--text-3); flex-shrink: 0; transition: transform 0.18s; }
 .ep-card:hover .ep-arrow { transform: translateX(3px); color: var(--accent); }
@@ -353,6 +475,7 @@ watch(() => route.params.id, () => { load() })
 .dialog-mask {
   position: fixed;
   inset: 0;
+  z-index: 100;
   background: rgba(15, 23, 38, 0.18);
   backdrop-filter: blur(8px);
   display: flex;
@@ -369,8 +492,8 @@ watch(() => route.params.id, () => { load() })
   padding: 26px 26px 22px;
   border-radius: 28px;
   background:
-    radial-gradient(circle at top left, rgba(122,167,255,0.14), transparent 34%),
-    radial-gradient(circle at top right, rgba(76,125,255,0.08), transparent 26%),
+    radial-gradient(circle at top left, rgba(20,184,166,0.14), transparent 34%),
+    radial-gradient(circle at top right, rgba(13,148,136,0.08), transparent 26%),
     linear-gradient(180deg, rgba(255,255,255,0.98), rgba(242,247,255,0.92));
   overflow: hidden;
   border: 1px solid rgba(27, 41, 64, 0.08);
@@ -393,7 +516,7 @@ watch(() => route.params.id, () => { load() })
   height: 28px;
   padding: 0 12px;
   border-radius: 999px;
-  background: rgba(76,125,255,0.1);
+  background: rgba(13,148,136,0.1);
   color: var(--accent-text);
   font-size: 12px;
   font-weight: 700;
@@ -477,6 +600,8 @@ watch(() => route.params.id, () => { load() })
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .field-hint { font-size: 12px; color: var(--text-3); }
+
+.rename-dialog { width: min(440px, 100%); }
 
 @media (max-width: 860px) {
   .dialog {

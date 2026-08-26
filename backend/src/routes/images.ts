@@ -8,7 +8,9 @@ import {
   buildStoryboardImagePrompt,
   getStoryboardCharacterAppearances,
   getStoryboardSceneDescription,
-  getStoryboardCharacterImageUrls,
+  getStoryboardReferenceImages,
+  STORYBOARD_IMAGE_NEGATIVE,
+  NEGATIVE_BASE,
 } from '../shared/prompt-utils.js'
 
 const app = new Hono()
@@ -38,19 +40,19 @@ app.post('/', async (c) => {
 
           prompt = buildStoryboardImagePrompt({
             description: body.prompt,
-            storyboardDescription: sb.storyboardDescription,
+            storyboardDescription: sb.description,
             characterDescription: charAppearances.length ? charAppearances.join('；') : null,
             sceneDescription: sceneDesc,
             location: sb.location,
             shotType: sb.shotType,
-            cameraAngle: sb.cameraAngle,
+            cameraAngle: sb.angle,
             dramaStyle: undefined, // 可通过 episode->drama 补充
           })
 
-          // 自动添加角色图片作为 reference_images
+          // 自动添加角色图片 + 场景图作为 reference_images，保证人物与场景一致
           if (!referenceImages?.length) {
-            const charUrls = getStoryboardCharacterImageUrls(sbId)
-            if (charUrls.length) referenceImages = charUrls
+            const refUrls = getStoryboardReferenceImages(sbId)
+            if (refUrls.length) referenceImages = refUrls
           }
         }
       }
@@ -70,6 +72,7 @@ app.post('/', async (c) => {
       sceneId: body.scene_id,
       characterId: body.character_id,
       prompt,
+      negativePrompt: body.negative_prompt || (body.storyboard_id ? STORYBOARD_IMAGE_NEGATIVE : NEGATIVE_BASE),
       model: body.model,
       size: body.size,
       referenceImages,

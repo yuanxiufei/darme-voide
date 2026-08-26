@@ -2,11 +2,11 @@
   <div class="model-selector">
     <label v-if="label" class="model-label">{{ label }}</label>
     <BaseSelect
-      v-model="localModel"
+      :model-value="localModel"
       :options="modelOptions"
       :placeholder="loading ? '加载中...' : (placeholder || '选择模型')"
       :disabled="disabled || loading"
-      @change="$emit('update:modelValue', $event)"
+      @update:model-value="handleSelect"
     />
   </div>
 </template>
@@ -35,6 +35,11 @@ const localModel = ref(props.modelValue || '')
 
 watch(() => props.modelValue, (v) => { if (v !== localModel.value) localModel.value = v || '' })
 
+function handleSelect(value: string) {
+  localModel.value = value
+  emit('update:modelValue', value)
+}
+
 const modelOptions = computed(() => {
   const opts = allConfigs.value.map((c: any) => ({
     value: c.model || c.name || 'default',
@@ -60,10 +65,13 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 180px;
+  max-width: 260px;
+  flex: 1 1 auto;
 }
 .model-label {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--text-3);
   white-space: nowrap;
 }
 </style>

@@ -9,6 +9,8 @@ import {
   getStoryboardCharacterAppearances,
   getStoryboardSceneDescription,
   getStoryboardCharacterImageUrls,
+  getStoryboardReferenceAudioUrls,
+  VIDEO_NEGATIVE,
 } from '../shared/prompt-utils.js'
 
 const app = new Hono()
@@ -23,6 +25,8 @@ app.post('/', async (c) => {
     let prompt = body.prompt
     let firstFrameUrl = body.first_frame_url
     let referenceImageUrls = body.reference_image_urls
+    let sceneType: string | undefined = body.scene_type
+    let referenceAudioUrls: string[] | undefined = body.reference_audio_urls
 
     // 分镜视频生成：注入角色外观+场景+风格上下文
     if (body.storyboard_id) {
@@ -39,7 +43,7 @@ app.post('/', async (c) => {
 
           prompt = buildStoryboardVideoPrompt({
             description: body.prompt,
-            storyboardDescription: sb.storyboardDescription,
+            storyboardDescription: sb.description,
             characterAppearances: charAppearances,
             scenePrompt: sceneDesc,
             action: sb.action,
@@ -52,6 +56,12 @@ app.post('/', async (c) => {
             const charUrls = getStoryboardCharacterImageUrls(sbId)
             if (charUrls.length) referenceImageUrls = charUrls
           }
+        }
+
+        if (!sceneType && sb.sceneType) sceneType = sb.sceneType
+        // H3 音视频联合生成：对话类镜头自动带出场角色声线样本作为参考音频（Ref2VA）
+        if (!referenceAudioUrls?.length && /dialogue|meeting|argument|conversation|multi/i.test(sb.sceneType || '')) {
+          referenceAudioUrls = getStoryboardReferenceAudioUrls(sbId)
         }
       }
     }
@@ -67,12 +77,15 @@ app.post('/', async (c) => {
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
       prompt,
+      negativePrompt: body.negative_prompt || VIDEO_NEGATIVE,
       model: body.model,
       referenceMode: body.reference_mode,
       imageUrl: body.image_url,
       firstFrameUrl,
       lastFrameUrl: body.last_frame_url,
       referenceImageUrls,
+      sceneType,
+      referenceAudioUrls,
       duration: body.duration,
       aspectRatio: body.aspect_ratio,
       configId,
@@ -125,7 +138,7 @@ app.put('/:id', async (c) => {
 
   // snake_case API keys → drizzle camelCase column names
   const fieldMap: Record<string, string> = {
-    prompt: 'prompt', model: 'model', duration: 'duration',
+    prompt: 'prompt', negative_prompt: 'negativePrompt', model: 'model', duration: 'duration',
     reference_mode: 'referenceMode', aspect_ratio: 'aspectRatio',
     character_ids: 'characterIds', image_url: 'imageUrl',
     first_frame_url: 'firstFrameUrl', last_frame_url: 'lastFrameUrl',
@@ -172,12 +185,16 @@ app.post('/:id/regenerate', async (c) => {
     storyboardId: row.storyboardId ?? undefined,
     dramaId: row.dramaId ?? undefined,
     prompt,
+    negativePrompt: body.negative_prompt || row.negativePrompt || VIDEO_NEGATIVE,
     model: body.model || row.model,
     referenceMode: body.reference_mode || row.referenceMode,
     imageUrl: body.image_url || row.imageUrl,
     firstFrameUrl: body.first_frame_url || row.firstFrameUrl,
     lastFrameUrl: body.last_frame_url || row.lastFrameUrl,
-    referenceImageUrls: body.reference_image_urls,
+    referenceImageUrls: body.reference_image_urls || row.referenceImageUrls,
+    sceneType: body.scene_type || row.sceneType || undefined,
+    referenceAudioUrls: body.reference_audio_urls
+      || (row.storyboardId ? getStoryboardReferenceAudioUrls(row.storyboardId) : undefined),
     duration: body.duration || row.duration,
     aspectRatio: body.aspect_ratio || row.aspectRatio,
     configId,  // ✅ 传递 configId

@@ -4,8 +4,6 @@ import path from 'path'
 import { now } from '../utils/response.js'
 import { getAbsolutePath } from '../utils/storage.js'
 
-const DATA_DIR = getAbsolutePath('grid-cells')
-
 interface SplitResult {
   index: number
   localPath: string
@@ -30,7 +28,7 @@ export async function splitGridImage(
   const cellW = Math.floor(meta.width / cols)
   const cellH = Math.floor(meta.height / rows)
 
-  const outDir = DATA_DIR
+  const outDir = getAbsolutePath('grid-cells')
   fs.mkdirSync(outDir, { recursive: true })
 
   const results: SplitResult[] = []

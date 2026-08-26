@@ -49,6 +49,11 @@ export class VolcEngineVideoAdapter implements VideoProviderAdapter {
       watermark: false,
     }
 
+    // 火山 Seedance 支持负面提示词
+    if (record.negativePrompt) {
+      body.negative_prompt = record.negativePrompt
+    }
+
     return {
       url: joinProviderUrl(config.baseUrl, '/api/v3', '/contents/generations/tasks'),
       method: 'POST',

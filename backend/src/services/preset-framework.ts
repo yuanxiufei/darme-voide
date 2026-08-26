@@ -16,6 +16,7 @@ import { eq } from 'drizzle-orm'
 import type { PresetVariationCard } from '../shared/prompt-utils.js'
 import { generateImage } from './image-generation.js'
 import { generateVideo } from './video-generation.js'
+import { runMerged } from '../utils/merge-queue.js'
 
 // ============================================================
 // 占位符数据池（使用时替换为具体领域数据）
@@ -292,7 +293,7 @@ export async function createPresetDrama(
 // ============================================================
 
 /**
- * 批量生成 5 个 Shot 的首帧图片
+ * 批量生成 5 个 Shot 的首帧图片（并发 + 顺序事件流，替代原串行 for 循环）
  */
 export async function triggerImageGeneration(
   dramaId: number,
@@ -300,49 +301,63 @@ export async function triggerImageGeneration(
   storyboardIds: number[],
   variationCard: PresetVariationCard
 ): Promise<{ imageGenIds: number[] }> {
-  const imageGenIds: number[] = []
-
-  for (const sbId of storyboardIds) {
-    const shot = variationCard.shots.find(s => s.shotIndex === storyboardIds.indexOf(sbId) + 1)
-    if (!shot) continue
-
-    try {
-      // 更新 Storyboard 状态
-      await db.update(schema.storyboards)
-        .set({ status: 'generating_image' } as any)
-        .where(eq(schema.storyboards.id, sbId))
-
-      // 构建 prompt（调用 prompt-utils 中的构建器）
-      const { buildPresetImagePrompt, PRESET_IMAGE_NEGATIVE } = await import('../shared/prompt-utils.js')
-      const prompt = buildPresetImagePrompt(shot)
-
-      // 调用现有图片生成服务（返回 image record ID）
-      const imageId = await generateImage({
-        dramaId,
-        storyboardId: sbId,
-        prompt,
-        negativePrompt: PRESET_IMAGE_NEGATIVE,
-      } as any)
-
-      if (imageId) {
-        imageGenIds.push(imageId)
-        await db.update(schema.storyboards)
-          .set({ status: 'image_ready' } as any)
-          .where(eq(schema.storyboards.id, sbId))
+  // 每个 Shot 是一个独立 producer，内部自管状态更新与异常，失败也返回 ok:false（不抛出）
+  const tasks = storyboardIds.map((sbId, index) => {
+    const shot = variationCard.shots.find(s => s.shotIndex === index + 1)
+    return async (): Promise<{ sbId: number; shotIndex: number; ok: boolean; imageId?: number }> => {
+      if (!shot) {
+        return { sbId, shotIndex: index + 1, ok: false }
       }
-    } catch (err) {
-      console.error(`[PresetFramework] Image generation failed for shot ${shot.shotIndex}:`, err)
-      await db.update(schema.storyboards)
-        .set({ status: 'image_failed' } as any)
-        .where(eq(schema.storyboards.id, sbId))
+      try {
+        await db.update(schema.storyboards)
+          .set({ status: 'generating_image' } as any)
+          .where(eq(schema.storyboards.id, sbId))
+
+        const { buildPresetImagePrompt, PRESET_IMAGE_NEGATIVE } = await import('../shared/prompt-utils.js')
+        const prompt = buildPresetImagePrompt(shot)
+
+        const imageId = await generateImage({
+          dramaId,
+          storyboardId: sbId,
+          prompt,
+          negativePrompt: PRESET_IMAGE_NEGATIVE,
+        } as any)
+
+        if (imageId) {
+          await db.update(schema.storyboards)
+            .set({ status: 'image_ready' } as any)
+            .where(eq(schema.storyboards.id, sbId))
+        }
+        return { sbId, shotIndex: index + 1, ok: true, imageId: imageId ?? undefined }
+      } catch (err) {
+        console.error(`[PresetFramework] Image generation failed for shot ${shot.shotIndex}:`, err)
+        await db.update(schema.storyboards)
+          .set({ status: 'image_failed' } as any)
+          .where(eq(schema.storyboards.id, sbId))
+        return { sbId, shotIndex: index + 1, ok: false }
+      }
     }
-  }
+  })
+
+  const events = await runMerged(tasks, (event) => {
+    if (event.status === 'rejected') {
+      console.error(`[PresetFramework] Image task rejected (index ${event.index}):`, event.error)
+    }
+  })
+
+  // 按 shotIndex 恢复提交顺序，与改造前串行行为一致
+  const imageGenIds = events
+    .map(e => e.value)
+    .filter((r): r is { sbId: number; shotIndex: number; ok: boolean; imageId?: number } =>
+      !!r && r.ok && r.imageId != null)
+    .sort((a, b) => a.shotIndex - b.shotIndex)
+    .map(r => r.imageId!)
 
   return { imageGenIds }
 }
 
 /**
- * 批量生成 5 个 Shot 的视频（图生视频，需要首帧已生成）
+ * 批量生成 5 个 Shot 的视频（图生视频，需要首帧已生成；并发 + 顺序事件流）
  */
 export async function triggerVideoGeneration(
   dramaId: number,
@@ -350,51 +365,71 @@ export async function triggerVideoGeneration(
   storyboardIds: number[],
   variationCard: PresetVariationCard
 ): Promise<{ videoGenIds: number[] }> {
-  const videoGenIds: number[] = []
+  // 每个 Shot 是一个独立 producer，内部自管状态更新与异常
+  const tasks = storyboardIds.map((sbId, index) => {
+    const shot = variationCard.shots.find(s => s.shotIndex === index + 1)
+    return async (): Promise<{ sbId: number; shotIndex: number; ok: boolean; videoId?: number }> => {
+      if (!shot) {
+        return { sbId, shotIndex: index + 1, ok: false }
+      }
 
-  for (const sbId of storyboardIds) {
-    const shot = variationCard.shots.find(s => s.shotIndex === storyboardIds.indexOf(sbId) + 1)
-    if (!shot) continue
+      // 检查首帧是否已就绪
+      const [sb] = await db.select()
+        .from(schema.storyboards)
+        .where(eq(schema.storyboards.id, sbId))
 
-    // 检查首帧是否已就绪
-    const [sb] = await db.select()
-      .from(schema.storyboards)
-      .where(eq(schema.storyboards.id, sbId))
+      if (!sb || !(sb as any).imageUrl) {
+        console.warn(`[PresetFramework] Skipping video for shot ${shot.shotIndex}: no first frame`)
+        return { sbId, shotIndex: index + 1, ok: false }
+      }
 
-    if (!sb || !(sb as any).imageUrl) {
-      console.warn(`[PresetFramework] Skipping video for shot ${shot.shotIndex}: no first frame`)
-      continue
+      try {
+        await db.update(schema.storyboards)
+          .set({ status: 'generating_video' } as any)
+          .where(eq(schema.storyboards.id, sbId))
+
+        const cameraMove = randomPick(CAMERA_MOVES)
+
+        const { buildPresetVideoPrompt, PRESET_VIDEO_NEGATIVE } = await import('../shared/prompt-utils.js')
+        const prompt = buildPresetVideoPrompt(shot, cameraMove)
+
+        const videoId = await generateVideo({
+          dramaId,
+          storyboardId: sbId,
+          prompt,
+          negativePrompt: PRESET_VIDEO_NEGATIVE,
+          referenceImageUrl: (sb as any).imageUrl,
+        } as any)
+
+        // 修正原串行实现瑕疵：videoId 为空时不应标记 video_ready
+        await db.update(schema.storyboards)
+          .set({ status: videoId ? 'video_ready' : 'video_failed' } as any)
+          .where(eq(schema.storyboards.id, sbId))
+
+        return { sbId, shotIndex: index + 1, ok: !!videoId, videoId: videoId ?? undefined }
+      } catch (err) {
+        console.error(`[PresetFramework] Video generation failed for shot ${shot.shotIndex}:`, err)
+        await db.update(schema.storyboards)
+          .set({ status: 'video_failed' } as any)
+          .where(eq(schema.storyboards.id, sbId))
+        return { sbId, shotIndex: index + 1, ok: false }
+      }
     }
+  })
 
-    try {
-      await db.update(schema.storyboards)
-        .set({ status: 'generating_video' } as any)
-        .where(eq(schema.storyboards.id, sbId))
-
-      const cameraMove = randomPick(CAMERA_MOVES)
-
-      const { buildPresetVideoPrompt } = await import('../shared/prompt-utils.js')
-      const prompt = buildPresetVideoPrompt(shot, cameraMove)
-
-      const videoId = await generateVideo({
-        dramaId,
-        storyboardId: sbId,
-        prompt,
-        referenceImageUrl: (sb as any).imageUrl,
-      } as any)
-
-      if (videoId) videoGenIds.push(videoId)
-
-      await db.update(schema.storyboards)
-        .set({ status: 'video_ready' } as any)
-        .where(eq(schema.storyboards.id, sbId))
-    } catch (err) {
-      console.error(`[PresetFramework] Video generation failed for shot ${shot.shotIndex}:`, err)
-      await db.update(schema.storyboards)
-        .set({ status: 'video_failed' } as any)
-        .where(eq(schema.storyboards.id, sbId))
+  const events = await runMerged(tasks, (event) => {
+    if (event.status === 'rejected') {
+      console.error(`[PresetFramework] Video task rejected (index ${event.index}):`, event.error)
     }
-  }
+  })
+
+  // 按 shotIndex 恢复提交顺序，与改造前串行行为一致
+  const videoGenIds = events
+    .map(e => e.value)
+    .filter((r): r is { sbId: number; shotIndex: number; ok: boolean; videoId?: number } =>
+      !!r && r.ok && r.videoId != null)
+    .sort((a, b) => a.shotIndex - b.shotIndex)
+    .map(r => r.videoId!)
 
   return { videoGenIds }
 }

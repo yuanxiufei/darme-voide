@@ -26,6 +26,11 @@ export class ViduVideoAdapter implements VideoProviderAdapter {
       prompt: record.prompt,
     }
 
+    // Vidu 支持负面提示词
+    if (record.negativePrompt) {
+      body.negative_prompt = record.negativePrompt
+    }
+
     // 添加参考图
     if (record.referenceMode === 'single' && record.imageUrl) {
       body.images.push(record.imageUrl)

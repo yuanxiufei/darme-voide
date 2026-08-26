@@ -5,10 +5,10 @@
 import { createTool } from '@mastra/core/tools'
 import { z } from 'zod'
 import { db, schema } from '../../db/index.js'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
-import { VISUAL_STYLE_MASTER } from '../../shared/prompt-utils.js'
+import { sliceLongText } from '../../utils/text-slice.js'
 
 function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   db.delete(schema.storyboardCharacters)
@@ -67,6 +67,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       if (!ep) return { error: 'Episode not found' }
       const script = ep.scriptContent || ep.content
       if (!script) return { error: 'Episode has no script' }
+      const slicedScript = sliceLongText(script)
 
       const charLinks = db.select().from(schema.episodeCharacters)
         .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
@@ -77,7 +78,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       const linkedSceneIds = new Set(sceneLinks.map(link => link.sceneId))
 
       const chars = db.select().from(schema.characters)
-        .where(eq(schema.characters.dramaId, dramaId)).all()
+        .where(and(eq(schema.characters.dramaId, dramaId), isNull(schema.characters.deletedAt))).all()
       const scns = db.select().from(schema.scenes)
         .where(eq(schema.scenes.dramaId, dramaId)).all()
       const existingStoryboards = db.select().from(schema.storyboards)
@@ -94,6 +95,8 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           appearance: c.appearance || '',
           personality: c.personality || '',
           voice_style: c.voiceStyle || '',
+          speaker_id: c.speakerId || '',
+          costume_id: c.costumeId || '',
           image_url: c.imageUrl || '',
           reference_images: c.referenceImages || '',
           // 重要提示：生成 image_prompt 和 video_prompt 时，必须用 appearance 确保角色视觉一致
@@ -106,20 +109,25 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         .map(s => ({
           id: s.id,
           location: s.location,
+          location_id: s.locationId || '',
           time: s.time,
           prompt: s.prompt || '',
           image_url: s.imageUrl || '',
           storyboard_count: s.storyboardCount || 0,
         }))
 
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
       const payload = {
+        style_id: drama?.styleId || '',
         episode: {
           id: ep.id,
           title: ep.title,
           episode_number: ep.episodeNumber,
           description: ep.description || '',
         },
-        script,
+        script: slicedScript.text,
+        script_truncated: slicedScript.truncated,
+        script_total_chars: slicedScript.total_chars,
         characters,
         scenes,
         existing_storyboards: existingStoryboards
@@ -166,12 +174,17 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         result: z.string().optional(),
         atmosphere: z.string().optional(),
         image_prompt: z.string().optional(),
+        first_frame_prompt: z.string().optional(),
+        last_frame_prompt: z.string().optional(),
         video_prompt: z.string().optional(),
+        negative_prompt: z.string().optional(),
         bgm_prompt: z.string().optional(),
         sound_effect: z.string().optional(),
         duration: z.number().optional(),
         scene_id: z.number().nullable().optional(),
         character_ids: z.array(z.number()).optional(),
+        scene_type: z.string().optional(),
+        speaker_id: z.string().optional(),
       })),
     }),
     execute: async ({ storyboards }) => {
@@ -199,7 +212,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
           .map(link => {
             const [char] = db.select().from(schema.characters)
-              .where(eq(schema.characters.id, link.characterId)).all()
+              .where(and(eq(schema.characters.id, link.characterId), isNull(schema.characters.deletedAt))).all()
             return char?.name || ''
           })
           .filter(Boolean),
@@ -213,7 +226,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           const sbCharNames = new Set(
             (sb.character_ids || []).map(id => {
               const [char] = db.select().from(schema.characters)
-                .where(eq(schema.characters.id, id)).all()
+                .where(and(eq(schema.characters.id, id), isNull(schema.characters.deletedAt))).all()
               return char?.name || ''
             }).filter(Boolean),
           )
@@ -241,9 +254,11 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           action: sb.action, dialogue: sb.dialogue,
           description: sb.description, result: sb.result,
           atmosphere: sb.atmosphere, imagePrompt: sb.image_prompt,
-          videoPrompt: sb.video_prompt, bgmPrompt: sb.bgm_prompt,
-          soundEffect: sb.sound_effect,
+          firstFramePrompt: sb.first_frame_prompt, lastFramePrompt: sb.last_frame_prompt,
+          videoPrompt: sb.video_prompt, negativePrompt: sb.negative_prompt,
+          bgmPrompt: sb.bgm_prompt, soundEffect: sb.sound_effect,
           sceneId: sb.scene_id, duration: sb.duration || 10,
+          sceneType: sb.scene_type, speakerId: sb.speaker_id,
           createdAt: ts, updatedAt: ts,
         }).run()
         syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
@@ -284,7 +299,10 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       result: z.string().optional(),
       atmosphere: z.string().optional(),
       image_prompt: z.string().optional(),
+      first_frame_prompt: z.string().optional(),
+      last_frame_prompt: z.string().optional(),
       video_prompt: z.string().optional(),
+      negative_prompt: z.string().optional(),
       bgm_prompt: z.string().optional(),
       sound_effect: z.string().optional(),
       description: z.string().optional(),
@@ -292,6 +310,8 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       scene_id: z.number().nullable().optional(),
       character_ids: z.array(z.number()).optional(),
       duration: z.number().optional(),
+      scene_type: z.string().nullable().optional(),
+      speaker_id: z.string().nullable().optional(),
     }),
     execute: async ({ storyboard_id, ...fields }) => {
       const [storyboard] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboard_id)).all()
@@ -323,13 +343,18 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       if ('result' in fields) updates.result = fields.result
       if ('atmosphere' in fields) updates.atmosphere = fields.atmosphere
       if ('image_prompt' in fields) updates.imagePrompt = fields.image_prompt
+      if ('first_frame_prompt' in fields) updates.firstFramePrompt = fields.first_frame_prompt
+      if ('last_frame_prompt' in fields) updates.lastFramePrompt = fields.last_frame_prompt
       if ('video_prompt' in fields) updates.videoPrompt = fields.video_prompt
+      if ('negative_prompt' in fields) updates.negativePrompt = fields.negative_prompt
       if ('bgm_prompt' in fields) updates.bgmPrompt = fields.bgm_prompt
       if ('sound_effect' in fields) updates.soundEffect = fields.sound_effect
       if ('description' in fields) updates.description = fields.description
       if ('dialogue' in fields) updates.dialogue = fields.dialogue
       if ('scene_id' in fields) updates.sceneId = fields.scene_id
       if ('duration' in fields) updates.duration = fields.duration
+      if ('scene_type' in fields) updates.sceneType = fields.scene_type
+      if ('speaker_id' in fields) updates.speakerId = fields.speaker_id
       db.update(schema.storyboards).set(updates).where(eq(schema.storyboards.id, storyboard_id)).run()
       if ('character_ids' in fields) syncStoryboardCharacters(storyboard_id, fields.character_ids || [])
       logTaskSuccess('StoryboardTool', 'update-complete', {
@@ -342,81 +367,5 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
     },
   })
 
-  // 为宫格图生成整体提示词（分析选中镜头的描述，生成一个连贯的画格布局描述）
-  const generateGridPrompt = createTool({
-    id: 'generate_grid_prompt',
-    description: '为宫格图生成整体画面描述。根据选中的镜头列表及其描述，生成一个连贯的宫格图提示词，用于一次性生成完整的宫格拼图。',
-    inputSchema: z.object({
-      shots: z.array(z.object({
-        shot_number: z.number(),
-        description: z.string(),
-        shot_type: z.string().optional(),
-        dialogue: z.string().optional(),
-      })),
-      rows: z.number(),
-      cols: z.number(),
-      mode: z.string(), // 'first_frame' | 'first_last' | 'multi_ref'
-    }),
-    execute: async ({ shots, rows, cols, mode }) => {
-      if (!shots.length) return { error: 'No shots provided' }
-      logTaskProgress('StoryboardTool', 'grid-prompt-begin', {
-        episodeId,
-        shots: shots.length,
-        rows,
-        cols,
-        mode,
-      })
-
-      if (mode === 'multi_ref') {
-        const sb = shots[0]
-        const payload = {
-          grid_prompt: `${VISUAL_STYLE_MASTER}，${rows}x${cols} grid, ${sb.description}`,
-          cell_prompts: shots.map(s => ({
-            shot_number: s.shot_number,
-            frame_type: 'reference',
-            prompt: `${VISUAL_STYLE_MASTER}，${s.description}`,
-          })),
-        }
-        logTaskSuccess('StoryboardTool', 'grid-prompt-complete', { episodeId, cells: payload.cell_prompts.length, mode })
-        return payload
-      }
-
-      if (mode === 'first_last') {
-        const cellPrompts = []
-        for (const s of shots) {
-          cellPrompts.push({
-            shot_number: s.shot_number,
-            frame_type: 'first_frame',
-            prompt: `${VISUAL_STYLE_MASTER}，${s.description}，${s.shot_type || ''}，${rows}x${cols} grid uniform style`,
-          })
-          cellPrompts.push({
-            shot_number: s.shot_number,
-            frame_type: 'last_frame',
-            prompt: `${VISUAL_STYLE_MASTER}，${s.description}，${s.shot_type || ''}，${rows}x${cols} grid uniform style`,
-          })
-        }
-        const payload = {
-          grid_prompt: `${VISUAL_STYLE_MASTER}，${rows}x${cols} grid，${shots.map(s => s.description).join(' | ')}`,
-          cell_prompts: cellPrompts,
-        }
-        logTaskSuccess('StoryboardTool', 'grid-prompt-complete', { episodeId, cells: payload.cell_prompts.length, mode })
-        return payload
-      }
-
-      // first_frame mode
-      const cellPrompts = shots.slice(0, rows * cols).map(s => ({
-        shot_number: s.shot_number,
-        frame_type: 'first_frame',
-        prompt: `${VISUAL_STYLE_MASTER}，${s.description}，${s.shot_type || ''}，${rows}x${cols} grid uniform style`,
-      }))
-      const payload = {
-        grid_prompt: `${VISUAL_STYLE_MASTER}，${rows}x${cols} grid，${shots.map(s => s.description).join(' | ')}`,
-        cell_prompts: cellPrompts,
-      }
-      logTaskSuccess('StoryboardTool', 'grid-prompt-complete', { episodeId, cells: payload.cell_prompts.length, mode })
-      return payload
-    },
-  })
-
-  return { readStoryboardContext, saveStoryboards, updateStoryboard, generateGridPrompt }
+  return { readStoryboardContext, saveStoryboards, updateStoryboard }
 }

@@ -2,7 +2,7 @@
   <div class="studio" v-if="drama">
     <header class="studio-topbar">
       <div class="studio-topbar-main">
-        <button class="back-btn topbar-back" @click="navigateTo(`/drama/${dramaId}`)">
+        <button class="back-btn topbar-back" @click="goBack">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
           </svg>
@@ -115,6 +115,11 @@
             </div>
             <div class="toolbar-right">
               <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button class="btn btn-sm" @click="continueRaw" :disabled="continueBusy">
+                <Loader2 v-if="continueBusy && continueTarget === 'raw'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                AI 续写
+              </button>
               <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                 保存
@@ -139,6 +144,11 @@
             </div>
             <div class="toolbar-right">
               <span v-if="scriptLen" class="char-count">{{ scriptLen }} 字</span>
+              <button class="btn btn-sm" @click="continueScr" :disabled="continueBusy">
+                <Loader2 v-if="continueBusy && continueTarget === 'script'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                AI 续写
+              </button>
               <button v-if="rawContent" class="btn btn-sm" @click="skipRewrite">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/><path d="M13 18l6-6-6-6"/></svg>
                 跳过改写
@@ -329,17 +339,69 @@
               </div>
               <div class="voice-library-meta">
                 <span>音色库</span>
-                <span>{{ voiceProfiles.length }} 条</span>
+                <span>{{ filteredVoiceProfiles.length }} / {{ voiceProfiles.length }} 条</span>
+              </div>
+              <div class="voice-role-filter">
+                <button
+                  v-for="t in ROLE_TAGS"
+                  :key="t.label"
+                  class="role-filter-chip"
+                  :class="[t.cls, { 'role-filter-chip-active': voiceRoleFilter === t.label }]"
+                  @click="voiceRoleFilter = voiceRoleFilter === t.label ? '' : t.label"
+                >{{ t.label }}</button>
               </div>
               <div class="voice-library">
-                <div v-for="voice in voiceProfiles" :key="voice.id" class="voice-library-item">
+                <div v-for="voice in filteredVoiceProfiles" :key="voice.id" class="voice-library-item">
                   <div class="voice-library-head">
                     <span class="voice-library-name">{{ voice.label }}</span>
+                    <button
+                      class="voice-preview-btn"
+                      :disabled="previewingVoiceId === voice.id"
+                      :title="voicePreviewMap[voice.id] ? '重新试听' : '试听'"
+                      @click="previewVoice(voice.id)"
+                    >
+                      <Loader2 v-if="previewingVoiceId === voice.id" :size="12" class="animate-spin" />
+                      <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></svg>
+                    </button>
                     <span class="tag">{{ voice.gender }}</span>
+                  </div>
+                  <div v-if="(voice.roleTags || []).length" class="voice-library-tags">
+                    <span v-for="rt in voice.roleTags" :key="rt" class="role-tag" :class="roleTagCls(rt)">{{ rt }}</span>
                   </div>
                   <div class="voice-library-traits">{{ voice.traits }}</div>
                   <div class="voice-library-fit">{{ voice.suitable }}</div>
+                  <audio v-if="voicePreviewMap[voice.id]" :src="'/' + voicePreviewMap[voice.id]" controls preload="none" class="voice-preview-audio" />
                 </div>
+              </div>
+
+              <div class="voice-clone-box">
+                <div class="voice-clone-head">
+                  <span>声纹克隆</span>
+                  <span class="voice-clone-hint">上传参考音频，复刻为可复用音色</span>
+                </div>
+                <input
+                  v-model="cloneVoiceName"
+                  class="voice-clone-input"
+                  type="text"
+                  placeholder="音色名称（可选，默认「克隆音色」）"
+                />
+                <label class="voice-clone-file-label">
+                  <input
+                    type="file"
+                    class="voice-clone-file"
+                    accept="audio/mpeg,audio/wav,audio/mp4,audio/m4a,audio/mp3"
+                    @change="onCloneFileChange"
+                  />
+                  <span>{{ cloneFileName || '选择参考音频' }}</span>
+                </label>
+                <button
+                  class="voice-clone-btn"
+                  :disabled="cloningVoice || !cloneFile"
+                  @click="cloneVoiceNow"
+                >
+                  <Loader2 v-if="cloningVoice" :size="12" class="animate-spin" />
+                  <span v-else>克隆音色</span>
+                </button>
               </div>
             </aside>
 
@@ -353,7 +415,10 @@
                         <div class="extract-name">{{ c.name }}</div>
                         <span class="tag" :class="(c.voice_style || c.voiceStyle) ? 'tag-success' : ''">{{ (c.voice_style || c.voiceStyle) ? '已分配' : '待分配' }}</span>
                       </div>
-                      <div class="extract-meta">{{ c.role || '角色' }}</div>
+                      <div class="extract-meta">
+                        {{ c.role || '角色' }}
+                        <span v-if="inferCharRoleTag(c)" class="role-tag" :class="roleTagCls(inferCharRoleTag(c))">{{ inferCharRoleTag(c) }}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -475,9 +540,14 @@
                   <span class="detail-head-sub">{{ selectedSb.title || `镜头 ${sbs.indexOf(selectedSb) + 1}` }} · {{ selectedSb.shot_type || selectedSb.shotType || '未设置景别' }}</span>
                   </div>
                   <span class="tag mono">{{ (selectedSb.duration || 10) }}s</span>
-                  <button class="btn btn-ghost btn-icon ml-auto" style="color:var(--error)" @click="deleteShot(selectedSb)">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
-                  </button>
+                  <div class="ml-auto flex items-center gap-2">
+                    <button class="btn btn-ghost btn-icon" :disabled="splittingShot" title="AI 拆分镜头" @click="splitShot(selectedSb)">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
+                    </button>
+                    <button class="btn btn-ghost btn-icon" style="color:var(--error)" @click="deleteShot(selectedSb)">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                    </button>
+                  </div>
               </div>
               <div class="detail-body">
                 <div class="detail-hero">
@@ -586,6 +656,20 @@
                         </button>
                         <span v-if="!chars.length" class="dim" style="font-size:12px">当前集还没有角色</span>
                       </div>
+                      <!-- 镜头级服装变体选择 -->
+                      <div v-if="boundChars.length" class="costume-picker">
+                        <div v-for="char in boundChars" :key="char.id" class="costume-picker-row">
+                          <span class="costume-picker-name">{{ char.name }}</span>
+                          <select
+                            class="input costume-picker-select"
+                            :value="getStoryboardCharacterCostume(selectedSb, char.id)"
+                            @change="setStoryboardCharacterCostume(selectedSb, char.id, $event.target.value)"
+                          >
+                            <option value="">默认形象</option>
+                            <option v-for="c in charCostumeOptions(char)" :key="c" :value="c">{{ c }}</option>
+                          </select>
+                        </div>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">绑定场景</span>
@@ -621,7 +705,13 @@
                   </div>
                   <div class="field-grid field-grid-2">
                     <label class="field">
-                      <span class="field-label">动作</span>
+                      <span class="field-label">
+                        动作
+                        <button class="field-ai-btn" :disabled="aiSuggesting" @click.prevent="genActionSuggestion(selectedSb)">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.6 1.4-4 3.9.9 5.5L12 15l-4.9 2.7.9-5.5-4-3.9 5.6-1.4z"/></svg>
+                          {{ aiSuggesting ? '生成中…' : 'AI 建议' }}
+                        </button>
+                      </span>
                       <textarea :value="selectedSb.action || ''" class="textarea" rows="3"
                         @blur="updateField(selectedSb, 'action', $event.target.value)" placeholder="谁在做什么，表情和动作细节是什么" />
                     </label>
@@ -691,6 +781,14 @@
                       @blur="updateField(selectedSb, 'custom_image_prompt', $event.target.value)"
                       placeholder="手动覆盖图片 prompt" />
                   </label>
+                  <label class="field">
+                    <span class="field-label">反向提示词（Negative Prompt，AI 提取，可修改；留空使用默认）</span>
+                    <textarea
+                      :value="selectedSb.negative_prompt || selectedSb.negativePrompt || ''"
+                      class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'negative_prompt', $event.target.value)"
+                      placeholder="排除不希望出现的内容，如：文字、水印、低清晰度、畸形手指" />
+                  </label>
                   <div class="flex gap-2 items-center mt-2">
                     <ModelSelector v-model="imageGenerationModel" service-type="image" label="图片模型" />
                     <button
@@ -702,6 +800,19 @@
                   </div>
                   <div class="flex gap-2 items-center mt-2">
                     <ModelSelector v-model="videoGenerationModel" service-type="video" label="视频模型" />
+                    <div class="aspect-selector-compact">
+                      <button
+                        v-for="opt in aspectRatioOptions"
+                        :key="opt.value"
+                        type="button"
+                        :class="['aspect-btn-compact', videoAspectRatio === opt.value && 'active']"
+                        :title="opt.label"
+                        @click="videoAspectRatio = opt.value"
+                      >
+                        <component :is="opt.icon" class="aspect-icon-compact" />
+                        <span>{{ opt.label }}</span>
+                      </button>
+                    </div>
                     <button class="btn btn-sm" @click="openVideoEditor(selectedSb)">
                       视频参数编辑 / 生成
                     </button>
@@ -771,6 +882,31 @@
                 <component :is="t.icon" :size="11" />
                 {{ t.label }}
                 <span v-if="t.badge" class="prod-tab-badge">{{ t.badge }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 镜头时间线总览 -->
+          <div v-if="sbs.length" class="shot-timeline">
+            <div class="shot-timeline-track">
+              <button
+                v-for="(sb, i) in sbs"
+                :key="sb.id"
+                class="shot-timeline-node"
+                :class="{ active: selectedSb?.id === sb.id, done: hasImg(sb) && hasVid(sb) }"
+                :title="`#${String(i + 1).padStart(2, '0')} ${sb.description || sb.title || '未命名镜头'}`"
+                @click="jumpToTimelineShot(sb)"
+              >
+                <div class="shot-timeline-thumb">
+                  <img v-if="getStoryboardCover(sb)" :src="'/' + getStoryboardCover(sb)" alt="" />
+                  <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                  <span class="shot-timeline-num">#{{ String(i + 1).padStart(2, '0') }}</span>
+                </div>
+                <div class="shot-timeline-dots">
+                  <span class="tl-dot" :class="{ on: hasImg(sb) }" title="分镜图" />
+                  <span class="tl-dot" :class="{ on: hasVid(sb) }" title="视频" />
+                  <span class="tl-dot" :class="{ on: hasComposed(sb) }" title="合成" />
+                </div>
               </button>
             </div>
           </div>
@@ -981,7 +1117,7 @@
                 </button>
                 <button class="btn btn-primary btn-sm" @click="openGridTool">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  宫格图工具
+                  批量生成
                 </button>
               </div>
             </div>
@@ -1043,6 +1179,7 @@
               <div class="frame-grid">
                 <div v-for="(sb, i) in sbs" :key="sb.id"
                   :class="['frame-row', 'card', { active: selectedSb?.id === sb.id }]"
+                  :data-shot-id="sb.id"
                   @click="selectedSb = sb">
                   <!-- Info: number + type + desc -->
                   <div class="frame-info">
@@ -1107,7 +1244,7 @@
             <div v-if="gridDialog" class="overlay" @click.self="gridDialog = false">
               <div class="card grid-tool">
                 <div class="grid-tool-head">
-                  <span style="font-size:15px;font-weight:600;font-family:var(--font-display)">宫格图工具</span>
+                  <span style="font-size:15px;font-weight:600;font-family:var(--font-display)">批量生成镜头图</span>
                   <button class="btn btn-ghost btn-icon ml-auto" @click="gridDialog = false">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                   </button>
@@ -1297,6 +1434,10 @@
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotVidCount }}/{{ sbs.length }} 已生成</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="openPlaylist">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  连播预览
+                </button>
                 <button class="btn btn-sm" @click="batchVideos">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                   批量视频
@@ -1333,7 +1474,10 @@
                     <span :class="['dot', hasImg(sb) && 'ok']" /><span style="font-size:10px">图</span>
                     <span :class="['dot', hasVid(sb) && 'ok', isPendingVideo(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingVideo(sb.id) ? '视频生成中' : '视频' }}</span>
                   </div>
-                  <div v-if="videoFailMessage(sb.id)" class="prod-error">{{ videoFailMessage(sb.id) }}</div>
+                  <div v-if="videoFailMessage(sb.id)" class="prod-error">
+                    <span>{{ videoFailMessage(sb.id) }}</span>
+                    <button class="prod-error-link" @click="openVideoEditor(sb)">编辑提示词</button>
+                  </div>
                 </div>
                 <div class="prod-actions">
                   <button class="btn btn-sm" :disabled="isPendingVideo(sb.id)" @click="genVid(sb)">
@@ -1429,7 +1573,20 @@
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <a :href="'/' + mergeUrl" download class="btn btn-primary ml-auto">
+                <select class="config-select ml-auto" v-model="exportScope" :disabled="exporting">
+                  <option value="all">导出全部</option>
+                  <option value="video">仅成片</option>
+                  <option value="assets">仅素材</option>
+                </select>
+                <button class="btn" :disabled="exporting" @click="doExportZip">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+                  {{ exporting ? '打包中…' : '打包导出' }}
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportEdl">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+                  EDL 导出
+                </button>
+                <a :href="'/' + mergeUrl" download class="btn btn-primary">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
@@ -1459,6 +1616,46 @@
               </div>
             </div>
           </div>
+        </div>
+
+        <!-- 统一配乐方案 -->
+        <div class="bgm-panel">
+          <div class="bgm-panel-head">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            <div class="bgm-head-text">
+              <div class="bgm-title">统一配乐方案</div>
+              <div class="bgm-sub">一条背景音乐贯穿全片，跨镜头自然过渡，避免割裂感</div>
+            </div>
+          </div>
+          <div class="bgm-controls">
+            <div class="bgm-file">
+              <span class="field-label">配乐文件</span>
+              <div class="bgm-file-row">
+                <button class="btn btn-sm" :disabled="bgmUploading" @click="triggerBgmUpload">
+                  {{ bgmUploading ? '上传中…' : (bgmUrl ? '更换配乐' : '上传配乐') }}
+                </button>
+                <span v-if="bgmUrl" class="bgm-filename truncate">{{ bgmName }}</span>
+                <span v-else class="dim" style="font-size:12px">未设置，拼接时将无背景音乐</span>
+                <button v-if="bgmUrl" class="btn btn-sm btn-ghost" @click="clearBgm">移除</button>
+              </div>
+            </div>
+            <label class="bgm-slider">
+              <span class="field-label">音量 <span class="mono">{{ Math.round(bgmVolume * 100) }}%</span></span>
+              <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" />
+            </label>
+            <label class="bgm-num">
+              <span class="field-label">淡入 (秒)</span>
+              <input v-model.number="bgmFadeIn" type="number" min="0" max="10" step="0.5" class="input" />
+            </label>
+            <label class="bgm-num">
+              <span class="field-label">淡出 (秒)</span>
+              <input v-model.number="bgmFadeOut" type="number" min="0" max="10" step="0.5" class="input" />
+            </label>
+            <button class="btn btn-primary" :disabled="bgmSaving" @click="saveBgm">
+              {{ bgmSaving ? '保存中…' : '保存配乐方案' }}
+            </button>
+          </div>
+          <input ref="bgmInput" type="file" accept="audio/*" style="display:none" @change="onPickBgm" />
         </div>
       </div>
 
@@ -1533,6 +1730,70 @@
           </div>
         </div>
       </div>
+
+      <div v-if="playlistPlayer.open" class="overlay playlist-overlay" @click.self="closePlaylist">
+        <div class="card playlist-dialog">
+          <div class="image-viewer-head">
+            <div class="image-viewer-title">连播预览（{{ playIndex + 1 }}/{{ playlist.length }}）</div>
+            <div class="playlist-head-right">
+              <label class="playlist-toggle" title="播放结束后自动切到下一个镜头">
+                <input type="checkbox" v-model="playlistAutoNext" />
+                <span>自动连播</span>
+              </label>
+              <button class="btn btn-ghost btn-icon" @click="closePlaylist">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="playlist-layout">
+            <div class="playlist-main">
+              <video
+                :key="playIndex"
+                ref="videoEl"
+                :src="'/' + (playlist[playIndex]?.url || '')"
+                class="playlist-video"
+                controls
+                autoplay
+                playsinline
+                @ended="onPlayEnded"
+                @play="playlistPaused = false"
+                @pause="playlistPaused = true"
+              />
+              <div class="playlist-caption dim">{{ playlist[playIndex]?.title || '' }}</div>
+              <div class="playlist-hint">← → 切换镜头 · 空格 播放/暂停 · Esc 关闭</div>
+            </div>
+            <div class="playlist-sidebar">
+              <button
+                v-for="(p, i) in playlist"
+                :key="i"
+                class="playlist-side-item"
+                :class="{ active: i === playIndex }"
+                @click="playAt(i)"
+              >
+                <span class="playlist-side-num">{{ String(i + 1).padStart(2, '0') }}</span>
+                <span class="playlist-side-title">{{ p.title }}</span>
+                <svg v-if="i === playIndex" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="playlist-bar">
+            <button class="btn btn-sm" @click="prevPlay">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+              上一个
+            </button>
+            <button class="btn btn-sm" @click="togglePlayPause">
+              <svg v-if="playlistPaused" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              {{ playlistPaused ? '播放' : '暂停' }}
+            </button>
+            <button class="btn btn-sm" @click="nextPlay">
+              下一个
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+            </button>
+            <button class="btn btn-sm btn-primary ml-auto" @click="closePlaylist">关闭</button>
+          </div>
+        </div>
+      </div>
     </main>
     </div>
   </div>
@@ -1558,6 +1819,8 @@
     :video-record="editingVideo"
     :characters="chars"
     :config-id="lockedVideoConfigId ?? undefined"
+    :fail-reason="editingVideoFailReason"
+    :neighbors="editingVideoNeighbors"
     @close="closeVideoEditor"
     @regenerated="refresh"
   />
@@ -1567,21 +1830,35 @@
 import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
-  Loader2,
+  Loader2, Monitor, Smartphone, Square,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import BaseSelect from '~/components/BaseSelect.vue'
 import ModelSelector from '~/components/ModelSelector.vue'
 import CharacterEditor from '~/components/CharacterEditor.vue'
 import SceneEditor from '~/components/SceneEditor.vue'
 import VideoEditor from '~/components/VideoEditor.vue'
+import { useConfirm } from '~/composables/useConfirm'
+
+const { confirm } = useConfirm()
 
 definePageMeta({ layout: 'studio' })
 
 const route = useRoute()
+const router = useRouter()
 const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
+
+// 返回项目页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
+function goBack() {
+  const state = window.history.state
+  if (state && state.back) {
+    router.back()
+  } else {
+    router.push(`/drama/${dramaId}`)
+  }
+}
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null), dubMatchCache = ref({})
 const panel = ref('script')
@@ -1605,13 +1882,42 @@ const prodTabIdx = computed({
   set: (v) => { prodTab.value = prodTabDefs.value[v]?.id || 'chars' },
 })
 const frameMode = ref('first')
+// 角色类型标签（旁白/主角/反派/配角）——音色库快速筛选的元数据
+const ROLE_TAGS = [
+  { label: '旁白', cls: 'role-tag-narrator' },
+  { label: '主角', cls: 'role-tag-protagonist' },
+  { label: '反派', cls: 'role-tag-villain' },
+  { label: '配角', cls: 'role-tag-supporting' },
+]
+function roleTagCls(label) {
+  return ROLE_TAGS.find(t => t.label === label)?.cls || ''
+}
+// 依据音色名 + 描述关键词推断该音色适合的角色类型（一个音色可打多个标签）
+function inferRoleTags(name, desc = []) {
+  const text = `${name || ''} ${Array.isArray(desc) ? desc.join(' ') : (desc || '')}`.toLowerCase()
+  const tags = []
+  if (/旁白|讲述|解说|叙述|播音|磁性|沉稳|醇厚|浑厚|大气|成熟男/.test(text)) tags.push('旁白')
+  if (/反派|低沉|冷酷|霸道|阴冷|沙哑|狠辣|凶狠|邪恶|强势|腹黑/.test(text)) tags.push('反派')
+  if (/主角|男主|女主|青年|少年|少女|阳光|甜美|温柔|清亮|青春|活力|甜润|元气|朝气/.test(text)) tags.push('主角')
+  if (/配角|大叔|大爷|大妈|奶奶|爷爷|老年|萝莉|正太|孩童|小孩|逗趣|憨厚|邻居/.test(text)) tags.push('配角')
+  return tags.slice(0, 3)
+}
+// 依据角色姓名 + 角色定位推断角色类型，用于角色卡片展示对照标签
+function inferCharRoleTag(c) {
+  const text = `${c.name || ''} ${c.role || ''}`.toLowerCase()
+  if (text.includes('旁白') || text.includes('narrator') || text.includes('画外音')) return '旁白'
+  if (text.includes('反派') || text.includes('villain') || text.includes('antagonist')) return '反派'
+  if (text.includes('主角') || text.includes('男主') || text.includes('女主') || text.includes('protagonist') || text.includes('hero')) return '主角'
+  if (text.includes('配角') || text.includes('supporting') || text.includes('support')) return '配角'
+  return ''
+}
 const fallbackVoiceProfiles = [
-  { id: 'alloy', label: 'Alloy', gender: '中性', traits: '平衡、自然、克制', suitable: '通用叙述、旁白、需要稳定输出的角色' },
-  { id: 'echo', label: 'Echo', gender: '男声', traits: '低沉、稳重、冷静', suitable: '成熟男性、父辈、旁白、压迫感角色' },
-  { id: 'fable', label: 'Fable', gender: '男声', traits: '温暖、讲述感、表现力强', suitable: '男主、成长型角色、叙事担当' },
-  { id: 'onyx', label: 'Onyx', gender: '男声', traits: '深沉、有力、权威', suitable: '反派、强势角色、掌控型人物' },
-  { id: 'nova', label: 'Nova', gender: '女声', traits: '温柔、甜润、亲和', suitable: '女主、母亲、柔和配角' },
-  { id: 'shimmer', label: 'Shimmer', gender: '女声', traits: '明亮、活泼、年轻', suitable: '少女、轻快角色、跳脱配角' },
+  { id: 'alloy', label: 'Alloy', gender: '中性', traits: '平衡、自然、克制', suitable: '通用叙述、旁白、需要稳定输出的角色', roleTags: ['旁白', '配角'] },
+  { id: 'echo', label: 'Echo', gender: '男声', traits: '低沉、稳重、冷静', suitable: '成熟男性、父辈、旁白、压迫感角色', roleTags: ['旁白', '反派'] },
+  { id: 'fable', label: 'Fable', gender: '男声', traits: '温暖、讲述感、表现力强', suitable: '男主、成长型角色、叙事担当', roleTags: ['主角'] },
+  { id: 'onyx', label: 'Onyx', gender: '男声', traits: '深沉、有力、权威', suitable: '反派、强势角色、掌控型人物', roleTags: ['反派'] },
+  { id: 'nova', label: 'Nova', gender: '女声', traits: '温柔、甜润、亲和', suitable: '女主、母亲、柔和配角', roleTags: ['主角', '配角'] },
+  { id: 'shimmer', label: 'Shimmer', gender: '女声', traits: '明亮、活泼、年轻', suitable: '少女、轻快角色、跳脱配角', roleTags: ['主角', '配角'] },
 ]
 const voiceProfiles = ref(fallbackVoiceProfiles)
 
@@ -1622,10 +1928,36 @@ const editingScene = ref<any>(null)
 const showSceneEditor = ref(false)
 const editingVideo = ref<any>(null)
 const editingVideoStoryboard = ref<any>(null)
+const editingVideoFailReason = ref('')
+const editingVideoNeighbors = ref<{ prev?: any; next?: any }>({})
 const showVideoEditor = ref(false)
 const imageGenerationModel = ref('')
 const videoGenerationModel = ref('')
+const aiSuggesting = ref(false)
+const continueBusy = ref(false)
+const continueTarget = ref<'raw' | 'script' | ''>('')
+const splittingShot = ref(false)
+const videoAspectRatio = ref('16:9')
+const aspectRatioOptions = [
+  { value: '16:9', label: '横屏', icon: Monitor },
+  { value: '9:16', label: '竖屏', icon: Smartphone },
+  { value: '1:1', label: '方形', icon: Square },
+]
 const regeneratingShotIds = ref<number[]>([])
+
+// ====== 统一配乐方案 ======
+const bgmUrl = ref('')
+const bgmVolume = ref(0.3)
+const bgmFadeIn = ref(1.5)
+const bgmFadeOut = ref(2.0)
+const bgmUploading = ref(false)
+const bgmSaving = ref(false)
+const bgmInput = ref<HTMLInputElement | null>(null)
+const bgmName = computed(() => {
+  if (!bgmUrl.value) return ''
+  const seg = bgmUrl.value.split('/').pop() || ''
+  return decodeURIComponent(seg) || '已设置配乐'
+})
 
 function openCharEditor(c: any) { useRouter().push(`/drama/${dramaId}/character/${c.id}`) }
 function closeCharEditor() { showCharEditor.value = false }
@@ -1634,6 +1966,11 @@ function closeSceneEditor() { showSceneEditor.value = false }
 function openVideoEditor(sb: any, vr?: any) {
   editingVideoStoryboard.value = sb
   editingVideo.value = vr || null
+  editingVideoFailReason.value = failedVideoMessages.value[sb.id] || ''
+  editingVideoNeighbors.value = {
+    prev: getPreviousStoryboard(sb),
+    next: getNextStoryboard(sb),
+  }
   showVideoEditor.value = true
 }
 function closeVideoEditor() { showVideoEditor.value = false }
@@ -1644,6 +1981,7 @@ async function regenerateShotImage(sb: any, model?: string) {
   try {
     await storyboardAPI.regenerateImage(sb.id, {
       prompt: sb.customImagePrompt || sb.custom_image_prompt || undefined,
+      negative_prompt: sb.negativePrompt || sb.negative_prompt || undefined,
       model: model || undefined,
     })
     await refresh()
@@ -1653,7 +1991,67 @@ async function regenerateShotImage(sb: any, model?: string) {
     regeneratingShotIds.value = regeneratingShotIds.value.filter(id => id !== sb.id)
   }
 }
-const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
+const voiceRoleFilter = ref('')
+const filteredVoiceProfiles = computed(() =>
+  voiceRoleFilter.value
+    ? voiceProfiles.value.filter(v => (v.roleTags || []).includes(voiceRoleFilter.value))
+    : voiceProfiles.value
+)
+
+// ====== 音色独立试听 ======
+const previewingVoiceId = ref<string | null>(null)
+const voicePreviewMap = ref<Record<string, string>>({})
+async function previewVoice(voiceId: string) {
+  previewingVoiceId.value = voiceId
+  try {
+    const res: any = await voicesAPI.preview(voiceId)
+    const url = res?.url
+    if (url) voicePreviewMap.value[voiceId] = url
+    else toast.error('试听生成失败，未返回音频地址')
+  } catch (e: any) {
+    console.error('Voice preview failed', e)
+    toast.error(e?.message || '试听生成失败')
+  } finally {
+    previewingVoiceId.value = null
+  }
+}
+
+// ====== 声纹克隆 ======
+const cloningVoice = ref(false)
+const cloneVoiceName = ref('')
+const cloneFile = ref<File | null>(null)
+const cloneFileName = ref('')
+function onCloneFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0] || null
+  cloneFile.value = file
+  cloneFileName.value = file ? file.name : ''
+  if (file) input.value = ''
+}
+async function cloneVoiceNow() {
+  if (!cloneFile.value) return
+  cloningVoice.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', cloneFile.value)
+    if (cloneVoiceName.value.trim()) fd.append('voice_name', cloneVoiceName.value.trim())
+    await voicesAPI.clone(fd)
+    toast.success('音色克隆成功，已加入音色库')
+    cloneFile.value = null
+    cloneFileName.value = ''
+    cloneVoiceName.value = ''
+    await loadVoices()
+  } catch (e: any) {
+    console.error('Voice clone failed', e)
+    toast.error(e?.message || '音色克隆失败')
+  } finally {
+    cloningVoice.value = false
+  }
+}
+const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({
+  label: `${v.label} · ${v.traits}${(v.roleTags || []).length ? ` · ${v.roleTags.join('/')}` : ''}`,
+  value: v.id,
+})))
 const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
   let modelName = ''
   try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
@@ -1699,12 +2097,86 @@ function closeImageViewer() {
   imageViewer.value = { open: false, src: '', title: '' }
 }
 
+// 连播预览播放器
+const playlistPlayer = ref({ open: false })
+const playlist = ref<{ title: string; url: string }[]>([])
+const playIndex = ref(0)
+const videoEl = ref<HTMLVideoElement | null>(null)
+const playlistAutoNext = ref(true)
+const playlistPaused = ref(false)
+
+function buildPlaylist() {
+  return sbs.value
+    .map((sb, i) => ({
+      title: `#${String(i + 1).padStart(2, '0')} ${sb.title || sb.description || ''}`.trim(),
+      url: getComposedVideoUrl(sb) || getVideoUrl(sb),
+    }))
+    .filter(item => !!item.url)
+}
+
+function openPlaylist() {
+  const list = buildPlaylist()
+  if (!list.length) {
+    toast.error('还没有可播放的视频')
+    return
+  }
+  playlist.value = list
+  playIndex.value = 0
+  playlistPaused.value = false
+  playlistPlayer.value = { open: true }
+}
+
+function closePlaylist() {
+  playlistPlayer.value = { open: false }
+  const el = videoEl.value
+  if (el) el.pause()
+  playlist.value = []
+  playIndex.value = 0
+  playlistPaused.value = false
+}
+
+function playAt(i) {
+  if (i < 0 || i >= playlist.value.length) return
+  playIndex.value = i
+}
+
+function prevPlay() {
+  if (!playlist.value.length) return
+  playAt(playIndex.value > 0 ? playIndex.value - 1 : playlist.value.length - 1)
+}
+
+function nextPlay() {
+  if (playlist.value.length <= 1) return
+  playAt(playIndex.value < playlist.value.length - 1 ? playIndex.value + 1 : 0)
+}
+
+function togglePlayPause() {
+  const el = videoEl.value
+  if (!el) return
+  if (el.paused) el.play()
+  else el.pause()
+}
+
+function onPlayEnded() {
+  if (!playlistAutoNext.value) return
+  nextPlay()
+}
+
 function handleImageViewerKeydown(event) {
   if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
 }
 
+function handlePlaylistKeydown(event: KeyboardEvent) {
+  if (!playlistPlayer.value.open) return
+  if (event.key === 'Escape') { closePlaylist(); return }
+  if (event.key === 'ArrowLeft') { prevPlay(); return }
+  if (event.key === 'ArrowRight') { nextPlay(); return }
+  if (event.key === ' ') { event.preventDefault(); togglePlayPause(); return }
+}
+
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
+  window.addEventListener('keydown', handlePlaylistKeydown)
 })
 
 const isMounted = ref(true)
@@ -2281,8 +2753,8 @@ const visualCharTotal = computed(() => visualChars.value.length)
 const prodTabDefs = computed(() => [
   { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
   { id: 'scenes', label: '场景图片', icon: MapPin, badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
-  { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
   { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
+  { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
   { id: 'videos', label: '视频生成', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
   { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
 ])
@@ -2301,19 +2773,25 @@ const sidebarSections = computed(() => ([
     items: [
       { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
       { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
-      { key: 'script:extract', label: '提取', desc: '', icon: Users, done: !!chars.value.length },
-      { key: 'script:voice', label: '音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
-      { key: 'script:storyboard', label: '分镜', desc: '', icon: Clapperboard, done: !!sbs.value.length },
     ],
   },
   {
-    id: 'production',
-    label: '制作',
+    id: 'assets',
+    label: '资产',
     items: [
+      { key: 'script:extract', label: '提取角色场景', desc: '', icon: Users, done: !!chars.value.length },
+      { key: 'script:voice', label: '分配音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
       { key: 'prod:chars', label: '角色形象', desc: '', icon: Users, done: prodStepDone('chars') },
       { key: 'prod:scenes', label: '场景图片', desc: '', icon: MapPin, done: prodStepDone('scenes') },
-      { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
+    ],
+  },
+  {
+    id: 'storyboard',
+    label: '分镜',
+    items: [
+      { key: 'script:storyboard', label: '分镜拆解', desc: '', icon: Clapperboard, done: !!sbs.value.length },
       { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
+      { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
       { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
       { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
     ],
@@ -2378,7 +2856,7 @@ function goMainStage(stageId) {
   }
   if (stageId === 'storyboard') {
     if (panel.value === 'production') {
-      prodTab.value = ['dubbing', 'shots', 'videos', 'compose'].includes(prodTab.value) ? prodTab.value : 'dubbing'
+      prodTab.value = ['shots', 'dubbing', 'videos', 'compose'].includes(prodTab.value) ? prodTab.value : 'shots'
       return
     }
     panel.value = 'script'
@@ -2406,8 +2884,8 @@ const activeSubSteps = computed(() => {
   if (activeMainStage.value === 'storyboard') {
     return [
       { key: 'script:storyboard', label: '分镜拆解', done: !!sbs.value.length },
-      { key: 'prod:dubbing', label: '配音生成', done: !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value },
       { key: 'prod:shots', label: '镜头图片', done: !!sbs.value.length && shotImgCount.value === sbs.value.length },
+      { key: 'prod:dubbing', label: '配音生成', done: !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value },
       { key: 'prod:videos', label: '视频生成', done: !!sbs.value.length && shotVidCount.value === sbs.value.length },
       { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
     ]
@@ -2532,6 +3010,16 @@ function getVoiceProfile(voiceId) {
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
 
 const selectedSb = ref(null)
+
+function jumpToTimelineShot(sb: any) {
+  panel.value = 'production'
+  prodTab.value = 'shots'
+  selectedSb.value = sb
+  setTimeout(() => {
+    document.querySelector(`[data-shot-id="${sb.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, 80)
+}
+
 const shotTypes = [
   '大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写',
   '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
@@ -2574,6 +3062,39 @@ function toggleStoryboardCharacter(sb, charId) {
   updateField(sb, 'character_ids', nextIds)
 }
 
+// —— 镜头级服装变体（每个角色可指定本镜头穿哪套造型）——
+function charCostumeOptions(char: any): string[] {
+  if (!char?.costumes) return []
+  try {
+    const arr = JSON.parse(char.costumes)
+    return Array.isArray(arr) ? arr.filter((x: any) => typeof x === 'string' && x.trim()) : []
+  } catch {
+    return []
+  }
+}
+
+function getStoryboardCharacterCostumes(sb: any): Record<number, string> {
+  return sb?.character_costumes || sb?.characterCostumes || {}
+}
+
+function getStoryboardCharacterCostume(sb: any, charId: number): string {
+  return getStoryboardCharacterCostumes(sb)[charId] || ''
+}
+
+function setStoryboardCharacterCostume(sb: any, charId: number, costume: string) {
+  const current = getStoryboardCharacterCostumes(sb)
+  const next = { ...current }
+  if (costume) next[charId] = costume
+  else delete next[charId]
+  updateField(sb, 'character_costumes', next)
+}
+
+const boundChars = computed(() => {
+  if (!selectedSb.value) return []
+  const ids = getStoryboardCharacterIds(selectedSb.value)
+  return chars.value.filter((char: any) => ids.includes(char.id) && charCostumeOptions(char).length > 0)
+})
+
 function getSceneName(sb) {
   const sceneId = sb?.scene_id || sb?.sceneId
   if (!sceneId) return '未绑定场景'
@@ -2581,8 +3102,46 @@ function getSceneName(sb) {
   return scene ? `${scene.location} · ${scene.time || '未设时间'}` : `场景 #${sceneId}`
 }
 
+async function genActionSuggestion(sb) {
+  if (!sb?.id || aiSuggesting.value) return
+  aiSuggesting.value = true
+  try {
+    const res = await fetch(`/api/v1/storyboards/${sb.id}/action-suggestion`, { method: 'POST' })
+    const data = await res.json()
+    if (data.code !== 200) throw new Error(data.message || '生成失败')
+    const suggestion = data.data?.suggestion
+    if (!suggestion) throw new Error('未返回建议')
+    const merged = (sb.action || '').trim() ? `${sb.action.trim()}\n${suggestion}` : suggestion
+    updateField(sb, 'action', merged)
+    toast.success('动作建议已生成')
+  } catch (e) {
+    toast.error(e.message || '生成失败')
+  } finally {
+    aiSuggesting.value = false
+  }
+}
+
+async function splitShot(sb) {
+  if (!sb?.id || splittingShot.value) return
+  if (!(await confirm({ message: 'AI 将把此镜头拆分为多个子镜头，保留原镜头并追加在其后。确定继续？' }))) return
+  splittingShot.value = true
+  try {
+    const res = await fetch(`/api/v1/storyboards/${sb.id}/split`, { method: 'POST' })
+    const data = await res.json()
+    if (data.code !== 200) throw new Error(data.message || '拆分失败')
+    const count = data.data?.subShots?.length || 0
+    if (!count) throw new Error('未返回子镜头')
+    await refresh()
+    toast.success(`已拆分为 ${count} 个子镜头`)
+  } catch (e) {
+    toast.error(e.message || '拆分失败')
+  } finally {
+    splittingShot.value = false
+  }
+}
+
 async function deleteShot(sb) {
-  if (!confirm('确定删除此镜头？')) return
+  if (!(await confirm({ message: '确定删除此镜头？', danger: true }))) return
   const idx = sbs.value.indexOf(sb)
   await storyboardAPI.del(sb.id)
   await refresh()
@@ -2627,6 +3186,11 @@ async function refresh() {
       else if (epHasScript && chars.value.length) scriptStep.value = 2
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
+      // 初始化统一配乐方案
+      bgmUrl.value = ep.bgm_url || ep.bgmUrl || ''
+      bgmVolume.value = Number(ep.bgm_volume ?? ep.bgmVolume ?? 0.3)
+      bgmFadeIn.value = Number(ep.bgm_fade_in ?? ep.bgmFadeIn ?? 1.5)
+      bgmFadeOut.value = Number(ep.bgm_fade_out ?? ep.bgmFadeOut ?? 2.0)
       await loadLatestGridImage()
 
       // 自动加载配音验证状态（异步，不阻塞 UI）
@@ -2640,6 +3204,83 @@ async function refresh() {
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
+
+// ====== 统一配乐：上传 / 保存 ======
+function triggerBgmUpload() { bgmInput.value?.click() }
+function clearBgm() { bgmUrl.value = '' }
+async function onPickBgm(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  bgmUploading.value = true
+  try {
+    const { url } = await uploadAPI.audio(file)
+    bgmUrl.value = url
+    toast.success('配乐已上传')
+  } catch (err: any) {
+    toast.error(err?.message || '上传失败')
+  } finally {
+    bgmUploading.value = false
+    input.value = ''
+  }
+}
+async function saveBgm() {
+  if (!epId.value) { toast.warning('请先选择剧集'); return }
+  bgmSaving.value = true
+  try {
+    await episodeAPI.update(epId.value, {
+      bgm_url: bgmUrl.value || undefined,
+      bgm_volume: bgmVolume.value,
+      bgm_fade_in: bgmFadeIn.value,
+      bgm_fade_out: bgmFadeOut.value,
+    })
+    if (episode.value) {
+      episode.value.bgm_url = bgmUrl.value
+      episode.value.bgm_volume = bgmVolume.value
+      episode.value.bgm_fade_in = bgmFadeIn.value
+      episode.value.bgm_fade_out = bgmFadeOut.value
+    }
+    toast.success('配乐方案已保存，下次拼接生效')
+  } catch (err: any) {
+    toast.error(err?.message || '保存失败')
+  } finally {
+    bgmSaving.value = false
+  }
+}
+
+async function continueRaw() {
+  const text = localRaw.value.trim()
+  if (!text) { toast.warning('请先输入内容再续写'); return }
+  continueBusy.value = true
+  continueTarget.value = 'raw'
+  try {
+    const res: any = await episodeAPI.continueScript(epId.value, { mode: 'raw', text: localRaw.value })
+    localRaw.value = localRaw.value.replace(/\s*$/, '') + '\n\n' + res.continuation
+    toast.success('已续写，确认后点击「保存」入库')
+  } catch (err: any) {
+    toast.error(err?.message || '续写失败')
+  } finally {
+    continueBusy.value = false
+    continueTarget.value = ''
+  }
+}
+
+async function continueScr() {
+  const text = localScript.value.trim()
+  if (!text) { toast.warning('请先输入或改写剧本再续写'); return }
+  continueBusy.value = true
+  continueTarget.value = 'script'
+  try {
+    const res: any = await episodeAPI.continueScript(epId.value, { mode: 'script', text: localScript.value })
+    localScript.value = localScript.value.replace(/\s*$/, '') + '\n\n' + res.continuation
+    toast.success('已续写，确认后点击「保存」入库')
+  } catch (err: any) {
+    toast.error(err?.message || '续写失败')
+  } finally {
+    continueBusy.value = false
+    continueTarget.value = ''
+  }
+}
 function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
 function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
@@ -3054,7 +3695,7 @@ async function genShotTTS(sb) {
   const issues = cache?.lines?.filter(l => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
   if (issues.length > 0) {
     const warns = issues.map(v => v.warning).filter(Boolean).join('；')
-    if (!confirm(`以下角色音色匹配存在问题：\n${warns}\n\n继续生成可能使用默认音色，是否继续？`)) return
+    if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${warns}\n\n继续生成可能使用默认音色，是否继续？` }))) return
   }
 
   try {
@@ -3085,7 +3726,7 @@ async function batchShotTTS() {
       const warns = issues.map(i => i.warning).filter(Boolean).join('；')
       return `#${num}：${warns}`
     }).join('\n')
-    if (!confirm(`以下角色音色匹配存在问题：\n${detail}\n\n继续生成可能使用默认音色，是否继续？`)) return
+    if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${detail}\n\n继续生成可能使用默认音色，是否继续？` }))) return
   }
 
   const results = await Promise.allSettled(pending.map(sb => storyboardAPI.generateTTS(sb.id)))
@@ -3105,6 +3746,16 @@ function hasImg(s) { return !!getStoryboardCover(s) }
 function hasVid(s) { return !!getVideoUrl(s) }
 function hasComposed(s) { return !!getComposedVideoUrl(s) }
 
+function getPreviousStoryboard(sb) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  return idx > 0 ? sbs.value[idx - 1] : null
+}
+
+function getNextStoryboard(sb) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  return idx >= 0 && idx < sbs.value.length - 1 ? sbs.value[idx + 1] : null
+}
+
 function getShotReferenceImages(sb) {
   const refs = []
   const pushRef = (value) => {
@@ -3117,6 +3768,12 @@ function getShotReferenceImages(sb) {
   for (const charId of getStoryboardCharacterIds(sb)) {
     const char = chars.value.find(item => item.id === charId)
     pushRef(char?.image_url || char?.imageUrl)
+  }
+  // 镜头连贯：上一镜头的尾帧作为当前镜头参考，让相邻镜头视觉延续
+  const prev = getPreviousStoryboard(sb)
+  if (prev) {
+    pushRef(getLastFrame(prev))
+    pushRef(getFirstFrame(prev))
   }
   for (const ref of getRefs(sb)) {
     pushRef(ref)
@@ -3192,13 +3849,19 @@ async function genVid(sb) {
     drama_id: dramaId,
     prompt: sb.video_prompt || sb.videoPrompt || '',
     duration: Number(sb.duration || 5),
+    aspect_ratio: videoAspectRatio.value,
   }
   const first = getFirstFrame(sb)
   const last = getLastFrame(sb)
+  // 镜头连贯：当前镜头无首帧时，回退用上一镜头的尾帧作参考
+  const prev = getPreviousStoryboard(sb)
+  const prevLast = prev ? getLastFrame(prev) : null
+  const prevFirst = prev ? getFirstFrame(prev) : null
+  const effFirst = first || prevLast || prevFirst
   const refs = getRefs(sb)
   if (first && last) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
-  else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [first, ...refs].filter(Boolean) }) }
-  else if (first) { Object.assign(params, { reference_mode: 'single', image_url: first }) }
+  else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [effFirst, ...refs].filter(Boolean) }) }
+  else if (effFirst) { Object.assign(params, { reference_mode: 'single', image_url: effFirst }) }
   try {
     delete failedVideoMessages.value[sb.id]
     if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
@@ -3291,6 +3954,62 @@ async function batchCompose() {
 }
 let mergeIntervalId: ReturnType<typeof setInterval> | null = null
 
+const exporting = ref(false)
+const exportScope = ref<'all' | 'video' | 'assets'>('all')
+
+async function doExportZip() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}?scope=${exportScope.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `导出失败 (${resp.status})`)
+    }
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-${exportScope.value}.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success('打包导出完成')
+  } catch (e: any) {
+    toast.error(e?.message || '打包导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+async function doExportEdl() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/edl?episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `EDL 导出失败 (${resp.status})`)
+    }
+    const text = await resp.text()
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-ep${episodeNumber}.edl`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success('EDL 导出完成')
+  } catch (e: any) {
+    toast.error(e?.message || 'EDL 导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
 async function doMerge() {
   await mergeAPI.merge(epId.value); toast.success('拼接中...')
   if (mergeIntervalId) clearInterval(mergeIntervalId)
@@ -3359,12 +4078,14 @@ function inferVoiceGender(name, desc = []) {
 
 function mapVoiceProfile(v) {
   const desc = Array.isArray(v.description) ? v.description : []
+  const backendTags = Array.isArray(v.role_tags) && v.role_tags.length ? v.role_tags : null
   return {
     id: v.voice_id,
     label: v.voice_name || v.voice_id,
     gender: inferVoiceGender(v.voice_name || v.voice_id, desc),
     traits: desc.length ? desc.slice(0, 2).join('、') : `${v.language || '多语言'}音色`,
     suitable: desc.length > 2 ? desc.slice(2).join('、') : `${v.language || '通用'}角色`,
+    roleTags: backendTags || inferRoleTags(v.voice_name || v.voice_id, desc),
   }
 }
 
@@ -3667,13 +4388,13 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 }
 .sidebar-jump-dot.active {
   background: var(--accent-dark);
-  box-shadow: 0 0 0 2px rgba(76, 125, 255, 0.14);
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.14);
 }
 .sidebar-jump-dot.done {
   background: var(--success);
 }
 .sidebar-jump-dot.active.done {
-  background: #1e3f8a;
+  background: #0f766e;
 }
 .progress-wrap { display: flex; flex-direction: column; gap: 5px; }
 .progress-head { display: flex; justify-content: space-between; }
@@ -3725,7 +4446,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .stage-subnav-item.active {
   background: rgba(19, 51, 121, 0.08);
   border-color: rgba(19, 51, 121, 0.12);
-  color: #1e3f8a;
+  color: #0f766e;
 }
 .stage-subnav-item.done {
   color: var(--text-1);
@@ -3809,7 +4530,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 }
 .bubble-btn:hover:not(:disabled) { background: #fff; color: var(--text-0); }
 .bubble-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.bubble-btn.primary { margin-left: auto; background: linear-gradient(135deg, #557ff4, #345fcc); color: #fff; box-shadow: 0 6px 16px rgba(53, 95, 206, 0.2); border-color: transparent; }
+.bubble-btn.primary { margin-left: auto; background: linear-gradient(135deg, #14b8a6, #0f766e); color: #fff; box-shadow: 0 6px 16px rgba(15, 118, 110, 0.2); border-color: transparent; }
 .bubble-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .bubble-btn.primary:disabled { filter: none; box-shadow: none; opacity: 0.5; }
 .bubble-dots { display: flex; gap: 7px; padding: 0 4px; }
@@ -3819,7 +4540,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   border: none;
 }
 .bubble-dot.done { background: var(--success); }
-.bubble-dot.current { background: var(--accent-dark); transform: scale(1.2); box-shadow: 0 0 0 2px rgba(76, 125, 255, 0.14); }
+.bubble-dot.current { background: var(--accent-dark); transform: scale(1.2); box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.14); }
 
 /* Extract grid */
 .extract-stage { flex: 1; min-height: 0; overflow: hidden; padding: 12px 16px; display: grid; grid-template-columns: 280px minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
@@ -3905,6 +4626,36 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .voice-library-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
 .voice-library-traits { font-size: 11px; color: var(--text-1); }
 .voice-library-fit { font-size: 10px; color: var(--text-3); line-height: 1.5; }
+.voice-preview-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); background: rgba(255,255,255,0.7); color: var(--accent); cursor: pointer; flex-shrink: 0; margin-left: auto; transition: all .15s ease; }
+.voice-preview-btn:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
+.voice-preview-btn:disabled { opacity: .5; cursor: default; }
+.voice-preview-audio { width: 100%; height: 28px; margin-top: 2px; }
+.voice-clone-box { margin-top: 12px; padding: 12px; border: 1px dashed var(--border-strong, var(--border)); border-radius: 12px; background: rgba(255,255,255,0.4); display: flex; flex-direction: column; gap: 8px; }
+.voice-clone-head { display: flex; flex-direction: column; gap: 2px; }
+.voice-clone-head > span:first-child { font-size: 12px; font-weight: 700; color: var(--text-0); }
+.voice-clone-hint { font-size: 11px; color: var(--text-3); }
+.voice-clone-input { width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; background: rgba(255,255,255,0.8); color: var(--text-0); outline: none; transition: border-color .15s ease; }
+.voice-clone-input:focus { border-color: var(--border-focus, var(--accent)); }
+.voice-clone-file-label { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.8); cursor: pointer; font-size: 12px; color: var(--text-2); overflow: hidden; }
+.voice-clone-file-label span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.voice-clone-file { display: none; }
+.voice-clone-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+.voice-clone-btn:hover:not(:disabled) { background: var(--accent-dark); }
+.voice-clone-btn:disabled { opacity: .5; cursor: default; }
+.voice-role-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+.role-filter-chip { padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: rgba(255,255,255,0.6); color: var(--text-2); transition: all .15s ease; }
+.role-filter-chip:hover { border-color: var(--border-strong); color: var(--text-0); }
+.role-filter-chip-active { color: #fff !important; border-color: transparent !important; }
+.role-filter-chip-active.role-tag-narrator { background: #0d9488; }
+.role-filter-chip-active.role-tag-protagonist { background: #3b82f6; }
+.role-filter-chip-active.role-tag-villain { background: #ef4444; }
+.role-filter-chip-active.role-tag-supporting { background: #a855f7; }
+.voice-library-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.role-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 1.5; white-space: nowrap; }
+.role-tag-narrator { color: #0f766e; background: rgba(13,148,136,0.12); border: 1px solid rgba(13,148,136,0.25); }
+.role-tag-protagonist { color: #1d4ed8; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.25); }
+.role-tag-villain { color: #b91c1c; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25); }
+.role-tag-supporting { color: #6b21a8; background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.25); }
 
 .voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; align-content: start; }
 .voice-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; border-radius: 22px; min-height: 0; }
@@ -4046,7 +4797,18 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 
 /* Field */
 .field { display: flex; flex-direction: column; gap: 5px; }
-.field-label { font-size: 12px; font-weight: 500; color: var(--text-1); }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-1); display: flex; align-items: center; gap: 8px; }
+.field-ai-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px; font-weight: 500;
+  background: var(--accent-bg); color: var(--accent-text);
+  border: 1px solid transparent; border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s var(--ease-out);
+}
+.field-ai-btn:hover:not(:disabled) { border-color: var(--accent); }
+.field-ai-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .field-row { display: flex; gap: 12px; }
 .field-grid { display: grid; gap: 12px; }
 .field-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4076,8 +4838,8 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   outline: none;
   transition: border-color .15s;
 }
-.config-select:hover { border-color: rgba(80,110,200,0.4); }
-.config-select:focus { border-color: rgba(60,90,180,0.5); box-shadow: 0 0 0 2px rgba(60,90,180,0.1); }
+.config-select:hover { border-color: rgba(13,148,136,0.4); }
+.config-select:focus { border-color: rgba(13,148,136,0.5); box-shadow: 0 0 0 2px rgba(13,148,136,0.1); }
 .locked-config-banner {
   margin-bottom: 8px;
   font-size: 12px;
@@ -4101,8 +4863,20 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   border-color: var(--accent);
   background: var(--accent);
   color: #fff;
-  box-shadow: 0 8px 18px rgba(29, 77, 176, 0.18);
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18);
 }
+.costume-picker { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.costume-picker-row { display: flex; align-items: center; gap: 8px; }
+.costume-picker-name {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 600;
+  padding: 2px 8px;
+  background: rgba(27,41,64,0.06);
+  border-radius: 6px;
+}
+.costume-picker-select { height: 30px; padding: 0 8px; font-size: 12px; min-width: 0; flex: 1; }
 
 /* Production tabs */
 .prod-tabs { display: flex; gap: 0; background: var(--bg-2); border-radius: var(--radius); padding: 2px; }
@@ -4115,6 +4889,78 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .prod-tab.active { background: var(--bg-0); color: var(--text-0); font-weight: 600; box-shadow: var(--shadow-xs); }
 .prod-tab-badge { font-size: 10px; font-family: var(--font-mono); padding: 0 4px; background: var(--bg-3); border-radius: 99px; }
 .prod-tab.active .prod-tab-badge { background: var(--accent-bg); color: var(--accent-text); }
+
+/* Shot timeline overview */
+.shot-timeline {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow-x: auto;
+}
+.shot-timeline-track {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: max-content;
+  padding-bottom: 2px;
+}
+.shot-timeline-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  padding: 5px 4px 7px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+  min-width: 56px;
+}
+.shot-timeline-node::after {
+  content: '';
+  position: absolute;
+  top: 22px;
+  left: calc(100% + 3px);
+  width: 4px;
+  height: 1px;
+  background: var(--border);
+}
+.shot-timeline-node:last-child::after { display: none; }
+.shot-timeline-node:hover { background: var(--bg-2); border-color: var(--border); }
+.shot-timeline-node.active { border-color: var(--accent); background: var(--accent-bg); }
+.shot-timeline-thumb {
+  width: 46px;
+  height: 34px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-3);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+.shot-timeline-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.shot-timeline-num {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-size: 8px;
+  font-family: var(--font-mono);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 3px;
+  padding: 0 3px;
+  line-height: 12px;
+}
+.shot-timeline-node.done .shot-timeline-thumb { box-shadow: 0 0 0 2px #22c55e inset; }
+.shot-timeline-dots { display: flex; gap: 3px; }
+.tl-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border); }
+.tl-dot.on:nth-child(1) { background: #6366f1; }
+.tl-dot.on:nth-child(2) { background: #22c55e; }
+.tl-dot.on:nth-child(3) { background: #f59e0b; }
 
 /* Production content */
 .prod-content { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -4154,14 +5000,14 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .dub-audio { flex: 1; min-width: 0; height: 30px; }
 
 /* Asset grid */
-.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
 .asset-card {
   display: flex; flex-direction: column; overflow: hidden;
   transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
 }
 .asset-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
 .asset-card.clickable { cursor: pointer; }
-.asset-card.clickable:hover { border-color: rgba(60,90,180,0.3); }
+.asset-card.clickable:hover { border-color: rgba(13,148,136,0.3); }
 .asset-cover { position: relative; aspect-ratio: 1; background: var(--bg-2); overflow: hidden; }
 .asset-cover.wide { aspect-ratio: 16/9; }
 .asset-cover img { width: 100%; height: 100%; object-fit: cover; }
@@ -4253,7 +5099,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .dot.ok { background: var(--success); }
 .dot.pending {
   background: var(--accent-dark);
-  box-shadow: 0 0 0 3px rgba(76, 125, 255, 0.14);
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14);
 }
 
 /* Prod grid */
@@ -4282,11 +5128,26 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .prod-meta-line { margin-top: 5px; font-size: 10px; color: var(--text-3); }
 .prod-dots { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--text-3); }
 .prod-error {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-top: 6px;
   font-size: 11px;
   line-height: 1.45;
   color: var(--error);
 }
+.prod-error-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.prod-error-link:hover { text-decoration: underline; }
 .prod-actions { display: flex; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
 .prod-actions .btn { flex: 1; justify-content: center; }
 
@@ -4296,6 +5157,115 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   padding: 28px;
   background: rgba(18, 24, 34, 0.68);
   backdrop-filter: blur(10px);
+}
+
+/* Playlist player */
+.playlist-overlay {
+  z-index: 130;
+  padding: 28px;
+}
+.playlist-dialog {
+  width: min(1120px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+}
+.playlist-layout {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.playlist-main {
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.playlist-video {
+  width: 100%;
+  max-height: calc(100vh - 240px);
+  background: #000;
+  border-radius: 12px;
+  display: block;
+}
+.playlist-caption {
+  font-size: 13px;
+  text-align: center;
+}
+.playlist-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: center;
+}
+.playlist-head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.playlist-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.playlist-toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.playlist-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-1);
+}
+.playlist-side-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.12s;
+  color: var(--text-2);
+}
+.playlist-side-item:hover { background: var(--bg-2); color: var(--text-0); }
+.playlist-side-item.active { background: var(--accent-bg); color: var(--accent-text); }
+.playlist-side-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.playlist-side-title {
+  font-size: 12px;
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.playlist-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
 }
 .image-viewer-dialog {
   width: min(1100px, calc(100vw - 56px));
@@ -4501,7 +5471,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   border-bottom: 1px dashed rgba(27, 41, 64, 0.08);
 }
 .grid-assign-row.active {
-  background: rgba(32, 86, 190, 0.05);
+  background: rgba(13, 148, 136, 0.05);
   border-radius: 12px;
   padding-left: 6px;
   padding-right: 6px;
@@ -4571,14 +5541,14 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 .grid-history-item:hover {
-  border-color: rgba(33, 88, 255, 0.18);
+  border-color: rgba(13, 148, 136, 0.18);
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
   transform: translateY(-1px);
 }
 .grid-history-item.active {
-  border-color: rgba(33, 88, 255, 0.26);
+  border-color: rgba(13, 148, 136, 0.26);
   background: linear-gradient(180deg, rgba(244,248,255,0.96), rgba(255,255,255,0.86));
-  box-shadow: 0 14px 28px rgba(33, 88, 255, 0.12);
+  box-shadow: 0 14px 28px rgba(13, 148, 136, 0.12);
 }
 .grid-history-thumb {
   width: 100%;
@@ -4684,6 +5654,25 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
 .exp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); }
 .exp-row:hover { background: var(--bg-hover); }
+.bgm-panel {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.bgm-panel-head { display: flex; align-items: center; gap: 10px; color: var(--accent); flex-shrink: 0; }
+.bgm-head-text { line-height: 1.3; }
+.bgm-title { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.bgm-sub { font-size: 11px; color: var(--text-3); }
+.bgm-controls { display: flex; align-items: flex-end; gap: 18px; flex: 1; flex-wrap: wrap; }
+.bgm-file-row { display: flex; align-items: center; gap: 8px; }
+.bgm-filename { font-size: 12px; color: var(--text-2); max-width: 200px; }
+.bgm-slider { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+.bgm-slider input[type="range"] { width: 140px; accent-color: var(--accent); }
+.bgm-num { display: flex; flex-direction: column; gap: 4px; }
+.bgm-num .input { width: 72px; }
 
 /* Shared */
 .dim { color: var(--text-3); }
@@ -4856,25 +5845,25 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   backdrop-filter: blur(4px);
 }
 .modal-panel {
-  background: var(--card-bg, #1e1e2e);
-  border: 1px solid var(--border, #2a2a3e);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
   border-radius: 12px;
   width: min(600px, 92vw);
   max-height: 85vh;
   display: flex; flex-direction: column;
-  box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+  box-shadow: var(--shadow-elevated);
 }
 .modal-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--border, #2a2a3e);
+  border-bottom: 1px solid var(--border);
 }
-.modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-0); }
 .btn-close {
-  background: none; border: none; color: #94a3b8;
+  background: none; border: none; color: var(--text-3);
   font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
 }
-.btn-close:hover { color: #fff; }
+.btn-close:hover { color: var(--text-0); }
 .modal-body {
   padding: 16px 20px; overflow-y: auto;
   flex: 1;
@@ -4884,55 +5873,55 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 }
 .modal-body .section h4 {
   margin: 0 0 10px; font-size: 13px;
-  color: var(--accent, #7c3aed); text-transform: uppercase;
+  color: var(--accent-text); text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 .modal-footer {
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 12px 20px;
-  border-top: 1px solid var(--border, #2a2a3e);
+  border-top: 1px solid var(--border);
 }
 .btn-save {
   padding: 8px 20px; border-radius: 6px;
-  background: var(--accent, #7c3aed); color: #fff;
+  background: var(--accent); color: #fff;
   border: none; font-weight: 600; cursor: pointer;
 }
 .btn-save:hover { opacity: 0.9; }
 .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-cancel {
   padding: 8px 16px; border-radius: 6px;
-  background: transparent; color: #94a3b8;
-  border: 1px solid var(--border, #2a2a3e); cursor: pointer;
+  background: transparent; color: var(--text-2);
+  border: 1px solid var(--border); cursor: pointer;
 }
-.btn-cancel:hover { color: #fff; }
+.btn-cancel:hover { color: var(--text-0); }
 .btn-ghost {
-  background: transparent !important; border: 1px solid var(--border, #2a2a3e) !important;
-  color: #94a3b8 !important; padding: 2px 6px !important;
+  background: transparent !important; border: 1px solid var(--border) !important;
+  color: var(--text-2) !important; padding: 2px 6px !important;
   min-width: unset !important;
 }
-.btn-ghost:hover { color: #fff !important; border-color: #64748b !important; }
+.btn-ghost:hover { color: var(--text-0) !important; border-color: var(--border-strong) !important; }
 .btn-edit {
-  background: transparent; border: 1px solid rgba(100,120,180,0.2);
-  color: #5a6a8a; padding: 4px 8px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-2); padding: 4px 8px;
   display: inline-flex; align-items: center; gap: 3px;
   border-radius: 6px; cursor: pointer; font-size: 11px;
   transition: all .15s; white-space: nowrap;
 }
-.btn-edit:hover { background: rgba(60,90,180,0.06); border-color: rgba(60,90,180,0.35); color: #3c5ab0; }
+.btn-edit:hover { background: var(--accent-bg); border-color: rgba(13,148,136,0.35); color: var(--accent-text); }
 .field {
   display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
 }
-.field span { font-size: 11px; color: #94a3b8; }
+.field span { font-size: 11px; color: var(--text-3); }
 .input, .textarea {
   padding: 8px 10px; border-radius: 6px;
-  border: 1px solid var(--border, #2a2a3e);
-  background: var(--input-bg, #16162a);
-  color: var(--text, #e2e8f0);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-0);
   font-size: 13px; font-family: inherit;
   resize: vertical;
 }
 .input:focus, .textarea:focus {
-  outline: none; border-color: var(--accent, #7c3aed);
+  outline: none; border-color: var(--accent);
 }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
@@ -4947,29 +5936,49 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 }
 .btn-primary {
   padding: 6px 14px; border-radius: 6px;
-  background: var(--accent, #7c3aed); color: #fff;
+  background: var(--accent); color: #fff;
   border: none; font-size: 12px; font-weight: 600; cursor: pointer;
 }
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .error-msg {
-  margin-top: 6px; font-size: 12px; color: #ef4444;
+  margin-top: 6px; font-size: 12px; color: var(--error);
 }
 .detail-section {
   padding: 12px 16px;
-  background: var(--card-bg-secondary, #1a1a2e);
+  background: var(--bg-1);
   border-radius: 8px;
   margin-bottom: 12px;
-  border: 1px solid var(--border, #2a2a3e);
+  border: 1px solid var(--border);
 }
 .detail-section-head {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 10px;
 }
 .detail-section-title {
-  font-size: 13px; font-weight: 600; color: var(--accent, #7c3aed);
+  font-size: 13px; font-weight: 600; color: var(--accent-text);
 }
 .detail-section-copy {
-  font-size: 11px; color: #64748b;
+  font-size: 11px; color: var(--text-2);
+}
+.aspect-selector-compact { display: flex; gap: 6px; }
+.aspect-btn-compact {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-2); font-size: 12px; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.aspect-btn-compact:hover { border-color: var(--accent); color: var(--text-0); }
+.aspect-btn-compact.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+.aspect-icon-compact {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
 }
 </style>

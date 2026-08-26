@@ -23,6 +23,10 @@ export class MiniMaxImageAdapter implements ImageProviderAdapter {
       n: 1,
     }
 
+    if (record.negativePrompt) {
+      body.negative_prompt = record.negativePrompt
+    }
+
     // MiniMax 支持 reference_images（参考图）
     if (record.referenceImages) {
       try {

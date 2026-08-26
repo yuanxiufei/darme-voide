@@ -14,7 +14,9 @@ import { AliImageAdapter } from './ali-image'
 import { AliVideoAdapter } from './ali-video'
 import { LocalSDImageAdapter } from './local-sd-image'
 import { CosyVoiceTTSAdapter } from './cosyvoice-tts'
-import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter } from './types'
+import { OpenAICompatibleTextAdapter } from './openai-compatible-text'
+import { GeminiTextAdapter } from './gemini-text'
+import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter, TextProviderAdapter } from './types'
 
 // 图片 Adapter 注册表
 export const imageAdapters: Record<string, ImageProviderAdapter> = {
@@ -44,24 +46,61 @@ export const ttsAdapters: Record<string, TTSProviderAdapter> = {
   cosyvoice: new CosyVoiceTTSAdapter(),
 }
 
+// 文本 Adapter 注册表
+// openai/openrouter/chatfire/ollama/volcengine/ali/minimax 均为 OpenAI 兼容（仅端点前缀不同），共享一个实例
+const openAICompatibleText = new OpenAICompatibleTextAdapter()
+export const textAdapters: Record<string, TextProviderAdapter> = {
+  openai: openAICompatibleText,
+  openrouter: openAICompatibleText,
+  chatfire: openAICompatibleText,
+  ollama: openAICompatibleText,
+  volcengine: openAICompatibleText,
+  ali: openAICompatibleText,
+  minimax: openAICompatibleText,
+  gemini: new GeminiTextAdapter(),
+}
+
+/**
+ * 获取文本 Adapter
+ * @param provider 厂商名称
+ * @throws 未知厂商显式报错
+ */
+export function getTextAdapter(provider: string): TextProviderAdapter {
+  return resolveAdapter(textAdapters, provider, 'text')
+}
+
+/**
+ * 从注册表解析 Adapter。
+ * 未知 provider **显式 throw**（不再静默 fallback 到 MiniMax），
+ * 让配置拼写错误在提交时尽早暴露，而非"成功走到 MiniMax"难以排查。
+ */
+function resolveAdapter<T>(registry: Record<string, T>, provider: string, kind: string): T {
+  const key = provider.toLowerCase()
+  const adapter = registry[key]
+  if (!adapter) {
+    throw new Error(`Unknown ${kind} provider "${provider}". Available: ${Object.keys(registry).join(', ')}`)
+  }
+  return adapter
+}
+
 export function getTTSAdapter(provider: string): TTSProviderAdapter {
-  return ttsAdapters[provider.toLowerCase()] || ttsAdapters['minimax']
+  return resolveAdapter(ttsAdapters, provider, 'TTS')
 }
 
 /**
  * 获取图片 Adapter
  * @param provider 厂商名称
- * @returns 对应的 Adapter，未知厂商返回 MiniMax 默认
+ * @throws 未知厂商显式报错
  */
 export function getImageAdapter(provider: string): ImageProviderAdapter {
-  return imageAdapters[provider.toLowerCase()] || imageAdapters['minimax']
+  return resolveAdapter(imageAdapters, provider, 'image')
 }
 
 /**
  * 获取视频 Adapter
  * @param provider 厂商名称
- * @returns 对应的 Adapter，未知厂商返回 MiniMax 默认
+ * @throws 未知厂商显式报错
  */
 export function getVideoAdapter(provider: string): VideoProviderAdapter {
-  return videoAdapters[provider.toLowerCase()] || videoAdapters['minimax']
+  return resolveAdapter(videoAdapters, provider, 'video')
 }

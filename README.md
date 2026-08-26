@@ -4,7 +4,7 @@
 
 **基于 TypeScript 全栈的 AI 短剧自动化生产平台**
 
-[![Node Version](https://img.shields.io/badge/Node.js-20+-339933?style=flat&logo=node.js)](https://nodejs.org)
+[![Node Version](https://img.shields.io/badge/Node.js-22.x-339933?style=flat&logo=node.js)](https://nodejs.org)
 [![Vue Version](https://img.shields.io/badge/Vue-3.x-4FC08D?style=flat&logo=vue.js)](https://vuejs.org)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -107,7 +107,7 @@ skills/     — Agent 技能定义 (SKILL.md)
 
 | 软件 | 版本要求 | 说明 |
 |---|---|---|
-| **Node.js** | 20+ | 前后端运行环境 |
+| **Node.js** | 22.x（推荐 22.20.0，**勿用 24**，better-sqlite3 原生模块与 Node 24 ABI 不兼容） | 前后端运行环境 |
 | **npm** | 9+ | 包管理工具 |
 | **FFmpeg** | 4.0+ | 视频处理（**必需**） |
 
@@ -150,8 +150,8 @@ app:
 
 storage:
   type: "local"
-  local_path: "./data/storage"
-  base_url: "http://localhost:5679/static"
+  local_path: "./data/static"
+  base_url: "http://localhost:5789/static"
 
 ai:
   default_text_provider: "openai"
@@ -160,6 +160,8 @@ ai:
 ```
 
 > **说明**：AI 服务的具体 API Key 和模型参数在 Web 界面的「设置」页面中配置。
+>
+> **配置优先级**：环境变量 > `config.yaml` > 默认值。常用环境变量：`PORT`、`HOST`、`CORS_ORIGINS`（逗号分隔）、`DB_PATH`、`STORAGE_PATH`、`CONFIG_PATH`（自定义配置文件路径）。
 
 ### 📥 安装依赖
 
@@ -192,7 +194,7 @@ npm run dev
 ```
 
 - 前端地址: `http://localhost:3013`
-- 后端 API: `http://localhost:5679/api/v1`
+- 后端 API: `http://localhost:5789/api/v1`
 - 前端自动代理 `/api` 和 `/static` 到后端
 
 #### 方式二：单服务模式
@@ -207,7 +209,7 @@ cd frontend && npm run generate
 cd ../backend && npm start
 ```
 
-访问: `http://localhost:5679`
+访问: `http://localhost:5789`
 
 ### 🗄️ 数据库
 
@@ -242,7 +244,7 @@ docker compose down
 # 从 Docker Hub 运行
 docker run -d \
   --name drama-studio \
-  -p 5679:5679 \
+  -p 5789:5789 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/configs/config.yaml:/app/configs/config.yaml \
   --restart unless-stopped \
@@ -258,7 +260,7 @@ docker logs -f drama-studio
 
 ```bash
 docker build -t drama-studio:latest .
-docker run -d --name drama-studio -p 5679:5679 \
+docker run -d --name drama-studio -p 5789:5789 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/configs/config.yaml:/app/configs/config.yaml \
   drama-studio:latest
@@ -318,7 +320,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://localhost:5679;
+        proxy_pass http://localhost:5789;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -332,7 +334,7 @@ server {
 
 ### 后端
 
-- **运行时**: Node.js 20+
+- **运行时**: Node.js 22.x
 - **Web 框架**: Hono
 - **ORM**: Drizzle ORM + better-sqlite3
 - **AI Agent**: Mastra + AI SDK (OpenAI compatible)

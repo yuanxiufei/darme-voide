@@ -42,7 +42,7 @@ COPY backend/tsconfig.json ./backend/
 COPY --from=frontend-build /app/frontend/.output/public ./frontend/dist
 
 # Skills
-COPY skills/ ./backend/skills/
+COPY skills/ ./skills/
 
 # Config
 COPY configs/config.example.yaml ./configs/config.yaml
@@ -50,9 +50,9 @@ COPY configs/config.example.yaml ./configs/config.yaml
 RUN mkdir -p data/static
 
 ENV NODE_ENV=production
-ENV PORT=5679
+ENV PORT=5789
 
-EXPOSE 5679
+EXPOSE 5789
 VOLUME ["/app/data"]
 
 CMD ["tsx", "backend/src/index.ts"]

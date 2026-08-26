@@ -11,7 +11,8 @@
  */
 
 import { db, schema } from '../db/index.js'
-import { eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, isNull } from 'drizzle-orm'
+import { getCameraMovementComposition } from './camera-movement-guides.js'
 
 // ============================================================
 // 风格预设常量（全域一致）
@@ -64,8 +65,47 @@ export interface PresetVariationCard {
   shots: PresetVariationCardShot[]
 }
 
-/** 预设图片负向提示词 */
-export const PRESET_IMAGE_NEGATIVE = 'text, watermark, signature, low quality, blurry, distorted, mutated body parts'
+// ============================================================
+// 统一负面提示词（Negative Prompt）体系
+// 每一条正向提示词都配套对应的反向提示词，明确排除不需要的内容/风格/元素。
+// 按生成类型拆分为针对性预设，各调用方在构建正向 prompt 时成对引用。
+// ============================================================
+
+/**
+ * 通用负面基础（所有生成类型共用）
+ * 排除低质、常见瑕疵与文字/水印等通用干扰项
+ */
+export const NEGATIVE_BASE = 'text, watermark, signature, logo, subtitles, low quality, blurry, out of focus, pixelated, jpeg artifacts, oversaturated, distorted, deformed, disfigured, bad anatomy, extra limbs, extra fingers, mutated hands, bad proportions, duplicated elements'
+
+/**
+ * 角色立绘负面提示词
+ * 排除写实照片质感（角色走 stylized 插画风）、杂乱/多人背景、角色重复与裁切
+ */
+export const CHARACTER_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, photorealistic, realistic photo, 3d render, cluttered background, busy background, multiple characters, multiple people, duplicated character, inconsistent character, cropped head, cut off face`
+
+/**
+ * 场景背景负面提示词
+ * 排除人物角色（场景图只保留环境）、特写人脸与空洞扁平构图
+ */
+export const SCENE_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, people, person, human figure, characters, portrait, close-up face, face, flat composition, empty boring layout`
+
+/**
+ * 分镜图片负面提示词
+ * 排除角色不一致、多余人物与时代/现代元素穿帮
+ */
+export const STORYBOARD_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, inconsistent character, character mismatch, extra characters, wrong number of people, anachronism, modern objects, modern clothing`
+
+/**
+ * 视频负面提示词（分镜视频 / 预设视频 / 手动视频共用）
+ * 排除运动瑕疵、闪烁、形变、角色漂移与镜头抖动
+ */
+export const VIDEO_NEGATIVE = `${NEGATIVE_BASE}, motion blur, jittery, flickering, flicker, warping, morphing, melting, distorted face, inconsistent character, character drift, frame inconsistency, jump cuts, camera shake, static image, frozen frame`
+
+/** 预设图片负面提示词（兼容旧引用，基于统一负面基础） */
+export const PRESET_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, mutated body parts`
+
+/** 预设视频负面提示词 */
+export const PRESET_VIDEO_NEGATIVE = VIDEO_NEGATIVE
 
 /**
  * 根据 Shot 配置构建预设图片生成 prompt
@@ -111,6 +151,51 @@ export function buildPresetVideoPrompt(shot: PresetVariationCardShot, cameraMove
 // 角色视觉 Prompt 构建
 // ============================================================
 
+/** 解析角色核心特征标签（JSON 数组字符串 → 字符串数组） */
+function parseCoreFeatures(coreFeatures?: string | null): string[] {
+  if (!coreFeatures) return []
+  try {
+    const arr = JSON.parse(coreFeatures)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((x): x is string => typeof x === 'string' && !!x.trim()).map(x => x.trim())
+  } catch {
+    return []
+  }
+}
+
+/** 解析角色多套服装变体（JSON 数组字符串 → 字符串数组） */
+function parseCostumes(costumes?: string | null): string[] {
+  if (!costumes) return []
+  try {
+    const arr = JSON.parse(costumes)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((x): x is string => typeof x === 'string' && !!x.trim()).map(x => x.trim())
+  } catch {
+    return []
+  }
+}
+
+/** 归一化装备/首饰文本：JSON 数组 → 逗号拼接；纯文本 → 去引号原样返回 */
+function formatEquip(text?: string | null): string {
+  if (!text) return ''
+  const arr = parseCoreFeatures(text)
+  if (arr.length) return arr.join(', ')
+  return text.replace(/[\[\]"']/g, '').replace(/\s+/g, ' ').trim()
+}
+
+/** 解析角色多变体立绘（JSON 数组字符串 → {name, imageUrl}[]） */
+function parseVariations(variations?: string | null): Array<{ name: string; imageUrl: string | null }> {
+  if (!variations) return []
+  try {
+    const arr = JSON.parse(variations)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((x): x is { name: string; imageUrl: string | null } =>
+      x && typeof x === 'object' && typeof x.name === 'string')
+  } catch {
+    return []
+  }
+}
+
 /**
  * 构建角色图片生成 prompt
  * @param name 角色名
@@ -124,9 +209,24 @@ export function buildCharacterImagePrompt(char: {
   appearance?: string | null
   description?: string | null
   personality?: string | null
+  coreFeatures?: string | null
+  clothing?: string | null
+  costume?: string | null
+  costumes?: string | null
+  weapons?: string | null
+  accessories?: string | null
 }): string {
   const parts: string[] = [char.name]
+  const core = parseCoreFeatures(char.coreFeatures)
+  if (core.length) parts.push(`core features: ${core.join(', ')}`)
   if (char.appearance) parts.push(char.appearance)
+  // 服装：优先本次选中的 costume，其次单套 clothing，最后回退多套 costumes 首套
+  const costume = char.costume || char.clothing || parseCostumes(char.costumes)[0]
+  if (costume) parts.push(`wearing ${costume}`)
+  const weapons = formatEquip(char.weapons)
+  if (weapons) parts.push(`armed with ${weapons}`)
+  const accessories = formatEquip(char.accessories)
+  if (accessories) parts.push(`wearing accessories: ${accessories}`)
   if (char.description && char.description !== char.appearance) parts.push(char.description)
 
   // 性格特征影响表情氛围
@@ -145,11 +245,58 @@ export function buildCharacterAppearanceText(char: {
   name: string
   appearance?: string | null
   description?: string | null
+  coreFeatures?: string | null
+  clothing?: string | null
+  costume?: string | null
+  costumes?: string | null
+  weapons?: string | null
+  accessories?: string | null
 }): string {
   const parts: string[] = [char.name]
+  const core = parseCoreFeatures(char.coreFeatures)
+  if (core.length) parts.push(core.join(', '))
   if (char.appearance) parts.push(char.appearance)
+  const costume = char.costume || char.clothing || parseCostumes(char.costumes)[0]
+  if (costume) parts.push(`wearing ${costume}`)
+  const weapons = formatEquip(char.weapons)
+  if (weapons) parts.push(`armed with ${weapons}`)
+  const accessories = formatEquip(char.accessories)
+  if (accessories) parts.push(`accessories: ${accessories}`)
   if (char.description && char.description !== char.appearance) parts.push(char.description)
   return parts.join(': ')
+}
+
+/**
+ * 构建角色「装备/服饰特写图」prompt（服装/武器/首饰独立设定图）
+ * @param type clothing/weapon/accessory
+ */
+export function buildEquipImagePrompt(
+  type: 'clothing' | 'weapon' | 'accessory',
+  char: {
+    name: string
+    appearance?: string | null
+    coreFeatures?: string | null
+    clothing?: string | null
+    weapons?: string | null
+    accessories?: string | null
+  },
+): string {
+  const parts: string[] = []
+  if (type === 'clothing') {
+    const c = formatEquip(char.clothing)
+    parts.push(c ? `detailed costume design sheet of ${c}` : 'detailed costume design sheet')
+  } else if (type === 'weapon') {
+    const w = formatEquip(char.weapons)
+    parts.push(w ? `detailed weapon concept art of ${w}` : 'detailed weapon concept art')
+  } else {
+    const a = formatEquip(char.accessories)
+    parts.push(a ? `detailed accessory jewelry design of ${a}` : 'detailed accessory jewelry design')
+  }
+  const core = parseCoreFeatures(char.coreFeatures)
+  if (core.length) parts.push(`matching the character's core features: ${core.join(', ')}`)
+  if (char.appearance) parts.push(`character appearance: ${char.appearance}`)
+  parts.push(`for the character ${char.name}`)
+  return `${parts.join(', ')}, ${VISUAL_STYLE_CHARACTER}, ${VISUAL_STYLE_MASTER}`
 }
 
 // ============================================================
@@ -294,11 +441,17 @@ export function getStoryboardCharacterAppearances(storyboardId: number): string[
 
   if (!spChars.length) return []
 
+  // 镜头级服装变体：每个角色可指定本镜头穿的造型
+  const costumeByCharId = new Map<number, string>()
+  for (const link of spChars) {
+    if (link.costume) costumeByCharId.set(link.characterId, link.costume)
+  }
+
   const characterIds = spChars.map(link => link.characterId)
   // 使用 inArray 替代内存过滤
   const characters = characterIds.length > 0
     ? db.select().from(schema.characters)
-        .where(inArray(schema.characters.id, characterIds))
+        .where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt)))
         .all()
     : []
 
@@ -307,6 +460,10 @@ export function getStoryboardCharacterAppearances(storyboardId: number): string[
       name: char.name,
       appearance: char.appearance,
       description: char.description,
+      coreFeatures: char.coreFeatures,
+      clothing: char.clothing,
+      costume: costumeByCharId.get(char.id),
+      costumes: char.costumes,
     })
   )
 }
@@ -340,8 +497,9 @@ export function getStoryboardSceneDescription(storyboardId: number): string | nu
 export function getCharacterImageUrls(characterIds: number[]): string[] {
   if (!characterIds.length) return []
   const characters = db.select().from(schema.characters)
+    .where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt)))
     .all()
-    .filter(char => characterIds.includes(char.id) && char.imageUrl)
+    .filter(char => char.imageUrl)
 
   return characters.map(char => char.imageUrl!)
 }
@@ -353,9 +511,81 @@ export function getStoryboardCharacterImageUrls(storyboardId: number): string[] 
   const spChars = db.select().from(schema.storyboardCharacters)
     .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
     .all()
-  
+  if (!spChars.length) return []
+
+  // 镜头级服装变体：若角色指定了变体且有对应立绘，用变体图；否则主图
+  const costumeByCharId = new Map<number, string>()
+  for (const link of spChars) {
+    if (link.costume) costumeByCharId.set(link.characterId, link.costume)
+  }
+
   const characterIds = spChars.map(link => link.characterId)
-  return getCharacterImageUrls(characterIds)
+  const characters = db.select().from(schema.characters)
+    .where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt)))
+    .all()
+
+  const urls: string[] = []
+  for (const char of characters) {
+    const costume = costumeByCharId.get(char.id)
+    if (costume) {
+      const variation = parseVariations(char.variations).find(v => v.name === costume)
+      if (variation?.imageUrl) {
+        urls.push(variation.imageUrl)
+        continue
+      }
+    }
+    if (char.imageUrl) urls.push(char.imageUrl)
+  }
+  return urls
+}
+
+/**
+ * 根据分镜ID获取参考图（角色立绘 + 场景图），用于分镜图片/视频生成保持人物与场景一致
+ */
+export function getStoryboardReferenceImages(storyboardId: number): string[] {
+  const urls = getStoryboardCharacterImageUrls(storyboardId)
+
+  const [sb] = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.id, storyboardId))
+    .all()
+  if (sb?.sceneId) {
+    const [scene] = db.select().from(schema.scenes)
+      .where(eq(schema.scenes.id, sb.sceneId))
+      .all()
+    if (scene?.imageUrl) urls.push(scene.imageUrl)
+  }
+
+  return urls
+}
+
+/**
+ * 将媒体相对路径转成可被本地/远程服务访问的绝对 URL（本地 H3 服务需能拉取参考音频）
+ */
+function toPublicMediaUrl(p: string): string {
+  if (/^(https?:|data:)/.test(p)) return p
+  const base = (process.env.PUBLIC_BASE_URL || 'http://localhost:5789').replace(/\/+$/, '')
+  return `${base}/${p.replace(/^\/+/, '')}`
+}
+
+/**
+ * 收集分镜出场角色的声线样本音频 URL（H3 Ref2VA 参考音频 / reference conditioning，最多 3 条）
+ */
+export function getStoryboardReferenceAudioUrls(storyboardId: number): string[] {
+  const links = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
+    .all()
+  if (!links.length) return []
+
+  const characterIds = links.map(l => l.characterId)
+  const characters = db.select().from(schema.characters)
+    .where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt)))
+    .all()
+
+  return characters
+    .map(c => c.voiceSampleUrl)
+    .filter((u): u is string => !!u && !!u.trim())
+    .map(toPublicMediaUrl)
+    .slice(0, 3)
 }
 
 // ============================================================
@@ -400,7 +630,7 @@ export function validateDialogueCharacterConsistency(
   const characterIds = spChars.map(link => link.characterId)
   const characters = characterIds.length > 0
     ? db.select().from(schema.characters)
-        .where(inArray(schema.characters.id, characterIds))
+        .where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt)))
         .all()
     : []
 
@@ -438,5 +668,355 @@ function parseDialogueForTTSLocal(dialogue: string): { ignorable: boolean; speak
     }
   }
   return { ignorable: false, speaker: '', pureText: text }
+}
+
+// ============================================================
+// 视频提示词标签剥离
+// ============================================================
+
+/**
+ * 剥离视频提示词中的结构化标记标签，只保留标签内的自然语言内容。
+ *
+ * 背景：分镜 agent 生成的 video_prompt 使用 <location>/<role>/<voice>/<n>
+ * 作为结构化 DSL，供程序解析（分段、角色绑定、场景提取）使用。
+ * 但视频扩散模型不识别这些 XML 标签，原样保留只会成为文本噪声，
+ * 占用注意力并可能干扰语义理解。因此在发送给视频生成模型前应剥离。
+ *
+ * 规则：
+ * - <location>…</location> / <role>…</role> / <voice>…</voice> → 去掉开闭标签，保留中间内容
+ * - <n>（时间段分隔符）→ 换成换行，让每个时间段独立成段
+ * - 清理多余空白
+ */
+export function stripVideoPromptTags(prompt: string): string {
+  if (!prompt) return prompt
+  return prompt
+    .replace(/<\/?(?:location|role|voice)>/gi, '')
+    .replace(/<n\s*\/?>/gi, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim()
+}
+
+// ============================================================
+// 宫格图 Prompt 构建（唯一入口）
+//
+// 宫格图 prompt 曾有三处重复实现（grid 路由内嵌模板、grid-prompt-tools、
+// storyboard-tools），现统一收敛到本模块。grid 路由与 grid_prompt_generator
+// agent 工具均调用 buildGridPrompt / buildGridCellPrompts，避免逻辑分叉。
+// ============================================================
+
+export type GridReferenceAsset = {
+  path: string
+  label: string
+  kind: 'scene' | 'character' | 'storyboard'
+  imageLabel: string
+  sceneId?: number
+  characterId?: number
+  storyboardId?: number
+}
+
+function safeParseJsonArray(value: any): string[] {
+  if (!value) return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function posLabel(i: number, rows: number, cols: number) {
+  const r = Math.floor(i / cols), c = i % cols
+  return `row ${r + 1} col ${c + 1}`
+}
+
+function cellLabel(i: number, rows: number, cols: number) {
+  return `格${i + 1}（${posLabel(i, rows, cols)}）`
+}
+
+/** 获取每个分镜关联的角色 ID 列表（用于注入角色外观与参考图） */
+function getStoryboardCharacterIds(storyboardIds: number[]) {
+  if (!storyboardIds.length) return new Map<number, number[]>()
+  const links = db.select().from(schema.storyboardCharacters).all()
+    .filter((link) => storyboardIds.includes(link.storyboardId))
+  const map = new Map<number, number[]>()
+  for (const link of links) {
+    const arr = map.get(link.storyboardId) || []
+    arr.push(link.characterId)
+    map.set(link.storyboardId, arr)
+  }
+  return map
+}
+
+/** 构建角色 ID → 外观描述文本的映射，用于将角色视觉特征注入分镜描述 */
+function buildCharacterAppearanceMap(storyboardCharacterIds: Map<number, number[]>) {
+  const allCharIds = new Set<number>()
+  for (const ids of storyboardCharacterIds.values()) ids.forEach(id => allCharIds.add(id))
+  if (!allCharIds.size) return new Map<number, string>()
+
+  const chars = db.select().from(schema.characters)
+    .where(and(inArray(schema.characters.id, [...allCharIds]), isNull(schema.characters.deletedAt)))
+    .all()
+
+  const map = new Map<number, string>()
+  for (const char of chars) {
+    map.set(char.id, buildCharacterAppearanceText(char))
+  }
+  return map
+}
+
+/** 构建分镜关联的参考图提示（角色立绘 + 场景图 + 已有分镜图） */
+function buildStoryboardReferenceHints(
+  sb: any,
+  referenceAssets: GridReferenceAsset[],
+  storyboardCharacterIds: Map<number, number[]>,
+) {
+  const hints: string[] = []
+  const charIds = storyboardCharacterIds.get(sb.id) || []
+
+  for (const asset of referenceAssets) {
+    if (asset.kind === 'scene' && sb.sceneId && asset.sceneId === sb.sceneId) {
+      hints.push(`${asset.imageLabel}（${asset.label}）`)
+    }
+    if (asset.kind === 'character') {
+      if (asset.characterId && charIds.includes(asset.characterId)) {
+        hints.push(`${asset.imageLabel}（${asset.label}）`)
+      }
+    }
+    if (asset.kind === 'storyboard' && asset.storyboardId === sb.id) {
+      hints.push(`${asset.imageLabel}（${asset.label}）`)
+    }
+  }
+
+  return [...new Set(hints)].slice(0, 4)
+}
+
+/** 构建增强的分镜 cell 描述：注入角色外观 + 参考图 + 分镜自身描述 */
+function buildEnrichedCellDescription(
+  sb: any,
+  index: number,
+  storyboardCharacterIds: Map<number, number[]>,
+  charAppearanceMap: Map<number, string>,
+  referenceAssets: GridReferenceAsset[],
+): string {
+  const parts: string[] = []
+
+  const charIds = storyboardCharacterIds.get(sb.id) || []
+  const appearances: string[] = []
+  for (const cid of charIds) {
+    const appearance = charAppearanceMap.get(cid)
+    if (appearance) appearances.push(appearance)
+  }
+  if (appearances.length) {
+    parts.push(`Characters: ${appearances.join('; ')}`)
+  }
+
+  const refs = buildStoryboardReferenceHints(sb, referenceAssets, storyboardCharacterIds)
+  if (refs.length) {
+    parts.push(`参考${refs.join('、')}`)
+  }
+
+  const desc = sb.imagePrompt || sb.description || sb.title || `shot ${index + 1}`
+  parts.push(desc)
+
+  return parts.join('. ')
+}
+
+/** 收集宫格图涉及的参考图（首尾帧/镜头图/参考图 + 场景图 + 角色立绘，上限 6 张） */
+export function collectGridReferenceAssets(storyboards: any[]): GridReferenceAsset[] {
+  const storyboardIds = storyboards.map((sb) => sb.id)
+  const storyboardCharacterIds = getStoryboardCharacterIds(storyboardIds)
+  const sceneIds = [...new Set(storyboards.map((sb) => sb.sceneId).filter(Boolean))]
+  const characterIds = [...new Set([...storyboardCharacterIds.values()].flat().filter(Boolean))]
+
+  const scenes = sceneIds.length > 0
+    ? db.select().from(schema.scenes).where(inArray(schema.scenes.id, sceneIds)).all()
+    : []
+  const characters = characterIds.length > 0
+    ? db.select().from(schema.characters).where(and(inArray(schema.characters.id, characterIds), isNull(schema.characters.deletedAt))).all()
+    : []
+
+  const assets: GridReferenceAsset[] = []
+  const seen = new Set<string>()
+  const pushAsset = (
+    path: string | null | undefined,
+    label: string,
+    kind: 'scene' | 'character' | 'storyboard',
+    extra: { sceneId?: number; characterId?: number; storyboardId?: number } = {},
+  ) => {
+    if (!path || seen.has(path) || assets.length >= 6) return
+    seen.add(path)
+    assets.push({ path, label, kind, ...extra } as GridReferenceAsset)
+  }
+
+  for (const sb of storyboards) {
+    pushAsset(sb.firstFrameImage, `镜头${sb.storyboardNumber}首帧`, 'storyboard', { storyboardId: sb.id })
+    pushAsset(sb.lastFrameImage, `镜头${sb.storyboardNumber}尾帧`, 'storyboard', { storyboardId: sb.id })
+    pushAsset(sb.composedImage, `镜头${sb.storyboardNumber}镜头图`, 'storyboard', { storyboardId: sb.id })
+    for (const ref of safeParseJsonArray(sb.referenceImages)) {
+      pushAsset(ref, `镜头${sb.storyboardNumber}参考图`, 'storyboard', { storyboardId: sb.id })
+    }
+  }
+  for (const scene of scenes) {
+    pushAsset(scene.imageUrl, `${scene.location}${scene.time ? `（${scene.time}）` : ''}场景`, 'scene', { sceneId: scene.id })
+  }
+  for (const char of characters) {
+    pushAsset(char.imageUrl, `${char.name}角色`, 'character', { characterId: char.id })
+  }
+
+  return assets.map((asset, index) => ({
+    ...asset,
+    imageIndex: index + 1,
+    imageLabel: `图片${index + 1}`,
+  }))
+}
+
+export function buildReferenceLegend(referenceAssets: Array<{ imageLabel: string; label: string }>) {
+  if (!referenceAssets.length) return ''
+  return referenceAssets.map((asset) => `${asset.imageLabel}=${asset.label}`).join('；')
+}
+
+const GRID_ANGLES = [
+  'wide establishing shot', 'medium shot character focus',
+  'close-up detail', 'dramatic low angle', 'over-the-shoulder view',
+  'bird eye view', 'side profile', 'atmospheric detail',
+  'extreme close-up', 'dutch angle', 'silhouette shot',
+  'depth of field focus', 'symmetrical composition', 'leading lines',
+  'negative space', 'high angle looking down', 'ground level',
+  'panoramic wide', 'intimate two-shot', 'reflection shot',
+  'shadow play', 'backlit silhouette', 'macro detail',
+  'split lighting', 'rim light portrait',
+]
+
+/**
+ * 构建宫格图整体 prompt（三种模式：first_frame / first_last / multi_ref）
+ * 统一注入：风格、参考图映射、角色外观、运镜构图。
+ */
+export function buildGridPrompt(
+  mode: string,
+  storyboards: any[],
+  rows: number,
+  cols: number,
+  dramaStyle: string,
+  referenceAssets: GridReferenceAsset[],
+): string {
+  const style = dramaStyle || 'cinematic'
+  const legend = buildReferenceLegend(referenceAssets)
+  const storyboardCharacterIds = getStoryboardCharacterIds(storyboards.map((sb) => sb.id))
+  const charAppearanceMap = buildCharacterAppearanceMap(storyboardCharacterIds)
+
+  if (mode === 'first_frame') {
+    const cells = storyboards.map((sb, i) => {
+      const desc = buildEnrichedCellDescription(sb, i, storyboardCharacterIds, charAppearanceMap, referenceAssets)
+      return `${cellLabel(i, rows, cols)}: ${desc}`
+    })
+    return [
+      `${rows}x${cols} grid layout, consistent art style, ${style},`,
+      legend ? `参考图映射：${legend}` : '',
+      '当画面涉及角色或场景时，优先使用对应的图片编号来约束一致性。',
+      ...cells,
+      'high quality, cinematic lighting, no text, no watermark',
+    ].filter(Boolean).join('\n')
+  }
+
+  if (mode === 'first_last') {
+    const totalCells = rows * cols
+    const cells = Array.from({ length: totalCells }, (_, i) => {
+      const sb = storyboards[i % storyboards.length]
+      const desc = sb.imagePrompt || sb.description || sb.title || `shot ${i + 1}`
+      const action = sb.action || sb.movement || ''
+      const refs = buildStoryboardReferenceHints(sb, referenceAssets, storyboardCharacterIds)
+      const isFirst = i % 2 === 0
+      const composition = getCameraMovementComposition(sb.movement || '', isFirst ? 'start' : 'end')
+      const comp = composition ? `, ${composition}` : ''
+      const frameHint = isFirst
+        ? 'opening moment'
+        : `${action ? `${action}, ` : ''}closing moment, subtle motion change`
+      return `${cellLabel(i, rows, cols)}: ${refs.length ? `参考${refs.join('、')}，` : ''}${desc}, ${frameHint}${comp}`
+    })
+    return [
+      `${rows}x${cols} grid layout, consistent art style, ${style},`,
+      legend ? `参考图映射：${legend}` : '',
+      'first/last frame visual rhythm, alternating opening and closing beats across the grid,',
+      ...cells,
+      'continuous motion implied between left and right, high quality, no text',
+    ].filter(Boolean).join('\n')
+  }
+
+  if (mode === 'multi_ref') {
+    const sb = storyboards[0]
+    const desc = sb.imagePrompt || sb.description || sb.title || 'scene'
+    const totalCells = rows * cols
+    const cells = Array.from({ length: totalCells }, (_, i) => {
+      return `${cellLabel(i, rows, cols)}: ${legend ? `参考${legend}，` : ''}${desc}, ${GRID_ANGLES[i % GRID_ANGLES.length]}`
+    })
+    return [
+      `${rows}x${cols} grid layout, same scene different angles and compositions, ${style},`,
+      legend ? `参考图映射：${legend}` : '',
+      `main scene: ${desc},`,
+      ...cells,
+      'consistent lighting and color palette, high quality, no text',
+    ].filter(Boolean).join('\n')
+  }
+
+  return `${rows}x${cols} grid, ${style}, storyboard frames, high quality`
+}
+
+/**
+ * 构建宫格图逐格 prompt（与 buildGridPrompt 同源，供 split 回写/逐格生成使用）
+ */
+export function buildGridCellPrompts(
+  mode: string,
+  storyboards: any[],
+  rows: number,
+  cols: number,
+  referenceAssets: GridReferenceAsset[],
+) {
+  if (!storyboards.length) return []
+  const storyboardCharacterIds = getStoryboardCharacterIds(storyboards.map((sb) => sb.id))
+
+  if (mode === 'multi_ref') {
+    const sb = storyboards[0]
+    const desc = sb.imagePrompt || sb.description || sb.title || 'scene'
+    return Array.from({ length: rows * cols }, (_, i) => {
+      const refs = buildStoryboardReferenceHints(sb, referenceAssets, storyboardCharacterIds)
+      return {
+        shot_number: sb.storyboardNumber,
+        frame_type: 'reference',
+        prompt: `${cellLabel(i, rows, cols)}: ${refs.length ? `参考${refs.join('、')}，` : ''}${desc}, ${GRID_ANGLES[i % GRID_ANGLES.length]}`,
+      }
+    })
+  }
+
+  if (mode === 'first_last') {
+    return Array.from({ length: rows * cols }, (_, i) => {
+      const sb = storyboards[i % storyboards.length]
+      const desc = sb.imagePrompt || sb.description || sb.title || `shot ${sb.storyboardNumber || ''}`
+      const motion = sb.action || sb.movement || ''
+      const refs = buildStoryboardReferenceHints(sb, referenceAssets, storyboardCharacterIds)
+      const isFirst = i % 2 === 0
+      const composition = getCameraMovementComposition(sb.movement || '', isFirst ? 'start' : 'end')
+      const comp = composition ? `, ${composition}` : ''
+      return {
+        shot_number: sb.storyboardNumber,
+        frame_type: isFirst ? 'first_frame' : 'last_frame',
+        prompt: isFirst
+          ? `${cellLabel(i, rows, cols)}，首帧：${refs.length ? `参考${refs.join('、')}，` : ''}${desc}${sb.location ? `, ${sb.location}` : ''}${sb.shotType ? `, ${sb.shotType}` : ''}${comp}`
+          : `${cellLabel(i, rows, cols)}，尾帧：${refs.length ? `参考${refs.join('、')}，` : ''}${desc}${motion ? `, ${motion}` : ''}${sb.location ? `, ${sb.location}` : ''}${sb.shotType ? `, ${sb.shotType}` : ''}${comp}`,
+      }
+    })
+  }
+
+  return storyboards.slice(0, rows * cols).map((sb, index) => {
+    const desc = sb.imagePrompt || sb.description || sb.title || `shot ${sb.storyboardNumber || ''}`
+    const refs = buildStoryboardReferenceHints(sb, referenceAssets, storyboardCharacterIds)
+    const composition = getCameraMovementComposition(sb.movement || '', 'start')
+    const comp = composition ? `, ${composition}` : ''
+    return {
+      shot_number: sb.storyboardNumber,
+      frame_type: 'first_frame',
+      prompt: `${cellLabel(index, rows, cols)}：${refs.length ? `参考${refs.join('、')}，` : ''}${desc}${sb.location ? `, ${sb.location}` : ''}${sb.shotType ? `, ${sb.shotType}` : ''}, opening scene${comp}`,
+    }
+  })
 }
 

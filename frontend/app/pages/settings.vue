@@ -66,6 +66,159 @@
           </div>
         </section>
         <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">Local Models</div>
+              <div class="setup-title">本地模型</div>
+              <div class="setup-desc">无需 API Key，一键初始化 Ollama / SD / 本地视频 / 语音四类本地服务。</div>
+            </div>
+            <button class="btn btn-ghost" :disabled="localLoading" @click="initLocalModels">
+              <Loader2 v-if="localLoading" :size="14" class="animate-spin" />
+              <Server v-else :size="14" />
+              初始化本地模型
+            </button>
+          </div>
+          <div v-if="localConfigs.length" class="local-grid">
+            <article v-for="lc in localConfigs" :key="lc.id" class="preset-card">
+              <div class="preset-card-top">
+                <span class="preset-service">{{ serviceMeta[lc.service_type]?.label || lc.service_type }}</span>
+                <span class="tag tag-accent">本地</span>
+              </div>
+              <div class="preset-model mono">{{ fmtModel(lc.model) }}</div>
+              <div class="preset-base mono">{{ lc.base_url || '未设置 Base URL' }}</div>
+            </article>
+          </div>
+          <p v-else class="config-empty">尚未初始化本地模型，点击右上角按钮一键创建。</p>
+
+          <!-- Ollama 本地模型管理 -->
+          <div class="ollama-panel">
+            <div class="ollama-head">
+              <div class="ollama-title">
+                <Bot :size="14" />
+                <span>Ollama 模型管理</span>
+                <span class="ollama-state" :class="{ on: ollamaStatus?.running }">{{ ollamaStatus?.running ? '运行中' : '未运行' }}</span>
+              </div>
+              <div class="ollama-head-actions">
+                <button class="btn btn-ghost btn-icon" :disabled="ollamaBusy" title="刷新检测" @click="refreshOllama">
+                  <Loader2 v-if="ollamaBusy" :size="13" class="animate-spin" />
+                  <RefreshCw v-else :size="13" />
+                </button>
+                <button v-if="!ollamaStatus?.running" class="btn btn-ghost btn-sm" :disabled="ollamaBusy" @click="startOllama">
+                  <Play :size="13" /> 启动 Ollama
+                </button>
+              </div>
+            </div>
+            <p v-if="ollamaStatus?.message" class="ollama-msg">{{ ollamaStatus.message }}</p>
+            <div v-if="ollamaModels.length" class="ollama-models">
+              <div v-for="m in ollamaModels" :key="m.name" class="ollama-model">
+                <span class="ollama-model-name mono">{{ m.name }}</span>
+                <span class="ollama-model-size">{{ m.size_label }}</span>
+                <button class="btn btn-ghost btn-xs" :disabled="ollamaBusy" title="创建/切换本地文本配置使用该模型" @click="useOllamaModel(m.name)">
+                  <Plus :size="12" /> 使用
+                </button>
+              </div>
+            </div>
+            <div v-else class="ollama-empty">{{ ollamaStatus?.running ? '本机暂无已安装模型，可在下方输入模型名下载' : 'Ollama 未运行，先点击「启动 Ollama」' }}</div>
+            <div class="ollama-pull">
+              <input v-model="ollamaPullName" class="input" placeholder="输入模型名，如 qwen3:8b / qwen2.5:7b" @keyup.enter="pullOllamaModel" />
+              <button class="btn btn-primary btn-sm" :disabled="ollamaPulling || !ollamaPullName.trim()" @click="pullOllamaModel">
+                <Loader2 v-if="ollamaPulling" :size="13" class="animate-spin" />
+                <Download v-else :size="13" />
+                {{ ollamaPulling ? '下载中…' : '下载模型' }}
+              </button>
+            </div>
+            <div v-if="ollamaPulling" class="ollama-progress">
+              <div class="gpu-bar"><div class="gpu-bar-fill" :style="{ width: pullProgress + '%' }" /></div>
+              <div class="ollama-progress-label">{{ pullStatusText }}</div>
+            </div>
+          </div>
+        </section>
+        <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">GPU Monitor</div>
+              <div class="setup-title">GPU 显存监控</div>
+              <div class="setup-desc">查看本地模型显存占用、租约状态与队列，支持一键释放全部显存。</div>
+            </div>
+            <div class="gpu-head-actions">
+              <button class="btn btn-ghost btn-icon" :disabled="gpuLoading" title="刷新" @click="loadGpuStatus">
+                <Loader2 v-if="gpuLoading" :size="13" class="animate-spin" />
+                <RefreshCw v-else :size="13" />
+              </button>
+              <button class="btn btn-ghost btn-sm" :disabled="gpuLoading || !gpu?.loadedModels?.length" @click="releaseAllGpu">
+                <Monitor :size="13" /> 释放显存
+              </button>
+            </div>
+          </div>
+          <div v-if="gpu" class="gpu-grid">
+            <div class="gpu-card">
+              <div class="gpu-label">显存占用</div>
+              <div class="gpu-value">{{ gpu.hardware ? gpu.usedVRAM_GB.toFixed(1) + ' / ' + gpu.totalVRAM_GB + ' GB' : '0 GB' }}</div>
+              <div class="gpu-bar"><div class="gpu-bar-fill" :style="{ width: vramPercent + '%' }" /></div>
+            </div>
+            <div class="gpu-card">
+              <div class="gpu-label">租约状态</div>
+              <div class="gpu-value">{{ gpu.isLocked ? '锁定中' : '空闲' }}</div>
+              <div class="gpu-sub">{{ gpu.holder || '无持有任务' }} · 队列 {{ gpu.queueLength }}</div>
+            </div>
+            <div class="gpu-card">
+              <div class="gpu-label">已加载模型</div>
+              <div class="gpu-value">{{ gpu.loadedModels?.length || 0 }} 个</div>
+              <div class="gpu-sub truncate">{{ gpu.loadedModels?.join(', ') || '—' }}</div>
+            </div>
+            <div v-if="gpu.hardware" class="gpu-card">
+              <div class="gpu-label">{{ gpu.hardware.gpuName }}</div>
+              <div class="gpu-value">{{ gpu.hardware.utilizationPercent }}% · {{ gpu.hardware.temperatureC }}°C</div>
+              <div class="gpu-sub">{{ fmtMB(gpu.hardware.usedMemoryMB) }} / {{ fmtMB(gpu.hardware.totalMemoryMB) }} 已用</div>
+            </div>
+          </div>
+          <div v-if="gpu && !gpu.hardware" class="gpu-notice">
+            未检测到 NVIDIA 独显（nvidia-smi 不可用）。当前仅显示软件估算的显存/租约状态，真实 GPU 名称、利用率、温度需在装有 NVIDIA 显卡的机器上查看。
+          </div>
+          <p v-else-if="!gpuLoading" class="config-empty">暂无 GPU 数据，点击刷新获取。无 NVIDIA GPU 时仅显示租约状态。</p>
+        </section>
+        <section class="setup-panel card">
+          <div class="setup-panel-head compact">
+            <div>
+              <div class="setup-title">Token 用量统计</div>
+              <div class="setup-desc">累计所有 Agent 调用的 token 消耗（输入 / 输出 / 总计）。</div>
+            </div>
+          </div>
+          <div v-if="tokenStats" class="token-stats">
+            <div class="token-stat-card">
+              <div class="token-stat-num">{{ fmtTokens(tokenStats.totalTokens) }}</div>
+              <div class="token-stat-label">总 Token</div>
+            </div>
+            <div class="token-stat-card">
+              <div class="token-stat-num">{{ fmtTokens(tokenStats.totalInputTokens) }}</div>
+              <div class="token-stat-label">输入 Token</div>
+            </div>
+            <div class="token-stat-card">
+              <div class="token-stat-num">{{ fmtTokens(tokenStats.totalOutputTokens) }}</div>
+              <div class="token-stat-label">输出 Token</div>
+            </div>
+            <div class="token-stat-card">
+              <div class="token-stat-num">{{ tokenStats.runs }}</div>
+              <div class="token-stat-label">Agent 调用次数</div>
+            </div>
+          </div>
+          <table v-if="tokenStats && tokenStats.byScope?.length" class="token-table">
+            <thead>
+              <tr><th>Agent</th><th>调用</th><th>输入</th><th>输出</th><th>总计</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in tokenStats.byScope" :key="row.scope">
+                <td>{{ row.scope }}</td>
+                <td>{{ row.runs }}</td>
+                <td>{{ fmtTokens(row.inputTokens) }}</td>
+                <td>{{ fmtTokens(row.outputTokens) }}</td>
+                <td>{{ fmtTokens(row.totalTokens) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="config-empty">暂无 token 用量记录，运行任意 Agent 任务后自动统计。</p>
+        </section>
+        <section class="setup-panel card">
           <div class="setup-panel-head compact">
             <div>
               <div class="setup-title">快捷模板</div>
@@ -94,23 +247,47 @@
               <button class="btn btn-ghost btn-sm ml-auto" @click="startAddCfg(st.type)"><Plus :size="13" /> 添加</button>
             </div>
             <div class="config-list">
-              <div v-for="c in byType(st.type)" :key="c.id" class="card config-row">
-                <div class="config-info">
-                  <div class="config-main">
-                    <div class="config-line">
-                      <span class="config-provider">{{ c.provider }}</span>
-                      <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
+              <template v-if="onlineByType(st.type).length">
+                <div class="config-group-label">在线 API</div>
+                <div v-for="c in onlineByType(st.type)" :key="c.id" class="card config-row">
+                  <div class="config-info">
+                    <div class="config-main">
+                      <div class="config-line">
+                        <span class="config-provider">{{ c.provider }}</span>
+                        <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
+                        <span class="tag tag-accent">在线</span>
+                      </div>
+                      <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
+                      <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
                     </div>
-                    <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
-                    <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
                   </div>
+                  <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
+                  <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
+                  <label class="toggle"><input type="checkbox" :checked="c.is_active" @change="toggleCfg(c)"><span /></label>
+                  <button class="btn btn-ghost btn-icon" @click="startEditCfg(c)"><Pencil :size="13" /></button>
+                  <button class="btn btn-ghost btn-icon" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
                 </div>
-                <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
-                <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
-                <label class="toggle"><input type="checkbox" :checked="c.is_active" @change="toggleCfg(c)"><span /></label>
-                <button class="btn btn-ghost btn-icon" @click="startEditCfg(c)"><Pencil :size="13" /></button>
-                <button class="btn btn-ghost btn-icon" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
-              </div>
+              </template>
+              <template v-if="localByType(st.type).length">
+                <div class="config-group-label">本地模型</div>
+                <div v-for="c in localByType(st.type)" :key="c.id" class="card config-row">
+                  <div class="config-info">
+                    <div class="config-main">
+                      <div class="config-line">
+                        <span class="config-provider">{{ c.provider }}</span>
+                        <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
+                        <span class="tag tag-local">本地</span>
+                      </div>
+                      <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
+                      <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
+                    </div>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
+                  <label class="toggle"><input type="checkbox" :checked="c.is_active" @change="toggleCfg(c)"><span /></label>
+                  <button class="btn btn-ghost btn-icon" @click="startEditCfg(c)"><Pencil :size="13" /></button>
+                  <button class="btn btn-ghost btn-icon" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
+                </div>
+              </template>
               <p v-if="!byType(st.type).length" class="config-empty">暂无配置</p>
             </div>
           </section>
@@ -181,9 +358,14 @@
                   <div
                     v-for="(binding, idx) in agentSkillBindings"
                     :key="binding.id"
-                    :class="['skill-bind-item', { disabled: !binding.enabled }]"
+                    :class="['skill-bind-item', { disabled: !binding.enabled, 'drag-over': skillDragOverIdx === idx }]"
+                    :draggable="true"
+                    @dragstart="onSkillDragStart(idx, $event)"
+                    @dragover.prevent="onSkillDragOver(idx)"
+                    @drop.prevent="onSkillDrop(idx)"
+                    @dragend="onSkillDragEnd"
                   >
-                    <span class="skill-bind-drag">&#x2261;</span>
+                    <span class="skill-bind-drag" title="拖拽调整优先级">&#x2261;</span>
                     <label class="skill-bind-toggle">
                       <input type="checkbox" v-model="binding.enabled" />
                       <span></span>
@@ -196,7 +378,7 @@
                   </div>
                 </div>
                 <p class="dim" style="font-size:10px;margin-top:6px">
-                  拖拽排序即将支持。当前按列表顺序决定优先级，仅 enabled=true 的 Skill 会在运行时加载。
+                  拖拽可调整优先级，保存后按列表顺序决定 Skill 加载顺序，仅 enabled=true 的 Skill 会在运行时加载。
                 </p>
               </div>
 
@@ -304,6 +486,195 @@
           </div>
         </div>
       </div>
+
+      <!-- ===== 生成历史 ===== -->
+      <div v-else-if="tab === 'history'" class="settings-scroll">
+        <div class="settings-head">
+          <div class="settings-brand">
+            <div class="settings-brand-mark">
+              <img v-if="showBrandImage" :src="brandLogo" alt="短剧工坊" class="settings-brand-logo" @error="showBrandImage = false" />
+              <span v-else class="settings-brand-fallback">剧</span>
+            </div>
+            <div class="settings-brand-copy">
+              <div class="settings-brand-kicker">Drama Studio</div>
+              <div class="settings-brand-name">短剧工坊</div>
+            </div>
+          </div>
+          <h2 class="settings-title">生成历史</h2>
+          <p class="settings-desc">汇总全部图片与视频生成记录，含模型、状态、耗时与提示词。失败项可展开查看具体原因。</p>
+        </div>
+
+        <div class="history-toolbar">
+          <div class="history-filters">
+            <button v-for="f in historyFilters" :key="f.value" :class="['chip', { active: historyFilter === f.value }]" @click="historyFilter = f.value">
+              {{ f.label }}
+            </button>
+          </div>
+          <button class="btn btn-ghost btn-icon" :disabled="historyLoading" title="刷新" @click="loadGenerations">
+            <Loader2 v-if="historyLoading" :size="13" class="animate-spin" />
+            <RefreshCw v-else :size="13" />
+          </button>
+        </div>
+
+        <div class="history-stats">
+          <div class="history-stat">
+            <div class="history-stat-num">{{ historyStats.total }}</div>
+            <div class="history-stat-label">总记录</div>
+          </div>
+          <div class="history-stat ok">
+            <div class="history-stat-num">{{ historyStats.success }}</div>
+            <div class="history-stat-label">成功</div>
+          </div>
+          <div class="history-stat warn">
+            <div class="history-stat-num">{{ historyStats.processing }}</div>
+            <div class="history-stat-label">处理中</div>
+          </div>
+          <div class="history-stat err">
+            <div class="history-stat-num">{{ historyStats.failed }}</div>
+            <div class="history-stat-label">失败</div>
+          </div>
+        </div>
+
+        <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">Generation Logs</div>
+              <div class="setup-title">生成记录</div>
+            </div>
+          </div>
+          <div v-if="historyLoading" class="config-empty">正在加载生成记录…</div>
+          <div v-else-if="!filteredGenerations.length" class="config-empty">暂无生成记录，运行图片 / 视频生成后自动记录。</div>
+          <ul v-else class="history-list">
+            <li v-for="g in filteredGenerations" :key="`${g.type}-${g.id}`" class="history-item">
+              <button class="history-item-head" @click="toggleHistory(g)">
+                <span :class="['history-type', g.type]">
+                  <ImageIcon v-if="g.type === 'image'" :size="14" />
+                  <Film v-else :size="14" />
+                </span>
+                <span class="history-item-main">
+                  <span class="history-item-title">{{ g.type === 'image' ? '图片生成' : '视频生成' }}</span>
+                  <span class="history-item-meta">
+                    <span class="mono">{{ g.model || '—' }}</span>
+                    <span class="dot">·</span>
+                    <span>{{ g.provider || '—' }}</span>
+                  </span>
+                </span>
+                <span :class="['status-badge', statusClass(g.status)]">{{ statusLabel(g.status) }}</span>
+                <span class="history-item-time">
+                  <Clock :size="12" />
+                  {{ fmtTime(g.createdAt) }}
+                </span>
+                <ChevronDown :size="14" :class="['history-chevron', { open: historyExpandedId === `${g.type}-${g.id}` }]" />
+              </button>
+              <div v-if="historyExpandedId === `${g.type}-${g.id}`" class="history-item-body">
+                <div class="history-detail-row"><span class="history-detail-label">模型</span><span class="mono">{{ g.model || '—' }}</span></div>
+                <div class="history-detail-row"><span class="history-detail-label">服务商</span><span>{{ g.provider || '—' }}</span></div>
+                <div class="history-detail-row"><span class="history-detail-label">状态</span><span :class="['status-badge', statusClass(g.status)]">{{ statusLabel(g.status) }}</span></div>
+                <div class="history-detail-row"><span class="history-detail-label">耗时</span><span>{{ fmtElapsed(g.elapsedMs) }}</span></div>
+                <div v-if="g.duration != null" class="history-detail-row"><span class="history-detail-label">时长</span><span>{{ g.duration }}s</span></div>
+                <div v-if="g.taskId" class="history-detail-row"><span class="history-detail-label">任务 ID</span><span class="mono">{{ g.taskId }}</span></div>
+                <div v-if="g.prompt" class="history-detail-block">
+                  <span class="history-detail-label">提示词</span>
+                  <p class="history-prompt">{{ g.prompt }}</p>
+                </div>
+                <div v-if="g.errorMsg" class="history-detail-block error">
+                  <span class="history-detail-label">失败原因</span>
+                  <p class="history-prompt">{{ g.errorMsg }}</p>
+                </div>
+                <div v-if="g.url" class="history-detail-block">
+                  <span class="history-detail-label">产物</span>
+                  <a :href="g.url" target="_blank" rel="noopener" class="history-link">打开产物</a>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </section>
+      </div>
+
+      <!-- ===== 数据存储 ===== -->
+      <div v-else-if="tab === 'storage'" class="settings-scroll">
+        <div class="settings-head">
+          <div class="settings-brand">
+            <div class="settings-brand-mark">
+              <img v-if="showBrandImage" :src="brandLogo" alt="短剧工坊" class="settings-brand-logo" @error="showBrandImage = false" />
+              <span v-else class="settings-brand-fallback">剧</span>
+            </div>
+            <div class="settings-brand-copy">
+              <div class="settings-brand-kicker">Drama Studio</div>
+              <div class="settings-brand-name">短剧工坊</div>
+            </div>
+          </div>
+          <h2 class="settings-title">数据存储</h2>
+          <p class="settings-desc">统一管理数据库与图片、视频、音频等生成文件。切换目录时自动迁移旧数据（旧目录保留作安全备份）。</p>
+        </div>
+
+        <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">Current Storage</div>
+              <div class="setup-title">当前存储位置</div>
+            </div>
+            <button class="btn btn-ghost btn-icon" :disabled="storageLoading" title="刷新" @click="loadStorageInfo">
+              <Loader2 v-if="storageLoading" :size="13" class="animate-spin" />
+              <RefreshCw v-else :size="13" />
+            </button>
+          </div>
+          <div v-if="storageInfo" class="storage-grid">
+            <div class="storage-row">
+              <span class="storage-icon"><Database :size="16" /></span>
+              <div class="storage-meta">
+                <div class="storage-label">数据根目录</div>
+                <div class="mono storage-path">{{ storageInfo.dataRoot }}</div>
+              </div>
+            </div>
+            <div class="storage-row">
+              <span class="storage-icon"><FileText :size="16" /></span>
+              <div class="storage-meta">
+                <div class="storage-label">数据库文件</div>
+                <div class="mono storage-path">{{ storageInfo.dbPath }}</div>
+                <div class="dim storage-sub">{{ storageInfo.dbExists ? `已创建 · ${fmtBytes(storageInfo.dbSizeBytes)}` : '尚未创建（首次写入时自动创建）' }}</div>
+              </div>
+            </div>
+            <div class="storage-row">
+              <span class="storage-icon"><FolderOpen :size="16" /></span>
+              <div class="storage-meta">
+                <div class="storage-label">生成文件目录（图片 / 视频 / 音频）</div>
+                <div class="mono storage-path">{{ storageInfo.storagePath }}</div>
+                <div class="dim storage-sub">{{ storageInfo.storageExists ? `已占用 ${fmtBytes(storageInfo.storageSizeBytes)}` : '尚未创建（首次生成时自动创建）' }}</div>
+              </div>
+            </div>
+          </div>
+          <p v-else class="config-empty">正在加载存储信息…</p>
+        </section>
+
+        <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">Change Directory</div>
+              <div class="setup-title">切换到其他目录</div>
+              <div class="setup-desc">填写电脑上的目标目录绝对路径，例如 <span class="mono">D:\drama-data</span>。</div>
+            </div>
+          </div>
+          <div class="storage-form">
+            <label class="field">
+              <span class="field-label">目标目录路径</span>
+              <input v-model="newDataRoot" class="input" placeholder="如 D:\drama-data 或 /home/user/drama-data" />
+            </label>
+            <label class="storage-check">
+              <input type="checkbox" v-model="migrateData" />
+              自动迁移旧数据（复制数据库与生成文件，旧目录保留）
+            </label>
+            <div class="storage-actions">
+              <button class="btn btn-primary" :disabled="storageChanging || !newDataRoot.trim()" @click="changeDataRoot">
+                <Loader2 v-if="storageChanging" :size="14" class="animate-spin" />
+                <HardDrive v-else :size="14" />
+                切换并迁移
+              </button>
+            </div>
+            <p class="dim storage-note">切换后当前运行中的实例会立即指向新目录，重启后依然生效。迁移采用复制方式，旧目录不会删除，可随时切回。</p>
+          </div>
+        </section>
+      </div>
     </div>
 
     <!-- AI Config Dialog -->
@@ -347,6 +718,11 @@
           <span class="mono">{{ endpointHint }}</span>
         </div>
         <label class="field"><span class="field-label">模型（逗号分隔）</span><input v-model="cfgForm.modelStr" class="input" placeholder="model-name" /></label>
+        <label v-if="cfgForm.service_type === 'image'" class="field">
+          <span class="field-label">负面提示词（可选）</span>
+          <textarea v-model="cfgForm.negative_prompt" class="input" rows="2" placeholder="如 low quality, blurry, distorted face, watermark, text" />
+          <span class="field-hint">图片生成时统一排除的内容；留空则用各服务商默认值。</span>
+        </label>
         <div v-if="cfgTestResult" class="test-result" :class="{ ok: cfgTestResult.reachable, bad: !cfgTestResult.reachable }">
           <div class="test-result-head">
             <span class="tag" :class="cfgTestResult.reachable ? 'tag-success' : 'tag-error'">{{ cfgTestResult.status || 'ERROR' }}</span>
@@ -355,10 +731,39 @@
           <div class="mono test-result-url">{{ cfgTestResult.method }} {{ cfgTestResult.url }}</div>
           <div v-if="cfgTestResult.response_preview" class="mono test-result-preview">{{ cfgTestResult.response_preview }}</div>
         </div>
+        <div v-if="cfgModelsResult" class="models-result">
+          <div class="models-result-head">
+            <span class="tag" :class="cfgModelsResult.listable ? 'tag-accent' : 'tag'">{{ cfgModelsResult.listable ? `${cfgModelsResult.models_count} 个模型` : '不支持列举' }}</span>
+            <span>{{ cfgModelsResult.message }}</span>
+          </div>
+          <div v-if="cfgModelsResult.model_checks && cfgModelsResult.model_checks.length" class="models-exists-list">
+            <div v-for="c in cfgModelsResult.model_checks" :key="c.model" class="models-exists" :class="{ ok: c.exists, bad: !c.exists }">
+              {{ c.exists ? '✓' : '✗' }} {{ c.model }}
+            </div>
+          </div>
+          <div v-else-if="cfgModelsResult.model" class="models-exists" :class="{ ok: cfgModelsResult.model_exists, bad: !cfgModelsResult.model_exists }">
+            {{ cfgModelsResult.model_exists ? '✓' : '✗' }} {{ cfgModelsResult.model }}
+          </div>
+          <div v-if="cfgModelsResult.models.length" class="models-list">
+            <button
+              v-for="m in cfgModelsResult.models"
+              :key="m"
+              type="button"
+              class="model-chip mono"
+              :class="{ active: isCurrentModel(m) }"
+              :title="`点击填入模型名`"
+              @click="cfgForm.modelStr = m"
+            >{{ m }}</button>
+          </div>
+        </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost" :disabled="cfgTesting" @click="testDraftCfg">
             <Loader2 v-if="cfgTesting" :size="12" class="animate-spin" />
             <span v-else>测试配置</span>
+          </button>
+          <button type="button" class="btn btn-ghost" :disabled="cfgModelsLoading" @click="listDraftModels">
+            <Loader2 v-if="cfgModelsLoading" :size="12" class="animate-spin" />
+            <span v-else>列出模型</span>
           </button>
           <button type="button" class="btn" @click="cfgDialog = false">取消</button>
           <button type="submit" class="btn btn-primary">保存</button>
@@ -426,24 +831,29 @@
 </template>
 
 <script setup lang="ts">
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Monitor, RefreshCw, Server, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, Play, Download } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, agentConfigAPI, skillsAPI } from '~/composables/useApi'
+import { aiConfigAPI, agentConfigAPI, skillsAPI, aiProvidersAPI, traceAPI, storageAPI, generationsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
 import brandLogo from '~/assets/brand-logo.svg'
+import { useConfirm } from '~/composables/useConfirm'
+
+const { confirm } = useConfirm()
 
 const showBrandImage = ref(true)
 const tab = ref('ai')
 const showAdvanced = ref(false)
 const baseTabs = [
   { id: 'ai', label: 'AI 服务', icon: Cpu },
+  { id: 'history', label: '生成历史', icon: History },
+  { id: 'storage', label: '数据存储', icon: HardDrive },
 ]
 const advancedTabs = [
   { id: 'agents', label: 'Agent 配置', icon: Bot },
   { id: 'skills', label: 'Skills', icon: FileText },
 ]
 watch(showAdvanced, (v) => {
-  if (!v && tab.value !== 'ai') tab.value = 'ai'
+  if (!v && !baseTabs.some((t) => t.id === tab.value)) tab.value = 'ai'
 })
 
 // ===== AI Service Configs =====
@@ -453,18 +863,20 @@ const cfgEditId = ref(null)
 const presetDialog = ref(false)
 const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
+const cfgModelsLoading = ref(false)
+const cfgModelsResult = ref<any>(null)
+const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, negative_prompt: '' })
 const presetForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
-const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
+const providers = ref<string[]>(['ali', 'chatfire', 'gemini', 'minimax', 'ollama', 'openai', 'openrouter', 'vidu', 'volcengine'])
+const providerSelectOptions = computed(() => providers.value.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
   image: { label: '图片', desc: '角色图、场景图、镜头图与首尾帧等静态图像生成' },
   video: { label: '视频', desc: '镜头视频生成，支持单图、多图和首尾帧模式' },
   audio: { label: '音频', desc: '角色试听、旁白与对白语音生成' },
 }
-const providerPresets = {
+const providerPresets = ref<Record<string, Record<string, { label: string; baseUrl: string; models: string[] }>>>({
   text: {
     chatfire: { label: '推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-preview'] },
     openrouter: { label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'] },
@@ -483,14 +895,14 @@ const providerPresets = {
   audio: {
     minimax: { label: 'MiniMax', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
   },
-}
-const presetCards = [
+})
+const presetCards = ref([
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'gemini', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-image-preview', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
-]
-const endpointPrefixes = {
+])
+const endpointPrefixes = ref<Record<string, string>>({
   chatfire: '/v1',
   openai: '/v1',
   openrouter: '/v1',
@@ -499,30 +911,82 @@ const endpointPrefixes = {
   volcengine: '/api/v3',
   ali: '/api/v1',
   vidu: '/ent/v2',
-}
+})
 
 const endpointHint = computed(() => {
   const provider = cfgForm.provider
   const base = cfgForm.base_url || 'https://...'
-  const prefix = endpointPrefixes[provider] || ''
+  const prefix = endpointPrefixes.value[provider] || ''
   if (!provider) return '选择服务商后显示推荐端点前缀'
   return `${base}${prefix}`
 })
 
 function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
+function onlineByType(t) { return cfgs.value.filter(c => c.service_type === t && !c.is_local) }
+function localByType(t) { return cfgs.value.filter(c => c.service_type === t && c.is_local) }
 function countActive(t) { return byType(t).filter(c => c.is_active).length }
 function fmtModel(m) { return Array.isArray(m) ? m.join(', ') : m || '—' }
 function presetsByType(type) {
-  const group = providerPresets[type] || {}
+  const group = providerPresets.value[type] || {}
   return Object.entries(group).map(([provider, preset]) => ({ provider, ...preset }))
 }
 function applyProviderPreset(type, provider) {
-  const preset = providerPresets[type]?.[provider]
+  const preset = providerPresets.value[type]?.[provider]
   if (!preset) return
   cfgForm.provider = provider
   cfgForm.base_url = preset.baseUrl
   cfgForm.modelStr = preset.models.join(', ')
   cfgForm.name = `${preset.label}-${serviceMeta[type].label}`
+}
+
+// 从后端 /ai-providers 拉取服务商目录，覆盖内置硬编码（后端不可用时静默降级到硬编码）
+async function loadProviders() {
+  try {
+    const rows: any[] = await aiProvidersAPI.list()
+    if (!Array.isArray(rows) || !rows.length) return
+
+    const provList: string[] = []
+    const seenProvider = new Set<string>()
+    const prefixMap: Record<string, string> = {}
+    const presets: Record<string, Record<string, { label: string; baseUrl: string; models: string[] }>> = {}
+    const cards: any[] = []
+    const priorityByType: Record<string, number> = { text: 100, image: 99, video: 98, audio: 97 }
+
+    for (const r of rows) {
+      const provider = r.provider
+      const st = r.service_type
+      if (!provider || !st) continue
+
+      if (!seenProvider.has(provider)) { seenProvider.add(provider); provList.push(provider) }
+      if (r.endpoint_prefix) prefixMap[provider] = r.endpoint_prefix
+
+      if (!presets[st]) presets[st] = {}
+      presets[st][provider] = {
+        label: r.display_name || provider,
+        baseUrl: r.default_url || '',
+        models: Array.isArray(r.preset_models) ? r.preset_models : [],
+      }
+
+      if (r.is_recommended) {
+        const models = Array.isArray(r.preset_models) ? r.preset_models : []
+        cards.push({
+          serviceType: st,
+          label: serviceMeta[st]?.label || st,
+          provider,
+          baseUrl: r.default_url || '',
+          model: models[0] || '',
+          priority: priorityByType[st] ?? 0,
+        })
+      }
+    }
+
+    if (provList.length) providers.value = provList
+    if (Object.keys(prefixMap).length) endpointPrefixes.value = prefixMap
+    if (Object.keys(presets).length) providerPresets.value = presets
+    if (cards.length) presetCards.value = cards
+  } catch (e) {
+    // 后端服务商目录不可用时，保留内置硬编码
+  }
 }
 
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
@@ -531,7 +995,8 @@ async function delCfg(id) { try { await aiConfigAPI.del(id); toast.success('已�
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0 })
+  cfgModelsResult.value = null
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0, negative_prompt: '' })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -539,6 +1004,7 @@ function startAddCfg(t) {
 function startEditCfg(c) {
   cfgEditId.value = c.id
   cfgTestResult.value = null
+  cfgModelsResult.value = null
   Object.assign(cfgForm, {
     name: c.name || '',
     provider: c.provider,
@@ -547,6 +1013,7 @@ function startEditCfg(c) {
     modelStr: fmtModel(c.model),
     service_type: c.service_type,
     priority: c.priority ?? 0,
+    negative_prompt: c.negative_prompt || '',
   })
   cfgDialog.value = true
 }
@@ -571,6 +1038,31 @@ async function testDraftCfg() {
     model: cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean),
   })
 }
+function isCurrentModel(m: string) {
+  const cur = cfgForm.modelStr.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+  return cur.includes(String(m).toLowerCase())
+}
+async function listDraftModels() {
+  if (!cfgForm.provider) { toast.warning('请先选择服务商'); return }
+  cfgModelsLoading.value = true
+  try {
+    const models = cfgForm.modelStr.split(',').map((s) => s.trim()).filter(Boolean)
+    cfgModelsResult.value = await aiConfigAPI.models({
+      provider: cfgForm.provider,
+      api_key: cfgForm.api_key,
+      base_url: cfgForm.base_url,
+      models,
+    })
+    const r = cfgModelsResult.value
+    if (r?.listable && r?.reachable) toast.success(r.message)
+    else if (r?.listable) toast.warning(r.message)
+    else toast(r.message)
+  } catch (e: any) {
+    toast.error(e.message)
+  } finally {
+    cfgModelsLoading.value = false
+  }
+}
 async function testExistingCfg(c) {
   startEditCfg(c)
   await testCfgPayload({
@@ -581,12 +1073,56 @@ async function testExistingCfg(c) {
     model: Array.isArray(c.model) ? c.model : [],
   })
 }
+/** 保存前校验模型是否存在于平台列表；存在缺失时弹红字确认。返回 false 表示用户取消保存。 */
+async function ensureModelsValidated(models: string[]): Promise<boolean> {
+  let checks: Array<{ model: string; exists: boolean }> | null = null
+
+  // 复用最近一次「列出模型」结果（仅当模型集合完全一致）
+  const cached = cfgModelsResult.value?.model_checks
+  if (Array.isArray(cached)) {
+    const set = new Set((cached as any[]).map((c) => String(c.model).toLowerCase()))
+    const same = cached.length === models.length && models.every((m) => set.has(m.toLowerCase()))
+    if (same) checks = cached
+  }
+
+  if (!checks) {
+    try {
+      const res = await aiConfigAPI.models({
+        provider: cfgForm.provider,
+        api_key: cfgForm.api_key,
+        base_url: cfgForm.base_url,
+        models,
+      })
+      cfgModelsResult.value = res
+      checks = res?.model_checks || null
+    } catch {
+      checks = null // 校验失败不阻断保存
+    }
+  }
+
+  if (!checks || !checks.length) return true
+  const missing = checks.filter((c) => !c.exists).map((c) => c.model)
+  if (!missing.length) return true
+
+  return await confirm({
+    title: '模型可能不存在',
+    message: `以下模型未出现在平台模型列表中，可能无法调用：\n${missing.join('、')}\n\n是否仍要保存？`,
+    confirmText: '仍要保存',
+    cancelText: '返回修改',
+    danger: true,
+  })
+}
+
 async function saveCfg() {
   if (!cfgForm.provider) { toast.warning('选择服务商'); return }
   const models = cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean)
+
+  // 保存前校验：平台支持列举时检测模型是否存在，缺失则红字预警确认
+  if (models.length && !(await ensureModelsValidated(models))) return
+
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
-    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
+    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt })
+    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
   } catch (e) { toast.error(e.message) }
 }
@@ -614,6 +1150,8 @@ const agentSaved = ref(null)
 const agentForm = reactive({ model: '', temperature: 0.7, max_tokens: 4096, system_prompt: '' })
 const agentSkillBindings = ref([])   // 当前编辑中的 Agent 的 Skill 绑定 [{ id, enabled, priority }]
 const availableSkills = ref([])      // 全局可用 Skill 列表 { id, name, description }[]
+const skillDragFrom = ref(null)      // 拖拽起始索引
+const skillDragOverIdx = ref(null)   // 当前悬停索引
 
 // 默认 Skill 映射（与后端 AGENT_SKILL_MAP 保持一致）
 const DEFAULT_AGENT_SKILLS = {
@@ -779,11 +1317,37 @@ function getSkillName(skillId) {
   return availableSkills.value.find(s => s.id === skillId)?.name
 }
 
+function onSkillDragStart(idx, e) {
+  skillDragFrom.value = idx
+  if (e?.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(idx))
+  }
+}
+function onSkillDragOver(idx) {
+  skillDragOverIdx.value = idx
+}
+function onSkillDrop(idx) {
+  const from = skillDragFrom.value
+  if (from == null || from === idx) { skillDragOverIdx.value = null; return }
+  const list = [...agentSkillBindings.value]
+  const [moved] = list.splice(from, 1)
+  list.splice(idx, 0, moved)
+  agentSkillBindings.value = list
+  skillDragOverIdx.value = null
+}
+function onSkillDragEnd() {
+  skillDragFrom.value = null
+  skillDragOverIdx.value = null
+}
+
 async function saveAgentCfg(type) {
   agentSaving.value = true
   agentSaved.value = null
   try {
     const existing = getAgentCfg(type)
+    // 按当前列表顺序重写 priority，确保拖拽排序后顺序正确落库
+    const orderedSkills = agentSkillBindings.value.map((b, i) => ({ ...b, priority: i + 1 }))
     const data = {
       agent_type: type,
       name: agentDefs.find(a => a.type === type)?.label || type,
@@ -791,7 +1355,7 @@ async function saveAgentCfg(type) {
       temperature: agentForm.temperature,
       max_tokens: agentForm.max_tokens,
       system_prompt: agentForm.system_prompt,
-      skills: agentSkillBindings.value.length ? JSON.stringify(agentSkillBindings.value) : null,
+      skills: orderedSkills.length ? JSON.stringify(orderedSkills) : null,
     }
     if (existing) {
       await agentConfigAPI.update(existing.id, data)
@@ -868,7 +1432,7 @@ async function confirmAddSkill() {
 }
 
 async function deleteSkill(id) {
-  if (!confirm(`确定删除 Skill「${id}」？`)) return
+  if (!(await confirm({ message: `确定删除 Skill「${id}」？`, danger: true }))) return
   try {
     await skillsAPI.del(id)
     if (editingSkill.value === id) editingSkill.value = null
@@ -905,7 +1469,245 @@ async function saveSkill(id) {
   }
 }
 
-onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills() })
+// ===== 本地模型 & GPU 监控 =====
+const localLoading = ref(false)
+const localConfigs = ref<any[]>([])
+const gpu = ref<any>(null)
+const gpuLoading = ref(false)
+
+const vramPercent = computed(() => {
+  if (!gpu.value?.hardware) return 0
+  const t = gpu.value?.totalVRAM_GB
+  if (!t) return 0
+  return Math.min(100, Math.round((gpu.value.usedVRAM_GB / t) * 100))
+})
+
+function fmtMB(mb: number) {
+  if (mb == null) return '—'
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
+}
+
+async function initLocalModels() {
+  localLoading.value = true
+  try {
+    await aiConfigAPI.quickLocal()
+    await loadCfgs()
+    await loadLocalConfigs()
+    toast.success('本地模型已初始化')
+  } catch (e: any) { toast.error(e.message) } finally { localLoading.value = false }
+}
+
+async function loadLocalConfigs() {
+  try { localConfigs.value = await aiConfigAPI.configsLocal() } catch (e: any) { /* 非关键，静默 */ }
+}
+
+async function loadGpuStatus() {
+  gpuLoading.value = true
+  try { gpu.value = await aiConfigAPI.gpuStatus() } catch (e: any) { toast.error(e.message) } finally { gpuLoading.value = false }
+}
+
+// ===== Ollama 模型管理 =====
+const ollamaStatus = ref<any>(null)
+const ollamaModels = computed(() => ollamaStatus.value?.models || [])
+const ollamaBusy = ref(false)
+const ollamaPulling = ref(false)
+const ollamaPullName = ref('')
+const pullProgress = ref(0)
+const pullStatusText = ref('')
+
+async function refreshOllama() {
+  ollamaBusy.value = true
+  try { ollamaStatus.value = await aiConfigAPI.ollamaStatus() } catch (e: any) { toast.error(e.message) } finally { ollamaBusy.value = false }
+}
+
+async function startOllama() {
+  ollamaBusy.value = true
+  try {
+    const res: any = await aiConfigAPI.ollamaStart()
+    toast(res.message || (res.started ? 'Ollama 已启动' : 'Ollama 未启动'))
+    await refreshOllama()
+  } catch (e: any) { toast.error(e.message) } finally { ollamaBusy.value = false }
+}
+
+async function pullOllamaModel() {
+  const name = ollamaPullName.value.trim()
+  if (!name || ollamaPulling.value) return
+  ollamaPulling.value = true
+  pullProgress.value = 0
+  pullStatusText.value = '连接 Ollama…'
+  try {
+    const res = await aiConfigAPI.ollamaPull(name, undefined, (ev: any) => {
+      if (ev.status) pullStatusText.value = ev.status
+      const total = Number(ev.total || 0)
+      const completed = Number(ev.completed || 0)
+      if (total > 0) pullProgress.value = Math.min(100, Math.round((completed / total) * 100))
+    })
+    if (res?.ok === false) { toast.error(res.error || '下载失败'); return }
+    toast.success(`模型 ${name} 下载完成`)
+    await refreshOllama()
+  } catch (e: any) { toast.error(e.message) } finally { ollamaPulling.value = false }
+}
+
+async function useOllamaModel(model: string) {
+  ollamaBusy.value = true
+  try {
+    const all: any[] = await aiConfigAPI.list('text')
+    const local = all?.find((c: any) => c.provider === 'ollama' || String(c.base_url || '').includes('11434'))
+    if (local) {
+      await aiConfigAPI.update(local.id, { ...local, model: [model] })
+      toast.success(`文本配置已切换为 ${model}`)
+    } else {
+      await aiConfigAPI.create({
+        service_type: 'text',
+        provider: 'ollama',
+        name: '文本(本地)',
+        base_url: 'http://localhost:11434',
+        model: [model],
+        priority: 85,
+      })
+      toast.success(`已创建本地文本配置（${model}）`)
+    }
+    await loadCfgs()
+    await loadLocalConfigs()
+  } catch (e: any) { toast.error(e.message) } finally { ollamaBusy.value = false }
+}
+
+async function releaseAllGpu() {
+  if (!(await confirm({ message: '确认释放全部本地模型显存？进行中的生成任务可能被中断。', danger: true }))) return
+  gpuLoading.value = true
+  try {
+    await aiConfigAPI.gpuReleaseAll()
+    toast.success('已释放全部显存')
+    await loadGpuStatus()
+  } catch (e: any) { toast.error(e.message) } finally { gpuLoading.value = false }
+}
+
+const tokenStats = ref<any>(null)
+async function loadTokenStats() {
+  try {
+    tokenStats.value = await traceAPI.stats()
+  } catch {
+    tokenStats.value = null
+  }
+}
+
+function fmtTokens(n: number): string {
+  if (n == null) return '0'
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k'
+  return String(n)
+}
+
+// ===== 生成历史 =====
+const generations = ref<GenerationRecord[]>([])
+const historyLoading = ref(false)
+const historyFilter = ref<'all' | 'image' | 'video'>('all')
+const historyExpandedId = ref<string | null>(null)
+
+const historyFilters = [
+  { value: 'all', label: '全部' },
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+] as const
+
+const filteredGenerations = computed(() => {
+  if (historyFilter.value === 'all') return generations.value
+  return generations.value.filter((g) => g.type === historyFilter.value)
+})
+
+const historyStats = computed(() => {
+  const list = generations.value
+  const total = list.length
+  const success = list.filter((g) => isSuccessStatus(g.status)).length
+  const failed = list.filter((g) => isFailedStatus(g.status)).length
+  return { total, success, failed, processing: total - success - failed }
+})
+
+function isSuccessStatus(s: string): boolean {
+  return ['completed', 'succeeded', 'success', 'done'].includes((s || '').toLowerCase())
+}
+function isFailedStatus(s: string): boolean {
+  return ['failed', 'error', 'cancelled', 'canceled'].includes((s || '').toLowerCase())
+}
+function statusLabel(s: string): string {
+  if (isSuccessStatus(s)) return '成功'
+  if (isFailedStatus(s)) return '失败'
+  const low = (s || '').toLowerCase()
+  if (['pending', 'queued', 'processing', 'running', 'generating'].includes(low)) return '处理中'
+  return s || '未知'
+}
+function statusClass(s: string): string {
+  if (isSuccessStatus(s)) return 'ok'
+  if (isFailedStatus(s)) return 'err'
+  return 'warn'
+}
+function fmtTime(iso?: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+function fmtElapsed(ms?: number | null): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const totalSec = Math.round(ms / 1000)
+  return `${Math.floor(totalSec / 60)}m ${totalSec % 60}s`
+}
+function toggleHistory(g: GenerationRecord) {
+  const key = `${g.type}-${g.id}`
+  historyExpandedId.value = historyExpandedId.value === key ? null : key
+}
+async function loadGenerations() {
+  historyLoading.value = true
+  try {
+    generations.value = await generationsAPI.list({ limit: 200 })
+  } catch (e: any) {
+    toast.error(e.message || '加载生成历史失败')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+// ===== 数据存储 =====
+const storageInfo = ref<StorageInfo | null>(null)
+const storageLoading = ref(false)
+const storageChanging = ref(false)
+const newDataRoot = ref('')
+const migrateData = ref(true)
+
+function fmtBytes(n: number | null | undefined): string {
+  if (n == null || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
+}
+
+async function loadStorageInfo() {
+  storageLoading.value = true
+  try { storageInfo.value = await storageAPI.info() }
+  catch (e: any) { toast.error(e.message || '加载存储信息失败') }
+  finally { storageLoading.value = false }
+}
+
+async function changeDataRoot() {
+  const target = newDataRoot.value.trim()
+  if (!target) { toast.error('请填写目标目录路径'); return }
+  storageChanging.value = true
+  try {
+    storageInfo.value = await storageAPI.change(target, migrateData.value)
+    newDataRoot.value = ''
+    toast.success(migrateData.value ? '目录已切换，旧数据已自动迁移（旧目录保留）' : '目录已切换')
+    loadTokenStats()
+  } catch (e: any) {
+    toast.error(e.message || '切换目录失败')
+  } finally { storageChanging.value = false }
+}
+
+onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); loadStorageInfo(); loadGenerations() })
 </script>
 
 <style scoped>
@@ -1089,6 +1891,8 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
 .section-title { font-size: 13px; font-weight: 600; }
 .section-subtitle { font-size: 11px; color: var(--text-3); margin-top: 2px; }
 .config-list { display: flex; flex-direction: column; gap: 6px; }
+.config-group-label { font-size: 11px; font-weight: 600; color: var(--text-3); margin: 8px 0 2px; letter-spacing: 0.4px; }
+.tag-local { background: var(--warning-bg); color: var(--warning); }
 .config-row { display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
 .config-info { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .config-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -1098,6 +1902,46 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
 .config-model { font-size: 11px; color: var(--text-2); }
 .config-base { font-size: 11px; color: var(--text-3); }
 .config-empty { font-size: 12px; color: var(--text-3); padding: 12px 0; }
+
+/* Token 用量统计 */
+.token-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+.token-stat-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.token-stat-num { font-size: 20px; font-weight: 700; font-family: var(--font-display); color: var(--text-0); }
+.token-stat-label { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+.token-table { width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 12px; }
+.token-table th, .token-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.token-table th { color: var(--text-3); font-weight: 600; }
+.token-table td { color: var(--text-1); }
+
+/* 本地模型 & GPU 监控 */
+.local-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; }
+.gpu-head-actions { display: flex; align-items: center; gap: 8px; }
+.gpu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }
+.gpu-card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.gpu-label { font-size: 11px; color: var(--text-3); margin-bottom: 6px; }
+.gpu-value { font-size: 16px; font-weight: 700; color: var(--text-0); }
+.gpu-sub { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+.gpu-bar { height: 6px; background: var(--bg-hover); border-radius: 999px; margin-top: 8px; overflow: hidden; }
+.gpu-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.3s; }
+.gpu-notice { margin-top: 10px; padding: 9px 12px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--bg-1); font-size: 12px; color: var(--text-2); line-height: 1.6; }
+
+/* Ollama 模型管理 */
+.ollama-panel { margin-top: 16px; padding: 14px 14px 16px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.ollama-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ollama-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-0); }
+.ollama-state { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 99px; background: var(--bg-3); color: var(--text-3); }
+.ollama-state.on { background: var(--accent-bg); color: var(--accent); }
+.ollama-head-actions { display: flex; align-items: center; gap: 8px; }
+.ollama-msg { margin-top: 10px; font-size: 12px; color: var(--text-2); }
+.ollama-models { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.ollama-model { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.ollama-model-name { flex: 1; min-width: 0; font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ollama-model-size { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.ollama-empty { margin-top: 10px; font-size: 12px; color: var(--text-3); }
+.ollama-pull { display: flex; gap: 8px; margin-top: 12px; }
+.ollama-pull .input { flex: 1; min-width: 0; }
+.ollama-progress { margin-top: 10px; }
+.ollama-progress-label { margin-top: 6px; font-size: 11px; color: var(--text-3); }
 
 .toggle { position: relative; width: 30px; height: 17px; cursor: pointer; flex-shrink: 0; }
 .toggle input { opacity: 0; width: 0; height: 0; }
@@ -1150,11 +1994,15 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
   padding: 7px 10px;
   border-radius: 8px;
   background: rgba(255,255,255,0.72);
-  transition: opacity 0.15s, background 0.15s;
+  transition: opacity 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .skill-bind-item.disabled {
   opacity: 0.48;
   background: rgba(245,245,245,0.9);
+}
+.skill-bind-item.drag-over {
+  background: var(--accent-bg);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 .skill-bind-drag {
   color: var(--text-3);
@@ -1163,6 +2011,7 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
   user-select: none;
   flex-shrink: 0;
 }
+.skill-bind-drag:active { cursor: grabbing; }
 .skill-bind-toggle {
   position: relative;
   width: 28px;
@@ -1302,6 +2151,53 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
   color: var(--text-3);
   word-break: break-all;
 }
+.models-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.72);
+  margin-top: 12px;
+}
+.models-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-1);
+}
+.models-exists {
+  font-size: 12px;
+  font-weight: 600;
+}
+.models-exists-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.models-exists.ok { color: #3f9d5c; }
+.models-exists.bad { color: #c95844; }
+.models-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.model-chip {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.model-chip:hover { border-color: var(--accent); color: var(--accent); }
+.model-chip.active { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
 .preset-grid-form {
   display: grid;
   grid-template-columns: repeat(1, minmax(0, 1fr));
@@ -1322,4 +2218,219 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== 数据存储 ===== */
+.storage-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+.storage-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.storage-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--accent);
+}
+.storage-meta { min-width: 0; flex: 1; }
+.storage-label { font-size: 11px; color: var(--text-3); margin-bottom: 2px; }
+.storage-path {
+  font-size: 12px;
+  color: var(--text-1);
+  word-break: break-all;
+  line-height: 1.5;
+}
+.storage-sub { font-size: 11px; margin-top: 3px; }
+.storage-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+.storage-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.storage-check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.storage-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.storage-note { font-size: 11px; line-height: 1.6; }
+
+/* ===== 生成历史 ===== */
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.history-filters { display: flex; gap: 8px; }
+.chip {
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.14s;
+}
+.chip:hover { color: var(--text-0); border-color: var(--text-3); }
+.chip.active {
+  background: var(--accent-bg);
+  border-color: transparent;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.history-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.history-stat {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.history-stat-num { font-size: 20px; font-weight: 700; font-family: var(--font-display); color: var(--text-0); }
+.history-stat-label { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+.history-stat.ok .history-stat-num { color: #2f9e63; }
+.history-stat.warn .history-stat-num { color: #c9973f; }
+.history-stat.err .history-stat-num { color: #c95844; }
+
+.history-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.history-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.history-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s;
+}
+.history-item-head:hover { background: var(--bg-hover); }
+.history-type {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.history-type.image { background: rgba(13,148,136,0.14); color: #0d9488; }
+.history-type.video { background: rgba(150, 92, 235, 0.16); color: #965ceb; }
+.history-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.history-item-title { font-size: 13px; font-weight: 600; color: var(--text-0); }
+.history-item-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }
+.history-item-meta .dot { color: var(--text-3); }
+.history-item-time {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.history-chevron { color: var(--text-3); transition: transform 0.18s; flex-shrink: 0; }
+.history-chevron.open { transform: rotate(180deg); }
+
+.status-badge {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.status-badge.ok { background: rgba(47, 158, 99, 0.12); color: #2f9e63; }
+.status-badge.warn { background: rgba(201, 151, 63, 0.14); color: #c9973f; }
+.status-badge.err { background: rgba(201, 88, 68, 0.12); color: #c95844; }
+
+.history-item-body {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.history-detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-1);
+}
+.history-detail-label {
+  flex-shrink: 0;
+  width: 64px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.history-detail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.history-detail-block .history-detail-label { width: auto; }
+.history-prompt {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.history-detail-block.error .history-detail-label { color: #c95844; }
+.history-detail-block.error .history-prompt { color: #c95844; border-color: rgba(201, 88, 68, 0.25); }
+.history-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.history-link:hover { text-decoration: underline; }
 </style>

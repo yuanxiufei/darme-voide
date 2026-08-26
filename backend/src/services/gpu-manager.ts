@@ -18,7 +18,7 @@
  *   - MiniMax H3 本地: 跟踪状态，由外部管理生命周期
  */
 
-import { logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
+import { logTaskError, logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
 
 // ─── 本地 Provider 标记 ────────────────────────────────────────
 /** 判断 provider 是否为本地 GPU 服务 */
@@ -29,10 +29,11 @@ export function isLocalProvider(provider: string): boolean {
 /** 本地 provider 集合（这些是运行在本机 GPU 上的服务） */
 const LOCAL_PROVIDERS = new Set([
   'ollama',
-  'openai',       // Ollama OpenAI 兼容接口
   'local-sd',
   'cosyvoice',
-  // minimax 本地 H3 也走 minimax provider，通过 baseUrl 中的 localhost 判断
+  // 注意：openai 不在此列 —— Ollama 的 OpenAI 兼容接口 baseUrl 指向 localhost，
+  // 会命中 isLocalConfig 的 hostname 判断；真实云端 OpenAI 不应被误判为本地服务。
+  // minimax 本地 H3 也走 minimax provider，通过 baseUrl 中的 localhost 判断。
 ])
 
 /** 判断 AIConfig 是否指向本地服务（检查 baseUrl 含 localhost/127.0.0.1） */
@@ -80,6 +81,8 @@ const VRAM_ESTIMATES: Record<string, VramProfile> = {
 
 const GPU_TOTAL_GB = 24
 const GPU_SAFE_MARGIN_GB = 2 // 安全余量，避免精确填满
+/** 模型复用窗口：释放后超过该时长未再使用则视为过期清理（避免显存估算只增不减） */
+const MODEL_REUSE_TTL_MS = 10 * 60 * 1000
 
 // ─── GPU 租约 ──────────────────────────────────────────────────
 export interface GpuLease {
@@ -91,13 +94,19 @@ export interface GpuLease {
 }
 
 // ─── 状态类型 ──────────────────────────────────────────────────
+interface LoadedModelEntry {
+  profile: VramProfile
+  /** 最近释放时间戳（null = 正在使用中） */
+  releasedAt: number | null
+}
+
 interface GpuState {
   /** 当前锁持有者 */
   holder: string | null
   /** 锁等待队列 */
   queue: Array<{ serviceType: string; resolve: () => void }>
   /** 当前已加载的模型列表（可能有多个轻量模型共存） */
-  loadedModels: Map<string, VramProfile>
+  loadedModels: Map<string, LoadedModelEntry>
 }
 
 // ─── GPU 管理器单例 ───────────────────────────────────────────
@@ -111,8 +120,19 @@ class GpuMemoryManager {
   /** 当前 GPU 总占用估算（GB） */
   get totalVramGB(): number {
     let total = 0
-    this.state.loadedModels.forEach(p => { total += p.vramGB })
+    this.state.loadedModels.forEach(entry => { total += entry.profile.vramGB })
     return Math.round(total * 10) / 10
+  }
+
+  /** 清理超过复用窗口未再使用的已释放模型，避免显存估算只增不减 */
+  private pruneExpired(): void {
+    const now = Date.now()
+    for (const [key, entry] of this.state.loadedModels) {
+      if (entry.releasedAt != null && now - entry.releasedAt > MODEL_REUSE_TTL_MS) {
+        this.state.loadedModels.delete(key)
+        logTaskProgress('GpuManager', 'pruned-expired', { modelKey: key })
+      }
+    }
   }
 
   /** 当前可用显存（GB） */
@@ -229,19 +249,19 @@ class GpuMemoryManager {
     // 但跳过即将要加载的新模型
     const candidates = Array.from(this.state.loadedModels.entries())
       .filter(([key]) => key !== newModelKey)
-      .sort((a, b) => a[1].vramGB - b[1].vramGB)
+      .sort((a, b) => a[1].profile.vramGB - b[1].profile.vramGB)
 
     let freed = 0
-    for (const [key, profile] of candidates) {
+    for (const [key, entry] of candidates) {
       if (freed >= needToFree) break
-      const success = await this.unloadModel(key, profile)
+      const success = await this.unloadModel(key, entry.profile)
       if (success) {
-        freed += profile.vramGB
+        freed += entry.profile.vramGB
         this.state.loadedModels.delete(key)
-        logTaskProgress('GpuManager', 'evicted', { modelKey: key, freedGB: profile.vramGB })
+        logTaskProgress('GpuManager', 'evicted', { modelKey: key, freedGB: entry.profile.vramGB })
       }
       // 卸载冷却时间
-      await new Promise(r => setTimeout(r, profile.cooldownMs))
+      await new Promise(r => setTimeout(r, entry.profile.cooldownMs))
     }
 
     if (freed < needToFree) {
@@ -268,6 +288,7 @@ class GpuMemoryManager {
     model: string,
     baseUrl?: string,
   ): Promise<GpuLease> {
+    this.pruneExpired()
     const modelKey = `${provider.toLowerCase()}:${model}`
     const baseProfile = this.getProfile(provider, model)
     // 浅拷贝，防止修改全局共享的 VRAM_ESTIMATES 配置对象
@@ -301,7 +322,7 @@ class GpuMemoryManager {
     await this.evictIfNeeded(profile.vramGB, modelKey)
 
     // 标记新模型已加载
-    this.state.loadedModels.set(modelKey, profile)
+    this.state.loadedModels.set(modelKey, { profile, releasedAt: null })
 
     logTaskProgress('GpuManager', 'acquired', {
       serviceType,
@@ -334,8 +355,9 @@ class GpuMemoryManager {
       })
       this.state.loadedModels.delete(modelKey)
     } else {
-      // 其他策略：暂时保留在 loadedModels 中（可能复用）
-      // 当需要空间时由 evictIfNeeded 卸载
+      // 其他策略：保留复用，记录释放时间，超过 TTL 后由 pruneExpired 清理
+      const entry = this.state.loadedModels.get(modelKey)
+      if (entry) entry.releasedAt = Date.now()
     }
 
     // 标记锁释放
@@ -360,8 +382,8 @@ class GpuMemoryManager {
       count: this.state.loadedModels.size,
     })
 
-    for (const [key, profile] of this.state.loadedModels) {
-      await this.unloadModel(key, profile)
+    for (const [key, entry] of this.state.loadedModels) {
+      await this.unloadModel(key, entry.profile)
     }
     this.state.loadedModels.clear()
     this.state.holder = null
@@ -375,6 +397,7 @@ class GpuMemoryManager {
    * 获取当前状态快照（供 API 返回）
    */
   getStatus(): GpuStatus {
+    this.pruneExpired()
     return {
       totalVRAM_GB: GPU_TOTAL_GB,
       safeMargin_GB: GPU_SAFE_MARGIN_GB,

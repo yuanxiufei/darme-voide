@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto'
+import { appendTraceEvent } from './trace-store.js'
+
 type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS'
 
 const C = {
@@ -140,4 +143,53 @@ export function logTaskPayload(scope: string, action: string, payload: unknown) 
     ? sanitized
     : JSON.stringify(sanitized, null, 2)
   console.log(`${C.dim}${timeText()}${C.reset} ${C.blue}[${scope}]${C.reset} ${action}\n${serialized}`)
+}
+
+export interface TraceHandle {
+  traceId: string
+  progress: (action: string, meta?: Record<string, unknown>) => void
+  success: (action: string, meta?: Record<string, unknown>) => void
+  warn: (action: string, meta?: Record<string, unknown>) => void
+  error: (action: string, meta?: Record<string, unknown>) => void
+  end: () => void
+}
+
+/**
+ * 开启一次可追踪的执行追踪（trace）。
+ * 同一 trace 内的所有日志自动附带 traceId 与 elapsedMs，便于把一次 Agent run
+ * 的多条日志串起来，对齐 PenguinHarness 的"单一事实来源"可观测性思想。
+ */
+export function startTrace(scope: string, action: string, meta?: Record<string, unknown>): TraceHandle {
+  const traceId = randomUUID().slice(0, 8)
+  const startAt = Date.now()
+  const withTrace = (m?: Record<string, unknown>): Record<string, unknown> => ({
+    ...(m || {}),
+    traceId,
+    elapsedMs: Date.now() - startAt,
+  })
+
+  // 单点 emit：console 输出 + append-only JSONL 落盘（对齐第 9 章「单一事实来源」可观测）
+  const emit = (level: LogLevel, a: string, m: Record<string, unknown>) => {
+    logTask(scope, a, m, level)
+    appendTraceEvent({
+      ts: new Date().toISOString(),
+      traceId,
+      scope,
+      level,
+      action: a,
+      elapsedMs: m.elapsedMs as number | undefined,
+      meta: sanitizeValue(m) as Record<string, unknown>,
+    })
+  }
+
+  emit('INFO', `START ${action}`, withTrace(meta))
+
+  return {
+    traceId,
+    progress: (a, m) => emit('INFO', a, withTrace(m)),
+    success: (a, m) => emit('SUCCESS', `DONE ${a}`, withTrace(m)),
+    warn: (a, m) => emit('WARN', a, withTrace(m)),
+    error: (a, m) => emit('ERROR', `ERROR ${a}`, withTrace(m)),
+    end: () => emit('INFO', `END trace ${traceId}`, { ...withTrace(meta), totalMs: Date.now() - startAt }),
+  }
 }

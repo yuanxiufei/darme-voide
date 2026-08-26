@@ -1,13 +1,28 @@
 ---
 name: storyboard-breaker
 description: 分镜拆解专业规范
+preconditions:
+  - 调用 read_storyboard_context 能读到剧本、角色和场景
+protocol:
+  - storyboards_count: 保存的分镜数量
 ---
 
 # 分镜拆解指南
 
 ## 拆解原则
 
-每个镜头聚焦**单一动作**，描述要详尽具体。每个镜头时长 10-15 秒。
+每个镜头聚焦**单一动作**，描述要详尽具体。
+
+### 一镜一人说（ONE_SHOT_ONE_SPEAKER）——最高优先级铁律
+- **一个镜头原则上只允许一个角色说话**。禁止一个镜头里多个角色轮流开口。
+- 双人对白必须拆成**正反打**：A 说一句是一个镜头，B 说一句是下一个镜头，交替切。
+- 多人会议/群戏：每一句台词单独成镜，谁说话镜头就给谁（可切旁人反应镜，但反应镜**无人说话**）。
+- 长对白（连续 4 句以上）按 **5-8 秒**切片，不要塞进 10-15 秒让一个角色说一长串。
+- 旁白/画外音：用 `<voice>角色名</voice>` 标记，且旁白镜头里**不再出现另一个角色说话**。
+
+### 时长
+- 动作/空镜/纯环境：10-15 秒。
+- 含对话镜头：**5-8 秒**，只装 1-2 句台词，保证音画同步、不被剪断。
 
 ## 镜头要素
 
@@ -28,6 +43,8 @@ description: 分镜拆解专业规范
 15. **音效提示词**：`sound_effect`，描述该镜头关键环境音/动作音
 16. **场景关联**：若能匹配已有场景，必须填写 `scene_id`
 17. **角色关联**：填写 `character_ids`，绑定当前镜头涉及的 0 到多个角色
+18. **镜头类型**：填写 `scene_type`，用于路由视频生成方式，取值见下方「镜头类型路由」
+19. **说话人**：填写 `speaker_id`（如 `S1`/`S2`），即本镜头**唯一说话人**的角色编号；无人说话则不填
 
 ## 视频提示词格式
 
@@ -49,7 +66,7 @@ description: 分镜拆解专业规范
 
 1. 调用 `read_storyboard_context` 读取剧本、角色、场景、已有分镜摘要
 2. 先基于剧本完成镜头拆解，确保总时长和叙事连续性合理
-3. 为每个镜头补全完整字段：`title / shot_type / angle / movement / location / time / character_ids / action / dialogue / description / result / atmosphere / image_prompt / video_prompt / bgm_prompt / sound_effect / duration / scene_id`
+3. 为每个镜头补全完整字段：`title / shot_type / angle / movement / location / time / character_ids / action / dialogue / description / result / atmosphere / image_prompt / video_prompt / bgm_prompt / sound_effect / duration / scene_id / scene_type / speaker_id`
 4. 调用 `save_storyboards` 一次性保存完整分镜
 5. 如需调整，调用 `update_storyboard` 修改具体镜头
 
@@ -66,6 +83,28 @@ description: 分镜拆解专业规范
 - 一个镜头可以没有角色，也可以绑定多个角色
 - 只要镜头里有明确出场、被看见、发生动作或说话的角色，都应绑定进去
 - 纯环境镜头、空镜头、物件镜头可以传空数组
+
+## 说话人规则（speaker_id）
+
+- `speaker_id` 来自 `read_storyboard_context` 返回角色身上的 `speaker_id`（如 `S1`/`S2`），**不要自己编造**。
+- 一个镜头只有一个 `speaker_id`，对应本镜头唯一开口的角色；无人说话就留空。
+- 说话人的名字必须出现在 `dialogue` 里，且与 `character_ids` 绑定一致。
+
+## 镜头类型路由（scene_type）
+
+根据镜头内容填写 `scene_type`，用于视频生成自动选择参考图策略：
+
+| scene_type | 场景 | 视频策略 |
+|---|---|---|
+| `single` | 单人说话/独角戏 | 首帧图生视频 |
+| `dialogue_2p` | 双人正反打对白 | 多角色参考图（保证两人一致） |
+| `meeting` | 三人及以上群戏/会议 | 多角色参考图 |
+| `argument` | 激烈争吵/多人抢话 | 多角色参考图 + 快速正反打 |
+| `long_dialogue` | 长对白（已 5-8s 切片） | 按切片单人逐镜 |
+| `action` | 打斗/追逐/动作 | 首帧图生视频 |
+| `silent` | 空镜/无对话/环境 | 首帧图生视频 |
+
+- 无法确定时用 `single`。
 
 ## 质量要求
 

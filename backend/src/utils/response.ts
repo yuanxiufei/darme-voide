@@ -16,6 +16,10 @@ export function notFound(c: Context, message = 'not found') {
   return c.json({ code: 404, message }, 404)
 }
 
+export function conflict(c: Context, message = 'conflict') {
+  return c.json({ code: 409, message }, 409)
+}
+
 export function serverError(c: Context, message = 'internal error') {
   return c.json({ code: 500, message }, 500)
 }

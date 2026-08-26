@@ -80,6 +80,16 @@ export class GeminiImageAdapter implements ImageProviderAdapter {
     const finishMessage = firstCandidate?.finishMessage || firstCandidate?.finish_message
 
     if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+      // Gemini 图片生成因安全策略拒绝时 finishReason 会是 SAFETY / IMAGE_SAFETY / SPII 等，
+      // 此时 finishMessage 是英文技术描述，归因成可行动的中文。
+      const reason = String(finishReason).toUpperCase()
+      if (
+        reason === 'SAFETY' || reason === 'IMAGE_SAFETY' || reason === 'SPII' ||
+        reason === 'RECITATION' || reason === 'PROHIBITED_CONTENT' || reason === 'BLOCKLIST' ||
+        reason === 'SEXUALLY_EXPLICIT' || reason === 'HATE_SPEECH' || reason === 'DANGEROUS_CONTENT'
+      ) {
+        throw new Error('图片生成被内容安全拦截：Gemini 判定该提示词或参考图触发了安全策略。请修改关键帧/角色提示词或更换参考图后重试。')
+      }
       throw new Error(finishMessage || `Gemini generation stopped: ${finishReason}`)
     }
 

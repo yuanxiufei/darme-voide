@@ -55,7 +55,7 @@
         class="lib-card" :class="{ selected: selectedItems.includes(item.id) }"
         @click="toggleSelect(item.id)"
       >
-        <div class="card-check"><input type="checkbox" :checked="selectedItems.includes(item.id)" @click.stop /></div>
+        <div class="card-check"><input type="checkbox" :checked="selectedItems.includes(item.id)" @click.stop="toggleSelect(item.id)" /></div>
         <div
           class="scene-thumb"
           :style="item.imageUrl ? { backgroundImage: `url(${item.imageUrl})` } : {}"
@@ -147,6 +147,9 @@
 <script setup lang="ts">
 import { toast } from 'vue-sonner'
 import { sceneLibraryAPI, dramaAPI } from '~/composables/useApi'
+import { useConfirm } from '~/composables/useConfirm'
+
+const { confirm } = useConfirm()
 
 const search = ref('')
 const filterCategory = ref('')
@@ -264,7 +267,7 @@ async function save() {
 }
 
 async function deleteItem(item: any) {
-  if (!confirm(`确认删除场景 "${item.name}"？`)) return
+  if (!(await confirm({ message: `确认删除场景 "${item.name}"？`, danger: true }))) return
   try {
     await sceneLibraryAPI.del(item.id)
     selectedItems.value = selectedItems.value.filter(id => id !== item.id)
@@ -275,7 +278,7 @@ async function deleteItem(item: any) {
 }
 
 async function batchDelete() {
-  if (!confirm(`确认删除 ${selectedItems.value.length} 个场景？`)) return
+  if (!(await confirm({ message: `确认删除 ${selectedItems.value.length} 个场景？`, danger: true }))) return
   try {
     await sceneLibraryAPI.batchDelete(selectedItems.value)
     selectedItems.value = []
@@ -335,8 +338,8 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .filter-select { padding: 7px 12px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; color: var(--text-0); outline: none; }
 .tag-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
 .tag-chip { padding: 4px 10px; font-size: 12px; border-radius: 12px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); cursor: pointer; }
-.tag-chip.active { background: var(--accent-bg); color: var(--accent-text); border-color: rgba(76,125,255,0.3); }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+.tag-chip.active { background: var(--accent-bg); color: var(--accent-text); border-color: rgba(13,148,136,0.3); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; }
 .lib-card { display: flex; gap: 14px; padding: 16px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.15s; }
 .lib-card:hover { border-color: var(--accent); }
 .lib-card.selected { border-color: var(--accent); background: var(--accent-bg); }
@@ -360,7 +363,7 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .card-tags { display: flex; gap: 4px; flex-wrap: wrap; }
 .mini-tag { font-size: 10px; padding: 1px 6px; background: var(--bg-2); border-radius: 6px; color: var(--text-3); }
 .card-actions { display: flex; gap: 4px; flex-shrink: 0; }
-.action-btn { padding: 3px 8px; font-size: 11px; border-radius: 4px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); cursor: pointer; }
+.action-btn { padding: 5px 10px; font-size: 12px; border-radius: 6px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); cursor: pointer; }
 .action-btn:hover { color: var(--accent-text); border-color: var(--accent); }
 .action-btn.danger:hover { color: #ef4444; border-color: #ef4444; }
 .pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 24px; font-size: 13px; color: var(--text-2); }

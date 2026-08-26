@@ -1,93 +1,57 @@
-# 项目长期记忆
+# 项目长期记忆（Drama Studio 短剧工坊）
 
-## 品牌标识 (2026-08-07，2026-08-13 复核)
-- **项目名称**：Drama Studio（短剧工坊）
-- **代码标识**：drama-studio / PRESET_*
-- **Logo 文件**：`frontend/app/assets/brand-logo.svg`
-- **数据库名**：`data/drama.db`
-- **localStorage key 前缀**：`drama:`
-- **API 路由**：`/quick-preset`
-- **npm 包名**：drama-studio-frontend
-- **Docker 容器名**：drama-studio
-- 品牌标识统一为 Drama Studio，旧项目商标字样已彻底清除（避免侵权），2026-08-13 全项目复核 0 残留
+## 项目与技术栈
+- 路径 `d:\code\voides\voide-darme`；标识 drama-studio / PRESET_*；DB `data/drama.db`；localStorage 前缀 `drama:`。
+- 前端 Nuxt 3.17+Vue3.5（端口 3013）；后端 Hono 4.12 + Mastra(5 Agent) + Drizzle ORM + better-sqlite3（端口 5789）；媒体 fluent-ffmpeg+sharp。API 前缀 `/api/v1`，22 路由 + `/webhooks/*` + `/static/*`，DB 19 表。
+- Node **v22.20.0**（v24 致 better-sqlite3 ERR_DLOPEN_FAILED）。config.yaml gitignored，仅 config.example.yaml 跟踪。
+- 启动：`cd backend && npm run start`、`cd frontend && npm run dev`。
+- 图片上传 `POST /api/v1/upload/image` → `data/static/uploads/` → `/static/uploads/*`。
 
-## 统一视觉风格系统 (2026-08-07)
-- **`backend/src/shared/prompt-utils.ts`** 是全域 prompt 构建的唯一入口
-- 风格预设 `VISUAL_STYLE_MASTER` = `cinematic illustration style, consistent art style, soft cinematic lighting, high quality, no text, no watermark`
-- 所有图片/视频生成必须通过本模块构建 prompt，禁止硬编码风格字符串
-- 角色图片：`buildCharacterImagePrompt(char)` → name + appearance + personality + style
-- 场景图片：`buildSceneImagePrompt({location, time, prompt, dramaStyle})`
-- 分镜图片：`buildStoryboardImagePrompt({characterDesc, sceneDesc, shotType, ...})`
-- 分镜视频：`buildStoryboardVideoPrompt({characterAppearances, scenePrompt, action, ...})`
-- 辅助查询：`getStoryboardCharacterAppearances/SceneDescription/ImageUrls()`
+## 主题色（唯一源 frontend/app/assets/studio.css :root）
+- 青绿 teal `#0d9488`（2026-08-22 由冷蓝统一改）。令牌：`--accent #0d9488`/`--accent-dark #0f766e`/`--accent-text #0f766e`/`--accent-bg rgba(13,148,136,.1)`/`--accent-glow rgba(13,148,136,.2)`/`--accent-gradient linear-gradient(135deg,#14b8a6,#0d9488 46%,#0f766e)`/`--border-focus #0d9488`。
+- 浅色：`--bg-base #f3f6fb`/`--bg-0 #fff`/`--bg-1 #f8fbff`/`--bg-2 #eef3f9`/`--text-0 #182132`/`--text-2 #60718a`/`--text-3 #8fa0b8`/`--border #dbe4f0`。
+- 禁止硬编码 accent 蓝、`#1a1a2e`、或引用不存在的 `--card-bg`/`--input-bg`/`--text`。
 
-## TTS 角色-音色-台词验证机制 (2026-08-07)
-- 后端 storyboards.ts 新增类型 `TTSMatchStatus`: `matched` | `no_voice` | `not_found` | `narrator`
-- `validateTTSSpeaker(speaker, dramaId)`: 验证角色名 → 剧组角色记录 → voiceStyle 三连匹配
-- `validateDialogueLines()`: 批量验证 dialogue 所有台词行
-- 新增端点 `GET /storyboards/:id/validate-dialogue` 独立返回验证结果
-- generate-tts 多人模式循环中先用 `validateDialogueLines` 验证，再以验证后的 voiceId 调用 TTS
-- 单人模式也加入验证，返回 match_status
-- PUT 路由保存 dialogue 时返回 `dialogue_validation` 字段
-- 前端 episode 页面：`loadAllDubMatchCache()` 在 refresh 时自动加载，`dubIssueCount` computed 显示问题数
-- 多人对话模板改为基于 `getDialogueLines(sb)` 渲染（不依赖 TTS 是否已生成）
-- 状态颜色：绿色=匹配，黄色=未配置音色，红色=角色不存在
-- 生成配音前弹出 confirm 对话框警告不匹配项
+## 统一 adapter 抽象（核心架构原则，用户明确强调）
+- 4 类 adapter(image/video/tts/text) 都是 `Record<provider,Adapter>`，线上(minimax/gemini/volcengine/vidu/ali/openai/chatfire) 与本地(ollama/local-sd/cosyvoice) 同表解析，靠 `AIConfig{provider,baseUrl,apiKey,model}` 切换，本地 baseUrl 指 localhost、线上指厂商域名，上游零感知。文本最彻底——openai 兼容一个实例覆盖 7 provider。
+- **任何新模型（含本地 H3）只加/复用 provider + 改 baseUrl，不引入新框架（如 ComfyUI）**。
+- GPU 租约 `gpuManager.acquire(serviceType,provider,model,baseUrl)`，serviceType∈text/image/video/audio。
+- 火山引擎必须用 Endpoint ID（ep-m-xxx）非模型 ID。
+- `ai_service_configs.model` 为 JSON 数组（多模型优先级 fallback）。
 
-## TTS 音色过期检测 (2026-08-07)
-- validate-dialogue 端点解析 ttsAudioUrl JSON，比对 voice_id 与当前角色 voiceStyle
-- 前端 dubStaleCount computed + 蓝色过期横幅提示重新生成配音
+## 制作流程
+- 4 主阶段：剧本 script→资产 assets→分镜 storyboard→导出 export。后端编排 scripting→extracting→voicing→storyboarding→imaging→videoing→composing→merging（音色 08-22 前移）。
+- 5 Agent：script_rewriter/extractor/storyboard_breaker/voice_assigner/grid_prompt_generator。
+- Prompt 唯一入口 `backend/src/shared/prompt-utils.ts`（`VISUAL_STYLE_MASTER` + buildCharacterImagePrompt/buildSceneImagePrompt/buildStoryboardImagePrompt/buildStoryboardVideoPrompt）。正/反向优先级见该文件与 text-generation。
 
-## 全链路一致性规则 (2026-08-07)
-- **角色图片**：prompt 必须包含 name+appearance+personality → `cinematic illustration style, stylized character design`
-- **场景图片**：prompt 必须包含 location+time+drama.style → `highly detailed cinematic environment`
-- **分镜图片**：prompt 必须注入角色外观文本+场景描述+镜头参数+叙事内容
-- **分镜视频**：prompt 必须注入角色外观列表+场景+叙事+动作+运镜；需传角色参考图
-- **Grid 宫格图**：cell prompt 注入 `buildCharacterAppearanceText()` 角色外观文本
-- **分镜保存**：dialogue 中角色名 vs character_ids 自动校验
-- 所有生成路径禁止硬编码 `cinematic portrait/专业摄影/电影质感` 等风格字符串
+## 六键 Bible + H3 视频（本地 MiniMax H3）
+- 六键：CHAR_ID/SPEAKER_ID/VOICE_ID/LOCATION_ID/COSTUME_ID/STYLE_ID（`services/bible-ids.ts` + 3 列 dramas.styleId/characters.costumeId/scenes.locationId）。
+- H3=音视频联合生成，双 checkpoint：FL2VA(动作/空镜/转场) + Ref2VA(单人说话/多对话，需声线参考)。参考音频=reference conditioning(≤3条各2-15s总≤15s)，非最终对白。声线样本源=characters.voiceSampleUrl（voice_style 变更置空）。
+- 铁律：ONE_SHOT_ONE_SPEAKER、「一角色一音色禁共用」、speaker_id 全局唯一（voice-tools assign_voice 硬校验）。
+- 路由：auto-pipeline submitMissingVideos 按 scene_type 路由（对话类→referenceMode multiple+多参考图/音频）；minimax-video `resolveH3Checkpoint` 按 scene_type 路由 FL2VA/Ref2VA；`MULTI_REFERENCE_PROVIDERS=volcengine/vidu/minimax`。
+- QC 规则分 `services/qc-scoring.ts`（lip_sync*0.4+consistency*0.3+continuity*0.3）+ video_quality_checks 表，视频完成自动触发。真实唇形/相似度 AI 检测未挂载。
+- 待办：本地 H3 服务部署；checkpoint_map 配到 ai_service_configs.settings；第一轮测试 A–G。
 
-## 资源库系统 (2026-08-07)
-- 4个资源库：角色库(character_templates)、场景库(scene_templates)、兵器库(weapon_templates)、服装库(costume_templates)
-- 后端路由：`routes/characterLibrary.ts`, `sceneLibrary.ts`, `weaponLibrary.ts`, `costumeLibrary.ts` - 均使用 Hono Router
-- API 前缀：`/api/v1/character-library`, `/scene-library`, `/weapon-library`, `/costume-library`
-- 前端页面：`pages/library/index.vue`(总览), `characters.vue`, `scenes.vue`, `weapons.vue`, `costumes.vue`
-- 通用功能：分页列表+模糊搜索+多维度筛选(分类/标签/专项字段)、CRUD、批量删除、应用到项目(角色/场景)、从项目保存到库
-- 角色库特有：视觉形象(外貌/服装/表情/性别/年龄段)+声音配置(音色/提供商/语调/语速JSON)
-- 场景库特有：环境+氛围+光线+时间+风格+季节+天气+生成prompt
-- 兵器库特有：类别/类型/品级/属性JSON(威力/稀有度/元素/特效)/材质/所属角色
-- 服装库特有：风格/部位/材质/配色/季节/外观描述
-- 所有4张表共用：soft delete(via deleted_at)、usage_count 引用计数、source_drama_id 来源追溯、tags JSON数组、metadata JSON扩展
-- 导航栏新增"资源库"链接(书架图标)，位于设置下方
+## 音色体系（role_tags 已后端化 2026-08-26）
+- `ai_voices.role_tags`（TEXT JSON：旁白/主角/反派/配角）；`text-generation.inferVoiceRoleTags` 批量 LLM 打标；sync 后自动打标（失败不阻塞，留空前端回退正则）。
+- `list_voices` 返回 role_tags + 可选 role_tag 筛选；前端 mapVoiceProfile 优先后端 role_tags。
+- TTS 验证：validateTTSSpeaker/validateDialogueLines 三连匹配；`GET /storyboards/:id/validate-dialogue`；PUT 保存 dialogue 返回 dialogue_validation；前端 dubStaleCount 过期横幅。
+- 已完成（2026-08-26）：B2 音色库独立试听 `POST /ai-voices/preview`；B4 `characters.role_type` 枚举（ensureColumn + `inferRoleType` + CharacterEditor select）；B5 声纹克隆 `POST /ai-voices/clone`（MiniMax files/upload→voice_clone，`services/voice-clone.ts`，前端 episode.vue 克隆入口 + `useApi.reqForm`）。待办：真实唇形/相似度 AI 检测挂载、本地 H3 部署、checkpoint_map 配置。
 
-## 全流程多模型 fallback 机制 (2026-08-10)
-- 配置表 `model` 字段为 JSON 数组，存储全部可用模型按优先级排序
-- `getActiveConfig()` 返回完整 `models: string[]` 数组
-- 各阶段遍历 models 数组，失败自动切换到下一个，全部失败才标记 failed
-- 图片/视频生成：每次切换自动释放旧 GPU 租约并获取新租约（不挤占 GPU 资源池）
-- Agent 文本生成：每次重试重新构建 Agent 实例（Mastra Agent 构造时绑定 model）
-- 日志埋点：每次 fallback 记录 attempt/totalModels/model 字段
+## 数据删除语义
+- soft delete（读取必加 isNull(deletedAt)）：characters/dramas/agentConfigs/episodes/资源库 4 表。
+- hard delete：scenes/storyboards/videos/images/aiConfigs/aiVoices。无 DELETE：videoMerges/videoGenerations。
 
-## AI 视频生成工作台编辑器系统 (2026-08-10)
-- 每阶段模型切换：ModelSelector 组件按 service_type 动态拉取模型列表
-- 角色编辑弹窗：CharacterEditor（4区块: 基本信息/形象设定/图片生成/声音配置）
-- 场景编辑弹窗：SceneEditor（3区块: 场景信息/环境设定/图片生成）
-- 视频编辑弹窗：VideoEditor（参考图/提示词/关联角色/模型选择）
-- 单镜头重新生成：POST /storyboards/:id/regenerate-image（支持自定义 prompt + model）
-- 视频重新生成：PUT /videos/:id（参数更新）+ POST /videos/:id/regenerate（重新生成）
-- TTS 增强：角色级 voiceSpeed/voiceEmotion/voicePitch/voiceModel → 通过 getCharacterVoiceParams() 注入 TTS 调用
-- emotion 标签映射：happy/sad/angry/excited/calm/serious→MiniMax 平台值
-- 角色扩展字段：clothing, weapons, customPrompt（图片生成 prompt 覆盖）
-- 场景扩展字段：description, atmosphere, lightning, weather, season, style, customPrompt
+## 关键坑
+- 响应码：`success()` 返回 `{code:200,data,message:'success'}`；badRequest/notFound 返回 `{code:4xx,message}`；前端判 `!==200`、错误读 `data.message`（非 msg）。资源库 4 表老代码仍 c.json({code:0})。
+- Hono 4.x `/*` 通配符不注册命名参数，取内容 `c.req.routePath + c.req.path.slice(prefix)`（skills.ts wildcardId）。
+- default prompt 被 DB 快照固化：agent_configs 残留历史 systemPrompt 会覆盖 DEFAULT_PROMPTS（已清空 5 内置 agent）。
+- 契约文档 `docs/api-contract.md`（改接口需同步更新）。
+- 本地 Ollama 仅 qwen2.5-coder 支持 tool calling；CPU 推理极慢（文本 >120s），重要任务走云端。
 
-## 通用预设框架 (2026-08-10)
-- 原"仙宫导览" Skill 已重构为通用预设框架，剥离全部领域内容
-- **Skill 模板**：`skills/preset-skill-template.md` — 含 5 阶段骨架、接口定义、Variation Card 算法伪码、复用指导
-- **后端服务**：`backend/src/services/preset-framework.ts` — 占位符数据池（THEME_FAMILY_A 等）+ Variation Card 引擎 + 管线编排
-- **后端路由**：`backend/src/routes/preset-framework.ts` — 6 端点（`/preset/framework/*`）
-- **前端页面**：`frontend/app/pages/preset/framework.vue` — 5 阶段 UI（Welcome→Preview→Confirm→Progress→Done）
-- **前端 API**：`presetFrameworkAPI`（generateCard/create/fullPipeline/status 等）
-- **prompt-utils**：`PRESET_STYLE_LOCK/IMAGE_NEGATIVE/VIDEO_NEGATIVE` — 均为 `{{PLACEHOLDER}}` 占位文本
-- **核心设计模式保留**：阶段化流水线 / Variation Card 多样性引擎 / 去重检查表 / Style Lock 固定风格块 / 三层空间公式 / 质量闸门 / 负向提示词清单
-- **扩展方式**：创建新 Skill 时，复制骨架 → 填充数据池 → 撰写 Style Lock → 注册路由+前端页面
-- 全项目 "仙宫/xian-gong/XianGong" 0 残留，清理日期 2026-08-10
+## 功能索引
+- 资源库 4 库 `/api/v1/{character,scene,weapon,costume}-library`（分页+搜索+筛选+CRUD+批量删+soft delete+usage_count+source_drama_id），前端 pages/library/*；weapon/costume `POST /from-character/:characterId`。
+- 角色图：三视图(generate-three-views)/校色(8 参 ColorGradeParams+applyColorGrade)/装备特写(generate-equip-image)/智能拆分(auto-split-visuals, splitCharacterVisuals)。
+- preset 框架：presets 表 `{type,name,config}` CRUD，type=colorGrade 校色预设；services/routes/pages preset/*。
+- 工作台编辑器：CharacterEditor(4)/SceneEditor(3)/VideoEditor；角色级 voiceSpeed/Emotion/Pitch/Model；emotion→MiniMax 映射。
+- 在线文本（复用 MiniMax key）：`https://api.minimax.chat/v1/chat/completions`，model MiniMax-Text-01(~5s)/abab6.5s-chat(~0.5s)；DB text id=8「MiniMax 在线文本」priority=300 优先本地 id=4。

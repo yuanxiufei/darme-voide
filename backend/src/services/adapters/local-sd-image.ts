@@ -18,6 +18,7 @@ export class LocalSDImageAdapter implements ImageProviderAdapter {
   buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest {
     const prompt = record.prompt || ''
     const negative =
+      record.negativePrompt ||
       'low quality, blurry, text, watermark, distorted face, deformed, bad anatomy, disfigured'
 
     const [w, h] = (record.size || '1024x1024').split('x').map(Number)

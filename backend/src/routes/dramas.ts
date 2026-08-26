@@ -1,11 +1,24 @@
 import { Hono } from 'hono'
-import { and, eq, isNull, like, desc } from 'drizzle-orm'
+import { and, eq, isNull, like, desc, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, notFound, created, now, parseParamId } from '../utils/response.js'
+import { success, badRequest, notFound, conflict, created, now, parseParamId } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
+import { ensureStyleId, ensureCostumeId } from '../services/bible-ids.js'
 
 const app = new Hono()
+
+// 白名单字段映射：snake_case/camelCase 双写 → drizzle camelCase 列名
+// 返回 any：动态 key 无法被 drizzle 静态推断，交由运行时校验
+function pickFields(src: any, camelKeys: string[]): any {
+  const out: Record<string, any> = {}
+  for (const key of camelKeys) {
+    const snakeKey = key.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase())
+    if (snakeKey in src) out[key] = src[snakeKey]
+    else if (key in src) out[key] = src[key]
+  }
+  return out
+}
 
 // GET /dramas - List dramas
 app.get('/', async (c) => {
@@ -26,14 +39,27 @@ app.get('/', async (c) => {
   const total = filtered.length
   const items = filtered.slice((page - 1) * pageSize, page * pageSize)
 
-  // Attach episode/character/scene counts
+  // Attach episode/character/scene counts + multi-stage production progress
   const enriched = await Promise.all(items.map(async (drama) => {
     const eps = await db.select().from(schema.episodes)
-      .where(eq(schema.episodes.dramaId, drama.id))
+      .where(and(eq(schema.episodes.dramaId, drama.id), isNull(schema.episodes.deletedAt)))
     const chars = await db.select().from(schema.characters)
-      .where(eq(schema.characters.dramaId, drama.id))
+      .where(and(eq(schema.characters.dramaId, drama.id), isNull(schema.characters.deletedAt)))
     const scns = await db.select().from(schema.scenes)
-      .where(eq(schema.scenes.dramaId, drama.id))
+      .where(and(eq(schema.scenes.dramaId, drama.id), isNull(schema.scenes.deletedAt)))
+
+    // 分镜进度统计：剧本 → 分镜 → 图片 → 视频 → 配音
+    let sbs: any[] = []
+    if (eps.length) {
+      sbs = await db.select().from(schema.storyboards)
+        .where(and(inArray(schema.storyboards.episodeId, eps.map(e => e.id)), isNull(schema.storyboards.deletedAt)))
+    }
+    const scripted = eps.filter(e => e.scriptContent).length
+    const storyboarded = new Set(sbs.map(s => s.episodeId)).size
+    const withImage = sbs.filter(s => s.composedImage || s.firstFrameImage).length
+    const withVideo = sbs.filter(s => s.videoUrl || s.composedVideoUrl).length
+    const withTts = sbs.filter(s => s.ttsAudioUrl).length
+
     return {
       ...toSnakeCase(drama),
       tags: drama.tags ? JSON.parse(drama.tags) : [],
@@ -41,6 +67,15 @@ app.get('/', async (c) => {
       episodes: toSnakeCaseArray(eps),
       characters: toSnakeCaseArray(chars),
       scenes: toSnakeCaseArray(scns),
+      progress: {
+        total_episodes: eps.length,
+        scripted_episodes: scripted,
+        storyboarded_episodes: storyboarded,
+        storyboards: sbs.length,
+        images: withImage,
+        videos: withVideo,
+        tts: withTts,
+      },
     }
   }))
 
@@ -68,8 +103,10 @@ app.post('/', async (c) => {
     updatedAt: ts,
   }).run()
 
+  const dramaId = Number(res.lastInsertRowid)
+  ensureStyleId(dramaId)
   const [result] = db.select().from(schema.dramas)
-    .where(eq(schema.dramas.id, Number(res.lastInsertRowid))).all()
+    .where(eq(schema.dramas.id, dramaId)).all()
 
   // Create default episodes
   const totalEpisodes = body.total_episodes || 1
@@ -108,17 +145,15 @@ app.get('/:id', async (c) => {
   try {
   const id = parseParamId(c)
   if (id == null) return notFound(c, 'Invalid drama id')
-  const [drama] = await db.select().from(schema.dramas).where(eq(schema.dramas.id, id))
+  const [drama] = await db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt)))
   if (!drama) return notFound(c, '剧本不存在')
 
   const eps = await db.select().from(schema.episodes)
-    .where(eq(schema.episodes.dramaId, id))
+    .where(and(eq(schema.episodes.dramaId, id), isNull(schema.episodes.deletedAt)))
   const chars = await db.select().from(schema.characters)
-    .where(eq(schema.characters.dramaId, id))
+    .where(and(eq(schema.characters.dramaId, id), isNull(schema.characters.deletedAt)))
   const scns = await db.select().from(schema.scenes)
-    .where(eq(schema.scenes.dramaId, id))
-  const prps = await db.select().from(schema.props)
-    .where(eq(schema.props.dramaId, id))
+    .where(and(eq(schema.scenes.dramaId, id), isNull(schema.scenes.deletedAt)))
 
   return success(c, {
     ...toSnakeCase(drama),
@@ -126,7 +161,6 @@ app.get('/:id', async (c) => {
     episodes: toSnakeCaseArray(eps),
     characters: toSnakeCaseArray(chars),
     scenes: toSnakeCaseArray(scns),
-    props: toSnakeCaseArray(prps),
   })
   } catch (err: any) { logTaskError('DramasAPI', 'get', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
@@ -160,12 +194,21 @@ app.delete('/:id', async (c) => {
   if (id == null) return notFound(c, 'Invalid drama id')
   const [drama] = db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt))).all()
   if (!drama) return notFound(c, 'Drama not found')
+
+  // 删除竞态保护：管线执行中的 episode 拒绝删除（避免已删剧本继续写数据/复活）
+  const inFlight = db.select().from(schema.episodes)
+    .where(and(eq(schema.episodes.dramaId, id), isNull(schema.episodes.deletedAt))).all()
+    .filter(ep => ep.status?.startsWith('auto:') && ep.status !== 'auto:done' && ep.status !== 'auto:failed')
+  if (inFlight.length) {
+    return conflict(c, `剧本正在自动生成中（${inFlight.length} 集执行中），请等待完成后再删除`)
+  }
+
   db.update(schema.dramas).set({ deletedAt: now() }).where(eq(schema.dramas.id, id)).run()
   return success(c)
   } catch (err: any) { logTaskError('DramasAPI', 'delete', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
-// PUT /dramas/:id/characters - Save characters
+// PUT /dramas/:id/characters - Save characters（白名单字段映射，避免 no such column）
 app.put('/:id/characters', async (c) => {
   try {
   const dramaId = parseParamId(c)
@@ -174,18 +217,28 @@ app.put('/:id/characters', async (c) => {
   const chars = body.characters || []
   const ts = now()
 
+  const CHAR_KEYS = [
+    'name', 'role', 'roleType', 'description', 'appearance', 'personality',
+    'voiceStyle', 'imageUrl', 'referenceImages', 'seedValue', 'sortOrder',
+    'localPath', 'voiceSampleUrl', 'voiceProvider', 'voiceSpeed', 'voiceEmotion',
+    'voicePitch', 'clothing', 'weapons', 'customPrompt', 'voiceModel', 'costumeId',
+  ]
+
   for (const char of chars) {
+    const fields = pickFields(char, CHAR_KEYS)
     if (char.id) {
-      await db.update(schema.characters).set({ ...char, updatedAt: ts }).where(eq(schema.characters.id, char.id))
+      await db.update(schema.characters).set({ ...fields, updatedAt: ts }).where(and(eq(schema.characters.id, char.id), isNull(schema.characters.deletedAt)))
+      ensureCostumeId(char.id)
     } else {
-      await db.insert(schema.characters).values({ ...char, dramaId, createdAt: ts, updatedAt: ts })
+      const ins = db.insert(schema.characters).values({ ...fields, dramaId, createdAt: ts, updatedAt: ts }).run()
+      ensureCostumeId(Number(ins.lastInsertRowid))
     }
   }
   return success(c)
   } catch (err: any) { logTaskError('DramasAPI', 'save-characters', { error: err.message }); return badRequest(c, err.message) }
 })
 
-// PUT /dramas/:id/episodes - Save episodes
+// PUT /dramas/:id/episodes - Save episodes（白名单字段映射，避免 no such column）
 app.put('/:id/episodes', async (c) => {
   try {
   const dramaId = parseParamId(c)
@@ -194,15 +247,22 @@ app.put('/:id/episodes', async (c) => {
   const episodes = body.episodes || []
   const ts = now()
 
+  const EP_KEYS = [
+    'episodeNumber', 'title', 'content', 'scriptContent', 'description',
+    'duration', 'status', 'videoUrl', 'thumbnail',
+    'imageConfigId', 'videoConfigId', 'audioConfigId',
+  ]
+
   for (const ep of episodes) {
+    const fields = pickFields(ep, EP_KEYS)
     if (ep.id) {
-      await db.update(schema.episodes).set({ ...ep, updatedAt: ts }).where(eq(schema.episodes.id, ep.id))
+      await db.update(schema.episodes).set({ ...fields, updatedAt: ts }).where(eq(schema.episodes.id, ep.id))
     } else {
       await db.insert(schema.episodes).values({
-        ...ep,
+        ...fields,
         dramaId,
-        episodeNumber: ep.episode_number || ep.episodeNumber || 1,
-        title: ep.title || '未命名',
+        episodeNumber: fields.episodeNumber || 1,
+        title: fields.title || '未命名',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -210,6 +270,60 @@ app.put('/:id/episodes', async (c) => {
   }
   return success(c)
   } catch (err: any) { logTaskError('DramasAPI', 'save-episodes', { error: err.message }); return badRequest(c, err.message) }
+})
+
+// GET /dramas/:id/prompts — 聚合该剧下所有提示词（角色/场景/分镜图片+视频），供统一提示词管理视图使用
+app.get('/:id/prompts', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid drama id')
+  try {
+    const [drama] = db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt))).all()
+    if (!drama) return notFound(c, 'Drama not found')
+
+    // 角色（软删除过滤，按 sortOrder 排序）
+    const characters = db.select().from(schema.characters)
+      .where(and(eq(schema.characters.dramaId, id), isNull(schema.characters.deletedAt)))
+      .orderBy(schema.characters.sortOrder).all()
+
+    // 场景（软删除过滤）
+    const scenes = db.select().from(schema.scenes)
+      .where(and(eq(schema.scenes.dramaId, id), isNull(schema.scenes.deletedAt)))
+      .orderBy(schema.scenes.id).all()
+
+    // 分镜（通过 episode 关联到 drama）
+    const episodes = db.select().from(schema.episodes)
+      .where(and(eq(schema.episodes.dramaId, id), isNull(schema.episodes.deletedAt)))
+      .orderBy(schema.episodes.episodeNumber).all()
+    const epIds = episodes.map(e => e.id)
+
+    let storyboards: any[] = []
+    if (epIds.length) {
+      storyboards = db.select().from(schema.storyboards)
+        .where(inArray(schema.storyboards.episodeId, epIds))
+        .orderBy(schema.storyboards.episodeId, schema.storyboards.storyboardNumber).all()
+    }
+
+    return success(c, {
+      characters: characters.map(ch => ({
+        id: ch.id, name: ch.name, role: ch.role,
+        customPrompt: ch.customPrompt, imageUrl: ch.imageUrl,
+      })),
+      scenes: scenes.map(sc => ({
+        id: sc.id, location: sc.location, time: sc.time,
+        prompt: sc.prompt, customPrompt: sc.customPrompt, imageUrl: sc.imageUrl,
+      })),
+      episodes: episodes.map(ep => ({ id: ep.id, episodeNumber: ep.episodeNumber, title: ep.title })),
+      storyboards: storyboards.map(sb => ({
+        id: sb.id, episodeId: sb.episodeId, storyboardNumber: sb.storyboardNumber, title: sb.title,
+        imagePrompt: sb.imagePrompt, videoPrompt: sb.videoPrompt,
+        customImagePrompt: sb.customImagePrompt, customVideoPrompt: sb.customVideoPrompt,
+        status: sb.status,
+      })),
+    })
+  } catch (err: any) {
+    logTaskError('DramasAPI', 'prompts', { error: err.message, id })
+    return badRequest(c, err.message)
+  }
 })
 
 export default app

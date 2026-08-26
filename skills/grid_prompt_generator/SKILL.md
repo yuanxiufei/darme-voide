@@ -1,6 +1,10 @@
 ---
 name: grid-image-generator
 description: 图片提示词生成指南 — 角色、场景、宫格图三类提示词规范
+preconditions:
+  - 已具备角色外貌 / 场景描述 / 分镜数据等输入
+protocol:
+  - prompts_count: 生成的提示词数量
 ---
 
 # 图片提示词生成指南

@@ -10,6 +10,7 @@ export const dramas = sqliteTable('dramas', {
   description: text('description'),
   genre: text('genre'),
   style: text('style').default('realistic'),
+  styleId: text('style_id'),
   totalEpisodes: integer('total_episodes').default(1),
   totalDuration: integer('total_duration').default(0),
   status: text('status').notNull().default('draft'),
@@ -36,6 +37,10 @@ export const episodes = sqliteTable('episodes', {
   imageConfigId: integer('image_config_id'),
   videoConfigId: integer('video_config_id'),
   audioConfigId: integer('audio_config_id'),
+  bgmUrl: text('bgm_url'),
+  bgmVolume: real('bgm_volume').default(0.3),
+  bgmFadeIn: real('bgm_fade_in').default(1.5),
+  bgmFadeOut: real('bgm_fade_out').default(2.0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -46,10 +51,13 @@ export const characters = sqliteTable('characters', {
   dramaId: integer('drama_id').notNull(),
   name: text('name').notNull(),
   role: text('role'),
+  roleType: text('role_type'),
   description: text('description'),
   appearance: text('appearance'),
   personality: text('personality'),
   voiceStyle: text('voice_style'),
+  speakerId: text('speaker_id'),
+  costumeId: text('costume_id'),
   imageUrl: text('image_url'),
   referenceImages: text('reference_images'),
   seedValue: text('seed_value'),
@@ -63,6 +71,13 @@ export const characters = sqliteTable('characters', {
   clothing: text('clothing'),
   weapons: text('weapons'),
   customPrompt: text('custom_prompt'),
+  negativePrompt: text('negative_prompt'),
+  coreFeatures: text('core_features'),
+  costumes: text('costumes'),
+  variations: text('variations'),
+  accessories: text('accessories'),
+  threeViews: text('three_views'),
+  equipImages: text('equip_images'),
   voiceModel: text('voice_model').default('speech-2.8-hd'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -90,6 +105,7 @@ export const scenes = sqliteTable('scenes', {
   dramaId: integer('drama_id').notNull(),
   episodeId: integer('episode_id'),
   location: text('location').notNull(),
+  locationId: text('location_id'),
   time: text('time').notNull(),
   prompt: text('prompt').notNull(),
   storyboardCount: integer('storyboard_count').default(1),
@@ -103,6 +119,7 @@ export const scenes = sqliteTable('scenes', {
   season: text('season'),
   style: text('style'),
   customPrompt: text('custom_prompt'),
+  negativePrompt: text('negative_prompt'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -117,6 +134,8 @@ export const storyboards = sqliteTable('storyboards', {
   location: text('location'),
   time: text('time'),
   shotType: text('shot_type'),
+  sceneType: text('scene_type'),
+  speakerId: text('speaker_id'),
   angle: text('angle'),
   movement: text('movement'),
   action: text('action'),
@@ -139,6 +158,11 @@ export const storyboards = sqliteTable('storyboards', {
   composedVideoUrl: text('composed_video_url'),
   customImagePrompt: text('custom_image_prompt'),
   customVideoPrompt: text('custom_video_prompt'),
+  negativePrompt: text('negative_prompt'),
+  firstFramePrompt: text('first_frame_prompt'),
+  lastFramePrompt: text('last_frame_prompt'),
+  transitionType: text('transition_type').default('cut'),
+  transitionDuration: real('transition_duration').default(0.5),
   status: text('status').default('pending'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -148,6 +172,7 @@ export const storyboards = sqliteTable('storyboards', {
 export const storyboardCharacters = sqliteTable('storyboard_characters', {
   storyboardId: integer('storyboard_id').notNull(),
   characterId: integer('character_id').notNull(),
+  costume: text('costume'),
 }, (table) => ({
   pk: primaryKey({ columns: [table.storyboardId, table.characterId] }),
 }))
@@ -180,6 +205,8 @@ export const aiServiceProviders = sqliteTable('ai_service_providers', {
   defaultUrl: text('default_url'),
   presetModels: text('preset_models'),
   description: text('description'),
+  endpointPrefix: text('endpoint_prefix'),
+  isRecommended: integer('is_recommended', { mode: 'boolean' }).default(false),
   isActive: integer('is_active', { mode: 'boolean' }).default(true),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -192,6 +219,7 @@ export const aiVoices = sqliteTable('ai_voices', {
   description: text('description'),                // 描述数组 JSON
   language: text('language'),                     // 语言标签
   provider: text('provider').notNull(),           // minimax
+  roleTags: text('role_tags'),                    // 角色类型标签 JSON 数组（旁白/主角/反派/配角）
   createdAt: text('created_at').notNull(),
 })
 
@@ -218,7 +246,6 @@ export const imageGenerations = sqliteTable('image_generations', {
   dramaId: integer('drama_id'),
   sceneId: integer('scene_id'),
   characterId: integer('character_id'),
-  propId: integer('prop_id'),
   imageType: text('image_type'),
   frameType: text('frame_type'),
   provider: text('provider'),
@@ -232,7 +259,6 @@ export const imageGenerations = sqliteTable('image_generations', {
   cfgScale: real('cfg_scale'),
   seed: integer('seed'),
   imageUrl: text('image_url'),
-  minioUrl: text('minio_url'),
   localPath: text('local_path'),
   status: text('status').default('pending'),
   taskId: text('task_id'),
@@ -240,6 +266,10 @@ export const imageGenerations = sqliteTable('image_generations', {
   width: integer('width'),
   height: integer('height'),
   referenceImages: text('reference_images'),
+  costume: text('costume'),
+  colorGrade: text('color_grade'),
+  viewType: text('view_type'),
+  equipType: text('equip_type'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
@@ -251,6 +281,7 @@ export const videoGenerations = sqliteTable('video_generations', {
   dramaId: integer('drama_id'),
   provider: text('provider'),
   prompt: text('prompt'),
+  negativePrompt: text('negative_prompt'),
   model: text('model'),
   imageGenId: integer('image_gen_id'),
   referenceMode: text('reference_mode'),
@@ -267,7 +298,6 @@ export const videoGenerations = sqliteTable('video_generations', {
   cameraMotion: text('camera_motion'),
   seed: integer('seed'),
   videoUrl: text('video_url'),
-  minioUrl: text('minio_url'),
   localPath: text('local_path'),
   status: text('status').default('pending'),
   taskId: text('task_id'),
@@ -279,6 +309,8 @@ export const videoGenerations = sqliteTable('video_generations', {
   completedAt: text('completed_at'),
   deletedAt: text('deleted_at'),
   characterIds: text('character_ids'),
+  sceneType: text('scene_type'),
+  referenceAudioUrls: text('reference_audio_urls'),
 })
 
 export const videoMerges = sqliteTable('video_merges', {
@@ -286,8 +318,8 @@ export const videoMerges = sqliteTable('video_merges', {
   episodeId: integer('episode_id'),
   dramaId: integer('drama_id'),
   title: text('title'),
-  provider: text('provider'),
-  model: text('model'),
+  provider: text('provider').notNull(),
+  model: text('model').notNull(),
   status: text('status').default('pending'),
   scenes: text('scenes'), // JSON
   mergedUrl: text('merged_url'),
@@ -299,47 +331,22 @@ export const videoMerges = sqliteTable('video_merges', {
   deletedAt: text('deleted_at'),
 })
 
-export const props = sqliteTable('props', {
+// 镜头级 QC 打分（唇形同步 / 角色一致性 / 连续性）
+export const videoQualityChecks = sqliteTable('video_quality_checks', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  dramaId: integer('drama_id').notNull(),
-  name: text('name').notNull(),
-  type: text('type'),
-  description: text('description'),
-  prompt: text('prompt'),
-  imageUrl: text('image_url'),
-  referenceImages: text('reference_images'),
-  localPath: text('local_path'),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-  deletedAt: text('deleted_at'),
-})
-
-export const assets = sqliteTable('assets', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
+  storyboardId: integer('storyboard_id'),
+  videoGenerationId: integer('video_generation_id'),
   dramaId: integer('drama_id'),
   episodeId: integer('episode_id'),
-  storyboardId: integer('storyboard_id'),
-  storyboardNum: integer('storyboard_num'),
-  name: text('name'),
-  description: text('description'),
-  type: text('type'),
-  category: text('category'),
-  url: text('url'),
-  thumbnailUrl: text('thumbnail_url'),
-  localPath: text('local_path'),
-  fileSize: integer('file_size'),
-  mimeType: text('mime_type'),
-  width: integer('width'),
-  height: integer('height'),
-  duration: integer('duration'),
-  format: text('format'),
-  imageGenId: integer('image_gen_id'),
-  videoGenId: integer('video_gen_id'),
-  isFavorite: integer('is_favorite', { mode: 'boolean' }).default(false),
-  viewCount: integer('view_count').default(0),
+  lipSyncScore: integer('lip_sync_score'),
+  characterConsistencyScore: integer('character_consistency_score'),
+  continuityScore: integer('continuity_score'),
+  overallScore: integer('overall_score'),
+  issues: text('issues'),
+  dimensions: text('dimensions'),
+  status: text('status').default('pending'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
-  deletedAt: text('deleted_at'),
 })
 
 // ====== 资源库模板表 ======
@@ -449,4 +456,14 @@ export const costumeTemplates = sqliteTable('costume_templates', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
+})
+
+// 预设表（校色预设、生成预设等）
+export const presets = sqliteTable('presets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  type: text('type').notNull(),          // colorGrade / character / generation / ...
+  name: text('name').notNull(),
+  config: text('config'),                // JSON 配置
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 })

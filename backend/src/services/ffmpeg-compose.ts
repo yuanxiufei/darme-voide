@@ -4,26 +4,22 @@
 import ffmpeg from 'fluent-ffmpeg'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { execFileSync } from 'child_process'
 import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { generateTTS } from './tts-generation.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
-const DATA_ROOT = path.resolve(__dirname, '../../../data')
+import { getDataRoot, getStorageRoot } from '../config.js'
 let subtitleFilterSupport: boolean | null = null
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
 
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
-  if (relativePath.startsWith('static/')) return path.join(DATA_ROOT, relativePath)
-  return path.join(STORAGE_ROOT, relativePath)
+  if (relativePath.startsWith('static/')) return path.join(getDataRoot(), relativePath)
+  return path.join(getStorageRoot(), relativePath)
 }
 
 function supportsSubtitleFilter(): boolean {
@@ -87,7 +83,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           const charName = parsedDialogue.speaker
           if (ep) {
             const chars = db.select().from(schema.characters)
-              .where(eq(schema.characters.dramaId, ep.dramaId)).all()
+              .where(and(eq(schema.characters.dramaId, ep.dramaId), isNull(schema.characters.deletedAt))).all()
             const found = chars.find(c => c.name === charName)
             if (found?.voiceStyle) voiceId = found.voiceStyle
           }
@@ -106,7 +102,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
     // 2. 生成字幕文件（SRT）
     if (!parsedDialogue.ignorable) {
-      const srtDir = path.join(STORAGE_ROOT, 'subtitles')
+      const srtDir = path.join(getStorageRoot(), 'subtitles')
       fs.mkdirSync(srtDir, { recursive: true })
       const srtFilename = `${uuid()}.srt`
       subtitlePath = path.join(srtDir, srtFilename)
@@ -122,7 +118,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     }
 
     // 3. FFmpeg 合成
-    const outputDir = path.join(STORAGE_ROOT, 'composed')
+    const outputDir = path.join(getStorageRoot(), 'composed')
     fs.mkdirSync(outputDir, { recursive: true })
     const outputFilename = `${uuid()}.mp4`
     const outputPath = path.join(outputDir, outputFilename)

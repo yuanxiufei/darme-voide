@@ -1,0 +1,18 @@
+[
+  {
+    "name": "knowledge-base",
+    "command": "npx",
+    "args": ["-y", "@some/mcp-server", "--port", "9000"],
+    "transport": "stdio",
+    "connectTimeoutMs": 10000,
+    "enabled": true
+  },
+  {
+    "name": "remote-tools",
+    "url": "https://mcp.example.com/mcp",
+    "transport": "http",
+    "headers": { "Authorization": "Bearer <token>" },
+    "connectTimeoutMs": 10000,
+    "enabled": false
+  }
+]

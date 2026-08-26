@@ -159,16 +159,36 @@ router.post('/batch-delete', async (c) => {
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
-router.post('/from-prop/:propId', async (c) => {
+// ====== POST /from-character/:characterId - 从项目角色武器保存到武器库 ======
+router.post('/from-character/:characterId', async (c) => {
   try {
-    const pid = parseInt(c.req.param('propId'))
-    const prop = Q_GET('SELECT * FROM props WHERE id = ? AND deleted_at IS NULL', pid) as any
-    if (!prop) return c.json({ code: 404, data: null, message: '道具不存在' })
+    const charId = parseInt(c.req.param('characterId'))
+    if (isNaN(charId)) return c.json({ code: 400, data: null, message: '无效的角色ID' })
+    const character = Q_GET('SELECT * FROM characters WHERE id = ? AND deleted_at IS NULL', charId) as any
+    if (!character) return c.json({ code: 404, data: null, message: '角色不存在' })
+    const body = await c.req.json().catch(() => ({}))
+
+    // 解析角色武器（JSON 数组或纯文本）
+    let weapons: any[] = []
+    let rawText = ''
+    try {
+      const p = JSON.parse(character.weapons || '')
+      if (Array.isArray(p)) weapons = p
+      else if (character.weapons) rawText = String(character.weapons)
+    } catch {
+      if (character.weapons) rawText = String(character.weapons)
+    }
+    const idx = body.weaponIndex != null ? Number(body.weaponIndex) : 0
+    const w = weapons[idx] || {}
+    const name = body.name || w.name || (rawText && weapons.length === 0 ? rawText.slice(0, 40) : '') || '未命名武器'
+
     const t = now()
-    const r = Q_RUN(`INSERT INTO weapon_templates (name,category,description,appearance,image_url,reference_images,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-      prop.name, prop.type || '其他', prop.description || '', prop.prompt || '', prop.image_url || '', prop.reference_images || '', prop.drama_id, t, t)
-    return c.json({ code: 0, data: { templateId: r.lastInsertRowid }, message: `道具 "${prop.name}" 已保存到兵器库` })
-  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+    const r = Q_RUN(
+      `INSERT INTO weapon_templates (name,category,type,description,appearance,material,attributes,rank,owner_character_name,image_url,reference_images,tags,metadata,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      name, body.category || w.category || '其他', body.type || w.type || '', body.description || w.description || '', body.appearance || w.appearance || '', body.material || w.material || '', safeStringify(body.attributes || w.attributes), body.rank || w.rank || '', character.name, body.imageUrl || w.imageUrl || '', safeStringify(body.referenceImages || w.referenceImages), safeStringify(body.tags || w.tags), safeStringify(body.metadata || w.metadata), character.drama_id, t, t,
+    )
+    return c.json({ code: 0, data: { id: r.lastInsertRowid }, message: `武器 "${name}" 已保存到武器库` })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message || '保存武器到武器库失败' }) }
 })
 
 export default router

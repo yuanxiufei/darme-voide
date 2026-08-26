@@ -4,15 +4,13 @@
  */
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
-import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
+import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { fetchWithRetry } from '../utils/vendor-errors.js'
 import { gpuManager, isLocalConfig } from './gpu-manager.js'
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
+import { getStorageRoot } from '../config.js'
 
 interface TTSParams {
   text: string
@@ -66,12 +64,9 @@ export async function generateTTS(params: TTSParams): Promise<string> {
       })
       logTaskPayload('AudioTask', 'request payload', { method, url, headers, body })
 
-      const resp = await fetch(url, { method, headers, body: JSON.stringify(body) })
-
-      if (!resp.ok) {
-        const errText = await resp.text()
-        throw new Error(`TTS API error ${resp.status}: ${errText}`)
-      }
+      const resp = await fetchWithRetry(url, { method, headers, body: JSON.stringify(body) }, 'audio', {
+        onRetry: (attempt, delayMs, reason) => logTaskWarn('AudioTask', 'request-retry', { model, attempt, delayMs, reason }),
+      })
 
       const result = await resp.json()
       const parsed = adapter.parseResponse(result)
@@ -80,7 +75,7 @@ export async function generateTTS(params: TTSParams): Promise<string> {
       const buffer = Buffer.from(parsed.audioHex, 'hex')
 
       // 保存到本地
-      const audioDir = path.join(STORAGE_ROOT, 'audio')
+      const audioDir = path.join(getStorageRoot(), 'audio')
       fs.mkdirSync(audioDir, { recursive: true })
       const filename = `${uuid()}.${parsed.format || 'mp3'}`
       const filePath = path.join(audioDir, filename)

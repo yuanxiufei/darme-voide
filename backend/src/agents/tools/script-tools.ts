@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { db, schema } from '../../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
+import { sliceLongText } from '../../utils/text-slice.js'
 
 export function createScriptTools(episodeId: number) {
   const readEpisodeScript = createTool({
@@ -19,7 +20,14 @@ export function createScriptTools(episodeId: number) {
       if (!ep) return { error: `Episode not found (id=${episodeId})` }
       const content = ep.content || ep.scriptContent
       if (!content) return { error: `Episode has no content (id=${episodeId})` }
-      return { content, word_count: content.length, episode_id: episodeId }
+      const sliced = sliceLongText(content)
+      return {
+        content: sliced.text,
+        word_count: content.length,
+        episode_id: episodeId,
+        truncated: sliced.truncated,
+        total_chars: sliced.total_chars,
+      }
     },
   })
 
@@ -35,9 +43,12 @@ export function createScriptTools(episodeId: number) {
       if (!ep) return { error: `Episode not found` }
       const source = ep.content || ep.scriptContent
       if (!source) return { error: `Episode has no content to rewrite` }
+      const sliced = sliceLongText(source)
 
       return {
-        source_content: source,
+        source_content: sliced.text,
+        truncated: sliced.truncated,
+        total_chars: sliced.total_chars,
         instruction: `请将以下内容改写为格式化剧本。
 
 格式规范：
@@ -49,7 +60,7 @@ export function createScriptTools(episodeId: number) {
 ${instructions || ''}
 
 【原始内容】
-${source}`,
+${sliced.text}`,
       }
     },
   })

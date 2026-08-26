@@ -8,6 +8,12 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
+import { getAudioConfig } from '../services/ai.js'
+import { inferVoiceRoleTags } from '../services/text-generation.js'
+import { generateTTS } from '../services/tts-generation.js'
+import { cloneVoice } from '../services/voice-clone.js'
+import { logTaskError } from '../utils/task-logger.js'
+import { vendorResponseError } from '../utils/vendor-errors.js'
 
 const app = new Hono()
 
@@ -22,11 +28,72 @@ app.get('/', async (c) => {
     voice_id: r.voiceId,
     voice_name: r.voiceName,
     description: r.description ? JSON.parse(r.description) : [],
+    role_tags: parseJsonArray(r.roleTags),
     language: r.language,
     provider: r.provider,
   }))
 
   return success(c, parsed)
+})
+
+// POST /ai-voices/preview - 生成音色试听（不绑定角色，用固定文案）
+app.post('/preview', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const voiceId = body.voice_id || body.voiceId
+  if (!voiceId) return badRequest(c, 'voice_id is required')
+
+  try {
+    const sampleText = body.text || '你好，欢迎来到短剧工坊，这是我的声音试听。'
+    const audioPath = await generateTTS({ text: sampleText, voice: voiceId, configId: body.config_id ?? null })
+    return success(c, { voice_id: voiceId, url: audioPath })
+  } catch (err: any) {
+    logTaskError('AiVoices', 'preview', { voiceId, error: err.message })
+    return badRequest(c, `试听生成失败: ${err.message}`)
+  }
+})
+
+// POST /ai-voices/clone - 音色快速复刻（上传参考音频，克隆为可复用音色）
+app.post('/clone', async (c) => {
+  try {
+    const body = await c.req.parseBody()
+    const file = body['file']
+    const voiceName = String(body['voice_name'] || body['voiceName'] || '').trim()
+    const demoText = body['demo_text'] || body['demoText'] || undefined
+
+    if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+
+    const config = getAudioConfig()
+    if (config.provider !== 'minimax') {
+      return badRequest(c, '音色复刻当前仅支持 MiniMax 音频服务')
+    }
+
+    const voiceId = generateCloneVoiceId(String(body['voice_id'] || body['voiceId'] || ''))
+
+    const result = await cloneVoice({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fileBuffer: Buffer.from(await file.arrayBuffer()),
+      filename: file.name,
+      voiceId,
+      demoText: demoText ? String(demoText) : undefined,
+      model: config.model,
+    })
+
+    // 写入音色库（不覆盖已有）
+    db.insert(schema.aiVoices).values({
+      voiceId: result.voiceId,
+      voiceName: voiceName || `克隆音色 ${result.voiceId.slice(-6)}`,
+      description: JSON.stringify(['克隆音色']),
+      language: '中文',
+      provider: 'minimax',
+      createdAt: now(),
+    }).onConflictDoNothing({ target: schema.aiVoices.voiceId }).run()
+
+    return success(c, { voice_id: result.voiceId, demo_audio: result.demoAudio })
+  } catch (err: any) {
+    logTaskError('AiVoices', 'clone', { error: err.message })
+    return badRequest(c, `音色克隆失败: ${err.message}`)
+  }
 })
 
 // POST /ai-voices/sync
@@ -59,7 +126,8 @@ app.post('/sync', async (c) => {
   })
 
   if (!resp.ok) {
-    return badRequest(c, `MiniMax API error: ${resp.status}`)
+    const err = await vendorResponseError(resp, 'audio')
+    return badRequest(c, err.message)
   }
 
   const result = await resp.json() as any
@@ -85,6 +153,23 @@ app.post('/sync', async (c) => {
 
   if (insertRows.length > 0) {
     db.insert(schema.aiVoices).values(insertRows).run()
+
+    // 批量 AI 打标（旁白/主角/反派/配角）；失败不阻塞 sync，role_tags 留空由前端回退正则
+    try {
+      const tags = await inferVoiceRoleTags(insertRows.map((r: any) => ({
+        voiceId: r.voiceId,
+        voiceName: r.voiceName,
+        description: JSON.parse(r.description || '[]'),
+      })))
+      for (const [voiceId, tagsArr] of Object.entries(tags)) {
+        db.update(schema.aiVoices)
+          .set({ roleTags: JSON.stringify(tagsArr) })
+          .where(eq(schema.aiVoices.voiceId, voiceId))
+          .run()
+      }
+    } catch (err: any) {
+      logTaskError('AiVoices', 'tag-voices', { error: err.message })
+    }
   }
 
   return success(c, { count: insertRows.length, message: `Synced ${insertRows.length} voices` })
@@ -140,6 +225,25 @@ function shouldKeepVoice(voice: { voice_id: string, voice_name: string }) {
   ]
 
   return !excludedPatterns.some(pattern => text.includes(pattern))
+}
+
+function generateCloneVoiceId(raw: string): string {
+  if (raw) {
+    const v = raw.trim()
+    if (/^[a-zA-Z][a-zA-Z0-9_-]{7,255}$/.test(v) && !/[_-]$/.test(v)) return v
+    throw new Error('voice_id 需 8-256 字符，首字符为英文字母，仅含字母/数字/-/_')
+  }
+  return 'ds_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+}
+
+function parseJsonArray(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.map(String) : []
+  } catch {
+    return []
+  }
 }
 
 export default app

@@ -1,7 +1,7 @@
 <template>
   <div class="scene-detail">
     <header class="detail-header">
-      <button class="back-btn" @click="$router.back()">
+      <button class="back-btn" @click="goBack">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
         返回
       </button>
@@ -44,15 +44,15 @@
               </label>
               <label class="field">
                 <span>时间设定</span>
-                <select v-model="form.timeOfDay" class="input">
+                <select v-model="form.time" class="input">
                   <option value="">未指定</option>
-                  <option value="dawn">黎明</option>
-                  <option value="morning">清晨</option>
-                  <option value="noon">正午</option>
-                  <option value="afternoon">午后</option>
-                  <option value="sunset">黄昏</option>
-                  <option value="night">夜晚</option>
-                  <option value="midnight">深夜</option>
+                  <option value="黎明">黎明</option>
+                  <option value="清晨">清晨</option>
+                  <option value="正午">正午</option>
+                  <option value="午后">午后</option>
+                  <option value="黄昏">黄昏</option>
+                  <option value="夜晚">夜晚</option>
+                  <option value="深夜">深夜</option>
                 </select>
               </label>
             </div>
@@ -72,7 +72,7 @@
               </label>
               <label class="field">
                 <span>光线</span>
-                <input v-model="form.lightning" class="input" placeholder="自然光 / 烛光 / 月光 / 昏暗..." />
+                <input v-model="form.lighting" class="input" placeholder="自然光 / 烛光 / 月光 / 昏暗..." />
               </label>
             </div>
             <div class="field-grid-2">
@@ -111,11 +111,22 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
-import { useRoute } from '#app'
+import { useRoute, useRouter } from '#app'
 
 const route = useRoute()
+const router = useRouter()
 const dramaId = Number(route.params.id)
 const sceneId = Number(route.params.sceneId)
+
+// 返回上一级：有浏览历史时后退，直接访问/刷新（无历史）时兜底回项目页
+function goBack() {
+  const state = window.history.state
+  if (state && state.back) {
+    router.back()
+  } else {
+    router.push(`/drama/${dramaId}`)
+  }
+}
 
 const scene = ref<any>(null)
 const loading = ref(true)
@@ -140,10 +151,10 @@ onMounted(async () => {
     if (!scene.value) return
     const s = scene.value
     form.location = s.location || ''
-    form.timeOfDay = s.timeOfDay || ''
+    form.time = s.time || ''
     form.description = s.description || ''
     form.atmosphere = s.atmosphere || ''
-    form.lightning = s.lightning || ''
+    form.lighting = s.lighting || ''
     form.weather = s.weather || ''
     form.season = s.season || ''
     form.style = s.style || ''
@@ -161,10 +172,10 @@ async function save() {
     const { sceneAPI } = await import('~/composables/useApi')
     await sceneAPI.update(sceneId, {
       location: form.location,
-      time_of_day: form.timeOfDay || null,
+      time: form.time || null,
       description: form.description,
       atmosphere: form.atmosphere || null,
-      lightning: form.lightning || null,
+      lighting: form.lighting || null,
       weather: form.weather || null,
       season: form.season || null,
       style: form.style || null,
@@ -184,7 +195,7 @@ async function generateImage() {
   errorMsg.value = ''
   try {
     const { sceneAPI, dramaAPI } = await import('~/composables/useApi')
-    await sceneAPI.generateImage(sceneId, dramaId, {
+    await sceneAPI.generateImage(sceneId, undefined, {
       prompt: form.customPrompt || undefined,
       model: imageModel.value || undefined,
     })
@@ -222,9 +233,11 @@ onUnmounted(() => {
 
 <style scoped>
 .scene-detail {
-  min-height: 100vh;
-  background: #f5f6fa;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-base);
+  font-family: var(--font-body);
 }
 .detail-header {
   display: flex;
@@ -243,7 +256,7 @@ onUnmounted(() => {
   font-weight: 700;
   flex: 1;
   margin: 0;
-  color: #1a1a2e;
+  color: var(--text-0);
 }
 .back-btn {
   display: inline-flex;
@@ -258,7 +271,7 @@ onUnmounted(() => {
   color: #2c3850;
   transition: all .15s;
 }
-.back-btn:hover { background: rgba(60,90,180,0.06); border-color: rgba(60,90,180,0.25); }
+.back-btn:hover { background: rgba(13,148,136,0.06); border-color: rgba(13,148,136,0.25); }
 
 .detail-body {
   display: grid;
@@ -306,7 +319,7 @@ onUnmounted(() => {
 .form-section h3 {
   font-size: 14px;
   font-weight: 700;
-  color: #1a1a2e;
+  color: var(--text-0);
   margin: 0 0 16px;
   display: flex;
   align-items: center;
@@ -326,9 +339,9 @@ onUnmounted(() => {
   outline: none;
   transition: border-color .15s, box-shadow .15s;
   background: #fafbfc;
-  color: #1a1a2e;
+  color: var(--text-0);
 }
-.input:focus { border-color: rgba(60,90,180,0.45); box-shadow: 0 0 0 3px rgba(60,90,180,0.08); background: #fff; }
+.input:focus { border-color: rgba(13,148,136,0.45); box-shadow: 0 0 0 3px rgba(13,148,136,0.08); background: #fff; }
 .input::placeholder { color: #b0b8c8; }
 textarea.input { resize: vertical; min-height: 60px; line-height: 1.5; }
 select.input { cursor: pointer; appearance: auto; }

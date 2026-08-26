@@ -1,0 +1,16 @@
+{
+  "id": "ext-case-001",
+  "kind": "extractor",
+  "statement": {
+    "script": "## S1 | 内景 · 咖啡厅 | 白天\n\n小明坐在靠窗位置，低头刷手机。小红推门进来，走到小明对面坐下。服务员老张端着两杯咖啡走过来。\n\n小明：两杯拿铁，谢谢。\n\n小红：（微笑）老张，还是老样子。\n\n老张：（憨厚地）二位慢用，有事叫我。\n\n## S2 | 内景 · 公司办公室 | 夜晚\n\n小明和小红在工位上加班改方案，老张敲门进来送夜宵。\n\n老张：给你们带了点吃的，别太拼了。\n\n小明：谢谢张哥。\n\n小红：张哥你也早点休息。"
+  },
+  "rubric": {
+    "goldenCharacters": ["小明", "小红", "老张"],
+    "goldenScenes": [
+      { "location": "咖啡厅", "time": "白天" },
+      { "location": "公司办公室", "time": "夜晚" }
+    ],
+    "minAppearanceLength": 20,
+    "minPromptLength": 20
+  }
+}

@@ -42,6 +42,13 @@
       </nav>
 
       <div class="header-right">
+        <button class="help-btn" title="使用引导" @click="openHelp">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </button>
         <div class="film-strip">
           <span class="film-frame"></span>
           <span class="film-frame"></span>
@@ -61,6 +68,10 @@ import brandLogo from '~/assets/brand-logo.svg'
 
 const route = useRoute()
 const showBrandImage = ref(true)
+
+function openHelp() {
+  useState('onboarding-open', () => false).value = true
+}
 </script>
 
 <style scoped>
@@ -139,11 +150,21 @@ const showBrandImage = ref(true)
 .nav-link.active {
   background: var(--accent-bg);
   color: var(--accent-text);
-  border-color: rgba(76,125,255,0.18);
+  border-color: rgba(13,148,136,0.18);
   font-weight: 600;
 }
 
-.header-right { display: flex; align-items: center; margin-left: auto; }
+.header-right { display: flex; align-items: center; margin-left: auto; gap: 12px; }
+
+.help-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer;
+  color: var(--text-2);
+  transition: all 0.18s var(--ease-out);
+}
+.help-btn:hover { color: var(--text-0); border-color: var(--accent); }
 
 /* Film strip decoration */
 .film-strip {

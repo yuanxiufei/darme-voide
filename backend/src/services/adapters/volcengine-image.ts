@@ -25,6 +25,10 @@ export class VolcEngineImageAdapter implements ImageProviderAdapter {
       prompt: record.prompt,
     }
 
+    if (record.negativePrompt) {
+      body.negative_prompt = record.negativePrompt
+    }
+
     // 尺寸参数
     if (record.size) {
       const [w, h] = record.size.split('x')

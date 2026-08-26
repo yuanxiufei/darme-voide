@@ -1,6 +1,11 @@
 ---
 name: character-scene-extractor
 description: 角色和场景提取的规范与方法
+preconditions:
+  - 调用 read_script_for_extraction 能读到当前集格式化剧本
+protocol:
+  - characters_count: 提取或复用的角色数量
+  - scenes_count: 提取或复用的场景数量
 ---
 
 # 角色与场景提取指南

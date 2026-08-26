@@ -1,11 +1,15 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, parseParamId } from '../utils/response.js'
 import { composeStoryboard } from '../services/ffmpeg-compose.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { toSnakeCase } from '../utils/transform.js'
 
+/**
+ * compose = 单镜合成：把单个镜头的视频 + 配音/音频合成为成片片段（composed_video_url）。
+ * 注意与 merge（整集拼接）区分：merge 把多个已合成镜头串接为完整剧集。
+ */
 const app = new Hono()
 
 // POST /storyboards/:id/compose — 合成单个镜头
@@ -38,10 +42,12 @@ app.post('/episodes/:id/compose-all', async (c) => {
   const withVideo = storyboards.filter(sb => sb.videoUrl)
   if (withVideo.length === 0) return badRequest(c, 'No storyboards have video yet')
 
-  // 异步处理
+  logTaskStart('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length })
+
+  // 只标记有视频的 storyboard 为合成中（无视频的保持原状）
   db.update(schema.storyboards)
     .set({ status: 'compose_processing' })
-    .where(eq(schema.storyboards.episodeId, episodeId))
+    .where(inArray(schema.storyboards.id, withVideo.map(sb => sb.id)))
     .run()
 
   ;(async () => {
@@ -58,7 +64,6 @@ app.post('/episodes/:id/compose-all', async (c) => {
     logTaskSuccess('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length, ok, fail })
   })()
 
-  logTaskStart('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length })
   return success(c, {
     message: `Started composing ${withVideo.length} storyboards`,
     total: withVideo.length,

@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now, parseParamId } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
+import { continueScript } from '../services/text-generation.js'
 
 const app = new Hono()
 
@@ -17,9 +18,9 @@ app.post('/', async (c) => {
   }
   const ts = now()
 
-  // Get next episode number
+  // Get next episode number (exclude soft-deleted)
   const existing = db.select().from(schema.episodes)
-    .where(eq(schema.episodes.dramaId, body.drama_id))
+    .where(and(eq(schema.episodes.dramaId, body.drama_id), isNull(schema.episodes.deletedAt)))
     .orderBy(schema.episodes.episodeNumber).all()
   const nextNum = existing.length ? Math.max(...existing.map(e => e.episodeNumber)) + 1 : 1
 
@@ -55,7 +56,8 @@ app.put('/:id', async (c) => {
   const body = await c.req.json()
 
   const allowed = ['content', 'script_content', 'title', 'description', 'status',
-    'image_config_id', 'video_config_id', 'audio_config_id']
+    'image_config_id', 'video_config_id', 'audio_config_id',
+    'bgm_url', 'bgm_volume', 'bgm_fade_in', 'bgm_fade_out']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -72,10 +74,26 @@ app.put('/:id', async (c) => {
   if ('image_config_id' in updates) drizzleUpdates.imageConfigId = Number(updates.image_config_id)
   if ('video_config_id' in updates) drizzleUpdates.videoConfigId = Number(updates.video_config_id)
   if ('audio_config_id' in updates) drizzleUpdates.audioConfigId = Number(updates.audio_config_id)
+  if ('bgm_url' in updates) drizzleUpdates.bgmUrl = updates.bgm_url
+  if ('bgm_volume' in updates) drizzleUpdates.bgmVolume = Number(updates.bgm_volume)
+  if ('bgm_fade_in' in updates) drizzleUpdates.bgmFadeIn = Number(updates.bgm_fade_in)
+  if ('bgm_fade_out' in updates) drizzleUpdates.bgmFadeOut = Number(updates.bgm_fade_out)
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
   } catch (err: any) { logTaskError('EpisodesAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
+})
+
+// DELETE /episodes/:id — Soft delete an episode
+app.delete('/:id', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid episode id')
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep || ep.deletedAt) return notFound(c, 'Episode not found')
+  await db.update(schema.episodes).set({ deletedAt: now(), updatedAt: now() }).where(eq(schema.episodes.id, id))
+  return success(c)
+  } catch (err: any) { logTaskError('EpisodesAPI', 'delete', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // GET /episodes/:id/characters — characters linked to this episode
@@ -119,10 +137,16 @@ app.get('/:episode_id/storyboards', async (c) => {
     .all()
   const links = db.select().from(schema.storyboardCharacters).all()
   const charIdsByStoryboard = new Map<number, number[]>()
+  const costumesByStoryboard = new Map<number, Record<number, string>>()
   for (const link of links) {
     const arr = charIdsByStoryboard.get(link.storyboardId) || []
     arr.push(link.characterId)
     charIdsByStoryboard.set(link.storyboardId, arr)
+    if (link.costume) {
+      const cm = costumesByStoryboard.get(link.storyboardId) || {}
+      cm[link.characterId] = link.costume
+      costumesByStoryboard.set(link.storyboardId, cm)
+    }
   }
 
   const episodeCharIds = db.select().from(schema.episodeCharacters)
@@ -134,6 +158,7 @@ app.get('/:episode_id/storyboards', async (c) => {
   return success(c, rows.map((row) => ({
     ...toSnakeCase(row),
     character_ids: charIdsByStoryboard.get(row.id) || [],
+    character_costumes: costumesByStoryboard.get(row.id) || {},
     characters: allChars
       .filter(ch => (charIdsByStoryboard.get(row.id) || []).includes(ch.id))
       .map(ch => toSnakeCase(ch)),
@@ -149,7 +174,7 @@ app.get('/:id/pipeline-status', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c, 'Episode not found')
 
-  const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+  const chars = db.select().from(schema.characters).where(and(eq(schema.characters.dramaId, ep.dramaId), isNull(schema.characters.deletedAt))).all()
   const scenes = db.select().from(schema.scenes).where(eq(schema.scenes.dramaId, ep.dramaId)).all()
   const sbs = db.select().from(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).all()
   const merges = db.select().from(schema.videoMerges).where(eq(schema.videoMerges.episodeId, episodeId)).all()
@@ -183,6 +208,27 @@ app.get('/:id/pipeline-status', async (c) => {
     },
   })
   } catch (err: any) { logTaskError('EpisodesAPI', 'pipeline-status', { error: err.message }); return badRequest(c, err.message) }
+})
+
+// POST /episodes/:id/continue-script — AI 续写剧本（原始内容或格式化剧本）
+app.post('/:id/continue-script', async (c) => {
+  try {
+    const id = parseParamId(c)
+    if (id == null) return notFound(c, 'Invalid episode id')
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+    if (!ep || ep.deletedAt) return notFound(c, 'Episode not found')
+
+    const body = await c.req.json()
+    const mode = body.mode === 'script' ? 'script' : 'raw'
+    const text = typeof body.text === 'string' ? body.text : ''
+    if (!text.trim()) return badRequest(c, 'text is required')
+
+    const continuation = await continueScript({ text, mode })
+    return success(c, { continuation })
+  } catch (err: any) {
+    logTaskError('EpisodesAPI', 'continue-script', { error: err.message, id: c.req.param('id') })
+    return badRequest(c, err.message)
+  }
 })
 
 export default app

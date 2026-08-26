@@ -7,8 +7,10 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest } from '../utils/response.js'
 import { downloadFile } from '../utils/storage.js'
-import { ViduVideoAdapter } from '../services/adapters/vidu-video'
+import { probeVideoDuration } from '../utils/video-probe.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+import { formatVendorTaskError } from '../utils/vendor-errors.js'
+import { runQcAfterVideoComplete } from '../services/qc-scoring.js'
 
 const app = new Hono()
 
@@ -55,11 +57,17 @@ app.post('/vidu', async (c) => {
   if (state === 'success' && video_url) {
     try {
       const localPath = await downloadFile(video_url, 'videos')
+
+      // Vidu 回调不返回时长，用 ffprobe 探测本地文件实际时长（供字幕/合成使用）
+      const probed = await probeVideoDuration(localPath)
+      const duration = probed > 0 ? probed : undefined
+
       db.update(schema.videoGenerations)
         .set({
           videoUrl: video_url,
           localPath,
           status: 'completed',
+          completedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         })
         .where(eq(schema.videoGenerations.id, record.id))
@@ -68,9 +76,11 @@ app.post('/vidu', async (c) => {
       // 更新 storyboard
       if (record.storyboardId) {
         db.update(schema.storyboards)
-          .set({ videoUrl: localPath, updatedAt: new Date().toISOString() })
+          .set({ videoUrl: localPath, duration, updatedAt: new Date().toISOString() })
           .where(eq(schema.storyboards.id, record.storyboardId))
           .run()
+        // 触发镜头级 QC 打分（fire-and-forget）
+        runQcAfterVideoComplete(record.storyboardId, record.id)
       }
 
       logTaskSuccess('Webhook', 'vidu-video-updated', {
@@ -78,6 +88,7 @@ app.post('/vidu', async (c) => {
         generationId: record.id,
         storyboardId: record.storyboardId,
         localPath,
+        duration,
       })
       return success(c, { message: 'Video updated successfully' })
     } catch (err: any) {
@@ -91,11 +102,12 @@ app.post('/vidu', async (c) => {
   }
 
   if (state === 'failed') {
-    logTaskError('Webhook', 'vidu-generation-failed', { taskId: task_id, generationId: record.id, error: error || 'Vidu generation failed' })
+    const msg = formatVendorTaskError(error, 'video')
+    logTaskError('Webhook', 'vidu-generation-failed', { taskId: task_id, generationId: record.id, error: msg })
     db.update(schema.videoGenerations)
       .set({
         status: 'failed',
-        errorMsg: error || 'Vidu generation failed',
+        errorMsg: msg,
       })
       .where(eq(schema.videoGenerations.id, record.id))
       .run()

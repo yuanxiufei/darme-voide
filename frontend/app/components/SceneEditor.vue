@@ -67,8 +67,12 @@
               <textarea v-model="form.prompt" class="input" rows="2" />
             </label>
             <label class="field">
-              <span>自定义 Prompt 覆盖</span>
+              <span>正向提示词（AI 提取，可修改）</span>
               <textarea v-model="form.customPrompt" class="input" rows="3" placeholder="覆盖自动生成，直接使用此 prompt..." />
+            </label>
+            <label class="field">
+              <span>反向提示词（AI 提取，可修改；留空使用默认）</span>
+              <textarea v-model="form.negativePrompt" class="input" rows="2" placeholder="排除内容/风格，如：people, text, watermark, flat composition..." />
             </label>
             <div class="regenerate-row">
               <ModelSelector v-model="imageModel" service-type="image" label="模型" />
@@ -174,6 +178,7 @@ watch(() => props.visible && props.scene, (s) => {
   form.season = s.season || ''
   form.style = s.style || ''
   form.customPrompt = s.customPrompt || ''
+  form.negativePrompt = s.negativePrompt || ''
 }, { immediate: true })
 
 async function save() {
@@ -192,6 +197,7 @@ async function save() {
       season: form.season || null,
       style: form.style || null,
       customPrompt: form.customPrompt || null,
+      negativePrompt: form.negativePrompt || null,
     })
     emit('saved')
     emit('close')
@@ -209,6 +215,7 @@ async function regenerateImage() {
     const { sceneAPI } = await import('../composables/useApi')
     await sceneAPI.generateImage(props.scene.id, props.episodeId, {
       prompt: form.customPrompt || form.prompt || undefined,
+      negative_prompt: form.negativePrompt || undefined,
       model: imageModel.value || undefined,
     })
     emit('saved')

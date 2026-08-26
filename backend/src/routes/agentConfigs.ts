@@ -4,6 +4,8 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
+import { generateAgentConfig, persistAgentConfig } from '../agents/creator.js'
+import { validAgentTypes } from '../agents/index.js'
 
 const app = new Hono()
 
@@ -26,6 +28,31 @@ app.get('/:id', async (c) => {
   if (!row) return notFound(c, 'Not found')
   return success(c, toSnakeCase(row))
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// POST /agent-configs/generate（一句话需求 → Agent 配置；dry_run=true 只预览不落库）
+app.post('/generate', async (c) => {
+  try {
+    const body = await c.req.json()
+    const agentType: string = body.agent_type
+    const requirement: string = body.requirement
+    const dryRun: boolean = body.dry_run === true
+
+    if (!agentType) return badRequest(c, 'agent_type required')
+    if (!validAgentTypes.includes(agentType)) {
+      return badRequest(c, `未知 Agent 类型：${agentType}（可用：${validAgentTypes.join(', ')}）`)
+    }
+    if (!requirement?.trim()) return badRequest(c, 'requirement required')
+
+    const candidate = await generateAgentConfig(agentType, requirement)
+    if (dryRun) return success(c, { candidate })
+
+    const saved = persistAgentConfig(candidate)
+    return success(c, { candidate, saved: toSnakeCase(saved) })
+  } catch (err: any) {
+    logTaskError('AgentConfigsAPI', 'generate', { error: err.message })
+    return badRequest(c, err.message)
+  }
 })
 
 // POST /agent-configs (upsert by agent_type)

@@ -158,4 +158,32 @@ router.post('/batch-delete', async (c) => {
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
+// ====== POST /from-character/:characterId - 从项目角色服装保存到服装库 ======
+router.post('/from-character/:characterId', async (c) => {
+  try {
+    const charId = parseInt(c.req.param('characterId'))
+    if (isNaN(charId)) return c.json({ code: 400, data: null, message: '无效的角色ID' })
+    const character = Q_GET('SELECT * FROM characters WHERE id = ? AND deleted_at IS NULL', charId) as any
+    if (!character) return c.json({ code: 404, data: null, message: '角色不存在' })
+    const body = await c.req.json().catch(() => ({}))
+
+    // 解析角色服装（costumes JSON 数组，含 name/imageUrl）
+    let costumes: any[] = []
+    try {
+      const p = JSON.parse(character.costumes || '')
+      if (Array.isArray(p)) costumes = p
+    } catch {}
+    const idx = body.costumeIndex != null ? Number(body.costumeIndex) : 0
+    const cst = costumes[idx] || {}
+    const name = body.name || cst.name || (character.clothing ? String(character.clothing).slice(0, 40) : '') || '未命名服装'
+
+    const t = now()
+    const r = Q_RUN(
+      `INSERT INTO costume_templates (name,category,description,style,body_part,material,color_scheme,season,appearance,image_url,reference_images,tags,metadata,source_drama_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      name, body.category || '通用', body.description || cst.description || character.clothing || '', body.style || cst.style || '', body.bodyPart || '', body.material || cst.material || '', body.colorScheme || cst.colorScheme || '', body.season || cst.season || '', body.appearance || cst.appearance || '', body.imageUrl || cst.imageUrl || character.image_url || '', safeStringify(body.referenceImages || cst.referenceImages), safeStringify(body.tags || cst.tags), safeStringify(body.metadata || cst.metadata), character.drama_id, t, t,
+    )
+    return c.json({ code: 0, data: { id: r.lastInsertRowid }, message: `服装 "${name}" 已保存到服装库` })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message || '保存服装到服装库失败' }) }
+})
+
 export default router

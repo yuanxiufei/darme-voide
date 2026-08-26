@@ -1,8 +1,9 @@
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import * as schema from './schema.js'
-import { sqlite } from './connection.js'
+import { getSqlite } from './connection.js'
 
-sqlite.exec(`
+function runMigrations(): void {
+  getSqlite().exec(`
   CREATE TABLE IF NOT EXISTS dramas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -171,6 +172,8 @@ sqlite.exec(`
     default_url TEXT,
     preset_models TEXT,
     description TEXT,
+    endpoint_prefix TEXT,
+    is_recommended INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -208,7 +211,6 @@ sqlite.exec(`
     drama_id INTEGER,
     scene_id INTEGER,
     character_id INTEGER,
-    prop_id INTEGER,
     image_type TEXT,
     frame_type TEXT,
     provider TEXT,
@@ -222,7 +224,6 @@ sqlite.exec(`
     cfg_scale REAL,
     seed INTEGER,
     image_url TEXT,
-    minio_url TEXT,
     local_path TEXT,
     status TEXT DEFAULT 'pending',
     task_id TEXT,
@@ -241,6 +242,7 @@ sqlite.exec(`
     drama_id INTEGER,
     provider TEXT,
     prompt TEXT,
+    negative_prompt TEXT,
     model TEXT,
     image_gen_id INTEGER,
     reference_mode TEXT,
@@ -257,7 +259,6 @@ sqlite.exec(`
     camera_motion TEXT,
     seed INTEGER,
     video_url TEXT,
-    minio_url TEXT,
     local_path TEXT,
     status TEXT DEFAULT 'pending',
     task_id TEXT,
@@ -288,48 +289,24 @@ sqlite.exec(`
     deleted_at TEXT
   );
 
-  CREATE TABLE IF NOT EXISTS props (
+  CREATE TABLE IF NOT EXISTS video_quality_checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    drama_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    type TEXT,
-    description TEXT,
-    prompt TEXT,
-    image_url TEXT,
-    reference_images TEXT,
-    local_path TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS assets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    storyboard_id INTEGER,
+    video_generation_id INTEGER,
     drama_id INTEGER,
     episode_id INTEGER,
-    storyboard_id INTEGER,
-    storyboard_num INTEGER,
-    name TEXT,
-    description TEXT,
-    type TEXT,
-    category TEXT,
-    url TEXT,
-    thumbnail_url TEXT,
-    local_path TEXT,
-    file_size INTEGER,
-    mime_type TEXT,
-    width INTEGER,
-    height INTEGER,
-    duration INTEGER,
-    format TEXT,
-    image_gen_id INTEGER,
-    video_gen_id INTEGER,
-    is_favorite INTEGER DEFAULT 0,
-    view_count INTEGER DEFAULT 0,
+    lip_sync_score INTEGER,
+    character_consistency_score INTEGER,
+    continuity_score INTEGER,
+    overall_score INTEGER,
+    issues TEXT,
+    dimensions TEXT,
+    status TEXT DEFAULT 'pending',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted_at TEXT
+    updated_at TEXT NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS idx_video_quality_checks_storyboard_id
+    ON video_quality_checks (storyboard_id);
 
   -- ====== 资源库模板表 ======
 
@@ -425,46 +402,117 @@ sqlite.exec(`
     updated_at TEXT NOT NULL,
     deleted_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `)
 
-function ensureColumn(table: string, column: string, definition: string) {
-  const tableExists = sqlite.prepare(
-    `SELECT 1 as ok FROM sqlite_master WHERE type='table' AND name=? LIMIT 1`,
-  ).get(table) as { ok: number } | undefined
-  if (!tableExists) return
-  const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
-  if (!columns.some(col => col.name === column)) {
-    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+  function ensureColumn(table: string, column: string, definition: string) {
+    const s = getSqlite()
+    const tableExists = s.prepare(
+      `SELECT 1 as ok FROM sqlite_master WHERE type='table' AND name=? LIMIT 1`,
+    ).get(table) as { ok: number } | undefined
+    if (!tableExists) return
+    const columns = s.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+    if (!columns.some(col => col.name === column)) {
+      s.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
   }
+
+  ensureColumn('episodes', 'image_config_id', 'INTEGER')
+  ensureColumn('episodes', 'video_config_id', 'INTEGER')
+  ensureColumn('episodes', 'audio_config_id', 'INTEGER')
+  ensureColumn('episodes', 'bgm_url', 'TEXT')
+  ensureColumn('episodes', 'bgm_volume', 'REAL DEFAULT 0.3')
+  ensureColumn('episodes', 'bgm_fade_in', 'REAL DEFAULT 1.5')
+  ensureColumn('episodes', 'bgm_fade_out', 'REAL DEFAULT 2.0')
+  ensureColumn('agent_configs', 'skills', 'TEXT')
+
+  // ====== v2 角色/场景/分镜/视频增强字段 ======
+  ensureColumn('characters', 'voice_speed', 'REAL DEFAULT 1.0')
+  ensureColumn('characters', 'voice_emotion', "TEXT DEFAULT 'happy'")
+  ensureColumn('characters', 'voice_pitch', 'REAL DEFAULT 0')
+  ensureColumn('characters', 'clothing', 'TEXT')
+  ensureColumn('characters', 'weapons', 'TEXT')
+  ensureColumn('characters', 'custom_prompt', 'TEXT')
+  ensureColumn('characters', 'core_features', 'TEXT')
+  ensureColumn('characters', 'costumes', 'TEXT')
+  ensureColumn('characters', 'variations', 'TEXT')
+  ensureColumn('characters', 'voice_model', "TEXT DEFAULT 'speech-2.8-hd'")
+  ensureColumn('characters', 'negative_prompt', 'TEXT')
+  ensureColumn('characters', 'speaker_id', 'TEXT')
+  ensureColumn('characters', 'accessories', 'TEXT')
+  ensureColumn('characters', 'three_views', 'TEXT')
+  ensureColumn('characters', 'equip_images', 'TEXT')
+
+  ensureColumn('scenes', 'description', 'TEXT')
+  ensureColumn('scenes', 'atmosphere', 'TEXT')
+  ensureColumn('scenes', 'lighting', 'TEXT')
+  ensureColumn('scenes', 'weather', 'TEXT')
+  ensureColumn('scenes', 'season', 'TEXT')
+  ensureColumn('scenes', 'style', 'TEXT')
+  ensureColumn('scenes', 'custom_prompt', 'TEXT')
+  ensureColumn('scenes', 'negative_prompt', 'TEXT')
+
+  ensureColumn('storyboards', 'custom_image_prompt', 'TEXT')
+  ensureColumn('storyboards', 'custom_video_prompt', 'TEXT')
+  ensureColumn('storyboards', 'negative_prompt', 'TEXT')
+  ensureColumn('storyboards', 'first_frame_prompt', 'TEXT')
+  ensureColumn('storyboards', 'last_frame_prompt', 'TEXT')
+  ensureColumn('storyboards', 'transition_type', "TEXT DEFAULT 'cut'")
+  ensureColumn('storyboards', 'transition_duration', 'REAL DEFAULT 0.5')
+  ensureColumn('storyboards', 'scene_type', 'TEXT')
+  ensureColumn('storyboards', 'speaker_id', 'TEXT')
+
+  ensureColumn('video_generations', 'character_ids', 'TEXT')
+  ensureColumn('video_generations', 'negative_prompt', 'TEXT')
+  ensureColumn('video_generations', 'scene_type', 'TEXT')
+  ensureColumn('video_generations', 'reference_audio_urls', 'TEXT')
+
+  ensureColumn('storyboard_characters', 'costume', 'TEXT')
+  ensureColumn('image_generations', 'costume', 'TEXT')
+  ensureColumn('image_generations', 'color_grade', 'TEXT')
+  ensureColumn('image_generations', 'view_type', 'TEXT')
+  ensureColumn('image_generations', 'equip_type', 'TEXT')
+
+  ensureColumn('ai_service_providers', 'endpoint_prefix', 'TEXT')
+  ensureColumn('ai_service_providers', 'is_recommended', 'INTEGER DEFAULT 0')
+
+  ensureColumn('ai_voices', 'role_tags', 'TEXT')
+  ensureColumn('characters', 'role_type', 'TEXT')
+
+  // ====== 六键 Bible 三键（LOCATION_ID / COSTUME_ID / STYLE_ID）======
+  ensureColumn('dramas', 'style_id', 'TEXT')
+  ensureColumn('characters', 'costume_id', 'TEXT')
+  ensureColumn('scenes', 'location_id', 'TEXT')
 }
 
-ensureColumn('episodes', 'image_config_id', 'INTEGER')
-ensureColumn('episodes', 'video_config_id', 'INTEGER')
-ensureColumn('episodes', 'audio_config_id', 'INTEGER')
-ensureColumn('agent_configs', 'skills', 'TEXT')
+runMigrations()
 
-// ====== v2 角色/场景/分镜/视频增强字段 ======
-ensureColumn('characters', 'voice_speed', 'REAL DEFAULT 1.0')
-ensureColumn('characters', 'voice_emotion', "TEXT DEFAULT 'happy'")
-ensureColumn('characters', 'voice_pitch', 'REAL DEFAULT 0')
-ensureColumn('characters', 'clothing', 'TEXT')
-ensureColumn('characters', 'weapons', 'TEXT')
-ensureColumn('characters', 'custom_prompt', 'TEXT')
-ensureColumn('characters', 'voice_model', "TEXT DEFAULT 'speech-2.8-hd'")
+let currentDb = drizzle(getSqlite(), { schema })
 
-ensureColumn('scenes', 'description', 'TEXT')
-ensureColumn('scenes', 'atmosphere', 'TEXT')
-ensureColumn('scenes', 'lighting', 'TEXT')
-ensureColumn('scenes', 'weather', 'TEXT')
-ensureColumn('scenes', 'season', 'TEXT')
-ensureColumn('scenes', 'style', 'TEXT')
-ensureColumn('scenes', 'custom_prompt', 'TEXT')
+export function rebuildDb(): void {
+  runMigrations()
+  currentDb = drizzle(getSqlite(), { schema })
+}
 
-ensureColumn('storyboards', 'custom_image_prompt', 'TEXT')
-ensureColumn('storyboards', 'custom_video_prompt', 'TEXT')
+export const db = new Proxy({} as typeof currentDb, {
+  get(_target, prop) {
+    const v = (currentDb as any)[prop]
+    if (typeof v === 'function') return v.bind(currentDb)
+    return v
+  },
+  set(_target, prop, value) {
+    ;(currentDb as any)[prop] = value
+    return true
+  },
+})
 
-ensureColumn('video_generations', 'character_ids', 'TEXT')
-
-export const db = drizzle(sqlite, { schema })
 export { schema }
-export type DB = typeof db
+export type DB = typeof currentDb

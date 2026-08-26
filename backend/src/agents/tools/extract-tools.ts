@@ -13,6 +13,13 @@ import { db, schema } from '../../db/index.js'
 import { eq, and } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
+import { sliceLongText } from '../../utils/text-slice.js'
+import {
+  buildCharacterImagePrompt,
+  buildSceneImagePrompt,
+  CHARACTER_IMAGE_NEGATIVE,
+  SCENE_IMAGE_NEGATIVE,
+} from '../../shared/prompt-utils.js'
 
 // ─── 关联辅助 ────────────────────────────────────────────────
 function linkCharToEpisode(episodeId: number, characterId: number) {
@@ -35,6 +42,16 @@ function linkSceneToEpisode(episodeId: number, sceneId: number) {
   }
 }
 
+/** 从自由文本 role 推断标准化角色类型（主角/反派/配角/旁白/其他） */
+function inferRoleType(role: string | undefined | null): string {
+  if (!role) return ''
+  if (/主角|男主|女主|hero|protagonist|lead/i.test(role)) return '主角'
+  if (/反派|坏|恶|villain|antagonist|boss/i.test(role)) return '反派'
+  if (/配角|supporting|side|龙套|路人/i.test(role)) return '配角'
+  if (/旁白|叙述|narrator|画外音/i.test(role)) return '旁白'
+  return '其他'
+}
+
 export function createExtractTools(episodeId: number, dramaId: number) {
 
   // 1. 读取剧本内容
@@ -48,8 +65,9 @@ export function createExtractTools(episodeId: number, dramaId: number) {
       if (!ep) return { error: 'Episode not found' }
       const content = ep.scriptContent || ep.content
       if (!content) return { error: 'Episode has no script content' }
+      const sliced = sliceLongText(content)
       logTaskSuccess('ExtractTool', 'read-script', { episodeId, dramaId, scriptLength: content.length })
-      return { script: content }
+      return { script: sliced.text, truncated: sliced.truncated, total_chars: sliced.total_chars }
     },
   })
 
@@ -119,9 +137,17 @@ export function createExtractTools(episodeId: number, dramaId: number) {
       characters: z.array(z.object({
         name: z.string(),
         role: z.string().optional(),
+        role_type: z.string().optional(),
         description: z.string().optional(),
         appearance: z.string().optional(),
         personality: z.string().optional(),
+        clothing: z.string().optional(),
+        weapons: z.string().optional(),
+        accessories: z.string().optional(),
+        core_features: z.array(z.string()).optional(),
+        costumes: z.array(z.string()).optional(),
+        image_prompt: z.string().optional(),
+        negative_prompt: z.string().optional(),
       })),
     }),
     execute: async ({ characters }) => {
@@ -139,13 +165,48 @@ export function createExtractTools(episodeId: number, dramaId: number) {
           .filter(c => !c.deletedAt)
           .find(c => c.name === char.name)
 
+        // 合并字段：agent 本次提供的值优先，缺省回退已有数据
+        const merged = {
+          name: char.name,
+          role: char.role || existing?.role || '',
+          roleType: char.role_type || inferRoleType(char.role || existing?.role || ''),
+          description: char.description || existing?.description || '',
+          appearance: char.appearance || existing?.appearance || '',
+          personality: char.personality || existing?.personality || '',
+          clothing: char.clothing || existing?.clothing || '',
+          weapons: char.weapons || existing?.weapons || '',
+          accessories: char.accessories || existing?.accessories || '',
+          coreFeatures: char.core_features?.length ? JSON.stringify(char.core_features) : (existing?.coreFeatures || ''),
+          costumes: char.costumes?.length ? JSON.stringify(char.costumes) : (existing?.costumes || ''),
+        }
+
+        // 提示词兜底：agent 值 > 已有值 > 基于合并字段自动构建（不依赖 LLM 必填，避免漏填导致留空）
+        const customPrompt = char.image_prompt || existing?.customPrompt || buildCharacterImagePrompt({
+          name: merged.name,
+          appearance: merged.appearance,
+          description: merged.description,
+          personality: merged.personality,
+          coreFeatures: merged.coreFeatures || undefined,
+          clothing: merged.clothing,
+          costumes: merged.costumes || undefined,
+        })
+        const negativePrompt = char.negative_prompt || existing?.negativePrompt || CHARACTER_IMAGE_NEGATIVE
+
         if (existing) {
           // 已存在：合并信息，保留 ID
           db.update(schema.characters).set({
-            role: char.role || existing.role,
-            description: char.description || existing.description,
-            appearance: char.appearance || existing.appearance,
-            personality: char.personality || existing.personality,
+            role: merged.role,
+            roleType: merged.roleType,
+            description: merged.description,
+            appearance: merged.appearance,
+            personality: merged.personality,
+            clothing: merged.clothing,
+            weapons: merged.weapons,
+            accessories: merged.accessories,
+            coreFeatures: merged.coreFeatures,
+            costumes: merged.costumes,
+            customPrompt,
+            negativePrompt,
             updatedAt: ts,
           }).where(eq(schema.characters.id, existing.id)).run()
           linkCharToEpisode(episodeId, existing.id)
@@ -153,11 +214,19 @@ export function createExtractTools(episodeId: number, dramaId: number) {
         } else {
           // 新增角色
           const res = db.insert(schema.characters).values({
-            name: char.name,
-            role: char.role || '',
-            description: char.description || '',
-            appearance: char.appearance || '',
-            personality: char.personality || '',
+            name: merged.name,
+            role: merged.role,
+            roleType: merged.roleType,
+            description: merged.description,
+            appearance: merged.appearance,
+            personality: merged.personality,
+            clothing: merged.clothing,
+            weapons: merged.weapons,
+            accessories: merged.accessories,
+            coreFeatures: merged.coreFeatures,
+            costumes: merged.costumes,
+            customPrompt,
+            negativePrompt,
             dramaId,
             createdAt: ts,
             updatedAt: ts,
@@ -186,6 +255,14 @@ export function createExtractTools(episodeId: number, dramaId: number) {
         location: z.string(),
         time: z.string().optional(),
         prompt: z.string().optional(),
+        description: z.string().optional(),
+        atmosphere: z.string().optional(),
+        lighting: z.string().optional(),
+        weather: z.string().optional(),
+        season: z.string().optional(),
+        style: z.string().optional(),
+        image_prompt: z.string().optional(),
+        negative_prompt: z.string().optional(),
       })),
     }),
     execute: async ({ scenes }) => {
@@ -204,8 +281,26 @@ export function createExtractTools(episodeId: number, dramaId: number) {
           .filter(s => !s.deletedAt)
           .find(s => s.location === scene.location && s.time === (scene.time || ''))
 
+        // 提示词兜底：agent 值 > 已有值 > 基于场景字段自动构建（不依赖 LLM 必填）
+        const fallbackImagePrompt = buildSceneImagePrompt({
+          location: scene.location,
+          time: scene.time,
+          prompt: scene.prompt || scene.description,
+        })
+
         if (existing) {
-          // 已存在完全匹配的场景：直接关联
+          // 已存在完全匹配的场景：合并更新细节与提示词后关联
+          db.update(schema.scenes).set({
+            description: scene.description || existing.description,
+            atmosphere: scene.atmosphere || existing.atmosphere,
+            lighting: scene.lighting || existing.lighting,
+            weather: scene.weather || existing.weather,
+            season: scene.season || existing.season,
+            style: scene.style || existing.style,
+            customPrompt: scene.image_prompt || existing.customPrompt || fallbackImagePrompt,
+            negativePrompt: scene.negative_prompt || existing.negativePrompt || SCENE_IMAGE_NEGATIVE,
+            updatedAt: ts,
+          }).where(eq(schema.scenes.id, existing.id)).run()
           linkSceneToEpisode(episodeId, existing.id)
           results.reused++
         } else {
@@ -220,6 +315,14 @@ export function createExtractTools(episodeId: number, dramaId: number) {
             location: scene.location,
             time: scene.time || '',
             prompt: scene.prompt || scene.location,
+            description: scene.description || '',
+            atmosphere: scene.atmosphere || '',
+            lighting: scene.lighting || '',
+            weather: scene.weather || '',
+            season: scene.season || '',
+            style: scene.style || '',
+            customPrompt: scene.image_prompt || fallbackImagePrompt,
+            negativePrompt: scene.negative_prompt || SCENE_IMAGE_NEGATIVE,
             createdAt: ts,
             updatedAt: ts,
           }).run()

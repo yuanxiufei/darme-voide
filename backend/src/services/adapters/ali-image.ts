@@ -41,7 +41,7 @@ export class AliImageAdapter implements ImageProviderAdapter {
       parameters: {
         size,
         n: 1,
-        negative_prompt: '',
+        negative_prompt: record.negativePrompt || '',
         prompt_extend: true,
         watermark: false,
         seed: record.referenceImages ? undefined : Math.floor(Math.random() * 2147483647),

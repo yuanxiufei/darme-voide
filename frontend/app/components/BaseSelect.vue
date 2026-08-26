@@ -1,7 +1,7 @@
 <template>
   <div class="base-select" ref="rootEl">
     <!-- Trigger -->
-    <button type="button" class="base-select-trigger" :class="{ open: isOpen }" @click="toggle">
+    <button type="button" class="base-select-trigger" :class="{ open: isOpen }" :title="selectedLabel || placeholder" @click="toggle">
       <span :class="selectedLabel ? '' : 'placeholder'" class="base-select-label">{{ selectedLabel || placeholder }}</span>
       <ChevronDown :size="13" class="base-select-arrow" />
     </button>
@@ -31,6 +31,7 @@
                 :key="opt.value"
                 type="button"
                 :class="['base-select-option', { selected: opt.value === modelValue, highlighted: highlightedIdx === getGlobalIdx(gi, oi) }]"
+                :title="opt.label"
                 @click="pick(opt)"
                 @mousemove="highlightedIdx = getGlobalIdx(gi, oi)"
               >{{ opt.label }}</button>
@@ -153,16 +154,24 @@ function pick(opt) {
 function positionDropdown() {
   const rect = rootEl.value?.getBoundingClientRect()
   if (!rect) return
-  const top = rect.bottom + 4
   const left = rect.left
-  // Keep within viewport
-  const maxHeight = window.innerHeight - top - 16
+  // 底部空间不足 240px 时改为向上展开，避免下拉框被视口截断导致选项展示不全
+  const spaceBelow = window.innerHeight - rect.bottom - 8
+  const spaceAbove = rect.top - 8
+  const openUp = spaceBelow < 240 && spaceAbove > spaceBelow
+  const maxHeight = Math.max(180, Math.min(420, openUp ? spaceAbove : spaceBelow))
+  const maxDropdownWidth = Math.min(360, window.innerWidth - left - 16)
   dropdownStyle.value = {
     position: 'fixed',
-    top: `${top}px`,
     left: `${left}px`,
-    width: `${rect.width}px`,
-    maxHeight: `${Math.min(maxHeight, 400)}px`,
+    width: 'auto',
+    minWidth: `${rect.width}px`,
+    maxWidth: `${maxDropdownWidth}px`,
+    maxHeight: `${maxHeight}px`,
+    // 向上展开：用 bottom 锚定在 trigger 上方，让下拉框贴着 trigger 向上生长，而不是飞到视口顶部
+    ...(openUp
+      ? { bottom: `${window.innerHeight - rect.top + 4}px` }
+      : { top: `${rect.bottom + 4}px` }),
   }
 }
 
@@ -262,6 +271,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
   z-index: 9999;
   animation: baseSelectIn 0.15s var(--ease-out);
+  display: flex;
+  flex-direction: column;
 }
 
 .base-select-search {
@@ -271,6 +282,7 @@ onBeforeUnmount(() => {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   color: var(--text-2);
+  flex-shrink: 0;
 }
 .base-select-search-input {
   flex: 1;
@@ -287,7 +299,8 @@ onBeforeUnmount(() => {
 
 .base-select-options {
   overflow-y: auto;
-  max-height: 260px;
+  flex: 1;
+  min-height: 0;
   padding: 4px;
 }
 
@@ -317,7 +330,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
   text-align: left;
   transition: background 0.1s;
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .base-select-option:hover,
 .base-select-option.highlighted {

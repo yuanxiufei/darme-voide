@@ -1,5 +1,8 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
+import { existsSync } from 'node:fs'
+import { spawn, execSync } from 'node:child_process'
+import { stream } from 'hono/streaming'
 import { db, schema } from '../db/index.js'
 import { success, notFound, created, badRequest, now, parseParamId } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
@@ -12,7 +15,7 @@ const app = new Hono()
 const PRESET_SERVICES = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'gemini', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-image-preview', priority: 99 },
-  { serviceType: 'video', label: '视频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'hailuo-02', priority: 98 },
+  { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
 ] as const
 
@@ -33,6 +36,62 @@ const PRESET_AGENT_DEFAULTS = [
 ] as const
 
 const PRESET_AGENT_MODEL = 'gemini-3-pro-preview'
+
+/**
+ * 服务商目录 — 前端「设置」页服务商下拉框与预设推荐的唯一数据源。
+ * 每项 = 一个 (provider, service_type) 组合；recommended=true 的 4 项对应
+ * 「一键配置」预设卡片，与 PRESET_SERVICES 保持一致。
+ */
+const PROVIDER_CATALOG = [
+  // 文本
+  { serviceType: 'text', provider: 'chatfire', label: '推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-preview'], endpointPrefix: '/v1', recommended: true, description: '文本生成 - ChatFire 代理' },
+  { serviceType: 'text', provider: 'openrouter', label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'], endpointPrefix: '/v1', recommended: false, description: '文本生成 - OpenRouter' },
+  { serviceType: 'text', provider: 'openai', label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'], endpointPrefix: '/v1', recommended: false, description: '文本生成 - OpenAI' },
+  { serviceType: 'text', provider: 'ollama', label: 'Ollama 本地', baseUrl: 'http://localhost:11434', models: [], endpointPrefix: '/v1', recommended: false, description: '文本生成 - Ollama 本地模型' },
+  // 图片
+  { serviceType: 'image', provider: 'chatfire', label: '推荐', baseUrl: 'https://api.chatfire.site', models: ['doubao-seedream-4-5-251128'], endpointPrefix: '/v1', recommended: false, description: '图片生成 - Seedream（ChatFire 代理）' },
+  { serviceType: 'image', provider: 'gemini', label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-image-preview'], endpointPrefix: '/v1beta', recommended: true, description: '图片生成 - Gemini' },
+  { serviceType: 'image', provider: 'volcengine', label: '火山推荐', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-4-0-250828'], endpointPrefix: '/api/v3', recommended: false, description: '图片生成 - 火山方舟' },
+  // 视频
+  { serviceType: 'video', provider: 'volcengine', label: '火山引擎', baseUrl: 'https://api.chatfire.site/volcengine', models: ['doubao-seedance-1-5-pro-251215'], endpointPrefix: '/api/v3', recommended: true, description: '视频生成 - Seedance' },
+  { serviceType: 'video', provider: 'vidu', label: 'Vidu 推荐', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'], endpointPrefix: '/ent/v2', recommended: false, description: '视频生成 - Vidu' },
+  { serviceType: 'video', provider: 'ali', label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'], endpointPrefix: '/api/v1', recommended: false, description: '视频生成 - 阿里云百炼' },
+  // 音频
+  { serviceType: 'audio', provider: 'minimax', label: 'MiniMax', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'], endpointPrefix: '/v1', recommended: true, description: '语音生成 - MiniMax' },
+] as const
+
+/**
+ * 幂等 seed 服务商目录到 ai_service_providers 表。
+ * 按 name 去重（`${provider}-${serviceType}`），已存在则跳过。
+ */
+export function seedServiceProviders(): number {
+  const ts = now()
+  let inserted = 0
+  for (const item of PROVIDER_CATALOG) {
+    const name = `${item.provider}-${item.serviceType}`
+    const [existing] = db.select().from(schema.aiServiceProviders)
+      .where(eq(schema.aiServiceProviders.name, name)).all()
+    if (existing) continue
+
+    db.insert(schema.aiServiceProviders).values({
+      name,
+      displayName: item.label,
+      serviceType: item.serviceType,
+      provider: item.provider,
+      defaultUrl: item.baseUrl,
+      presetModels: JSON.stringify(item.models),
+      description: item.description,
+      endpointPrefix: item.endpointPrefix,
+      isRecommended: item.recommended,
+      isActive: true,
+      createdAt: ts,
+      updatedAt: ts,
+    }).run()
+    inserted++
+  }
+  if (inserted > 0) logTaskSuccess('AIConfig', 'seed-providers', { inserted, total: PROVIDER_CATALOG.length })
+  return inserted
+}
 
 function bearerHeaders(apiKey?: string, withJson = false) {
   const headers: Record<string, string> = {}
@@ -159,6 +218,79 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
   }
 }
 
+// ──────────────────────────────────────────────────────────────
+// 通用「平台检测 + 模型列举」能力：识别各平台可用模型、检测模型是否存在
+// ──────────────────────────────────────────────────────────────
+
+type ModelListDescriptor = {
+  url: string
+  method: string
+  headers: Record<string, string>
+  parse: (data: any) => string[]
+} | null
+
+/** 根据 provider 构造「列出可用模型」的请求描述；不支持在线列举的返回 null */
+function buildListModels(provider: string, baseUrl: string, apiKey?: string): ModelListDescriptor {
+  const p = provider.toLowerCase()
+
+  // OpenAI 兼容平台（OpenAI / OpenRouter / ChatFire）→ GET /v1/models
+  if (p === 'openai' || p === 'openrouter' || p === 'chatfire') {
+    return {
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '/v1', '/models'),
+      headers: bearerHeaders(apiKey),
+      parse: (d) => (Array.isArray(d?.data) ? d.data.map((m: any) => m?.id).filter(Boolean) : []),
+    }
+  }
+
+  // Google Gemini → GET /v1beta/models（key 走 query）
+  if (p === 'gemini') {
+    const url = new URL(joinProviderUrl(baseUrl, '/v1beta', '/models'))
+    if (apiKey) url.searchParams.set('key', apiKey)
+    return {
+      method: 'GET',
+      url: url.toString(),
+      headers: {},
+      parse: (d) => (Array.isArray(d?.models)
+        ? d.models.map((m: any) => String(m?.name || '').replace(/^models\//, '')).filter(Boolean)
+        : []),
+    }
+  }
+
+  // Ollama 本地 → GET /api/tags
+  if (p === 'ollama') {
+    return {
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '', '/api/tags'),
+      headers: {},
+      parse: (d) => (Array.isArray(d?.models) ? d.models.map((m: any) => m?.name).filter(Boolean) : []),
+    }
+  }
+
+  // 阿里百炼 / 火山方舟 / MiniMax / Vidu / 本地 SD / CosyVoice 等无公开 list models 接口
+  return null
+}
+
+/** 执行模型列举，返回 { listable, models, error } */
+async function listProviderModels(provider: string, baseUrl: string, apiKey?: string) {
+  const desc = buildListModels(provider, baseUrl, apiKey)
+  if (!desc) return { listable: false, models: [] as string[], error: '' }
+  try {
+    const resp = await fetch(desc.url, {
+      method: desc.method,
+      headers: desc.headers,
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!resp.ok) {
+      return { listable: true, models: [] as string[], error: `HTTP ${resp.status} ${resp.statusText}`.trim() }
+    }
+    const data = await resp.json().catch(() => ({}))
+    return { listable: true, models: desc.parse(data), error: '' }
+  } catch (err: any) {
+    return { listable: true, models: [] as string[], error: err.message }
+  }
+}
+
 // GET /ai-configs?service_type=text
 app.get('/', async (c) => {
   try {
@@ -166,10 +298,16 @@ app.get('/', async (c) => {
   let rows = db.select().from(schema.aiServiceConfigs).all()
   if (serviceType) rows = rows.filter(r => r.serviceType === serviceType)
 
-  const parsed = rows.map(r => ({
-    ...toSnakeCase(r),
-    model: r.model ? JSON.parse(r.model) : [],
-  }))
+  const parsed = rows.map(r => {
+    let negativePrompt = ''
+    try { negativePrompt = JSON.parse(r.settings || '{}')?.negative_prompt || '' } catch { /* 忽略损坏的 settings */ }
+    return {
+      ...toSnakeCase(r),
+      model: r.model ? JSON.parse(r.model) : [],
+      negative_prompt: negativePrompt,
+      is_local: isLocalConfig(r.baseUrl ?? '', r.provider ?? ''),
+    }
+  })
   return success(c, parsed)
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
@@ -193,6 +331,7 @@ app.post('/', async (c) => {
     apiKey: body.api_key || '',
     model: JSON.stringify(body.model || []),
     priority: body.priority || 0,
+    settings: JSON.stringify({ negative_prompt: body.negative_prompt || '' }),
     isActive: true,
     createdAt: ts,
     updatedAt: ts,
@@ -336,6 +475,220 @@ app.post('/quick-local', async (c) => {
   } catch (err: any) { logTaskError('AIConfig', 'quick-local', { error: err.message }); return badRequest(c, err.message) }
 })
 
+// ──────────────────────────────────────────────────────────────
+// Ollama 本地模型管理：识别本机所有模型 + 下载模型 + 启动服务
+// ──────────────────────────────────────────────────────────────
+
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434'
+
+function normalizeOllamaUrl(baseUrl?: string): string {
+  return String(baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '')
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) { value /= 1024; i++ }
+  return `${value.toFixed(1)} ${units[i]}`
+}
+
+/** 探测 Ollama 可执行文件位置（Windows 优先，兼容 PATH） */
+function findOllamaExe(): string | null {
+  try {
+    const where = execSync('where ollama', { encoding: 'utf8', shell: 'cmd.exe', timeout: 3000 }).trim()
+    const first = where.split(/\r?\n/).find(Boolean)
+    if (first) return first
+  } catch { /* 不在 PATH 中 */ }
+  const candidates = [
+    process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\Ollama\\ollama.exe` : '',
+    'C:\\Program Files\\Ollama\\ollama.exe',
+    'C:\\Program Files (x86)\\Ollama\\ollama.exe',
+    'D:\\app\\ollama\\ollama.exe',
+  ].filter(Boolean)
+  for (const p of candidates) if (existsSync(p)) return p
+  return null
+}
+
+async function isOllamaReachable(baseUrl: string): Promise<boolean> {
+  try {
+    const resp = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(2500) })
+    return resp.ok
+  } catch { return false }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** 尝试启动本地 Ollama 服务并等待就绪 */
+async function tryStartOllama(): Promise<{ started: boolean; message: string; exe?: string | null }> {
+  if (await isOllamaReachable(DEFAULT_OLLAMA_URL)) {
+    return { started: false, message: 'Ollama 已在运行', exe: findOllamaExe() }
+  }
+  const exe = findOllamaExe()
+  if (!exe) return { started: false, message: '未找到 Ollama，请先安装（ollama.com）', exe: null }
+  try {
+    const child = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+  } catch (err: any) {
+    return { started: false, message: `启动失败: ${err.message}`, exe }
+  }
+  for (let i = 0; i < 40; i++) {
+    await sleep(500)
+    if (await isOllamaReachable(DEFAULT_OLLAMA_URL)) {
+      return { started: true, message: 'Ollama 已启动并就绪', exe }
+    }
+  }
+  return { started: true, message: '启动命令已发出，若 10 秒内未就绪请检查 Ollama 安装', exe }
+}
+
+// POST /ai-configs/ollama/status — 检测 Ollama 运行状态并列出本机所有已安装模型
+app.post('/ollama/status', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const baseUrl = normalizeOllamaUrl(body.base_url)
+    const exe = findOllamaExe()
+    if (!(await isOllamaReachable(baseUrl))) {
+      return success(c, { running: false, base_url: baseUrl, models: [], exe, message: `无法连接 ${baseUrl}（Ollama 服务未运行）` })
+    }
+    const resp = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) })
+    if (!resp.ok) {
+      return success(c, { running: true, base_url: baseUrl, models: [], exe, message: `Ollama 响应异常 (HTTP ${resp.status})` })
+    }
+    const data = await resp.json() as { models?: Array<{ name: string; size?: number; modified_at?: string; digest?: string }> }
+    const models = (data.models || [])
+      .map((m) => ({
+        name: m.name,
+        size: m.size || 0,
+        size_label: formatBytes(m.size),
+        modified_at: m.modified_at || '',
+        digest: (m.digest || '').slice(0, 12),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+    return success(c, { running: true, base_url: baseUrl, models, exe, message: `检测到 ${models.length} 个本地模型` })
+  } catch (err: any) {
+    logTaskError('AIConfig', 'ollama-status', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /ai-configs/ollama/start — 启动本地 Ollama 服务
+app.post('/ollama/start', async (c) => {
+  try {
+    const result = await tryStartOllama()
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('AIConfig', 'ollama-start', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /ai-configs/ollama/pull — 下载/拉取模型，NDJSON 流式返回进度
+app.post('/ollama/pull', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const baseUrl = normalizeOllamaUrl(body.base_url)
+    const name = String(body.name || '').trim()
+    if (!name) return badRequest(c, '缺少模型名，例如 qwen3:8b')
+    if (!(await isOllamaReachable(baseUrl))) {
+      return badRequest(c, `Ollama 服务未运行（${baseUrl}），请先在下方启动`)
+    }
+    const resp = await fetch(`${baseUrl}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, stream: true }),
+      signal: AbortSignal.timeout(60 * 60_000),
+    })
+    if (!resp.ok || !resp.body) {
+      const text = await resp.text().catch(() => '')
+      return success(c, { ok: false, error: (text || `HTTP ${resp.status}`).slice(0, 400) })
+    }
+    c.header('Content-Type', 'application/x-ndjson; charset=utf-8')
+    return stream(c, async (s) => {
+      const reader = resp.body!.getReader()
+      const decoder = new TextDecoder()
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          await s.write(decoder.decode(value, { stream: true }))
+        }
+      } finally { reader.releaseLock() }
+    })
+  } catch (err: any) {
+    logTaskError('AIConfig', 'ollama-pull', { error: err.message })
+    return success(c, { ok: false, error: err.message })
+  }
+})
+
+// POST /ai-configs/models — 检测平台连通性 + 列出可用模型 + 检测指定模型是否存在
+app.post('/models', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const provider = String(body.provider || '').trim()
+    const baseUrl = String(body.base_url || '').trim()
+    if (!provider) return badRequest(c, 'provider is required')
+
+    const apiKey = String(body.api_key || '')
+    // 支持单 model 字符串（兼容旧调用）或 models 数组（批量检测）
+    const wantedList: string[] = (Array.isArray(body.models) ? body.models : body.model ? [body.model] : [])
+      .map((m: any) => String(m || '').trim())
+      .filter(Boolean)
+    const p = provider.toLowerCase()
+
+    const { listable, models, error } = await listProviderModels(provider, baseUrl, apiKey)
+
+    // 检测模型是否存在：精确匹配；Ollama 允许省略 tag（qwen3 匹配 qwen3:14b）
+    const modelChecks = wantedList.map((wanted) => {
+      const w = wanted.toLowerCase()
+      const exists = models.some((id) => {
+        const idl = String(id).toLowerCase()
+        if (idl === w) return true
+        if (p === 'ollama' && idl.startsWith(`${w}:`)) return true
+        return false
+      })
+      return { model: wanted, exists }
+    })
+
+    const firstMissing = modelChecks.find((c) => !c.exists)
+    const message = error
+      ? `平台连接失败：${error}`
+      : !listable
+        ? '该平台暂不支持在线列举模型，可手动填写模型名（可用「测试配置」验证连通性）'
+        : modelChecks.length === 0
+          ? `已检测到 ${models.length} 个可用模型`
+          : firstMissing
+            ? `模型 ${firstMissing.model} 未出现在平台模型列表中，请核对模型名`
+            : modelChecks.length === 1
+              ? `模型 ${modelChecks[0].model} 可用 ✓`
+              : `${modelChecks.length} 个模型均可用 ✓`
+
+    logTaskProgress('AIConfig', 'models-list', {
+      provider,
+      listable,
+      modelsCount: models.length,
+      wantedCount: modelChecks.length,
+      missingCount: modelChecks.filter((c) => !c.exists).length,
+    })
+
+    return success(c, {
+      provider,
+      base_url: baseUrl,
+      listable,
+      reachable: listable ? !error : null,
+      models: models.slice(0, 500),
+      models_count: models.length,
+      model: modelChecks[0]?.model || null,
+      model_exists: modelChecks[0]?.exists ?? false,
+      model_checks: modelChecks,
+      message,
+    })
+  } catch (err: any) {
+    logTaskError('AIConfig', 'models', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /ai-configs/test
 app.post('/test', async (c) => {
   const body = await c.req.json()
@@ -413,9 +766,12 @@ app.get('/:id', async (c) => {
   if (id == null) return notFound(c, 'Invalid config id')
   const [row] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
   if (!row) return notFound(c)
+  let negativePrompt = ''
+  try { negativePrompt = JSON.parse(row.settings || '{}')?.negative_prompt || '' } catch { /* 忽略 */ }
   return success(c, {
     ...toSnakeCase(row),
     model: row.model ? JSON.parse(row.model) : [],
+    negative_prompt: negativePrompt,
   })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
@@ -435,6 +791,7 @@ app.put('/:id', async (c) => {
   if ('model' in body) updates.model = JSON.stringify(body.model)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active
+  if ('negative_prompt' in body) updates.settings = JSON.stringify({ negative_prompt: body.negative_prompt || '' })
 
   db.update(schema.aiServiceConfigs).set(updates).where(eq(schema.aiServiceConfigs.id, id)).run()
   return success(c)
@@ -467,28 +824,26 @@ aiProviders.get('/', async (c) => {
 // ─── GPU 显存监控 ──────────────────────────────────────────────
 
 // GET /gpu/status — GPU 显存使用状态
-app.get('/gpu/status', (c) => {
+app.get('/gpu/status', async (c) => {
   try {
   const status = gpuManager.getStatus()
 
   // 尝试获取 nvidia-smi 实时数据（Windows）
-  const smiPromise = getNvidiaSmi().catch(() => null)
+  const smi = await getNvidiaSmi().catch(() => null)
 
-  return smiPromise.then(smi => {
-    const result: any = {
-      ...status,
-      isLocalMode: smi !== null,
-      hardware: smi ? {
-        gpuName: smi.gpuName,
-        totalMemoryMB: smi.totalMemoryMB,
-        usedMemoryMB: smi.usedMemoryMB,
-        freeMemoryMB: smi.freeMemoryMB,
-        utilizationPercent: smi.utilizationPercent,
-        temperatureC: smi.temperatureC,
-      } : null,
-    }
-    return c.json(result)
-  })
+  const result: any = {
+    ...status,
+    isLocalMode: smi !== null,
+    hardware: smi ? {
+      gpuName: smi.gpuName,
+      totalMemoryMB: smi.totalMemoryMB,
+      usedMemoryMB: smi.usedMemoryMB,
+      freeMemoryMB: smi.freeMemoryMB,
+      utilizationPercent: smi.utilizationPercent,
+      temperatureC: smi.temperatureC,
+    } : null,
+  }
+  return c.json(result)
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 
@@ -505,7 +860,7 @@ app.get('/configs/local', (c) => {
   try {
   const configs = db.select().from(schema.aiServiceConfigs).all()
   const localConfigs = configs
-    .filter(row => isLocalConfig(row.baseUrl, row.provider))
+    .filter(row => isLocalConfig(row.baseUrl ?? '', row.provider ?? ''))
     .map(row => ({
       ...toSnakeCase(row),
       model: row.model ? JSON.parse(row.model) : [],
@@ -530,8 +885,13 @@ async function getNvidiaSmi(): Promise<NvidiaSmiInfo> {
     ? 'nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits'
     : 'nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits'
 
-  const { execSync } = await import('child_process')
-  const output = execSync(cmd, { encoding: 'utf-8', timeout: 5000 })
+  const { exec } = await import('child_process')
+  const output = await new Promise<string>((resolve, reject) => {
+    exec(cmd, { encoding: 'utf-8', timeout: 5000 }, (err, stdout) => {
+      if (err) reject(err)
+      else resolve(stdout)
+    })
+  })
   const [line] = output.trim().split('\n')
   const parts = line.split(',').map(s => s.trim())
 

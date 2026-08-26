@@ -3,6 +3,8 @@
     <NuxtPage />
   </NuxtLayout>
   <Toaster position="top-right" :duration="3000" />
+  <Onboarding />
+  <ConfirmDialog />
 </template>
 
 <script setup>

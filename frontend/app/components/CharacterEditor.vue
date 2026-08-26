@@ -23,10 +23,21 @@
                 <input v-model="form.name" class="input" />
               </label>
               <label class="field">
-                <span>角色定位</span>
-                <input v-model="form.role" class="input" placeholder="主角/反派/配角" />
+                <span>角色类型</span>
+                <select v-model="form.roleType" class="input">
+                  <option value="">未指定</option>
+                  <option value="主角">主角</option>
+                  <option value="反派">反派</option>
+                  <option value="配角">配角</option>
+                  <option value="旁白">旁白</option>
+                  <option value="其他">其他</option>
+                </select>
               </label>
             </div>
+            <label class="field">
+              <span>角色定位</span>
+              <input v-model="form.role" class="input" placeholder="如：霸道总裁男主 / 亦正亦邪的反派" />
+            </label>
             <label class="field">
               <span>描述</span>
               <textarea v-model="form.description" class="input" rows="2" />
@@ -49,8 +60,16 @@
               <input v-model="form.clothing" class="input" placeholder="古装/现代/盔甲/长袍..." />
             </label>
             <label class="field">
+              <span>多套服装变体（逗号分隔，可选）</span>
+              <input v-model="form.costumes" class="input" placeholder="便装, 战甲, 礼服" />
+            </label>
+            <label class="field">
               <span>武器</span>
               <input v-model="form.weapons" class="input" placeholder="长剑/匕首/法杖..." />
+            </label>
+            <label class="field">
+              <span>核心特征标签（逗号分隔，跨镜保持一致）</span>
+              <input v-model="form.coreFeatures" class="input" placeholder="30岁, 消瘦, 小麦肤色, 短发, 丹凤眼" />
             </label>
           </section>
 
@@ -58,8 +77,18 @@
           <section class="section">
             <h4>图片生成提示词</h4>
             <label class="field">
-              <span>自定义 Prompt（留空使用自动生成）</span>
+              <span>正向提示词（AI 提取，可修改；留空自动生成）</span>
               <textarea v-model="form.customPrompt" class="input" rows="3" placeholder="cinematic portrait of..." />
+            </label>
+            <label class="field">
+              <span>反向提示词（AI 提取，可修改；留空使用默认）</span>
+              <textarea v-model="form.negativePrompt" class="input" rows="2" placeholder="排除内容/风格，如：photorealistic, text, watermark, multiple people..." />
+            </label>
+            <label v-if="costumeOptions.length" class="field" style="margin-bottom: 12px;">
+              <span>本次生成服装</span>
+              <select v-model="selectedCostume" class="input">
+                <option v-for="c in costumeOptions" :key="c" :value="c">{{ c }}</option>
+              </select>
             </label>
             <div class="regenerate-row">
               <ModelSelector v-model="imageModel" service-type="image" label="模型" />
@@ -129,6 +158,44 @@ const emit = defineEmits<{
 const form = reactive<any>({})
 const saving = ref(false)
 const imageModel = ref('')
+
+function parseCoreFeaturesToText(coreFeatures?: string | null): string {
+  if (!coreFeatures) return ''
+  try {
+    const arr = JSON.parse(coreFeatures)
+    return Array.isArray(arr) ? arr.join(', ') : ''
+  } catch {
+    return coreFeatures || ''
+  }
+}
+
+function parseCoreFeaturesFromText(text?: string): string | null {
+  if (!text) return null
+  const arr = text.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
+  return arr.length ? JSON.stringify(arr) : null
+}
+
+function parseCostumesArray(text?: string): string[] {
+  if (!text) return []
+  return text.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
+}
+function parseCostumesToText(costumes?: string | null): string {
+  if (!costumes) return ''
+  try {
+    const arr = JSON.parse(costumes)
+    return Array.isArray(arr) ? arr.join(', ') : ''
+  } catch {
+    return costumes || ''
+  }
+}
+function parseCostumesFromText(text?: string): string | null {
+  if (!text) return null
+  const arr = parseCostumesArray(text)
+  return arr.length ? JSON.stringify(arr) : null
+}
+
+const costumeOptions = computed(() => parseCostumesArray(form.costumes))
+const selectedCostume = ref('')
 const imageGenerating = ref(false)
 const imageError = ref('')
 const saveError = ref('')  // ✅ 新增：保存错误独立显示
@@ -169,12 +236,17 @@ watch(() => props.visible && props.character, (c) => {
   if (!c) return
   form.name = c.name
   form.role = c.role
+  form.roleType = c.role_type || c.roleType || ''
   form.description = c.description
   form.appearance = c.appearance
   form.personality = c.personality
   form.clothing = c.clothing || ''
   form.weapons = c.weapons || ''
   form.customPrompt = c.customPrompt || ''
+  form.negativePrompt = c.negativePrompt || ''
+  form.coreFeatures = parseCoreFeaturesToText(c.coreFeatures)
+  form.costumes = parseCostumesToText(c.costumes)
+  selectedCostume.value = parseCostumesArray(form.costumes)[0] || ''
   form.voiceStyle = c.voiceStyle
   form.voiceModel = c.voiceModel || 'speech-2.8-hd'
   form.voiceSpeed = c.voiceSpeed != null ? String(c.voiceSpeed) : ''
@@ -190,12 +262,16 @@ async function save() {
     await characterAPI.update(props.character.id, {
       name: form.name,
       role: form.role,
+      roleType: form.roleType || null,
       description: form.description,
       appearance: form.appearance,
       personality: form.personality,
       clothing: form.clothing || null,
       weapons: form.weapons || null,
       customPrompt: form.customPrompt || null,
+      negativePrompt: form.negativePrompt || null,
+      coreFeatures: parseCoreFeaturesFromText(form.coreFeatures),
+      costumes: parseCostumesFromText(form.costumes),
       voiceStyle: form.voiceStyle,
       voiceModel: form.voiceModel,
       voiceSpeed: form.voiceSpeed ? Number(form.voiceSpeed) : null,
@@ -218,7 +294,9 @@ async function regenerateImage() {
     const { characterAPI } = await import('../composables/useApi')
     await characterAPI.generateImage(props.character.id, props.episodeId, {
       prompt: form.customPrompt || undefined,
+      negative_prompt: form.negativePrompt || undefined,
       model: imageModel.value || undefined,
+      costume: selectedCostume.value || undefined,
     })
     emit('saved')
   } catch (err: any) {

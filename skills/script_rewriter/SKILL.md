@@ -1,6 +1,10 @@
 ---
 name: script-rewriter
 description: 小说改写为格式化剧本的方法论和规范
+preconditions:
+  - 调用 read_episode_script 能读到非空的原始内容
+protocol:
+  - scene_count: 格式化剧本中的场景数（S01/S02 场景头数量）
 ---
 
 # 剧本改写指南

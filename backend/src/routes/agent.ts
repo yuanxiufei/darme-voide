@@ -50,6 +50,7 @@ app.post('/:type/chat', async (c) => {
       text: result.text,
       toolCalls: result.toolCalls,
       toolResults: result.toolResults,
+      usage: result.usage,
     })
   } catch (err: any) {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)

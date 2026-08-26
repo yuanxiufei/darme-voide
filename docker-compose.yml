@@ -2,11 +2,15 @@ services:
   drama-studio:
     build: .
     ports:
-      - "5679:5679"
+      - "5789:5789"
     volumes:
+      # 数据根目录（容器内默认 /app/data）。若通过 DATA_ROOT 或设置页切换了数据目录，
+      # 需同步挂载新目录到容器，否则容器重建后数据会丢失。
       - ./data:/app/data
       - ./configs/config.yaml:/app/configs/config.yaml
     environment:
       - NODE_ENV=production
-      - PORT=5679
+      - PORT=5789
+      # 如需指定数据根目录，取消注释并同步调整上方 volume 挂载（推荐用 env + 卷固定数据位置）：
+      # - DATA_ROOT=/app/data
     restart: unless-stopped

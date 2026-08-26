@@ -3,7 +3,9 @@
  * 支持 DB 配置（用户可控）+ 硬编码默认值（兜底）
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseSkill, renderSkill, type ParsedSkill } from './skill-parser.js'
 
 // ── 硬编码默认映射（DB 无配置时使用） ─────────────────
 export const AGENT_SKILL_MAP: Record<string, string[]> = {
@@ -12,6 +14,7 @@ export const AGENT_SKILL_MAP: Record<string, string[]> = {
   storyboard_breaker: ['storyboard_breaker', 'extractor'],
   voice_assigner: ['voice_assigner'],
   grid_prompt_generator: ['grid_prompt_generator'],
+  orchestrator: [],
 }
 
 // ── 类型定义 ────────────────────────────────────────────
@@ -51,14 +54,18 @@ function defaultBindings(skillIds: string[]): SkillBinding[] {
   return skillIds.map((id, index) => ({ id, enabled: true, priority: index + 1 }))
 }
 
+// skills/ 目录定位：从本文件位置上溯到项目根（与 process.cwd() 解耦，
+// 兼容 Docker 容器 WORKDIR /app 及任意 cwd 启动），对齐 routes/skills.ts 的写法
+const SKILLS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../../skills')
+
 /**
- * 加载指定 Skill 的 Markdown 内容
+ * 加载并解析指定 Skill 的 Markdown（分离 frontmatter 元数据与正文）
  */
-function loadSkillContent(skillId: string): string | null {
-  const filePath = resolve(process.cwd(), 'skills', skillId, 'SKILL.md')
+function loadSkill(skillId: string): ParsedSkill | null {
+  const filePath = resolve(SKILLS_DIR, skillId, 'SKILL.md')
   if (!existsSync(filePath)) return null
   try {
-    return readFileSync(filePath, 'utf-8')
+    return parseSkill(readFileSync(filePath, 'utf-8'), skillId)
   } catch {
     return null
   }
@@ -93,12 +100,12 @@ export function loadAgentSkills(agentType: string, dbSkillsRaw?: string | null):
     bindings = defaultBindings(defaultIds)
   }
 
-  // 加载每个 Skill 的内容
+  // 加载每个 Skill 的内容（只注入正文，frontmatter 元数据经 renderSkill 转为前置契约/协议字段段）
   const sections: string[] = []
   for (const binding of bindings) {
-    const content = loadSkillContent(binding.id)
-    if (content) {
-      sections.push(content)
+    const parsed = loadSkill(binding.id)
+    if (parsed) {
+      sections.push(renderSkill(parsed))
     }
   }
 

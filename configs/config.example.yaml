@@ -5,25 +5,41 @@ app:
   language: "zh" # 系统语言：zh(中文) 或 en(英文)
 
 server:
-  port: 5679
+  port: 5789
   host: "0.0.0.0"
   cors_origins:
     - "http://localhost:3013"
   read_timeout: 600
   write_timeout: 600
 
+# ===== 数据根目录（dataRoot）说明 =====
+# 所有运行时数据统一存放在「数据根目录」下：
+#   <dataRoot>/drama.db  SQLite 数据库（文件名固定）
+#   <dataRoot>/static/   图片/视频/音频等生成文件（目录名固定）
+#   <dataRoot>/traces/   Agent 执行轨迹与 token 统计（目录名固定）
+# 数据根目录优先级：.data-root 标记文件 > DATA_ROOT 环境变量 > 下方 database.path 所在目录 > ./data
+# 也可在设置页「数据存储」中运行时切换（写入 .data-root 标记文件，重启后依然生效）。
+
 database:
   type: "sqlite"
-  path: "./data/drama.db"
+  path: "./data/drama.db"   # 仅目录部分参与推导数据根目录，数据库文件名固定为 drama.db
   max_idle: 10
   max_open: 100
 
 storage:
   type: "local"
-  local_path: "./data/storage"
-  base_url: "http://localhost:5679/static"
+  local_path: "./data/static"   # 已废弃：生成文件固定存 <dataRoot>/static，此项不再单独生效
+  base_url: "http://localhost:5789/static"
 
 ai:
   default_text_provider: "openai"
   default_image_provider: "openai"
   default_video_provider: "doubao"
+
+evaluation:
+  auto_optimize:
+    enabled: false        # 是否开启每日定时全量优化（无人值守自进化闭环）
+    hour: 3               # 每日触发小时（0-23）
+    minute: 0             # 每日触发分钟（0-59）
+    iterations: 3         # 每个 case 的优化迭代次数
+    run_on_startup: false # 启动时是否立即跑一轮（调试用）
