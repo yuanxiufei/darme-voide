@@ -304,6 +304,11 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19 5v14"/></svg>
                 生成试听文件
               </button>
+              <button v-if="charsVoiced" class="btn btn-sm" :disabled="generatingVoices" @click="generateVoicesFromCharacters">
+                <Loader2 v-if="generatingVoices" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
+                根据人物生成音色
+              </button>
             </div>
           </div>
 
@@ -385,6 +390,12 @@
                   type="text"
                   placeholder="音色名称（可选，默认「克隆音色」）"
                 />
+                <input
+                  v-model="clonePromptText"
+                  class="voice-clone-input"
+                  type="text"
+                  placeholder="参考音频文本（本地 CosyVoice 克隆需要，即参考音频里说的内容）"
+                />
                 <label class="voice-clone-file-label">
                   <input
                     type="file"
@@ -416,8 +427,7 @@
                         <span class="tag" :class="(c.voice_style || c.voiceStyle) ? 'tag-success' : ''">{{ (c.voice_style || c.voiceStyle) ? '已分配' : '待分配' }}</span>
                       </div>
                       <div class="extract-meta">
-                        {{ c.role || '角色' }}
-                        <span v-if="inferCharRoleTag(c)" class="role-tag" :class="roleTagCls(inferCharRoleTag(c))">{{ inferCharRoleTag(c) }}</span>
+                        <span class="role-tag" :class="roleTagCls(inferCharRoleTag(c))">{{ inferCharRoleTag(c) || c.role || '角色' }}</span>
                       </div>
                     </div>
                   </div>
@@ -1890,6 +1900,7 @@ const ROLE_TAGS = [
   { label: '配角', cls: 'role-tag-supporting' },
 ]
 function roleTagCls(label) {
+  if (label === '龙套') return 'role-tag-extra'
   return ROLE_TAGS.find(t => t.label === label)?.cls || ''
 }
 // 依据音色名 + 描述关键词推断该音色适合的角色类型（一个音色可打多个标签）
@@ -1905,6 +1916,9 @@ function inferRoleTags(name, desc = []) {
 // 依据角色姓名 + 角色定位推断角色类型，用于角色卡片展示对照标签
 function inferCharRoleTag(c) {
   const text = `${c.name || ''} ${c.role || ''}`.toLowerCase()
+  if (text.includes('龙套') || text.includes('路人') || text.includes('群演') || text.includes('extra')) return '龙套'
+  const rt = c?.role_type || c?.roleType || ''
+  if (['主角', '反派', '配角', '旁白', '龙套'].includes(rt)) return rt
   if (text.includes('旁白') || text.includes('narrator') || text.includes('画外音')) return '旁白'
   if (text.includes('反派') || text.includes('villain') || text.includes('antagonist')) return '反派'
   if (text.includes('主角') || text.includes('男主') || text.includes('女主') || text.includes('protagonist') || text.includes('hero')) return '主角'
@@ -2019,6 +2033,8 @@ async function previewVoice(voiceId: string) {
 // ====== 声纹克隆 ======
 const cloningVoice = ref(false)
 const cloneVoiceName = ref('')
+const clonePromptText = ref('')
+const generatingVoices = ref(false)
 const cloneFile = ref<File | null>(null)
 const cloneFileName = ref('')
 function onCloneFileChange(e: Event) {
@@ -2035,11 +2051,13 @@ async function cloneVoiceNow() {
     const fd = new FormData()
     fd.append('file', cloneFile.value)
     if (cloneVoiceName.value.trim()) fd.append('voice_name', cloneVoiceName.value.trim())
+    if (clonePromptText.value.trim()) fd.append('prompt_text', clonePromptText.value.trim())
     await voicesAPI.clone(fd)
     toast.success('音色克隆成功，已加入音色库')
     cloneFile.value = null
     cloneFileName.value = ''
     cloneVoiceName.value = ''
+    clonePromptText.value = ''
     await loadVoices()
   } catch (e: any) {
     console.error('Voice clone failed', e)
@@ -2216,6 +2234,8 @@ function composeFailMessage(id) {
 }
 
 function isNarratorCharacter(char) {
+  const rt = char?.role_type || char?.roleType || ''
+  if (rt === '旁白') return true
   const text = `${char?.name || ''} ${char?.role || ''}`.toLowerCase()
   return text.includes('旁白') || text.includes('narrator') || text.includes('画外音')
 }
@@ -3307,6 +3327,26 @@ async function batchGenSamples() {
   if (okCount) toast.success(`已生成 ${okCount} 份试听文件`)
   if (failCount) toast.error(`${failCount} 份试听文件生成失败`)
   await refresh()
+}
+async function generateVoicesFromCharacters() {
+  if (generatingVoices.value) return
+  generatingVoices.value = true
+  try {
+    const data = await voicesAPI.generateFromCharacters(dramaId)
+    const ok = data.success_count ?? data.successCount ?? 0
+    const total = data.total ?? 0
+    const skipped = (data.results || []).filter((r: any) => r.status === 'skipped').length
+    const failed = total - ok - skipped
+    if (ok) toast.success(`已为 ${ok} 个角色生成专属音色`)
+    if (skipped) toast.info(`${skipped} 个角色已有专属音色，已跳过`)
+    if (failed) toast.error(`${failed} 个角色音色生成失败`)
+    await refresh()
+    await loadVoices()
+  } catch (e: any) {
+    toast.error(e.message || '音色生成失败')
+  } finally {
+    generatingVoices.value = false
+  }
 }
 function doBreakdown() {
   const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
@@ -4656,6 +4696,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .role-tag-protagonist { color: #1d4ed8; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.25); }
 .role-tag-villain { color: #b91c1c; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25); }
 .role-tag-supporting { color: #6b21a8; background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.25); }
+.role-tag-extra { color: #475569; background: rgba(100,116,139,0.12); border: 1px solid rgba(100,116,139,0.25); }
 
 .voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; align-content: start; }
 .voice-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; border-radius: 22px; min-height: 0; }

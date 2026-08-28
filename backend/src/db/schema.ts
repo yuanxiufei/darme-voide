@@ -220,6 +220,8 @@ export const aiVoices = sqliteTable('ai_voices', {
   language: text('language'),                     // 语言标签
   provider: text('provider').notNull(),           // minimax
   roleTags: text('role_tags'),                    // 角色类型标签 JSON 数组（旁白/主角/反派/配角）
+  referenceAudio: text('reference_audio'),         // 零样本克隆参考音频相对路径（CosyVoice）
+  promptText: text('prompt_text'),                 // 参考音频对应文本（CosyVoice 零样本）
   createdAt: text('created_at').notNull(),
 })
 

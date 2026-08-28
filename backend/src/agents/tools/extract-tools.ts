@@ -47,7 +47,8 @@ function inferRoleType(role: string | undefined | null): string {
   if (!role) return ''
   if (/主角|男主|女主|hero|protagonist|lead/i.test(role)) return '主角'
   if (/反派|坏|恶|villain|antagonist|boss/i.test(role)) return '反派'
-  if (/配角|supporting|side|龙套|路人/i.test(role)) return '配角'
+  if (/龙套|路人/i.test(role)) return '龙套'
+  if (/配角|supporting|side/i.test(role)) return '配角'
   if (/旁白|叙述|narrator|画外音/i.test(role)) return '旁白'
   return '其他'
 }

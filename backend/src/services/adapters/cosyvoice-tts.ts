@@ -16,6 +16,8 @@ export interface CosyVoiceTTSParams {
   speed?: number
   model?: string
   emotion?: string
+  promptAudio?: string   // 零样本克隆：参考音频 base64
+  promptText?: string    // 零样本克隆：参考音频对应文本
 }
 
 export class CosyVoiceTTSAdapter implements TTSProviderAdapter {
@@ -27,6 +29,23 @@ export class CosyVoiceTTSAdapter implements TTSProviderAdapter {
     headers: Record<string, string>
     body: any
   } {
+    // 零样本模式：带参考音频时走 CosyVoice 官方 /inference_zero_shot
+    if (params.promptAudio) {
+      return {
+        url: joinProviderUrl(config.baseUrl, '', '/inference_zero_shot'),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: {
+          tts_text: params.text,
+          prompt_text: params.promptText || '',
+          prompt_audio: params.promptAudio,
+          model: config.model || 'cosyvoice-v2',
+          stream: false,
+          speed: params.speed ?? 1.0,
+        },
+      }
+    }
+
     return {
       url: joinProviderUrl(config.baseUrl, '', '/tts'),
       method: 'POST',

@@ -36,7 +36,7 @@
 - `ai_voices.role_tags`（TEXT JSON：旁白/主角/反派/配角）；`text-generation.inferVoiceRoleTags` 批量 LLM 打标；sync 后自动打标（失败不阻塞，留空前端回退正则）。
 - `list_voices` 返回 role_tags + 可选 role_tag 筛选；前端 mapVoiceProfile 优先后端 role_tags。
 - TTS 验证：validateTTSSpeaker/validateDialogueLines 三连匹配；`GET /storyboards/:id/validate-dialogue`；PUT 保存 dialogue 返回 dialogue_validation；前端 dubStaleCount 过期横幅。
-- 已完成（2026-08-26）：B2 音色库独立试听 `POST /ai-voices/preview`；B4 `characters.role_type` 枚举（ensureColumn + `inferRoleType` + CharacterEditor select）；B5 声纹克隆 `POST /ai-voices/clone`（MiniMax files/upload→voice_clone，`services/voice-clone.ts`，前端 episode.vue 克隆入口 + `useApi.reqForm`）。待办：真实唇形/相似度 AI 检测挂载、本地 H3 部署、checkpoint_map 配置。
+- 已完成（2026-08-26）：B2 音色库独立试听 `POST /ai-voices/preview`；B4 `characters.role_type` 枚举（ensureColumn + `inferRoleType` + CharacterEditor select）；B5 声纹克隆 `POST /ai-voices/clone`（MiniMax files/upload→voice_clone，`services/voice-clone.ts`，前端 episode.vue 克隆入口 + `useApi.reqForm`）；B6 根据剧人物批量生成专属音色 `POST /ai-voices/generate-from-characters`（批量写入 ai_voices + 更新角色 voiceStyle 为克隆 voice_id，role→role_tags 映射；2026-08-27 已端到端跑通，6 角色生成 `ds_mtak...` 专属音色，preview/list 验证可用）。**参考音频须 ≥10s**：角色试听 voiceSampleUrl 仅约 4s 会报 `voice duration too short`，已改为即时用角色 voiceStyle 合成约 15s 参考音频（REF_TEXT）再克隆。待办：真实唇形/相似度 AI 检测挂载、本地 H3 部署、checkpoint_map 配置。
 
 ## 数据删除语义
 - soft delete（读取必加 isNull(deletedAt)）：characters/dramas/agentConfigs/episodes/资源库 4 表。

@@ -485,6 +485,8 @@ function runMigrations(): void {
   ensureColumn('ai_service_providers', 'is_recommended', 'INTEGER DEFAULT 0')
 
   ensureColumn('ai_voices', 'role_tags', 'TEXT')
+  ensureColumn('ai_voices', 'reference_audio', 'TEXT')
+  ensureColumn('ai_voices', 'prompt_text', 'TEXT')
   ensureColumn('characters', 'role_type', 'TEXT')
 
   // ====== 六键 Bible 三键（LOCATION_ID / COSTUME_ID / STYLE_ID）======

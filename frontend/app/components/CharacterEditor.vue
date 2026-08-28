@@ -29,6 +29,7 @@
                   <option value="主角">主角</option>
                   <option value="反派">反派</option>
                   <option value="配角">配角</option>
+                  <option value="龙套">龙套</option>
                   <option value="旁白">旁白</option>
                   <option value="其他">其他</option>
                 </select>

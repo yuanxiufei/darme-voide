@@ -248,6 +248,7 @@ export const voicesAPI = {
   sync: () => api.post('/ai-voices/sync', {}),
   preview: (voiceId: string, text?: string) => api.post('/ai-voices/preview', { voice_id: voiceId, text }),
   clone: (formData: FormData) => reqForm('/ai-voices/clone', formData),
+  generateFromCharacters: (dramaId: number) => api.post('/ai-voices/generate-from-characters', { drama_id: dramaId }),
 }
 
 export const aiProvidersAPI = {

@@ -5,6 +5,8 @@
 import fs from 'fs'
 import path from 'path'
 import { v4 as uuid } from 'uuid'
+import { eq } from 'drizzle-orm'
+import { db, schema } from '../db/index.js'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
@@ -57,7 +59,25 @@ export async function generateTTS(params: TTSParams): Promise<string> {
 
     try {
       const adapter = getTTSAdapter(config.provider)
-      const { url, method, headers, body } = adapter.buildGenerateRequest(attemptConfig, { ...params, model })
+
+      // CosyVoice 零样本复用：音色库中若存有参考音频，则走 /inference_zero_shot
+      let zeroShot: { promptAudio?: string; promptText?: string } = {}
+      if (config.provider === 'cosyvoice') {
+        const voiceRow = db.select().from(schema.aiVoices)
+          .where(eq(schema.aiVoices.voiceId, params.voice))
+          .get()
+        if (voiceRow?.referenceAudio) {
+          const abs = path.join(getStorageRoot(), voiceRow.referenceAudio.replace(/^static\//, ''))
+          if (fs.existsSync(abs)) {
+            zeroShot = {
+              promptAudio: fs.readFileSync(abs).toString('base64'),
+              promptText: voiceRow.promptText || '',
+            }
+          }
+        }
+      }
+
+      const { url, method, headers, body } = adapter.buildGenerateRequest(attemptConfig, { ...params, model, ...zeroShot })
       logTaskProgress('AudioTask', 'request', {
         provider: config.provider, voice: params.voice,
         method, url: redactUrl(url), model,

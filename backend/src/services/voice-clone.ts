@@ -12,6 +12,7 @@ export interface VoiceCloneInput {
   fileBuffer: Buffer
   filename: string
   voiceId: string
+  voiceName?: string
   demoText?: string
   model?: string
 }
@@ -63,6 +64,7 @@ export async function cloneVoice(input: VoiceCloneInput): Promise<VoiceCloneResu
       need_noise_reduction: true,
       need_volume_normalization: true,
     }
+    if (input.voiceName) body.voice_name = input.voiceName
     if (input.demoText) {
       body.text = input.demoText
       body.model = input.model || 'speech-2.8-hd'
@@ -87,6 +89,47 @@ export async function cloneVoice(input: VoiceCloneInput): Promise<VoiceCloneResu
     return result
   } catch (err: any) {
     logTaskError('VoiceClone', 'clone', { error: err.message })
+    throw err
+  }
+}
+
+/**
+ * CosyVoice 2 零样本克隆（本地）：POST /inference_zero_shot
+ * 无需训练，传入参考音频（prompt_audio）+ 参考文本（prompt_text）即时模仿音色合成 demo。
+ * 接口约定参考 CosyVoice 官方 FastAPI 封装；本地服务（http://localhost:9880）部署后需按实际接口核对。
+ */
+export async function cloneVoiceCosyVoice(input: {
+  baseUrl: string
+  fileBuffer: Buffer
+  promptText: string
+  demoText: string
+  model?: string
+}): Promise<{ demoAudio?: string }> {
+  logTaskStart('VoiceClone', 'cosyvoice-zero-shot', { promptText: input.promptText.slice(0, 20) })
+  try {
+    const url = `${input.baseUrl.replace(/\/+$/, '')}/inference_zero_shot`
+    const body: Record<string, unknown> = {
+      tts_text: input.demoText,
+      prompt_text: input.promptText,
+      prompt_audio: input.fileBuffer.toString('base64'),
+      model: input.model || 'cosyvoice-v2',
+      stream: false,
+      speed: 1.0,
+    }
+
+    const resp = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, 'audio', { maxRetries: 2 })
+
+    const data = await resp.json().catch(() => ({}))
+    const audio = data?.audio || data?.data?.audio
+    const result: { demoAudio?: string } = { demoAudio: audio || undefined }
+    logTaskSuccess('VoiceClone', 'cosyvoice-zero-shot', {})
+    return result
+  } catch (err: any) {
+    logTaskError('VoiceClone', 'cosyvoice-zero-shot', { error: err.message })
     throw err
   }
 }

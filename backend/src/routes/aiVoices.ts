@@ -3,15 +3,19 @@
  * GET  /api/v1/ai-voices       - 获取音色列表
  * POST /api/v1/ai-voices/sync  - 从 MiniMax 同步音色
  */
+import fs from 'fs'
+import path from 'path'
+import { v4 as uuid } from 'uuid'
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { eq, and, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { success, badRequest, now } from '../utils/response.js'
+import { getStorageRoot } from '../config.js'
+import { success, badRequest, notFound, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
 import { getAudioConfig } from '../services/ai.js'
 import { inferVoiceRoleTags } from '../services/text-generation.js'
 import { generateTTS } from '../services/tts-generation.js'
-import { cloneVoice } from '../services/voice-clone.js'
+import { cloneVoice, cloneVoiceCosyVoice } from '../services/voice-clone.js'
 import { logTaskError } from '../utils/task-logger.js'
 import { vendorResponseError } from '../utils/vendor-errors.js'
 
@@ -53,46 +57,201 @@ app.post('/preview', async (c) => {
 })
 
 // POST /ai-voices/clone - 音色快速复刻（上传参考音频，克隆为可复用音色）
+// minimax：MiniMax voice_clone 注册式克隆；cosyvoice：本地零样本克隆（参考音频 + 参考文本）
 app.post('/clone', async (c) => {
   try {
     const body = await c.req.parseBody()
     const file = body['file']
     const voiceName = String(body['voice_name'] || body['voiceName'] || '').trim()
     const demoText = body['demo_text'] || body['demoText'] || undefined
+    const promptText = String(body['prompt_text'] || body['promptText'] || '').trim()
+    const rawVoiceId = String(body['voice_id'] || body['voiceId'] || '')
 
     if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
 
     const config = getAudioConfig()
-    if (config.provider !== 'minimax') {
-      return badRequest(c, '音色复刻当前仅支持 MiniMax 音频服务')
+    const isCosyVoice = config.provider === 'cosyvoice'
+    if (config.provider !== 'minimax' && !isCosyVoice) {
+      return badRequest(c, `音色复刻当前仅支持 MiniMax / CosyVoice 音频服务（当前 ${config.provider}）`)
+    }
+    if (isCosyVoice && !promptText) {
+      return badRequest(c, 'CosyVoice 零样本克隆需要提供参考音频文本 prompt_text')
     }
 
-    const voiceId = generateCloneVoiceId(String(body['voice_id'] || body['voiceId'] || ''))
+    const fileBuffer = Buffer.from(await file.arrayBuffer())
+    const voiceId = generateCloneVoiceId(rawVoiceId, isCosyVoice ? 'cv_' : 'ds_')
 
-    const result = await cloneVoice({
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
-      filename: file.name,
-      voiceId,
-      demoText: demoText ? String(demoText) : undefined,
-      model: config.model,
-    })
+    let demoAudio: string | undefined
+    let referenceAudio: string | null = null
+    let refPromptText: string | null = null
+
+    if (isCosyVoice) {
+      const sampleText = String(demoText || '你好，欢迎来到短剧工坊，这是我的声音试听。')
+      const r = await cloneVoiceCosyVoice({
+        baseUrl: config.baseUrl,
+        fileBuffer,
+        promptText,
+        demoText: sampleText,
+        model: config.model,
+      })
+      // demo 音频（base64）落盘为可试听 URL
+      if (r.demoAudio) {
+        const audioDir = path.join(getStorageRoot(), 'audio')
+        fs.mkdirSync(audioDir, { recursive: true })
+        const demoName = `${uuid()}.mp3`
+        fs.writeFileSync(path.join(audioDir, demoName), Buffer.from(r.demoAudio, 'base64'))
+        demoAudio = `static/audio/${demoName}`
+      }
+      // 参考音频落盘，供后续 TTS 零样本复用
+      const voicesDir = path.join(getStorageRoot(), 'voices')
+      fs.mkdirSync(voicesDir, { recursive: true })
+      const refName = `${uuid()}.wav`
+      fs.writeFileSync(path.join(voicesDir, refName), fileBuffer)
+      referenceAudio = `static/voices/${refName}`
+      refPromptText = promptText
+    } else {
+      const result = await cloneVoice({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        fileBuffer,
+        filename: file.name,
+        voiceId,
+        demoText: demoText ? String(demoText) : undefined,
+        model: config.model,
+      })
+      demoAudio = result.demoAudio
+    }
 
     // 写入音色库（不覆盖已有）
     db.insert(schema.aiVoices).values({
-      voiceId: result.voiceId,
-      voiceName: voiceName || `克隆音色 ${result.voiceId.slice(-6)}`,
+      voiceId,
+      voiceName: voiceName || `克隆音色 ${voiceId.slice(-6)}`,
       description: JSON.stringify(['克隆音色']),
       language: '中文',
-      provider: 'minimax',
+      provider: config.provider,
+      referenceAudio,
+      promptText: refPromptText,
       createdAt: now(),
     }).onConflictDoNothing({ target: schema.aiVoices.voiceId }).run()
 
-    return success(c, { voice_id: result.voiceId, demo_audio: result.demoAudio })
+    return success(c, { voice_id: voiceId, demo_audio: demoAudio })
   } catch (err: any) {
     logTaskError('AiVoices', 'clone', { error: err.message })
     return badRequest(c, `音色克隆失败: ${err.message}`)
+  }
+})
+
+// POST /ai-voices/generate-from-characters - 根据剧人物批量生成专属音色（用角色试听音频做声线克隆）
+app.post('/generate-from-characters', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const dramaId = Number(body.drama_id || body.dramaId)
+    if (!dramaId) return badRequest(c, 'drama_id is required')
+
+    const drama = db.select().from(schema.dramas)
+      .where(eq(schema.dramas.id, dramaId))
+      .get()
+    if (!drama) return notFound(c, 'Drama not found')
+
+    const characters = db.select().from(schema.characters)
+      .where(and(eq(schema.characters.dramaId, dramaId), isNull(schema.characters.deletedAt)))
+      .all()
+      .filter(ch => ch.voiceStyle)
+
+    if (characters.length === 0) {
+      return badRequest(c, '该剧暂无已分配音色的角色，请先在角色页分配音色')
+    }
+
+    const config = getAudioConfig()
+    const isCosyVoice = config.provider === 'cosyvoice'
+    const audioConfigId = resolveDramaConfigId(dramaId, 'audioConfigId')
+
+    // 声线克隆要求参考音频 ≥10 秒，现有试听仅约 4 秒会报 "voice duration too short"，
+    // 故改用角色音色即时合成一段约 15 秒的参考音频用于克隆。
+    const REF_TEXT = '在这座城市里，每天都有许多故事在上演。清晨的阳光洒在街道上，午后微风拂过树梢，傍晚霞光映红了天边。我愿意把最温暖的声音带给你，陪伴你度过每一个平凡而美好的日子。'
+
+    const results: any[] = []
+    let okCount = 0
+
+    for (const ch of characters) {
+      const name = ch.name || '角色'
+      try {
+        // 已是克隆专属音色（ds_/cv_ 前缀）则跳过，避免重复生成
+        if (/^(ds_|cv_)/.test(ch.voiceStyle!)) {
+          results.push({ character_id: ch.id, name, status: 'skipped', voice_id: ch.voiceStyle, reason: '已有专属音色' })
+          continue
+        }
+
+        // 即时合成 ≥10s 参考音频（MiniMax voice_clone 最低 10 秒）
+        const refPath = await generateTTS({ text: REF_TEXT, voice: ch.voiceStyle!, configId: audioConfigId })
+        const filePath = resolveLocalAudioPath(refPath)
+        if (!filePath || !fs.existsSync(filePath)) {
+          results.push({ character_id: ch.id, name, status: 'failed', error: '参考音频落盘失败' })
+          continue
+        }
+
+        const fileBuffer = fs.readFileSync(filePath)
+        // demo 试听文案（短句）；参考文本仅 CosyVoice 零样本需要
+        const demoText = `你好，我是${name}。很高兴认识你，这是我的专属音色。`
+        const voiceId = generateCloneVoiceId('', isCosyVoice ? 'cv_' : 'ds_')
+
+        let referenceAudio: string | null = null
+        let refPromptText: string | null = null
+
+        if (isCosyVoice) {
+          await cloneVoiceCosyVoice({
+            baseUrl: config.baseUrl,
+            fileBuffer,
+            promptText: REF_TEXT,
+            demoText,
+            model: config.model,
+          })
+          referenceAudio = refPath
+          refPromptText = REF_TEXT
+        } else {
+          await cloneVoice({
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey,
+            fileBuffer,
+            filename: path.basename(refPath),
+            voiceId,
+            voiceName: name,
+            demoText,
+            model: config.model,
+          })
+        }
+
+        // 写入音色库（不覆盖已有）
+        db.insert(schema.aiVoices).values({
+          voiceId,
+          voiceName: name,
+          description: JSON.stringify([ch.role || '角色音色']),
+          language: '中文',
+          provider: config.provider,
+          roleTags: JSON.stringify([mapRoleToTag(ch.role)]),
+          referenceAudio,
+          promptText: refPromptText,
+          createdAt: now(),
+        }).onConflictDoNothing({ target: schema.aiVoices.voiceId }).run()
+
+        // 角色改用专属音色
+        db.update(schema.characters)
+          .set({ voiceStyle: voiceId, voiceProvider: config.provider, updatedAt: now() })
+          .where(eq(schema.characters.id, ch.id))
+          .run()
+
+        results.push({ character_id: ch.id, name, status: 'success', voice_id: voiceId })
+        okCount++
+      } catch (err: any) {
+        logTaskError('AiVoices', 'generate-from-characters', { characterId: ch.id, name, error: err.message })
+        results.push({ character_id: ch.id, name, status: 'failed', error: err.message })
+      }
+    }
+
+    return success(c, { total: characters.length, success_count: okCount, results })
+  } catch (err: any) {
+    logTaskError('AiVoices', 'generate-from-characters', { error: err.message })
+    return badRequest(c, `生成音色失败: ${err.message}`)
   }
 })
 
@@ -227,13 +386,41 @@ function shouldKeepVoice(voice: { voice_id: string, voice_name: string }) {
   return !excludedPatterns.some(pattern => text.includes(pattern))
 }
 
-function generateCloneVoiceId(raw: string): string {
+// 把 /static/... 相对 URL 解析为本地磁盘绝对路径
+function resolveLocalAudioPath(url: string): string | null {
+  if (!url) return null
+  const cleaned = url.split('?')[0]
+  const rel = cleaned.replace(/^\/?static\//, '').replace(/^\//, '')
+  if (!rel) return null
+  return path.join(getStorageRoot(), rel)
+}
+
+// 解析剧集级配置 id（音色生成用剧的 audioConfigId，找不到则走默认）
+function resolveDramaConfigId(dramaId: number, field: 'imageConfigId' | 'audioConfigId'): number | undefined {
+  const eps = db.select().from(schema.episodes)
+    .where(and(eq(schema.episodes.dramaId, dramaId), isNull(schema.episodes.deletedAt)))
+    .all()
+  for (const e of eps) {
+    const v = e[field] as number | null
+    if (v != null) return v
+  }
+  return undefined
+}
+
+// 角色 role（主角/反派/龙套/旁白）→ 音色 role_tags 四类（龙套归入配角）
+function mapRoleToTag(role: string | null): string {
+  const r = (role || '').trim()
+  if (r === '主角' || r === '反派' || r === '旁白') return r
+  return '配角'
+}
+
+function generateCloneVoiceId(raw: string, prefix = 'ds_'): string {
   if (raw) {
     const v = raw.trim()
     if (/^[a-zA-Z][a-zA-Z0-9_-]{7,255}$/.test(v) && !/[_-]$/.test(v)) return v
     throw new Error('voice_id 需 8-256 字符，首字符为英文字母，仅含字母/数字/-/_')
   }
-  return 'ds_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+  return prefix + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
 }
 
 function parseJsonArray(raw: string | null): string[] {

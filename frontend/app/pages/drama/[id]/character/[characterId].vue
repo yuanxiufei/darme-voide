@@ -106,10 +106,21 @@
                 <input v-model="form.name" class="input" />
               </label>
               <label class="field">
-                <span>角色定位</span>
-                <input v-model="form.role" class="input" placeholder="主角 / 反派 / 配角 / 旁白" />
+                <span>角色类型</span>
+                <select v-model="form.roleType" class="input">
+                  <option value="">未指定</option>
+                  <option value="主角">主角</option>
+                  <option value="反派">反派</option>
+                  <option value="配角">配角</option>
+                  <option value="旁白">旁白</option>
+                  <option value="其他">其他</option>
+                </select>
               </label>
             </div>
+            <label class="field">
+              <span>角色定位</span>
+              <input v-model="form.role" class="input" placeholder="如：霸道总裁男主 / 亦正亦邪的反派" />
+            </label>
             <label class="field">
               <span>角色描述</span>
               <textarea v-model="form.description" class="input" rows="3" placeholder="角色的背景故事、性格特点、在剧情中的作用..." />
@@ -367,6 +378,7 @@ onMounted(async () => {
     const c = char.value
     form.name = c.name
     form.role = c.role || ''
+    form.roleType = c.role_type || c.roleType || ''
     form.description = c.description || ''
     form.appearance = c.appearance || ''
     form.personality = c.personality || ''
@@ -394,6 +406,7 @@ async function persistForm() {
   await characterAPI.update(characterId, {
     name: form.name,
     role: form.role,
+    roleType: form.roleType || null,
     description: form.description,
     appearance: form.appearance,
     personality: form.personality,
