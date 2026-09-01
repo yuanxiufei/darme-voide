@@ -185,7 +185,7 @@
               </label>
               <label class="field">
                 <span class="field-label">视觉风格</span>
-                <BaseSelect v-model="autoForm.style" :options="styleSelectOptions" placeholder="默认 realistic" searchable />
+                <BaseSelect v-model="autoForm.style" :options="styleSelectOptions" placeholder="默认 写实" searchable />
               </label>
             </div>
             <div class="field">
@@ -304,8 +304,15 @@ function autoEpClass(s) {
   if (s === 'auto:failed') return 'is-failed'
   return 'is-running'
 }
-const styles = ['realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
-const styleSelectOptions = computed(() => styles.map(s => ({ label: s, value: s })))
+const styles = {
+  realistic: '写实',
+  anime: '动漫',
+  ghibli: '吉卜力',
+  cinematic: '电影感',
+  comic: '漫画',
+  watercolor: '水彩',
+}
+const styleSelectOptions = computed(() => Object.entries(styles).map(([value, label]) => ({ label, value })))
 
 const STATUS_LABELS = {
   draft: '草稿',

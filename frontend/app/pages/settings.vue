@@ -90,6 +90,39 @@
           </div>
           <p v-else class="config-empty">尚未初始化本地模型，点击右上角按钮一键创建。</p>
 
+          <!-- 本地服务状态 -->
+          <div class="runtime-panel">
+            <div class="ollama-head">
+              <div class="ollama-title">
+                <Server :size="14" />
+                <span>本地服务状态</span>
+                <span class="ollama-state" :class="{ on: runtimeHealth?.all_running }">
+                  {{ runtimeHealth ? `${runtimeHealth.running_count}/${runtimeHealth.total} 运行中` : '检测中…' }}
+                </span>
+              </div>
+              <div class="ollama-head-actions">
+                <button class="btn btn-ghost btn-icon" :disabled="runtimeBusy" title="刷新检测" @click="refreshRuntimeHealth">
+                  <Loader2 v-if="runtimeBusy" :size="13" class="animate-spin" />
+                  <RefreshCw v-else :size="13" />
+                </button>
+              </div>
+            </div>
+            <div class="runtime-grid">
+              <div v-for="s in runtimeHealth?.services ?? []" :key="s.key" class="runtime-item">
+                <span class="runtime-dot" :class="{ on: s.running }" />
+                <div class="runtime-meta">
+                  <span class="runtime-label">{{ s.label }}</span>
+                  <span class="runtime-sub mono">
+                    {{ s.base_url }}
+                    <template v-if="s.running"> · {{ s.latency_ms }}ms</template>
+                    <template v-else-if="s.error"> · {{ s.error }}</template>
+                  </span>
+                </div>
+                <span v-if="s.registered_count" class="tag tag-accent">{{ s.registered_count }} 配置</span>
+              </div>
+            </div>
+          </div>
+
           <!-- Ollama 本地模型管理 -->
           <div class="ollama-panel">
             <div class="ollama-head">
@@ -116,6 +149,9 @@
                 <button class="btn btn-ghost btn-xs" :disabled="ollamaBusy" title="创建/切换本地文本配置使用该模型" @click="useOllamaModel(m.name)">
                   <Plus :size="12" /> 使用
                 </button>
+                <button class="btn btn-ghost btn-icon" :disabled="ollamaBusy" title="删除该模型" @click="deleteOllamaModel(m.name)">
+                  <Trash2 :size="12" />
+                </button>
               </div>
             </div>
             <div v-else class="ollama-empty">{{ ollamaStatus?.running ? '本机暂无已安装模型，可在下方输入模型名下载' : 'Ollama 未运行，先点击「启动 Ollama」' }}</div>
@@ -130,6 +166,222 @@
             <div v-if="ollamaPulling" class="ollama-progress">
               <div class="gpu-bar"><div class="gpu-bar-fill" :style="{ width: pullProgress + '%' }" /></div>
               <div class="ollama-progress-label">{{ pullStatusText }}</div>
+            </div>
+          </div>
+
+          <!-- 本地模型扫描与注册 -->
+          <div class="scan-panel">
+            <div class="ollama-head">
+              <div class="ollama-title">
+                <ScanSearch :size="15" />
+                本地模型扫描与注册
+              </div>
+              <div class="ollama-head-actions">
+                <select v-model="selectedDrive" class="input scan-drive-select" :disabled="scanLoading" title="选择要扫描的盘符">
+                  <option value="">全部目录</option>
+                  <option v-for="d in drives" :key="d.root" :value="d.root">{{ d.letter }} 盘 ({{ d.root }})</option>
+                </select>
+                <label class="scan-auto-toggle" title="扫描完成后自动注册所有可注册模型">
+                  <input type="checkbox" v-model="autoRegister" />
+                  <span>自动注册</span>
+                </label>
+                <button v-if="scanLoading" class="btn btn-ghost btn-sm" @click="cancelScan">
+                  <X :size="14" /> 取消
+                </button>
+                <button class="btn btn-ghost btn-sm" :disabled="scanLoading" @click="scanLocalModels">
+                  <Loader2 v-if="scanLoading" :size="14" class="animate-spin" />
+                  <ScanSearch v-else :size="14" />
+                  {{ scanLoading ? '扫描中…' : '扫描本地模型' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="scanProgress && !scanProgress.done" class="scan-progress">
+              <div class="gpu-bar"><div class="gpu-bar-fill" :style="{ width: scanProgressPercent + '%' }" /></div>
+              <div class="scan-progress-label">
+                已扫描 <b>{{ scanProgress.scannedFiles }}</b> 个文件，发现 <b>{{ scanProgress.foundModels }}</b> 个模型
+                <span v-if="scanProgress.currentDir" class="scan-progress-dir">{{ scanProgress.currentDir }}</span>
+              </div>
+            </div>
+
+            <p class="scan-desc">扫描电脑里的模型文件并识别类型，勾选即可一键注册。可设置「模型存储目录」作为下载/存放的主目录，散落在电脑任意位置的其他模型则添加为额外扫描目录一并调用。</p>
+
+            <div class="scan-roots">
+              <div class="scan-roots-label">
+                <HardDrive :size="13" />
+                <span>模型存储目录</span>
+                <span class="scan-roots-hint">下载/存放模型的主目录，扫描时优先扫描</span>
+              </div>
+              <div class="scan-roots-input-row">
+                <input
+                  v-model="modelDirInput"
+                  class="input"
+                  type="text"
+                  placeholder="如 D:\models 或 D:\code\ComfyUI\ComfyUI\models"
+                  @keyup.enter="saveModelDir"
+                />
+                <button class="btn btn-ghost btn-sm" :disabled="modelDirInput.trim().replace(/[\\/]+$/, '') === modelDir" @click="saveModelDir">
+                  <Check :size="14" /> 保存
+                </button>
+              </div>
+
+              <div class="hf-download">
+                <div class="scan-roots-label">
+                  <Download :size="13" />
+                  <span>下载模型</span>
+                  <span class="scan-roots-hint">权重下载到上面的「模型存储目录」</span>
+                </div>
+                <div class="hf-source-row">
+                  <button
+                    v-for="s in HF_SOURCES"
+                    :key="s.value"
+                    type="button"
+                    class="hf-source-btn"
+                    :class="{ active: hfSource === s.value }"
+                    @click="hfSource = s.value"
+                  >
+                    {{ s.label }}
+                  </button>
+                </div>
+                <div class="scan-roots-input-row">
+                  <input
+                    v-model="hfRepo"
+                    class="input"
+                    type="text"
+                    placeholder="如 Qwen/Qwen3-4B"
+                    @keyup.enter="listHfFiles"
+                  />
+                  <button class="btn btn-ghost btn-sm" :disabled="!hfRepo.trim() || hfListing" @click="listHfFiles">
+                    <Loader2 v-if="hfListing" :size="14" class="animate-spin" />
+                    <ScanSearch v-else :size="14" /> 浏览文件
+                  </button>
+                  <button class="btn btn-primary btn-sm" :disabled="!hfRepo.trim() || hfDownloading || !hfSelectedFiles.length" @click="startHfDownload">
+                    <Loader2 v-if="hfDownloading" :size="14" class="animate-spin" />
+                    <Download v-else :size="14" /> 下载{{ hfSelectedFiles.length ? ` (${hfSelectedFiles.length})` : '' }}
+                  </button>
+                </div>
+
+                <div v-if="hfFiles.length" class="hf-file-list">
+                  <label class="hf-file-row">
+                    <input type="checkbox" class="scan-check" :checked="hfSelectedFiles.length === hfFiles.length" @change="toggleAllHf" />
+                    <span class="hf-file-name">全选</span>
+                  </label>
+                  <label v-for="f in hfFiles" :key="f.name" class="hf-file-row">
+                    <input type="checkbox" class="scan-check" :checked="hfSelectedFiles.includes(f.name)" @change="toggleHfFile(f.name)" />
+                    <span class="hf-file-name mono">{{ f.name }}</span>
+                    <span class="hf-file-size">{{ formatSize(f.size) }}</span>
+                  </label>
+                </div>
+
+                <div v-if="hfProgress" class="hf-progress">
+                  <div class="hf-progress-track"><div class="hf-progress-fill" :style="{ width: hfPercent + '%' }" /></div>
+                  <div class="hf-progress-text">{{ hfProgressText }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="scan-roots">
+              <div class="scan-roots-label">
+                <FolderOpen :size="13" />
+                <span>额外扫描目录</span>
+                <span class="scan-roots-hint">电脑里其他位置的模型也一并扫描</span>
+              </div>
+              <div class="scan-roots-input-row">
+                <input
+                  v-model="customRootInput"
+                  class="input"
+                  type="text"
+                  placeholder="如 D:\models\LLM，回车或点添加"
+                  @keyup.enter="addCustomRoot"
+                />
+                <button class="btn btn-ghost btn-sm" :disabled="!customRootInput.trim()" @click="addCustomRoot">
+                  <Plus :size="14" /> 添加
+                </button>
+              </div>
+              <div v-if="customRoots.length" class="scan-roots-chips">
+                <span v-for="r in customRoots" :key="r" class="scan-root-chip">
+                  <FolderOpen :size="12" class="scan-root-chip-icon" />
+                  <span class="scan-root-chip-path">{{ r }}</span>
+                  <button class="scan-root-chip-x" title="移除" @click="removeCustomRoot(r)"><X :size="12" /></button>
+                </span>
+              </div>
+            </div>
+
+            <p v-if="scanError" class="scan-error">{{ scanError }}</p>
+
+            <div v-if="scanResult" class="scan-summary">
+              <span class="scan-summary-total">共识别 <b>{{ scanResult.total }}</b> 个模型文件</span>
+              <span v-if="scanResult.truncated" class="tag tag-warning">结果已截断</span>
+              <span v-for="(count, kind) in scanResult.byKind" :key="kind" class="tag" :class="`kind-tag-${kind}`">{{ KIND_META[kind]?.label || kind }} {{ count }}</span>
+            </div>
+
+            <div v-if="scanModels.length" class="scan-toolbar">
+              <div class="scan-filters">
+                <button
+                  v-for="k in ['all', 'text', 'image', 'video', 'audio', 'unknown']"
+                  :key="k"
+                  class="scan-filter"
+                  :class="{ active: scanFilter === k }"
+                  @click="scanFilter = k"
+                >{{ k === 'all' ? '全部' : KIND_META[k]?.label || k }}</button>
+              </div>
+              <div class="scan-toolbar-actions">
+                <button class="btn btn-ghost btn-sm" :disabled="!registerableModels.length" @click="toggleSelectAll">
+                  {{ allSelected ? '取消全选' : '全选可注册' }}
+                </button>
+                <button class="btn btn-primary btn-sm" :disabled="registerLoading || !selectedCount" @click="registerSelected">
+                  <Loader2 v-if="registerLoading" :size="14" class="animate-spin" />
+                  注册所选{{ selectedCount ? ` (${selectedCount})` : '' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="scanModels.length" class="scan-list">
+              <label
+                v-for="m in scanModels"
+                :key="m.path"
+                class="scan-item"
+                :class="{ disabled: !isRegisterable(m) }"
+              >
+                <input
+                  type="checkbox"
+                  class="scan-check"
+                  :checked="selectedPaths.has(m.path)"
+                  :disabled="!isRegisterable(m)"
+                  @change="toggleSelect(m.path)"
+                />
+                <div class="scan-item-main">
+                  <div class="scan-item-name mono">{{ m.filename }}</div>
+                  <div class="scan-item-meta">
+                    <span class="tag" :class="`kind-tag-${m.kind}`">{{ KIND_META[m.kind]?.label || m.kind }}</span>
+                    <span class="tag" :class="m.role === 'standalone' ? 'tag-accent' : ''">{{ ROLE_LABEL[m.role] || m.role }}</span>
+                    <span class="scan-item-path">{{ m.dirname }}</span>
+                  </div>
+                  <div v-if="m.suggested?.note" class="scan-item-note"><Info :size="12" /> {{ m.suggested.note }}</div>
+                </div>
+                <div class="scan-item-right">
+                  <span class="scan-item-size">{{ m.sizeHuman }}</span>
+                  <span v-if="m.runtime" class="scan-item-runtime">{{ m.runtime }}</span>
+                  <button
+                    v-if="isInsideModelDir(m)"
+                    class="btn btn-ghost btn-icon scan-item-del"
+                    :disabled="deletingPath === m.path"
+                    title="删除本地文件"
+                    @click.stop.prevent="deleteModelFile(m)"
+                  >
+                    <Loader2 v-if="deletingPath === m.path" :size="14" class="animate-spin" />
+                    <Trash2 v-else :size="14" />
+                  </button>
+                </div>
+              </label>
+            </div>
+            <p v-else-if="!scanLoading && !scanError" class="scan-empty">点击「扫描本地模型」开始识别本机可用的模型文件。</p>
+
+            <div v-if="registerResult?.skipped?.length" class="scan-skipped">
+              <div class="scan-skipped-title">已跳过 {{ registerResult.skipped.length }} 项：</div>
+              <div v-for="s in registerResult.skipped" :key="s.filename" class="scan-skipped-item">
+                <span class="mono">{{ s.filename }}</span> — {{ s.reason }}
+              </div>
             </div>
           </div>
         </section>
@@ -723,6 +975,15 @@
           <textarea v-model="cfgForm.negative_prompt" class="input" rows="2" placeholder="如 low quality, blurry, distorted face, watermark, text" />
           <span class="field-hint">图片生成时统一排除的内容；留空则用各服务商默认值。</span>
         </label>
+        <label v-if="cfgForm.service_type === 'video'" class="field">
+          <span class="field-label">FL2VA Checkpoint（动作/空镜/转场，本地 H3）</span>
+          <input v-model="cfgForm.checkpoint_fl2va" class="input" placeholder="minimax_h3_fl2va_pruned_int8_convrot" />
+        </label>
+        <label v-if="cfgForm.service_type === 'video'" class="field">
+          <span class="field-label">Ref2VA Checkpoint（说话/对话，本地 H3）</span>
+          <input v-model="cfgForm.checkpoint_ref2va" class="input" placeholder="minimax_h3_ref2va_pruned_int8_convrot" />
+          <span class="field-hint">两者留空则退化为模型字段单 checkpoint 模式（云端 MiniMax 无需填写）。</span>
+        </label>
         <div v-if="cfgTestResult" class="test-result" :class="{ ok: cfgTestResult.reachable, bad: !cfgTestResult.reachable }">
           <div class="test-result-head">
             <span class="tag" :class="cfgTestResult.reachable ? 'tag-success' : 'tag-error'">{{ cfgTestResult.status || 'ERROR' }}</span>
@@ -831,10 +1092,10 @@
 </template>
 
 <script setup lang="ts">
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Monitor, RefreshCw, Server, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, Play, Download } from 'lucide-vue-next'
+import { Plus, X, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Monitor, RefreshCw, Server, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, Play, Download, ScanSearch, Info } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, agentConfigAPI, skillsAPI, aiProvidersAPI, traceAPI, storageAPI, generationsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
+import { aiConfigAPI, agentConfigAPI, skillsAPI, aiProvidersAPI, traceAPI, storageAPI, generationsAPI, localModelsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
 import brandLogo from '~/assets/brand-logo.svg'
 import { useConfirm } from '~/composables/useConfirm'
 
@@ -865,7 +1126,7 @@ const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
 const cfgModelsLoading = ref(false)
 const cfgModelsResult = ref<any>(null)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, negative_prompt: '' })
+const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, negative_prompt: '', checkpoint_fl2va: '', checkpoint_ref2va: '' })
 const presetForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
 const providers = ref<string[]>(['ali', 'chatfire', 'gemini', 'minimax', 'ollama', 'openai', 'openrouter', 'vidu', 'volcengine'])
@@ -996,7 +1257,7 @@ function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
   cfgModelsResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0, negative_prompt: '' })
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0, negative_prompt: '', checkpoint_fl2va: '', checkpoint_ref2va: '' })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -1014,6 +1275,8 @@ function startEditCfg(c) {
     service_type: c.service_type,
     priority: c.priority ?? 0,
     negative_prompt: c.negative_prompt || '',
+    checkpoint_fl2va: c.checkpoint_map?.fl2va || '',
+    checkpoint_ref2va: c.checkpoint_map?.ref2va || '',
   })
   cfgDialog.value = true
 }
@@ -1121,10 +1384,22 @@ async function saveCfg() {
   if (models.length && !(await ensureModelsValidated(models))) return
 
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt })
-    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt })
+    const checkpoint_map = buildCheckpointMap()
+    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt, checkpoint_map })
+    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt, checkpoint_map })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
   } catch (e) { toast.error(e.message) }
+}
+
+/** 组装 checkpoint_map：仅视频类填写；视频类留空返回 null 以清除，非视频类返回 undefined 不触碰 */
+function buildCheckpointMap(): Record<string, string> | null | undefined {
+  if (cfgForm.service_type !== 'video') return undefined
+  const fl2va = (cfgForm.checkpoint_fl2va || '').trim()
+  const ref2va = (cfgForm.checkpoint_ref2va || '').trim()
+  const map: Record<string, string> = {}
+  if (fl2va) map.fl2va = fl2va
+  if (ref2va) map.ref2va = ref2va
+  return Object.keys(map).length ? map : null
 }
 async function applyQuickPreset() {
   if (!presetForm.apiKey) {
@@ -1501,9 +1776,364 @@ async function loadLocalConfigs() {
   try { localConfigs.value = await aiConfigAPI.configsLocal() } catch (e: any) { /* 非关键，静默 */ }
 }
 
+// ===== 本地模型扫描与注册 =====
+const scanLoading = ref(false)
+const scanResult = ref<any>(null)
+const scanError = ref('')
+const scanFilter = ref<string>('all')
+const registerLoading = ref(false)
+const registerResult = ref<any>(null)
+const selectedPaths = ref<Set<string>>(new Set())
+const customRoots = ref<string[]>([])
+const customRootInput = ref('')
+const modelDir = ref('')
+const modelDirInput = ref('')
+// 异步扫描（磁盘/全盘级）：盘符选择、后台任务轮询、自动注册
+const drives = ref<{ letter: string; root: string }[]>([])
+const selectedDrive = ref('')
+const autoRegister = ref(true)
+const scanProgress = ref<any>(null)
+const scanTaskId = ref('')
+let scanTimer: ReturnType<typeof setInterval> | null = null
+
+const KIND_META: Record<string, { label: string; color: string }> = {
+  text: { label: '文本', color: 'teal' },
+  image: { label: '图像', color: 'blue' },
+  video: { label: '视频', color: 'purple' },
+  audio: { label: '音频', color: 'orange' },
+  unknown: { label: '未知', color: 'gray' },
+}
+const ROLE_LABEL: Record<string, string> = { standalone: '独立', component: '组件' }
+
+const scanModels = computed(() => {
+  const list: any[] = scanResult.value?.models || []
+  if (scanFilter.value === 'all') return list
+  return list.filter((m) => m.kind === scanFilter.value)
+})
+// 可注册：仅 standalone 且存在可调用建议（ComfyUI 只读来源 callable=false，不可注册）
+function isRegisterable(m: any) {
+  return m.role === 'standalone' && m.suggested?.callable !== false
+}
+const registerableModels = computed(() =>
+  (scanResult.value?.models || []).filter((m: any) => isRegisterable(m)),
+)
+const selectedCount = computed(() => selectedPaths.value.size)
+const allSelected = computed(() => {
+  const all = registerableModels.value.map((m: any) => m.path)
+  return all.length > 0 && all.every((p) => selectedPaths.value.has(p))
+})
+
+function toggleSelect(path: string) {
+  const next = new Set(selectedPaths.value)
+  next.has(path) ? next.delete(path) : next.add(path)
+  selectedPaths.value = next
+}
+function toggleSelectAll() {
+  const all = registerableModels.value.map((m: any) => m.path)
+  const allSelected = all.length > 0 && all.every((p) => selectedPaths.value.has(p))
+  selectedPaths.value = allSelected ? new Set() : new Set(all)
+}
+
+async function loadDrives() {
+  try {
+    const r: any = await localModelsAPI.drives()
+    drives.value = Array.isArray(r?.drives) ? r.drives : []
+  } catch { /* 非关键，静默失败 */ }
+}
+
+const scanProgressPercent = computed(() => {
+  const p = scanProgress.value
+  if (!p) return 0
+  if (p.done) return 100
+  // 扫描总量不可预知，用已扫文件数做渐近伪进度（趋近 95%，完成时跳 100%）
+  return Math.min(95, Math.round((p.scannedFiles / (p.scannedFiles + 800)) * 100))
+})
+
+function stopScanPolling() {
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null }
+}
+
+function cancelScan() {
+  if (scanTaskId.value) localModelsAPI.scanCancel(scanTaskId.value).catch(() => {})
+}
+
+async function autoRegisterAll(result: any) {
+  const models = (result?.models || []).filter((m: any) => isRegisterable(m))
+  if (!models.length) return
+  registerLoading.value = true
+  try {
+    registerResult.value = await localModelsAPI.register(models)
+    const created = registerResult.value?.created?.length || 0
+    const updated = registerResult.value?.updated?.length || 0
+    toast.success(`已自动注册：新增 ${created}，更新 ${updated}`)
+    await loadCfgs()
+    await loadLocalConfigs()
+  } catch (e: any) {
+    toast.error(e?.message || '自动注册失败')
+  } finally {
+    registerLoading.value = false
+  }
+}
+
+async function scanLocalModels() {
+  scanLoading.value = true
+  scanError.value = ''
+  scanResult.value = null
+  registerResult.value = null
+  selectedPaths.value = new Set()
+  scanProgress.value = null
+  stopScanPolling()
+
+  try {
+    const params: any = {}
+    if (selectedDrive.value) params.roots = [selectedDrive.value]
+    const { taskId } = await localModelsAPI.scanAsync(params)
+    scanTaskId.value = taskId
+    scanProgress.value = { scannedFiles: 0, foundModels: 0, currentDir: '', done: false }
+
+    scanTimer = setInterval(async () => {
+      let status: any
+      try {
+        status = await localModelsAPI.scanStatus(taskId)
+      } catch (e: any) {
+        stopScanPolling()
+        scanLoading.value = false
+        scanError.value = e?.message || '查询扫描进度失败'
+        return
+      }
+      const progress = status?.progress
+      scanProgress.value = progress
+      if (!progress?.done) return
+
+      stopScanPolling()
+      scanLoading.value = false
+      if (progress.error) {
+        scanError.value = progress.error
+      } else if (progress.cancelled) {
+        scanError.value = '扫描已取消'
+      } else if (progress.result) {
+        scanResult.value = progress.result
+        if (!progress.result.models?.length) {
+          scanError.value = '未扫描到任何模型文件'
+        } else if (autoRegister.value) {
+          await autoRegisterAll(progress.result)
+        }
+      }
+    }, 800)
+  } catch (e: any) {
+    stopScanPolling()
+    scanLoading.value = false
+    scanError.value = e?.message || '扫描失败'
+  }
+}
+
+async function loadLocalRoots() {
+  try {
+    const r: any = await localModelsAPI.roots()
+    customRoots.value = Array.isArray(r?.extra) ? r.extra : []
+    modelDir.value = r?.paths?.models_dir || ''
+    modelDirInput.value = modelDir.value
+  } catch { /* 非关键路径，静默失败 */ }
+}
+
+async function saveCustomRoots() {
+  try {
+    await localModelsAPI.savePaths({ roots: customRoots.value })
+  } catch (e: any) {
+    toast.error(e?.message || '保存目录失败')
+  }
+}
+
+async function saveModelDir() {
+  const v = modelDirInput.value.trim().replace(/[\\/]+$/, '')
+  if (v === modelDir.value) return
+  try {
+    await localModelsAPI.savePaths({ models_dir: v })
+    modelDir.value = v
+    toast.success(v ? '模型存储目录已保存' : '模型存储目录已清空')
+  } catch (e: any) {
+    toast.error(e?.message || '保存目录失败')
+  }
+}
+
+// ── 删除本地模型文件 ──
+const deletingPath = ref('')
+
+function normPath(s: string): string {
+  return (s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+function isInsideModelDir(m: any): boolean {
+  const dir = normPath(modelDir.value)
+  if (!dir) return false
+  const target = normPath(m?.path)
+  return target !== dir && target.startsWith(dir + '/')
+}
+
+async function deleteModelFile(m: any) {
+  if (deletingPath.value) return
+  if (!(await confirm({ message: `确定删除本地文件「${m.filename}」？此操作不可撤销。`, danger: true }))) return
+  deletingPath.value = m.path
+  try {
+    await localModelsAPI.delFiles([m.path])
+    toast.success('已删除')
+    if (scanResult.value?.models) {
+      const models = scanResult.value.models.filter((x: any) => x.path !== m.path)
+      const byKind: Record<string, number> = {}
+      for (const x of models) byKind[x.kind] = (byKind[x.kind] || 0) + 1
+      scanResult.value = { ...scanResult.value, models, total: models.length, byKind }
+    }
+    if (selectedPaths.value.has(m.path)) selectedPaths.value.delete(m.path)
+  } catch (e: any) {
+    toast.error(e?.message || '删除失败')
+  } finally {
+    deletingPath.value = ''
+  }
+}
+
+// ── 模型下载 ──
+const HF_SOURCE_KEY = 'darme.hfSource'
+function loadHfSource(): 'hf' | 'hf_mirror' | 'modelscope' {
+  try {
+    const v = localStorage.getItem(HF_SOURCE_KEY)
+    if (v === 'hf' || v === 'hf_mirror' || v === 'modelscope') return v
+  } catch { /* SSR/隐私模式忽略 */ }
+  return 'hf'
+}
+const hfRepo = ref('')
+const hfSource = ref<'hf' | 'hf_mirror' | 'modelscope'>(loadHfSource())
+watch(hfSource, (v) => {
+  try { localStorage.setItem(HF_SOURCE_KEY, v) } catch { /* ignore */ }
+})
+const HF_SOURCES = [
+  { value: 'hf', label: 'HuggingFace 官方' },
+  { value: 'hf_mirror', label: 'hf-mirror 镜像' },
+  { value: 'modelscope', label: 'ModelScope 魔搭' },
+] as const
+const hfListing = ref(false)
+const hfFiles = ref<{ name: string; size: number }[]>([])
+const hfSelectedFiles = ref<string[]>([])
+const hfDownloading = ref(false)
+const hfProgress = ref<any>(null)
+const hfProgressText = ref('')
+
+const hfPercent = computed(() => {
+  const p = hfProgress.value
+  const total = p?.overallTotal || p?.total || 0
+  const done = p?.overall || 0
+  if (!total) return 0
+  return Math.min(100, Math.round((done / total) * 100))
+})
+
+function formatSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let n = bytes
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++ }
+  return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+async function listHfFiles() {
+  const repo = hfRepo.value.trim()
+  if (!repo || hfListing.value) return
+  hfListing.value = true
+  hfFiles.value = []
+  hfSelectedFiles.value = []
+  hfProgress.value = null
+  hfProgressText.value = ''
+  try {
+    const r: any = await localModelsAPI.hfFiles(repo, '', hfSource.value)
+    hfFiles.value = r?.files || []
+    if (!hfFiles.value.length) toast.warning('仓库中没有可下载的文件')
+  } catch (e: any) {
+    toast.error(e?.message || '获取文件列表失败')
+  } finally {
+    hfListing.value = false
+  }
+}
+
+function toggleAllHf() {
+  hfSelectedFiles.value = hfSelectedFiles.value.length === hfFiles.value.length ? [] : hfFiles.value.map((f) => f.name)
+}
+
+function toggleHfFile(name: string) {
+  const i = hfSelectedFiles.value.indexOf(name)
+  if (i >= 0) hfSelectedFiles.value.splice(i, 1)
+  else hfSelectedFiles.value.push(name)
+}
+
+async function startHfDownload() {
+  const repo = hfRepo.value.trim()
+  if (!repo || hfDownloading.value) return
+  if (!hfSelectedFiles.value.length) { toast.warning('请先勾选要下载的文件'); return }
+  hfDownloading.value = true
+  hfProgress.value = { status: 'start' }
+  hfProgressText.value = '准备下载…'
+  try {
+    await localModelsAPI.hfDownload(repo, hfSelectedFiles.value, '', hfSource.value, (ev) => {
+      hfProgress.value = ev
+      if (ev.status === 'file_start') hfProgressText.value = ev.resumed ? `断点续传 ${ev.file}（已下载 ${formatSize(ev.downloaded || 0)}）` : `开始下载 ${ev.file}`
+      else if (ev.status === 'progress') hfProgressText.value = `${ev.file} · ${formatSize(ev.downloaded)} / ${formatSize(ev.total)}`
+      else if (ev.status === 'file_done') hfProgressText.value = ev.skipped ? `已存在，跳过 ${ev.file}` : `已完成 ${ev.file}`
+      else if (ev.status === 'error') toast.error(`${ev.file}：${ev.error}`)
+      else if (ev.status === 'done') {
+        hfProgressText.value = ev.failed?.length ? `下载完成（${ev.failed.length} 个文件失败）` : '全部下载完成'
+      }
+    })
+    toast.success('下载完成，可重新扫描以识别新模型')
+  } catch (e: any) {
+    toast.error(e?.message || '下载失败')
+  } finally {
+    hfDownloading.value = false
+  }
+}
+
+function addCustomRoot() {
+  const v = customRootInput.value.trim().replace(/[\\/]+$/, '')
+  if (!v) return
+  if (!customRoots.value.includes(v)) {
+    customRoots.value = [...customRoots.value, v]
+    saveCustomRoots()
+  }
+  customRootInput.value = ''
+}
+
+function removeCustomRoot(r: string) {
+  customRoots.value = customRoots.value.filter((x) => x !== r)
+  saveCustomRoots()
+}
+
+async function registerSelected() {
+  const models = registerableModels.value.filter((m: any) => selectedPaths.value.has(m.path))
+  if (!models.length) { toast.warning('请先勾选要注册的模型'); return }
+  registerLoading.value = true
+  try {
+    registerResult.value = await localModelsAPI.register(models)
+    const created = registerResult.value?.created?.length || 0
+    const updated = registerResult.value?.updated?.length || 0
+    toast.success(`注册完成：新增 ${created}，更新 ${updated}`)
+    await loadCfgs()
+    await loadLocalConfigs()
+  } catch (e: any) {
+    toast.error(e?.message || '注册失败')
+  } finally {
+    registerLoading.value = false
+  }
+}
+
 async function loadGpuStatus() {
   gpuLoading.value = true
   try { gpu.value = await aiConfigAPI.gpuStatus() } catch (e: any) { toast.error(e.message) } finally { gpuLoading.value = false }
+}
+
+// ===== 本地服务运行时健康检查 =====
+const runtimeHealth = ref<any>(null)
+const runtimeBusy = ref(false)
+
+async function refreshRuntimeHealth() {
+  runtimeBusy.value = true
+  try { runtimeHealth.value = await aiConfigAPI.runtimeHealth() } catch (e: any) { toast.error(e.message) } finally { runtimeBusy.value = false }
 }
 
 // ===== Ollama 模型管理 =====
@@ -1569,6 +2199,16 @@ async function useOllamaModel(model: string) {
     }
     await loadCfgs()
     await loadLocalConfigs()
+  } catch (e: any) { toast.error(e.message) } finally { ollamaBusy.value = false }
+}
+
+async function deleteOllamaModel(model: string) {
+  if (!(await confirm({ message: `确认删除 Ollama 模型 ${model}？此操作不可撤销。`, danger: true }))) return
+  ollamaBusy.value = true
+  try {
+    await aiConfigAPI.ollamaDelete(model)
+    toast.success(`已删除模型 ${model}`)
+    await refreshOllama()
   } catch (e: any) { toast.error(e.message) } finally { ollamaBusy.value = false }
 }
 
@@ -1707,7 +2347,8 @@ async function changeDataRoot() {
   } finally { storageChanging.value = false }
 }
 
-onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); loadStorageInfo(); loadGenerations() })
+onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills(); loadLocalConfigs(); loadGpuStatus(); refreshRuntimeHealth(); refreshOllama(); loadProviders(); loadTokenStats(); loadStorageInfo(); loadGenerations(); loadLocalRoots(); loadDrives() })
+onUnmounted(() => stopScanPolling())
 </script>
 
 <style scoped>
@@ -1932,6 +2573,17 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
 .ollama-state { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 99px; background: var(--bg-3); color: var(--text-3); }
 .ollama-state.on { background: var(--accent-bg); color: var(--accent); }
 .ollama-head-actions { display: flex; align-items: center; gap: 8px; }
+
+/* 本地服务状态 */
+.runtime-panel { margin-top: 16px; padding: 14px 14px 16px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
+.runtime-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.runtime-dot { width: 9px; height: 9px; border-radius: 99px; background: var(--text-3); flex-shrink: 0; box-shadow: 0 0 0 3px var(--bg-hover); }
+.runtime-dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15); }
+.runtime-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.runtime-label { font-size: 12px; font-weight: 600; color: var(--text-0); }
+.runtime-sub { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .ollama-msg { margin-top: 10px; font-size: 12px; color: var(--text-2); }
 .ollama-models { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
 .ollama-model { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); }
@@ -1942,6 +2594,72 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
 .ollama-pull .input { flex: 1; min-width: 0; }
 .ollama-progress { margin-top: 10px; }
 .ollama-progress-label { margin-top: 6px; font-size: 11px; color: var(--text-3); }
+
+/* 本地模型扫描与注册 */
+.scan-panel { margin-top: 16px; padding: 14px 14px 16px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.scan-desc { margin-top: 8px; font-size: 12px; color: var(--text-2); }
+.scan-drive-select { width: auto; min-width: 120px; height: 30px; font-size: 12px; }
+.scan-auto-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.scan-auto-toggle input { accent-color: var(--accent); cursor: pointer; }
+.scan-progress { margin-top: 10px; }
+.scan-progress .gpu-bar { margin-top: 4px; }
+.scan-progress-label { margin-top: 6px; font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.scan-progress-label b { color: var(--accent-text); }
+.scan-progress-dir { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.scan-roots { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.scan-roots-label { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-0); }
+.scan-roots-label > svg { color: var(--accent-text); flex-shrink: 0; }
+.scan-roots-hint { font-size: 11px; font-weight: 400; color: var(--text-3); }
+.scan-roots-input-row { display: flex; align-items: center; gap: 8px; }
+.scan-roots-input-row .input { flex: 1; min-width: 0; }
+.scan-roots-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.scan-root-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 8px; font-size: 12px; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px; }
+.scan-root-chip-icon { color: var(--accent-text); flex-shrink: 0; }
+.scan-root-chip-path { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scan-root-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; color: var(--text-3); transition: background .15s, color .15s; }
+.scan-root-chip-x:hover { background: var(--border); color: var(--error); }
+.scan-error { margin-top: 10px; font-size: 12px; color: var(--error); }
+.scan-summary { margin-top: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.scan-summary-total { font-size: 12px; color: var(--text-2); }
+.scan-summary-total b { color: var(--accent-text); font-weight: 700; }
+.scan-toolbar { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.scan-filters { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.scan-filter {
+  padding: 3px 10px; font-size: 11.5px; font-weight: 500; color: var(--text-2);
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: 99px; cursor: pointer;
+  transition: all 0.15s var(--ease-out);
+}
+.scan-filter:hover { border-color: var(--border-strong); color: var(--text-0); }
+.scan-filter.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); }
+.scan-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+.scan-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; padding-right: 2px; }
+.scan-item {
+  display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer;
+  transition: border-color 0.15s var(--ease-out);
+}
+.scan-item:hover { border-color: var(--border-strong); }
+.scan-item.disabled { opacity: 0.55; cursor: not-allowed; }
+.scan-check { margin-top: 3px; flex-shrink: 0; width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.scan-check:disabled { cursor: not-allowed; }
+.scan-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.scan-item-name { font-size: 12px; color: var(--text-0); word-break: break-all; }
+.scan-item-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.scan-item-path { font-size: 10.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.scan-item-note { display: flex; align-items: flex-start; gap: 4px; font-size: 11px; color: var(--text-2); }
+.scan-item-note svg { margin-top: 2px; flex-shrink: 0; }
+.scan-item-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex-shrink: 0; }
+.scan-item-size { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.scan-item-runtime { font-size: 10.5px; color: var(--info); }
+.scan-empty { margin-top: 12px; font-size: 12px; color: var(--text-3); }
+.scan-skipped { margin-top: 10px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--warning-bg); font-size: 11.5px; color: var(--text-2); }
+.scan-skipped-title { font-weight: 600; color: var(--warning); margin-bottom: 4px; }
+.scan-skipped-item { color: var(--text-2); }
+.kind-tag-text { background: var(--accent-bg); color: var(--accent-text); }
+.kind-tag-image { background: var(--info-bg); color: var(--info); }
+.kind-tag-video { background: rgba(147,51,234,0.1); color: #7c3aed; }
+.kind-tag-audio { background: rgba(234,88,12,0.1); color: #c2410c; }
+.kind-tag-unknown { background: var(--bg-2); color: var(--text-3); }
 
 .toggle { position: relative; width: 30px; height: 17px; cursor: pointer; flex-shrink: 0; }
 .toggle input { opacity: 0; width: 0; height: 0; }
@@ -2433,4 +3151,20 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAvailableSkills
   font-weight: 500;
 }
 .history-link:hover { text-decoration: underline; }
+
+/* HuggingFace 下载 */
+.hf-download { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.hf-source-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hf-source-btn { padding: 4px 12px; font-size: 12px; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
+.hf-source-btn:hover { color: var(--text-0); border-color: var(--text-3); }
+.hf-source-btn.active { color: var(--accent-text); background: var(--accent-bg); border-color: var(--accent); }
+.hf-file-list { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; padding: 4px 0; }
+.hf-file-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.hf-file-row:hover { background: rgba(255, 255, 255, 0.04); }
+.hf-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-0); }
+.hf-file-size { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
+.hf-progress { display: flex; flex-direction: column; gap: 4px; }
+.hf-progress-track { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.hf-progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.2s ease; }
+.hf-progress-text { font-size: 11px; color: var(--text-2); }
 </style>

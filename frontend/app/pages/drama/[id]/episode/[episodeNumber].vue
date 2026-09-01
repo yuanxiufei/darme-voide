@@ -184,7 +184,27 @@
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
             <div class="loading-text">正在改写剧本...</div>
           </div>
-          <textarea v-else class="fill-textarea" v-model="localScript" placeholder="格式化剧本内容..." />
+          <div v-else class="script-result">
+            <div class="script-result-head">
+              <span class="script-result-label">{{ scriptEditing ? '编辑剧本' : '剧本预览' }}</span>
+              <button class="btn btn-sm" @click="scriptEditing = !scriptEditing">
+                <svg v-if="!scriptEditing" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                {{ scriptEditing ? '预览' : '编辑' }}
+              </button>
+            </div>
+            <div v-if="!scriptEditing" class="script-preview">
+              <template v-for="(b, i) in scriptBlocks" :key="i">
+                <div v-if="b.type === 'scene'" class="sp-scene">{{ b.text }}</div>
+                <div v-else-if="b.type === 'dialog'" class="sp-dialog">
+                  <span class="sp-speaker">{{ b.speaker }}</span><span v-if="b.action" class="sp-action">（{{ b.action }}）</span><span class="sp-colon">：</span><span class="sp-line">{{ b.line }}</span>
+                </div>
+                <div v-else class="sp-narr">{{ b.text }}</div>
+              </template>
+              <div v-if="!scriptBlocks.length" class="sp-empty">剧本内容为空，点击「编辑」手动填写，或点击「重新改写」。</div>
+            </div>
+            <textarea v-else class="fill-textarea" v-model="localScript" placeholder="格式化剧本内容..." />
+          </div>
         </div>
 
         <!-- Step 2: Extract -->
@@ -1875,8 +1895,34 @@ const panel = ref('script')
 const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, run: runAgent } = useAgent()
 
 const localRaw = ref(''), localScript = ref('')
+const scriptEditing = ref(false)
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
+
+// 解析改写后的剧本为可预览的块结构（场景头 / 对白 / 叙述）
+const scriptBlocks = computed(() => {
+  const blocks = []
+  for (const raw of (localScript.value || '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('#')) {
+      blocks.push({ type: 'scene', text: line.replace(/^#+\s*/, '') })
+      continue
+    }
+    const m = line.match(/^([^：:]{1,12}?)[：:]\s*(.*)$/)
+    if (m) {
+      const speaker = m[1].trim()
+      const rest = (m[2] || '').trim()
+      const am = rest.match(/^（([^）]*)）\s*(.*)$/)
+      blocks.push(am
+        ? { type: 'dialog', speaker, action: am[1], line: am[2] }
+        : { type: 'dialog', speaker, action: '', line: rest })
+      continue
+    }
+    blocks.push({ type: 'narr', text: line })
+  }
+  return blocks
+})
 const epId = computed(() => episode.value?.id || 0)
 const rawLen = computed(() => localRaw.value.replace(/\s/g, '').length || 0)
 const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 0)
@@ -3301,7 +3347,14 @@ async function continueScr() {
     continueTarget.value = ''
   }
 }
-function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
+function doRewrite() {
+  saveRaw()
+  scriptEditing.value = false
+  runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, async () => {
+    await refresh()
+    scriptStep.value = 1 // 改写完成后停留在 AI 改写步骤，展示改写后的剧本
+  })
+}
 function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
   if (!raw) {
@@ -4526,6 +4579,21 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   font-family: var(--font-body); background: linear-gradient(180deg, rgba(255,255,255,0.28), rgba(255,255,255,0.12)); color: var(--text-0);
 }
 .fill-textarea:focus { box-shadow: none; }
+
+/* Script Preview */
+.script-result { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.script-result-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; border-bottom: 1px solid rgba(27, 41, 64, 0.08); }
+.script-result-label { font-size: 11px; font-weight: 700; color: var(--text-2); font-family: var(--font-mono); }
+.script-preview { flex: 1; overflow-y: auto; padding: 20px 28px 28px; }
+.sp-scene { margin: 16px 0 8px; font-weight: 800; color: var(--accent-text); font-size: 13.5px; font-family: var(--font-display); display: flex; align-items: center; gap: 8px; }
+.sp-scene::before { content: ''; width: 6px; height: 14px; border-radius: 2px; background: var(--accent-gradient); flex-shrink: 0; }
+.sp-dialog { padding: 7px 0 7px 12px; border-left: 2px solid rgba(19, 51, 121, 0.12); margin: 4px 0; font-size: 13.5px; line-height: 1.7; }
+.sp-speaker { font-weight: 700; color: var(--text-0); }
+.sp-action { color: var(--text-3); font-size: 12px; margin: 0 4px 0 2px; }
+.sp-colon { color: var(--text-3); margin-right: 4px; }
+.sp-line { color: var(--text-1); }
+.sp-narr { padding: 6px 0; color: var(--text-2); font-size: 13px; line-height: 1.8; }
+.sp-empty { color: var(--text-3); font-size: 12.5px; padding: 24px 0; text-align: center; }
 
 /* Step Empty State */
 .step-empty {

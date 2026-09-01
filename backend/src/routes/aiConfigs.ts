@@ -93,6 +93,32 @@ export function seedServiceProviders(): number {
   return inserted
 }
 
+/** 解析 ai_service_configs.settings JSON 为对象（损坏时回退空对象） */
+function parseSettingsObject(settings: string | null | undefined): Record<string, any> {
+  try { return JSON.parse(settings || '{}') } catch { return {} }
+}
+
+/**
+ * 组装 ai_service_configs.settings JSON：
+ * - 保留既有 settings（含 checkpoint_map 等扩展配置），避免覆盖丢失
+ * - negative_prompt / checkpoint_map 作为首类字段合并；settings 作为兜底整体合并
+ */
+function buildSettings(input: {
+  existing?: string | null
+  negative_prompt?: string
+  checkpoint_map?: Record<string, string> | null
+  settings?: Record<string, any> | null
+}): string {
+  const next = parseSettingsObject(input.existing)
+  if (input.negative_prompt !== undefined) next.negative_prompt = input.negative_prompt || ''
+  if (input.checkpoint_map !== undefined) {
+    if (input.checkpoint_map == null) delete next.checkpoint_map
+    else next.checkpoint_map = input.checkpoint_map
+  }
+  if (input.settings && typeof input.settings === 'object') Object.assign(next, input.settings)
+  return JSON.stringify(next)
+}
+
 function bearerHeaders(apiKey?: string, withJson = false) {
   const headers: Record<string, string> = {}
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`
@@ -299,12 +325,12 @@ app.get('/', async (c) => {
   if (serviceType) rows = rows.filter(r => r.serviceType === serviceType)
 
   const parsed = rows.map(r => {
-    let negativePrompt = ''
-    try { negativePrompt = JSON.parse(r.settings || '{}')?.negative_prompt || '' } catch { /* 忽略损坏的 settings */ }
+    const settingsObj = parseSettingsObject(r.settings)
     return {
       ...toSnakeCase(r),
       model: r.model ? JSON.parse(r.model) : [],
-      negative_prompt: negativePrompt,
+      negative_prompt: settingsObj.negative_prompt || '',
+      checkpoint_map: settingsObj.checkpoint_map ?? null,
       is_local: isLocalConfig(r.baseUrl ?? '', r.provider ?? ''),
     }
   })
@@ -331,7 +357,7 @@ app.post('/', async (c) => {
     apiKey: body.api_key || '',
     model: JSON.stringify(body.model || []),
     priority: body.priority || 0,
-    settings: JSON.stringify({ negative_prompt: body.negative_prompt || '' }),
+    settings: buildSettings({ negative_prompt: body.negative_prompt, checkpoint_map: body.checkpoint_map, settings: body.settings }),
     isActive: true,
     createdAt: ts,
     updatedAt: ts,
@@ -621,6 +647,33 @@ app.post('/ollama/pull', async (c) => {
   }
 })
 
+// POST /ai-configs/ollama/delete — 删除本地 Ollama 模型
+app.post('/ollama/delete', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const baseUrl = normalizeOllamaUrl(body.base_url)
+    const name = String(body.name || '').trim()
+    if (!name) return badRequest(c, '缺少模型名')
+    if (!(await isOllamaReachable(baseUrl))) {
+      return badRequest(c, `Ollama 服务未运行（${baseUrl}）`)
+    }
+    const resp = await fetch(`${baseUrl}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      return badRequest(c, (text || `HTTP ${resp.status}`).slice(0, 400))
+    }
+    return success(c, { ok: true, deleted: name })
+  } catch (err: any) {
+    logTaskError('AIConfig', 'ollama-delete', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /ai-configs/models — 检测平台连通性 + 列出可用模型 + 检测指定模型是否存在
 app.post('/models', async (c) => {
   try {
@@ -766,12 +819,12 @@ app.get('/:id', async (c) => {
   if (id == null) return notFound(c, 'Invalid config id')
   const [row] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
   if (!row) return notFound(c)
-  let negativePrompt = ''
-  try { negativePrompt = JSON.parse(row.settings || '{}')?.negative_prompt || '' } catch { /* 忽略 */ }
+  const settingsObj = parseSettingsObject(row.settings)
   return success(c, {
     ...toSnakeCase(row),
     model: row.model ? JSON.parse(row.model) : [],
-    negative_prompt: negativePrompt,
+    negative_prompt: settingsObj.negative_prompt || '',
+    checkpoint_map: settingsObj.checkpoint_map ?? null,
   })
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
@@ -781,6 +834,8 @@ app.put('/:id', async (c) => {
   try {
   const id = parseParamId(c)
   if (id == null) return notFound(c, 'Invalid config id')
+  const [row] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
+  if (!row) return notFound(c)
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
 
@@ -791,7 +846,15 @@ app.put('/:id', async (c) => {
   if ('model' in body) updates.model = JSON.stringify(body.model)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active
-  if ('negative_prompt' in body) updates.settings = JSON.stringify({ negative_prompt: body.negative_prompt || '' })
+  // settings 合并写入：negative_prompt / checkpoint_map / settings 任一出现即重算，避免覆盖既有扩展配置
+  if ('negative_prompt' in body || 'checkpoint_map' in body || 'settings' in body) {
+    updates.settings = buildSettings({
+      existing: row.settings,
+      negative_prompt: body.negative_prompt,
+      checkpoint_map: body.checkpoint_map,
+      settings: body.settings,
+    })
+  }
 
   db.update(schema.aiServiceConfigs).set(updates).where(eq(schema.aiServiceConfigs.id, id)).run()
   return success(c)
@@ -867,6 +930,66 @@ app.get('/configs/local', (c) => {
     }))
   return success(c, localConfigs)
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// ─── 本地运行时健康检查 ───────────────────────────────────────
+// 与 LOCAL_PRESET_SERVICES 的 baseUrl 保持一致，作为「一键配置」之外的健康探测来源。
+const LOCAL_RUNTIMES = [
+  { key: 'ollama', label: '文本 · Ollama', serviceType: 'text', provider: 'ollama', baseUrl: 'http://localhost:11434', probePath: '/api/tags' },
+  { key: 'local-sd', label: '图像 · Stable Diffusion', serviceType: 'image', provider: 'local-sd', baseUrl: 'http://localhost:7860', probePath: '/sdapi/v1/samplers' },
+  { key: 'h3', label: '视频 · MiniMax H3', serviceType: 'video', provider: 'minimax', baseUrl: 'http://localhost:8765', probePath: '/' },
+  { key: 'cosyvoice', label: '语音 · CosyVoice', serviceType: 'audio', provider: 'cosyvoice', baseUrl: 'http://localhost:9880', probePath: '/' },
+] as const
+
+async function probeLocalRuntime(baseUrl: string, probePath: string, timeoutMs = 2500) {
+  const startedAt = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const resp = await fetch(`${baseUrl}${probePath}`, { method: 'GET', signal: controller.signal })
+    return { reachable: true, httpStatus: resp.status, latencyMs: Date.now() - startedAt, error: '' }
+  } catch (err: any) {
+    const aborted = err?.name === 'AbortError'
+    return { reachable: false, httpStatus: null, latencyMs: Date.now() - startedAt, error: aborted ? `超时(${timeoutMs}ms)` : (err?.message || '连接失败') }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// GET /runtime/health — 统一探测本地四大运行时（文本/图像/视频/语音）
+app.get('/runtime/health', async (c) => {
+  try {
+    const configs = db.select().from(schema.aiServiceConfigs).all()
+    const services = await Promise.all(LOCAL_RUNTIMES.map(async (rt) => {
+      const probe = await probeLocalRuntime(rt.baseUrl, rt.probePath)
+      const registered = configs.filter(row =>
+        isLocalConfig(row.baseUrl ?? '', row.provider ?? '') && row.serviceType === rt.serviceType
+      )
+      return {
+        key: rt.key,
+        label: rt.label,
+        service_type: rt.serviceType,
+        provider: rt.provider,
+        base_url: rt.baseUrl,
+        running: probe.reachable,
+        http_status: probe.httpStatus,
+        latency_ms: probe.latencyMs,
+        error: probe.error,
+        registered_count: registered.length,
+        registered: registered.map(r => ({ id: r.id, name: r.name, provider: r.provider, base_url: r.baseUrl })),
+      }
+    }))
+    const runningCount = services.filter(s => s.running).length
+    return success(c, {
+      services,
+      running_count: runningCount,
+      total: services.length,
+      all_running: runningCount === services.length,
+    })
+  } catch (err: any) {
+    logTaskError('AIConfig', 'runtime-health', { error: err.message })
+    return badRequest(c, err.message)
+  }
 })
 
 // ─── nvidia-smi 辅助 ──────────────────────────────────────────

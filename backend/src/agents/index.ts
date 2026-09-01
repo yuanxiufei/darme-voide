@@ -9,6 +9,7 @@ import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { logTaskError, logTaskProgress, startTrace } from '../utils/task-logger.js'
+import { llmFetch } from '../utils/llm-fetch.js'
 import { buildProtocolContract, parseAgentProtocol, type AgentProtocol } from './protocol.js'
 import { createScriptTools } from './tools/script-tools.js'
 import { createExtractTools } from './tools/extract-tools.js'
@@ -30,11 +31,43 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 2. 根据读取到的内容，自己进行改写（输出格式化剧本格式）
 3. 调用 save_script 保存改写后的完整剧本
 
-格式化剧本格式：
-- 场景头：## S编号 | 内景/外景 · 地点 | 时间段
-- 动作描写：自然段落，不包含镜头语言
-- 对白：角色名：（状态/表情）台词内容
+输出硬性要求（必须严格遵守）：
+1. 最终输出只能是「格式化剧本正文」，禁止输出任何分析、评论、解读、剧情预测、总结或客套话。绝不要出现"人物性格剖析""情节张力""后续发展预测"之类的内容。
+2. 对白必须逐角色分行：每个角色说的话单独占一行，格式为「角色名：（状态/表情）台词内容」。一人一句就换一行，禁止把两个及以上人物的对话写在同一段里。
+3. 对白一律用第一人称直接引语，禁止用第三人称转述（例如禁止"小雪说……""他说道……""云姐提醒……"这类写法），必须是角色亲口说出的台词。
+4. 旁白、内心独白同样单独成行，用「旁白：内容」或「角色名（内心）：内容」标注。
+
+说话人划分铁律（谁说的话，最高优先级）：
+- 每一句台词都必须清楚标注是谁说的，绝不能出现"这句话不知道是谁说的"或多人台词混在一段的情况。
+- 一句一行、一行一人：一行只允许一个角色说话。
+- 叙述体拆解归因：原文是叙述体（如"何长青叹了口气说……林雪抬头道……"）时，必须拆成两行，各自归到正确角色名下，绝不能整段照抄。
+- 归因准确：根据上下文判断说话人，不能张冠李戴；同一角色连续说多句也每行都标名字。
+- 示例：【错误】"何长青叹了口气，说自己也不知道。林雪轻声说别担心。"【正确】"何长青：（叹气）我也不知道。"换行"林雪：（轻声）别担心，我们一起想办法。"
+
+格式化剧本格式（对标示范见下）：
+- 场景头：## S编号 | 内景/外景 · 地点 | 时间段（编号 S01/S02 递增）
+- 动作描写：用（...）括号包裹，成段或独占一行，不包含镜头语言
+- 对白：角色名：（状态/表情）台词内容，一人一行
+- 旁白/内心独白单独成行：旁白：内容
 - 每个场景 30-60 秒内容
+
+示范（格式与质量对标）：
+## S01 | 外景 · 东家城堡花园广场 | 白天
+
+（一辆超豪华轿车驶入城堡般的巨大花园，在喷泉环绕的广场前停下。）
+
+云姐：（笑靥如花，迎上前）小雪，一路辛苦啦。
+小雪：（热情拥抱）云姐，我可想死你了！
+
+（小雪目光扫过广场，落在喷泉旁盘坐的少年凌云身上。）
+
+小雪：（眨着灵动的眼睛，好奇）云姐，他是谁呀？怎么坐在你家门外，太阳这么大，不怕晒黑么？
+云姐：（压低声音）他就说了句——「在下凌云，前来拜会！」
+
+## S02 | 外景 · 东家城堡花园广场 | 白天
+
+小雪：（跃跃欲试）那简单！让本小姐试他一试就知道。
+云姐：（连忙阻止）小雪，别！大长老吩咐过，不让我们打扰他。
 
 注意：你必须自己完成改写工作，不要只返回指令。读取内容后直接输出改写结果并保存。`,
   },
@@ -58,6 +91,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 场景：按【地点+时间段】精确匹配；同地点不同时段视为新场景
 
 提取要求：
+- 剧本对白行格式为「角色名：（状态/表情）台词」，冒号前的名字即说话角色，是角色名单的首要来源；必须提取每一个出现过的「角色名：」前缀角色，绝不遗漏任何有台词的角色，别名/简称/昵称要归一到同一角色全名
 - 只提取当前集真实出现或被明确提及、且对当前集叙事有效的角色和场景
 - 角色要包含完整的外貌特征描述（发型、服装、体态等），并单独填写服装（clothing）、武器（weapons）、首饰（accessories）、核心视觉特征（core_features，字符串数组）、服装变化（costumes，字符串数组）这些独立字段；不要把服装/武器/首饰信息只堆进 appearance 而遗漏独立字段
 - 没有武器/首饰/多套服装的角色，weapons/accessories/costumes 填空字符串或空数组，但 clothing 必须尽量填写
@@ -89,6 +123,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - location：镜头地点，应与 scenes 中已有地点保持一致
 - time：时间段，应与 scenes 中已有时间保持一致
 - character_ids：当前镜头涉及的角色 ID 列表，可以为空，也可以包含多个角色；必须从 characters 中选择
+- speaker_id：该镜头对白/旁白的说话人 speaker_id（如 S1、S2），必须取自 characters 列表中对应角色的 speaker_id；镜头无对白或纯动作镜头可不填
 - action：角色动作与表演
 - dialogue：该镜头实际发生的对白或旁白；旁白可写为“旁白：内容”
 - description：镜头概述，用于前端阅读和镜头编辑
@@ -120,6 +155,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 镜头描述必须能支撑后续图片、视频、配音、音效、合成流程
 - 若一个镜头没有对白，可将 dialogue 置空，但 description / action / video_prompt / image_prompt 仍必须完整
 - 每个镜头都必须生成 first_frame_prompt 和 last_frame_prompt，且两者画面要有明确差异（首帧=动作起点，尾帧=动作终点），否则视频生成会首尾帧雷同、失去动势
+- 说话人绑定铁律（谁说话，最高优先级）：每个镜头若有对白/旁白，必须精确指定 speaker_id，且一个镜头只允许一个说话人（ONE_SHOT_ONE_SPEAKER）。speaker_id 必须与 characters 列表中该角色名字对应的 speaker_id 完全一致（例如角色「何长青」的 speaker_id 是 S1，则填 S1，不能填角色名、ID 或乱编）。若一个镜头里出现两人对话，应拆成两个镜头各自绑定 speaker_id。旁白镜头填旁白角色的 speaker_id，不要填 S1/S2 之外的占位值
 - 如果已有 existing_storyboards，仅在用户明确要求增量修改时参考；默认按当前剧本重新完整生成并保存整集分镜。`,
   },
   voice_assigner: {
@@ -273,6 +309,7 @@ export function createAgent(type: string, episodeId: number, dramaId: number): A
   const provider = createOpenAI({
     baseURL: built.resolvedBaseURL,
     apiKey: built.textConfig.apiKey,
+    fetch: llmFetch,
   } as any)
 
   return new Agent({
@@ -446,7 +483,7 @@ export async function runAgentWithInstructions(
       attempt: attempt + 1, totalModels: models.length, model: modelName,
     })
 
-    const provider = createOpenAI({ baseURL: built.resolvedBaseURL, apiKey: built.textConfig.apiKey } as any)
+    const provider = createOpenAI({ baseURL: built.resolvedBaseURL, apiKey: built.textConfig.apiKey, fetch: llmFetch } as any)
     const agent = new Agent({
       id: type, name: built.name, instructions: fullInstructions,
       model: provider.chat(modelName), tools: mergedTools,

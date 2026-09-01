@@ -18,6 +18,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
+import { llmFetch } from '../utils/llm-fetch.js'
 import { getDefaultInstructions, getDefaultName, validAgentTypes } from './index.js'
 import { AGENT_SKILL_MAP } from './skills.js'
 import { now } from '../utils/response.js'
@@ -71,6 +72,7 @@ export async function generateAgentConfig(
   const provider = createOpenAI({
     baseURL: getTextProviderBaseUrl(textConfig),
     apiKey: textConfig.apiKey,
+    fetch: llmFetch,
   } as any)
 
   const agent = new Agent({

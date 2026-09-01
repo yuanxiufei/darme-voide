@@ -1,0 +1,252 @@
+{
+  "version": 1,
+  "description": "Drama Studio 本地模型统一清单：多类模型（文本/图片/视频/TTS）+ ComfyUI 自定义节点。由 scripts/model_manager.py 读取，增删模型无需改代码。",
+  "models": [
+    {
+      "key": "dit_fl2va_int8",
+      "name": "MiniMax H3 FL2VA INT8",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "file_path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "size_gib": 19.53,
+      "required": true,
+      "tags": ["h3", "video", "24gb"],
+      "note": "FL2VA 主权重（首尾帧/图生视频），24GB 首选"
+    },
+    {
+      "key": "dit_ref2va_int8",
+      "name": "MiniMax H3 Ref2VA INT8",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "file_path": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "size_gib": 19.53,
+      "required": false,
+      "tags": ["h3", "video"],
+      "note": "Ref2VA 参考生视频分支，短剧角色一致性更强；不装则复用 FL2VA"
+    },
+    {
+      "key": "te_nvfp4",
+      "name": "H3 文本编码器 Qwen3-VL-32B nvfp4",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "text_encoders",
+      "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "file_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size_gib": 14.61,
+      "required": true,
+      "tags": ["h3", "video", "24gb"],
+      "note": "Qwen3-VL-32B 文本编码器，最小官方量化（nvfp4 AWQ）"
+    },
+    {
+      "key": "te_qwen3_4b",
+      "name": "H3 文本编码器 Qwen3-4B（轻量裁剪）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "text_encoders",
+      "filename": "qwen_3_4b.safetensors",
+      "size_gib": 7.6,
+      "required": false,
+      "tags": ["h3", "video", "text-encoder", "lightweight"],
+      "note": "MiniMax H3 专用文本编码器（Qwen3-4B 去头去尾裁剪版，缺 lm_head 与 embed_tokens）。本地已迁移到 Shared，无官方直链，不参与自动下载"
+    },
+    {
+      "key": "vae_video_fp16",
+      "name": "H3 视频 VAE fp16",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "minimax_h3_video_vae_fp16.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "file_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size_gib": 4.85,
+      "required": true,
+      "tags": ["h3", "video", "24gb"],
+      "note": "视频 VAE（每个生成流程必需）"
+    },
+    {
+      "key": "vae_audio_fp32",
+      "name": "H3 音频 VAE fp32",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "minimax_h3_audio_vae_fp32.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "file_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size_gib": 0.56,
+      "required": true,
+      "tags": ["h3", "video", "24gb"],
+      "note": "音频 VAE（每个生成流程必需）"
+    },
+    {
+      "key": "vae_video_fp8mix",
+      "name": "H3 视频 VAE fp8mix（社区）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "minimax_h3_video_vae_fp8mix.safetensors",
+      "url": "https://huggingface.co/dummy9996/minimax_h3_vae_fp8/resolve/main/minimax_h3_video_vae_fp8mix.safetensors",
+      "repo": "dummy9996/minimax_h3_vae_fp8",
+      "file_path": "minimax_h3_video_vae_fp8mix.safetensors",
+      "size_gib": 2.6,
+      "required": false,
+      "tags": ["h3", "video", "community"],
+      "note": "社区 fp8mix 视频 VAE，比官方省约 2.25 GiB"
+    },
+    {
+      "key": "vae_audio_bf16",
+      "name": "H3 音频 VAE bf16（社区）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "minimax_h3_audio_vae_bf16.safetensors",
+      "url": "https://huggingface.co/dummy9996/minimax_h3_vae_fp8/resolve/main/minimax_h3_audio_vae_bf16.safetensors",
+      "repo": "dummy9996/minimax_h3_vae_fp8",
+      "file_path": "minimax_h3_audio_vae_bf16.safetensors",
+      "size_gib": 0.28,
+      "required": false,
+      "tags": ["h3", "video", "community"],
+      "note": "社区 bf16 音频 VAE，比官方省约 288 MiB"
+    },
+    {
+      "key": "dit_fl2va_gguf_q4km",
+      "name": "MiniMax H3 FL2VA GGUF Q4_K_M",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "minimax_h3_fl2va_pruned-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/MiniMax-H3-GGUF/resolve/main/minimax_h3_fl2va_pruned-Q4_K_M.gguf",
+      "repo": "unsloth/MiniMax-H3-GGUF",
+      "file_path": "minimax_h3_fl2va_pruned-Q4_K_M.gguf",
+      "size_gib": 10.64,
+      "required": false,
+      "tags": ["h3", "video", "gguf"],
+      "note": "路线 B Multishot 官方 demo 用 GGUF，最省显存；需 ComfyUI-GGUF + 架构补丁"
+    },
+
+    {
+      "key": "qwen3_14b",
+      "name": "Qwen3 14B Q4_K_M",
+      "category": "text",
+      "runtime": "ollama",
+      "ref": "qwen3:14b",
+      "size_gib": 9.0,
+      "required": true,
+      "tags": ["text", "llm", "ollama"],
+      "note": "剧本改写/角色提取/音色分配共享实例，中文最强 14B"
+    },
+    {
+      "key": "qwen3_32b",
+      "name": "Qwen3 32B IQ4_XS",
+      "category": "text",
+      "runtime": "ollama",
+      "ref": "qwen3:32b",
+      "size_gib": 16.0,
+      "required": true,
+      "tags": ["text", "llm", "ollama"],
+      "note": "分镜拆解专用（JSON 结构化最强），环节 5 单独切换加载"
+    },
+    {
+      "key": "glm4_9b",
+      "name": "GLM4 9B",
+      "category": "text",
+      "runtime": "ollama",
+      "ref": "glm4:9b",
+      "size_gib": 6.0,
+      "required": false,
+      "tags": ["text", "llm", "ollama"],
+      "note": "轻量备选，偶尔丢格式约束"
+    },
+    {
+      "key": "deepseek_r1_14b",
+      "name": "DeepSeek-R1 14B",
+      "category": "text",
+      "runtime": "ollama",
+      "ref": "deepseek-r1:14b",
+      "size_gib": 9.0,
+      "required": false,
+      "tags": ["text", "llm", "ollama"],
+      "note": "推理强，中文长篇稳定性不如 Qwen"
+    },
+
+    {
+      "key": "sdxl_base",
+      "name": "SDXL Base 1.0",
+      "category": "image",
+      "runtime": "comfyui",
+      "kind": "checkpoints",
+      "filename": "sd_xl_base_1.0.safetensors",
+      "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+      "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "file_path": "sd_xl_base_1.0.safetensors",
+      "size_gib": 6.94,
+      "required": true,
+      "tags": ["image", "sdxl", "comfyui"],
+      "note": "角色立绘/场景图/分镜图基础模型，需配合 IP-Adapter + ControlNet"
+    },
+
+    {
+      "key": "cosyvoice2",
+      "name": "CosyVoice 2",
+      "category": "tts",
+      "runtime": "git",
+      "repo": "https://github.com/FunAudioLLM/CosyVoice.git",
+      "size_gib": 4.0,
+      "required": true,
+      "tags": ["tts", "voice"],
+      "note": "阿里中文 TTS 天花板，0-shot 音色克隆；clone 后需按其 README 下载权重并 pip 安装，部署为独立 HTTP 服务"
+    },
+
+    {
+      "key": "wan26_i2v_14b_gguf",
+      "name": "Wan 2.6 I2V 14B GGUF Q4",
+      "category": "video",
+      "runtime": "manual",
+      "size_gib": 15.0,
+      "required": false,
+      "tags": ["video", "wan", "gguf"],
+      "note": "开源图生视频最强；按 ComfyUI-GGUF 官方指引下载 GGUF 到 diffusion_models，需 ComfyUI-GGUF 节点（手动核对最新地址）"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "ComfyUI-MiniMaxH3-Easy",
+      "repo": "https://github.com/nkxx188/ComfyUI-MiniMaxH3-Easy",
+      "category": "video",
+      "purpose": "路线 A 单镜头 R2V（T2V/I2V/首尾帧/参考图统一 Media 口）",
+      "required": true
+    },
+    {
+      "name": "MiniMax-H3-Multishot-Workflow",
+      "repo": "https://github.com/joeygambino/MiniMax-H3-Multishot-Workflow",
+      "category": "video",
+      "purpose": "路线 B Multishot 多镜接龙（含 H3_Multishot_AIO.json 工作流）",
+      "required": false
+    },
+    {
+      "name": "ComfyUI-GGUF",
+      "repo": "https://github.com/city96/ComfyUI-GGUF",
+      "category": "video",
+      "purpose": "GGUF 量化权重加载器（H3 路线 B / Wan 2.6 GGUF 必需）",
+      "required": false
+    },
+    {
+      "name": "ComfyUI-KJNodes",
+      "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+      "category": "video",
+      "purpose": "KJNodes 工具集（TAE 预览 VAE 依赖）",
+      "required": false
+    }
+  ]
+}
