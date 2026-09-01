@@ -8,7 +8,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
-import { logTaskError, logTaskProgress, startTrace } from '../utils/task-logger.js'
+import { logTaskError, logTaskProgress, logTaskWarn, startTrace } from '../utils/task-logger.js'
 import { llmFetch } from '../utils/llm-fetch.js'
 import { buildProtocolContract, parseAgentProtocol, type AgentProtocol } from './protocol.js'
 import { createScriptTools } from './tools/script-tools.js'
@@ -19,6 +19,7 @@ import { createGridPromptTools } from './tools/grid-prompt-tools.js'
 import { createRunSubagentTool } from './subagent.js'
 import { loadAgentSkills } from './skills.js'
 import { discoverMcpTools } from './mcp.js'
+import { getActiveProfileForDrama } from '../services/style-profiles.js'
 
 // Default prompts (used when DB has no config)
 const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = {
@@ -305,6 +306,67 @@ function assembleInstructions(baseInstructions: string, skillInstructions: strin
     .join('\n\n')
 }
 
+/**
+ * 注入激活的风格 Profile（对齐 H3-Codex-Drama house style locked 机制）：
+ * 将 shot_patterns / storytelling / audio_captions 作为高优先级风格约束追加到指令，
+ * 跨集保持统一风格。仅对画面/叙事相关的生成类 Agent 生效；读取失败静默降级。
+ */
+export function appendStyleProfile(type: string, episodeId: number, dramaId: number, instructions: string): string {
+  if (type !== 'storyboard_breaker' && type !== 'extractor' && type !== 'script_rewriter') {
+    return instructions
+  }
+  try {
+    const profile = getActiveProfileForDrama(dramaId)
+    if (!profile) return instructions
+    const parts: string[] = [instructions, `\n\n【项目风格 Profile（house style，最高优先级，必须遵守）】`]
+    if (profile.shotPatterns) {
+      parts.push(`镜头语言偏好（shot_patterns）：
+${profile.shotPatterns}`)
+    }
+    if (profile.storytelling) {
+      parts.push(`叙事节奏偏好（storytelling）：
+${profile.storytelling}`)
+    }
+    if (profile.audioCaptions) {
+      parts.push(`音效/配乐/字幕偏好（audio_captions）：
+${profile.audioCaptions}`)
+    }
+    if (profile.preferences) {
+      parts.push(`用户明确偏好（preferences，最高优先级）：
+${profile.preferences}`)
+    }
+    if (profile.qcRules) {
+      parts.push(`验收规则（qc_rules，涉及画面/音频标准时必须遵守）：
+${profile.qcRules}`)
+    }
+    // 多集节奏相位：向 storyboard_breaker 注入跨集节奏引导
+    if (type === 'storyboard_breaker' && episodeId) {
+      try {
+        const { rhythmGuidanceForEpisode } = require('../services/rhythm-phase.js') as typeof import('../services/rhythm-phase.js')
+        const guidance = rhythmGuidanceForEpisode(episodeId)
+        if (guidance) parts.push(guidance)
+      } catch (err2: any) {
+        logTaskWarn('AgentFactory', 'rhythm-guidance-failed', { episodeId, error: err2?.message || String(err2) })
+      }
+    }
+    // 视觉图谱：向 storyboard_breaker 注入景别/构图/运镜/灯光图谱引导（对齐参考项目视觉图谱驱动提示词）
+    if (type === 'storyboard_breaker' && dramaId) {
+      try {
+        const { buildVisualGraphGuidance } = require('../shared/visual-graph.js') as typeof import('../shared/visual-graph.js')
+        const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).limit(1).all()
+        const guidance = buildVisualGraphGuidance(drama?.genre || null, drama?.style || null)
+        if (guidance) parts.push(guidance)
+      } catch (err3: any) {
+        logTaskWarn('AgentFactory', 'visual-graph-inject-failed', { dramaId, type, error: err3?.message || String(err3) })
+      }
+    }
+    return parts.join('\n')
+  } catch (err: any) {
+    logTaskWarn('AgentFactory', 'style-profile-inject-failed', { dramaId, type, error: err?.message || String(err) })
+    return instructions
+  }
+}
+
 function buildAgentConfig(type: string, episodeId: number, dramaId: number): AgentConfig | null {
   const defaults = DEFAULT_PROMPTS[type]
   if (!defaults) return null
@@ -312,7 +374,7 @@ function buildAgentConfig(type: string, episodeId: number, dramaId: number): Age
   const dbConfig = getAgentConfig(type)
   const baseInstructions = dbConfig?.systemPrompt?.trim() || defaults.instructions
   const skillInstructions = loadAgentSkills(type, dbConfig?.skills)
-  const instructions = assembleInstructions(baseInstructions, skillInstructions)
+  const instructions = appendStyleProfile(type, episodeId, dramaId, assembleInstructions(baseInstructions, skillInstructions))
   const name = dbConfig?.name || defaults.name
   const tools = createAgentTools(type, episodeId, dramaId)
   if (!tools) return null

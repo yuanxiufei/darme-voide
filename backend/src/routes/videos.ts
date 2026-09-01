@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { generateVideo } from '../services/video-generation.js'
+import { getActiveConfig, getConfigById } from '../services/ai.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import {
   buildStoryboardVideoPrompt,
@@ -12,6 +13,7 @@ import {
   getStoryboardReferenceAudioUrls,
   VIDEO_NEGATIVE,
 } from '../shared/prompt-utils.js'
+import { decideShotRoute } from '../services/shot-router.js'
 
 const app = new Hono()
 
@@ -49,6 +51,7 @@ app.post('/', async (c) => {
             action: sb.action,
             movement: sb.movement,
             dramaStyle: undefined,
+            backgroundAudio: sb.soundEffect, // H3 原生 [background_audio] 场景声标记
           })
 
           // 自动添加角色图片作为 reference_images（首帧已由前端传）
@@ -73,13 +76,41 @@ app.post('/', async (c) => {
       duration: body.duration,
     })
     logTaskPayload('VideoAPI', 'enriched prompt', { original: body.prompt, enriched: prompt, hasCharRefs: !!referenceImageUrls?.length })
+
+    // 逐镜路由（对齐 H3-Codex-Drama shot routing）：手动提交时按分镜属性决策生成路线，
+    // 并回写 storyboards.route / route_reason + video_generations 快照（供可复现账本追溯）。
+    let routeDecision: { route?: string; reason?: string; referenceMode?: 'none' | 'single' | 'multiple' } = {}
+    if (body.storyboard_id) {
+      const sbForRoute = db.select().from(schema.storyboards)
+        .where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()[0]
+      if (sbForRoute) {
+        const provider = (body.config_id
+          ? getConfigById(body.config_id)?.provider
+          : getActiveConfig('video')?.provider) || 'default'
+        const canMultiRef = ['volcengine', 'vidu', 'minimax'].includes(provider.toLowerCase()) || !!body.reference_mode
+        routeDecision = decideShotRoute({
+          storyboardId: sbForRoute.id,
+          sceneType: sbForRoute.sceneType,
+          firstFrameImage: sbForRoute.firstFrameImage,
+          lastFrameImage: sbForRoute.lastFrameImage,
+          keyframeImage: sbForRoute.keyframeImage,
+          blocked: sbForRoute.assetStatus === 'needs_regeneration' && !sbForRoute.firstFrameImage,
+          provider: provider || 'default',
+          canMultiRef,
+          referenceImages: referenceImageUrls || [],
+          referenceAudioUrls: referenceAudioUrls || [],
+          prevTail: body.image_url && !body.first_frame_url ? body.image_url : undefined,
+        })
+      }
+    }
+
     const id = await generateVideo({
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
       prompt,
       negativePrompt: body.negative_prompt || VIDEO_NEGATIVE,
       model: body.model,
-      referenceMode: body.reference_mode,
+      referenceMode: body.reference_mode || routeDecision.referenceMode,
       imageUrl: body.image_url,
       firstFrameUrl,
       lastFrameUrl: body.last_frame_url,
@@ -89,6 +120,9 @@ app.post('/', async (c) => {
       duration: body.duration,
       aspectRatio: body.aspect_ratio,
       configId,
+      force: body.force,
+      route: routeDecision.route,
+      routeReason: routeDecision.reason,
     })
 
     const [record] = db.select().from(schema.videoGenerations)
@@ -198,6 +232,7 @@ app.post('/:id/regenerate', async (c) => {
     duration: body.duration || row.duration,
     aspectRatio: body.aspect_ratio || row.aspectRatio,
     configId,  // ✅ 传递 configId
+    force: body.force,
   })
 
   const [record] = db.select().from(schema.videoGenerations)

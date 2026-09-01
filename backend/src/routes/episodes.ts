@@ -80,6 +80,11 @@ app.put('/:id', async (c) => {
   if ('bgm_fade_out' in updates) drizzleUpdates.bgmFadeOut = Number(updates.bgm_fade_out)
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
+
+  // 剧本内容指纹门禁：剧本内容变更后立即重算指纹，下游分镜/资产据此标记过期
+  if ('script_content' in updates || 'content' in updates) {
+    await import('../services/script-fingerprint.js').then(m => m.refreshEpisodeScriptHash(id))
+  }
   return success(c)
   } catch (err: any) { logTaskError('EpisodesAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
@@ -235,6 +240,36 @@ app.post('/:id/continue-script', async (c) => {
     return success(c, { continuation })
   } catch (err: any) {
     logTaskError('EpisodesAPI', 'continue-script', { error: err.message, id: c.req.param('id') })
+    return badRequest(c, err.message)
+  }
+})
+
+// GET /episodes/:id/script-fingerprint — 剧本内容指纹门禁状态
+app.get('/:id/script-fingerprint', async (c) => {
+  try {
+    const id = parseParamId(c)
+    if (id == null) return notFound(c, 'Invalid episode id')
+    const { checkEpisodeFingerprint } = await import('../services/script-fingerprint.js')
+    return success(c, checkEpisodeFingerprint(id))
+  } catch (err: any) {
+    logTaskError('EpisodesAPI', 'script-fingerprint', { error: err.message, id: c.req.param('id') })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/consistency-qc — 图像连续性检测（手动触发，report 模式）
+app.post('/:id/consistency-qc', async (c) => {
+  try {
+    const id = parseParamId(c)
+    if (id == null) return notFound(c, 'Invalid episode id')
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+    if (!ep || ep.deletedAt) return notFound(c, 'Episode not found')
+
+    const { runEpisodeConsistencyQc } = await import('../services/consistency-qc.js')
+    const report = await runEpisodeConsistencyQc(id, ep.dramaId)
+    return success(c, report)
+  } catch (err: any) {
+    logTaskError('EpisodesAPI', 'consistency-qc', { error: err.message, id: c.req.param('id') })
     return badRequest(c, err.message)
   }
 })

@@ -41,6 +41,9 @@ export const episodes = sqliteTable('episodes', {
   bgmVolume: real('bgm_volume').default(0.3),
   bgmFadeIn: real('bgm_fade_in').default(1.5),
   bgmFadeOut: real('bgm_fade_out').default(2.0),
+  // 剧本内容指纹门禁：script_hash 记录剧本内容快照，
+  // 剧本变更后自动重算，用于检测下游分镜/资产是否过期（对齐 H3-Codex-Drama asset gate）
+  scriptHash: text('script_hash'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -174,6 +177,21 @@ export const storyboards = sqliteTable('storyboards', {
   status: text('status').default('pending'),
   // 资产验收门禁（对齐参考项目 asset review）：missing=未生成 / approved=验收通过 / needs_regeneration=需重生成
   assetStatus: text('asset_status').default('missing'),
+  // 剧本内容指纹门禁：记录本分镜生成时对应的剧本 script_hash，
+  // 与 episodes.script_hash 不一致即视为剧本变更后过期（stale），需重新拆解
+  scriptHash: text('script_hash'),
+  // per-shot take 预算：每个分镜允许的生成尝试次数（默认 3），超预算阻断生成，
+  // 重新拆解分镜时重置；对齐参考项目 per-shot take budget
+  takeCount: integer('take_count').default(0),
+  takeBudget: integer('take_budget').default(3),
+  // 多集节奏相位：setup/development/climax/resolution，按分镜在集内的时长位置自动分配；
+  // 跨集统计节奏分布，供 storyboard_breaker 保持节奏一致（对齐参考项目 multi-episode rhythm phase）
+  rhythmPhase: text('rhythm_phase'),
+  // 逐镜路由（对齐参考项目 H3-Codex-Drama shot routing）：每镜显式决策视频生成路线，
+  // text_to_video / first_frame_to_video / first_last_frame / reference_to_video / keyframe_to_video / video_editor，
+  // 记录决策结果与原因，供管线提交/可复现账本引用
+  route: text('route'),
+  routeReason: text('route_reason'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -343,6 +361,9 @@ export const videoGenerations = sqliteTable('video_generations', {
   referenceAudioUrls: text('reference_audio_urls'),
   // 资产验收门禁：视频任务因资产缺失被阻断时的原因（如 blocked_by_missing_asset）
   blockReason: text('block_reason'),
+  // 逐镜路由快照：本次提交时采用的生成路线（text_to_video / first_frame_to_video / ...）
+  route: text('route'),
+  routeReason: text('route_reason'),
 })
 
 export const videoMerges = sqliteTable('video_merges', {
@@ -534,4 +555,73 @@ export const presets = sqliteTable('presets', {
   config: text('config'),                // JSON 配置
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+})
+
+// ====== 用量统计与成本估算（对齐参考项目 ArcReel usage_repo）======
+// 每次模型调用记一条账；cost_amount 为按单价目录估算（settings.pricing 可覆盖）；
+// 本地模型 is_local=1 不计费。支持按项目/集/服务类型/提供商汇总，回答「这集花了多少、重拍烧了多少」。
+export const apiUsage = sqliteTable('api_usage', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  serviceType: text('service_type').notNull(), // image / video / audio / text
+  provider: text('provider').notNull(),
+  model: text('model').notNull(),
+  // 归属维度（可空：项目级/集级/镜头级）
+  dramaId: integer('drama_id'),
+  episodeId: integer('episode_id'),
+  storyboardId: integer('storyboard_id'),
+  // 关联生成任务（用于追溯重拍/fallback 成本）
+  imageGenerationId: integer('image_generation_id'),
+  videoGenerationId: integer('video_generation_id'),
+  // 用量与成本
+  units: integer('units'),              // 计费单位数（图片张数 / 视频秒数 / 音频字符数）
+  costAmount: real('cost_amount'),      // 估算成本（元），查不到单价时为 null
+  currency: text('currency').default('CNY'),
+  isLocal: integer('is_local', { mode: 'boolean' }).default(false),
+  status: text('status').default('submitted'), // submitted / completed / failed
+  retryCount: integer('retry_count').default(0), // 同一任务第几次尝试（0=首次，含模型 fallback）
+  meta: text('meta'),                   // JSON 扩展
+  createdAt: text('created_at').notNull(),
+})
+
+// ====== 资产版本历史/回滚（对齐参考项目 ArcReel artifact_version_provenance）======
+// 每次图片/视频生成成功自动留档，支持查看历史版本与回滚切换。
+// 同一资产（asset_type + asset_id + media_type + frame_type）只有一个 status='current'。
+export const assetVersions = sqliteTable('asset_versions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  assetType: text('asset_type').notNull(),   // storyboard / character / scene / prop
+  assetId: integer('asset_id').notNull(),
+  mediaType: text('media_type').notNull(),   // image / video
+  frameType: text('frame_type'),             // 分镜图片子位置：composed / first_frame / last_frame / keyframe
+  version: integer('version').notNull(),     // 同资产递增，从 1 开始
+  assetUrl: text('asset_url').notNull(),     // 当前生效的 URL / 本地路径
+  provider: text('provider'),
+  model: text('model'),
+  prompt: text('prompt'),
+  generationId: integer('generation_id'),    // image_generations / video_generations 的 id
+  meta: text('meta'),                        // JSON 扩展
+  status: text('status').default('current'), // current / historical
+  createdAt: text('created_at').notNull(),
+})
+
+// ====== 风格 Profile 提炼（对齐参考项目 H3-Codex-Drama Profile Distiller）======
+// 从参考视频/素材提炼可复用的 house style：叙事节奏、镜头语言、音频字幕、验收规则。
+// 区分三类来源：measurement facts（测量事实）/ visual inference（视觉推断）/ user preference（用户偏好）。
+// 激活后注入 storyboard_breaker 等生成 Agent 的指令，跨集保持统一风格。
+export const styleProfiles = sqliteTable('style_profiles', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  dramaId: integer('drama_id'),
+  name: text('name').notNull(),
+  description: text('description'),
+  source: text('source'),                    // 参考素材说明（视频路径/链接/文字描述）
+  storytelling: text('storytelling'),        // JSON：叙事节奏/悬念密度/转场偏好
+  shotPatterns: text('shot_patterns'),       // JSON：景别分布/机位/运镜偏好
+  audioCaptions: text('audio_captions'),     // JSON：音效/配乐/字幕风格
+  qcRules: text('qc_rules'),                 // JSON：验收规则覆盖（阈值等）
+  facts: text('facts'),                      // JSON：测量事实（可从 ffprobe 提取）
+  inferences: text('inferences'),            // JSON：视觉推断
+  preferences: text('preferences'),          // JSON：用户偏好（手工标注）
+  isActive: integer('is_active', { mode: 'boolean' }).default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
 })

@@ -59,6 +59,13 @@
           </svg>
           <span>Agent</span>
         </NuxtLink>
+        <NuxtLink to="/style-profiles" class="nav-link" :class="{ active: route.path.startsWith('/style-profiles') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8z"/>
+            <path d="M6 20l2-2M18 20l-2-2"/>
+          </svg>
+          <span>风格</span>
+        </NuxtLink>
         <NuxtLink to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>

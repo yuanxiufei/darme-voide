@@ -462,6 +462,77 @@ function runMigrations(): void {
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  -- ====== 用量统计与成本估算（对齐参考项目 ArcReel usage_repo）======
+  CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_type TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    drama_id INTEGER,
+    episode_id INTEGER,
+    storyboard_id INTEGER,
+    image_generation_id INTEGER,
+    video_generation_id INTEGER,
+    units INTEGER,
+    cost_amount REAL,
+    currency TEXT DEFAULT 'CNY',
+    is_local INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'submitted',
+    retry_count INTEGER DEFAULT 0,
+    meta TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_usage_drama_id
+    ON api_usage (drama_id);
+  CREATE INDEX IF NOT EXISTS idx_api_usage_episode_id
+    ON api_usage (episode_id);
+  CREATE INDEX IF NOT EXISTS idx_api_usage_created_at
+    ON api_usage (created_at);
+
+  -- ====== 资产版本历史/回滚（对齐参考项目 ArcReel artifact_version_provenance）======
+  CREATE TABLE IF NOT EXISTS asset_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_type TEXT NOT NULL,
+    asset_id INTEGER NOT NULL,
+    media_type TEXT NOT NULL,
+    frame_type TEXT,
+    version INTEGER NOT NULL,
+    asset_url TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    prompt TEXT,
+    generation_id INTEGER,
+    meta TEXT,
+    status TEXT DEFAULT 'current',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_asset_versions_asset
+    ON asset_versions (asset_type, asset_id, media_type, frame_type, version);
+  CREATE INDEX IF NOT EXISTS idx_asset_versions_status
+    ON asset_versions (asset_type, asset_id, status);
+
+  -- ====== 风格 Profile 提炼（对齐参考项目 H3-Codex-Drama Profile Distiller）======
+  CREATE TABLE IF NOT EXISTS style_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER,
+    name TEXT NOT NULL,
+    description TEXT,
+    source TEXT,
+    storytelling TEXT,
+    shot_patterns TEXT,
+    audio_captions TEXT,
+    qc_rules TEXT,
+    facts TEXT,
+    inferences TEXT,
+    preferences TEXT,
+    is_active INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_style_profiles_drama
+    ON style_profiles (drama_id, deleted_at);
 `)
 
   function ensureColumn(table: string, column: string, definition: string) {
@@ -535,6 +606,23 @@ function runMigrations(): void {
 
   // ====== 资产验收门禁（asset review gate）======
   ensureColumn('storyboards', 'asset_status', "TEXT DEFAULT 'missing'")
+
+  // ====== 剧本内容指纹门禁（script content fingerprint gate）======
+  ensureColumn('episodes', 'script_hash', 'TEXT')
+  ensureColumn('storyboards', 'script_hash', 'TEXT')
+
+  // ====== per-shot take 预算 ======
+  ensureColumn('storyboards', 'take_count', "INTEGER DEFAULT 0")
+  ensureColumn('storyboards', 'take_budget', "INTEGER DEFAULT 3")
+
+  // ====== 多集节奏相位 ======
+  ensureColumn('storyboards', 'rhythm_phase', 'TEXT')
+
+  // ====== 逐镜路由（shot routing，对齐 H3-Codex-Drama）======
+  ensureColumn('storyboards', 'route', 'TEXT')
+  ensureColumn('storyboards', 'route_reason', 'TEXT')
+  ensureColumn('video_generations', 'route', 'TEXT')
+  ensureColumn('video_generations', 'route_reason', 'TEXT')
 
   // ====== 关键帧扩展（keyframe）======
   ensureColumn('storyboards', 'keyframe_prompt', 'TEXT')

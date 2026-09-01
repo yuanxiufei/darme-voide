@@ -464,6 +464,120 @@
         <p v-else class="config-empty">暂无 token 用量记录，运行任意 Agent 任务后自动统计。</p>
       </section>
 
+      <section v-show="activeTab === 'costs'" class="setup-panel card">
+        <div class="setup-panel-head compact">
+          <div>
+            <div class="setup-title">用量与成本</div>
+            <div class="setup-desc">按服务统计的实际调用与费用（花后核算），以及按剧集成本看板。</div>
+          </div>
+          <button class="btn btn-ghost" :disabled="usageLoading" @click="refreshUsage">刷新</button>
+        </div>
+        <div v-if="usageSummary" class="cost-stats">
+          <div class="cost-stat-card">
+            <div class="cost-stat-num">¥{{ fmtCost(usageSummary.totalCost) }}</div>
+            <div class="cost-stat-label">总成本</div>
+          </div>
+          <div class="cost-stat-card">
+            <div class="cost-stat-num">{{ fmtCount(usageSummary.totalCount) }}</div>
+            <div class="cost-stat-label">总调用</div>
+          </div>
+          <div class="cost-stat-card">
+            <div class="cost-stat-num">{{ usageSummary.checkedCost ? '已计价' : '未计价' }}</div>
+            <div class="cost-stat-label">计费状态</div>
+          </div>
+        </div>
+        <div v-if="usageSummary?.byService?.length" class="cost-grid">
+          <div v-for="row in usageSummary.byService" :key="row.service_type" class="cost-grid-item">
+            <div class="cost-grid-num">{{ row.count }}</div>
+            <div class="cost-grid-label">{{ row.service_type }} · ¥{{ fmtCost(row.cost) }}</div>
+          </div>
+        </div>
+        <div v-if="usageBoards.length" class="cost-boards">
+          <div class="cost-board" v-for="board in usageBoards" :key="board.drama_id">
+            <div class="cost-board-head">
+              <span class="cost-board-title">{{ board.drama_title }}</span>
+              <span class="cost-board-total">¥{{ fmtCost(board.total_cost) }} / {{ fmtCount(board.total_calls) }} 次</span>
+            </div>
+            <table class="token-table">
+              <thead>
+                <tr><th>集数</th><th>标题</th><th>调用</th><th>重拍成本</th><th>总成本</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="ep in board.episodes" :key="ep.episode_id">
+                  <td>第 {{ ep.episode_number }} 集</td>
+                  <td>{{ ep.title || '—' }}</td>
+                  <td>{{ ep.total_calls }}</td>
+                  <td>¥{{ fmtCost(ep.retry_cost) }}</td>
+                  <td>¥{{ fmtCost(ep.total_cost) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p v-else class="config-empty">暂无成本记录，生成图片/视频/音频后自动核算。</p>
+      </section>
+
+      <section v-show="activeTab === 'estimate'" class="setup-panel card">
+        <div class="setup-panel-head compact">
+          <div>
+            <div class="setup-title">费用预估</div>
+            <div class="setup-desc">生成前按当前激活模型单价 × 待生成工作量估算（花前估算）。</div>
+          </div>
+        </div>
+        <div class="estimate-form">
+          <select v-model="usageSelectedDrama" class="input">
+            <option value="">选择剧集…</option>
+            <option v-for="d in usageDramaOptions" :key="d.id" :value="d.id">{{ d.title || `剧集 ${d.id}` }}</option>
+          </select>
+          <select v-model="estimateScope" class="input">
+            <option value="drama">整部剧集</option>
+            <option value="episode">单集</option>
+          </select>
+          <select v-if="estimateScope === 'episode'" v-model="epIdForEstimate" class="input">
+            <option value="">选择集数…</option>
+            <option v-for="ep in selectedDramaEpisodes" :key="ep.id" :value="ep.id">第 {{ ep.episode_number }} 集</option>
+          </select>
+          <button class="btn btn-primary" :disabled="estimateLoading" @click="loadUsageEstimate">开始预估</button>
+        </div>
+        <div v-if="usageEstimate" class="estimate-result">
+          <div class="cost-stats">
+            <div class="cost-stat-card">
+              <div class="cost-stat-num">¥{{ fmtCost(usageEstimate.total_cost) }}</div>
+              <div class="cost-stat-label">预估总费用</div>
+            </div>
+            <div class="cost-stat-card">
+              <div class="cost-stat-num">{{ usageEstimate.pending_images }}</div>
+              <div class="cost-stat-label">待生成图片</div>
+            </div>
+            <div class="cost-stat-card">
+              <div class="cost-stat-num">{{ usageEstimate.pending_videos }}</div>
+              <div class="cost-stat-label">待生成视频</div>
+            </div>
+            <div class="cost-stat-card">
+              <div class="cost-stat-num">{{ usageEstimate.pending_audio_chars }}</div>
+              <div class="cost-stat-label">待合成字数</div>
+            </div>
+          </div>
+          <table v-if="usageEstimate.items?.length" class="token-table">
+            <thead>
+              <tr><th>服务</th><th>模型</th><th>工作量</th><th>单价</th><th>小计</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(item, i) in usageEstimate.items" :key="i">
+                <td>{{ item.service_type }}</td>
+                <td>{{ item.provider }} / {{ item.model }}</td>
+                <td>{{ item.units }} {{ item.unit }}</td>
+                <td>¥{{ fmtCost(item.cost) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="usageEstimate.unestimatable?.length" class="estimate-note">
+            无法计价：{{ usageEstimate.unestimatable.join('、') }}
+          </p>
+        </div>
+        <p v-else class="config-empty">选择剧集后点击「开始预估」，按当前激活单价计算待生成工作量。</p>
+      </section>
+
       <section v-show="activeTab === 'configs'" class="setup-panel card">
         <div class="setup-panel-head compact">
           <div>
@@ -681,10 +795,10 @@
 </template>
 
 <script setup lang="ts">
-import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2 } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2, CircleDollarSign, Calculator } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, aiProvidersAPI, traceAPI, localModelsAPI } from '~/composables/useApi'
+import { aiConfigAPI, aiProvidersAPI, traceAPI, localModelsAPI, usageAPI, dramaAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
 
 const { confirm } = useConfirm()
@@ -705,6 +819,8 @@ const sideItems = [
   { key: 'configs', label: '服务配置', icon: SlidersHorizontal },
   { key: 'gpu', label: 'GPU 监控', icon: Monitor },
   { key: 'tokens', label: 'Token 用量', icon: BarChart2 },
+  { key: 'costs', label: '成本看板', icon: CircleDollarSign },
+  { key: 'estimate', label: '费用预估', icon: Calculator },
 ]
 
 // ===== AI Service Configs =====
@@ -1146,6 +1262,96 @@ async function loadTokenStats() {
   }
 }
 
+// ====== 用量与成本 ======
+const usageSummary = ref<any>(null)
+const usageBoards = ref<any[]>([])
+const usageDramaOptions = ref<any[]>([])
+const usageSelectedDrama = ref<number | ''>('')
+const usageEstimate = ref<any>(null)
+const usageLoading = ref(false)
+const estimateLoading = ref(false)
+const estimateScope = ref<'drama' | 'episode'>('drama')
+
+async function loadUsageSummary() {
+  try {
+    const res = await usageAPI.summary({ limit: 200 })
+    usageSummary.value = res
+  } catch (e: any) {
+    usageSummary.value = null
+    toast.error(e?.message || '加载用量汇总失败')
+  }
+}
+
+async function loadUsageBoards() {
+  usageLoading.value = true
+  try {
+    const dramas = await dramaAPI.list()
+    const dramaList: any[] = dramas.items || dramas || []
+    usageDramaOptions.value = dramaList
+    usageBoards.value = []
+    for (const d of dramaList) {
+      try {
+        const board = await usageAPI.board(d.id)
+        if (board) usageBoards.value.push({ ...board, drama_title: d.title || `剧集 ${d.id}` })
+      } catch { /* 单部剧集失败不阻断 */ }
+    }
+  } catch (e: any) {
+    toast.error(e?.message || '加载成本看板失败')
+  } finally {
+    usageLoading.value = false
+  }
+}
+
+async function loadUsageEstimate() {
+  if (usageSelectedDrama.value === '') { toast.warning('请先选择剧集'); return }
+  estimateLoading.value = true
+  usageEstimate.value = null
+  try {
+    usageEstimate.value = await usageAPI.estimate({
+      drama_id: Number(usageSelectedDrama.value),
+      episode_id: estimateScope.value === 'episode' && epIdForEstimate.value ? Number(epIdForEstimate.value) : undefined,
+    })
+  } catch (e: any) {
+    toast.error(e?.message || '费用预估失败')
+  } finally {
+    estimateLoading.value = false
+  }
+}
+
+const epIdForEstimate = ref<number | ''>('')
+
+const selectedDramaEpisodes = computed(() => {
+  if (usageSelectedDrama.value === '') return []
+  const d = usageDramaOptions.value.find((x: any) => x.id === Number(usageSelectedDrama.value))
+  return d?.episodes || []
+})
+
+watch(usageSelectedDrama, async (val) => {
+  epIdForEstimate.value = ''
+  if (val === '') return
+  const d = usageDramaOptions.value.find((x: any) => x.id === Number(val))
+  if (d && !d.episodes?.length) {
+    try {
+      const detail = await dramaAPI.get(Number(val))
+      d.episodes = detail.episodes || []
+    } catch { /* 忽略 */ }
+  }
+})
+
+function fmtCost(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return n.toFixed(4)
+}
+
+function fmtCount(n: number | null | undefined): string {
+  if (n == null) return '0'
+  return String(n)
+}
+
+async function refreshUsage() {
+  await Promise.all([loadUsageSummary(), loadUsageBoards()])
+}
+
 function fmtTokens(n: number): string {
   if (n == null) return '0'
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
@@ -1422,7 +1628,7 @@ function jumpToSection(serviceType: string) {
   })
 }
 
-onMounted(() => { loadCfgs(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); refreshRuntimeHealth(); loadDrives(); loadLocalRoots() })
+onMounted(() => { loadCfgs(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); refreshRuntimeHealth(); loadDrives(); loadLocalRoots(); refreshUsage() })
 onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sectionFlashTimer) clearTimeout(sectionFlashTimer) })
 </script>
 
@@ -1577,6 +1783,25 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 .token-table th, .token-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .token-table th { color: var(--text-3); font-weight: 600; }
 .token-table td { color: var(--text-1); }
+
+/* 用量与成本 */
+.cost-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+.cost-stat-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.cost-stat-num { font-size: 20px; font-weight: 700; font-family: var(--font-display); color: var(--accent); }
+.cost-stat-label { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+.cost-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.cost-grid-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-1); }
+.cost-grid-num { font-size: 16px; font-weight: 700; color: var(--text-0); }
+.cost-grid-label { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+.cost-boards { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.cost-board { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--bg-1); }
+.cost-board-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.cost-board-title { font-size: 13px; font-weight: 600; color: var(--text-0); }
+.cost-board-total { font-size: 12px; color: var(--accent); font-family: var(--font-mono); }
+.estimate-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+.estimate-form .input { flex: 1; min-width: 140px; }
+.estimate-result { margin-top: 14px; }
+.estimate-note { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
 
 /* 本地模型 & GPU 监控 */
 .local-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; }

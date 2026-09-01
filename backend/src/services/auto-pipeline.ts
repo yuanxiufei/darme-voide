@@ -27,6 +27,7 @@ import { publishPipelineEvent } from '../utils/sse-hub.js'
 import { STORYBOARD_IMAGE_NEGATIVE, VIDEO_NEGATIVE, getStoryboardReferenceImages, getStoryboardReferenceAudioUrls } from '../shared/prompt-utils.js'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { extractStoryboardTailFrames } from './frame-extractor.js'
+import { decideShotRoute } from './shot-router.js'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -329,13 +330,29 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
       logTaskProgress('AutoPipeline', 'tail-link', { storyboardId: sb.id, linkedFrom: prev.id, fromTail: prevTail })
     }
 
+    // 逐镜路由（对齐 H3-Codex-Drama shot routing）：提交前显式决策生成路线（T2V/I2V/FL2VA/R2V/K-Frame/Editor），
+    // 并回写 storyboards.route / route_reason，供可复现账本与前端展示。
+    const routeDecision = decideShotRoute({
+      storyboardId: sb.id,
+      sceneType: sb.sceneType,
+      firstFrameImage: sb.firstFrameImage,
+      lastFrameImage: sb.lastFrameImage,
+      keyframeImage: sb.keyframeImage,
+      blocked: false,
+      provider,
+      canMultiRef,
+      referenceImages,
+      referenceAudioUrls,
+      prevTail,
+    })
+
     const prompt = sb.videoPrompt || sb.imagePrompt || sb.description || '镜头缓慢推进，人物自然表演'
     await generateVideo({
       storyboardId: sb.id,
       dramaId,
       prompt,
       negativePrompt: VIDEO_NEGATIVE,
-      referenceMode: referenceImages.length ? 'multiple' : 'single',
+      referenceMode: routeDecision.referenceMode,
       imageUrl: anchorImage,
       firstFrameUrl: prevTail ? sb.firstFrameImage : undefined, // 顺接时本镜首帧作为补充首帧参考
       lastFrameUrl: sb.lastFrameImage || undefined,             // 尾帧目标（grid 模式已生成时锁定结束画面）
@@ -343,6 +360,8 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
       sceneType: sceneType || undefined,
       referenceAudioUrls: referenceAudioUrls.length ? referenceAudioUrls : undefined,
       configId,
+      route: routeDecision.route,
+      routeReason: routeDecision.reason,
     })
     submitted++
   }

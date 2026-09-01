@@ -1,5 +1,5 @@
 import { db, schema } from '../db/index.js'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { getActiveConfig, getActiveConfigByProvider, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl } from '../utils/storage.js'
@@ -11,6 +11,8 @@ import { fetchWithRetry, formatVendorHttpError, formatVendorTaskError, isNonRetr
 import { gpuManager, type GpuLease, isLocalConfig } from './gpu-manager.js'
 import { stripVideoPromptTags } from '../shared/prompt-utils.js'
 import { runQcAfterVideoComplete } from './qc-scoring.js'
+import { recordUsage, type UsageStatus } from './usage-tracking.js'
+import { recordAssetVersion } from './asset-versions.js'
 
 /** 后台任务 GPU 租约映射（fire-and-forget 模式用 id 追踪租约） */
 const videoGpuLeases = new Map<number, GpuLease>()
@@ -31,6 +33,11 @@ interface GenerateVideoParams {
   duration?: number
   aspectRatio?: string
   configId?: number
+  /** 剧本内容指纹门禁：设为 true 跳过门禁（确认基于旧分镜继续） */
+  force?: boolean
+  /** 逐镜路由快照（对齐 H3-Codex-Drama shot routing）：本镜采用的生成路线与决策原因 */
+  route?: string
+  routeReason?: string
 }
 
 export async function generateVideo(params: GenerateVideoParams): Promise<number> {
@@ -39,6 +46,26 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     ? getConfigById(params.configId)
     : getActiveConfig('video')
   if (!config) throw new Error('No active video AI config')
+
+  // per-shot take 预算：分镜生成尝试超预算则阻断（force 可放行）
+  if (params.storyboardId && !params.force) {
+    const { checkTakeBudget } = await import('./take-budget.js')
+    const budget = checkTakeBudget(params.storyboardId)
+    if (!budget.allowed) {
+      logTaskWarn('VideoTask', 'take-budget-exhausted', { storyboardId: params.storyboardId, reason: budget.reason })
+      throw new Error(budget.reason)
+    }
+  }
+
+  // 剧本内容指纹门禁：分镜媒体生成前校验剧本未变更，过期分镜阻断（force 可放行）
+  if (params.storyboardId && !params.force) {
+    const { checkStoryboardGate } = await import('./script-fingerprint.js')
+    const gate = checkStoryboardGate(params.storyboardId)
+    if (!gate.allowed) {
+      logTaskWarn('VideoTask', 'gate-blocked', { storyboardId: params.storyboardId, reason: gate.reason })
+      throw new Error(gate.reason)
+    }
+  }
 
   // 剥离分镜视频提示词中的结构化标签（<location>/<role>/<voice>/<n>），
   // 让视频生成模型拿到干净的纯自然语言 prompt（标签是给 agent/程序解析用的 DSL）
@@ -49,6 +76,12 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, params.storyboardId)).all()
     if (sb?.constraints) {
       prompt = `${prompt} -- 逐镜禁止变化（画面中以下元素必须始终保持不变，不得增减或改变）: ${sb.constraints}`
+    }
+    // H3 原生场景声标记 [background_audio]（对齐参考项目 minimax-h3-comfyui 语法）：
+    // 分镜配置了 sound_effect 且 prompt 尚未包含该标记时注入，H3 会在成片时同步合成环境音。
+    // 幂等：videos.ts 富化路径已注入过则不再重复追加。
+    if (sb?.soundEffect?.trim() && !prompt.includes('[background_audio]')) {
+      prompt = `${prompt} [background_audio] ${sb.soundEffect.trim()}`
     }
   }
 
@@ -66,6 +99,8 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     referenceImageUrls: params.referenceImageUrls ? JSON.stringify(params.referenceImageUrls) : null,
     sceneType: params.sceneType || null,
     referenceAudioUrls: params.referenceAudioUrls?.length ? JSON.stringify(params.referenceAudioUrls) : null,
+    route: params.route || null,
+    routeReason: params.routeReason || null,
     duration: params.duration || 5,
     aspectRatio: params.aspectRatio || '16:9',
     status: 'processing',
@@ -74,6 +109,12 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
   }).run()
 
   const lastId = Number(res.lastInsertRowid)
+
+  // per-shot take 预算：任务提交成功即消耗一次 take（无论成败，算一次尝试）
+  if (params.storyboardId) {
+    await import('./take-budget.js').then(m => m.consumeTake(params.storyboardId))
+  }
+
   logTaskStart('VideoTask', 'enqueue', {
     id: lastId,
     provider: config.provider,
@@ -129,7 +170,8 @@ async function processVideoGeneration(id: number, config: AIConfig) {
     if (attempt > 0) releaseVideoGpuLease(id)
 
     // ── 本地 GPU 模型：获取显存租约 ──
-    if (isLocalConfig(config.baseUrl, config.provider)) {
+    const isLocal = isLocalConfig(config.baseUrl, config.provider)
+    if (isLocal) {
       try {
         const lease = await gpuManager.acquire('video', config.provider, model, config.baseUrl)
         videoGpuLeases.set(id, lease)
@@ -137,6 +179,21 @@ async function processVideoGeneration(id: number, config: AIConfig) {
         logTaskWarn('VideoTask', 'gpu-acquire-failed', { id, model, error: err.message })
       }
     }
+
+    // ── 用量记账：每次模型尝试（含 fallback）记一条 submitted，完成/失败后收口 ──
+    recordUsage({
+      serviceType: 'video',
+      provider: config.provider,
+      model,
+      dramaId: record.dramaId,
+      storyboardId: record.storyboardId,
+      videoGenerationId: id,
+      units: record.duration ?? null,
+      isLocal,
+      status: 'submitted',
+      retryCount: attempt,
+      settings: config.settings,
+    })
 
     try {
       logTaskProgress('VideoTask', 'build-request', {
@@ -203,6 +260,7 @@ async function processVideoGeneration(id: number, config: AIConfig) {
 
       if (isLastAttempt) {
         releaseVideoGpuLease(id)
+        markUsageByVideoGen(id, 'failed')
         logTaskError('VideoTask', 'process', { id, provider: config.provider, attemptedModels: models, error: err.message })
         db.update(schema.videoGenerations)
           .set({ status: 'failed', errorMsg: `All models failed. Last error: ${err.message}`, updatedAt: now() })
@@ -301,8 +359,17 @@ function releaseVideoGpuLease(id: number): void {
   }
 }
 
+/** 收口某个视频生成任务的所有 submitted 用量记录（完成/失败） */
+function markUsageByVideoGen(videoGenerationId: number, status: UsageStatus) {
+  db.update(schema.apiUsage)
+    .set({ status })
+    .where(and(eq(schema.apiUsage.videoGenerationId, videoGenerationId), eq(schema.apiUsage.status, 'submitted')))
+    .run()
+}
+
 async function handleVideoComplete(id: number, videoUrl: string, duration: number | null | undefined, storyboardId?: number | null) {
   releaseVideoGpuLease(id)
+  markUsageByVideoGen(id, 'completed')
   const localPath = await downloadFile(videoUrl, 'videos')
 
   // 异步提供商（轮询/Webhook）不返回时长时，用 ffprobe 探测本地文件实际时长
@@ -325,8 +392,25 @@ async function handleVideoComplete(id: number, videoUrl: string, duration: numbe
       .run()
   }
 
-  // 触发镜头级 QC 打分（fire-and-forget）
+  // 资产版本历史留档（分镜视频）
   const [gen] = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, id)).all()
+  const versionSbId = storyboardId ?? gen?.storyboardId
+  if (versionSbId) {
+    recordAssetVersion({
+      assetType: 'storyboard',
+      assetId: versionSbId,
+      mediaType: 'video',
+      frameType: null,
+      assetUrl: localPath,
+      provider: gen?.provider,
+      model: gen?.model,
+      prompt: gen?.prompt,
+      generationId: id,
+      meta: gen?.duration ? { duration: gen.duration } : undefined,
+    })
+  }
+
+  // 触发镜头级 QC 打分（fire-and-forget）
   const qcStoryboardId = storyboardId ?? gen?.storyboardId
   if (qcStoryboardId) runQcAfterVideoComplete(qcStoryboardId, id)
 }

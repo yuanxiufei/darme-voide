@@ -29,6 +29,7 @@ import presetFramework from './routes/preset-framework.js'
 import autoPipeline from './routes/auto-pipeline.js'
 import evaluation from './routes/evaluation.js'
 import exportRoute from './routes/export.js'
+import visualGraphRoute from './routes/visual-graph.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import characterLibrary from './routes/characterLibrary.js'
@@ -37,6 +38,9 @@ import weaponLibrary from './routes/weaponLibrary.js'
 import costumeLibrary from './routes/costumeLibrary.js'
 import presets from './routes/presets.js'
 import storageRoute from './routes/storage.js'
+import usageRoute from './routes/usage.js'
+import assetVersionsRoute from './routes/asset-versions.js'
+import styleProfilesRoute from './routes/style-profiles.js'
 import localModels from './routes/localModels.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { config, getStorageRoot } from './config.js'
@@ -89,12 +93,16 @@ api.route('/preset/framework', presetFramework)
 api.route('/auto-pipeline', autoPipeline)
 api.route('/evaluation', evaluation)
 api.route('/export', exportRoute)
+api.route('/visual-graph', visualGraphRoute)
 api.route('/character-library', characterLibrary)
 api.route('/scene-library', sceneLibrary)
 api.route('/weapon-library', weaponLibrary)
 api.route('/costume-library', costumeLibrary)
 api.route('/presets', presets)
 api.route('/storage', storageRoute)
+api.route('/usage', usageRoute)
+api.route('/asset-versions', assetVersionsRoute)
+api.route('/style-profiles', styleProfilesRoute)
 
 app.route('/api/v1', api)
 

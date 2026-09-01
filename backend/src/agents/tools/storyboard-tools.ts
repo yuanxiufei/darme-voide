@@ -398,6 +398,13 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         .set({ duration: Math.ceil(totalDuration / 60), updatedAt: ts })
         .where(eq(schema.episodes.id, episodeId)).run()
 
+      // 剧本内容指纹门禁：分镜重建后把当前剧本指纹盖章到每个分镜
+      await import('../../services/script-fingerprint.js').then(m => m.stampStoryboardsScriptHash(episodeId))
+      // per-shot take 预算：分镜重建后重置该集所有分镜的 take 计数
+      await import('../../services/take-budget.js').then(m => m.resetTakeBudgetForEpisode(episodeId))
+      // 多集节奏相位：重建后按时长位置自动分配节奏相位
+      await import('../../services/rhythm-phase.js').then(m => m.assignRhythmPhases(episodeId))
+
       logTaskSuccess('StoryboardTool', 'save-complete', {
         episodeId,
         count: storyboards.length,

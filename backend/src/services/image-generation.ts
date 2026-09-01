@@ -9,6 +9,8 @@ import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 import { fetchWithRetry, formatVendorHttpError, formatVendorTaskError, isNonRetryableHttpError } from '../utils/vendor-errors.js'
 import { gpuManager, type GpuLease, isLocalConfig } from './gpu-manager.js'
+import { recordUsage, type UsageStatus } from './usage-tracking.js'
+import { recordAssetVersion, resolveStoryboardFrameType } from './asset-versions.js'
 
 /** 后台任务 GPU 租约映射（fire-and-forget 模式用 id 追踪租约） */
 const imageGpuLeases = new Map<number, GpuLease>()
@@ -35,6 +37,8 @@ interface GenerateImageParams {
   viewType?: string
   /** 装备特写类型：clothing/weapon/accessory；存在时结果写入 characters.equipImages 对应项而非主图 */
   equipType?: string
+  /** 剧本内容指纹门禁：设为 true 跳过门禁（确认基于旧分镜继续） */
+  force?: boolean
 }
 
 export async function generateImage(params: GenerateImageParams): Promise<number> {
@@ -43,6 +47,26 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     ? getConfigById(params.configId)
     : getActiveConfig('image')
   if (!config) throw new Error('No active image AI config')
+
+  // per-shot take 预算：分镜生成尝试超预算则阻断（force 可放行）
+  if (params.storyboardId && !params.force) {
+    const { checkTakeBudget } = await import('./take-budget.js')
+    const budget = checkTakeBudget(params.storyboardId)
+    if (!budget.allowed) {
+      logTaskWarn('ImageTask', 'take-budget-exhausted', { storyboardId: params.storyboardId, reason: budget.reason })
+      throw new Error(budget.reason)
+    }
+  }
+
+  // 剧本内容指纹门禁：分镜媒体生成前校验剧本未变更，过期分镜阻断（force 可放行）
+  if (params.storyboardId && !params.force) {
+    const { checkStoryboardGate } = await import('./script-fingerprint.js')
+    const gate = checkStoryboardGate(params.storyboardId)
+    if (!gate.allowed) {
+      logTaskWarn('ImageTask', 'gate-blocked', { storyboardId: params.storyboardId, reason: gate.reason })
+      throw new Error(gate.reason)
+    }
+  }
 
   // 连续性状态机 v3：逐镜禁止变化清单注入（该镜画面中必须保持不变的元素）
   let prompt = params.prompt
@@ -75,6 +99,12 @@ export async function generateImage(params: GenerateImageParams): Promise<number
   }).run()
 
   const lastId = Number(res.lastInsertRowid)
+
+  // per-shot take 预算：任务提交成功即消耗一次 take（无论成败，算一次尝试）
+  if (params.storyboardId) {
+    await import('./take-budget.js').then(m => m.consumeTake(params.storyboardId))
+  }
+
   logTaskStart('ImageTask', 'enqueue', {
     id: lastId,
     provider: config.provider,
@@ -128,7 +158,8 @@ async function processImageGeneration(id: number, config: AIConfig) {
     if (attempt > 0) releaseImageGpuLease(id)
 
     // ── 本地 GPU 模型：获取显存租约 ──
-    if (isLocalConfig(config.baseUrl, config.provider)) {
+    const isLocal = isLocalConfig(config.baseUrl, config.provider)
+    if (isLocal) {
       try {
         const lease = await gpuManager.acquire('image', config.provider, model, config.baseUrl)
         imageGpuLeases.set(id, lease)
@@ -136,6 +167,23 @@ async function processImageGeneration(id: number, config: AIConfig) {
         logTaskWarn('ImageTask', 'gpu-acquire-failed', { id, model, error: err.message })
       }
     }
+
+    // ── 用量记账：每次模型尝试（含 fallback）记一条 submitted，完成/失败后收口 ──
+    recordUsage({
+      serviceType: 'image',
+      provider: config.provider,
+      model,
+      dramaId: record.dramaId,
+      storyboardId: record.storyboardId,
+      sceneId: record.sceneId,
+      characterId: record.characterId,
+      imageGenerationId: id,
+      units: 1, // 每次调用产出 1 张图
+      isLocal,
+      status: 'submitted',
+      retryCount: attempt,
+      settings: config.settings,
+    })
 
     try {
       logTaskProgress('ImageTask', 'build-request', {
@@ -206,6 +254,7 @@ async function processImageGeneration(id: number, config: AIConfig) {
 
       if (isLastAttempt) {
         releaseImageGpuLease(id)
+        markUsageByImageGen(id, 'failed')
         logTaskError('ImageTask', 'process', { id, provider: config.provider, attemptedModels: models, error: err.message })
         db.update(schema.imageGenerations)
           .set({ status: 'failed', errorMsg: `All models failed. Last error: ${err.message}`, updatedAt: now() })
@@ -392,8 +441,84 @@ function updateCharacterImage(record: any, localPath: string) {
   }
 }
 
+/**
+ * 图片生成成功后为关联资产留档版本历史（storyboard/character/scene/prop）。
+ * 分镜图片按 frameType 分组版本；meta 保留参数上下文（costume/viewType 等）。
+ */
+function recordAssetVersionForGeneration(record: any, id: number, provider: string, finalPath: string) {
+  const meta: Record<string, unknown> = {}
+  if (record.frameType) meta.frameType = record.frameType
+  if (record.costume) meta.costume = record.costume
+  if (record.viewType) meta.viewType = record.viewType
+  if (record.equipType) meta.equipType = record.equipType
+  if (record.imageType) meta.imageType = record.imageType
+
+  if (record.storyboardId) {
+    recordAssetVersion({
+      assetType: 'storyboard',
+      assetId: record.storyboardId,
+      mediaType: 'image',
+      frameType: resolveStoryboardFrameType(record.frameType),
+      assetUrl: finalPath,
+      provider,
+      model: record.model,
+      prompt: record.prompt,
+      generationId: id,
+      meta,
+    })
+  }
+  if (record.characterId) {
+    recordAssetVersion({
+      assetType: 'character',
+      assetId: record.characterId,
+      mediaType: 'image',
+      assetUrl: finalPath,
+      provider,
+      model: record.model,
+      prompt: record.prompt,
+      generationId: id,
+      meta,
+    })
+  }
+  if (record.sceneId) {
+    recordAssetVersion({
+      assetType: 'scene',
+      assetId: record.sceneId,
+      mediaType: 'image',
+      assetUrl: finalPath,
+      provider,
+      model: record.model,
+      prompt: record.prompt,
+      generationId: id,
+      meta,
+    })
+  }
+  if (record.propId) {
+    recordAssetVersion({
+      assetType: 'prop',
+      assetId: record.propId,
+      mediaType: 'image',
+      assetUrl: finalPath,
+      provider,
+      model: record.model,
+      prompt: record.prompt,
+      generationId: id,
+      meta,
+    })
+  }
+}
+
+/** 收口某个图片生成任务的所有 submitted 用量记录（完成/失败） */
+function markUsageByImageGen(imageGenerationId: number, status: UsageStatus) {
+  db.update(schema.apiUsage)
+    .set({ status })
+    .where(and(eq(schema.apiUsage.imageGenerationId, imageGenerationId), eq(schema.apiUsage.status, 'submitted')))
+    .run()
+}
+
 async function handleImageComplete(id: number, provider: string, imageUrl: string) {
   releaseImageGpuLease(id)
+  markUsageByImageGen(id, 'completed')
   const localPath = await downloadFile(imageUrl, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]
@@ -434,10 +559,14 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
   if (record?.propId) {
     db.update(schema.propTemplates).set({ imageUrl: finalPath, updatedAt: now() }).where(eq(schema.propTemplates.id, record.propId)).run()
   }
+
+  // 资产版本历史留档
+  if (record) recordAssetVersionForGeneration(record, id, provider, finalPath)
 }
 
 async function handleImageCompleteBase64(id: number, provider: string, base64Data: string, mimeType: string) {
   releaseImageGpuLease(id)
+  markUsageByImageGen(id, 'completed')
   const localPath = await saveBase64Image(base64Data, mimeType, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]
@@ -478,6 +607,9 @@ async function handleImageCompleteBase64(id: number, provider: string, base64Dat
   if (record?.propId) {
     db.update(schema.propTemplates).set({ imageUrl: finalPath, updatedAt: now() }).where(eq(schema.propTemplates.id, record.propId)).run()
   }
+
+  // 资产版本历史留档
+  if (record) recordAssetVersionForGeneration(record, id, provider, finalPath)
 }
 
 /** 恢复超时阈值：processing 状态超过该时长（毫秒）无进展，判定为孤儿任务直接失败 */

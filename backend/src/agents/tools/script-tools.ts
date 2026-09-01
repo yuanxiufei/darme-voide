@@ -88,6 +88,8 @@ ${sliced.text}`,
         .set({ scriptContent: content, updatedAt: now() })
         .where(eq(schema.episodes.id, episodeId))
         .run()
+      // 剧本内容指纹门禁：改写落库后重算指纹
+      await import('../../services/script-fingerprint.js').then(m => m.refreshEpisodeScriptHash(episodeId))
       return { message: `Script saved`, word_count: content.length }
     },
   })

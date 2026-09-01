@@ -2,6 +2,7 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+import { runTechnicalQc } from './technical-qc.js'
 
 interface QcIssue {
   dimension: 'lip_sync' | 'character_consistency' | 'continuity'
@@ -248,7 +249,7 @@ export function scoreStoryboard(storyboardId: number): any {
   return { ...saved, issues, dimensions: dims }
 }
 
-/** 视频生成完成后自动触发 QC（fire-and-forget） */
+/** 视频生成完成后自动触发 QC（fire-and-forget）：规则打分 + 技术规格硬性检测 */
 export function runQcAfterVideoComplete(storyboardId: number, videoGenerationId: number): void {
   try {
     scoreStoryboard(storyboardId)
@@ -259,4 +260,12 @@ export function runQcAfterVideoComplete(storyboardId: number, videoGenerationId:
       error: err?.message || String(err),
     })
   }
+  // 技术维度 QC（黑场/冻帧/响度/帧率/时长硬性数值），独立 fire-and-forget
+  runTechnicalQc(storyboardId, videoGenerationId).catch((err: any) => {
+    logTaskWarn('QcScoring', 'tech-qc-failed', {
+      storyboardId,
+      videoGenerationId,
+      error: err?.message || String(err),
+    })
+  })
 }

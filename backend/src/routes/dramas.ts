@@ -326,4 +326,17 @@ app.get('/:id/prompts', async (c) => {
   }
 })
 
+// GET /dramas/:id/rhythm — 多集节奏相位报告
+app.get('/:id/rhythm', async (c) => {
+  try {
+    const id = parseParamId(c)
+    if (id == null) return notFound(c, 'Invalid drama id')
+    const { getDramaRhythm } = await import('../services/rhythm-phase.js')
+    return success(c, getDramaRhythm(id))
+  } catch (err: any) {
+    logTaskError('DramasAPI', 'rhythm', { error: err.message, id: c.req.param('id') })
+    return badRequest(c, err.message)
+  }
+})
+
 export default app

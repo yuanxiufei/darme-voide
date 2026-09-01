@@ -636,6 +636,54 @@
                 </div>
                 <div class="detail-section">
                   <div class="detail-section-head">
+                    <span class="detail-section-title">版本历史</span>
+                    <span class="detail-section-copy">分镜图/视频按帧类型分组，可查看与回滚</span>
+                    <button class="btn btn-ghost btn-sm" :disabled="versionsLoading" @click="loadVersions">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                      刷新
+                    </button>
+                  </div>
+                  <div v-if="versionsLoading" class="version-list-loading">加载中…</div>
+                  <div v-else-if="versionsByType.length" class="version-list">
+                    <div v-for="group in versionsByType" :key="group.type" class="version-group">
+                      <div class="version-group-head">
+                        <span class="version-group-title">{{ group.typeLabel }}</span>
+                        <span class="version-group-count">{{ group.items.length }} 个版本</span>
+                      </div>
+                      <div class="version-item" v-for="v in group.items" :key="v.id">
+                        <div class="version-thumb" v-if="v.asset_url">
+                          <img :src="'/' + v.asset_url.replace(/^\//, '')" alt="" loading="lazy" @click="openImageViewer('/' + v.asset_url.replace(/^\//, ''), `版本 v${v.version}`)" />
+                        </div>
+                        <div v-else class="version-thumb version-thumb-empty">无图</div>
+                        <div class="version-info">
+                          <div class="version-info-top">
+                            <span class="version-badge" :class="{ 'is-current': v.id === currentVersionId }">v{{ v.version }}</span>
+                            <span v-if="v.id === currentVersionId" class="version-current">当前</span>
+                            <span v-else class="version-status" :class="v.status">{{ v.status }}</span>
+                          </div>
+                          <div class="version-meta">
+                            <span v-if="v.provider">{{ v.provider }}</span>
+                            <span v-if="v.model">{{ v.model }}</span>
+                            <span>{{ formatTime(v.created_at) }}</span>
+                          </div>
+                          <button
+                            v-if="v.id !== currentVersionId"
+                            class="btn btn-ghost btn-sm"
+                            :disabled="activatingVersion"
+                            @click="activateVersion(v)"
+                          >回滚到该版本</button>
+                          <button
+                            v-else
+                            class="btn btn-ghost btn-sm" disabled
+                          >已启用</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="version-list-empty">暂无版本记录（生成完成后自动记录）</div>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
                     <span class="detail-section-title">镜头结构</span>
                     <span class="detail-section-copy">景别、角度、运镜、场景绑定和时长</span>
                   </div>
@@ -1700,6 +1748,30 @@
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
                   EDL 导出
                 </button>
+                <button class="btn" :disabled="exporting" @click="doExportJianying">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                  剪映草稿
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportLedger('md')" title="导出可复现工程账本（Markdown 报告）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+                  工程账本
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportLedger('json')" title="导出完整结构化账本（JSON）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  JSON
+                </button>
+                <button class="btn" :disabled="exporting" @click="doCheckStale" :title="staleSummary">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><polyline points="21 3 21 9 15 9"/></svg>
+                  {{ staleCount ? `stale×${staleCount}` : '指纹校验' }}
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportQcReport('md')" title="导出 QC 报告（每镜评分 + 问题清单 + 时间线汇总，Markdown）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                  QC 报告
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportContactSheet" title="导出联系表（每镜首尾帧缩略图 + 元信息网格，HTML）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+                  联系表
+                </button>
                 <a :href="'/' + mergeUrl" download class="btn btn-primary">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   下载视频
@@ -1726,6 +1798,8 @@
               <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
                 <span class="mono dim" style="font-size:10px">#{{ String(i+1).padStart(2,'0') }}</span>
                 <span class="truncate" style="flex:1;font-size:11px">{{ sb.description || sb.title || '—' }}</span>
+                <span v-if="shotTag(sb)" class="shot-tag" :title="`景别/机位/运镜：${sb.shot_type || '—'} / ${sb.angle || '—'} / ${sb.movement || '—'}`">{{ shotTag(sb) }}</span>
+                <span v-if="routeTag(sb.route)" class="route-tag" :title="sb.route_reason || ''">{{ routeTag(sb.route) }}</span>
                 <span :class="['dot', hasComposed(sb) && 'ok']" />
               </div>
             </div>
@@ -1946,7 +2020,7 @@ import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
   Loader2, Monitor, Smartphone, Square,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI, assetVersionsAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import BaseSelect from '~/components/BaseSelect.vue'
 import ModelSelector from '~/components/ModelSelector.vue'
@@ -3175,6 +3249,76 @@ const shotTypes = [
   '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
   '过肩', '主观视角', '航拍', '运动镜头',
 ]
+
+// ====== 分镜资产版本历史 ======
+const versions = ref<any[]>([])
+const versionsLoading = ref(false)
+const activatingVersion = ref(false)
+
+const versionsByType = computed(() => {
+  if (!versions.value.length) return []
+  const groups: any[] = []
+  const map = new Map<string, string>()
+  const TYPE_LABELS: Record<string, string> = {
+    first_frame: '首帧',
+    keyframe: '关键帧',
+    last_frame: '尾帧',
+    video: '视频',
+    composed: '合成图',
+  }
+  const sorted = [...versions.value].sort((a: any, b: any) => b.version - a.version)
+  for (const v of sorted) {
+    const type = v.frame_type || v.media_type || 'asset'
+    let group = groups.find(g => g.type === type)
+    if (!group) {
+      group = { type, typeLabel: TYPE_LABELS[type] || type, items: [] }
+      groups.push(group)
+    }
+    group.items.push(v)
+  }
+  return groups
+})
+
+const currentVersionId = computed(() => {
+  const current = versions.value.find((v: any) => v.status === 'current' || v.status === 'active')
+  return current?.id ?? null
+})
+
+function formatTime(ts: string) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ts
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+async function loadVersions() {
+  const sb = selectedSb.value as any
+  if (!sb?.id) return
+  versionsLoading.value = true
+  try {
+    const res = await assetVersionsAPI.list('storyboard', sb.id)
+    versions.value = res.versions || []
+  } catch (e: any) {
+    versions.value = []
+    toast.error(e?.message || '加载版本历史失败')
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+async function activateVersion(v: any) {
+  if (!confirm(`确定将「${v.frame_type || v.media_type || '资产'}」回滚到 v${v.version}？此操作会覆盖当前分镜媒体并写入版本记录。`)) return
+  activatingVersion.value = true
+  try {
+    await assetVersionsAPI.activate(v.id)
+    toast.success(`已回滚到 v${v.version}`)
+    await loadVersions()
+  } catch (e: any) {
+    toast.error(e?.message || '回滚失败')
+  } finally {
+    activatingVersion.value = false
+  }
+}
 const shotAngles = ['平视', '仰视', '俯视', '侧拍', '背拍', '斜侧', '主观视角', '过肩']
 const shotMovements = ['固定', '推镜', '拉镜', '摇镜', '移镜', '跟拍', '升降', '手持', '环绕']
 
@@ -4214,6 +4358,164 @@ async function doExportEdl() {
   }
 }
 
+async function doExportJianying() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/jianying-draft?episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `剪映草稿导出失败 (${resp.status})`)
+    }
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-ep${episodeNumber}-jianying.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success('剪映草稿导出完成')
+  } catch (e: any) {
+    toast.error(e?.message || '剪映草稿导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+const staleCount = ref(0)
+const staleSummary = computed(() => staleCount.value
+  ? `${staleCount.value} 个分镜剧本指纹与当前剧本不一致（stale），可点击查看明细`
+  : '剧本内容指纹校验：分镜与剧本一致时显示 0 stale')
+
+async function doExportLedger(format: 'json' | 'md') {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/project-ledger?format=${format}&episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `工程账本导出失败 (${resp.status})`)
+    }
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-ep${episodeNumber}-ledger.${format === 'md' ? 'md' : 'json'}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success(format === 'md' ? '工程账本（Markdown）导出完成' : '工程账本（JSON）导出完成')
+  } catch (e: any) {
+    toast.error(e?.message || '工程账本导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+async function doCheckStale() {
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/project-ledger/stale?episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `指纹校验失败 (${resp.status})`)
+    }
+    const j = await resp.json()
+    staleCount.value = j.staleCount || 0
+    if (j.staleCount) {
+      const list = (j.stale || []).map((s: any) => `#${s.storyboardNumber}`).join('、')
+      toast.warning(`发现 ${j.staleCount} 个 stale 分镜：${list}`)
+    } else {
+      toast.success('指纹校验通过：所有分镜与当前剧本一致')
+    }
+  } catch (e: any) {
+    toast.error(e?.message || '指纹校验失败')
+  }
+}
+
+async function doExportQcReport(format: 'json' | 'md' | 'html') {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/qc-report?format=${format}&episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `QC 报告导出失败 (${resp.status})`)
+    }
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-qc-report.${format === 'json' ? 'json' : format}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success(`QC 报告（${format.toUpperCase()}）导出完成`)
+  } catch (e: any) {
+    toast.error(e?.message || 'QC 报告导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+async function doExportContactSheet() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/contact-sheet?episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `联系表导出失败 (${resp.status})`)
+    }
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `drama-${dramaId}-episode-${epId.value}-contact-sheet.html`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success('联系表导出完成')
+  } catch (e: any) {
+    toast.error(e?.message || '联系表导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+function routeTag(route: string | null): string {
+  if (!route) return ''
+  const map: Record<string, string> = {
+    text_to_video: 'T2V',
+    first_frame_to_video: 'I2V',
+    first_last_frame: 'FL2VA',
+    reference_to_video: 'R2V',
+    keyframe_to_video: 'I2V-K',
+    video_editor: 'Edit',
+    blocked: '⛔',
+  }
+  return map[route] || route.slice(0, 8)
+}
+
+/** 视觉图谱徽标：景别/机位/运镜缩略（如 中景/平视/缓慢推镜 → 中景·推） */
+const SHOT_TAG_MAP: Record<string, string> = {
+  大远景: '大远景', 远景: '远景', 全景: '全景', 中景: '中景', 中近景: '中近景',
+  近景: '近景', 特写: '特写', 大特写: '大特写',
+  平视: '平视', 仰视: '仰视', 俯视: '俯视', 侧拍: '侧拍', 过肩: '过肩',
+}
+function shotTag(sb: any): string {
+  const st = sb?.shot_type || ''
+  const mv = sb?.movement || ''
+  if (!st && !mv) return ''
+  const stLabel = SHOT_TAG_MAP[st] || st.slice(0, 2)
+  const mvLabel = mv ? (mv.includes('推') ? '推' : mv.includes('拉') ? '拉' : mv.includes('摇') ? '摇' : mv.includes('移') ? '移' : mv.includes('跟') ? '跟' : mv.includes('环绕') ? '环' : mv.includes('升降') ? '升降' : mv.includes('手持') ? '手持' : mv.slice(0, 2)) : ''
+  return mvLabel ? `${stLabel}·${mvLabel}` : stLabel
+}
+
 async function doMerge() {
   await mergeAPI.merge(epId.value); toast.success('拼接中...')
   if (mergeIntervalId) clearInterval(mergeIntervalId)
@@ -4996,6 +5298,38 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 .detail-preview-empty {
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   color: var(--text-3); font-size: 12px;
+}
+.version-list { display: flex; flex-direction: column; gap: 10px; max-height: 320px; overflow-y: auto; }
+.version-list-loading { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.version-list-empty { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.version-group {
+  border: 1px solid rgba(27, 41, 64, 0.08); border-radius: 8px; padding: 8px; background: var(--bg-1);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.version-group-head { display: flex; align-items: center; justify-content: space-between; }
+.version-group-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.version-group-count { font-size: 11px; color: var(--text-3); }
+.version-item { display: flex; gap: 10px; align-items: flex-start; }
+.version-thumb {
+  width: 64px; height: 64px; flex: none; border-radius: 6px; overflow: hidden;
+  border: 1px solid rgba(27, 41, 64, 0.1); background: var(--bg-2); cursor: zoom-in;
+}
+.version-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.version-thumb-empty {
+  display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text-3);
+}
+.version-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.version-info-top { display: flex; align-items: center; gap: 6px; }
+.version-badge {
+  font-size: 11px; font-weight: 700; color: var(--text-2); padding: 1px 6px; border-radius: 4px;
+  background: var(--bg-2); border: 1px solid var(--border); font-family: var(--font-mono);
+}
+.version-badge.is-current { color: #fff; background: var(--primary, #4f7cff); border-color: var(--primary, #4f7cff); }
+.version-current { font-size: 11px; color: var(--success, #22c55e); font-weight: 600; }
+.version-status { font-size: 11px; color: var(--text-3); text-transform: capitalize; }
+.version-meta {
+  display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-3);
+  font-family: var(--font-mono, monospace);
 }
 .detail-section {
   display: flex;
@@ -5884,6 +6218,8 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 .export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
 .exp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); }
 .exp-row:hover { background: var(--bg-hover); }
+.route-tag { flex-shrink: 0; font-size: 9px; font-weight: 700; letter-spacing: 0.02em; padding: 1px 5px; border-radius: 5px; color: #7dd3fc; background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.25); font-family: var(--font-mono); }
+.shot-tag { flex-shrink: 0; font-size: 9px; font-weight: 600; letter-spacing: 0.02em; padding: 1px 5px; border-radius: 5px; color: #fbbf24; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.22); font-family: var(--font-mono); }
 .bgm-panel {
   border-top: 1px solid var(--border);
   padding: 12px 16px;

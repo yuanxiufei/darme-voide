@@ -489,3 +489,141 @@ export const storageAPI = {
   info: () => api.get<StorageInfo>('/storage/info'),
   change: (path: string, migrate = true) => api.post<StorageInfo>('/storage/change', { path, migrate }),
 }
+
+// ====== 用量统计 + 成本预估（花后核算 / 花前估算） ======
+
+export interface UsageRecord {
+  id: number
+  service_type: string
+  provider: string
+  model: string
+  drama_id: number | null
+  episode_id: number | null
+  storyboard_id: number | null
+  units: number | null
+  cost_amount: number | null
+  is_local: boolean
+  status: string
+  retry_count: number
+  created_at: string
+}
+
+export interface UsageSummary {
+  totalCount: number
+  totalCost: number
+  checkedCost: boolean
+  byService: Array<{ service_type: string; count: number; cost: number }>
+  byProvider: Array<{ provider: string; count: number; cost: number }>
+  byDay: Array<{ date: string; count: number; cost: number }>
+  records: UsageRecord[]
+}
+
+export interface EpisodeCostBoard {
+  drama_id: number
+  total_cost: number
+  total_calls: number
+  retry_cost: number
+  episodes: Array<{
+    episode_id: number
+    episode_number: number
+    title: string | null
+    total_cost: number
+    total_calls: number
+    retry_cost: number
+    by_service: Array<{ service_type: string; count: number; cost: number }>
+  }>
+}
+
+export interface EstimateResult {
+  drama_id: number
+  episode_id?: number
+  scope: string
+  generated_at: string
+  pending_images: number
+  pending_videos: number
+  pending_audio_chars: number
+  active_image: { provider: string; model: string } | null
+  active_video: { provider: string; model: string } | null
+  active_audio: { provider: string; model: string } | null
+  items: Array<{ service_type: string; provider: string; model: string; units: number; unit: string; cost: number | null }>
+  total_cost: number | null
+  unestimatable: string[]
+}
+
+export const usageAPI = {
+  /** 用量汇总：总量/总成本/按服务/按提供商/按天/最近明细 */
+  summary: (params?: { drama_id?: number; episode_id?: number; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.drama_id) q.set('drama_id', String(params.drama_id))
+    if (params?.episode_id) q.set('episode_id', String(params.episode_id))
+    if (params?.limit) q.set('limit', String(params.limit))
+    return api.get<UsageSummary>(`/usage/summary${q.size ? `?${q}` : ''}`)
+  },
+  /** 多集成本看板：每集总成本/总调用/重拍成本/按服务拆分 */
+  board: (dramaId: number) => api.get<EpisodeCostBoard>(`/usage/board?drama_id=${dramaId}`),
+  /** 生成前费用预估：当前激活单价 × 待生成工作量 */
+  estimate: (params: { drama_id: number; episode_id?: number; storyboard_ids?: number[] }) => {
+    const q = new URLSearchParams()
+    q.set('drama_id', String(params.drama_id))
+    if (params.episode_id) q.set('episode_id', String(params.episode_id))
+    if (params.storyboard_ids?.length) q.set('storyboard_ids', params.storyboard_ids.join(','))
+    return api.get<EstimateResult>(`/usage/estimate?${q}`)
+  },
+}
+
+// ====== 资产版本历史 / 回滚 ======
+
+export interface AssetVersion {
+  id: number
+  asset_type: string
+  asset_id: number
+  media_type: string | null
+  frame_type: string | null
+  version: number
+  asset_url: string | null
+  provider: string | null
+  model: string | null
+  prompt: string | null
+  generation_id: number | null
+  status: string
+  created_at: string
+}
+
+export const assetVersionsAPI = {
+  list: (assetType: string, assetId: number) =>
+    api.get<{ asset_type: string; asset_id: number; versions: AssetVersion[] }>(
+      `/asset-versions?asset_type=${encodeURIComponent(assetType)}&asset_id=${assetId}`,
+    ),
+  activate: (versionId: number) => api.post(`/asset-versions/${versionId}/activate`),
+}
+
+// ====== 风格 Profile（house style 提炼） ======
+
+export interface StyleProfile {
+  id: number
+  drama_id: number | null
+  name: string
+  description: string | null
+  source: string | null
+  storytelling: string | null
+  shot_patterns: string | null
+  audio_captions: string | null
+  qc_rules: string | null
+  facts: string | null
+  inferences: string | null
+  preferences: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const styleProfileAPI = {
+  list: (dramaId?: number) => api.get<{ profiles: StyleProfile[] }>(`/style-profiles${dramaId ? `?drama_id=${dramaId}` : ''}`),
+  get: (id: number) => api.get<{ profile: StyleProfile }>(`/style-profiles/${id}`),
+  create: (data: Partial<StyleProfile>) => api.post('/style-profiles', data),
+  update: (id: number, data: Partial<StyleProfile>) => api.put(`/style-profiles/${id}`, data),
+  del: (id: number) => api.del(`/style-profiles/${id}`),
+  activate: (id: number) => api.post(`/style-profiles/${id}/activate`),
+  distill: (id: number) => api.post<{ result: any }>(`/style-profiles/${id}/distill`),
+  apply: (id: number, data: any) => api.post(`/style-profiles/${id}/apply`, data),
+}

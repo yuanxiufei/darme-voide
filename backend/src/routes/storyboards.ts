@@ -587,6 +587,7 @@ app.post('/:id/regenerate-image', async (c) => {
       model: body.model,
       referenceImages,
       configId: ep.imageConfigId ?? undefined,
+      force: body.force,
     })
 
     logTaskSuccess('StoryboardAPI', 'regenerate-image', { storyboardId: id, generationId: genId })
@@ -652,6 +653,7 @@ app.post('/:id/regenerate-frame', async (c) => {
       frameType,
       referenceImages,
       configId: ep.imageConfigId ?? undefined,
+      force: body.force,
     })
 
     logTaskSuccess('StoryboardAPI', 'regenerate-frame', { storyboardId: id, frameType, generationId: genId })

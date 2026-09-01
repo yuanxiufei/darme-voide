@@ -13,6 +13,7 @@
 import { db, schema } from '../db/index.js'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { getCameraMovementComposition } from './camera-movement-guides.js'
+import { resolveVisualTerm } from './visual-graph.js'
 
 // ============================================================
 // 风格预设常量（全域一致）
@@ -429,10 +430,12 @@ export function buildStoryboardImagePrompt(options: {
     parts.push(`Characters: ${options.characterDescription}`)
   }
 
-  // 3. 镜头描述
+  // 3. 镜头描述（景别/机位经视觉图谱翻译为英文电影术语，避免中文混入英文 prompt）
   const cinematicHints: string[] = []
-  if (options.shotType) cinematicHints.push(options.shotType)
-  if (options.cameraAngle) cinematicHints.push(options.cameraAngle)
+  const shotEn = resolveVisualTerm(options.shotType)
+  if (options.shotType) cinematicHints.push(shotEn || options.shotType)
+  const angleEn = resolveVisualTerm(options.cameraAngle)
+  if (options.cameraAngle) cinematicHints.push(angleEn || options.cameraAngle)
   if (cinematicHints.length) parts.push(`Camera: ${cinematicHints.join(', ')}`)
 
   // 4. 叙事内容
@@ -465,6 +468,7 @@ export function buildStoryboardVideoPrompt(options: {
   action?: string | null                   // 动作描述
   movement?: string | null                 // 运镜
   dramaStyle?: string                      // 戏剧风格
+  backgroundAudio?: string | null          // 场景声/环境音描述（H3 原生 [background_audio] 标记）
 }): string {
   const parts: string[] = []
 
@@ -485,9 +489,12 @@ export function buildStoryboardVideoPrompt(options: {
     parts.push(options.description)
   }
 
-  // 4. 动作与运镜
+  // 4. 动作与运镜（运镜经视觉图谱翻译为英文电影术语）
   if (options.action) parts.push(`Action: ${options.action}`)
-  if (options.movement) parts.push(`Camera movement: ${options.movement}`)
+  if (options.movement) {
+    const moveEn = resolveVisualTerm(options.movement)
+    parts.push(`Camera movement: ${moveEn || options.movement}`)
+  }
 
   // 5. 风格
   if (options.dramaStyle) parts.push(`${options.dramaStyle} cinematic style`)
@@ -500,7 +507,13 @@ export function buildStoryboardVideoPrompt(options: {
     .some(containsScreenElement)
   const uiRule = hasScreen ? `, ${UI_OVERLAY_RULE}` : ''
 
-  return `${parts.join('. ')}, ${soundPolicy}.${uiRule} ${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
+  // 8. H3 原生场景声标记 [background_audio]（对齐参考项目 minimax-h3-comfyui 的 prompt 语法）：
+  //    H3 会在生成视频时同步合成场景环境音；该标记放在 prompt 末尾即可生效。
+  const bgAudio = options.backgroundAudio?.trim()
+    ? ` [background_audio] ${options.backgroundAudio.trim()}`
+    : ''
+
+  return `${parts.join('. ')}, ${soundPolicy}.${uiRule}${bgAudio} ${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
 }
 
 // ============================================================

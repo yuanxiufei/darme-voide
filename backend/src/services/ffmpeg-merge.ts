@@ -11,6 +11,17 @@ import { now } from '../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { getDataRoot, getStorageRoot } from '../config.js'
 
+/**
+ * 合并前自动触发图像连续性检测（fire-and-forget，report 模式）：
+ * 所有分镜画面就绪后、开始拼接前对相邻镜头做穿帮筛查，结果写入各分镜 QC 记录。
+ * 与用户手动触发的 POST /episodes/:id/consistency-qc 等价。
+ */
+function runConsistencyQcBeforeMerge(episodeId: number, dramaId: number): void {
+  import('./consistency-qc.js').then(({ runEpisodeConsistencyQc }) =>
+    runEpisodeConsistencyQc(episodeId, dramaId).catch(() => {})
+  ).catch(() => {})
+}
+
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
   if (relativePath.startsWith('static/')) return path.join(getDataRoot(), relativePath)
@@ -49,6 +60,9 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
     : null
 
   logTaskStart('MergeTask', 'episode-merge', { episodeId, dramaId, clips: videos.length, bgm: !!bgm })
+
+  // 合并前自动做图像连续性检测（穿帮筛查，不影响拼接主流程）
+  runConsistencyQcBeforeMerge(episodeId, dramaId)
 
   // 创建 merge 记录
   const ts = now()
@@ -132,6 +146,15 @@ async function doMerge(
     }
   }
 
+  // 成片响度归一化：对齐社媒平台验收标准 I=-14 LUFS / TP=-1.5dB / LRA=11
+  // （对齐参考项目 H3-Codex-Drama final master 阶段 loudnorm）
+  try {
+    finalPath = await normalizeLoudness(finalPath)
+  } catch (err: any) {
+    console.warn(`[Merge] Loudness normalization failed, keep as-is:`, err.message)
+    logTaskError('MergeTask', 'loudnorm', { mergeId, episodeId, error: err.message })
+  }
+
   // 获取时长
   const duration = await getVideoDuration(finalPath)
 
@@ -207,4 +230,48 @@ function getVideoDuration(filePath: string): Promise<number> {
       resolve(Math.round(metadata.format.duration || 0))
     })
   })
+}
+
+/** 探测视频是否存在音轨 */
+function videoHasAudio(filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) { resolve(false); return }
+      const stream = metadata.streams?.find((s) => s.codec_type === 'audio')
+      resolve(!!stream)
+    })
+  })
+}
+
+/**
+ * 成片响度归一化（I=-14 LUFS / TP=-1.5dB / LRA=11）。
+ * 对齐社媒平台验收标准（抖音/小红书等常见参考门限）与参考项目 H3-Codex-Drama 的 final master 阶段。
+ * 无音轨视频直接返回原路径；loudnorm 失败抛错由调用方兜底。
+ * 成功时输出为新文件并删除旧文件。
+ */
+async function normalizeLoudness(videoPath: string): Promise<string> {
+  if (!(await videoHasAudio(videoPath))) return videoPath
+
+  const outPath = path.join(path.dirname(videoPath), `${uuid()}.mp4`)
+
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg()
+      .input(videoPath)
+      .outputOptions([
+        '-c:v', 'copy',
+        '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+      ])
+      .output(outPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+
+  try { if (outPath !== videoPath) fs.unlinkSync(videoPath) } catch {}
+
+  return outPath
 }

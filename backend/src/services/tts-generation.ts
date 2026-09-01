@@ -13,6 +13,7 @@ import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuc
 import { fetchWithRetry } from '../utils/vendor-errors.js'
 import { gpuManager, isLocalConfig } from './gpu-manager.js'
 import { getStorageRoot } from '../config.js'
+import { recordUsage } from './usage-tracking.js'
 
 interface TTSParams {
   text: string
@@ -102,6 +103,18 @@ export async function generateTTS(params: TTSParams): Promise<string> {
       fs.writeFileSync(filePath, buffer)
 
       const relativePath = `static/audio/${filename}`
+
+      // 用量记账：TTS 同步成功即记 completed（按合成字符数计费）
+      recordUsage({
+        serviceType: 'audio',
+        provider: config.provider,
+        model,
+        units: params.text.length,
+        isLocal,
+        status: 'completed',
+        settings: config.settings,
+      })
+
       logTaskSuccess('AudioTask', 'tts-saved', {
         provider: config.provider, model, voice: params.voice,
         path: relativePath, bytes: buffer.length, audioMs: parsed.audioLength,
