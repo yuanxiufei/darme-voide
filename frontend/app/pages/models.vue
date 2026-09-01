@@ -1,22 +1,20 @@
 <template>
   <div class="models-page">
+    <aside class="models-side">
+      <nav class="side-nav">
+        <button v-for="item in sideItems" :key="item.key" type="button" class="side-item" :class="{ active: activeTab === item.key }" @click="switchTab(item.key)">
+          <component :is="item.icon" :size="15" />
+          <span>{{ item.label }}</span>
+        </button>
+      </nav>
+    </aside>
     <div class="settings-scroll">
       <div class="settings-head">
-        <div class="settings-brand">
-          <div class="settings-brand-mark">
-            <img v-if="showBrandImage" :src="brandLogo" alt="短剧工坊" class="settings-brand-logo" @error="showBrandImage = false" />
-            <span v-else class="settings-brand-fallback">剧</span>
-          </div>
-          <div class="settings-brand-copy">
-            <div class="settings-brand-kicker">Drama Studio</div>
-            <div class="settings-brand-name">短剧工坊</div>
-          </div>
-        </div>
         <h2 class="settings-title">AI 服务配置</h2>
         <p class="settings-desc">先用推荐模板快速落配置，再按服务类型微调。工作台创建集时会锁定所选图片、视频和音频能力。</p>
       </div>
 
-      <section class="setup-panel card">
+      <section v-show="activeTab === 'quick'" class="setup-panel card">
         <div class="setup-panel-head">
           <div>
             <div class="setup-kicker">Quick Setup</div>
@@ -39,7 +37,7 @@
         </div>
       </section>
 
-      <section class="setup-panel card">
+      <section v-show="activeTab === 'local'" class="setup-panel card">
         <div class="setup-panel-head">
           <div>
             <div class="setup-kicker">Local Models</div>
@@ -63,8 +61,16 @@
           </article>
         </div>
         <p v-else class="config-empty">尚未初始化本地模型，点击右上角按钮一键创建。</p>
+      </section>
 
-        <!-- 本地服务状态 -->
+      <section v-show="activeTab === 'runtime'" class="setup-panel card">
+        <div class="setup-panel-head">
+          <div>
+            <div class="setup-kicker">Service Health</div>
+            <div class="setup-title">本地服务状态</div>
+            <div class="setup-desc">探测文本 / 图片 / 视频 / 语音四类本地运行时，点「N 配置」可跳转到对应服务配置。</div>
+          </div>
+        </div>
         <div class="runtime-panel">
           <div class="ollama-head">
             <div class="ollama-title">
@@ -92,11 +98,13 @@
                   <template v-else-if="s.error"> · {{ s.error }}</template>
                 </span>
               </div>
-              <span v-if="s.registered_count" class="tag tag-accent">{{ s.registered_count }} 配置</span>
+              <span v-if="s.registered_count" class="tag tag-accent runtime-tag" title="点击查看已注册配置" @click="jumpToSection(s.service_type)">{{ s.registered_count }} 配置</span>
             </div>
           </div>
         </div>
+      </section>
 
+      <section v-show="activeTab === 'ollama'" class="setup-panel card">
         <!-- Ollama 本地模型管理 -->
         <div class="ollama-panel">
           <div class="ollama-head">
@@ -142,7 +150,16 @@
             <div class="ollama-progress-label">{{ pullStatusText }}</div>
           </div>
         </div>
+      </section>
 
+      <section v-show="activeTab === 'download'" class="setup-panel card">
+        <div class="setup-panel-head">
+          <div>
+            <div class="setup-kicker">Model Hub</div>
+            <div class="setup-title">模型扫描与下载</div>
+            <div class="setup-desc">扫描本机模型文件一键注册，或从 HuggingFace / ModelScope 下载权重（支持断点续传）。</div>
+          </div>
+        </div>
         <!-- 本地模型扫描与注册 -->
         <div class="scan-panel">
           <div class="ollama-head">
@@ -360,7 +377,7 @@
         </div>
       </section>
 
-      <section class="setup-panel card">
+      <section v-show="activeTab === 'gpu'" class="setup-panel card">
         <div class="setup-panel-head">
           <div>
             <div class="setup-kicker">GPU Monitor</div>
@@ -405,7 +422,7 @@
         <p v-else-if="!gpuLoading" class="config-empty">暂无 GPU 数据，点击刷新获取。无 NVIDIA GPU 时仅显示租约状态。</p>
       </section>
 
-      <section class="setup-panel card">
+      <section v-show="activeTab === 'tokens'" class="setup-panel card">
         <div class="setup-panel-head compact">
           <div>
             <div class="setup-title">Token 用量统计</div>
@@ -447,7 +464,7 @@
         <p v-else class="config-empty">暂无 token 用量记录，运行任意 Agent 任务后自动统计。</p>
       </section>
 
-      <section class="setup-panel card">
+      <section v-show="activeTab === 'configs'" class="setup-panel card">
         <div class="setup-panel-head compact">
           <div>
             <div class="setup-title">快捷模板</div>
@@ -466,8 +483,8 @@
         </div>
       </section>
 
-      <div class="sections">
-        <section v-for="st in serviceTypes" :key="st.type">
+      <div v-show="activeTab === 'configs'" class="sections">
+        <section v-for="st in serviceTypes" :key="st.type" :id="`cfg-section-${st.type}`" class="cfg-section">
           <div class="section-head">
             <div>
               <span class="section-title">{{ st.label }}</span>
@@ -664,16 +681,31 @@
 </template>
 
 <script setup lang="ts">
-import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2 } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, aiProvidersAPI, traceAPI, localModelsAPI } from '~/composables/useApi'
-import brandLogo from '~/assets/brand-logo.svg'
 import { useConfirm } from '~/composables/useConfirm'
 
 const { confirm } = useConfirm()
 
-const showBrandImage = ref(true)
+// ===== 左侧菜单导航 =====
+const activeTab = ref('quick')
+function switchTab(key: string) {
+  activeTab.value = key
+  const scroller = document.querySelector('.settings-scroll')
+  if (scroller) scroller.scrollTop = 0
+}
+const sideItems = [
+  { key: 'quick', label: '推荐配置', icon: Sparkles },
+  { key: 'local', label: '本地模型', icon: Server },
+  { key: 'runtime', label: '服务状态', icon: Activity },
+  { key: 'ollama', label: 'Ollama 模型', icon: Bot },
+  { key: 'download', label: '扫描与下载', icon: ScanSearch },
+  { key: 'configs', label: '服务配置', icon: SlidersHorizontal },
+  { key: 'gpu', label: 'GPU 监控', icon: Monitor },
+  { key: 'tokens', label: 'Token 用量', icon: BarChart2 },
+]
 
 // ===== AI Service Configs =====
 const cfgs = ref([])
@@ -1377,63 +1409,58 @@ function formatSize(bytes?: number): string {
   return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
 }
 
+let sectionFlashTimer: ReturnType<typeof setTimeout> | null = null
+function jumpToSection(serviceType: string) {
+  activeTab.value = 'configs'
+  nextTick(() => {
+    const el = document.getElementById(`cfg-section-${serviceType}`)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    el.classList.add('section-flash')
+    if (sectionFlashTimer) clearTimeout(sectionFlashTimer)
+    sectionFlashTimer = setTimeout(() => el.classList.remove('section-flash'), 1600)
+  })
+}
+
 onMounted(() => { loadCfgs(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); refreshRuntimeHealth(); loadDrives(); loadLocalRoots() })
-onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value) })
+onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sectionFlashTimer) clearTimeout(sectionFlashTimer) })
 </script>
 
 <style scoped>
-.models-page { height: 100%; overflow: hidden; }
-.settings-scroll { height: 100%; overflow-y: auto; padding: 36px 48px; max-width: 840px; margin: 0 auto; animation: fadeUp 0.3s var(--ease-out); }
-.settings-head { margin-bottom: 24px; }
-.settings-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.settings-brand-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 15px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(242,247,255,0.9));
-  box-shadow: var(--shadow-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.settings-brand-logo {
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
-  display: block;
-}
-.settings-brand-fallback {
-  font-family: var(--font-display);
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--accent-text);
-  line-height: 1;
-}
-.settings-brand-copy {
+.models-page { height: 100%; overflow: hidden; display: flex; }
+.models-side {
+  width: 196px;
+  flex-shrink: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  line-height: 1;
+  gap: 4px;
+  padding: 20px 10px;
+  border-right: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.55), rgba(255,255,255,0.22));
+  overflow-y: auto;
 }
-.settings-brand-kicker {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-3);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+.side-nav { display: flex; flex-direction: column; gap: 2px; }
+.side-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
-.settings-brand-name {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-1);
-  font-family: var(--font-display);
-}
+.side-item:hover { background: rgba(0,0,0,0.045); color: var(--text-1); }
+.side-item.active { background: var(--accent-bg); color: var(--accent-text); font-weight: 600; }
+.side-item.active svg { stroke-width: 2.4; }
+.settings-scroll { flex: 1; height: 100%; overflow-y: auto; padding: 36px 48px; max-width: 840px; margin: 0 auto; animation: fadeUp 0.3s var(--ease-out); }
+.settings-head { margin-bottom: 24px; }
 .settings-title { font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
 .settings-desc { font-size: 13px; color: var(--text-2); margin-top: 4px; }
 
@@ -1513,6 +1540,18 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value) })
   background: var(--accent-bg);
 }
 .sections { display: flex; flex-direction: column; gap: 24px; }
+.cfg-section {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 4px 10px;
+  margin: -4px -10px;
+  transition: border-color 0.25s, box-shadow 0.25s;
+  scroll-margin-top: 16px;
+}
+.cfg-section.section-flash {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
 .section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .section-title { font-size: 13px; font-weight: 600; }
 .section-subtitle { font-size: 11px; color: var(--text-3); margin-top: 2px; }
@@ -1748,6 +1787,11 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value) })
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
+}
+.runtime-tag {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .runtime-label {
   font-size: 13px;

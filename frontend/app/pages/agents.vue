@@ -2,16 +2,6 @@
   <div class="agents-page">
     <div class="settings-scroll">
       <div class="settings-head">
-        <div class="settings-brand">
-          <div class="settings-brand-mark">
-            <img v-if="showBrandImage" :src="brandLogo" alt="短剧工坊" class="settings-brand-logo" @error="showBrandImage = false" />
-            <span v-else class="settings-brand-fallback">剧</span>
-          </div>
-          <div class="settings-brand-copy">
-            <div class="settings-brand-kicker">Drama Studio</div>
-            <div class="settings-brand-name">短剧工坊</div>
-          </div>
-        </div>
         <h2 class="settings-title">Agent 配置</h2>
         <p class="settings-desc">调整各 Agent 的模型、提示词和参数，保存后立即生效。</p>
       </div>
@@ -109,9 +99,6 @@ import { FileText, Check, Loader2, ChevronDown } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { agentConfigAPI, aiConfigAPI, skillsAPI } from '~/composables/useApi'
-import brandLogo from '~/assets/brand-logo.svg'
-
-const showBrandImage = ref(true)
 
 // ===== Agent Configs =====
 const agentCfgs = ref([])
@@ -387,55 +374,6 @@ onMounted(() => { loadAgents(); loadCfgs(); loadAvailableSkills() })
 .agents-page { height: 100%; overflow: hidden; }
 .settings-scroll { height: 100%; overflow-y: auto; padding: 36px 48px; max-width: 840px; margin: 0 auto; animation: fadeUp 0.3s var(--ease-out); }
 .settings-head { margin-bottom: 24px; }
-.settings-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.settings-brand-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 15px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(242,247,255,0.9));
-  box-shadow: var(--shadow-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.settings-brand-logo {
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
-  display: block;
-}
-.settings-brand-fallback {
-  font-family: var(--font-display);
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--accent-text);
-  line-height: 1;
-}
-.settings-brand-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  line-height: 1;
-}
-.settings-brand-kicker {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-3);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.settings-brand-name {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-1);
-  font-family: var(--font-display);
-}
 .settings-title { font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
 .settings-desc { font-size: 13px; color: var(--text-2); margin-top: 4px; }
 
