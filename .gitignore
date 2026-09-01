@@ -55,3 +55,6 @@ local-deploy-plan.md
 
 # Browser test DOM dumps
 models.yaml
+
+# Reference projects (downloaded for learning)
+reference/
