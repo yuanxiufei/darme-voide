@@ -18,6 +18,7 @@ import { getDefaultInstructions, getDefaultName } from '../agents/index.js'
 import { AGENT_SKILL_MAP } from '../agents/skills.js'
 import { persistAgentConfig, type GeneratedAgentConfig } from '../agents/creator.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
+import { llmFetch } from '../utils/llm-fetch.js'
 import { evaluateCase } from './evaluator.js'
 import type { BenchmarkCase, OptimizationHistory, ScoreReport } from './types.js'
 
@@ -80,6 +81,7 @@ async function generateCandidatePrompt(
   const provider = createOpenAI({
     baseURL: getTextProviderBaseUrl(textConfig),
     apiKey: textConfig.apiKey,
+    fetch: llmFetch,
   } as any)
 
   const agent = new Agent({

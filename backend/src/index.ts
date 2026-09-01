@@ -36,6 +36,7 @@ import weaponLibrary from './routes/weaponLibrary.js'
 import costumeLibrary from './routes/costumeLibrary.js'
 import presets from './routes/presets.js'
 import storageRoute from './routes/storage.js'
+import localModels from './routes/localModels.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { config, getStorageRoot } from './config.js'
 import { recoverVideoTasksOnStartup } from './services/video-generation.js'
@@ -72,6 +73,7 @@ api.route('/generations', generations)
 api.route('/upload', upload)
 api.route('/ai-configs', aiConfigs)
 api.route('/ai-providers', aiProviders)
+api.route('/local-models', localModels)
 api.route('/agent-configs', agentConfigs)
 api.route('/agent', agent)
 api.route('/compose', compose)

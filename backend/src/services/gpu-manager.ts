@@ -15,7 +15,7 @@
  *   - Ollama: POST /api/generate { keep_alive: 0 } → 响应后立即卸载
  *   - SD WebUI: POST /sdapi/v1/unload-checkpoint（best-effort，部分版本支持）
  *   - CosyVoice: 轻量级（~4GB），不强制卸载，仅跟踪状态
- *   - MiniMax H3 本地: 跟踪状态，由外部管理生命周期
+ *   - MiniMax H3 本地: 通过 ComfyUI POST /free 主动卸载（视频任务完成后释放显存）
  */
 
 import { logTaskError, logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
@@ -53,12 +53,17 @@ export interface VramProfile {
   /** 估算显存占用（GB） */
   vramGB: number
   /** 卸载策略 */
-  unloadStrategy: 'ollama-keep-alive' | 'sd-unload-checkpoint' | 'passive' | 'none'
-  /** 服务 baseUrl（用于发送卸载请求） */
+  unloadStrategy: 'ollama-keep-alive' | 'sd-unload-checkpoint' | 'comfyui-free' | 'passive' | 'none'
+  /** 服务 baseUrl（用于发送卸载请求，运行时由 acquire 覆盖为实际推理服务地址） */
   baseUrl?: string
+  /** 卸载请求目标地址（与 baseUrl 分离，如 H3 卸载走 ComfyUI 8188 而非推理薄封装 8765） */
+  unloadBaseUrl?: string
   /** 卸载等待时间（ms），给服务端缓冲 */
   cooldownMs: number
 }
+
+/** ComfyUI HTTP 服务地址（用于主动卸载模型，可通过 COMFYUI_URL 环境变量覆盖） */
+const COMFYUI_BASE_URL = process.env.COMFYUI_URL || 'http://localhost:8188'
 
 /** 每个 provider+model 组合的显存估算（GB） */
 const VRAM_ESTIMATES: Record<string, VramProfile> = {
@@ -73,8 +78,8 @@ const VRAM_ESTIMATES: Record<string, VramProfile> = {
   'local-sd:sd15':          { vramGB: 5,  unloadStrategy: 'sd-unload-checkpoint', cooldownMs: 1500 },
   // CosyVoice 语音模型（轻量）
   'cosyvoice:cosyvoice-v2': { vramGB: 4,  unloadStrategy: 'passive',              cooldownMs: 500 },
-  // MiniMax H3 本地视频模型
-  'minimax:hailuo-02':      { vramGB: 15, unloadStrategy: 'passive',              cooldownMs: 5000 },
+  // MiniMax H3 本地视频模型（权重实际驻留 ComfyUI 显存，卸载走 ComfyUI /free）
+  'minimax:hailuo-02':      { vramGB: 15, unloadStrategy: 'comfyui-free', unloadBaseUrl: COMFYUI_BASE_URL, cooldownMs: 5000 },
   // 默认兜底
   'default':                { vramGB: 8,  unloadStrategy: 'none',                 cooldownMs: 1000 },
 }
@@ -215,6 +220,24 @@ class GpuMemoryManager {
           return true
         }
 
+        case 'comfyui-free': {
+          // ComfyUI: POST /free 卸载全部已加载模型并释放显存
+          // H3 的 DiT/VAE/text_encoder 实际驻留在 ComfyUI 显存中，故卸载打到 ComfyUI 而非推理薄封装
+          const comfyUrl = profile.unloadBaseUrl || COMFYUI_BASE_URL
+          const resp = await fetch(`${comfyUrl}/free`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ unload_models: true, free_memory: true }),
+            signal: AbortSignal.timeout(10_000),
+          })
+          if (resp.ok) {
+            logTaskProgress('GpuManager', 'unload-comfyui-ok', { modelKey })
+            return true
+          }
+          logTaskWarn('GpuManager', 'unload-comfyui-failed', { modelKey, status: resp.status })
+          return false
+        }
+
         case 'passive':
           // 被动模式：仅从跟踪列表中移除，由外部服务自行管理
           logTaskProgress('GpuManager', 'unload-passive', { modelKey })
@@ -348,8 +371,8 @@ class GpuMemoryManager {
       strategy: profile.unloadStrategy,
     })
 
-    // 如果是 ollama-keep-alive，主动卸载
-    if (profile.unloadStrategy === 'ollama-keep-alive') {
+    // ollama-keep-alive / comfyui-free 等主动卸载策略：任务结束后立即卸载释放显存
+    if (profile.unloadStrategy === 'ollama-keep-alive' || profile.unloadStrategy === 'comfyui-free') {
       this.unloadModel(modelKey, profile).catch(err => {
         logTaskError('GpuManager', 'unload-on-release', { modelKey, error: err.message })
       })

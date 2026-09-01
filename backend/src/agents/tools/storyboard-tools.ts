@@ -56,6 +56,16 @@ function validateStoryboardBindings(episodeId: number, sceneId: number | null | 
   }
 }
 
+/** 从对白文本解析第一个「角色名：台词」前缀的说话人名字，旁白/画外音返回 null */
+function extractSpeakerName(dialogue: string | undefined): string | null {
+  if (!dialogue) return null
+  const match = /^\s*([^\n:：]{1,12}?)[:：]/.exec(dialogue)
+  if (!match) return null
+  const name = match[1].trim()
+  if (!name || /^(旁白|画外音|narrator)$/i.test(name)) return null
+  return name
+}
+
 export function createStoryboardTools(episodeId: number, dramaId: number) {
   const readStoryboardContext = createTool({
     id: 'read_storyboard_context',
@@ -207,19 +217,36 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
 
       let totalDuration = 0
       let dialogueIssueCount = 0
-      const episodeCharNames = new Set(
-        db.select().from(schema.episodeCharacters)
-          .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-          .map(link => {
-            const [char] = db.select().from(schema.characters)
-              .where(and(eq(schema.characters.id, link.characterId), isNull(schema.characters.deletedAt))).all()
-            return char?.name || ''
-          })
-          .filter(Boolean),
-      )
+      const episodeCharNames = new Set<string>()
+      const nameToSpeaker = new Map<string, string>()
+      for (const link of db.select().from(schema.episodeCharacters)
+        .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()) {
+        const [char] = db.select().from(schema.characters)
+          .where(and(eq(schema.characters.id, link.characterId), isNull(schema.characters.deletedAt))).all()
+        if (char?.name) {
+          episodeCharNames.add(char.name)
+          if (char.speakerId) nameToSpeaker.set(char.name, char.speakerId)
+        }
+      }
 
       for (const sb of storyboards) {
         validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
+
+        // 说话人绑定闭环：speaker_id 未填时，从对白「角色名：台词」自动解析并绑定说话人
+        let resolvedSpeakerId = sb.speaker_id || ''
+        if (!resolvedSpeakerId && sb.dialogue) {
+          const speakerName = extractSpeakerName(sb.dialogue)
+          if (speakerName) {
+            resolvedSpeakerId = nameToSpeaker.get(speakerName) || ''
+            if (resolvedSpeakerId) {
+              logTaskProgress('StoryboardTool', 'speaker-auto-bind', {
+                shotNumber: sb.shot_number,
+                speakerName,
+                speakerId: resolvedSpeakerId,
+              })
+            }
+          }
+        }
 
         // 对话角色一致性校验：dialogue 中的角色名必须存在于本集角色或 character_ids 中
         if (sb.dialogue) {
@@ -258,7 +285,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           videoPrompt: sb.video_prompt, negativePrompt: sb.negative_prompt,
           bgmPrompt: sb.bgm_prompt, soundEffect: sb.sound_effect,
           sceneId: sb.scene_id, duration: sb.duration || 10,
-          sceneType: sb.scene_type, speakerId: sb.speaker_id,
+          sceneType: sb.scene_type, speakerId: resolvedSpeakerId,
           createdAt: ts, updatedAt: ts,
         }).run()
         syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])

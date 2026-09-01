@@ -188,6 +188,10 @@ export const aiConfigAPI = {
   gpuReleaseAll: () => api.post('/ai-configs/gpu/release-all'),
   ollamaStatus: (baseUrl?: string) => api.post('/ai-configs/ollama/status', { base_url: baseUrl }),
   ollamaStart: () => api.post('/ai-configs/ollama/start'),
+  /** 统一探测本地四大运行时（文本/图像/视频/语音）健康状态 */
+  runtimeHealth: () => api.get('/ai-configs/runtime/health'),
+  /** 删除本地 Ollama 模型 */
+  ollamaDelete: (name: string, baseUrl?: string) => api.post('/ai-configs/ollama/delete', { name, base_url: baseUrl }),
   /** 下载 Ollama 模型，NDJSON 流式返回进度事件 { status, completed, total, error } */
   ollamaPull: async (name: string, baseUrl?: string, onEvent?: (ev: any) => void): Promise<{ ok: boolean; error?: string }> => {
     const resp = await fetch(`${BASE}/ai-configs/ollama/pull`, {
@@ -221,6 +225,66 @@ export const aiConfigAPI = {
           if (ev.error) return { ok: false, error: ev.error }
           onEvent?.(ev)
         } catch { /* 忽略非 JSON 行 */ }
+      }
+    }
+    return { ok: true }
+  },
+}
+
+export const localModelsAPI = {
+  /** 扫描本地模型文件并识别类型，返回 { roots, models, total, truncated, elapsedMs, byKind } */
+  scan: (params?: { roots?: string[]; kinds?: string[]; maxDepth?: number; maxFiles?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.roots?.length) q.set('roots', JSON.stringify(params.roots))
+    if (params?.kinds?.length) q.set('kinds', params.kinds.join(','))
+    if (params?.maxDepth) q.set('maxDepth', String(params.maxDepth))
+    if (params?.maxFiles) q.set('maxFiles', String(params.maxFiles))
+    const qs = q.toString()
+    return api.get(`/local-models/scan${qs ? `?${qs}` : ''}`)
+  },
+  /** 返回默认扫描根目录、探测状态及完整路径配置（paths.models_dir 等） */
+  roots: () => api.get('/local-models/roots'),
+  /** 保存模型路径配置（partial：roots=额外扫描目录，models_dir=模型存储目录） */
+  savePaths: (patch: { roots?: string[]; models_dir?: string }) => api.put('/local-models/roots', patch),
+  /** 将扫描到的模型注册进 ai_service_configs，返回 { created, updated, skipped, configs } */
+  register: (models: any[], name?: string) => api.post('/local-models/register', { models, name }),
+  /** 列出可用磁盘盘符，返回 { drives: [{ letter, root }] } */
+  drives: () => api.get('/local-models/drives'),
+  /** 启动后台异步扫描任务，返回 { taskId } */
+  scanAsync: (params?: { roots?: string[]; kinds?: string[]; maxDepth?: number; maxFiles?: number }) =>
+    api.post('/local-models/scan', params || {}),
+  /** 查询扫描任务进度/结果，返回 { taskId, progress } */
+  scanStatus: (taskId: string) => api.get(`/local-models/scan/status?taskId=${encodeURIComponent(taskId)}`),
+  /** 取消扫描任务 */
+  scanCancel: (taskId: string) => api.post(`/local-models/scan/cancel?taskId=${encodeURIComponent(taskId)}`),
+  /** 列出仓库文件（按来源），返回 { repo, source, revision, files: [{ name, size }] } */
+  hfFiles: (repo: string, revision?: string, source?: string) => api.post('/local-models/hf/files', { repo, revision, source }),
+  /** 删除「模型存储目录」下的本地模型文件/目录，返回 { deleted, failed } */
+  delFiles: (paths: string[]) => api.post('/local-models/delete', { paths }),
+  /** 下载模型到「模型存储目录」（按来源），NDJSON 流式进度事件 { status, file, downloaded, total, overall, ... } */
+  hfDownload: async (repo: string, files: string[], revision: string, source: string, onEvent?: (ev: any) => void): Promise<{ ok: boolean }> => {
+    const resp = await fetch(`${BASE}/local-models/hf/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, files, revision, source }),
+    })
+    if (!resp.ok || !resp.body) {
+      const json = await resp.json().catch(() => null)
+      throw new Error(json?.message || `下载失败 (HTTP ${resp.status})`)
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 1)
+        if (!line) continue
+        try { onEvent?.(JSON.parse(line)) } catch { /* 忽略非 JSON 行 */ }
       }
     }
     return { ok: true }
