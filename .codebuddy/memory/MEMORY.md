@@ -42,3 +42,8 @@ Drama Studio（`darme-voide`）：AI 剧本/分镜/视频生成。Nuxt 3 前端�
 
 ## 用户操作规范
 - 上下文过大时必须按阶段拆分、每阶段只读 1 文件只改 1 处、逐步验证，避免一次塞入过多内容。
+
+## Git 提交约定（本机）
+- 本机无默认 git user 身份（user.name/email 全局与系统均为空），commit 需临时指定：`git -c user.name=yuanxf -c user.email=yuanxf@wedoctor.com commit ...`。
+- PowerShell 传中文 commit message 会乱码（GBK/UTF-8 转换损坏字节），统一用英文 commit message。
+- 提交拆分风格：按「整理类 chore / 功能类 feat」分组，每类一个逻辑提交。
