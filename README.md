@@ -166,9 +166,9 @@ ai:
 ### 📥 安装依赖
 
 ```bash
-# 克隆项目
-git clone https://github.com/your-org/drama-studio.git
-cd drama-studio
+# 获取源码（git clone 或下载解压后进入项目根目录）
+# git clone <你的仓库地址>
+cd darme-voide
 
 # 安装后端依赖
 cd backend && npm install
@@ -370,12 +370,6 @@ A: 检查后端是否启动，端口是否正确。开发模式下前端代理�
 ### Q: 数据库表未创建？
 
 A: 后端会在首次启动时自动创建所有表，检查日志确认初始化是否成功。
-
----
-
-## 📋 更新日志
-
-完整更新日志见 [CHANGELOG.md](./CHANGELOG.md)
 
 ---
 
