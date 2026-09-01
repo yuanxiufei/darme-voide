@@ -40,6 +40,19 @@ Drama Studio（`darme-voide`）：AI 剧本/分镜/视频生成。Nuxt 3 前端�
 - 关键概念：`nvcc`（CUDA Toolkit 编译器）≠ CUDA runtime（驱动/PyTorch 的 cuXXX pip 包只带 runtime+cudnn，不带 nvcc）。→「torch.cuda 可用」不代表「能源码编译 CUDA 版 sd.cpp」。
 - 后果：路线 A/B 的 sd.cpp 需 nvcc 编 CUDA 版，当前只能 CPU 版（极慢）；路线 C（ComfyUI Desktop，本机已在跑、显存 22.4/23 GiB 占用中）不依赖 nvcc，是现成可用路线。
 
+## 参考项目借鉴点（6 项，2026-08-31 至 09-01 全部落地）
+参考了 3 个对标项目（ArcReel / H3-Codex-Drama / Minimax 类似物），将核心机制落地到 Drama Studio 后端：
+1. **多级 QC 管道**：`technical-qc.ts`（技术帧检测）+ `consistency-qc.ts`（跨帧连续性/角色相似度），接入 image-generation 完成回调。
+2. **资产版本历史/回滚**：`asset_versions` 表 + `asset-versions.ts` 服务，分镜图按 frameType 分组版本，回滚写回主表字段。
+3. **风格 Profile 提炼**：`style_profiles` 表 + `style-profiles.ts`（LLM 提炼 + 激活注入 storyboard_breaker 等指令，house style 最高优先级）。
+4. **剧本内容指纹门禁**：`script-fingerprint.ts`（episodes.script_hash / storyboards.script_hash 比对，剧本变更阻断旧分镜媒体生成，force 可放行）。
+5. **per-shot take 预算**：`take-budget.ts`（storyboards.take_count/take_budget 默认 3，超预算阻断，重新拆分镜重置）。
+6. **多集节奏相位**：`rhythm-phase.ts`（分镜按累计时长占比分 setup/development/climax/resolution 四相，跨集节奏引导注入 storyboard_breaker，`GET /dramas/:id/rhythm`）。
+7. **剪映草稿导出**（2026-09-01 晚）：`jianying-draft.ts` + `GET /export/dramas/:dramaId/jianying-draft?episodeId=`，生成 .draft 文件夹（draft_content/draft_info/素材副本），微秒计时 UUID 引用架构，视频+音频+字幕三轨道。
+8. **生成前费用预估**：`estimate-service.ts` + `GET /usage/estimate`（当前激活单价 × 待生成工作量，花前估算）。
+9. **多集成本看板**：`usage-tracking.ts` 的 `getEpisodeCostBoard` + `GET /usage/board?drama_id=`（每集成本/调用/重拍成本/按服务拆分）。
+关键约定：agents/index.ts `appendStyleProfile(type, episodeId, dramaId, instructions)` 是同步函数（内部用 require 不用 await import）；门禁类检查统一支持 force 参数；分镜无指纹/无相位视为旧产物不阻断（向后兼容）；storyboards 无 resolution/fps 字段（在 video_generations）；Windows 下 ZIP 内路径需转 posix 分隔符。
+
 ## 用户操作规范
 - 上下文过大时必须按阶段拆分、每阶段只读 1 文件只改 1 处、逐步验证，避免一次塞入过多内容。
 
