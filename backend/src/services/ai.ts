@@ -61,6 +61,11 @@ export function getTextProviderBaseUrl(config: AIConfig) {
     return joinProviderUrl(config.baseUrl, '/compatible-mode/v1', '')
   }
 
+  if (provider === 'minimax') {
+    // MiniMax 文本走 OpenAI 兼容 /v1 端点（与 adapters/openai-compatible-text 的 PREFIX_BY_PROVIDER 对齐）
+    return joinProviderUrl(config.baseUrl, '/v1', '')
+  }
+
   return config.baseUrl
 }
 
