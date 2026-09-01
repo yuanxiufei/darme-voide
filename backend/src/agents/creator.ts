@@ -19,7 +19,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { getDefaultInstructions, getDefaultName, validAgentTypes } from './index.js'
-import { AGENT_SKILL_MAP } from './skills.js'
+import { AGENT_SKILL_MAP, listSkillIds } from './skills.js'
 import { now } from '../utils/response.js'
 
 export interface GeneratedAgentConfig {
@@ -31,8 +31,8 @@ export interface GeneratedAgentConfig {
   skills: Array<{ id: string; enabled: boolean; priority: number }>
 }
 
-/** 全部可用 skill id 集合（从默认映射推导，Drama Studio 当前就这 5 个） */
-const AVAILABLE_SKILL_IDS = Array.from(new Set(Object.values(AGENT_SKILL_MAP).flat()))
+/** 全部可用 skill id 集合（扫描 skills/ 目录，含 minimax 技能库；不再受默认映射子集限制） */
+const AVAILABLE_SKILL_IDS = listSkillIds()
 
 const CREATOR_INSTRUCTIONS = `你是一名 AI Agent 配置生成专家。根据用户的一句话需求，为指定类型的 Agent 生成优化后的配置。
 

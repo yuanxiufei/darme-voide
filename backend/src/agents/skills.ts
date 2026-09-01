@@ -2,18 +2,44 @@
  * Agent Skill 加载器
  * 支持 DB 配置（用户可控）+ 硬编码默认值（兜底）
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseSkill, renderSkill, type ParsedSkill } from './skill-parser.js'
 
 // ── 硬编码默认映射（DB 无配置时使用） ─────────────────
+// 除项目自有 skill 外，已融入 MiniMax 导入的技能库（skills/minimax/），
+// 按各 Agent 职责挑选最相关项作为默认启用；其余可在前端 Settings 手动绑定。
 export const AGENT_SKILL_MAP: Record<string, string[]> = {
-  script_rewriter: ['script_rewriter'],
-  extractor: ['extractor'],
-  storyboard_breaker: ['storyboard_breaker', 'extractor'],
-  voice_assigner: ['voice_assigner'],
-  grid_prompt_generator: ['grid_prompt_generator'],
+  script_rewriter: [
+    'script_rewriter',
+    'minimax/installed/short-drama-screenwriter',
+    'minimax/installed/short-drama-series-writer',
+  ],
+  extractor: [
+    'extractor',
+    'minimax/installed/film-assets',
+  ],
+  storyboard_breaker: [
+    'storyboard_breaker',
+    'extractor',
+    'minimax/installed/film-shot',
+    'minimax/installed/storyboard',
+    'minimax/installed/coordinate-camera-control-designer',
+  ],
+  voice_assigner: [
+    'voice_assigner',
+    'minimax/installed/voice-clone',
+    'minimax/installed/voiceover-direction',
+  ],
+  grid_prompt_generator: [
+    'grid_prompt_generator',
+    'minimax/installed/film-reference-prompt-writer',
+    'minimax/installed/film-style-picker',
+    'minimax/installed/video-deconstruct-analyzer',
+    'minimax/builtin/video-deconstruct',
+    'minimax/installed/face-warp',
+  ],
   orchestrator: [],
 }
 
@@ -117,4 +143,25 @@ export function loadAgentSkills(agentType: string, dbSkillsRaw?: string | null):
     ...sections.map(s => `---\n${s}\n`),
     '---',
   ].join('\n')
+}
+
+/**
+ * 扫描 skills/ 目录，返回全部可用 skill id（含嵌套目录，如 minimax/installed/xxx）。
+ * 供 Agent 配置生成器（creator）作为全量可选集合，而非仅限默认映射中的子集。
+ */
+export function listSkillIds(): string[] {
+  if (!existsSync(SKILLS_DIR)) return []
+  const out: string[] = []
+  function scan(dir: string, prefix = '') {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const full = resolve(dir, entry.name)
+      const id = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (existsSync(resolve(full, 'SKILL.md'))) out.push(id)
+      scan(full, id)
+    }
+  }
+  scan(SKILLS_DIR)
+  return out
 }

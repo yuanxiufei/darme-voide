@@ -32,6 +32,33 @@
           </svg>
           <span>资源库</span>
         </NuxtLink>
+        <NuxtLink to="/skills" class="nav-link" :class="{ active: route.path.startsWith('/skills') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="13" y2="17"/>
+          </svg>
+          <span>Skill</span>
+        </NuxtLink>
+        <NuxtLink to="/models" class="nav-link" :class="{ active: route.path.startsWith('/models') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <rect x="9" y="9" width="6" height="6"/>
+            <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>
+          </svg>
+          <span>模型</span>
+        </NuxtLink>
+        <NuxtLink to="/agents" class="nav-link" :class="{ active: route.path.startsWith('/agents') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="8" width="16" height="12" rx="2"/>
+            <path d="M12 8V4"/>
+            <circle cx="12" cy="3" r="1.2"/>
+            <line x1="9" y1="13" x2="9" y2="15"/>
+            <line x1="15" y1="13" x2="15" y2="15"/>
+          </svg>
+          <span>Agent</span>
+        </NuxtLink>
         <NuxtLink to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>

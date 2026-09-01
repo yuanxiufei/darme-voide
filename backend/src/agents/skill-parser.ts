@@ -19,6 +19,8 @@ export interface SkillMetadata {
   preconditions: string[]
   /** 输出协议字段：完成后需在 YAML 协议块中额外汇报的字段名（空数组 = 仅 status/summary） */
   protocol: string[]
+  /** 适用工作流/制作阶段（frontmatter `workflows:` 可选声明，如：剧本编写 / 分镜拆解） */
+  workflows: string[]
 }
 
 export interface ParsedSkill {
@@ -69,6 +71,7 @@ export function parseSkill(content: string, fallbackId: string): ParsedSkill {
     description: typeof fm.description === 'string' ? fm.description.trim() : '',
     preconditions: toStrArray(fm.preconditions),
     protocol: toStrArray(fm.protocol),
+    workflows: toStrArray(fm.workflows),
   }
 
   return { metadata, body: body.trim() }

@@ -176,11 +176,20 @@
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/` | 列表 |
+| GET | `/` | 列表（含分类/绑定 Agent/工作流阶段） |
 | GET | `/*` | 详情（通配符，routePath 动态提取 id） |
 | PUT | `/*` | 更新 |
 | POST | `/` | 创建 |
 | DELETE | `/*` | 删除 |
+
+**GET `/` 列表项扩展字段**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `category` | string | 来源分类：`core`（内置 Agent）/ `minimax-builtin` / `minimax-installed` / `custom`（自定义） |
+| `workflows` | string[] | SKILL.md frontmatter `workflows:` 声明的适用工作流/阶段（可缺省 = 空数组） |
+| `boundAgents` | string[] | 反向查询 `agent_configs.skills` 得到的绑定该 skill 的 agent_type 列表（含已禁用项） |
+| `phases` | string[] | 工作流制作阶段 = 绑定 Agent 对应阶段 + frontmatter 声明，去重（`script_rewriter→剧本编写 / extractor→资产提取 / voice_assigner→音色分配 / storyboard_breaker→分镜拆解 / grid_prompt_generator→画面提示词`） |
 
 ### 2.15 音色 aiVoices —— `/api/v1/ai-voices`
 

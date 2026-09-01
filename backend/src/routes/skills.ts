@@ -3,12 +3,66 @@ import type { Context } from 'hono'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { isNull } from 'drizzle-orm'
 import { success, badRequest } from '../utils/response.js'
 import { parseSkill } from '../agents/skill-parser.js'
+import { AGENT_SKILL_MAP } from '../agents/skills.js'
+import { db, schema } from '../db/index.js'
 
 const app = new Hono()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SKILLS_DIR = path.resolve(__dirname, '../../../skills')
+
+/** Agent → 工作流制作阶段（用于展示 skill 关联的流水线环节） */
+const AGENT_WORKFLOW_PHASES: Record<string, string> = {
+  script_rewriter: '剧本编写',
+  extractor: '资产提取',
+  voice_assigner: '音色分配',
+  storyboard_breaker: '分镜拆解',
+  grid_prompt_generator: '画面提示词',
+}
+
+/** 按 id 前缀推导来源分类 */
+function categoryOf(id: string): string {
+  if (id.startsWith('minimax/builtin/')) return 'minimax-builtin'
+  if (id.startsWith('minimax/')) return 'minimax-installed'
+  if (id in AGENT_WORKFLOW_PHASES) return 'core'
+  return 'custom'
+}
+
+/** 反向查询 skill 绑定关系：skillId → agent_type 列表（含已禁用的）
+ *  优先 DB agent_configs.skills（用户显式配置）；DB 未配置（null）的 agent 回退默认映射 AGENT_SKILL_MAP */
+function loadSkillBindings(): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  // 默认映射兜底
+  for (const [agent, ids] of Object.entries(AGENT_SKILL_MAP)) {
+    for (const id of ids) {
+      const list = map.get(id) ?? []
+      if (!list.includes(agent)) list.push(agent)
+      map.set(id, list)
+    }
+  }
+  const rows = db.select().from(schema.agentConfigs).where(isNull(schema.agentConfigs.deletedAt)).all()
+  for (const row of rows) {
+    if (!row.skills) continue // 未配置 → 保留默认映射
+    try {
+      const arr = JSON.parse(row.skills)
+      if (!Array.isArray(arr)) continue
+      // 用户显式配置：先移除该 agent 的默认绑定，再按用户配置重建
+      for (const agents of map.values()) {
+        const i = agents.indexOf(row.agentType)
+        if (i >= 0) agents.splice(i, 1)
+      }
+      for (const item of arr) {
+        if (!item || typeof item.id !== 'string') continue
+        const list = map.get(item.id) ?? []
+        if (!list.includes(row.agentType)) list.push(row.agentType)
+        map.set(item.id, list)
+      }
+    } catch { /* 忽略损坏的 skills JSON */ }
+  }
+  return map
+}
 
 /** 验证 skill id 是安全的，防止路径遍历攻击 */
 function validateSkillId(rawId: string): string | null {
@@ -45,7 +99,22 @@ function wildcardId(c: Context): string {
 // GET /skills — List all skills (recursive, supports nested dirs)
 app.get('/', async (c) => {
   try {
-  const skills: { id: string; name: string; description: string; preconditions: string[]; protocol: string[] }[] = []
+  const bindings = loadSkillBindings()
+  const skills: {
+    id: string
+    name: string
+    description: string
+    preconditions: string[]
+    protocol: string[]
+    /** 来源分类：core（内置 Agent）/ minimax-builtin / minimax-installed / custom（自定义） */
+    category: string
+    /** frontmatter workflows: 声明的适用工作流/阶段 */
+    workflows: string[]
+    /** 反向查询：绑定了该 skill 的 agent_type 列表 */
+    boundAgents: string[]
+    /** 工作流制作阶段 = 绑定 Agent 对应阶段 + frontmatter 声明（去重） */
+    phases: string[]
+  }[] = []
 
   if (!fs.existsSync(SKILLS_DIR)) {
     return success(c, skills)
@@ -61,12 +130,20 @@ app.get('/', async (c) => {
         const content = fs.readFileSync(skillPath, 'utf-8')
         const parsed = parseSkill(content, entry.name)
         const id = prefix ? `${prefix}/${entry.name}` : entry.name
+        const boundAgents = bindings.get(id) || []
         skills.push({
           id,
           name: parsed.metadata.name,
           description: parsed.metadata.description,
           preconditions: parsed.metadata.preconditions,
           protocol: parsed.metadata.protocol,
+          category: categoryOf(id),
+          workflows: parsed.metadata.workflows,
+          boundAgents,
+          phases: Array.from(new Set([
+            ...boundAgents.map(a => AGENT_WORKFLOW_PHASES[a]).filter(Boolean),
+            ...parsed.metadata.workflows,
+          ])),
         })
       }
       // Always recurse — nested skills may exist even if this dir has SKILL.md
