@@ -950,7 +950,14 @@ async function probeLocalRuntime(baseUrl: string, probePath: string, timeoutMs =
     return { reachable: true, httpStatus: resp.status, latencyMs: Date.now() - startedAt, error: '' }
   } catch (err: any) {
     const aborted = err?.name === 'AbortError'
-    return { reachable: false, httpStatus: null, latencyMs: Date.now() - startedAt, error: aborted ? `超时(${timeoutMs}ms)` : (err?.message || '连接失败') }
+    const raw = err?.message || ''
+    // 把 fetch 原始错误归一化为可读状态：未启动 / 连接超时
+    const error = aborted
+      ? '连接超时'
+      : /fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR_CONNECT|ENETUNREACH|SocketError/i.test(raw)
+        ? '未启动'
+        : raw
+    return { reachable: false, httpStatus: null, latencyMs: Date.now() - startedAt, error }
   } finally {
     clearTimeout(timer)
   }
