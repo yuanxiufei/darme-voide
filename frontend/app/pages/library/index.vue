@@ -3,7 +3,7 @@
     <header class="lib-header">
       <div class="lib-title">
         <h2>资源库</h2>
-        <p class="lib-sub">管理角色、场景、兵器、服装模板，提升内容复用效率</p>
+        <p class="lib-sub">管理角色、场景、兵器、服装、物品模板，提升内容复用效率</p>
       </div>
     </header>
 
@@ -66,6 +66,20 @@
           <span class="hub-stat">{{ stats.costumes }} 个模板</span>
         </div>
       </NuxtLink>
+
+      <NuxtLink to="/library/props" class="hub-card">
+        <div class="hub-icon" style="background: rgba(139, 92, 246, 0.12); color: #a78bfa;">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8z"/>
+            <path d="M3 20h18"/>
+          </svg>
+        </div>
+        <div class="hub-body">
+          <h3>物品库</h3>
+          <p>道具、信物、线索、法器资产，设定图注入分镜参考</p>
+          <span class="hub-stat">{{ stats.props }} 个模板</span>
+        </div>
+      </NuxtLink>
     </div>
 
     <!-- 最近添加 -->
@@ -83,36 +97,41 @@
 </template>
 
 <script setup lang="ts">
-import { characterLibraryAPI, sceneLibraryAPI, weaponLibraryAPI, costumeLibraryAPI } from '~/composables/useApi'
+import { characterLibraryAPI, sceneLibraryAPI, weaponLibraryAPI, costumeLibraryAPI, propsLibraryAPI } from '~/composables/useApi'
 
-const stats = reactive({ characters: 0, scenes: 0, weapons: 0, costumes: 0 })
+const stats = reactive({ characters: 0, scenes: 0, weapons: 0, costumes: 0, props: 0 })
 const recentItems = ref([] as any[])
 
 onMounted(async () => {
   try {
-    const [cr, sr, wr, cor] = await Promise.all([
+    const [cr, sr, wr, cor, pr] = await Promise.all([
       characterLibraryAPI.list({ pageSize: 1 }),
       sceneLibraryAPI.list({ pageSize: 1 }),
       weaponLibraryAPI.list({ pageSize: 1 }),
       costumeLibraryAPI.list({ pageSize: 1 }),
+      propsLibraryAPI.list(),
     ])
     stats.characters = cr.total ?? 0
     stats.scenes = sr.total ?? 0
     stats.weapons = wr.total ?? 0
     stats.costumes = cor.total ?? 0
+    stats.props = (Array.isArray(pr) ? pr : pr?.items || []).length
 
     // 获取最近条目
-    const [rc, rs, rw, rco] = await Promise.all([
+    const [rc, rs, rw, rco, rp] = await Promise.all([
       characterLibraryAPI.list({ pageSize: 4, sortBy: 'created_at', sortOrder: 'desc' }),
       sceneLibraryAPI.list({ pageSize: 4, sortBy: 'created_at', sortOrder: 'desc' }),
       weaponLibraryAPI.list({ pageSize: 4, sortBy: 'created_at', sortOrder: 'desc' }),
       costumeLibraryAPI.list({ pageSize: 4, sortBy: 'created_at', sortOrder: 'desc' }),
+      propsLibraryAPI.list(),
     ])
+    const propArr = Array.isArray(rp) ? rp : rp?.items || []
     recentItems.value = [
       ...(rc.items || []).map((i: any) => ({ ...i, type: 'char', typeLabel: '角色' })),
       ...(rs.items || []).map((i: any) => ({ ...i, type: 'scene', typeLabel: '场景' })),
       ...(rw.items || []).map((i: any) => ({ ...i, type: 'weapon', typeLabel: '兵器' })),
       ...(rco.items || []).map((i: any) => ({ ...i, type: 'costume', typeLabel: '服装' })),
+      ...propArr.slice(0, 4).map((i: any) => ({ ...i, type: 'prop', typeLabel: '物品' })),
     ]
       .sort((a: any, b: any) => new Date(b.created_at || b.createdAt).getTime() - new Date(a.created_at || a.createdAt).getTime())
       .slice(0, 8)
@@ -227,6 +246,7 @@ function formatDate(d: string) {
 .recent-badge.scene { background: rgba(16,185,129,0.1); color: #34d399; }
 .recent-badge.weapon { background: rgba(245,158,11,0.1); color: #fbbf24; }
 .recent-badge.costume { background: rgba(236,72,153,0.1); color: #f472b6; }
+.recent-badge.prop { background: rgba(139,92,246,0.1); color: #a78bfa; }
 .recent-name {
   font-size: 13px; font-weight: 500;
   color: var(--text-0);

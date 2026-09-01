@@ -545,6 +545,7 @@
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
                       <div v-if="sb.imageUrl || sb.composedImage || sb.firstFrameImage" class="shot-dot has-img" title="已生成图片"></div>
+                      <div v-if="sb.asset_status === 'needs_regeneration' || sb.assetStatus === 'needs_regeneration'" class="shot-dot has-asset-warn" title="资产需重新生成"></div>
                       <div v-if="sb.videoUrl || sb.composedVideoUrl" class="shot-dot has-video" title="已生成视频"></div>
                       <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
                     </div>
@@ -590,6 +591,7 @@
                       <span class="tag">{{ selectedSb.movement || '未设运镜' }}</span>
                       <span class="tag" :class="getFirstFrame(selectedSb) ? 'tag-success' : ''">首帧 {{ getFirstFrame(selectedSb) ? '已生成' : '待生成' }}</span>
                       <span class="tag" :class="getLastFrame(selectedSb) ? 'tag-success' : ''">尾帧 {{ getLastFrame(selectedSb) ? '已生成' : '待生成' }}</span>
+                      <span v-if="selectedSb.keyframe_prompt || selectedSb.keyframePrompt" class="tag" :class="getKeyframe(selectedSb) ? 'tag-success' : ''">关键帧 {{ getKeyframe(selectedSb) ? '已生成' : '待生成' }}</span>
                       <span class="tag" :class="hasVid(selectedSb) ? 'tag-success' : ''">视频 {{ hasVid(selectedSb) ? '已生成' : '待生成' }}</span>
                     </div>
                   </div>
@@ -602,6 +604,18 @@
                           :src="'/' + getFirstFrame(selectedSb)"
                           class="previewable-image"
                           @click.stop="openImageViewer('/' + getFirstFrame(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 首帧`)"
+                        />
+                        <div v-else class="detail-preview-empty">待生成</div>
+                      </div>
+                    </div>
+                    <div v-if="selectedSb.keyframe_prompt || selectedSb.keyframePrompt || getKeyframe(selectedSb)" class="detail-preview-card">
+                      <div class="detail-preview-title">关键帧</div>
+                      <div class="detail-preview-media">
+                        <img
+                          v-if="getKeyframe(selectedSb)"
+                          :src="'/' + getKeyframe(selectedSb)"
+                          class="previewable-image"
+                          @click.stop="openImageViewer('/' + getKeyframe(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 关键帧`)"
                         />
                         <div v-else class="detail-preview-empty">待生成</div>
                       </div>
@@ -767,6 +781,58 @@
                     <span class="field-label">对白 / 旁白</span>
                     <textarea :value="selectedSb.dialogue || ''" class="textarea" rows="3"
                       @blur="updateField(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容 或 旁白：内容" />
+                  </label>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">连续性状态</span>
+                    <span class="detail-section-copy">跨镜状态衔接、逐镜禁止变化与关键物品</span>
+                  </div>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">开始状态</span>
+                      <textarea :value="selectedSb.start_state || selectedSb.startState || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'start_state', $event.target.value)" placeholder="如：角色_林晚=站在门口左侧，面朝屋内" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">结束状态</span>
+                      <textarea :value="selectedSb.end_state || selectedSb.endState || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'end_state', $event.target.value)" placeholder="如：角色_林晚=走到桌旁坐下" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">逐镜禁止变化</span>
+                    <textarea :value="selectedSb.constraints || ''" class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'constraints', $event.target.value)" placeholder="如：服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变" />
+                  </label>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">转场动机</span>
+                      <input :value="selectedSb.transition_motive || selectedSb.transitionMotive || ''" type="text" class="input"
+                        @change="updateField(selectedSb, 'transition_motive', $event.target.value)"
+                        placeholder="视线引导 / 动作匹配 / 声音引导 / 道具承接 / 情绪延续 / 信息揭示 / 空间切换 / 危险预警" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">转场方式</span>
+                      <input :value="selectedSb.transition_type || selectedSb.transitionType || 'cut'" type="text" class="input"
+                        @change="updateField(selectedSb, 'transition_type', $event.target.value)"
+                        placeholder="cut / 匹配剪辑 / 叠化 / 闪切" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">关键帧（中段）</span>
+                    <textarea :value="selectedSb.keyframe_prompt || selectedSb.keyframePrompt || ''" class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'keyframe_prompt', $event.target.value)"
+                      placeholder="动作进行到一半/道具状态变化/机位移动中间态的画面描述，用于生成中段关键帧锁定中间状态" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">关联物品</span>
+                    <div class="prop-chips" v-if="propsList.length">
+                      <button v-for="p in propsList" :key="p.id" type="button"
+                        class="chip-btn" :class="{ active: (selectedSb.prop_ids || selectedSb.propIds || []).includes(p.id) }"
+                        @click="toggleStoryboardProp(selectedSb, p.id)">{{ p.name }}</button>
+                    </div>
+                    <span v-else class="empty-hint">暂无物品库模板，可到「资源库 &gt; 物品库」创建</span>
                   </label>
                 </div>
                 <div class="detail-section">
@@ -1264,6 +1330,24 @@
                         </span>
                       </div>
                       <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'last_frame') ? '尾帧生成中' : '尾帧' }}</span>
+                    </div>
+                    <div v-if="sb.keyframe_prompt || sb.keyframePrompt || getKeyframe(sb)" class="frame-thumb-wrap">
+                      <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'keyframe') && genShotFrame(sb, 'keyframe')">
+                        <img
+                          v-if="getKeyframe(sb)"
+                          :src="'/' + getKeyframe(sb)"
+                          class="previewable-image"
+                          @click.stop="openImageViewer('/' + getKeyframe(sb), `镜头 #${String(i + 1).padStart(2, '0')} 关键帧`)"
+                        />
+                        <div v-else class="frame-thumb-empty">
+                          <Loader2 v-if="isPendingShotFrame(sb.id, 'keyframe')" :size="14" class="animate-spin" />
+                          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </div>
+                        <span v-if="getKeyframe(sb)" class="frame-re">
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        </span>
+                      </div>
+                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'keyframe') ? '关键帧生成中' : '关键帧' }}</span>
                     </div>
                   </div>
                 </div>
@@ -1862,7 +1946,7 @@ import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
   Loader2, Monitor, Smartphone, Square,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import BaseSelect from '~/components/BaseSelect.vue'
 import ModelSelector from '~/components/ModelSelector.vue'
@@ -3128,6 +3212,24 @@ function toggleStoryboardCharacter(sb, charId) {
   updateField(sb, 'character_ids', nextIds)
 }
 
+function toggleStoryboardProp(sb, propId) {
+  const current = sb.prop_ids || sb.propIds || []
+  const next = current.includes(propId)
+    ? current.filter(id => id !== propId)
+    : [...current, propId]
+  updateField(sb, 'prop_ids', next)
+}
+
+const propsList = ref([] as any[])
+async function loadProps() {
+  try {
+    const res = await propsLibraryAPI.list(dramaId ? { drama_id: dramaId } : undefined)
+    propsList.value = Array.isArray(res) ? res : res?.items || []
+  } catch (e: any) {
+    console.error('[Episode] Failed to load props:', e?.message ?? e)
+  }
+}
+
 // —— 镜头级服装变体（每个角色可指定本镜头穿哪套造型）——
 function charCostumeOptions(char: any): string[] {
   if (!char?.costumes) return []
@@ -3832,6 +3934,7 @@ async function batchShotTTS() {
 
 function getFirstFrame(s) { return s?.first_frame_image || s?.firstFrameImage || null }
 function getLastFrame(s) { return s?.last_frame_image || s?.lastFrameImage || null }
+function getKeyframe(s) { return s?.keyframe_image || s?.keyframeImage || null }
 function getStoryboardCover(s) { return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null }
 function getVideoUrl(s) { return s?.video_url || s?.videoUrl || null }
 function getComposedVideoUrl(s) { return s?.composed_video_url || s?.composedVideoUrl || null }
@@ -3880,7 +3983,11 @@ function getShotReferenceImages(sb) {
 
 function buildShotImagePrompt(sb, frameType) {
   const title = sb.title || ''
-  const description = sb.image_prompt || sb.imagePrompt || sb.description || ''
+  const keyframeDesc = sb.keyframe_prompt || sb.keyframePrompt || ''
+  // 关键帧生成优先用用户填写的中段关键帧描述，其次回退画面描述
+  const description = frameType === 'keyframe' && keyframeDesc
+    ? keyframeDesc
+    : (sb.image_prompt || sb.imagePrompt || sb.description || '')
   const shotType = sb.shot_type || sb.shotType || ''
   const angle = sb.angle || ''
   const movement = sb.movement || ''
@@ -3891,7 +3998,9 @@ function buildShotImagePrompt(sb, frameType) {
   const atmosphere = sb.atmosphere || ''
   const frameHint = frameType === 'first_frame'
     ? '生成这个镜头的起始关键帧，突出建立关系和动作开始瞬间'
-    : '生成这个镜头的结束关键帧，突出动作结束、情绪落点或结果状态'
+    : frameType === 'last_frame'
+      ? '生成这个镜头的结束关键帧，突出动作结束、情绪落点或结果状态'
+      : '生成这个镜头的中段关键帧，锁定动作进行到一半、道具状态变化、机位移动中间态的瞬间'
 
   return [
     title ? `镜头标题：${title}` : '',
@@ -3922,11 +4031,13 @@ async function genShotFrame(sb, frameType) {
       reference_images: referenceImages.length ? referenceImages : undefined,
     }
     await imageAPI.generate(body)
-    toast.success(frameType === 'first_frame' ? '首帧生成中' : '尾帧生成中')
+    toast.success(frameType === 'first_frame' ? '首帧生成中' : frameType === 'last_frame' ? '尾帧生成中' : '关键帧生成中')
     await refresh()
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === sb.id)
-      const done = frameType === 'first_frame' ? !!getFirstFrame(target) : !!getLastFrame(target)
+      const done = frameType === 'first_frame' ? !!getFirstFrame(target)
+        : frameType === 'last_frame' ? !!getLastFrame(target)
+          : !!getKeyframe(target)
       if (done) pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
       return done
     })
@@ -4194,7 +4305,7 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-onMounted(() => { refresh(); loadConfigs(); loadVoices() })
+onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 </script>
 
 <style scoped>
@@ -4832,6 +4943,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .shot-dot.has-img { background: var(--success); }
 .shot-dot.has-video { background: var(--info); }
 .shot-dot.has-dialogue { background: var(--warning); }
+.shot-dot.has-asset-warn { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
 .shot-body { }
 .shot-desc { font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-1); }
 .shot-item.active .shot-desc { color: var(--text-0); }
@@ -4922,6 +5034,15 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .field-grid { display: grid; gap: 12px; }
 .field-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.prop-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.chip-btn {
+  padding: 5px 12px; font-size: 12px; border-radius: 999px;
+  background: var(--bg-input); border: 1px solid var(--border); color: var(--text-2); cursor: pointer;
+  transition: all 0.15s;
+}
+.chip-btn:hover { border-color: var(--accent); color: var(--text-0); }
+.chip-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-3); }
 .locked-config {
   display: inline-flex;
   align-items: center;

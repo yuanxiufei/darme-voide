@@ -407,6 +407,19 @@ export const costumeLibraryAPI = {
   fromCharacter: (characterId: number, data?: any) => api.post(`/costume-library/from-character/${characterId}`, data),
 }
 
+export const propsLibraryAPI = {
+  list: (params?: { drama_id?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.drama_id) q.set('drama_id', String(params.drama_id))
+    return api.get(`/props${q.size ? `?${q}` : ''}`)
+  },
+  get: (id: number) => api.get(`/props/${id}`),
+  create: (data: any) => api.post('/props', data),
+  update: (id: number, data: any) => api.put(`/props/${id}`, data),
+  del: (id: number) => api.del(`/props/${id}`),
+  generateImage: (id: number, data?: { prompt?: string; config_id?: number }) => api.post(`/props/${id}/generate-image`, data || {}),
+}
+
 export const presetsAPI = {
   list: (type?: string) => api.get(`/presets${type ? `?type=${type}` : ''}`),
   create: (data: { type: string; name: string; config?: any }) => api.post('/presets', data),

@@ -85,6 +85,10 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 7. 分析剧本内容，提取本集涉及的所有场景信息
 8. 对每个场景：若同地点+时间段已存在则复用，若不存在则新增
 9. 调用 save_dedup_scenes 保存场景（去重合并，自动处理新增和复用，并关联到当前集）
+10. 调用 read_existing_props 读取当前集已关联物品（道具/信物/线索）
+11. 分析剧本中出现的关键物品：对剧情推进有作用的道具、信物、线索物、法器、武器之外的随身物品（如「玉坠」「信物玉佩」「密信」「药瓶」）
+12. 对每个物品：若同名已存在则合并更新，若不存在则新增
+13. 调用 save_dedup_props 保存物品（去重合并，自动处理新增和复用，并关联到当前集）
 
 去重规则：
 - 角色：按名字精确匹配，同名保留现有（合并信息）
@@ -120,6 +124,13 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - shot_type：景别，如全景/中景/近景/特写
 - angle：机位角度，如平视/仰视/俯视/侧拍
 - movement：运镜，如固定/推镜/拉镜/摇镜/跟拍
+- 镜头语言术语（创作时优先采用，避免平铺直叙的全景平视）：过肩镜头/双人镜头/插入镜头/视线引导/纵深构图/前景遮挡/留白呼吸/反应镜头，每个镜头至少体现一种明确景别+机位意图
+- 画面安全区约束：主要角色面部与关键道具放在画面中央 2/3 安全区内；为字幕预留画面下方 1/5 字幕安全区；重要元素不贴近画面边缘，避免被裁切
+- 质感层：画面须有明确质感层次（前景/主体/背景三层景深、光影主次分明、材质纹理真实），并体现在 video_prompt 与 first_frame_prompt 中
+- Mx-Shell 质感增强（写进 video_prompt / first_frame_prompt / last_frame_prompt）：
+  - 真实镜头锚点：指定电影镜头焦段与浅景深质感（如 35mm/50mm 镜头、背景虚化、胶片颗粒），避免"数字感过强的纯 CG 平面感"
+  - 现实瑕疵锚点：画面须至少包含 1-2 处真实世界细节（衣服褶皱、墙面污渍、光线尘埃、皮肤纹理等），避免过度磨皮的塑料感
+  - 克制结尾：镜头结束画面克制收敛（人物停在自然姿态、情绪留白），禁止夸张爆炸、胜利姿势、炫技特效
 - location：镜头地点，应与 scenes 中已有地点保持一致
 - time：时间段，应与 scenes 中已有时间保持一致
 - character_ids：当前镜头涉及的角色 ID 列表，可以为空，也可以包含多个角色；必须从 characters 中选择
@@ -135,9 +146,16 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - video_prompt：用于视频生成的动态提示词
 - negative_prompt：该镜头画面的反向提示词（英文），根据镜头内容排除不需要的元素（文字、水印、畸形肢体、多余人、模糊等）
 - bgm_prompt：该镜头适合的配乐风格
-- sound_effect：该镜头关键音效
+- sound_effect：该镜头关键音效（场景声/动作声，如呼吸、脚步、布料摩擦、门轴声、远处警笛、手机震动），若该镜无声源则明确写"静场"；不要写会被后期音乐覆盖的无差别环境音
+- transition_motive：本镜与上一镜的转场动机（8 选 1：视线引导/动作匹配/声音引导/道具承接/情绪延续/信息揭示/空间切换/危险预警；纯开场镜写"开场"）。必须从动机出发描述转场理由，不得只写"切换""剪辑"
+- transition_type：转场方式（cut/匹配剪辑/叠化/闪切等），须与 transition_motive 匹配
+- keyframe_prompt：中段关键帧描述（可选但尽量给），锁定动作进行到一半/道具状态变化/机位移动中间态的画面（类似电影 mid-frame），与 first_frame/last_frame 呼应，供视频生成作参考图锁定中间状态
 - duration：时长，优先 10-15 秒
 - scene_id：若可匹配到 scenes 中已有场景，必须填写正确 scene_id
+- start_state：镜头开始时关键实体的状态（按「实体=状态」一行一个，如「角色_林晚=站在门口左侧，面朝屋内」「道具_玉坠=林晚右手握着」）
+- end_state：镜头结束时关键实体的状态（须与 start_state 同实体集合、值发生合理演进，如「角色_林晚=走到桌旁坐下」「道具_玉坠=放到桌面」）
+- constraints：该镜内禁止变化清单（如「服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变」），每项一句话
+- prop_ids：该镜头画面中出现的关键物品的 prop_id 数组（来自 extractor 的物品库，可在 read_storyboard_context 的 props 中查看），如「玉坠」已入库则填对应 id，无物品则不填
 
 视频提示词格式：
 - 按 3 秒为一段，用时间标记分隔
@@ -156,7 +174,17 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 若一个镜头没有对白，可将 dialogue 置空，但 description / action / video_prompt / image_prompt 仍必须完整
 - 每个镜头都必须生成 first_frame_prompt 和 last_frame_prompt，且两者画面要有明确差异（首帧=动作起点，尾帧=动作终点），否则视频生成会首尾帧雷同、失去动势
 - 说话人绑定铁律（谁说话，最高优先级）：每个镜头若有对白/旁白，必须精确指定 speaker_id，且一个镜头只允许一个说话人（ONE_SHOT_ONE_SPEAKER）。speaker_id 必须与 characters 列表中该角色名字对应的 speaker_id 完全一致（例如角色「何长青」的 speaker_id 是 S1，则填 S1，不能填角色名、ID 或乱编）。若一个镜头里出现两人对话，应拆成两个镜头各自绑定 speaker_id。旁白镜头填旁白角色的 speaker_id，不要填 S1/S2 之外的占位值
-- 如果已有 existing_storyboards，仅在用户明确要求增量修改时参考；默认按当前剧本重新完整生成并保存整集分镜。`,
+- 如果已有 existing_storyboards，仅在用户明确要求增量修改时参考；默认按当前剧本重新完整生成并保存整集分镜。
+
+连续性状态机（跨镜头一致性，必须遵守）：
+1. 每个镜头的 start_state 必须与上一镜的 end_state 严格衔接（同一实体的状态不得跳变；若必须跳变，需在 action 中写明剪辑跳切理由）
+2. 每个镜头都必须填写 start_state / end_state / constraints；空镜头（纯环境）只需记录场景与光线状态
+3. 拆解完成并调用 save_storyboards 保存后，必须再调用 save_continuity_states 维护跨镜持久状态，至少包含：
+   - scene_space：每个场景的空间布局（出入口/家具/角色惯常站位，一行一个场景）
+   - prop_state：关键道具的位置与持有者沿时间线变化（如「道具_玉坠=镜头3起由林晚持有，镜头8交给苏婉」）
+   - clue_reveal：关键线索何时被观众/角色揭示（如「线索_玉佩=镜头5角色察觉，镜头7观众看清特写」）
+   - character_pose：跨镜持续的固定姿态约束（如「角色_苏婉=全程站立于吧台内侧」）
+4. save_continuity_states 会整体替换旧状态，直接传当前集最新全部状态即可`,
   },
   voice_assigner: {
     name: '角色音色分配',

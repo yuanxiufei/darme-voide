@@ -35,8 +35,51 @@ export const VISUAL_STYLE_SCENE = 'highly detailed cinematic environment, atmosp
 
 /**
  * 视频生成风格引导前缀
+ *
+ * 对齐参考项目 Mx-Shell 质感层规范：
+ * - 真实镜头锚点（camera lens profile）：35mm/50mm 电影镜头质感、浅景深
+ * - 现实瑕疵锚点（imperfection anchors）：克制真实、不堆特效
+ * - 克制结尾（restrained ending）：不追求爆炸/胜利姿势
+ * - 声音策略（sound policy）：画面内不包含背景音乐（后期统一配乐）
  */
-export const VISUAL_STYLE_VIDEO = 'cinematic motion, smooth camera movement, consistent character design, lighting continuity'
+export const VISUAL_STYLE_VIDEO =
+  'cinematic motion, smooth camera movement, consistent character design, lighting continuity, ' +
+  'real lens feel with natural depth of field (35mm/50mm cinematic lens), subtle film grain, ' +
+  'grounded realistic texture with small natural imperfections, restrained ending (no explosion, no victory pose, no text overlay)'
+
+/**
+ * UI 屏幕留白规则（对齐参考项目 ui_plate 资产约束）：
+ * 视频画面中的屏幕/UI 元素（手机/新闻/短信/监控/地图/电脑/文件/时间码）只保留留白，
+ * 禁止生成可读文字/图标，所有文字一律后期叠加，防止 AI 生成乱码文字。
+ */
+export const UI_OVERLAY_RULE =
+  'screens and displays (phone/computer/news/SMS/surveillance/map/clock) show only blank or neutral panels: no readable text, no legible characters, no app icons with text; all on-screen text is added in post-production'
+
+/** 屏幕/UI 元素关键词（用于检测分镜描述是否含屏幕画面） */
+const SCREEN_ELEMENT_PATTERN =
+  /手机|短信|屏幕|显示器|监控|地图|电脑|平板|文件|时间码|新闻|聊天|打字|发消息|phone|screen|display|monitor|surveillance|map|computer|tablet|text message|news|sms|chat/i
+
+/** 检测文本中是否包含屏幕/UI 元素 */
+export function containsScreenElement(text: string | null | undefined): boolean {
+  if (!text) return false
+  return SCREEN_ELEMENT_PATTERN.test(text)
+}
+
+/** 屏幕留白图类别名（props 物品库用） */
+export const UI_PLATE_CATEGORY = '屏幕留白'
+
+/** 构建屏幕留白图（ui_plate）prompt：供后期叠加文字 */
+export function buildUiPlateImagePrompt(plate: {
+  type?: string | null
+  context?: string | null
+}): string {
+  const type = plate.type || 'phone screen'
+  const parts: string[] = []
+  parts.push(`blank ${type} plate, no text, no readable characters, no icons with text`)
+  if (plate.context) parts.push(`context: ${plate.context}`)
+  parts.push('flat neutral screen surface ready for post-production text overlay, empty UI layout')
+  return `${parts.join(', ')}, ${VISUAL_STYLE_SCENE}, ${VISUAL_STYLE_MASTER}`
+}
 
 // ============================================================
 // 通用预设类型定义（Preset Framework Types）
@@ -300,6 +343,31 @@ export function buildEquipImagePrompt(
 }
 
 // ============================================================
+// 物品视觉 Prompt 构建（连续性状态机 v3 物品库）
+// ============================================================
+
+/** 构建物品（道具/信物/线索/法器）设定图 prompt */
+export function buildPropImagePrompt(prop: {
+  name: string
+  category?: string | null
+  description?: string | null
+  appearance?: string | null
+  sizeHint?: string | null
+  color?: string | null
+  holder?: string | null
+}): string {
+  const parts: string[] = []
+  parts.push(`detailed prop design sheet of ${prop.name}（${prop.category || '道具'}）`)
+  if (prop.appearance) parts.push(`appearance: ${prop.appearance}`)
+  if (prop.color) parts.push(`color: ${prop.color}`)
+  if (prop.sizeHint) parts.push(`size: ${prop.sizeHint}`)
+  if (prop.description) parts.push(`description: ${prop.description}`)
+  if (prop.holder) parts.push(`used/hold by: ${prop.holder}`)
+  parts.push('single object centered, clean background, faithful to the drama art style')
+  return `${parts.join(', ')}, ${VISUAL_STYLE_SCENE}, ${VISUAL_STYLE_MASTER}`
+}
+
+// ============================================================
 // 场景视觉 Prompt 构建
 // ============================================================
 
@@ -424,7 +492,15 @@ export function buildStoryboardVideoPrompt(options: {
   // 5. 风格
   if (options.dramaStyle) parts.push(`${options.dramaStyle} cinematic style`)
 
-  return `${parts.join('. ')}, ${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
+  // 6. 声音策略（对齐 Mx-Shell sound policy：画面内不混音，音乐后期叠加）
+  const soundPolicy = 'Sound: production audio only, no background music in frame (music is mixed in post-production)'
+
+  // 7. UI 屏幕留白规则（ui_plate 约束）：分镜含屏幕/UI 元素时强制只留白、文字后期叠加
+  const hasScreen = [options.description, options.storyboardDescription, options.action]
+    .some(containsScreenElement)
+  const uiRule = hasScreen ? `, ${UI_OVERLAY_RULE}` : ''
+
+  return `${parts.join('. ')}, ${soundPolicy}.${uiRule} ${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
 }
 
 // ============================================================
@@ -553,6 +629,20 @@ export function getStoryboardReferenceImages(storyboardId: number): string[] {
       .where(eq(schema.scenes.id, sb.sceneId))
       .all()
     if (scene?.imageUrl) urls.push(scene.imageUrl)
+  }
+
+  // 物品参考图（连续性状态机 v3 物品库）：本镜关联物品的设定图
+  const propLinks = db.select().from(schema.storyboardProps)
+    .where(eq(schema.storyboardProps.storyboardId, storyboardId))
+    .all()
+  if (propLinks.length) {
+    const propIds = propLinks.map((l) => l.propId)
+    const props = db.select().from(schema.propTemplates)
+      .where(and(inArray(schema.propTemplates.id, propIds), isNull(schema.propTemplates.deletedAt)))
+      .all()
+    for (const p of props) {
+      if (p.imageUrl) urls.push(p.imageUrl)
+    }
   }
 
   return urls

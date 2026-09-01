@@ -148,6 +148,13 @@ app.get('/:episode_id/storyboards', async (c) => {
       costumesByStoryboard.set(link.storyboardId, cm)
     }
   }
+  const propLinks = db.select().from(schema.storyboardProps).all()
+  const propIdsByStoryboard = new Map<number, number[]>()
+  for (const pl of propLinks) {
+    const arr = propIdsByStoryboard.get(pl.storyboardId) || []
+    arr.push(pl.propId)
+    propIdsByStoryboard.set(pl.storyboardId, arr)
+  }
 
   const episodeCharIds = db.select().from(schema.episodeCharacters)
     .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
@@ -159,6 +166,7 @@ app.get('/:episode_id/storyboards', async (c) => {
     ...toSnakeCase(row),
     character_ids: charIdsByStoryboard.get(row.id) || [],
     character_costumes: costumesByStoryboard.get(row.id) || {},
+    prop_ids: propIdsByStoryboard.get(row.id) || [],
     characters: allChars
       .filter(ch => (charIdsByStoryboard.get(row.id) || []).includes(ch.id))
       .map(ch => toSnakeCase(ch)),

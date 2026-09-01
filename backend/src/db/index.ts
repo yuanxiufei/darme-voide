@@ -308,6 +308,57 @@ function runMigrations(): void {
   CREATE INDEX IF NOT EXISTS idx_video_quality_checks_storyboard_id
     ON video_quality_checks (storyboard_id);
 
+  -- ====== 连续性状态机（v3）======
+  CREATE TABLE IF NOT EXISTS continuity_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    storyboard_id INTEGER,
+    scene_id INTEGER,
+    state_type TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    state_value TEXT NOT NULL,
+    constraints TEXT,
+    meta TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_continuity_states_episode_id
+    ON continuity_states (episode_id);
+  CREATE INDEX IF NOT EXISTS idx_continuity_states_storyboard_id
+    ON continuity_states (storyboard_id);
+
+  -- ====== 物品库（props）======
+  CREATE TABLE IF NOT EXISTS prop_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT DEFAULT '道具',
+    description TEXT,
+    appearance TEXT,
+    size_hint TEXT,
+    holder TEXT,
+    key_clue TEXT,
+    image_prompt TEXT,
+    negative_prompt TEXT,
+    image_url TEXT,
+    reference_images TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_prop_templates_drama_id
+    ON prop_templates (drama_id);
+  CREATE TABLE IF NOT EXISTS episode_props (
+    episode_id INTEGER NOT NULL,
+    prop_id INTEGER NOT NULL,
+    PRIMARY KEY (episode_id, prop_id)
+  );
+  CREATE TABLE IF NOT EXISTS storyboard_props (
+    storyboard_id INTEGER NOT NULL,
+    prop_id INTEGER NOT NULL,
+    PRIMARY KEY (storyboard_id, prop_id)
+  );
+
   -- ====== 资源库模板表 ======
 
   CREATE TABLE IF NOT EXISTS character_templates (
@@ -467,13 +518,27 @@ function runMigrations(): void {
   ensureColumn('storyboards', 'last_frame_prompt', 'TEXT')
   ensureColumn('storyboards', 'transition_type', "TEXT DEFAULT 'cut'")
   ensureColumn('storyboards', 'transition_duration', 'REAL DEFAULT 0.5')
+  ensureColumn('storyboards', 'transition_motive', 'TEXT')
   ensureColumn('storyboards', 'scene_type', 'TEXT')
   ensureColumn('storyboards', 'speaker_id', 'TEXT')
+  ensureColumn('storyboards', 'start_state', 'TEXT')
+  ensureColumn('storyboards', 'end_state', 'TEXT')
+  ensureColumn('storyboards', 'constraints', 'TEXT')
+  ensureColumn('image_generations', 'deleted_at', 'TEXT')
+  ensureColumn('image_generations', 'prop_id', 'INTEGER')
 
   ensureColumn('video_generations', 'character_ids', 'TEXT')
   ensureColumn('video_generations', 'negative_prompt', 'TEXT')
   ensureColumn('video_generations', 'scene_type', 'TEXT')
   ensureColumn('video_generations', 'reference_audio_urls', 'TEXT')
+  ensureColumn('video_generations', 'block_reason', 'TEXT')
+
+  // ====== 资产验收门禁（asset review gate）======
+  ensureColumn('storyboards', 'asset_status', "TEXT DEFAULT 'missing'")
+
+  // ====== 关键帧扩展（keyframe）======
+  ensureColumn('storyboards', 'keyframe_prompt', 'TEXT')
+  ensureColumn('storyboards', 'keyframe_image', 'TEXT')
 
   ensureColumn('storyboard_characters', 'costume', 'TEXT')
   ensureColumn('image_generations', 'costume', 'TEXT')

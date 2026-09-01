@@ -26,6 +26,31 @@ function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) 
   }
 }
 
+export function syncStoryboardProps(storyboardId: number, propIds: number[]) {
+  db.delete(schema.storyboardProps)
+    .where(eq(schema.storyboardProps.storyboardId, storyboardId))
+    .run()
+
+  const uniqueIds = [...new Set(propIds.filter(Boolean))]
+  if (!uniqueIds.length) return
+
+  for (const propId of uniqueIds) {
+    db.insert(schema.storyboardProps).values({
+      storyboardId,
+      propId,
+    }).run()
+  }
+}
+
+export function getStoryboardPropIds(storyboardId: number): number[] {
+  return db
+    .select({ propId: schema.storyboardProps.propId })
+    .from(schema.storyboardProps)
+    .where(eq(schema.storyboardProps.storyboardId, storyboardId))
+    .all()
+    .map((r) => r.propId)
+}
+
 function getEpisodeSceneIds(episodeId: number) {
   return new Set(
     db.select().from(schema.episodeScenes)
@@ -152,7 +177,31 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
               .map(link => link.characterId),
             shot_type: sb.shotType || '',
             duration: sb.duration || 0,
+            start_state: sb.startState || '',
+            end_state: sb.endState || '',
           })),
+        continuity_states: db.select().from(schema.continuityStates)
+          .where(and(eq(schema.continuityStates.episodeId, episodeId)))
+          .orderBy(schema.continuityStates.id)
+          .all()
+          .map(st => ({
+            state_type: st.stateType,
+            entity_key: st.entityKey,
+            state_value: st.stateValue,
+            constraints: st.constraints || '',
+            storyboard_id: st.storyboardId,
+          })),
+        props: db.select().from(schema.episodeProps)
+          .where(eq(schema.episodeProps.episodeId, episodeId))
+          .all()
+          .map(link => {
+            const [p] = db.select().from(schema.propTemplates)
+              .where(eq(schema.propTemplates.id, link.propId)).all()
+            return p && !p.deletedAt
+              ? { id: p.id, name: p.name, category: p.category, appearance: p.appearance, holder: p.holder }
+              : null
+          })
+          .filter((p): p is NonNullable<typeof p> => p != null),
       }
       logTaskSuccess('StoryboardTool', 'read-context', {
         episodeId,
@@ -163,6 +212,47 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         scriptLength: script.length,
       })
       return payload
+    },
+  })
+
+  const saveContinuityStates = createTool({
+    id: 'save_continuity_states',
+    description:
+      'Save/replace the persistent continuity states (scene space layout, character pose, prop state, clue reveal) for this episode. ' +
+      'Call after save_storyboards to lock cross-shot consistency. Replaces all previous states (idempotent).',
+    inputSchema: z.object({
+      states: z.array(z.object({
+        state_type: z.string(),
+        entity_key: z.string(),
+        state_value: z.string(),
+        constraints: z.string().optional(),
+        storyboard_id: z.number().nullable().optional(),
+        scene_id: z.number().nullable().optional(),
+      })),
+    }),
+    execute: async ({ states }) => {
+      const ts = now()
+      db.delete(schema.continuityStates).where(eq(schema.continuityStates.episodeId, episodeId)).run()
+      for (const st of states) {
+        db.insert(schema.continuityStates).values({
+          episodeId,
+          storyboardId: st.storyboard_id ?? null,
+          sceneId: st.scene_id ?? null,
+          stateType: st.state_type,
+          entityKey: st.entity_key,
+          stateValue: st.state_value,
+          constraints: st.constraints || '',
+          createdAt: ts,
+          updatedAt: ts,
+        }).run()
+      }
+      logTaskSuccess('StoryboardTool', 'save-continuity', {
+        episodeId,
+        dramaId,
+        count: states.length,
+        types: [...new Set(states.map((s) => s.state_type))].join(','),
+      })
+      return { message: `Saved ${states.length} continuity states`, count: states.length }
     },
   })
 
@@ -195,6 +285,13 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         character_ids: z.array(z.number()).optional(),
         scene_type: z.string().optional(),
         speaker_id: z.string().optional(),
+        start_state: z.string().optional(),
+        end_state: z.string().optional(),
+        constraints: z.string().optional(),
+        transition_motive: z.string().optional(),
+        // 关键帧（中段）：锁定动作/道具/机位的中间状态，供视频生成参考
+        keyframe_prompt: z.string().optional(),
+        prop_ids: z.array(z.number()).optional(),
       })),
     }),
     execute: async ({ storyboards }) => {
@@ -286,9 +383,14 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           bgmPrompt: sb.bgm_prompt, soundEffect: sb.sound_effect,
           sceneId: sb.scene_id, duration: sb.duration || 10,
           sceneType: sb.scene_type, speakerId: resolvedSpeakerId,
+          startState: sb.start_state, endState: sb.end_state,
+          constraints: sb.constraints,
+          transitionMotive: sb.transition_motive,
+          keyframePrompt: sb.keyframe_prompt,
           createdAt: ts, updatedAt: ts,
         }).run()
         syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
+        syncStoryboardProps(Number(res.lastInsertRowid), sb.prop_ids || [])
         totalDuration += sb.duration || 10
       }
 
@@ -339,6 +441,10 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       duration: z.number().optional(),
       scene_type: z.string().nullable().optional(),
       speaker_id: z.string().nullable().optional(),
+      start_state: z.string().optional(),
+      end_state: z.string().optional(),
+      constraints: z.string().optional(),
+      transition_motive: z.string().optional(),
     }),
     execute: async ({ storyboard_id, ...fields }) => {
       const [storyboard] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboard_id)).all()
@@ -382,6 +488,11 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       if ('duration' in fields) updates.duration = fields.duration
       if ('scene_type' in fields) updates.sceneType = fields.scene_type
       if ('speaker_id' in fields) updates.speakerId = fields.speaker_id
+      if ('start_state' in fields) updates.startState = fields.start_state
+      if ('end_state' in fields) updates.endState = fields.end_state
+      if ('constraints' in fields) updates.constraints = fields.constraints
+      if ('transition_motive' in fields) updates.transitionMotive = fields.transition_motive
+      if ('keyframe_prompt' in fields) updates.keyframePrompt = fields.keyframe_prompt
       db.update(schema.storyboards).set(updates).where(eq(schema.storyboards.id, storyboard_id)).run()
       if ('character_ids' in fields) syncStoryboardCharacters(storyboard_id, fields.character_ids || [])
       logTaskSuccess('StoryboardTool', 'update-complete', {
@@ -394,5 +505,5 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
     },
   })
 
-  return { readStoryboardContext, saveStoryboards, updateStoryboard }
+  return { readStoryboardContext, saveStoryboards, updateStoryboard, saveContinuityStates }
 }

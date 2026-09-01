@@ -19,6 +19,17 @@ function clamp(n: number): number {
   return Math.max(0, Math.min(100, Math.round(n)))
 }
 
+/** 解析「实体=状态」文本（每行一个），返回 Map<entity, value> */
+function parseEntityStates(stateText: string | null | undefined): Map<string, string> {
+  const map = new Map<string, string>()
+  if (!stateText) return map
+  for (const line of stateText.split('\n')) {
+    const match = /^\s*([^=：]{1,20}?)\s*[=：]\s*(.+)$/.exec(line.trim())
+    if (match) map.set(match[1].trim(), match[2].trim())
+  }
+  return map
+}
+
 /**
  * 镜头级 QC 打分（启发式规则 + 元数据一致性）
  * - lip_sync：对白配音（tts_audio_url）、speaker 声音锁定、视频时长偏差
@@ -156,10 +167,36 @@ export function scoreStoryboard(storyboardId: number): any {
           issues.push({ dimension: 'continuity', severity: 'error', message: `同一场景 #${sb.sceneId} 但地点 ID 不一致（${prevScene.locationId} vs ${scene.locationId}）` })
         }
       }
+      // 状态衔接：上一镜 end_state 与本镜 start_state 的公共实体必须一致（连续性状态机）
+      if (prev.endState && sb.startState) {
+        const prevEnd = parseEntityStates(prev.endState)
+        const curStart = parseEntityStates(sb.startState)
+        for (const [entity, val] of prevEnd) {
+          if (curStart.has(entity) && curStart.get(entity) !== val) {
+            score -= 20
+            issues.push({ dimension: 'continuity', severity: 'error', message: `相邻镜头状态跳变：${entity} 上一镜尾「${val}」→ 本镜首「${curStart.get(entity)}」（应严格衔接或写明跳切理由）` })
+          }
+        }
+      } else if (idx > 0 && (sb.startState || prev.endState)) {
+        score -= 5
+        issues.push({ dimension: 'continuity', severity: 'info', message: '相邻镜头缺少 start_state / end_state 之一，无法校验状态衔接' })
+      }
+    }
+    if (!sb.startState || !sb.endState) {
+      score -= 10
+      issues.push({ dimension: 'continuity', severity: 'warning', message: '本镜未填写 start_state / end_state（连续性状态机要求每镜填写）' })
     }
     if (sb.sceneId && scene && !scene.locationId) {
       score -= 5
       issues.push({ dimension: 'continuity', severity: 'info', message: '关联场景未锁定地点 ID（location_id 为空）' })
+    }
+    // 跨镜持久状态存在性（提示）
+    const contCount = db.select().from(schema.continuityStates)
+      .where(and(eq(schema.continuityStates.episodeId, sb.episodeId)))
+      .all().length
+    if (contCount === 0) {
+      score -= 5
+      issues.push({ dimension: 'continuity', severity: 'info', message: '本集未保存跨镜连续性状态（continuity_states 为空），建议 storyboard_breaker 调用 save_continuity_states' })
     }
     dims.continuity.score = clamp(score)
   }

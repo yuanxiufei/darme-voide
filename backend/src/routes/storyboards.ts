@@ -20,6 +20,8 @@ import {
 } from '../shared/prompt-utils.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { scoreStoryboard } from '../services/qc-scoring.js'
+import { retryFailedStoryboard } from '../services/qc-retry.js'
+import { syncStoryboardProps, getStoryboardPropIds } from '../agents/tools/storyboard-tools.js'
 
 const app = new Hono()
 
@@ -242,6 +244,7 @@ app.post('/', async (c) => {
     updatedAt: ts,
   }).run()
   syncStoryboardCharacters(Number(res.lastInsertRowid), body.character_ids || [])
+  if ('prop_ids' in body) syncStoryboardProps(Number(res.lastInsertRowid), body.prop_ids || [])
   const [result] = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.id, Number(res.lastInsertRowid))).all()
   logTaskSuccess('StoryboardAPI', 'create', {
@@ -252,6 +255,7 @@ app.post('/', async (c) => {
   return created(c, {
     ...toSnakeCase(result),
     character_ids: getStoryboardCharacterIds(result.id),
+    prop_ids: getStoryboardPropIds(result.id),
   })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'create', { error: err.message, stack: err.stack })
@@ -285,7 +289,11 @@ app.put('/:id', async (c) => {
     negative_prompt: 'negativePrompt',
     first_frame_prompt: 'firstFramePrompt', last_frame_prompt: 'lastFramePrompt',
     transition_type: 'transitionType', transition_duration: 'transitionDuration',
+    transition_motive: 'transitionMotive',
     first_frame_image: 'firstFrameImage', last_frame_image: 'lastFrameImage',
+    keyframe_prompt: 'keyframePrompt', keyframe_image: 'keyframeImage',
+    asset_status: 'assetStatus',
+    start_state: 'startState', end_state: 'endState', constraints: 'constraints',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -309,6 +317,9 @@ app.put('/:id', async (c) => {
     const currentIds = 'character_ids' in body ? (body.character_ids || []) : getStoryboardCharacterIds(id)
     const costumes: Record<number, string> = body.character_costumes ?? getStoryboardCharacterCostumes(id)
     syncStoryboardCharacters(id, currentIds, costumes)
+  }
+  if ('prop_ids' in body) {
+    syncStoryboardProps(id, Array.isArray(body.prop_ids) ? body.prop_ids : [])
   }
 
   // 对话角色名验证：保存时检测 dialogue 中的角色名是否存在于剧组角色列表
@@ -586,12 +597,12 @@ app.post('/:id/regenerate-image', async (c) => {
   }
 })
 
-// POST /storyboards/:id/regenerate-frame — 独立重新生成首帧/尾帧图（frame_type: first_frame | last_frame）
+// POST /storyboards/:id/regenerate-frame — 独立重新生成首帧/尾帧/关键帧图（frame_type: first_frame | last_frame | keyframe）
 app.post('/:id/regenerate-frame', async (c) => {
   const id = parseParamId(c)
   if (id == null) return notFound(c, 'Invalid storyboard id')
   const body = await c.req.json()
-  const frameType = body.frame_type === 'last_frame' ? 'last_frame' : 'first_frame'
+  const frameType = ['last_frame', 'keyframe'].includes(body.frame_type) ? body.frame_type : 'first_frame'
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
   if (!sb) return notFound(c, '镜头不存在')
 
@@ -606,11 +617,12 @@ app.post('/:id/regenerate-frame', async (c) => {
       ? body.reference_images
       : getStoryboardReferenceImages(id)
 
-    // 首/尾帧画面内容：优先请求体 prompt，其次分镜存库的首/尾帧 prompt
+    // 首/尾/关键帧画面内容：优先请求体 prompt，其次分镜存库对应帧 prompt
     const frameContent = body.prompt
-      || (frameType === 'first_frame' ? sb.firstFramePrompt : sb.lastFramePrompt)
+      || (frameType === 'first_frame' ? sb.firstFramePrompt
+        : frameType === 'last_frame' ? sb.lastFramePrompt : sb.keyframePrompt)
 
-    // 画面基底：标准构建器（始终注入角色外观 + 场景），首尾帧画面内容作为附加描述叠加
+    // 画面基底：标准构建器（始终注入角色外观 + 场景），帧画面内容作为附加描述叠加
     const basePrompt = buildStoryboardImagePrompt({
       description: sb.description || body.character_description || '',
       storyboardDescription: sb.description,
@@ -622,7 +634,9 @@ app.post('/:id/regenerate-frame', async (c) => {
     })
     const frameHint = frameType === 'first_frame'
       ? 'opening frame, establishing the scene, subject at start position, beginning of the shot'
-      : 'closing frame, final composition, subject at end position, end of the shot'
+      : frameType === 'last_frame'
+        ? 'closing frame, final composition, subject at end position, end of the shot'
+        : 'mid-action keyframe, subject mid-motion, action or prop state in transition, intermediate moment of the shot'
     const prompt = [basePrompt, frameContent, frameHint].filter(Boolean).join(', ')
 
     logTaskStart('StoryboardAPI', 'regenerate-frame', {
@@ -876,6 +890,21 @@ app.post('/:id/qc', async (c) => {
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'qc-score', { storyboardId: id, error: err.message })
     return badRequest(c, err.message || 'Failed to score storyboard')
+  }
+})
+
+// POST /storyboards/:id/retry-qc — 审片重跑：QC 未通过时只重写该失败分镜并重新生成图片/视频
+app.post('/:id/retry-qc', async (c) => {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid storyboard id')
+  try {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+    if (!sb) return notFound(c, '镜头不存在')
+    const result = await retryFailedStoryboard(id)
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'retry-qc', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || 'Failed to retry storyboard')
   }
 })
 

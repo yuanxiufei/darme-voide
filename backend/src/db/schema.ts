@@ -151,6 +151,9 @@ export const storyboards = sqliteTable('storyboards', {
   composedImage: text('composed_image'),
   firstFrameImage: text('first_frame_image'),
   lastFrameImage: text('last_frame_image'),
+  // 关键帧扩展（对齐参考项目 8-16 张关键帧理念）：中段关键帧锁定动作/道具/机位中间态
+  keyframePrompt: text('keyframe_prompt'),
+  keyframeImage: text('keyframe_image'),
   referenceImages: text('reference_images'),
   videoUrl: text('video_url'),
   ttsAudioUrl: text('tts_audio_url'),
@@ -163,7 +166,14 @@ export const storyboards = sqliteTable('storyboards', {
   lastFramePrompt: text('last_frame_prompt'),
   transitionType: text('transition_type').default('cut'),
   transitionDuration: real('transition_duration').default(0.5),
+  transitionMotive: text('transition_motive'),
+  // 连续性状态机字段（v3）
+  startState: text('start_state'),
+  endState: text('end_state'),
+  constraints: text('constraints'),
   status: text('status').default('pending'),
+  // 资产验收门禁（对齐参考项目 asset review）：missing=未生成 / approved=验收通过 / needs_regeneration=需重生成
+  assetStatus: text('asset_status').default('missing'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -176,6 +186,22 @@ export const storyboardCharacters = sqliteTable('storyboard_characters', {
 }, (table) => ({
   pk: primaryKey({ columns: [table.storyboardId, table.characterId] }),
 }))
+
+// ====== 连续性状态机（v3）======
+// 跨镜持久状态：场景空间 / 角色姿态 / 道具状态 / 线索揭示 / 动作因果 / 转场动机
+export const continuityStates = sqliteTable('continuity_states', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  episodeId: integer('episode_id').notNull(),
+  storyboardId: integer('storyboard_id'),
+  sceneId: integer('scene_id'),
+  stateType: text('state_type').notNull(), // scene_space / character_pose / prop_state / clue_reveal / causal_link / transition_motive
+  entityKey: text('entity_key').notNull(), // 如 "角色_林晚" / "道具_玉坠" / "线索_玉佩" / "场景_大堂"
+  stateValue: text('state_value').notNull(),
+  constraints: text('constraints'),        // 禁止变化清单（服装/站位/灯光等）
+  meta: text('meta'),                      // JSON 扩展
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
 
 export const aiServiceConfigs = sqliteTable('ai_service_configs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -248,6 +274,7 @@ export const imageGenerations = sqliteTable('image_generations', {
   dramaId: integer('drama_id'),
   sceneId: integer('scene_id'),
   characterId: integer('character_id'),
+  propId: integer('prop_id'),
   imageType: text('image_type'),
   frameType: text('frame_type'),
   provider: text('provider'),
@@ -275,6 +302,7 @@ export const imageGenerations = sqliteTable('image_generations', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
+  deletedAt: text('deleted_at'),
 })
 
 export const videoGenerations = sqliteTable('video_generations', {
@@ -313,6 +341,8 @@ export const videoGenerations = sqliteTable('video_generations', {
   characterIds: text('character_ids'),
   sceneType: text('scene_type'),
   referenceAudioUrls: text('reference_audio_urls'),
+  // 资产验收门禁：视频任务因资产缺失被阻断时的原因（如 blocked_by_missing_asset）
+  blockReason: text('block_reason'),
 })
 
 export const videoMerges = sqliteTable('video_merges', {
@@ -408,6 +438,42 @@ export const sceneTemplates = sqliteTable('scene_templates', {
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
 })
+
+// ====== 物品库（props，连续性状态机 v3）======
+export const propTemplates = sqliteTable('prop_templates', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  dramaId: integer('drama_id').notNull(),
+  name: text('name').notNull(),
+  category: text('category').default('道具'),  // 道具/信物/线索/文件/法器/食物/随身物/其他
+  description: text('description'),
+  appearance: text('appearance'),               // 外观描述（颜色/材质/形状/大小）
+  sizeHint: text('size_hint'),                  // 尺寸参照（如「掌心大小」「半人高」）
+  holder: text('holder'),                       // 惯常持有者（角色名）
+  keyClue: text('key_clue'),                    // 是否关键线索：是/否
+  customPrompt: text('image_prompt'),
+  negativePrompt: text('negative_prompt'),
+  imageUrl: text('image_url'),
+  referenceImages: text('reference_images'),    // JSON 数组
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+})
+
+// 物品-剧集关联
+export const episodeProps = sqliteTable('episode_props', {
+  episodeId: integer('episode_id').notNull(),
+  propId: integer('prop_id').notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.episodeId, table.propId] }),
+}))
+
+// 物品-分镜关联
+export const storyboardProps = sqliteTable('storyboard_props', {
+  storyboardId: integer('storyboard_id').notNull(),
+  propId: integer('prop_id').notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.storyboardId, table.propId] }),
+}))
 
 // 兵器库模板
 export const weaponTemplates = sqliteTable('weapon_templates', {

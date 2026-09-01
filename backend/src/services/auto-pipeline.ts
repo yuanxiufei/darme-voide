@@ -26,6 +26,7 @@ import { logTaskStart, logTaskSuccess, logTaskError, logTaskWarn, logTaskProgres
 import { publishPipelineEvent } from '../utils/sse-hub.js'
 import { STORYBOARD_IMAGE_NEGATIVE, VIDEO_NEGATIVE, getStoryboardReferenceImages, getStoryboardReferenceAudioUrls } from '../shared/prompt-utils.js'
 import { getActiveConfig, getConfigById } from './ai.js'
+import { extractStoryboardTailFrames } from './frame-extractor.js'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -209,6 +210,31 @@ async function runVoiceStage(episodeId: number, dramaId: number): Promise<void> 
 // 媒体阶段
 // ============================================================
 
+/** 提交缺失的关键帧图（幂等：keyframe_prompt 存在但 keyframe_image 缺失且无进行中任务时提交） */
+async function submitMissingKeyframes(episodeId: number, dramaId: number, configId?: number): Promise<number> {
+  const sbs = getStoryboards(episodeId)
+  let submitted = 0
+  for (const sb of sbs) {
+    if (!sb.keyframePrompt || sb.keyframeImage) continue
+    const existing = db
+      .select()
+      .from(schema.imageGenerations)
+      .where(and(eq(schema.imageGenerations.storyboardId, sb.id), eq(schema.imageGenerations.frameType, 'keyframe')))
+      .all()
+    if (existing.some((g) => g.status === 'processing' || g.status === 'pending' || g.status === 'completed')) continue
+    await generateImage({
+      storyboardId: sb.id,
+      dramaId,
+      prompt: sb.keyframePrompt,
+      negativePrompt: STORYBOARD_IMAGE_NEGATIVE,
+      frameType: 'keyframe',
+      configId,
+    })
+    submitted++
+  }
+  return submitted
+}
+
 /** 提交缺失的首帧图（幂等：已有首帧 / 已有 processing/completed 任务则跳过） */
 async function submitMissingImages(episodeId: number, dramaId: number, configId?: number): Promise<number> {
   const sbs = getStoryboards(episodeId)
@@ -242,9 +268,37 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
   const provider = (config?.provider || '').toLowerCase()
   const canMultiRef = MULTI_REFERENCE_PROVIDERS.has(provider)
   let submitted = 0
-  for (const sb of sbs) {
+  for (let i = 0; i < sbs.length; i++) {
+    const sb = sbs[i]
     if (sb.videoUrl) continue
-    if (!sb.firstFrameImage) continue
+    if (!sb.firstFrameImage) {
+      // 资产验收门禁：分镜首帧资产标记为 needs_regeneration 时，写入 blocked 视频记录
+      // （状态 blocked_by_missing_asset），阻止继续提交并向前端暴露阻断原因。
+      if (sb.assetStatus === 'needs_regeneration') {
+        const existing = db
+          .select()
+          .from(schema.videoGenerations)
+          .where(eq(schema.videoGenerations.storyboardId, sb.id))
+          .all()
+        const alreadyBlocked = existing.some((v) => v.status === 'blocked_by_missing_asset')
+        if (!alreadyBlocked) {
+          const ts = now()
+          db.insert(schema.videoGenerations)
+            .values({
+              dramaId,
+              storyboardId: sb.id,
+              status: 'blocked_by_missing_asset',
+              blockReason: 'first frame asset needs_regeneration',
+              prompt: sb.videoPrompt || sb.imagePrompt || sb.description || '',
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run()
+          logTaskWarn('AutoPipeline', 'asset-gate-blocked', { storyboardId: sb.id, reason: 'first_frame_needs_regeneration' })
+        }
+      }
+      continue
+    }
     const existing = db
       .select()
       .from(schema.videoGenerations)
@@ -256,9 +310,24 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
     // 保证多人同框一致；其余场景保持首帧图生视频（MiniMax/万相仅支持首尾帧，自动降级为 single）
     const sceneType = sb.sceneType || ''
     const isDialogue = /dialogue|meeting|argument|conversation|multi/i.test(sceneType)
-    const referenceImages = isDialogue && canMultiRef ? getStoryboardReferenceImages(sb.id).slice(0, 9) : []
+    let referenceImages = isDialogue && canMultiRef ? getStoryboardReferenceImages(sb.id).slice(0, 9) : []
+    // 关键帧扩展：有中段关键帧图时并入参考图（锁定动作/道具/机位中间态，供多参考图 provider 使用）
+    if (canMultiRef && sb.keyframeImage) {
+      referenceImages = referenceImages.concat(sb.keyframeImage).slice(0, 9)
+    }
     // H3 音视频联合生成：对话类镜头带出场角色声线样本作为参考音频（Ref2VA reference conditioning）
     const referenceAudioUrls = isDialogue && provider === 'minimax' ? getStoryboardReferenceAudioUrls(sb.id) : []
+
+    // 尾帧衔接（连续性状态机 v3）：同场景顺接时，以「上一镜尾帧」作为本镜视频起帧，
+    // 让相邻镜头画面从上一镜结束处自然延续，避免跨镜跳变。
+    // 场景切换 / 硬切 / 无上一镜尾帧时，回退为本镜首帧图起帧。
+    const prev = i > 0 ? sbs[i - 1] : undefined
+    const sameScene = prev != null && prev.sceneId != null && prev.sceneId === sb.sceneId
+    const prevTail = sameScene ? prev.lastFrameImage : undefined
+    const anchorImage = prevTail || sb.firstFrameImage
+    if (prevTail && prev) {
+      logTaskProgress('AutoPipeline', 'tail-link', { storyboardId: sb.id, linkedFrom: prev.id, fromTail: prevTail })
+    }
 
     const prompt = sb.videoPrompt || sb.imagePrompt || sb.description || '镜头缓慢推进，人物自然表演'
     await generateVideo({
@@ -267,7 +336,9 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
       prompt,
       negativePrompt: VIDEO_NEGATIVE,
       referenceMode: referenceImages.length ? 'multiple' : 'single',
-      imageUrl: sb.firstFrameImage,
+      imageUrl: anchorImage,
+      firstFrameUrl: prevTail ? sb.firstFrameImage : undefined, // 顺接时本镜首帧作为补充首帧参考
+      lastFrameUrl: sb.lastFrameImage || undefined,             // 尾帧目标（grid 模式已生成时锁定结束画面）
       referenceImageUrls: referenceImages.length ? referenceImages : undefined,
       sceneType: sceneType || undefined,
       referenceAudioUrls: referenceAudioUrls.length ? referenceAudioUrls : undefined,
@@ -291,13 +362,38 @@ async function waitForImages(episodeId: number, dramaId: number, timeoutMs = MED
   return false
 }
 
-/** 轮询等待所有分镜视频就绪；超时返回 false */
+/** 分镜是否已被资产门禁阻断（存在 blocked_by_missing_asset 视频记录） */
+function isStoryboardBlocked(storyboardId: number): boolean {
+  const blocked = db
+    .select()
+    .from(schema.videoGenerations)
+    .where(and(eq(schema.videoGenerations.storyboardId, storyboardId), eq(schema.videoGenerations.status, 'blocked_by_missing_asset')))
+    .all()
+  return blocked.length > 0
+}
+
+/** 轮询等待所有有关键帧 prompt 的分镜关键帧就绪；无 keyframe_prompt 或已生成即视为就绪；超时返回 false */
+async function waitForKeyframes(episodeId: number, dramaId: number, timeoutMs = MEDIA_WAIT_TIMEOUT_MS): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const sbs = getStoryboards(episodeId)
+    const needing = sbs.filter((sb) => !!sb.keyframePrompt)
+    if (needing.length === 0) return true
+    const ready = needing.filter((sb) => !!sb.keyframeImage).length
+    if (ready >= needing.length) return true
+    await sleep(MEDIA_POLL_INTERVAL_MS)
+  }
+  return false
+}
+
+/** 轮询等待所有分镜视频就绪；资产门禁阻断的分镜视为已结束；超时返回 false */
 async function waitForVideos(episodeId: number, dramaId: number, timeoutMs = MEDIA_WAIT_TIMEOUT_MS): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     const sbs = getStoryboards(episodeId)
     const ready = sbs.filter((sb) => !!sb.videoUrl).length
-    if (ready >= sbs.length) return true
+    const settled = sbs.filter((sb) => sb.videoUrl || isStoryboardBlocked(sb.id)).length
+    if (settled >= sbs.length) return true
     publishPipelineEvent(dramaId, { type: 'media-progress', episodeId, ready, total: sbs.length })
     await sleep(MEDIA_POLL_INTERVAL_MS)
   }
@@ -313,6 +409,14 @@ async function runImageStage(episodeId: number, dramaId: number, opts: AutoPipel
     const pending = getStoryboards(episodeId).filter((sb) => !sb.firstFrameImage).length
     logTaskWarn('AutoPipeline', 'image-timeout', { episodeId, pendingCount: pending })
   }
+  // 关键帧扩展：首帧就绪后再补齐中段关键帧（不影响首帧等待完成度，失败不阻断）
+  if (ok) {
+    const keySubmitted = await submitMissingKeyframes(episodeId, dramaId, configId)
+    if (keySubmitted > 0) {
+      logTaskProgress('AutoPipeline', 'image-keyframes', { episodeId, submitted: keySubmitted })
+      await waitForKeyframes(episodeId, dramaId, MEDIA_WAIT_TIMEOUT_MS)
+    }
+  }
 }
 
 async function runVideoStage(episodeId: number, dramaId: number, opts: AutoPipelineOptions): Promise<void> {
@@ -320,8 +424,10 @@ async function runVideoStage(episodeId: number, dramaId: number, opts: AutoPipel
   const submitted = await submitMissingVideos(episodeId, dramaId, configId)
   logTaskProgress('AutoPipeline', 'video-stage', { episodeId, submitted })
   const ok = await waitForVideos(episodeId, dramaId)
+  // 尾帧衔接：从已完成视频提取真实尾帧写入 last_frame_image，供下一镜/重跑衔接参考
+  await extractStoryboardTailFrames(episodeId, dramaId)
   if (!ok) {
-    const pending = getStoryboards(episodeId).filter((sb) => !sb.videoUrl).length
+    const pending = getStoryboards(episodeId).filter((sb) => !sb.videoUrl && !isStoryboardBlocked(sb.id)).length
     logTaskWarn('AutoPipeline', 'video-timeout', { episodeId, pendingCount: pending })
   }
 }
@@ -574,8 +680,8 @@ function mediaMissingStatus(episodeId: number, opts: AutoPipelineOptions): strin
   if (!needImage) return null
   const sbs = getStoryboards(episodeId)
   if (sbs.length === 0) return null
-  if (needImage && sbs.some((sb) => !sb.firstFrameImage)) return AUTO_STATUS.imaging
-  if (needVideo && sbs.some((sb) => !sb.videoUrl)) return AUTO_STATUS.videoing
+  if (needImage && sbs.some((sb) => !sb.firstFrameImage && !isStoryboardBlocked(sb.id))) return AUTO_STATUS.imaging
+  if (needVideo && sbs.some((sb) => !sb.videoUrl && !isStoryboardBlocked(sb.id))) return AUTO_STATUS.videoing
   if (needCompose && sbs.some((sb) => !sb.composedVideoUrl)) return AUTO_STATUS.composing
   if (needMerge) {
     const completed = db
@@ -622,6 +728,7 @@ export function getAutoPipelineStatus(dramaId: number) {
       sceneCount: scenes.length,
       imageReadyCount: sbs.filter((sb) => !!sb.firstFrameImage).length,
       videoReadyCount: sbs.filter((sb) => !!sb.videoUrl).length,
+      videoBlockedCount: sbs.filter((sb) => isStoryboardBlocked(sb.id)).length,
       composedCount: sbs.filter((sb) => !!sb.composedVideoUrl).length,
     }
   })

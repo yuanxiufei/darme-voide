@@ -18,6 +18,7 @@ interface GenerateImageParams {
   dramaId?: number
   sceneId?: number
   characterId?: number
+  propId?: number
   prompt: string
   /** 负面提示词；不传则继承当前图片配置的默认值 */
   negativePrompt?: string
@@ -43,12 +44,22 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     : getActiveConfig('image')
   if (!config) throw new Error('No active image AI config')
 
+  // 连续性状态机 v3：逐镜禁止变化清单注入（该镜画面中必须保持不变的元素）
+  let prompt = params.prompt
+  if (params.storyboardId) {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, params.storyboardId)).all()
+    if (sb?.constraints) {
+      prompt = `${prompt} -- 逐镜禁止变化（画面中以下元素必须保持不变，不得增减或改变）: ${sb.constraints}`
+    }
+  }
+
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
     sceneId: params.sceneId,
     characterId: params.characterId,
-    prompt: params.prompt,
+    propId: params.propId,
+    prompt,
     negativePrompt: params.negativePrompt ?? config.negativePrompt ?? null,
     model: params.model || config.model,
     provider: config.provider,
@@ -199,6 +210,8 @@ async function processImageGeneration(id: number, config: AIConfig) {
         db.update(schema.imageGenerations)
           .set({ status: 'failed', errorMsg: `All models failed. Last error: ${err.message}`, updatedAt: now() })
           .where(eq(schema.imageGenerations.id, id)).run()
+        // 资产验收门禁：图片生成失败 → 分镜资产标记 needs_regeneration
+        markStoryboardAssetNeedsRegeneration(id)
       }
     }
   }
@@ -406,7 +419,10 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
     const sbUpdate: Record<string, any> = { updatedAt: now() }
     if (record.frameType === 'first_frame') sbUpdate.firstFrameImage = finalPath
     else if (record.frameType === 'last_frame') sbUpdate.lastFrameImage = finalPath
+    else if (record.frameType === 'keyframe') sbUpdate.keyframeImage = finalPath
     else sbUpdate.composedImage = finalPath
+    // 资产验收门禁：分镜首/尾帧资产生成成功即视为验收通过
+    if (record.frameType === 'first_frame' || record.frameType === 'last_frame') sbUpdate.assetStatus = 'approved'
     db.update(schema.storyboards).set(sbUpdate).where(eq(schema.storyboards.id, record.storyboardId)).run()
   }
   if (record?.characterId) {
@@ -414,6 +430,9 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
   }
   if (record?.sceneId) {
     db.update(schema.scenes).set({ imageUrl: finalPath, status: 'completed', updatedAt: now() }).where(eq(schema.scenes.id, record.sceneId)).run()
+  }
+  if (record?.propId) {
+    db.update(schema.propTemplates).set({ imageUrl: finalPath, updatedAt: now() }).where(eq(schema.propTemplates.id, record.propId)).run()
   }
 }
 
@@ -444,7 +463,10 @@ async function handleImageCompleteBase64(id: number, provider: string, base64Dat
     const sbUpdate: Record<string, any> = { updatedAt: now() }
     if (record.frameType === 'first_frame') sbUpdate.firstFrameImage = finalPath
     else if (record.frameType === 'last_frame') sbUpdate.lastFrameImage = finalPath
+    else if (record.frameType === 'keyframe') sbUpdate.keyframeImage = finalPath
     else sbUpdate.composedImage = finalPath
+    // 资产验收门禁：分镜首/尾帧资产生成成功即视为验收通过
+    if (record.frameType === 'first_frame' || record.frameType === 'last_frame') sbUpdate.assetStatus = 'approved'
     db.update(schema.storyboards).set(sbUpdate).where(eq(schema.storyboards.id, record.storyboardId)).run()
   }
   if (record?.characterId) {
@@ -452,6 +474,9 @@ async function handleImageCompleteBase64(id: number, provider: string, base64Dat
   }
   if (record?.sceneId) {
     db.update(schema.scenes).set({ imageUrl: finalPath, status: 'completed', updatedAt: now() }).where(eq(schema.scenes.id, record.sceneId)).run()
+  }
+  if (record?.propId) {
+    db.update(schema.propTemplates).set({ imageUrl: finalPath, updatedAt: now() }).where(eq(schema.propTemplates.id, record.propId)).run()
   }
 }
 
@@ -528,4 +553,23 @@ function markImageRecoverFailed(id: number, reason: string) {
     .where(eq(schema.imageGenerations.id, id))
     .run()
   logTaskError('ImageTask', 'recover-failed', { id, reason })
+  markStoryboardAssetNeedsRegeneration(id)
+}
+
+/**
+ * 资产验收门禁：图片任务失败时，将关联分镜的资产标记为 needs_regeneration。
+ * 仅首/尾帧类任务（分镜资产）生效，角色/场景/物品图失败不影响分镜门禁。
+ */
+function markStoryboardAssetNeedsRegeneration(imageId: number) {
+  try {
+    const rec = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, imageId)).get()
+    if (!rec?.storyboardId) return
+    if (rec.frameType !== 'first_frame' && rec.frameType !== 'last_frame') return
+    db.update(schema.storyboards)
+      .set({ assetStatus: 'needs_regeneration', updatedAt: now() })
+      .where(eq(schema.storyboards.id, rec.storyboardId))
+      .run()
+  } catch (e) {
+    logTaskError('ImageTask', 'mark-asset-status', { imageId, error: (e as Error).message })
+  }
 }

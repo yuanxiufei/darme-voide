@@ -42,7 +42,15 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
 
   // 剥离分镜视频提示词中的结构化标签（<location>/<role>/<voice>/<n>），
   // 让视频生成模型拿到干净的纯自然语言 prompt（标签是给 agent/程序解析用的 DSL）
-  const prompt = stripVideoPromptTags(params.prompt)
+  let prompt = stripVideoPromptTags(params.prompt)
+
+  // 连续性状态机 v3：逐镜禁止变化清单注入（该镜画面中必须保持不变的元素）
+  if (params.storyboardId) {
+    const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, params.storyboardId)).all()
+    if (sb?.constraints) {
+      prompt = `${prompt} -- 逐镜禁止变化（画面中以下元素必须始终保持不变，不得增减或改变）: ${sb.constraints}`
+    }
+  }
 
   const res = db.insert(schema.videoGenerations).values({
     storyboardId: params.storyboardId,

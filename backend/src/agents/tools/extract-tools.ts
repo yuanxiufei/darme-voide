@@ -17,6 +17,7 @@ import { sliceLongText } from '../../utils/text-slice.js'
 import {
   buildCharacterImagePrompt,
   buildSceneImagePrompt,
+  buildPropImagePrompt,
   CHARACTER_IMAGE_NEGATIVE,
   SCENE_IMAGE_NEGATIVE,
 } from '../../shared/prompt-utils.js'
@@ -39,6 +40,15 @@ function linkSceneToEpisode(episodeId: number, sceneId: number) {
     .all()
   if (!existing.length) {
     db.insert(schema.episodeScenes).values({ episodeId, sceneId, createdAt: ts }).run()
+  }
+}
+
+function linkEpisodeToProp(episodeId: number, propId: number) {
+  const existing = db.select().from(schema.episodeProps)
+    .where(and(eq(schema.episodeProps.episodeId, episodeId), eq(schema.episodeProps.propId, propId)))
+    .all()
+  if (!existing.length) {
+    db.insert(schema.episodeProps).values({ episodeId, propId }).run()
   }
 }
 
@@ -342,11 +352,116 @@ export function createExtractTools(episodeId: number, dramaId: number) {
     },
   })
 
+  const readExistingProps = createTool({
+    id: 'read_existing_props',
+    description: 'Read props (items/clues) already extracted for this episode, for dedup when saving new props.',
+    inputSchema: z.object({}),
+    execute: async () => {
+      const links = db.select().from(schema.episodeProps).where(eq(schema.episodeProps.episodeId, episodeId)).all()
+      if (!links.length) return { props: [] }
+      const props = links
+        .map((l) => {
+          const [p] = db.select().from(schema.propTemplates).where(eq(schema.propTemplates.id, l.propId)).all()
+          return p && !p.deletedAt
+            ? { id: p.id, name: p.name, category: p.category, description: p.description, holder: p.holder, keyClue: p.keyClue }
+            : null
+        })
+        .filter((p): p is NonNullable<typeof p> => p != null)
+      return { props }
+    },
+  })
+
+  const saveDedupProps = createTool({
+    id: 'save_dedup_props',
+    description: 'Save extracted props (items/clues/treasure/props) with deduplication by name within the drama. All are linked to the current episode.',
+    inputSchema: z.object({
+      props: z.array(z.object({
+        name: z.string(),
+        category: z.string().optional(),
+        description: z.string().optional(),
+        appearance: z.string().optional(),
+        size_hint: z.string().optional(),
+        holder: z.string().optional(),
+        key_clue: z.string().optional(),
+        image_prompt: z.string().optional(),
+        negative_prompt: z.string().optional(),
+      })),
+    }),
+    execute: async ({ props }) => {
+      const ts = now()
+      const results = { created: 0, reused: 0 }
+      logTaskProgress('ExtractTool', 'save-props-begin', {
+        episodeId,
+        dramaId,
+        props: props.map((p) => p.name).join(','),
+      })
+
+      for (const prop of props) {
+        const existing = db.select().from(schema.propTemplates)
+          .where(eq(schema.propTemplates.dramaId, dramaId)).all()
+          .filter((p) => !p.deletedAt)
+          .find((p) => p.name === prop.name)
+
+        const fallbackPrompt = buildPropImagePrompt({
+          name: prop.name,
+          category: prop.category,
+          description: prop.description,
+          appearance: prop.appearance,
+          sizeHint: prop.size_hint,
+          holder: prop.holder,
+        })
+
+        if (existing) {
+          db.update(schema.propTemplates).set({
+            category: prop.category || existing.category || '道具',
+            description: prop.description || existing.description,
+            appearance: prop.appearance || existing.appearance,
+            sizeHint: prop.size_hint || existing.sizeHint,
+            holder: prop.holder || existing.holder,
+            keyClue: prop.key_clue || existing.keyClue,
+            customPrompt: prop.image_prompt || existing.customPrompt || fallbackPrompt,
+            negativePrompt: prop.negative_prompt || existing.negativePrompt || '',
+            updatedAt: ts,
+          }).where(eq(schema.propTemplates.id, existing.id)).run()
+          linkEpisodeToProp(episodeId, existing.id)
+          results.reused++
+        } else {
+          const res = db.insert(schema.propTemplates).values({
+            dramaId,
+            name: prop.name,
+            category: prop.category || '道具',
+            description: prop.description || '',
+            appearance: prop.appearance || '',
+            sizeHint: prop.size_hint || '',
+            holder: prop.holder || '',
+            keyClue: prop.key_clue || '否',
+            customPrompt: prop.image_prompt || fallbackPrompt,
+            negativePrompt: prop.negative_prompt || '',
+            createdAt: ts,
+            updatedAt: ts,
+          }).run()
+          const propId = Number(res.lastInsertRowid)
+          linkEpisodeToProp(episodeId, propId)
+          results.created++
+        }
+      }
+
+      const payload = {
+        message: `物品保存完成：新增 ${results.created}，复用已有 ${results.reused}`,
+        ...results,
+      }
+      logTaskSuccess('ExtractTool', 'save-props-complete', { episodeId, ...results })
+      return payload
+    },
+  })
+
   return {
     readScriptForExtraction,
     readExistingCharacters,
     readExistingScenes,
     saveDedupCharacters,
     saveDedupScenes,
+    readExistingProps,
+    saveDedupProps,
   }
 }
