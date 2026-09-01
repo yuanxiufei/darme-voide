@@ -49,3 +49,9 @@ temp/
 # AI service configuration (contains real API keys)
 ai-configs.md
 local-deploy-plan.md
+
+# Playwright CLI test artifacts
+.playwright-cli/
+
+# Browser test DOM dumps
+models.yaml
