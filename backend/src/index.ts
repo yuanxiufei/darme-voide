@@ -41,6 +41,7 @@ import storageRoute from './routes/storage.js'
 import usageRoute from './routes/usage.js'
 import assetVersionsRoute from './routes/asset-versions.js'
 import styleProfilesRoute from './routes/style-profiles.js'
+import appSettingsRoute from './routes/app-settings.js'
 import localModels from './routes/localModels.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { config, getStorageRoot } from './config.js'
@@ -103,6 +104,7 @@ api.route('/storage', storageRoute)
 api.route('/usage', usageRoute)
 api.route('/asset-versions', assetVersionsRoute)
 api.route('/style-profiles', styleProfilesRoute)
+api.route('/app-settings', appSettingsRoute)
 
 app.route('/api/v1', api)
 

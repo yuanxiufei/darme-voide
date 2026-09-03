@@ -18,7 +18,7 @@ import {
   buildCharacterImagePrompt,
   buildSceneImagePrompt,
   buildPropImagePrompt,
-  CHARACTER_IMAGE_NEGATIVE,
+  buildCharacterNegativePrompt,
   SCENE_IMAGE_NEGATIVE,
 } from '../../shared/prompt-utils.js'
 
@@ -164,6 +164,10 @@ export function createExtractTools(episodeId: number, dramaId: number) {
     execute: async ({ characters }) => {
       const ts = now()
       const results = { created: 0, merged: 0 }
+      const [dramaRow] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
+      const [globalRow] = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, 'art_style')).all()
+      // 剧集未设画风时回退全局默认画风，保证提取兜底 prompt 与生成链路一致
+      const dramaStyle = dramaRow?.style || globalRow?.value || null
       logTaskProgress('ExtractTool', 'save-characters-begin', {
         episodeId,
         dramaId,
@@ -200,8 +204,9 @@ export function createExtractTools(episodeId: number, dramaId: number) {
           coreFeatures: merged.coreFeatures || undefined,
           clothing: merged.clothing,
           costumes: merged.costumes || undefined,
+          dramaStyle,
         })
-        const negativePrompt = char.negative_prompt || existing?.negativePrompt || CHARACTER_IMAGE_NEGATIVE
+        const negativePrompt = char.negative_prompt || existing?.negativePrompt || buildCharacterNegativePrompt(dramaStyle)
 
         if (existing) {
           // 已存在：合并信息，保留 ID

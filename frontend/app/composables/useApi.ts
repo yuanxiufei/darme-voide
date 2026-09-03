@@ -1,3 +1,6 @@
+// 共享契约：字段唯一来源，禁止在前端再手工双写一遍（见 backend/src/shared/contracts.ts）
+import type { DramaDetailDTO, DramaListResponse, DramaUpdateBody, EraBackground } from '~contracts'
+
 const BASE = '/api/v1'
 
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
@@ -61,13 +64,21 @@ export const api = {
 }
 
 export const dramaAPI = {
-  list: () => api.get<{ items: any[] }>('/dramas'),
-  get: (id: number) => api.get(`/dramas/${id}`),
+  list: () => api.get<DramaListResponse>('/dramas'),
+  get: (id: number) => api.get<DramaDetailDTO>(`/dramas/${id}`),
   create: (data: any) => api.post('/dramas', data),
-  update: (id: number, data: any) => api.put(`/dramas/${id}`, data),
+  update: (id: number, data: DramaUpdateBody) => api.put(`/dramas/${id}`, data),
   del: (id: number) => api.del(`/dramas/${id}`),
   stats: () => api.get<{ total: number; by_status: { status: string; count: number }[] }>('/dramas/stats'),
   prompts: (id: number) => api.get(`/dramas/${id}/prompts`),
+  /** AI 从剧本提炼时代背景并落库（与 PUT 时代背景同构，三字段规范见 shared/contracts EraBackground） */
+  eraExtract: (id: number, data?: { source_text?: string }) => api.post<EraBackground>(`/dramas/${id}/era-background/extract`, data || {}),
+}
+
+// 全局应用设置（KV：art_style 全局默认画风等）
+export const appSettingsAPI = {
+  get: () => api.get<{ art_style?: string | null }>('/app-settings'),
+  setArtStyle: (artStyle: string) => api.put('/app-settings', { art_style: artStyle }),
 }
 
 export const episodeAPI = {
@@ -98,10 +109,15 @@ export const characterAPI = {
   voiceSample: (id: number, episodeId?: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
   generateImage: (id: number, episodeId?: number, data?: { prompt?: string; negative_prompt?: string; model?: string; costume?: string; color_grade?: any }) =>
     api.post(`/characters/${id}/generate-image`, { episode_id: episodeId, ...data }),
-  generateThreeViews: (id: number, episodeId?: number, data?: { prompt?: string; negative_prompt?: string; model?: string; views?: string[] }) =>
+  generatePrompt: (id: number, data?: { type?: 'character' | 'clothing' | 'weapon' | 'accessory'; name?: string; appearance?: string; personality?: string; description?: string; clothing?: string; weapons?: string; accessories?: string; costumes?: string; style?: string }) =>
+    api.post(`/characters/${id}/generate-prompt`, data),
+  generateThreeViews: (id: number, episodeId?: number, data?: { prompt?: string; negative_prompt?: string; model?: string; views?: string[]; clothing?: string; weapons?: string; accessories?: string; costumes?: string; style?: string; anchor?: string; reference_images?: string[] }) =>
     api.post(`/characters/${id}/generate-three-views`, { episode_id: episodeId, ...data }),
-  generateEquipImage: (id: number, episodeId?: number, data?: { type: string; prompt?: string; negative_prompt?: string; model?: string; color_grade?: any }) =>
+  generateEquipImage: (id: number, episodeId?: number, data?: { type: string; prompt?: string; negative_prompt?: string; model?: string; color_grade?: any; clothing?: string; weapons?: string; accessories?: string; costumes?: string; anchor?: string; mode?: 'single' | 'view'; reference_images?: string[] }) =>
     api.post(`/characters/${id}/generate-equip-image`, { episode_id: episodeId, ...data }),
+  // 批量生成表情头像特写组：body.keys 为空默认全部 9 个；传单 key 单独重生成
+  generateExpressions: (id: number, data?: { keys?: string[]; appearance?: string; clothing?: string; costumes?: string; model?: string; episodeId?: number; anchor?: string; reference_images?: string[] }) =>
+    api.post(`/characters/${id}/generate-expressions`, data),
   batchImages: (ids: number[], episodeId: number) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId }),
   autoSplitVisuals: (id: number, appearance?: string) => api.post(`/characters/${id}/auto-split-visuals`, { appearance }),
 }

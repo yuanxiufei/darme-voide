@@ -37,6 +37,10 @@ interface GenerateImageParams {
   viewType?: string
   /** 装备特写类型：clothing/weapon/accessory；存在时结果写入 characters.equipImages 对应项而非主图 */
   equipType?: string
+  /** 单件道具图类型：clothing/weapon/accessory；存在时结果写入 characters.itemImages 对应项而非主图 */
+  itemType?: string
+  /** 表情 key（表情头像特写组）；存在时结果写入 characters.expressions 对应项而非主图 */
+  expression?: string
   /** 剧本内容指纹门禁：设为 true 跳过门禁（确认基于旧分镜继续） */
   force?: boolean
 }
@@ -77,6 +81,12 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     }
   }
 
+  // 剧集时代背景自动注入：整剧所有视觉资产生成统一携带时代/环境美术指令（dramas.era_background）
+  if (params.dramaId) {
+    const { applyEraImageClause } = await import('./era-background.js')
+    prompt = applyEraImageClause(prompt, params.dramaId)
+  }
+
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
@@ -93,6 +103,9 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     costume: params.costume ?? null,
     colorGrade: params.colorGrade && hasColorGrade(params.colorGrade) ? JSON.stringify(params.colorGrade) : null,
     viewType: params.viewType ?? null,
+    equipType: params.equipType ?? null,
+    itemType: params.itemType ?? null,
+    expression: params.expression ?? null,
     status: 'processing',
     createdAt: ts,
     updatedAt: ts,
@@ -388,8 +401,23 @@ function updateCharacterImage(record: any, localPath: string) {
   const char = charRows[0]
   if (!char) return
 
-  // 三视图：写入 threeViews 对应项而非主图
-  if (record.viewType === 'front' || record.viewType === 'side' || record.viewType === 'back') {
+  // 单件高清道具图（服装/武器/首饰单品、纯物品无人物）：写入 itemImages 对应项而非主图
+  if (record.itemType === 'clothing' || record.itemType === 'weapon' || record.itemType === 'accessory') {
+    let imgs: Record<string, { type: string; imageUrl: string; prompt?: string | null; generatedAt: string }> = {}
+    try {
+      imgs = JSON.parse(char.itemImages || '{}')
+    } catch {
+      imgs = {}
+    }
+    imgs[record.itemType] = { type: record.itemType, imageUrl: localPath, prompt: record.prompt, generatedAt: now() }
+    db.update(schema.characters)
+      .set({ itemImages: JSON.stringify(imgs), updatedAt: now() })
+      .where(eq(schema.characters.id, record.characterId)).run()
+    return
+  }
+
+  // 三视图：写入 threeViews 对应项而非主图（combined = 正面/侧面/背面合成的一张横向长图）
+  if (record.viewType === 'front' || record.viewType === 'side' || record.viewType === 'back' || record.viewType === 'combined') {
     let views: Record<string, { view: string; imageUrl: string; prompt?: string | null; generatedAt: string }> = {}
     try {
       views = JSON.parse(char.threeViews || '{}')
@@ -399,6 +427,22 @@ function updateCharacterImage(record: any, localPath: string) {
     views[record.viewType] = { view: record.viewType, imageUrl: localPath, prompt: record.prompt, generatedAt: now() }
     db.update(schema.characters)
       .set({ threeViews: JSON.stringify(views), updatedAt: now() })
+      .where(eq(schema.characters.id, record.characterId)).run()
+    return
+  }
+
+  // 表情头像特写组：写入 characters.expressions 对应项而非主图
+  if (record.expression) {
+    const key = String(record.expression)
+    let exps: Record<string, { key: string; imageUrl: string; prompt?: string | null; generatedAt: string }> = {}
+    try {
+      exps = JSON.parse(char.expressions || '{}')
+    } catch {
+      exps = {}
+    }
+    exps[key] = { key, imageUrl: localPath, prompt: record.prompt, generatedAt: now() }
+    db.update(schema.characters)
+      .set({ expressions: JSON.stringify(exps), updatedAt: now() })
       .where(eq(schema.characters.id, record.characterId)).run()
     return
   }
@@ -451,6 +495,7 @@ function recordAssetVersionForGeneration(record: any, id: number, provider: stri
   if (record.costume) meta.costume = record.costume
   if (record.viewType) meta.viewType = record.viewType
   if (record.equipType) meta.equipType = record.equipType
+  if (record.expression) meta.expression = record.expression
   if (record.imageType) meta.imageType = record.imageType
 
   if (record.storyboardId) {

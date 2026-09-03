@@ -11,6 +11,8 @@ export const dramas = sqliteTable('dramas', {
   genre: text('genre'),
   style: text('style').default('realistic'),
   styleId: text('style_id'),
+  // 剧集时代背景：AI 从剧本提炼后存储的 JSON 文本（era/summary/imageHint），生成前自动注入
+  eraBackground: text('era_background'),
   totalEpisodes: integer('total_episodes').default(1),
   totalDuration: integer('total_duration').default(0),
   status: text('status').notNull().default('draft'),
@@ -75,12 +77,25 @@ export const characters = sqliteTable('characters', {
   weapons: text('weapons'),
   customPrompt: text('custom_prompt'),
   negativePrompt: text('negative_prompt'),
+  // 角色级画风覆盖（realistic/anime/ghibli/cinematic/comic/watercolor；空 = 跟随剧集）
+  style: text('style'),
   coreFeatures: text('core_features'),
   costumes: text('costumes'),
   variations: text('variations'),
   accessories: text('accessories'),
   threeViews: text('three_views'),
   equipImages: text('equip_images'),
+  // 单件高清道具图：{ [clothing|weapon|accessory]: { type, imageUrl, prompt, generatedAt } }，无人物纯物品、可入库
+  itemImages: text('item_images'),
+  // 各对象类型独立提示词（角色立绘沿用 custom_prompt/negative_prompt；服装/武器/首饰各自独立）
+  clothingPrompt: text('clothing_prompt'),
+  clothingNegativePrompt: text('clothing_negative_prompt'),
+  weaponPrompt: text('weapon_prompt'),
+  weaponNegativePrompt: text('weapon_negative_prompt'),
+  accessoryPrompt: text('accessory_prompt'),
+  accessoryNegativePrompt: text('accessory_negative_prompt'),
+  // 角色表情头像特写组：{ [expressionKey]: { key,label,imageUrl,prompt,generatedAt } }
+  expressions: text('expressions'),
   voiceModel: text('voice_model').default('speech-2.8-hd'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -317,6 +332,10 @@ export const imageGenerations = sqliteTable('image_generations', {
   colorGrade: text('color_grade'),
   viewType: text('view_type'),
   equipType: text('equip_type'),
+  /** 单件道具图类型（clothing/weapon/accessory）；存在时结果写回 characters.item_images */
+  itemType: text('item_type'),
+  /** 表情头像 key（character expressions 用）；存在时结果写回 characters.expressions */
+  expression: text('expression'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
@@ -554,6 +573,13 @@ export const presets = sqliteTable('presets', {
   name: text('name').notNull(),
   config: text('config'),                // JSON 配置
   createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+// 全局应用设置（KV：全局默认画风 art_style 等）
+export const appSettings = sqliteTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value'),
   updatedAt: text('updated_at').notNull(),
 })
 

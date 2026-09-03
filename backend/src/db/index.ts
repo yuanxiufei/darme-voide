@@ -535,6 +535,15 @@ function runMigrations(): void {
     ON style_profiles (drama_id, deleted_at);
 `)
 
+  // ====== 全局应用设置（KV 表：全局默认画风等）======
+  getSqlite().exec(`
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT NOT NULL
+  );
+`)
+
   function ensureColumn(table: string, column: string, definition: string) {
     const s = getSqlite()
     const tableExists = s.prepare(
@@ -544,6 +553,20 @@ function runMigrations(): void {
     const columns = s.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
     if (!columns.some(col => col.name === column)) {
       s.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
+  }
+
+  // 彻底移除已废弃列（SQLite >= 3.35 支持 DROP COLUMN；失败仅告警不阻断迁移）
+  function dropColumnIfExists(table: string, column: string) {
+    try {
+      const s = getSqlite()
+      const columns = s.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      if (columns.some(col => col.name === column)) {
+        s.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`)
+        console.warn(`[db] dropped legacy column ${table}.${column}`)
+      }
+    } catch (e: any) {
+      console.warn(`[db] skip dropping ${table}.${column}: ${e.message}`)
     }
   }
 
@@ -568,10 +591,20 @@ function runMigrations(): void {
   ensureColumn('characters', 'variations', 'TEXT')
   ensureColumn('characters', 'voice_model', "TEXT DEFAULT 'speech-2.8-hd'")
   ensureColumn('characters', 'negative_prompt', 'TEXT')
+  ensureColumn('characters', 'style', 'TEXT')
   ensureColumn('characters', 'speaker_id', 'TEXT')
   ensureColumn('characters', 'accessories', 'TEXT')
   ensureColumn('characters', 'three_views', 'TEXT')
   ensureColumn('characters', 'equip_images', 'TEXT')
+  // 服装/武器/首饰各自的独立正反向提示词
+  ensureColumn('characters', 'clothing_prompt', 'TEXT')
+  ensureColumn('characters', 'clothing_negative_prompt', 'TEXT')
+  ensureColumn('characters', 'weapon_prompt', 'TEXT')
+  ensureColumn('characters', 'weapon_negative_prompt', 'TEXT')
+  ensureColumn('characters', 'accessory_prompt', 'TEXT')
+  ensureColumn('characters', 'accessory_negative_prompt', 'TEXT')
+  // ====== 角色表情头像特写组 ======
+  ensureColumn('characters', 'expressions', 'TEXT')
 
   ensureColumn('scenes', 'description', 'TEXT')
   ensureColumn('scenes', 'atmosphere', 'TEXT')
@@ -633,6 +666,7 @@ function runMigrations(): void {
   ensureColumn('image_generations', 'color_grade', 'TEXT')
   ensureColumn('image_generations', 'view_type', 'TEXT')
   ensureColumn('image_generations', 'equip_type', 'TEXT')
+  ensureColumn('image_generations', 'expression', 'TEXT')
 
   ensureColumn('ai_service_providers', 'endpoint_prefix', 'TEXT')
   ensureColumn('ai_service_providers', 'is_recommended', 'INTEGER DEFAULT 0')
@@ -646,6 +680,36 @@ function runMigrations(): void {
   ensureColumn('dramas', 'style_id', 'TEXT')
   ensureColumn('characters', 'costume_id', 'TEXT')
   ensureColumn('scenes', 'location_id', 'TEXT')
+
+  // ====== 剧集时代背景（AI 提炼 → 生成前自动注入）======
+  ensureColumn('dramas', 'era_background', 'TEXT')
+
+  // ====== 单件高清道具图（item_images / image_generations.item_type）======
+  ensureColumn('characters', 'item_images', 'TEXT')
+  ensureColumn('image_generations', 'item_type', 'TEXT')
+
+  // ====== 移除已废弃的「角色随身道具」列（2026-09-02 道具概念彻底下线）======
+  dropColumnIfExists('characters', 'props')
+  dropColumnIfExists('characters', 'prop_prompt')
+  dropColumnIfExists('characters', 'prop_negative_prompt')
+
+  // ====== 清理历史遗留的「单图/含人物」装备提示词（会污染服装/武器/首饰三视图生图）======
+  try {
+    const s = getSqlite()
+    const legacyCnt = s.prepare(`
+      UPDATE characters SET
+        clothing_prompt = CASE WHEN clothing_prompt LIKE '%character appearance%' OR clothing_prompt LIKE '%for the character%' OR (clothing_prompt LIKE '%single view%' AND clothing_prompt NOT LIKE '%side by side%') OR (clothing_prompt LIKE '%character design%' AND clothing_prompt NOT LIKE '%side by side%') THEN NULL ELSE clothing_prompt END,
+        weapon_prompt = CASE WHEN weapon_prompt LIKE '%character appearance%' OR weapon_prompt LIKE '%for the character%' OR (weapon_prompt LIKE '%single view%' AND weapon_prompt NOT LIKE '%side by side%') OR (weapon_prompt LIKE '%character design%' AND weapon_prompt NOT LIKE '%side by side%') THEN NULL ELSE weapon_prompt END,
+        accessory_prompt = CASE WHEN accessory_prompt LIKE '%character appearance%' OR accessory_prompt LIKE '%for the character%' OR (accessory_prompt LIKE '%single view%' AND accessory_prompt NOT LIKE '%side by side%') OR (accessory_prompt LIKE '%character design%' AND accessory_prompt NOT LIKE '%side by side%') THEN NULL ELSE accessory_prompt END,
+        clothing_negative_prompt = CASE WHEN clothing_negative_prompt NOT LIKE '%person%' THEN NULL ELSE clothing_negative_prompt END,
+        weapon_negative_prompt = CASE WHEN weapon_negative_prompt NOT LIKE '%person%' THEN NULL ELSE weapon_negative_prompt END,
+        accessory_negative_prompt = CASE WHEN accessory_negative_prompt NOT LIKE '%person%' THEN NULL ELSE accessory_negative_prompt END
+      WHERE deleted_at IS NULL
+    `).run()
+    console.warn(`[db] sanitized legacy equip prompts (changed=${legacyCnt.changes})`)
+  } catch (e: any) {
+    console.warn(`[db] skip sanitizing equip prompts: ${e.message}`)
+  }
 }
 
 runMigrations()

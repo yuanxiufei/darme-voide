@@ -186,19 +186,62 @@
           </div>
         </section>
       </div>
+
+      <!-- ===== 画风设置 ===== -->
+      <div v-else-if="tab === 'style'" class="settings-scroll">
+        <div class="settings-head">
+          <h2 class="settings-title">全局默认画风</h2>
+          <p class="settings-desc">作为兜底画风。实际优先级：角色画风 &gt; 剧集画风 &gt; 全局默认 &gt; 写实。</p>
+        </div>
+
+        <section class="setup-panel card">
+          <div class="setup-panel-head">
+            <div>
+              <div class="setup-kicker">Global Art Style</div>
+              <div class="setup-title">默认画风</div>
+              <div class="setup-desc">新建剧集 / 角色未指定画风时使用该画风。不设时回退「写实」。</div>
+            </div>
+            <button class="btn btn-primary" :disabled="artStyleSaving" @click="saveArtStyle">
+              <Loader2 v-if="artStyleSaving" :size="14" class="animate-spin" />
+              <Check v-else :size="14" />
+              保存
+            </button>
+          </div>
+          <div v-if="artStyleLoading" class="config-empty">正在加载画风设置…</div>
+          <div v-else class="art-style-grid">
+            <button
+              v-for="opt in artStyleOptions"
+              :key="opt.value"
+              class="art-style-card"
+              :class="{ active: artStyle === opt.value }"
+              @click="artStyle = opt.value"
+            >
+              <span class="art-style-check">{{ artStyle === opt.value ? '✓' : '' }}</span>
+              <span class="art-style-label">{{ opt.label }}</span>
+              <span class="art-style-desc">{{ opt.desc }}</span>
+            </button>
+            <button class="art-style-card" :class="{ active: artStyle === '' }" @click="artStyle = ''">
+              <span class="art-style-check">{{ artStyle === '' ? '✓' : '' }}</span>
+              <span class="art-style-label">跟随默认（写实）</span>
+              <span class="art-style-desc">不设全局画风，使用系统内置写实兜底</span>
+            </button>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ChevronDown, Loader2, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, RefreshCw, FileText } from 'lucide-vue-next'
+import { ChevronDown, Loader2, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, RefreshCw, FileText, Palette, Check } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import { storageAPI, generationsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
+import { storageAPI, generationsAPI, appSettingsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
 
 const tab = ref('history')
 const baseTabs = [
   { id: 'history', label: '生成历史', icon: History },
   { id: 'storage', label: '数据存储', icon: HardDrive },
+  { id: 'style', label: '画风设置', icon: Palette },
 ]
 
 // ===== 生成历史 =====
@@ -309,7 +352,41 @@ async function changeDataRoot() {
   } finally { storageChanging.value = false }
 }
 
-onMounted(() => { loadStorageInfo(); loadGenerations() })
+// ===== 全局画风 =====
+const artStyle = ref('')
+const artStyleLoading = ref(false)
+const artStyleSaving = ref(false)
+
+const artStyleOptions = [
+  { value: 'realistic', label: '写实电影', desc: '真人质感、电影级光影与景深' },
+  { value: 'anime', label: '日式动漫', desc: '赛璐璐上色、鲜明线条、典型动漫风' },
+  { value: 'ghibli', label: '吉卜力', desc: '手绘质感、温暖配色、治愈系' },
+  { value: 'cinematic', label: '电影感', desc: '商业电影帧、强氛围与色彩分级' },
+  { value: 'comic', label: '美漫漫画', desc: '美式漫画、粗线条、明快对比' },
+  { value: 'watercolor', label: '水彩', desc: '水彩晕染、柔和过渡、纸面纹理' },
+] as const
+
+async function loadArtStyle() {
+  artStyleLoading.value = true
+  try {
+    const data = await appSettingsAPI.get()
+    artStyle.value = data.art_style || ''
+  } catch (e: any) {
+    toast.error(e.message || '加载画风设置失败')
+  } finally { artStyleLoading.value = false }
+}
+
+async function saveArtStyle() {
+  artStyleSaving.value = true
+  try {
+    await appSettingsAPI.setArtStyle(artStyle.value)
+    toast.success('全局默认画风已保存')
+  } catch (e: any) {
+    toast.error(e.message || '保存画风设置失败')
+  } finally { artStyleSaving.value = false }
+}
+
+onMounted(() => { loadStorageInfo(); loadGenerations(); loadArtStyle() })
 </script>
 
 <style scoped>
@@ -475,4 +552,31 @@ onMounted(() => { loadStorageInfo(); loadGenerations() })
 /* Field */
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 12px; font-weight: 500; color: var(--text-1); }
+/* 画风设置 */
+.art-style-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.art-style-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 12px 14px; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-1); color: var(--text-0);
+  transition: all 0.12s; position: relative;
+}
+.art-style-card:hover { border-color: var(--accent); background: var(--accent-bg); }
+.art-style-card.active { border-color: var(--accent); background: var(--accent-bg); box-shadow: var(--shadow-card); }
+.art-style-check {
+  position: absolute; top: 8px; right: 10px;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--bg-2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: transparent;
+}
+.art-style-card.active .art-style-check {
+  border-color: var(--accent); background: var(--accent); color: #fff;
+}
+.art-style-label { font-size: 13px; font-weight: 600; }
+.art-style-desc { font-size: 11px; color: var(--text-3); line-height: 1.5; }
 </style>

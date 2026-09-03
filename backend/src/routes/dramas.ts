@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, conflict, created, now, parseParamId } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
+import { extractDramaEraBackground, parseEraBackground } from '../services/era-background.js'
 import { ensureStyleId, ensureCostumeId } from '../services/bible-ids.js'
 
 const app = new Hono()
@@ -18,6 +19,12 @@ function pickFields(src: any, camelKeys: string[]): any {
     else if (key in src) out[key] = src[key]
   }
   return out
+}
+
+/** 读取全局默认画风（app_settings.art_style），未设置返回 null */
+function getGlobalArtStyle(): string | null {
+  const [row] = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, 'art_style')).all()
+  return row?.value || null
 }
 
 // GET /dramas - List dramas
@@ -95,7 +102,8 @@ app.post('/', async (c) => {
     title: body.title,
     description: body.description,
     genre: body.genre,
-    style: body.style,
+    // 创建时未指定画风则用全局默认（app_settings.art_style），仍为空则回退 DB 默认 realistic
+    style: body.style || getGlobalArtStyle() || undefined,
     tags: body.tags ? JSON.stringify(body.tags) : null,
     metadata: body.metadata,
     status: 'draft',
@@ -182,9 +190,37 @@ app.put('/:id', async (c) => {
   if (body.status !== undefined) updates.status = body.status
   if (body.tags !== undefined) updates.tags = JSON.stringify(body.tags)
   if (body.metadata !== undefined) updates.metadata = body.metadata
+  // 时代背景（前端 AI 提炼后回填 / 用户手工编辑）：统一规范化为 { era, summary, imageHint }
+  // 历史 image_style_en 旧键由 parseEraBackground 兼容读入；空串清空；非法结构直接 400 拒绝落库
+  const eraRaw = body.era_background ?? body.eraBackground
+  if (eraRaw !== undefined) {
+    if (eraRaw === null || eraRaw === '') {
+      updates.eraBackground = ''
+    } else if (typeof eraRaw === 'string' || typeof eraRaw === 'object') {
+      const norm = parseEraBackground(typeof eraRaw === 'string' ? eraRaw : JSON.stringify(eraRaw))
+      if (!norm) return badRequest(c, 'era_background 不是有效的时代背景 JSON（需 era/summary/imageHint 字段）')
+      updates.eraBackground = JSON.stringify(norm)
+    } else {
+      return badRequest(c, 'era_background 类型不合法')
+    }
+  }
   db.update(schema.dramas).set(updates).where(eq(schema.dramas.id, id)).run()
   return success(c)
   } catch (err: any) { logTaskError('DramasAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
+})
+
+// POST /dramas/:id/era-background/extract — AI 从剧本提炼时代背景并落库（前端「AI 自动提炼」按钮）
+app.post('/:id/era-background/extract', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid drama id')
+  const [drama] = db.select().from(schema.dramas).where(and(eq(schema.dramas.id, id), isNull(schema.dramas.deletedAt))).all()
+  if (!drama) return notFound(c, '剧本不存在')
+  const body = await c.req.json().catch(() => ({}))
+  const sourceText = (body as any).source_text ?? (body as any).sourceText
+  const result = await extractDramaEraBackground(id, sourceText)
+  return success(c, result)
+  } catch (err: any) { logTaskError('DramasAPI', 'era-extract', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
 })
 
 // DELETE /dramas/:id - Soft delete

@@ -29,6 +29,17 @@ export class VolcEngineImageAdapter implements ImageProviderAdapter {
       body.negative_prompt = record.negativePrompt
     }
 
+    // Seedream 参考图锚定：record.referenceImages 为 normalize 后的 JSON 数组
+    //（URL 或 data URL），支持多张；忽略该参数能力时请传 anchor=none 避免引用。
+    if (record.referenceImages) {
+      try {
+        const refs = JSON.parse(record.referenceImages)
+        if (Array.isArray(refs) && refs.length > 0) {
+          body.image = refs
+        }
+      } catch { /* 非法 JSON 静默忽略，保持纯文生图 */ }
+    }
+
     // 尺寸参数
     if (record.size) {
       const [w, h] = record.size.split('x')

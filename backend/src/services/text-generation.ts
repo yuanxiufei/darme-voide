@@ -337,42 +337,168 @@ export interface SplitCharacterVisualsInput {
 }
 
 const SPLIT_VISUALS_SYSTEM_PROMPT =
-  '你是一位专业的角色设定分析师。用户会给你一段角色的「外貌特征」描述，' +
-  '这段描述里可能混杂了角色的服装穿着、武器装备、首饰配饰等信息。' +
-  '请把它们拆分成三个独立字段：' +
-  '（1）clothing 服装风格：角色的穿着，如「青色古风长衫」；' +
-  '（2）weapons 武器装备：角色携带或使用的武器，如「三尺青锋长剑」；' +
-  '（3）accessories 首饰配饰：角色佩戴的首饰、发饰、束发带等配饰。' +
-  '要求：只输出 JSON，格式为 {"clothing":"","weapons":"","accessories":""}；' +
-  '只提炼原文确实存在的描述，不得凭空新增；每项措辞精简，不超过 20 字；' +
-  '若原文未提及某类信息，对应字段输出空字符串；' +
-  '不要输出任何解释或 markdown 代码块标记。'
+  '你是一位专业的角色视觉设定解析器。用户会给你一段角色的外貌特征描述，其中混杂了神态气质、外貌体型、服装穿着、武器装备、首饰配饰、随身器物等内容。\n' +
+  '你的任务：只精确提取以下三个视觉字段，其余内容一律忽略：\n' +
+  '（1）clothing 服装：身上穿着的衣物鞋帽（含服装配件），如「朴素古意的青色长衫」「玄色劲装」「白色西装」；\n' +
+  '（2）weapons 武器装备：随身携带或使用的武器（含法器），如「三尺青锋」「龙首紫檀法杖」「长弓」；\n' +
+  '（3）accessories 首饰配饰：佩戴在身上的饰品与发饰，如「简单束带」「白玉发簪」「蓝宝石项链」「玉佩」。\n' +
+  '拆分规则：\n' +
+  '1. 先通读全文，逐句扫描，凡涉及上述三类的信息必须全部提取，不得遗漏；\n' +
+  '2. 提取时必须保留原文对物体的完整描述：名物词、数量词与修饰语（如「朴素古意的青色长衫」「三尺青锋，剑鞘古朴无华，却蕴含着慑人的锋芒」），只去掉「身着/身穿/头戴/手持/腰间别着/身旁横放」等动词引导词；\n' +
+  '3. 不把神态、气质、环境、场景、动作过程带进任何字段，如「沉静如枯木」「与周围格格不入」「快逾闪电」应忽略；\n' +
+  '4. 武器配件（剑鞘/刀鞘/箭袋等）不单独拆成独立条目，但属于武器细节的描述（如「剑鞘古朴无华」「却蕴含着慑人的锋芒」）要保留在 weapons 字段中；\n' +
+  '5. 发带/发簪/耳环/项链/玉佩等佩戴类饰品一律归入 accessories，不归入 clothing；腰带/靴子/帽子归入 clothing；\n' +
+  '6. 法器/法杖/飞剑等进攻性器物归入 weapons；折扇、酒葫芦、拂尘、罗盘、乐器、书卷等非武器器物既不属于服装也不属于配饰，一律忽略、不输出；\n' +
+  '7. 同一类出现多项时用中文逗号分隔；原文未提及某类则输出空字符串，绝不编造；\n' +
+  '8. 只输出 JSON：{"clothing":"","weapons":"","accessories":""}，禁止 markdown 代码块和任何解释。'
+
+/** 拆分 few-shot 示例：贴近真实长文本（神态/环境与装备混排），让模型模仿「只留名物短语」的输出风格 */
+const SPLIT_VISUALS_EXAMPLES =
+  '示例 1：\n' +
+  '输入：「少年身着朴素古意的青色长衫，长发以简单束带松松挽于脑后，腰间别着一柄三尺青锋长剑，手中把玩着一把白面折扇。」\n' +
+  '输出：{"clothing":"朴素古意的青色长衫","weapons":"三尺青锋长剑","accessories":"简单束带"}\n\n' +
+  '示例 2：\n' +
+  '输入：「老者鹤发童颜，双目精光湛湛，一副仙风道骨模样。身穿玄色道袍，腰系玉带，脚蹬云纹靴。右手拄着一根龙首紫檀法杖，杖身刻满符文，隐隐泛着灵光，左手还托着一个刻满铭文的黄铜罗盘。左腕戴着一串佛珠，偶尔转动。」\n' +
+  '输出：{"clothing":"玄色道袍，玉带，云纹靴","weapons":"龙首紫檀法杖","accessories":"佛珠"}\n\n' +
+  '示例 3：\n' +
+  '输入：「她踩着高跟鞋走进会场，一袭白色晚礼服裙摆曳地，颈间坠着蓝宝石项链，耳垂上悬着细钻耳环。手提包里藏着一把袖珍手枪，作为最后防身之物。」\n' +
+  '输出：{"clothing":"白色晚礼服，高跟鞋","weapons":"袖珍手枪","accessories":"蓝宝石项链，细钻耳环"}\n\n' +
+  '示例 4：\n' +
+  '输入：「少年身着一袭朴素古意的青色长衫，长发以简单束带松松挽于脑后，身旁横放一柄三尺青锋，剑鞘古朴无华，却蕴含着慑人的锋芒，腰间别着一只温润的羊脂白玉酒葫芦。」\n' +
+  '输出：{"clothing":"朴素古意的青色长衫","weapons":"三尺青锋，剑鞘古朴无华，却蕴含着慑人的锋芒","accessories":"简单束带"}\n'
+
+// ====== 本地规则兜底：AI 输出异常或漏字段时按关键词从原文提取 ======
+// 关键词先长后短：优先命中完整名物词，避免「衣/剑/枪」等单字提前匹配
+const SPLIT_CLOTHING_KEYWORDS = ['长衫', '汉服', '唐装', '戏服', '劲装', '布衣', '古衣', '战甲', '燕尾服', '西装', '礼服', '外套', '大衣', '风衣', '马甲', '衬衫', '卫衣', '牛仔裤', '短裤', '披风', '斗篷', '长裙', '围巾', '领带', '腰带', '护腕', '皮鞋', '运动鞋', '靴', '帽', '裙', '袍', '衫', '衣', '裤', '甲', '铠', '盔']
+const SPLIT_WEAPON_KEYWORDS = ['狼牙棒', '飞镖', '暗器', '火铳', '狙击枪', '冲锋枪', '机枪', '手枪', '步枪', '长剑', '青锋', '佩剑', '短剑', '匕首', '法杖', '长弓', '弓箭', '弓弩', '剑匣', '剑', '刀', '棍', '枪', '矛', '戟', '锤', '斧', '盾', '鞭', '锏', '弩', '杖']
+// 武器屏蔽词：命中时说明该句在描述「出剑/挥剑」等动作过程而非武器本体
+const SPLIT_WEAPON_BANNED = ['出剑', '拔剑', '挥剑', '使剑', '用剑', '剑尖', '剑光']
+// 神态/环境/动作过程杂质词：命中时说明该子句与物品本体无关，合并邻近句时剔除
+const SPLIT_NOISE_KEYWORDS = ['气质', '神态', '神情', '神色', '眼神', '目光', '面色', '面容', '模样', '场景', '环境', '格格不入', '气势', '沉静', '淡漠', '精光', '不敢直视', '出剑', '拔剑', '挥剑', '使剑', '用剑', '剑尖', '剑光']
+const SPLIT_ACCESSORY_KEYWORDS = ['束发带', '发带', '发簪', '玉簪', '头冠', '凤冠', '王冠', '璎珞', '香囊', '荷包', '项链', '吊坠', '挂坠', '戒指', '扳指', '手串', '手链', '手镯', '脚链', '耳环', '耳钉', '花钿', '纶巾', '玉佩', '红绳', '簪', '钗', '冠', '束带']
+// 随身器物（非武器、非穿戴，如折扇/酒葫芦/罗盘）：不再作为独立字段输出，仅用于阻止其污染服装/武器/首饰的合并片段
+const SPLIT_PROP_NOISE_KEYWORDS = ['羊脂白玉酒葫芦', '芭蕉扇', '油纸伞', '紫金葫芦', '酒葫芦', '乾坤袋', '储物袋', '褡裢', '折扇', '团扇', '蒲扇', '羽扇', '拂尘', '罗盘', '花灯', '宫灯', '灯笼', '玉箫', '洞箫', '长箫', '横笛', '竹笛', '牧笛', '玉笛', '古琴', '瑶琴', '七弦琴', '焦尾琴', '琵琶', '古筝', '三弦', '书卷', '画卷', '书简', '卷轴', '经卷', '经书', '铜镜', '古镜', '香炉', '丹炉', '砚台', '算盘', '玉如意', '铜铃', '木鱼', '药瓶', '瓷瓶', '玉瓶', '酒坛', '茶壶', '酒樽', '金樽', '夜光杯', '水囊', '钱袋', '钱囊', '锦囊', '包袱', '药箱', '药篓', '手帕', '绣帕', '信笺', '令牌', '玉玺', '印玺', '官印', '圣旨', '如意']
+// 名物清洗时可去掉的常见动词/数量词引导与冗余后缀（先长后短）
+const SPLIT_REDUNDANT_PREFIXES = ['腰间别着一柄', '腰间别着', '腰间悬着一柄', '腰间悬着', '腰间佩着', '手里拿着', '手里拄着', '手执一柄', '手执', '手持一柄', '手持', '手中握着', '手上戴', '背后背着', '肩上扛着', '身旁横放一柄', '身旁横放', '横放', '头上戴', '头戴', '脚蹬一双', '脚蹬', '身着', '穿着', '身穿', '身披', '披着', '腰系', '腰缠', '长发以', '手腕上系着', '悬着', '挎着', '别着', '佩着', '戴着', '佩戴', '腰挂', '腰佩', '颈间坠着', '颈间戴着', '耳垂上悬着', '一手拄着', '拄着', '一串', '一柄', '一把', '一根', '一支', '一件', '一袭', '一身', '背着', '拿着', '握着', '脑后']
+const SPLIT_REDUNDANT_SUFFIXES = ['松松挽于脑后', '挽于脑后', '松松地挽着', '松松挽着', '松散地挽着', '斜挎在腰', '别在腰间', '挂在腰间', '挎在腰间', '握在手中', '提在手中', '垂在身侧', '拄于地面', '立在地上', '悬在腰间', '佩在腰间', '裙摆曳地', '裙摆轻摇', '无风自动', '随风飘动']
+
+/**
+ * 清洗单条视觉片段：去掉动词/数量词引导与冗余后缀，保留名物短语。
+ * 兼容逗号分隔的多词值（逐段清洗后重新拼接，不破坏分隔）。
+ */
+function cleanVisualFragment(raw: string): string {
+  const parts = (raw || '').split(/[，,]/).map((p) => {
+    let fragment = p.replace(/[。；：、\n]/g, '').trim()
+    if (!fragment) return ''
+    // 循环去掉引导词（如「穿着一身」→ 依次去掉「穿着」「一身」）
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const prefix of SPLIT_REDUNDANT_PREFIXES) {
+        if (fragment.startsWith(prefix)) { fragment = fragment.slice(prefix.length).trim(); changed = true; break }
+      }
+    }
+    for (const suffix of SPLIT_REDUNDANT_SUFFIXES) {
+      if (fragment.endsWith(suffix)) { fragment = fragment.slice(0, -suffix.length).trim(); break }
+    }
+    return fragment
+  }).filter(Boolean)
+  return parts.join('，')
+}
+
+function splitVisualsByRules(appearance: string): { clothing: string; weapons: string; accessories: string } {
+  const sentences = appearance.split(/[，。；、\n,;：:！!？?]/).map(s => s.trim()).filter(Boolean)
+  const pick = (keywords: string[], banned: string[] = [], otherKeywords: string[] = []): string => {
+    const items: string[] = []
+    for (let i = 0; i < sentences.length; i++) {
+      const s = sentences[i]
+      const hit = keywords.find(k => s.includes(k))
+      if (!hit) continue
+      if (banned.some(b => s.includes(b)) && hit.length <= 2) continue
+      // 同类已提取过 → 跳过（如原文重复粘贴同一武器）
+      if (items.some(it => it.includes(hit))) continue
+      // 合并前后相邻的描述性子句：遇神态/环境/动作杂质词或他类关键词即停，
+      // 保留完整物品描述（如「三尺青锋，剑鞘古朴无华，却蕴含着慑人的锋芒」）
+      const fragParts: string[] = [s]
+      let total = s.length
+      const canMerge = (t: string) =>
+        !SPLIT_NOISE_KEYWORDS.some(k => t.includes(k)) && !otherKeywords.some(k => t.includes(k))
+      for (let j = i - 1; j >= 0; j--) {
+        const adj = sentences[j]
+        if (!canMerge(adj)) break
+        if (total + adj.length + 1 > 34) break
+        total += adj.length + 1
+        fragParts.unshift(adj)
+      }
+      for (let j = i + 1; j < sentences.length; j++) {
+        const adj = sentences[j]
+        if (!canMerge(adj)) break
+        if (total + adj.length + 1 > 34) break
+        total += adj.length + 1
+        fragParts.push(adj)
+      }
+      const cleaned = cleanVisualFragment(fragParts.join('，'))
+      if (cleaned && !items.includes(cleaned)) items.push(cleaned)
+    }
+    return items.join('，')
+  }
+  const allOther = [...SPLIT_CLOTHING_KEYWORDS, ...SPLIT_WEAPON_KEYWORDS, ...SPLIT_ACCESSORY_KEYWORDS, ...SPLIT_PROP_NOISE_KEYWORDS]
+  return {
+    clothing: pick(SPLIT_CLOTHING_KEYWORDS, [], allOther),
+    weapons: pick(SPLIT_WEAPON_KEYWORDS, SPLIT_WEAPON_BANNED, [...SPLIT_CLOTHING_KEYWORDS, ...SPLIT_ACCESSORY_KEYWORDS, ...SPLIT_PROP_NOISE_KEYWORDS]),
+    accessories: pick(SPLIT_ACCESSORY_KEYWORDS, [], [...SPLIT_CLOTHING_KEYWORDS, ...SPLIT_WEAPON_KEYWORDS, ...SPLIT_PROP_NOISE_KEYWORDS]),
+  }
+}
 
 /**
  * 从「外貌特征」文本智能拆分服装/武器/首饰三个字段，
  * 用于角色详情页「智能拆分」按钮自动回填，减少重复填写。
+ *
+ * 融合策略（保证完整描述 + 防幻觉）：
+ * 1. 本地规则先拆：名物短语精确、无动词引导/神态杂质（对常见词覆盖稳定）；
+ * 2. AI 增强：AI 能保留原文完整物品描述（含剑鞘/锋芒等细节），覆盖规则词表盲区；
+ * 3. 每字段「AI 优先，规则兜底」：AI 值逐段校验均来自原文才采用（防「三尺青芒」类幻觉），否则回退规则值。
  */
 export async function splitCharacterVisuals(input: SplitCharacterVisualsInput): Promise<{ clothing: string; weapons: string; accessories: string }> {
   const appearance = (input.appearance || '').trim()
   if (!appearance) throw new Error('外貌特征为空')
 
-  const userPrompt = `角色外貌特征描述：\n${appearance}\n\n请拆分出 clothing / weapons / accessories 三个字段。`
+  // 规则先拆：稳定、精确、无杂质
+  const ruleResult = splitVisualsByRules(appearance)
+
+  const userPrompt =
+    SPLIT_VISUALS_EXAMPLES +
+    `现在拆分以下角色描述：\n${appearance}\n\n请严格按规则只输出 JSON。`
 
   logTaskStart('SplitVisuals', 'generate', {})
-  const result = await generateText(userPrompt, { system: SPLIT_VISUALS_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 300 })
-
-  let parsed: { clothing?: unknown; weapons?: unknown; accessories?: unknown }
+  let ai: { clothing?: unknown; weapons?: unknown; accessories?: unknown } = {}
   try {
-    parsed = JSON.parse(cleanJsonString(result))
-  } catch {
-    throw new Error('AI 返回的拆分结果不是有效 JSON')
+    const result = await generateText(userPrompt, { system: SPLIT_VISUALS_SYSTEM_PROMPT, temperature: 0.1, maxTokens: 300 })
+    ai = JSON.parse(cleanJsonString(result))
+    logTaskProgress('SplitVisuals', 'ai', { ...ai })
+  } catch (err: any) {
+    // AI 输出异常 → 直接使用规则结果，保证按钮始终有输出
+    logTaskProgress('SplitVisuals', 'fallback', { reason: 'ai-failed', error: err.message })
   }
 
-  const out = {
-    clothing: String(parsed.clothing || '').trim(),
-    weapons: String(parsed.weapons || '').trim(),
-    accessories: String(parsed.accessories || '').trim(),
+  // AI 值统一清洗：去掉动词引导/冗余后缀
+  const cleanAi = {
+    clothing: cleanVisualFragment(String(ai.clothing || '')),
+    weapons: cleanVisualFragment(String(ai.weapons || '')),
+    accessories: cleanVisualFragment(String(ai.accessories || '')),
   }
+
+  // AI 优先 + 原文一致性校验：AI 值每个名物片段必须能在原文中找到（防「三尺青芒」类幻觉），否则回退规则值
+  const appearsInSource = (value: string): boolean => {
+    const segs = value.split(/[，,]/).map(s => s.trim()).filter(Boolean)
+    return segs.length > 0 && segs.every(seg => seg.length >= 2 && appearance.includes(seg))
+  }
+  const out = {
+    clothing: appearsInSource(cleanAi.clothing) ? cleanAi.clothing : ruleResult.clothing,
+    weapons: appearsInSource(cleanAi.weapons) ? cleanAi.weapons : ruleResult.weapons,
+    accessories: appearsInSource(cleanAi.accessories) ? cleanAi.accessories : ruleResult.accessories,
+  }
+
   logTaskSuccess('SplitVisuals', 'generated', out)
   return out
 }

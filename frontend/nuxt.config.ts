@@ -1,6 +1,21 @@
+import { fileURLToPath } from 'node:url'
+
 export default defineNuxtConfig({
   srcDir: 'app/',
   ssr: false,
+  // 共享契约类型（backend/src/shared/contracts.ts）：import type 别名，字段单一来源
+  alias: {
+    '~contracts': fileURLToPath(new URL('../backend/src/shared/contracts.ts', import.meta.url)),
+  },
+  typescript: {
+    tsConfig: {
+      compilerOptions: {
+        paths: {
+          '~contracts': ['../backend/src/shared/contracts.ts'],
+        },
+      },
+    },
+  },
   devtools: { enabled: false },
   experimental: {
     appManifest: false,

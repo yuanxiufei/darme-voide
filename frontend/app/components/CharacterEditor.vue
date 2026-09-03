@@ -85,6 +85,18 @@
               <span>反向提示词（AI 提取，可修改；留空使用默认）</span>
               <textarea v-model="form.negativePrompt" class="input" rows="2" placeholder="排除内容/风格，如：photorealistic, text, watermark, multiple people..." />
             </label>
+            <label class="field">
+              <span>画风（留空跟随剧集）</span>
+              <select v-model="form.style" class="input">
+                <option value="">跟随剧集</option>
+                <option value="realistic">写实电影</option>
+                <option value="anime">日式动漫</option>
+                <option value="ghibli">吉卜力</option>
+                <option value="cinematic">电影感</option>
+                <option value="comic">美漫漫画</option>
+                <option value="watercolor">水彩</option>
+              </select>
+            </label>
             <label v-if="costumeOptions.length" class="field" style="margin-bottom: 12px;">
               <span>本次生成服装</span>
               <select v-model="selectedCostume" class="input">
@@ -245,6 +257,7 @@ watch(() => props.visible && props.character, (c) => {
   form.weapons = c.weapons || ''
   form.customPrompt = c.customPrompt || ''
   form.negativePrompt = c.negativePrompt || ''
+  form.style = c.style || ''
   form.coreFeatures = parseCoreFeaturesToText(c.coreFeatures)
   form.costumes = parseCostumesToText(c.costumes)
   selectedCostume.value = parseCostumesArray(form.costumes)[0] || ''
@@ -271,6 +284,7 @@ async function save() {
       weapons: form.weapons || null,
       customPrompt: form.customPrompt || null,
       negativePrompt: form.negativePrompt || null,
+      style: form.style || null,
       coreFeatures: parseCoreFeaturesFromText(form.coreFeatures),
       costumes: parseCostumesFromText(form.costumes),
       voiceStyle: form.voiceStyle,

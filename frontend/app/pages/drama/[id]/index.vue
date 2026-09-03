@@ -28,6 +28,12 @@
       </div>
       <div class="head-actions">
         <button class="btn btn-ghost" @click="navigateTo(`/drama/${drama.id}/prompts`)">提示词</button>
+        <button class="btn btn-ghost" @click="openEditDrama">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+          </svg>
+          编辑剧集
+        </button>
         <button class="btn btn-primary" @click="openAddEpisode">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -187,6 +193,68 @@
         </div>
       </div>
     </div>
+
+    <!-- Edit Drama Dialog -->
+    <div v-if="editDramaDialog" class="dialog-mask" @click.self="editDramaDialog = false">
+      <div class="card dialog rename-dialog edit-drama-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Drama Setup</div>
+            <div class="dialog-title">编辑剧集</div>
+            <div class="dialog-sub">修改剧集标题、视觉风格与时代背景。风格影响该剧全部角色立绘、分镜与场景图；时代背景会注入全部视觉资产生成，避免古装戏里出现现代元素这类串味。</div>
+          </div>
+          <button class="back-btn" @click="editDramaDialog = false">取消</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">标题</span>
+            <input v-model="editDramaTitle" class="input" placeholder="输入剧集标题" />
+          </label>
+          <label class="field">
+            <span class="field-label">视觉风格</span>
+            <select v-model="editDramaStyle" class="input">
+              <option value="realistic">写实电影</option>
+              <option value="anime">日式动漫</option>
+              <option value="ghibli">吉卜力</option>
+              <option value="cinematic">电影感</option>
+              <option value="comic">美漫漫画</option>
+              <option value="watercolor">水彩</option>
+            </select>
+          </label>
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">时代背景</span>
+              <span class="dialog-section-copy">全剧共享 · 可 AI 提炼</span>
+            </div>
+            <label class="field">
+              <span class="field-label">时代标签</span>
+              <input v-model="editEra.era" class="input" placeholder="如：古代仙侠 / 民国谍战 / 现代都市·赛博朋克 / 中世纪奇幻" />
+            </label>
+            <label class="field">
+              <span class="field-label">时代概述（中文）</span>
+              <textarea v-model="editEra.summary" class="textarea" rows="2" placeholder="世界观 / 地域 / 年代 / 社会风貌 / 常见场景"></textarea>
+            </label>
+            <label class="field">
+              <span class="field-label">画面指令（English，生图时自动注入）</span>
+              <textarea v-model="editEra.imageHint" class="textarea" rows="3" placeholder="Describe era-specific visual & art-direction hints for character / costume / prop / scene images"></textarea>
+            </label>
+            <div class="era-extract-row">
+              <button class="btn btn-sm btn-ghost" :disabled="eraExtracting" @click="extractEra">
+                <span v-if="eraExtracting" class="era-spinner" />
+                {{ eraExtracting ? '提炼中...' : 'AI 从剧本提炼' }}
+              </button>
+              <span class="era-extract-hint">自动读取全剧剧本并提炼上方三项，确认后仍需点击「保存」落库</span>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy"></div>
+          <button class="btn btn-primary" :disabled="savingDrama || !editDramaTitle.trim()" @click="saveEditDrama">
+            {{ savingDrama ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -309,6 +377,89 @@ async function renameEpisode() {
     toast.error(e.message)
   } finally {
     renamingEpisode.value = false
+  }
+}
+
+// ===== 编辑剧集（标题 + 视觉风格 + 时代背景）=====
+const editDramaDialog = ref(false)
+const savingDrama = ref(false)
+const editDramaTitle = ref('')
+const editDramaStyle = ref('realistic')
+// 时代背景编辑态（对应 dramas.era_background JSON 的三字段，可 AI 提炼后手工微调）
+const editEra = reactive({ era: '', summary: '', imageHint: '' })
+const eraExtracting = ref(false)
+
+function parseEraFromDrama() {
+  const raw = drama.value?.era_background || drama.value?.eraBackground
+  if (!raw) {
+    editEra.era = ''
+    editEra.summary = ''
+    editEra.imageHint = ''
+    return
+  }
+  try {
+    const o = JSON.parse(raw)
+    editEra.era = String(o.era || o.summary || '').trim()
+    editEra.summary = String(o.summary || o.raw || o.era || '').trim()
+    editEra.imageHint = String(o.image_style_en || o.imageHint || '').trim()
+  } catch {
+    editEra.era = ''
+    editEra.summary = ''
+    editEra.imageHint = ''
+  }
+}
+
+function openEditDrama() {
+  editDramaTitle.value = drama.value?.title || ''
+  editDramaStyle.value = drama.value?.style || 'realistic'
+  parseEraFromDrama()
+  editDramaDialog.value = true
+}
+
+// AI 从全剧剧本提炼时代背景：结果填入编辑区，确认后随「保存」一并落库
+async function extractEra() {
+  if (eraExtracting.value) return
+  try {
+    eraExtracting.value = true
+    const res = await dramaAPI.eraExtract(dramaId.value)
+    const o = res?.data || res || {}
+    editEra.era = String(o.era || '').trim()
+    editEra.summary = String(o.summary || '').trim()
+    editEra.imageHint = String(o.imageHint || o.image_style_en || '').trim()
+    if (!editEra.era && !editEra.summary && !editEra.imageHint) {
+      toast.error('未提炼到有效的时代背景，请确认剧本已保存后重试')
+      return
+    }
+    toast.success('已从剧本提炼时代背景，请确认后保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    eraExtracting.value = false
+  }
+}
+
+function buildEraPayload() {
+  // 字段键与 shared/contracts EraBackground 一致（era/summary/imageHint），勿再写 image_style_en
+  const parts = {}
+  if (editEra.era.trim()) parts.era = editEra.era.trim()
+  if (editEra.summary.trim()) parts.summary = editEra.summary.trim()
+  if (editEra.imageHint.trim()) parts.imageHint = editEra.imageHint.trim()
+  return Object.keys(parts).length ? JSON.stringify(parts) : ''
+}
+
+async function saveEditDrama() {
+  const title = editDramaTitle.value.trim()
+  if (!title) { toast.error('标题不能为空'); return }
+  try {
+    savingDrama.value = true
+    await dramaAPI.update(dramaId.value, { title, style: editDramaStyle.value, era_background: buildEraPayload() })
+    toast.success('剧集信息已更新')
+    editDramaDialog.value = false
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingDrama.value = false
   }
 }
 
@@ -602,6 +753,35 @@ watch(() => route.params.id, () => { load() })
 .field-hint { font-size: 12px; color: var(--text-3); }
 
 .rename-dialog { width: min(440px, 100%); }
+/* 编辑剧集弹窗需容纳时代背景三字段，适度加宽 */
+.edit-drama-dialog { width: min(560px, 100%); }
+
+.era-extract-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+.era-extract-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.era-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(13, 148, 136, 0.25);
+  border-top-color: var(--accent-text, #0d9488);
+  border-radius: 50%;
+  animation: era-spin 0.7s linear infinite;
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+@keyframes era-spin {
+  to { transform: rotate(360deg); }
+}
 
 @media (max-width: 860px) {
   .dialog {

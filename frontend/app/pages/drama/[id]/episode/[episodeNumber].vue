@@ -1062,6 +1062,11 @@
               <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
                 <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
               </select>
+              <span class="dim" style="font-size:12px">画风</span>
+              <select class="config-select" :value="dramaStyleValue" @change="switchDramaStyle(($event.target as HTMLSelectElement).value)">
+                <option value="">跟随全局</option>
+                <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
+              </select>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchCharImages">
@@ -1085,7 +1090,13 @@
                   <span class="asset-cover-badge" :class="(c.image_url || c.imageUrl) ? 'is-ready' : (isPendingCharImage(c.id) ? 'is-pending' : '')">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
                 </div>
                 <div class="asset-body">
-                  <div class="asset-name">{{ c.name }}</div>
+                  <div class="asset-name-row">
+                    <div class="asset-name">{{ c.name }}</div>
+                    <select class="config-select char-style-select" :value="c.style || ''" title="角色画风（留空跟随剧集）" @click.stop @change="switchCharStyle(c, ($event.target as HTMLSelectElement).value)">
+                      <option value="">随剧集</option>
+                      <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
+                    </select>
+                  </div>
                   <div class="asset-meta dim">{{ c.role || '角色' }}</div>
                 </div>
                 <div class="asset-foot">
@@ -2048,7 +2059,7 @@ function goBack() {
   }
 }
 
-const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null), dubMatchCache = ref({})
+const drama = ref<any>(null), episode = ref<any>(null), chars = ref<any[]>([]), scenes = ref<any[]>([]), sbs = ref<any[]>([]), mergeData = ref<any>(null), dubMatchCache = ref<any>({})
 const panel = ref('script')
 const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, run: runAgent } = useAgent()
 
@@ -2468,6 +2479,33 @@ async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: 
     }
   } catch (e: any) {
     toast.error(e?.message || '切换配置失败')
+  }
+}
+
+// ===== 画风切换（剧集级 / 角色级）=====
+const styleLabels: Record<string, string> = {
+  realistic: '写实电影', anime: '日式动漫', ghibli: '吉卜力',
+  cinematic: '电影感', comic: '美漫漫画', watercolor: '水彩',
+}
+const dramaStyleValue = computed(() => drama.value?.style || '')
+
+async function switchDramaStyle(style: string) {
+  try {
+    await dramaAPI.update(dramaId, { style })
+    if (drama.value) drama.value.style = style || null
+    toast.success(style ? `剧集画风已切换为「${styleLabels[style] || style}」` : '剧集画风已恢复跟随全局')
+  } catch (e: any) {
+    toast.error(e?.message || '切换剧集画风失败')
+  }
+}
+
+async function switchCharStyle(c: any, style: string) {
+  try {
+    await characterAPI.update(c.id, { style })
+    c.style = style || null
+    toast.success(`${c.name} 画风：${style ? styleLabels[style] || style : '跟随剧集'}`)
+  } catch (e: any) {
+    toast.error(e?.message || '切换角色画风失败')
   }
 }
 
@@ -3668,16 +3706,23 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
     }
   })()
 }
+function normEpUrl(p?: string | null): string {
+  if (!p) return ''
+  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
+  return p.startsWith('/') ? p : '/' + p
+}
 
 async function genCharImg(id) {
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
+    const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
     await characterAPI.generateImage(id, epId.value)
     toast.success('角色图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
+      const cur = normEpUrl(char?.image_url || char?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
       if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
       return done
     })
@@ -3694,12 +3739,14 @@ async function genCharImgWithModel(id: number) {
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     const model = charImageModels.value[id] || undefined
+    const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
     await characterAPI.generateImage(id, epId.value, { prompt: undefined, model })
     toast.success('角色图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
+      const cur = normEpUrl(char?.image_url || char?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
       if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
       return done
     })
@@ -3729,12 +3776,14 @@ function batchCharImages() {
 async function genSceneImg(id) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
+    const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
     await sceneAPI.generateImage(id, epId.value)
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const scene = scenes.value.find(s => s.id === id)
-      const done = !!(scene?.image_url || scene?.imageUrl)
+      const cur = normEpUrl(scene?.image_url || scene?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
       if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
       return done
     })
@@ -3751,12 +3800,14 @@ async function genSceneImgWithModel(id: number) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     const model = sceneImageModels.value[id] || undefined
+    const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
     await sceneAPI.generateImage(id, epId.value, { prompt: undefined, model })
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const scene = scenes.value.find(s => s.id === id)
-      const done = !!(scene?.image_url || scene?.imageUrl)
+      const cur = normEpUrl(scene?.image_url || scene?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
       if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
       return done
     })
@@ -5598,6 +5649,8 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 }
 .asset-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
 .asset-body { padding: 10px 12px; }
+.asset-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.asset-name-row .asset-name { flex: 1; min-width: 0; }
 .asset-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .asset-meta { font-size: 11px; }
 .asset-foot { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-top: 1px solid var(--border); gap: 8px; }
@@ -5605,6 +5658,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 .foot-status { font-size: 11px; white-space: nowrap; }
 .foot-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .foot-right :deep(.model-selector) { width: 100px !important; }
+.char-style-select { width: 76px; flex-shrink: 0; }
 
 /* Frame grid */
 .frame-grid { display: flex; flex-direction: column; gap: 8px; }

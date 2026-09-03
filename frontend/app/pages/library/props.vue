@@ -193,16 +193,19 @@ async function generateImage(item: any) {
   if (item._generating) return
   item._generating = true
   try {
+    // 生成前快照当前图 URL：重新生成时旧图仍在，须等到 URL 变为新图才算完成
+    const beforeUrl = normPUrl(item.imageUrl)
     toast.loading(`正在生成「${item.name}」设定图...`, { id: `prop-img-${item.id}` })
     await propsLibraryAPI.generateImage(item.id)
     toast.success('设定图生成任务已提交，生成完成后自动刷新', { id: `prop-img-${item.id}` })
-    // 轮询刷新直到拿到图
+    // 轮询刷新直到拿到新图（URL 与生成前不同）
     for (let i = 0; i < 12; i++) {
       await new Promise((r) => setTimeout(r, 5000))
       const res = await propsLibraryAPI.list(dramaId.value ? { drama_id: dramaId.value } : undefined)
       const arr = Array.isArray(res) ? res : res?.items || []
       const updated = arr.find((p: any) => p.id === item.id)
-      if (updated?.imageUrl) { items.value = arr; break }
+      const cur = normPUrl(updated?.imageUrl)
+      if (cur && cur !== beforeUrl) { items.value = arr; break }
     }
   } catch (e: any) {
     toast.error(e?.message || '设定图生成失败', { id: `prop-img-${item.id}` })
@@ -211,6 +214,11 @@ async function generateImage(item: any) {
 
 onMounted(() => load())
 function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, n) + '...' : s }
+function normPUrl(p?: string | null): string {
+  if (!p) return ''
+  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
+  return p.startsWith('/') ? p : '/' + p
+}
 </script>
 
 <style scoped>

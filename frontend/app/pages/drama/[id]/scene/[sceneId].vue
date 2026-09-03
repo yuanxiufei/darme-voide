@@ -138,6 +138,11 @@ const imgPollRef = ref<ReturnType<typeof setInterval> | null>(null)
 const imgPollTimeoutRef = ref<ReturnType<typeof setTimeout> | null>(null)
 
 const form = reactive<any>({})
+function resolveUrl(p?: string | null): string {
+  if (!p) return ''
+  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
+  return p.startsWith('/') ? p : '/' + p
+}
 onUnmounted(() => {
   if (imgPollRef.value) clearInterval(imgPollRef.value)
   if (imgPollTimeoutRef.value) clearTimeout(imgPollTimeoutRef.value)
@@ -195,6 +200,8 @@ async function generateImage() {
   errorMsg.value = ''
   try {
     const { sceneAPI, dramaAPI } = await import('~/composables/useApi')
+    // 生成前快照当前场景图 URL：重新生成时旧图仍在，须等到 URL 变为新图才算完成
+    const beforeUrl = resolveUrl(scene.value?.image_url || scene.value?.imageUrl)
     await sceneAPI.generateImage(sceneId, undefined, {
       prompt: form.customPrompt || undefined,
       model: imageModel.value || undefined,
@@ -204,7 +211,8 @@ async function generateImage() {
         const data: any = await dramaAPI.get(dramaId)
         const list = data?.scenes || []
         const updated = list.find((s: any) => s.id === sceneId)
-        if (updated?.image_url || updated?.imageUrl) {
+        const cur = resolveUrl(updated?.image_url || updated?.imageUrl)
+        if (cur && cur !== beforeUrl) {
           clearInterval(imgPollRef.value!)
           imgPollRef.value = null
           scene.value = updated

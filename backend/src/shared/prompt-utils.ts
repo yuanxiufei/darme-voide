@@ -127,6 +127,80 @@ export const NEGATIVE_BASE = 'text, watermark, signature, logo, subtitles, low q
  */
 export const CHARACTER_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, photorealistic, realistic photo, 3d render, cluttered background, busy background, multiple characters, multiple people, duplicated character, inconsistent character, cropped head, cut off face`
 
+// ============================================================
+// 画风统一（dramas.style → 统一英文画风描述）
+//
+// 根因：角色立绘此前不读 dramas.style，且 customPrompt 会完全绕过
+// 统一风格标签，导致同一剧内不同角色时而动漫、时而真人。
+// 现由本映射把「剧集视觉风格」注入所有角色图 prompt 与负面提示词，
+// 与分镜/场景/视频的 dramaStyle 注入对齐，保证全链路画风一致。
+// ============================================================
+
+/** 戏剧视觉风格 → 英文画风描述（对齐前端创建/编辑剧集时的 6 选） */
+export const DRAMA_ART_STYLE_MAP: Record<string, string> = {
+  realistic: 'realistic cinematic character design, natural skin texture, film quality lighting',
+  anime: '2D anime illustration style, clean line art, cel shading, vibrant colors',
+  ghibli: 'ghibli-inspired hand-drawn animation style, soft watercolor background, gentle rounded character design',
+  cinematic: 'cinematic film still style, dramatic moody lighting, shallow depth of field',
+  comic: 'comic book illustration style, bold ink line work, halftone shading, dynamic comic character design',
+  watercolor: 'watercolor painting style, soft brush strokes, translucent washes, delicate pastel palette',
+}
+
+/** 各画风对应的对立风格负面词（防止模型混用动漫/真人） */
+const DRAMA_ART_NEGATIVE_MAP: Record<string, string> = {
+  realistic: 'anime style, cartoon, illustration, cel shading, line art, 3d render',
+  anime: 'photorealistic, realistic photo, live action, 3d render',
+  ghibli: 'photorealistic, realistic photo, live action, 3d render',
+  cinematic: 'anime style, cartoon, illustration, flat coloring',
+  comic: 'photorealistic, realistic photo, live action',
+  watercolor: 'photorealistic, realistic photo, live action, harsh outline',
+}
+
+/**
+ * 构建角色图统一画风后缀（追加在 prompt 末尾）。
+ * - 未指定 dramaStyle：维持默认 stylized illustration（not photorealistic）
+ * - 指定 dramaStyle：优先使用映射画风（anime/realistic/ghibli...），同剧强制一致
+ */
+export function buildCharacterArtStyleSuffix(dramaStyle?: string | null): string {
+  const art = (dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle]) || ''
+  if (!art) {
+    return `, ${VISUAL_STYLE_CHARACTER}, ${VISUAL_STYLE_MASTER}`
+  }
+  return `, ${art}, cinematic illustration style, consistent art style, soft cinematic lighting, high quality, no text, no watermark`
+}
+
+/**
+ * 装备/服装/武器/首饰图的画风尾（无人物语义）。
+ * DRAMA_ART_STYLE_MAP 是为角色像准备的（含 character design / skin texture），
+ * 若直接用于「纯物品」三视图会诱导模型生成人物或穿着人体的服装，故单独定义。
+ */
+const EQUIP_ART_STYLE_MAP: Record<string, string> = {
+  realistic: 'professional product photography, studio softbox lighting, clean neutral background, sharp fabric and metal texture detail',
+  anime: '2D anime prop illustration style, clean line art, cel shading, vibrant colors',
+  ghibli: 'ghibli-inspired hand-drawn art style, soft colors, gentle shading',
+  cinematic: 'cinematic concept art style, dramatic moody lighting, shallow depth of field',
+  comic: 'comic book illustration style, bold ink line work, halftone shading',
+  watercolor: 'watercolor painting style, soft brush strokes, translucent washes, delicate pastel palette',
+}
+
+/** 装备图统一画风/无人物后缀：追加在 equip prompt 末尾 */
+export function buildEquipArtStyleSuffix(dramaStyle?: string | null): string {
+  const art = (dramaStyle && EQUIP_ART_STYLE_MAP[dramaStyle]) || ''
+  const base = ', isolated product shot, single object, empty scene, no people, no person, no model, no mannequin body, no body parts, no skin'
+  if (!art) return `${base}, stylized concept art, high quality, no text, no watermark`
+  return `${base}, ${art}, high quality, no text, no watermark`
+}
+
+/**
+ * 构建角色图默认负面提示词（按画风排除对立风格）。
+ * 未指定 dramaStyle 或映射缺失时回退 CHARACTER_IMAGE_NEGATIVE，保持向后兼容。
+ */
+export function buildCharacterNegativePrompt(dramaStyle?: string | null): string {
+  const artNegative = (dramaStyle && DRAMA_ART_NEGATIVE_MAP[dramaStyle]) || ''
+  if (!artNegative) return CHARACTER_IMAGE_NEGATIVE
+  return `${NEGATIVE_BASE}, ${artNegative}, cluttered background, busy background, multiple characters, multiple people, duplicated character, inconsistent character, cropped head, cut off face`
+}
+
 /**
  * 场景背景负面提示词
  * 排除人物角色（场景图只保留环境）、特写人脸与空洞扁平构图
@@ -241,6 +315,45 @@ function parseVariations(variations?: string | null): Array<{ name: string; imag
 }
 
 /**
+ * 构建角色「服装/武器/首饰」正向子句。
+ * 供自定义 prompt 场景强制注入：即使走了用户手写 prompt，
+ * 智能拆分出的三个视觉字段也始终进入生图 prompt，避免信息被丢弃。
+ */
+export function buildCharacterVisualsClause(char: {
+  clothing?: string | null
+  costume?: string | null
+  costumes?: string | null
+  weapons?: string | null
+  accessories?: string | null
+}): string {
+  const parts: string[] = []
+  // 服装：优先本次选中的 costume，其次单套 clothing，最后回退多套 costumes 首套
+  const costume = char.costume || char.clothing || parseCostumes(char.costumes)[0]
+  if (costume) parts.push(`wearing ${costume}`)
+  const weapons = formatEquip(char.weapons)
+  if (weapons) parts.push(`armed with ${weapons}`)
+  const accessories = formatEquip(char.accessories)
+  if (accessories) parts.push(`wearing accessories: ${accessories}`)
+  return parts.join(', ')
+}
+
+/** 三视图组合排版：一张横向长图内含正面/侧面/背面三个视角，同一个人物三次出现 */
+export const THREE_VIEW_COMBINED_LAYOUT =
+  'full body three-view turnaround, one single wide horizontal image with the same character shown three times side by side: front view on the left, side view in the middle, back view on the right, identical outfit and appearance across all three views, consistent character, head to toe'
+
+/** 三视图画布尺寸：超宽横向比例（≈2.29:1），保证三个全身视角横向排开不挤压 */
+export const THREE_VIEW_SIZE = '2048x896'
+
+/**
+ * 三视图负面提示词：在画风负面基础上排除分屏拼接/文字/边框/多余人，
+ * 保证三个视角自然排列在同一张横向长图内。
+ */
+export function buildThreeViewNegative(dramaStyle?: string | null): string {
+  const base = buildCharacterNegativePrompt(dramaStyle)
+  return `${base}, split image, split panel, grid layout, frame border, panel divider, side-by-side separate images, multiple different characters, different people, clone, extra person, text, watermark, logo, label`
+}
+
+/**
  * 构建角色图片生成 prompt
  * @param name 角色名
  * @param appearance 外貌描述
@@ -259,18 +372,15 @@ export function buildCharacterImagePrompt(char: {
   costumes?: string | null
   weapons?: string | null
   accessories?: string | null
+  /** 剧集视觉风格（dramas.style）；注入统一画风，保证同剧角色一致 */
+  dramaStyle?: string | null
 }): string {
   const parts: string[] = [char.name]
   const core = parseCoreFeatures(char.coreFeatures)
   if (core.length) parts.push(`core features: ${core.join(', ')}`)
   if (char.appearance) parts.push(char.appearance)
-  // 服装：优先本次选中的 costume，其次单套 clothing，最后回退多套 costumes 首套
-  const costume = char.costume || char.clothing || parseCostumes(char.costumes)[0]
-  if (costume) parts.push(`wearing ${costume}`)
-  const weapons = formatEquip(char.weapons)
-  if (weapons) parts.push(`armed with ${weapons}`)
-  const accessories = formatEquip(char.accessories)
-  if (accessories) parts.push(`wearing accessories: ${accessories}`)
+  const visuals = buildCharacterVisualsClause(char)
+  if (visuals) parts.push(visuals)
   if (char.description && char.description !== char.appearance) parts.push(char.description)
 
   // 性格特征影响表情氛围
@@ -278,7 +388,8 @@ export function buildCharacterImagePrompt(char: {
     parts.push(`${char.personality} expression and mannerisms`)
   }
 
-  return `${parts.join(', ')}, ${VISUAL_STYLE_CHARACTER}, ${VISUAL_STYLE_MASTER}`
+  // 统一画风收口：dramaStyle 存在时按剧集视觉风格注入，否则维持默认插画风
+  return `${parts.join(', ')}${buildCharacterArtStyleSuffix(char.dramaStyle)}`
 }
 
 /**
@@ -312,6 +423,14 @@ export function buildCharacterAppearanceText(char: {
 
 /**
  * 构建角色「装备/服饰特写图」prompt（服装/武器/首饰独立设定图）
+ *
+ * 设计原则：三类对象是「不同的东西」，提示词必须聚焦各自对象本体——
+ * - 服装：完整衣物的剪裁/面料/配色，无人物
+ * - 武器：武器的整体造型/金属质感/雕刻细节，无手持
+ * - 首饰：单件首饰的近景/宝石/金属工艺，无佩戴
+ * 不再把整段角色外貌、核心特征、角色名灌入（那是角色立绘的职责），
+ * 否则服装/武器/首饰提示词会与立绘雷同、彼此雷同。
+ *
  * @param type clothing/weapon/accessory
  */
 export function buildEquipImagePrompt(
@@ -323,24 +442,154 @@ export function buildEquipImagePrompt(
     clothing?: string | null
     weapons?: string | null
     accessories?: string | null
+    /** 剧集视觉风格（dramas.style）；注入统一画风 */
+    dramaStyle?: string | null
   },
 ): string {
   const parts: string[] = []
   if (type === 'clothing') {
     const c = formatEquip(char.clothing)
-    parts.push(c ? `detailed costume design sheet of ${c}` : 'detailed costume design sheet')
+    parts.push(c ? `detailed costume three-view design of ${c}` : 'detailed costume three-view design')
+    parts.push('one wide horizontal image with the same garment shown three times side by side: front view, back view, side view')
+    parts.push('ghost mannequin, silhouette, fabric texture and color scheme, no person wearing it, no body')
   } else if (type === 'weapon') {
     const w = formatEquip(char.weapons)
-    parts.push(w ? `detailed weapon concept art of ${w}` : 'detailed weapon concept art')
+    parts.push(w ? `detailed weapon three-view concept art of ${w}` : 'detailed weapon three-view concept art')
+    parts.push('one wide horizontal image with the same weapon shown three times side by side: front view, side view, top view')
+    parts.push('metal texture, engravings and material details, isolated on clean background, no hand, no character holding it')
   } else {
     const a = formatEquip(char.accessories)
-    parts.push(a ? `detailed accessory jewelry design of ${a}` : 'detailed accessory jewelry design')
+    parts.push(a ? `detailed jewelry three-view design of ${a}` : 'detailed jewelry three-view design')
+    parts.push('one wide horizontal image with the same piece of jewelry shown three times side by side: front view, side view, top view')
+    parts.push('gemstone and metalwork details, isolated on clean background, no person wearing it')
   }
+  parts.push('object focused concept sheet, clean studio lighting, consistent item across all three views, no split panel borders, no grid frames, no text, no labels, no watermark')
+  // 画风收口：装备图使用「无人物」画风尾，绝不引入 character design / skin 等人物语义词
+  return `${parts.join(', ')}${buildEquipArtStyleSuffix(char.dramaStyle)}`
+}
+
+/**
+ * 装备三视图负面提示词：在画风负面基础上排除人物/手持/不同物体/边框文字，
+ * 保证服装/武器/首饰同一物品的三个视角自然排列在同一张横向长图内。
+ * 注意：不排除 side-by-side / 三视图布局，否则模型会把三视角画成单个物体。
+ */
+export function buildEquipNegative(dramaStyle?: string | null): string {
+  const base = buildCharacterNegativePrompt(dramaStyle)
+  return `${base}, person, human figure, character, hands, body parts, multiple different items, different objects, duplicate inconsistent object, frame border, grid lines, panel divider, section divider, text, watermark, logo, label, extra floating parts, cropped object, cut off object`
+}
+
+// ============================================================
+// 单件高清道具图（区别于三视图设定图：单件纯物品图，无人物，可直接进道具库/分镜）
+// ============================================================
+
+/** 单件道具图尺寸：方形高清，便于道具库卡片与分镜引用 */
+export const ITEM_IMAGE_SIZE = '1024x1024'
+
+/**
+ * 构建单件高清道具图 prompt（服装/武器/首饰各自独立单品图）。
+ * 与 buildEquipImagePrompt（三视角并排设定图）不同：单品居中展示、纯物品、无人物，
+ * 用于入库与分镜画面中的物品质感呈现。
+ */
+export function buildItemImagePrompt(
+  type: 'clothing' | 'weapon' | 'accessory',
+  char: {
+    clothing?: string | null
+    weapons?: string | null
+    accessories?: string | null
+    /** 剧集视觉风格（dramas.style）；注入统一画风 */
+    dramaStyle?: string | null
+  },
+): string {
+  const parts: string[] = []
+  if (type === 'clothing') {
+    const c = formatEquip(char.clothing)
+    parts.push(c ? `hero product shot of ${c}` : 'hero product shot of a single costume')
+    parts.push('one garment displayed alone and centered, full view, fabric texture, color and tailoring details, studio product lighting, clean soft gradient background, no person, no mannequin, no body')
+  } else if (type === 'weapon') {
+    const w = formatEquip(char.weapons)
+    parts.push(w ? `hero product shot of ${w}` : 'hero product shot of a single weapon')
+    parts.push('one weapon displayed alone and centered, full view, metal texture, engravings and material details, studio product lighting, clean soft gradient background, no hand, no character holding it')
+  } else {
+    const a = formatEquip(char.accessories)
+    parts.push(a ? `hero product shot of ${a}` : 'hero product shot of a single piece of jewelry')
+    parts.push('one piece of jewelry displayed alone and centered, full view, gemstone and metalwork details, studio product lighting, clean soft gradient background, no person wearing it')
+  }
+  parts.push('single object only, high-detail prop asset, isolated, no text, no labels, no watermark, no logo, not a three-view, not side by side')
+  // 画风收口：与装备三视图同一「无人物」画风尾
+  return `${parts.join(', ')}${buildEquipArtStyleSuffix(char.dramaStyle)}`
+}
+
+/** 单件道具图负面提示词：排除人物/手持/三视角拼接/多物品/文字（单品入库基准） */
+export function buildItemNegative(dramaStyle?: string | null): string {
+  const base = buildCharacterNegativePrompt(dramaStyle)
+  return `${base}, person, human figure, character, hands, body parts, mannequin, ghost mannequin, side by side, three views, multi view, turnaround, multiple items, different objects, duplicate, frame border, grid lines, panel divider, section divider, text, watermark, logo, label, cropped object, cut off object`
+}
+
+// ============================================================
+// 角色表情头像特写组（表情演出：分镜/表情参考）
+// ============================================================
+
+/**
+ * 角色表情预设（9 个默认表情）：表情演出用头像特写组。
+ * 后端在生成/回填/校验时与前端共用同一份常量，保证 key 对齐。
+ */
+export const EXPRESSION_PRESETS: Array<{ key: string; label: string; en: string }> = [
+  { key: 'smile', label: '微笑', en: 'gentle warm smile, softly curved lips, kind happy eyes' },
+  { key: 'laugh', label: '大笑', en: 'hearty open laugh, bright joyful eyes, wide laughing mouth' },
+  { key: 'mischievous', label: '俏皮', en: 'playful mischievous grin, slightly raised eyebrow, cheerful teasing look' },
+  { key: 'angry', label: '愤怒', en: 'fierce angry glare, furrowed brows, tight frowning mouth' },
+  { key: 'sad', label: '悲伤', en: 'sad melancholy face, downcast eyes, drooping mouth corners' },
+  { key: 'surprised', label: '惊讶', en: 'surprised wide eyes, raised eyebrows, slightly open mouth' },
+  { key: 'tearful', label: '泪目', en: 'teary glistening eyes about to cry, reddened rims, sorrowful trembling lips' },
+  { key: 'serious', label: '严肃', en: 'serious stern neutral face, calm unreadable gaze, pressed lips' },
+  { key: 'sobbing', label: '大哭', en: 'crying hard, eyes squeezed shut, tears streaming down cheeks, open wailing mouth' },
+]
+
+/** 按 key 查找表情预设；未知 key 返回空（调用方需自行兜底） */
+export function findExpressionPreset(key: string): { key: string; label: string; en: string } | undefined {
+  return EXPRESSION_PRESETS.find(p => p.key === key)
+}
+
+/**
+ * 构建单个表情头像特写 prompt（头肩特写 + 表情 + 服装一致性）。
+ *
+ * 设计原则：表情图用于「表情演出/参考」，构图必须单一表情、单一人物、
+ * 头肩取景，避免生成整身/多人/表情拼接；同时保留角色核心五官与服装，
+ * 保证与立绘/三视图是同一个人。
+ */
+export function buildExpressionImagePrompt(
+  char: {
+    name: string
+    appearance?: string | null
+    coreFeatures?: string | null
+    description?: string | null
+    clothing?: string | null
+    costumes?: string | null
+  },
+  expressionKey: string,
+  dramaStyle?: string | null,
+): string {
+  const preset = findExpressionPreset(expressionKey)
+  const parts: string[] = []
+  parts.push(`close-up portrait headshot of ${char.name}`)
   const core = parseCoreFeatures(char.coreFeatures)
-  if (core.length) parts.push(`matching the character's core features: ${core.join(', ')}`)
-  if (char.appearance) parts.push(`character appearance: ${char.appearance}`)
-  parts.push(`for the character ${char.name}`)
-  return `${parts.join(', ')}, ${VISUAL_STYLE_CHARACTER}, ${VISUAL_STYLE_MASTER}`
+  if (core.length) parts.push(`core features: ${core.join(', ')}`)
+  if (char.appearance) parts.push(char.appearance)
+  const costume = char.clothing || parseCostumes(char.costumes)[0]
+  if (costume) parts.push(`wearing ${costume}`)
+  parts.push(`facial expression: ${preset?.en || 'neutral calm expression'}`)
+  parts.push('looking directly at viewer, head and shoulders framing, single face only')
+  // 画风收口：与角色立绘保持一致（同剧统一）
+  return `${parts.join(', ')}${buildCharacterArtStyleSuffix(dramaStyle)}`
+}
+
+/**
+ * 表情头像特写负面提示词：在画风负面基础上排除多人/多表情/拼接/整身，
+ * 保证一张图只有单个头肩、单一表情。
+ */
+export function buildExpressionNegative(dramaStyle?: string | null): string {
+  const base = buildCharacterNegativePrompt(dramaStyle)
+  return `${base}, multiple faces, multiple expressions, two or more different expressions, extra person, duplicate character, group shot, collage, split image, grid layout, side-by-side panels, body below shoulders, full body shot, whole figure, text, watermark, logo, label`
 }
 
 // ============================================================
