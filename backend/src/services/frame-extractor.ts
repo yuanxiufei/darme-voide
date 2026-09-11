@@ -1,8 +1,13 @@
 /**
  * 尾帧提取（连续性状态机 v3 的衔接链路）
  *
- * 视频生成完成后，从已产出视频中提取真实尾帧写入 storyboards.last_frame_image，
+ * 视频生成完成后，从已产出视频中提取真实尾帧写入 storyboards.tail_frame_image，
  * 供下一镜头视频生成时作为「上一镜尾帧」起帧参考（submitMissingVideos 的 tail-link）。
+ *
+ * 语义边界（2026-09-03 明确）：
+ * - last_frame_image  = 设计尾帧（grid first_last / 手动上传），是 FL2VA 锁定结束画面的目标，由用户/设计流程写。
+ * - tail_frame_image  = 真实尾帧（视频的实际末帧），是可运行产物，随视频重生成随时刷新；
+ *   分离后真实尾帧永远不会冒充设计尾帧污染 shot-router 的 FL2VA 决策。
  */
 import ffmpeg from 'fluent-ffmpeg'
 import fs from 'fs'
@@ -53,7 +58,7 @@ async function extractTailFrame(videoUrl: string): Promise<string | null> {
   }
 }
 
-/** 提取本集所有「已有视频但缺尾帧」分镜的尾帧；返回成功提取数量（幂等） */
+/** 提取本集所有「已有视频」分镜的真实尾帧；返回成功提取数量（幂等，重生成视频后重跑会刷新） */
 export async function extractStoryboardTailFrames(episodeId: number, dramaId: number): Promise<number> {
   const sbs = db
     .select()
@@ -63,11 +68,12 @@ export async function extractStoryboardTailFrames(episodeId: number, dramaId: nu
   let done = 0
   let failed = 0
   for (const sb of sbs) {
-    if (!sb.videoUrl || sb.lastFrameImage) continue
+    if (!sb.videoUrl) continue
     const frame = await extractTailFrame(sb.videoUrl)
     if (!frame) { failed++; continue }
+    // 只写 tail_frame_image：设计尾帧（last_frame_image）永不被真实产物覆盖
     db.update(schema.storyboards)
-      .set({ lastFrameImage: frame, updatedAt: now() })
+      .set({ tailFrameImage: frame, updatedAt: now() })
       .where(eq(schema.storyboards.id, sb.id))
       .run()
     done++

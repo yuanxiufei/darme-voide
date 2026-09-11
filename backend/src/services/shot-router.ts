@@ -35,8 +35,8 @@ export interface RouteDecision {
   route: ShotRoute
   /** 决策原因（人类可读，写入 route_reason 供可复现账本追溯） */
   reason: string
-  /** 决策对应的 reference_mode（映射到生成请求参数） */
-  referenceMode: 'none' | 'single' | 'multiple'
+  /** 决策对应的 reference_mode（映射到生成请求参数；first_last = FL2VA 首尾帧） */
+  referenceMode: 'none' | 'single' | 'first_last' | 'multiple'
 }
 
 /** 对话/多人/争吵类场景关键词（R2V 多参考图适用） */
@@ -115,7 +115,7 @@ export function decideShotRoute(input: RouteDecisionInput): RouteDecision {
     const decision: RouteDecision = {
       route: 'first_last_frame',
       reason: `分镜配置了尾帧目标，采用首尾帧连接动画化（FL2VA）以锁定结束画面`,
-      referenceMode: 'single',
+      referenceMode: 'first_last',
     }
     persistRoute(storyboardId, decision)
     return decision

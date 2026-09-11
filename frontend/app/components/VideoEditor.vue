@@ -297,7 +297,8 @@ function toggleCharId(id: number) {
 // ===== 相邻镜头首尾帧一键复用（对齐 gcc KeyframeEditor 的 copyPrevious/copyNext，保证镜头间视觉连贯）=====
 // 兼容后端 snake_case（first_frame_image）与前端 camelCase（firstFrameImage）两种字段形态
 const getSbFirst = (s: any) => s?.first_frame_image || s?.firstFrameImage || s?.first_frame_url || s?.firstFrameUrl || null
-const getSbLast = (s: any) => s?.last_frame_image || s?.lastFrameImage || s?.last_frame_url || s?.lastFrameUrl || null
+// 取上一镜尾帧做顺接参考时，优先真实尾帧（tail_frame_image = 视频实际末帧，像素级连续），设计尾帧兜底
+const getSbLast = (s: any) => s?.tail_frame_image || s?.tailFrameImage || s?.last_frame_image || s?.lastFrameImage || s?.last_frame_url || s?.lastFrameUrl || null
 
 const prevLastFrameUrl = computed(() => getSbLast(props.neighbors?.prev))
 const nextFirstFrameUrl = computed(() => getSbFirst(props.neighbors?.next))

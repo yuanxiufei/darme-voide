@@ -169,6 +169,9 @@ export const storyboards = sqliteTable('storyboards', {
   composedImage: text('composed_image'),
   firstFrameImage: text('first_frame_image'),
   lastFrameImage: text('last_frame_image'),
+  // 真实尾帧（frame-extractor 从已产出视频提取，供下一镜 tail-link 顺接起帧）：
+  // 与 lastFrameImage（设计尾帧，FL2VA 锁定结束画面）语义分离，避免真实尾帧污染路由决策。
+  tailFrameImage: text('tail_frame_image'),
   // 关键帧扩展（对齐参考项目 8-16 张关键帧理念）：中段关键帧锁定动作/道具/机位中间态
   keyframePrompt: text('keyframe_prompt'),
   keyframeImage: text('keyframe_image'),

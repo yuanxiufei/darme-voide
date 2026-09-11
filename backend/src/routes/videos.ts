@@ -9,7 +9,7 @@ import {
   buildStoryboardVideoPrompt,
   getStoryboardCharacterAppearances,
   getStoryboardSceneDescription,
-  getStoryboardCharacterImageUrls,
+  getStoryboardReferenceImages,
   getStoryboardReferenceAudioUrls,
   VIDEO_NEGATIVE,
 } from '../shared/prompt-utils.js'
@@ -54,10 +54,11 @@ app.post('/', async (c) => {
             backgroundAudio: sb.soundEffect, // H3 原生 [background_audio] 场景声标记
           })
 
-          // 自动添加角色图片作为 reference_images（首帧已由前端传）
+          // 自动添加参考图作为 reference_images（角色立绘 + 场景图 + 道具图，与 auto-pipeline 批量
+          // 路径同源，保证手动/批量两种触发方式收到同一套跨集一致性参考；首帧已由前端传）
           if (!referenceImageUrls?.length) {
-            const charUrls = getStoryboardCharacterImageUrls(sbId)
-            if (charUrls.length) referenceImageUrls = charUrls
+            const sbRefs = getStoryboardReferenceImages(sbId)
+            if (sbRefs.length) referenceImageUrls = sbRefs
           }
         }
 
@@ -79,7 +80,7 @@ app.post('/', async (c) => {
 
     // 逐镜路由（对齐 H3-Codex-Drama shot routing）：手动提交时按分镜属性决策生成路线，
     // 并回写 storyboards.route / route_reason + video_generations 快照（供可复现账本追溯）。
-    let routeDecision: { route?: string; reason?: string; referenceMode?: 'none' | 'single' | 'multiple' } = {}
+    let routeDecision: { route?: string; reason?: string; referenceMode?: 'none' | 'single' | 'first_last' | 'multiple' } = {}
     if (body.storyboard_id) {
       const sbForRoute = db.select().from(schema.storyboards)
         .where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()[0]
@@ -104,14 +105,23 @@ app.post('/', async (c) => {
       }
     }
 
+    // referenceMode 兜底对齐 adapter 契约：first_last（FL2VA）必须首尾帧字段齐备才会被
+    // adapter 派发；手动请求只给单帧而路由默认值落 first_last 时降级 single 用 image_url 起帧，
+    // 避免产生缺首帧的坏请求。
+    const referenceMode = body.reference_mode || routeDecision.referenceMode || 'none'
+    const effectiveMode =
+      referenceMode === 'first_last' && !(firstFrameUrl && body.last_frame_url)
+        ? (firstFrameUrl || body.image_url ? 'single' : 'none')
+        : referenceMode
+
     const id = await generateVideo({
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
       prompt,
       negativePrompt: body.negative_prompt || VIDEO_NEGATIVE,
       model: body.model,
-      referenceMode: body.reference_mode || routeDecision.referenceMode,
-      imageUrl: body.image_url,
+      referenceMode: effectiveMode,
+      imageUrl: effectiveMode === 'first_last' ? undefined : body.image_url,
       firstFrameUrl,
       lastFrameUrl: body.last_frame_url,
       referenceImageUrls,

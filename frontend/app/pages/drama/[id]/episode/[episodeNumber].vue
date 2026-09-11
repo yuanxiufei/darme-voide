@@ -4249,9 +4249,10 @@ function getShotReferenceImages(sb) {
     pushRef(char?.image_url || char?.imageUrl)
   }
   // 镜头连贯：上一镜头的尾帧作为当前镜头参考，让相邻镜头视觉延续
+  // （优先真实尾帧 tail_frame_image = 视频实际末帧，设计尾帧兜底）
   const prev = getPreviousStoryboard(sb)
   if (prev) {
-    pushRef(getLastFrame(prev))
+    pushRef(prev?.tail_frame_image || prev?.tailFrameImage || getLastFrame(prev))
     pushRef(getFirstFrame(prev))
   }
   for (const ref of getRefs(sb)) {
@@ -4341,8 +4342,9 @@ async function genVid(sb) {
   const first = getFirstFrame(sb)
   const last = getLastFrame(sb)
   // 镜头连贯：当前镜头无首帧时，回退用上一镜头的尾帧作参考
+  // （优先真实尾帧 tail_frame_image = 视频实际末帧，保证像素级顺接；设计尾帧兜底）
   const prev = getPreviousStoryboard(sb)
-  const prevLast = prev ? getLastFrame(prev) : null
+  const prevLast = prev ? (prev?.tail_frame_image || prev?.tailFrameImage || getLastFrame(prev)) : null
   const prevFirst = prev ? getFirstFrame(prev) : null
   const effFirst = first || prevLast || prevFirst
   const refs = getRefs(sb)

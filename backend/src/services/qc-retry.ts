@@ -130,13 +130,19 @@ export async function retryFailedStoryboard(storyboardId: number): Promise<QcRet
   const referenceAudioUrls = isDialogue && provider === 'minimax' ? getStoryboardReferenceAudioUrls(storyboardId) : []
 
   const videoPrompt = finalSb?.videoPrompt || finalSb?.imagePrompt || finalSb?.description || '镜头缓慢推进，人物自然表演'
+  // FL2VA（首尾帧连接）镜头重跑：只要存在设计尾帧（last_frame_image，FL2VA 锁定结束画面的
+  // 唯一依据；真实尾帧 tail_frame_image 不参与决策）就保留 first_last 模式，以新首帧图起帧；
+  // 否则按 R2V（多参考图）或 I2V（单帧起帧）沿用现状。
+  const isFl2vaRetry = !!finalSb?.lastFrameImage
   const videoId = await generateVideo({
     storyboardId,
     dramaId: ep.dramaId,
     prompt: videoPrompt,
     negativePrompt: VIDEO_NEGATIVE,
-    referenceMode: referenceImages.length ? 'multiple' : 'single',
-    imageUrl: finalSb?.firstFrameImage || undefined,
+    referenceMode: isFl2vaRetry ? 'first_last' : (referenceImages.length ? 'multiple' : 'single'),
+    imageUrl: isFl2vaRetry ? undefined : (finalSb?.firstFrameImage || undefined),
+    firstFrameUrl: isFl2vaRetry ? (finalSb?.firstFrameImage || undefined) : undefined,
+    lastFrameUrl: isFl2vaRetry ? (finalSb?.lastFrameImage || undefined) : undefined,
     referenceImageUrls: referenceImages.length ? referenceImages : undefined,
     sceneType: sceneType || undefined,
     referenceAudioUrls: referenceAudioUrls.length ? referenceAudioUrls : undefined,

@@ -116,6 +116,11 @@ export function collectDramaExportFiles(dramaId: number, scope: ExportScope): Ex
           const abs = toLocalAbsPath(sb.lastFrameImage)
           if (abs) files.push({ absPath: abs, zipPath: `${dir}/sb${sbLabel}_last.${extOf(sb.lastFrameImage)}` })
         }
+        // 真实尾帧（视频末帧）单独导出，避免与设计尾帧混用
+        if (sb.tailFrameImage) {
+          const abs = toLocalAbsPath(sb.tailFrameImage)
+          if (abs) files.push({ absPath: abs, zipPath: `${dir}/sb${sbLabel}_tail.${extOf(sb.tailFrameImage)}` })
+        }
       }
     }
   }

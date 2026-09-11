@@ -688,6 +688,9 @@ function runMigrations(): void {
   ensureColumn('characters', 'item_images', 'TEXT')
   ensureColumn('image_generations', 'item_type', 'TEXT')
 
+  // ====== 真实尾帧（tail_frame_image，与设计尾帧 last_frame_image 分离）======
+  ensureColumn('storyboards', 'tail_frame_image', 'TEXT')
+
   // ====== 移除已废弃的「角色随身道具」列（2026-09-02 道具概念彻底下线）======
   dropColumnIfExists('characters', 'props')
   dropColumnIfExists('characters', 'prop_prompt')

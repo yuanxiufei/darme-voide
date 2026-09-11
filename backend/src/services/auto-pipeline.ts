@@ -319,12 +319,12 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
     // H3 音视频联合生成：对话类镜头带出场角色声线样本作为参考音频（Ref2VA reference conditioning）
     const referenceAudioUrls = isDialogue && provider === 'minimax' ? getStoryboardReferenceAudioUrls(sb.id) : []
 
-    // 尾帧衔接（连续性状态机 v3）：同场景顺接时，以「上一镜尾帧」作为本镜视频起帧，
+    // 尾帧衔接（连续性状态机 v3）：同场景顺接时，以「上一镜真实尾帧」作为本镜视频起帧，
     // 让相邻镜头画面从上一镜结束处自然延续，避免跨镜跳变。
-    // 场景切换 / 硬切 / 无上一镜尾帧时，回退为本镜首帧图起帧。
+    // 真实尾帧（tail_frame_image，视频末帧）优先，其次设计尾帧；都没有或跨场景时回退本镜首帧图起帧。
     const prev = i > 0 ? sbs[i - 1] : undefined
     const sameScene = prev != null && prev.sceneId != null && prev.sceneId === sb.sceneId
-    const prevTail = sameScene ? prev.lastFrameImage : undefined
+    const prevTail = sameScene ? (prev.tailFrameImage || prev.lastFrameImage) : undefined
     const anchorImage = prevTail || sb.firstFrameImage
     if (prevTail && prev) {
       logTaskProgress('AutoPipeline', 'tail-link', { storyboardId: sb.id, linkedFrom: prev.id, fromTail: prevTail })
@@ -347,15 +347,20 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
     })
 
     const prompt = sb.videoPrompt || sb.imagePrompt || sb.description || '镜头缓慢推进，人物自然表演'
+    // FL2VA（首尾帧连接）：video adapter 契约要求 referenceMode='first_last' 才会派发
+    // first_frame_image / last_frame_image。决策为 first_last 时：起帧 = 同场景顺接的真实尾帧
+    // （连续性）或本镜设计首帧；尾帧目标 = 本镜 last_frame_image（grid 模式锁定结束画面）。
+    // 其余模式（single 顺接起帧 / multiple 多参考图）沿用现状，imageUrl 起帧。
+    const isFirstLast = routeDecision.referenceMode === 'first_last'
     await generateVideo({
       storyboardId: sb.id,
       dramaId,
       prompt,
       negativePrompt: VIDEO_NEGATIVE,
       referenceMode: routeDecision.referenceMode,
-      imageUrl: anchorImage,
-      firstFrameUrl: prevTail ? sb.firstFrameImage : undefined, // 顺接时本镜首帧作为补充首帧参考
-      lastFrameUrl: sb.lastFrameImage || undefined,             // 尾帧目标（grid 模式已生成时锁定结束画面）
+      imageUrl: isFirstLast ? undefined : anchorImage,
+      firstFrameUrl: isFirstLast ? (prevTail || sb.firstFrameImage || undefined) : (prevTail ? sb.firstFrameImage : undefined),
+      lastFrameUrl: sb.lastFrameImage || undefined, // 尾帧目标（grid 模式已生成时锁定结束画面）
       referenceImageUrls: referenceImages.length ? referenceImages : undefined,
       sceneType: sceneType || undefined,
       referenceAudioUrls: referenceAudioUrls.length ? referenceAudioUrls : undefined,

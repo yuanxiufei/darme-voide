@@ -86,6 +86,8 @@ export interface QcShotEntry {
   composedVideoUrl: string | null
   ttsAudioUrl: string | null
   firstFrameImage: string | null
+  /** 真实尾帧（视频实际末帧，tail-link 顺接用） */
+  tailFrameImage: string | null
   lastFrameImage: string | null
   keyframeImage: string | null
   videoGen: VideoGenInfo | null
@@ -337,6 +339,7 @@ export async function buildQcReport(
       composedVideoUrl: sb.composedVideoUrl,
       ttsAudioUrl: sb.ttsAudioUrl,
       firstFrameImage: sb.firstFrameImage,
+      tailFrameImage: sb.tailFrameImage,
       lastFrameImage: sb.lastFrameImage,
       keyframeImage: sb.keyframeImage,
       videoGen: vg
@@ -502,7 +505,7 @@ export async function buildContactSheetHtml(dramaId: number, opts?: { episodeId?
     L.push(`<div class="card">
       <div class="header"><span>#${s.storyboardNumber} ${escapeHtml(s.title || '')}</span>
       ${s.route ? `<span class="route-tag${s.route === 'blocked' ? ' bad' : ''}">${escapeHtml(s.route)}</span>` : ''}</div>
-      <div class="thumbs">${imgTagOrPlaceholder(s.firstFrameImage, '首帧')}${imgTagOrPlaceholder(s.lastFrameImage, '尾帧')}</div>
+      <div class="thumbs">${imgTagOrPlaceholder(s.firstFrameImage, '首帧')}${imgTagOrPlaceholder(s.tailFrameImage || s.lastFrameImage, '尾帧')}</div>
       <div class="info">
         <div>${escapeHtml(s.shotType || '—')} / ${escapeHtml(s.angle || '—')} / ${escapeHtml(s.movement || '—')} ｜ 时长 ${s.durationSec?.toFixed(1) || '—'}s</div>
         <div>视频：${s.videoUrl ? '✅ 已生成' : '—'} ｜ 合成：${s.composedVideoUrl ? '✅' : '—'} ｜ take ${s.takeCount}/${s.takeBudget}</div>
