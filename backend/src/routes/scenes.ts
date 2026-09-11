@@ -105,15 +105,19 @@ app.post('/:id/generate-image', async (c) => {
 
   // 跨集一致：自动注入同剧同地点已生成的场景图作为参考图，让同地点不同时段/不同集的新场景
   // 继承既有空间布局与材质（仅按提示词变化光效时段），避免同一地点跨集各出一版视觉漂移。
+  // 注意：地点为空时必须跳过——否则 normLoc === '' 会命中所有同样「无地点」的场景，
+  // 把毫不相关的画面当参考图注入，造成跨场景串图。
   const normLoc = (scene.location || '').trim()
-  const locationRefs = db
-    .select()
-    .from(schema.scenes)
-    .where(and(eq(schema.scenes.dramaId, scene.dramaId), isNull(schema.scenes.deletedAt)))
-    .all()
-    .filter(s => s.id !== scene.id && (s.location || '').trim() === normLoc && !!s.imageUrl)
-    .slice(0, 2)
-    .map(s => s.imageUrl!)
+  const locationRefs = normLoc
+    ? db
+      .select()
+      .from(schema.scenes)
+      .where(and(eq(schema.scenes.dramaId, scene.dramaId), isNull(schema.scenes.deletedAt)))
+      .all()
+      .filter(s => s.id !== scene.id && (s.location || '').trim() === normLoc && !!s.imageUrl)
+      .slice(0, 2)
+      .map(s => s.imageUrl!)
+    : []
   try {
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep?.id, dramaId: scene.dramaId, location: scene.location, model: body.model || 'default', locationRefs: locationRefs.length })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()

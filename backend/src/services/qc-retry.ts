@@ -130,10 +130,10 @@ export async function retryFailedStoryboard(storyboardId: number): Promise<QcRet
   const referenceAudioUrls = isDialogue && provider === 'minimax' ? getStoryboardReferenceAudioUrls(storyboardId) : []
 
   const videoPrompt = finalSb?.videoPrompt || finalSb?.imagePrompt || finalSb?.description || '镜头缓慢推进，人物自然表演'
-  // FL2VA（首尾帧连接）镜头重跑：只要存在设计尾帧（last_frame_image，FL2VA 锁定结束画面的
-  // 唯一依据；真实尾帧 tail_frame_image 不参与决策）就保留 first_last 模式，以新首帧图起帧；
-  // 否则按 R2V（多参考图）或 I2V（单帧起帧）沿用现状。
-  const isFl2vaRetry = !!finalSb?.lastFrameImage
+  // FL2VA（首尾帧连接）镜头重跑：设计首帧与设计尾帧必须同时存在才能走 first_last——adapter 在
+  // first_last 分支缺任一端都会发出坏请求（MiniMax 侧缺 first_frame_image 直接报错）。真实尾帧
+  // tail_frame_image 不参与决策（它是可运行产物，不代表设计目标）。否则按 R2V 或 I2V 沿用现状。
+  const isFl2vaRetry = !!finalSb?.lastFrameImage && !!finalSb?.firstFrameImage
   const videoId = await generateVideo({
     storyboardId,
     dramaId: ep.dramaId,

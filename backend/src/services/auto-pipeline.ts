@@ -448,7 +448,8 @@ async function runVideoStage(episodeId: number, dramaId: number, opts: AutoPipel
   const submitted = await submitMissingVideos(episodeId, dramaId, configId)
   logTaskProgress('AutoPipeline', 'video-stage', { episodeId, submitted })
   const ok = await waitForVideos(episodeId, dramaId)
-  // 尾帧衔接：从已完成视频提取真实尾帧写入 last_frame_image，供下一镜/重跑衔接参考
+  // 尾帧衔接：从已完成视频提取真实末帧写入 tail_frame_image（真实尾帧，供下一镜顺接与重跑衔接），
+  // 不写 last_frame_image——设计尾帧是 FL2VA 的决策依据，不能被产物覆盖
   await extractStoryboardTailFrames(episodeId, dramaId)
   if (!ok) {
     const pending = getStoryboards(episodeId).filter((sb) => !sb.videoUrl && !isStoryboardBlocked(sb.id)).length

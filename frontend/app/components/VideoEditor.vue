@@ -213,12 +213,23 @@ const paddedIdx = computed(() => {
   return String(idx).padStart(2, '0')
 })
 
+// reference_mode 必须落在后端 adapter 认识的枚举内（none/single/first_last/multiple）。
+// 历史上曾用 'first' 表示「首帧驱动」，但 adapter 三个分支都不识别它 → 请求实际不带任何
+// 参考帧，退化成纯文生视频，故统一收敛为 'single'（其语义就是单帧起图 = 首帧驱动）。
 const refModeOptions = [
-  { value: '', label: '使用图片' },
-  { value: 'single', label: '单图参考' },
-  { value: 'first', label: '首帧驱动' },
+  { value: '', label: '使用图片（自动）' },
+  { value: 'single', label: '首帧驱动' },
   { value: 'first_last', label: '首帧+尾帧' },
+  { value: 'multiple', label: '多参考图' },
 ]
+
+// 归一历史记录里的非法 / 别名 reference_mode，避免回填后再次发出 adapter 不识别的模式
+function normalizeRefMode(mode?: string | null): string {
+  const v = String(mode || '').trim()
+  if (v === 'first') return 'single'
+  if (v === 'last') return 'first_last'
+  return v
+}
 
 const aspectRatioOptions = [
   { value: '16:9', label: '横屏', desc: '16:9', icon: Monitor },
@@ -268,7 +279,8 @@ watch(() => props.visible && (props.storyboard || props.videoRecord), () => {
   const vr = props.videoRecord
   if (!sb) return
   form.model = vr?.model || ''
-  form.referenceMode = vr?.referenceMode || vr?.reference_mode || 'first'
+  // 空值表示「自动」：交给后端按分镜资产（首帧/尾帧/参考图）决策路线
+  form.referenceMode = normalizeRefMode(vr?.referenceMode || vr?.reference_mode)
   form.duration = vr?.duration || sb.duration || 10
   form.aspectRatio = vr?.aspectRatio || vr?.aspect_ratio || '16:9'
   form.prompt = vr?.prompt || sb.videoPrompt || sb.video_prompt || ''
@@ -479,12 +491,19 @@ async function regenerate() {
         prompt: form.prompt,
         negative_prompt: form.negativePrompt || undefined,
         model: form.model || undefined,
-        reference_mode: form.referenceMode || 'first',
+        // 空值 = 自动：交给后端按分镜资产（首帧/尾帧/参考图）决策路线。
+        // 此处曾兜底成 'first'，而 adapter 不识别该值 → 请求不带任何参考帧。
+        reference_mode: form.referenceMode || undefined,
         duration: form.duration,
         aspect_ratio: form.aspectRatio || undefined,
         character_ids: charIdsPayload,
         first_frame_url: form.firstFrameUrl || undefined,
         last_frame_url: form.lastFrameUrl || undefined,
+        // 多参考图模式回传已有参考图；其余模式留空，由后端按分镜自动注入角色/场景/道具图
+        reference_image_urls: form.referenceMode === 'multiple'
+          && Array.isArray(form.referenceImageUrls) && form.referenceImageUrls.length
+          ? form.referenceImageUrls
+          : undefined,
         config_id: props.configId,  // ✅ 传递配置 ID
       })
     }

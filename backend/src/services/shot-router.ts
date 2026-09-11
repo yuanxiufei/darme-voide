@@ -68,7 +68,8 @@ export interface RouteDecisionInput {
  *
  * 优先级（高 → 低）：
  * 1. blocked：资产门禁阻断
- * 2. text_to_video：无首帧（纯文本生成）
+ * 2. text_to_video：无首帧（纯文本生成）；若同场景顺接给了上一镜尾帧，则改用
+ *    first_frame_to_video 以其起帧（I2V）
  * 3. first_last_frame：有尾帧目标（FL2VA 锁定结束画面）
  * 4. reference_to_video：对话/多人场景 + 多参考提供商 + 有参考图，或 H3 有参考音频（Ref2VA）
  * 5. keyframe_to_video：有中段关键帧图
@@ -99,8 +100,20 @@ export function decideShotRoute(input: RouteDecisionInput): RouteDecision {
     return decision
   }
 
-  // 2. 无首帧：只能纯文本生成（T2V）
+  // 2. 无首帧：若同场景顺接提供了上一镜尾帧，则以它起帧（I2V，保证镜头间像素级连续）；
+  //    否则只能纯文本生成（T2V）。
+  //    注意：prevTail 必须在 T2V 之前消费——否则 referenceMode 落 none，调用方传的顺接帧
+  //    不会被 adapter 派发，尾帧顺接形同虚设。
   if (!firstFrameImage) {
+    if (input.prevTail) {
+      const decision: RouteDecision = {
+        route: 'first_frame_to_video',
+        reason: '分镜无首帧图，但同场景顺接提供上一镜尾帧，以其起帧的图生视频（I2V）',
+        referenceMode: 'single',
+      }
+      persistRoute(storyboardId, decision)
+      return decision
+    }
     const decision: RouteDecision = {
       route: 'text_to_video',
       reason: '分镜无首帧图，采用纯文本提示词生成（T2V）',

@@ -507,7 +507,7 @@
               <div class="merge-char-head">
                 <div>
                   <div class="merge-char-title">把「{{ mergeSourceChar.name }}」并入全剧已有角色</div>
-                  <div class="merge-char-sub">目标中为空的形象/声音等资产会从源回填；本集/分镜关联与生成历史迁移到目标后，源角色将被合并删除。</div>
+                  <div class="merge-char-sub">目标中为空的形象/声音等资产会从源回填；本集/分镜关联与生成历史迁移到目标后，源角色将被合并删除。标有「疑似同人」的候选仅名称相近，请确认是同一人物后再合并。</div>
                 </div>
                 <button class="btn btn-ghost btn-icon" :disabled="mergeBusy" @click="closeMergePicker">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -515,7 +515,7 @@
               </div>
               <div class="merge-char-list">
                 <button
-                  v-for="t in mergeCandidates()"
+                  v-for="t in pickerCandidates()"
                   :key="t.id"
                   class="merge-char-item"
                   :disabled="mergeBusy"
@@ -523,10 +523,15 @@
                 >
                   <span class="char-avatar">{{ (t.name || '?')[0] }}</span>
                   <span class="merge-char-item-name">{{ t.name }}</span>
+                  <span
+                    v-if="!isExactNameMatch(mergeSourceChar, t)"
+                    class="tag tag-warning"
+                    :title="`名称与「${mergeSourceChar?.name || '?'}」不同但疑似同一人物，请确认后再合并`"
+                  >疑似同人</span>
                   <span class="role-tag" :class="roleTagCls(inferCharRoleTag(t))">{{ inferCharRoleTag(t) || t.role || '角色' }}</span>
                   <span class="tag" :class="(t.voice_style || t.voiceStyle) ? 'tag-success' : ''">{{ (t.voice_style || t.voiceStyle) ? '已分配音色' : '待分配' }}</span>
                 </button>
-                <div v-if="!mergeCandidates().length" class="merge-char-empty">暂无其他可并入的角色</div>
+                <div v-if="!pickerCandidates().length" class="merge-char-empty">暂无其他可并入的角色</div>
               </div>
             </div>
           </div>
@@ -3316,13 +3321,51 @@ const mergeBusy = ref(false)
 function normName(n) {
   return String(n || '').replace(/\s+/g, '').toLowerCase()
 }
+// 称谓词缀：与后端 shared/character-match.ts 保持一致（前后端无共享包，此处同步维护）。
+// 后端已能用这套规则把台词说话人「阿晚/林小姐」归一到「林晚」，若合并入口只认全名相同，
+// 这类别名重复就永远没有修复入口——所以候选列表复用同一套判定。
+const ALIAS_TITLE_SUFFIX = /(?:小姐|夫人|太太|先生|公子|老爷|少爷|姑娘|师傅|师父|前辈|老师|阿姨|哥哥|姐姐|妹妹|弟弟|妈妈|爸爸|母亲|父亲|奶奶|爷爷|祖母|祖父)$/
+const ALIAS_TITLE_PREFIX = /^(?:阿|小|老)/
+function stripAliasAffixes(name) {
+  let out = String(name || '').trim()
+  let prev = ''
+  while (prev !== out && out.length > 0) {
+    prev = out
+    out = out.replace(ALIAS_TITLE_SUFFIX, '').replace(ALIAS_TITLE_PREFIX, '')
+  }
+  return out
+}
+/** 精确同名（高置信重复记录） */
 function sameNameCandidates(c) {
   const cNorm = normName(c?.name)
   if (!cNorm) return []
   return (drama.value?.characters || []).filter(t => t.id !== c?.id && normName(t.name) === cNorm)
 }
+/** 别名疑似同人：去称谓词缀后同名，或双向包含（单字不比较，避免误配） */
+function aliasCandidates(c) {
+  const cNorm = normName(c?.name)
+  if (!cNorm) return []
+  const cBase = stripAliasAffixes(cNorm) || cNorm
+  return (drama.value?.characters || []).filter((t) => {
+    if (t.id === c?.id) return false
+    const tNorm = normName(t.name)
+    if (!tNorm || tNorm === cNorm) return false
+    const tBase = stripAliasAffixes(tNorm) || tNorm
+    if (tBase === cBase) return true
+    return (cBase.length >= 2 && tBase.includes(cBase)) || (tBase.length >= 2 && cBase.includes(tBase))
+  })
+}
+/** 候选 = 精确同名 + 别名疑似，同名的排前面 */
+function mergeCandidates(c) {
+  return [...sameNameCandidates(c), ...aliasCandidates(c)]
+}
 function hasMergeCandidates(c) {
-  return sameNameCandidates(c).length > 0
+  return mergeCandidates(c).length > 0
+}
+/** 是否为精确同名；否则视为「疑似同人」，列表里给出提示标签后再人工确认 */
+function isExactNameMatch(a, b) {
+  const na = normName(a?.name)
+  return !!na && na === normName(b?.name)
 }
 function openMergePicker(c) {
   mergeSourceChar.value = c
@@ -3331,10 +3374,10 @@ function closeMergePicker() {
   if (mergeBusy.value) return
   mergeSourceChar.value = null
 }
-function mergeCandidates() {
+/** 当前待合并角色的候选列表（模板用） */
+function pickerCandidates() {
   const s = mergeSourceChar.value
-  if (!s) return []
-  return sameNameCandidates(s)
+  return s ? mergeCandidates(s) : []
 }
 async function mergeInto(target) {
   const s = mergeSourceChar.value

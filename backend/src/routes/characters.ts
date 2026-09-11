@@ -317,8 +317,41 @@ app.post('/:id/merge', async (c) => {
 
     // 4) 生成历史 / 资产版本归属迁移
     db.update(schema.imageGenerations).set({ characterId: targetId }).where(eq(schema.imageGenerations.characterId, id)).run()
-    db.update(schema.assetVersions).set({ assetId: targetId })
-      .where(and(eq(schema.assetVersions.assetType, 'character'), eq(schema.assetVersions.assetId, id))).run()
+    // asset_versions 对 (asset_type, asset_id, media_type, frame_type) 没有唯一约束，直接改挂会让
+    // source 的 v1/v2 与 target 的 v1/v2 撞号，且同组出现多条 status='current'，前端版本列表出现
+    // 重号、「回滚到 vN」语义歧义。这里按 (mediaType, frameType) 分组把 source 版本号接续到 target
+    // 之后，并入的历史统一置为 historical；target 该分组原本没有 current 时补最新一条为 current。
+    const srcVersions = db.select().from(schema.assetVersions)
+      .where(and(eq(schema.assetVersions.assetType, 'character'), eq(schema.assetVersions.assetId, id))).all()
+    if (srcVersions.length) {
+      const tgtVersions = db.select().from(schema.assetVersions)
+        .where(and(eq(schema.assetVersions.assetType, 'character'), eq(schema.assetVersions.assetId, targetId))).all()
+      const groupKey = (v: { mediaType: string; frameType: string | null }) => `${v.mediaType}::${v.frameType ?? ''}`
+      const nextByGroup = new Map<string, number>()
+      const currentGroups = new Set<string>()
+      for (const v of tgtVersions) {
+        const k = groupKey(v)
+        nextByGroup.set(k, Math.max(nextByGroup.get(k) ?? 0, v.version))
+        if (v.status === 'current') currentGroups.add(k)
+      }
+      const sorted = [...srcVersions].sort((a, b) => a.version - b.version)
+      const maxByGroup = new Map<string, number>()
+      for (const v of sorted) {
+        const k = groupKey(v)
+        maxByGroup.set(k, Math.max(maxByGroup.get(k) ?? 0, v.version))
+      }
+      for (const v of sorted) {
+        const k = groupKey(v)
+        const next = (nextByGroup.get(k) ?? 0) + 1
+        nextByGroup.set(k, next)
+        // target 从未在该位置生成过（该组无 current）时，保并入的最新一条为 current，
+        // 否则整组会只剩 historical，版本列表失去「当前生效」语义
+        const keepCurrent = !currentGroups.has(k) && v.version === maxByGroup.get(k)
+        db.update(schema.assetVersions)
+          .set({ assetId: targetId, version: next, status: keepCurrent ? 'current' : 'historical' })
+          .where(eq(schema.assetVersions.id, v.id)).run()
+      }
+    }
 
     // 5) source 软删
     db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, id)).run()

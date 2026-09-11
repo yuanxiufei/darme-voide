@@ -29,11 +29,14 @@ app.post('/', async (c) => {
     let referenceImageUrls = body.reference_image_urls
     let sceneType: string | undefined = body.scene_type
     let referenceAudioUrls: string[] | undefined = body.reference_audio_urls
+    // 分镜行：上下文注入与逐镜路由共用同一次查询，保证「决策输入」与「请求输入」同源
+    let sbRow: typeof schema.storyboards.$inferSelect | undefined = undefined
 
     // 分镜视频生成：注入角色外观+场景+风格上下文
     if (body.storyboard_id) {
       const sbId = Number(body.storyboard_id)
-      const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sbId)).all()
+      sbRow = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sbId)).all()[0]
+      const sb = sbRow
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (ep?.videoConfigId != null) configId = ep.videoConfigId
@@ -78,41 +81,55 @@ app.post('/', async (c) => {
     })
     logTaskPayload('VideoAPI', 'enriched prompt', { original: body.prompt, enriched: prompt, hasCharRefs: !!referenceImageUrls?.length })
 
+    // —— 帧来源统一：body 显式传帧优先 → 分镜已存帧兜底 ——
+    // 此前路由决策读 DB 帧、生成请求只读 body 帧，两者不同源，会出现「决策判定 first_last/single，
+    // 实发请求却一帧都不带」的坏请求（例如调用方只传 first_frame_url，而 adapter 的单帧分支只认
+    // image_url）。这里统一成同一份候选帧，决策与请求共用。
+    const sbFirstFrame = sbRow?.firstFrameImage || undefined
+    const sbLastFrame = sbRow?.lastFrameImage || undefined
+    const candFirstFrameUrl = firstFrameUrl || sbFirstFrame || undefined
+    const candLastFrameUrl = body.last_frame_url || sbLastFrame || undefined
+
     // 逐镜路由（对齐 H3-Codex-Drama shot routing）：手动提交时按分镜属性决策生成路线，
     // 并回写 storyboards.route / route_reason + video_generations 快照（供可复现账本追溯）。
     let routeDecision: { route?: string; reason?: string; referenceMode?: 'none' | 'single' | 'first_last' | 'multiple' } = {}
-    if (body.storyboard_id) {
-      const sbForRoute = db.select().from(schema.storyboards)
-        .where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()[0]
-      if (sbForRoute) {
-        const provider = (body.config_id
-          ? getConfigById(body.config_id)?.provider
-          : getActiveConfig('video')?.provider) || 'default'
-        const canMultiRef = ['volcengine', 'vidu', 'minimax'].includes(provider.toLowerCase()) || !!body.reference_mode
-        routeDecision = decideShotRoute({
-          storyboardId: sbForRoute.id,
-          sceneType: sbForRoute.sceneType,
-          firstFrameImage: sbForRoute.firstFrameImage,
-          lastFrameImage: sbForRoute.lastFrameImage,
-          keyframeImage: sbForRoute.keyframeImage,
-          blocked: sbForRoute.assetStatus === 'needs_regeneration' && !sbForRoute.firstFrameImage,
-          provider: provider || 'default',
-          canMultiRef,
-          referenceImages: referenceImageUrls || [],
-          referenceAudioUrls: referenceAudioUrls || [],
-          prevTail: body.image_url && !body.first_frame_url ? body.image_url : undefined,
-        })
-      }
+    if (sbRow) {
+      const provider = (body.config_id
+        ? getConfigById(body.config_id)?.provider
+        : getActiveConfig('video')?.provider) || 'default'
+      const canMultiRef = ['volcengine', 'vidu', 'minimax'].includes(provider.toLowerCase()) || !!body.reference_mode
+      routeDecision = decideShotRoute({
+        storyboardId: sbRow.id,
+        sceneType: sbRow.sceneType,
+        firstFrameImage: candFirstFrameUrl,
+        lastFrameImage: candLastFrameUrl,
+        keyframeImage: sbRow.keyframeImage,
+        blocked: sbRow.assetStatus === 'needs_regeneration' && !candFirstFrameUrl,
+        provider: provider || 'default',
+        canMultiRef,
+        referenceImages: referenceImageUrls || [],
+        referenceAudioUrls: referenceAudioUrls || [],
+        prevTail: body.image_url && !body.first_frame_url ? body.image_url : undefined,
+      })
     }
 
-    // referenceMode 兜底对齐 adapter 契约：first_last（FL2VA）必须首尾帧字段齐备才会被
-    // adapter 派发；手动请求只给单帧而路由默认值落 first_last 时降级 single 用 image_url 起帧，
-    // 避免产生缺首帧的坏请求。
-    const referenceMode = body.reference_mode || routeDecision.referenceMode || 'none'
+    // referenceMode 兜底对齐 adapter 契约：first_last（FL2VA）必须首尾帧齐备才会被 adapter 派发；
+    // 只有单帧可用而目标模式落 first_last 时降级 single（用首帧起图），避免产生缺首帧的坏请求。
+    const requestedMode = body.reference_mode || routeDecision.referenceMode || 'none'
     const effectiveMode =
-      referenceMode === 'first_last' && !(firstFrameUrl && body.last_frame_url)
-        ? (firstFrameUrl || body.image_url ? 'single' : 'none')
-        : referenceMode
+      requestedMode === 'first_last' && !(candFirstFrameUrl && candLastFrameUrl)
+        ? (candFirstFrameUrl || body.image_url ? 'single' : 'none')
+        : requestedMode
+
+    // 仅 single / first_last 消费帧字段（multiple 走 reference_image_urls、none 不用帧），
+    // 这两种模式不注入兜底帧，保持既有请求体不变。
+    const frameMode = effectiveMode === 'single' || effectiveMode === 'first_last'
+    const outFirstFrameUrl = frameMode ? candFirstFrameUrl : firstFrameUrl
+    const outLastFrameUrl = effectiveMode === 'first_last' ? candLastFrameUrl : body.last_frame_url
+    // adapter 单帧分支只读 imageUrl（无 first_frame_url 入参），故 single 时把首帧统一落到 imageUrl
+    const outImageUrl = effectiveMode === 'first_last'
+      ? undefined
+      : (body.image_url || (frameMode ? candFirstFrameUrl : undefined) || undefined)
 
     const id = await generateVideo({
       storyboardId: body.storyboard_id,
@@ -121,9 +138,9 @@ app.post('/', async (c) => {
       negativePrompt: body.negative_prompt || VIDEO_NEGATIVE,
       model: body.model,
       referenceMode: effectiveMode,
-      imageUrl: effectiveMode === 'first_last' ? undefined : body.image_url,
-      firstFrameUrl,
-      lastFrameUrl: body.last_frame_url,
+      imageUrl: outImageUrl,
+      firstFrameUrl: outFirstFrameUrl,
+      lastFrameUrl: outLastFrameUrl,
       referenceImageUrls,
       sceneType,
       referenceAudioUrls,
