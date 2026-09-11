@@ -102,10 +102,30 @@ app.post('/:id/generate-image', async (c) => {
       prompt: scene.prompt,
       dramaStyle: drama?.style || undefined,
     })
+
+  // 跨集一致：自动注入同剧同地点已生成的场景图作为参考图，让同地点不同时段/不同集的新场景
+  // 继承既有空间布局与材质（仅按提示词变化光效时段），避免同一地点跨集各出一版视觉漂移。
+  const normLoc = (scene.location || '').trim()
+  const locationRefs = db
+    .select()
+    .from(schema.scenes)
+    .where(and(eq(schema.scenes.dramaId, scene.dramaId), isNull(schema.scenes.deletedAt)))
+    .all()
+    .filter(s => s.id !== scene.id && (s.location || '').trim() === normLoc && !!s.imageUrl)
+    .slice(0, 2)
+    .map(s => s.imageUrl!)
   try {
-    logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep?.id, dramaId: scene.dramaId, location: scene.location, model: body.model || 'default' })
+    logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep?.id, dramaId: scene.dramaId, location: scene.location, model: body.model || 'default', locationRefs: locationRefs.length })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
-    const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, negativePrompt: body.negative_prompt || scene.negativePrompt || SCENE_IMAGE_NEGATIVE, model: body.model, configId: ep?.imageConfigId ?? resolveDramaConfigId(scene.dramaId, 'imageConfigId') })
+    const genId = await generateImage({
+      sceneId: id,
+      dramaId: scene.dramaId,
+      prompt,
+      negativePrompt: body.negative_prompt || scene.negativePrompt || SCENE_IMAGE_NEGATIVE,
+      model: body.model,
+      configId: ep?.imageConfigId ?? resolveDramaConfigId(scene.dramaId, 'imageConfigId'),
+      referenceImages: locationRefs.length ? locationRefs : undefined,
+    })
     logTaskSuccess('SceneImage', 'generate', { sceneId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {
