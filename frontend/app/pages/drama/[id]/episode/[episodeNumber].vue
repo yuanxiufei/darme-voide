@@ -450,6 +450,14 @@
                         <span class="role-tag" :class="roleTagCls(inferCharRoleTag(c))">{{ inferCharRoleTag(c) || c.role || '角色' }}</span>
                       </div>
                     </div>
+                    <button
+                      v-if="hasMergeCandidates(c)"
+                      class="btn btn-ghost btn-icon voice-merge-btn"
+                      title="把本角色并入全剧已有角色（跨集重复时使用，源角色资产/关联会迁移合并）"
+                      @click.stop="openMergePicker(c)"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+                    </button>
                   </div>
                 </div>
 
@@ -489,6 +497,36 @@
                 <div v-if="c.voice_sample_url || c.voiceSampleUrl" class="voice-player">
                   <audio :src="'/' + (c.voice_sample_url || c.voiceSampleUrl)" controls preload="none" />
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 跨集去重：选择并入目标角色 -->
+          <div v-if="mergeSourceChar" class="overlay" @click.self="closeMergePicker">
+            <div class="card merge-char-dialog">
+              <div class="merge-char-head">
+                <div>
+                  <div class="merge-char-title">把「{{ mergeSourceChar.name }}」并入全剧已有角色</div>
+                  <div class="merge-char-sub">目标中为空的形象/声音等资产会从源回填；本集/分镜关联与生成历史迁移到目标后，源角色将被合并删除。</div>
+                </div>
+                <button class="btn btn-ghost btn-icon" :disabled="mergeBusy" @click="closeMergePicker">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <div class="merge-char-list">
+                <button
+                  v-for="t in mergeCandidates()"
+                  :key="t.id"
+                  class="merge-char-item"
+                  :disabled="mergeBusy"
+                  @click="mergeInto(t)"
+                >
+                  <span class="char-avatar">{{ (t.name || '?')[0] }}</span>
+                  <span class="merge-char-item-name">{{ t.name }}</span>
+                  <span class="role-tag" :class="roleTagCls(inferCharRoleTag(t))">{{ inferCharRoleTag(t) || t.role || '角色' }}</span>
+                  <span class="tag" :class="(t.voice_style || t.voiceStyle) ? 'tag-success' : ''">{{ (t.voice_style || t.voiceStyle) ? '已分配音色' : '待分配' }}</span>
+                </button>
+                <div v-if="!mergeCandidates().length" class="merge-char-empty">暂无其他可并入的角色</div>
               </div>
             </div>
           </div>
@@ -3271,6 +3309,56 @@ function getVoiceProfile(voiceId) {
 }
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
 
+// —— 跨集一致性修复：把本角色并入全剧已有角色（merge 按钮 + 候选选择）——
+const mergeSourceChar = ref<any>(null)
+const mergeBusy = ref(false)
+/** 规范化名称：去空白/大小写，用于判定「同一人物」的重复记录 */
+function normName(n) {
+  return String(n || '').replace(/\s+/g, '').toLowerCase()
+}
+function sameNameCandidates(c) {
+  const cNorm = normName(c?.name)
+  if (!cNorm) return []
+  return (drama.value?.characters || []).filter(t => t.id !== c?.id && normName(t.name) === cNorm)
+}
+function hasMergeCandidates(c) {
+  return sameNameCandidates(c).length > 0
+}
+function openMergePicker(c) {
+  mergeSourceChar.value = c
+}
+function closeMergePicker() {
+  if (mergeBusy.value) return
+  mergeSourceChar.value = null
+}
+function mergeCandidates() {
+  const s = mergeSourceChar.value
+  if (!s) return []
+  return sameNameCandidates(s)
+}
+async function mergeInto(target) {
+  const s = mergeSourceChar.value
+  if (!s || mergeBusy.value) return
+  const ok = await confirm({
+    danger: true,
+    message: `将角色「${s.name || '?'}」并入「${target.name || '?'}」？\n\n` +
+      `合并后：目标中为空的形象/声音等资产会从源回填，` +
+      `「${s.name || '?'}」在本集及分镜中的关联、生成历史都会迁移到目标，源角色将被合并删除。\n此操作不可逆，确定执行？`,
+  })
+  if (!ok) return
+  mergeBusy.value = true
+  try {
+    await characterAPI.merge(s.id, target.id)
+    toast.success(`已将「${s.name || '?'}」并入「${target.name || '?'}」`)
+    mergeSourceChar.value = null
+    await refresh()
+  } catch (e: any) {
+    toast.error(e?.message || '合并失败')
+  } finally {
+    mergeBusy.value = false
+  }
+}
+
 const selectedSb = ref(null)
 
 function jumpToTimelineShot(sb: any) {
@@ -5248,6 +5336,18 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
 .voice-actions-row { display: flex; align-items: center; gap: 8px; }
 .voice-player audio { width: 100%; height: 30px; border-radius: var(--radius); }
 .char-avatar.lg { width: 38px; height: 38px; font-size: 16px; }
+.voice-merge-btn { flex-shrink: 0; color: var(--text-3); }
+.voice-merge-btn:hover:not(:disabled) { color: var(--accent); background: var(--accent-bg); }
+.merge-char-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.merge-char-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.merge-char-title { font-size: 15px; font-weight: 700; font-family: var(--font-display); color: var(--text-0); }
+.merge-char-sub { font-size: 12px; color: var(--text-2); margin-top: 4px; line-height: 1.6; }
+.merge-char-list { overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.merge-char-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,0.6); cursor: pointer; text-align: left; transition: all .15s ease; }
+.merge-char-item:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
+.merge-char-item:disabled { opacity: .6; cursor: default; }
+.merge-char-item-name { font-weight: 600; font-size: 13px; color: var(--text-0); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.merge-char-empty { padding: 28px 12px; text-align: center; color: var(--text-3); font-size: 12px; }
 
 /* Split layout (storyboard) */
 .split-layout { flex: 1; display: flex; min-height: 0; overflow: hidden; }

@@ -214,6 +214,125 @@ app.post('/:id/auto-split-visuals', async (c) => {
   }
 })
 
+/** source 合并进 target 时可回填的资产字段（target 该字段为空才补，不覆盖既有资产） */
+const MERGE_FILLABLE_FIELDS: Array<{ col: string; label: string }> = [
+  { col: 'role', label: '定位' },
+  { col: 'roleType', label: '角色类型' },
+  { col: 'description', label: '人物简介' },
+  { col: 'appearance', label: '外貌特征' },
+  { col: 'personality', label: '性格' },
+  { col: 'clothing', label: '服装' },
+  { col: 'weapons', label: '武器' },
+  { col: 'costumes', label: '服装设定集' },
+  { col: 'variations', label: '变体' },
+  { col: 'accessories', label: '首饰' },
+  { col: 'threeViews', label: '三视图' },
+  { col: 'equipImages', label: '装备图' },
+  { col: 'itemImages', label: '道具图' },
+  { col: 'expressions', label: '表情头像组' },
+  { col: 'customPrompt', label: '自定义提示词' },
+  { col: 'negativePrompt', label: '负面提示词' },
+  { col: 'style', label: '画风' },
+  { col: 'imageUrl', label: '形象图' },
+  { col: 'localPath', label: '形象图路径' },
+  { col: 'referenceImages', label: '参考图集' },
+  { col: 'seedValue', label: '种子值' },
+  { col: 'voiceStyle', label: '音色' },
+  { col: 'voiceProvider', label: '音色服务商' },
+  { col: 'voiceModel', label: '音色模型' },
+  { col: 'voiceSpeed', label: '语速' },
+  { col: 'voiceEmotion', label: '情感' },
+  { col: 'voicePitch', label: '音调' },
+  { col: 'voiceSampleUrl', label: '试听音频' },
+  { col: 'speakerId', label: '说话人 ID' },
+]
+
+// POST /characters/:id/merge — 跨集一致性修复：把「当前角色(source)」合并进「全剧已有角色(target)」。
+// 语义：target 为主角色；source 中 target 为空的资产字段回填（不覆盖 target 既有形象/声线），
+// source 的所有关联（episode/scene 绑定、分镜绑定、生成历史、资产版本）迁移到 target，
+// 最后 source 软删。用于 LLM 跨集未归一导致同一人物建出两条记录的修复场景。
+app.post('/:id/merge', async (c) => {
+  try {
+    const id = parseParamId(c)
+    if (id == null) return notFound(c, 'Invalid character id')
+    const body = await c.req.json().catch(() => ({}))
+    const targetId = Number((body as any).target_id)
+    if (!targetId || targetId === id) return badRequest(c, 'target_id 必填且不能是自身')
+
+    const [source] = db.select().from(schema.characters)
+      .where(and(eq(schema.characters.id, id), isNull(schema.characters.deletedAt))).all()
+    const [target] = db.select().from(schema.characters)
+      .where(and(eq(schema.characters.id, targetId), isNull(schema.characters.deletedAt))).all()
+    if (!source || !target) return notFound(c, '角色不存在')
+    if (source.dramaId !== target.dramaId) return badRequest(c, '只能合并同一部剧内的角色')
+
+    const ts = now()
+
+    // 1) 资产字段回填：target 为空才从 source 补
+    const backfill: Record<string, any> = {}
+    const filled: string[] = []
+    for (const f of MERGE_FILLABLE_FIELDS) {
+      const sv = (source as any)[f.col]
+      const tv = (target as any)[f.col]
+      const emptyTv = tv == null || tv === ''
+      if (emptyTv && sv != null && sv !== '') {
+        backfill[f.col] = sv
+        filled.push(`${f.label}=${f.col}`)
+      }
+    }
+    if (Object.keys(backfill).length) {
+      backfill.updatedAt = ts
+      db.update(schema.characters).set(backfill).where(eq(schema.characters.id, targetId)).run()
+    }
+    // 合并后按 target 主名补齐语音/说话人相关派生字段（speaker_id/costume_id 沿用 target）
+    ensureCostumeId(targetId)
+
+    // 2) episode 绑定迁移：source 关联的集改挂 target（该集已有 target 则删除 source 行）
+    const srcEpLinks = db.select().from(schema.episodeCharacters)
+      .where(eq(schema.episodeCharacters.characterId, id)).all()
+    for (const link of srcEpLinks) {
+      const dup = db.select().from(schema.episodeCharacters)
+        .where(and(eq(schema.episodeCharacters.episodeId, link.episodeId), eq(schema.episodeCharacters.characterId, targetId))).all()
+      if (dup.length) {
+        db.delete(schema.episodeCharacters).where(eq(schema.episodeCharacters.id, link.id)).run()
+      } else {
+        db.update(schema.episodeCharacters).set({ characterId: targetId }).where(eq(schema.episodeCharacters.id, link.id)).run()
+      }
+    }
+
+    // 3) 分镜绑定迁移：同一分镜同时绑了 target 时删除 source 行，否则改挂
+    const srcSbLinks = db.select().from(schema.storyboardCharacters)
+      .where(eq(schema.storyboardCharacters.characterId, id)).all()
+    for (const link of srcSbLinks) {
+      const dup = db.select().from(schema.storyboardCharacters)
+        .where(and(eq(schema.storyboardCharacters.storyboardId, link.storyboardId), eq(schema.storyboardCharacters.characterId, targetId))).all()
+      if (dup.length) {
+        db.delete(schema.storyboardCharacters)
+          .where(and(eq(schema.storyboardCharacters.storyboardId, link.storyboardId), eq(schema.storyboardCharacters.characterId, id))).run()
+      } else {
+        db.update(schema.storyboardCharacters).set({ characterId: targetId })
+          .where(and(eq(schema.storyboardCharacters.storyboardId, link.storyboardId), eq(schema.storyboardCharacters.characterId, id))).run()
+      }
+    }
+
+    // 4) 生成历史 / 资产版本归属迁移
+    db.update(schema.imageGenerations).set({ characterId: targetId }).where(eq(schema.imageGenerations.characterId, id)).run()
+    db.update(schema.assetVersions).set({ assetId: targetId })
+      .where(and(eq(schema.assetVersions.assetType, 'character'), eq(schema.assetVersions.assetId, id))).run()
+
+    // 5) source 软删
+    db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, id)).run()
+
+    logTaskSuccess('CharacterAPI', 'merge', {
+      sourceId: id, targetId,
+      filled: filled.join(',') || '(无)',
+      episodeLinks: srcEpLinks.length,
+      storyboardLinks: srcSbLinks.length,
+    })
+    return success(c, { target_id: targetId, filled, mergedEpisodeLinks: srcEpLinks.length, mergedStoryboardLinks: srcSbLinks.length })
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
 // DELETE /characters/:id
 app.delete('/:id', async (c) => {
   try {

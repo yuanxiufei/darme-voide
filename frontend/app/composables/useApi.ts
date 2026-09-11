@@ -120,6 +120,8 @@ export const characterAPI = {
     api.post(`/characters/${id}/generate-expressions`, data),
   batchImages: (ids: number[], episodeId: number) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId }),
   autoSplitVisuals: (id: number, appearance?: string) => api.post(`/characters/${id}/auto-split-visuals`, { appearance }),
+  /** 跨集一致性修复：把 source 角色(id) 并入全剧已有 target 角色（target 资产优先，source 关联迁移后软删） */
+  merge: (id: number, targetId: number) => api.post(`/characters/${id}/merge`, { target_id: targetId }),
 }
 
 export const sceneAPI = {

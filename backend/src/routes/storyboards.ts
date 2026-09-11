@@ -18,6 +18,7 @@ import {
   getStoryboardSceneDescription,
   getStoryboardReferenceImages,
 } from '../shared/prompt-utils.js'
+import { matchCharacterBySpeakerName } from '../shared/character-match.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { scoreStoryboard } from '../services/qc-scoring.js'
 import { retryFailedStoryboard } from '../services/qc-retry.js'
@@ -117,7 +118,7 @@ function validateTTSSpeaker(speaker: string, dramaId: number): TTSValidationResu
 
   const chars = db.select().from(schema.characters)
     .where(and(eq(schema.characters.dramaId, dramaId), isNull(schema.characters.deletedAt))).all()
-  const found = chars.find((char) => char.name === speaker)
+  const found = matchCharacterBySpeakerName(chars, speaker)
 
   if (!found) {
     return { match_status: 'not_found', voiceId: 'alloy', characterId: null }
@@ -509,10 +510,10 @@ app.get('/:id/validate-dialogue', async (c) => {
       if (Array.isArray(ttsLines)) {
         for (const line of ttsLines) {
           if (!line.voice_id || !line.speaker) continue
-          // 查找当前角色的最新 voiceStyle
+          // 查找当前角色的最新 voiceStyle（跨集一致性：别名/简称同样命中）
           const chars = db.select().from(schema.characters)
             .where(and(eq(schema.characters.dramaId, ep?.dramaId || 0), isNull(schema.characters.deletedAt))).all()
-          const char = chars.find(c => c.name === line.speaker)
+          const char = matchCharacterBySpeakerName(chars, line.speaker)
           if (char?.voiceStyle && char.voiceStyle !== line.voice_id) {
             ttsStaleCount++
             ttsStaleDetails.push({
