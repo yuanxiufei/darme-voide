@@ -1,0 +1,10 @@
+# 换行策略
+#
+# 只声明**必须在 POSIX 下解释**的文件，不加 `* text=auto`：
+# 后者会对全仓触发 renormalize，制造大量无意义 diff，收益却只在少数几个文件上。
+#
+# 为什么需要这条规则：
+#   `.githooks/pre-commit` 由 sh 执行。若工作区是 CRLF，shebang 会变成 `#!/bin/sh\r`，
+#   解释器路径带上 \r ⇒ 钩子在 Windows 上直接报 "command not found"（且报错信息很难指向换行）。
+#   实测 2026-09-12：`git ls-files --eol` 显示 `i/lf w/crlf attr/(空)`。
+.githooks/* text eol=lf

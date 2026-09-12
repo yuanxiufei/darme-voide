@@ -8,7 +8,7 @@
 #      → scripts/check-memory.mjs（规则见脚本头）
 #   3) 改动**守卫脚本自身**时跑守卫自检：守卫被改哑后基线仍会是绿的（真实仓库本就合规）
 #      ⇒「不报错」≠「还能报错」，故此道只在守卫脚本被动时触发。
-#      → scripts/test-guards.mjs（8 用例，1 = 有用例失败）
+#      → scripts/test-guards.mjs（用例数见脚本头，1 = 有用例失败）
 #
 # 启用（在仓库根目录执行一次，仓库不会自动生效）：
 #     git config core.hooksPath .githooks
@@ -26,8 +26,9 @@ staged=$(git diff --cached --name-only --diff-filter=ACMRD)
 rc=0
 
 # ── 1) skills/ 引用完整性（守卫自身被改动时也跑）────────────────────────
-if printf '%s\n' "$staged" | grep -qE '^skills/|^scripts/check-skill-refs\.mjs$'; then
-	printf '%s\n' '[pre-commit] skills/ 有改动，校验路径引用完整性...'
+# 注意：docs/ 也在列 —— skill 正文会引用 `docs/*.md`，改了/删了 docs 同样会断链。
+if printf '%s\n' "$staged" | grep -qE '^skills/|^docs/|^scripts/check-skill-refs\.mjs$'; then
+	printf '%s\n' '[pre-commit] skills/ 或 docs/ 有改动，校验路径引用完整性...'
 	if ! node scripts/check-skill-refs.mjs; then
 		printf '%s\n' '[pre-commit] FAIL: 存在致命断链，提交已阻止。' >&2
 		printf '%s\n' '            修复后重试；确认无碍可用 git commit --no-verify 绕过。' >&2
@@ -47,8 +48,9 @@ fi
 
 # ── 3) 守卫自检（守卫脚本本身被改动时）──────────────────────────────────
 # 注意：第 2 道在守卫被改哑时**依然是绿的**，所以必须靠这一道兜住。
-if printf '%s\n' "$staged" | grep -qE '^scripts/check-memory\.mjs$|^scripts/test-guards\.mjs$'; then
-	printf '%s\n' '[pre-commit] 守卫脚本有改动，跑守卫自检（8 用例，临时副本上造故障）...'
+# 三个守卫脚本都要触发：早先漏了 check-skill-refs.mjs ⇒ 改它时自检根本不跑（改哑也无人拦）。
+if printf '%s\n' "$staged" | grep -qE '^scripts/(check-memory|check-skill-refs|test-guards)\.mjs$'; then
+	printf '%s\n' '[pre-commit] 守卫脚本有改动，跑守卫自检（临时副本上造故障）...'
 	if ! node scripts/test-guards.mjs; then
 		printf '%s\n' '[pre-commit] FAIL: 守卫自检未通过（某个检查已失效），提交已阻止。' >&2
 		printf '%s\n' '            修复后重试；确认无碍可用 git commit --no-verify 绕过。' >&2

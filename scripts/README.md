@@ -1,7 +1,15 @@
-# scripts/ — AI/GPU 工具链
+# scripts/ — 工具与自检脚本
 
-本目录是 Drama Studio 的「AI/GPU 计算层」脚本，与 TS 后端（`backend/`）通过 subprocess 解耦。
-全部 Python 脚本仅依赖 **Python 3.8+ 标准库**（零第三方 pip 依赖）。
+本目录有**三类**脚本（此前标题只写"AI/GPU 工具链"，漏了后两类）：
+
+| 类别 | 脚本 | 运行环境 |
+|---|---|---|
+| **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` / `migrate_models.ps1` —— 与 TS 后端（`backend/`）通过 subprocess 解耦 | Python 3.8+，**仅标准库**（零第三方 pip 依赖） |
+| **仓库自检** | `check-skill-refs.mjs` / `check-memory.mjs` / `test-guards.mjs` / `check-all.mjs` —— 防资产**静默漂移** | Node ESM（零依赖） |
+| **语料分析** | `corpus/analyze{,2,3}.py` —— 产出 `docs/seedance2-corpus-analysis.md` 的统计结论 | Python 3.8+，**仅标准库** |
+
+> 三类都**不参与产品运行时**。自检脚本的自动触发靠 `.githooks/pre-commit`（**需手动启用一次**），
+> 但它只在「本次提交触及相应资产」时才跑对应守卫 ⇒ **想全局体检请用 `check-all.mjs`**。
 
 ## 工具清单
 
@@ -62,12 +70,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate_models.ps1
 | `check-skill-refs.mjs` | Node ESM | 校验 `skills/**/*.md` 里的路径引用是否都能落地（`references/` 资产、跨 skill `../`、及 `skills/`+`backend/`+`frontend/`+`docs/` repo 根相对路径），防「改 skill 名 / 挪库 / 改 docs 名」造成的**静默断链** |
 | `check-memory.mjs` | Node ESM | 校验 `.codebuddy/memory/` 三层记忆：`MEMORY.md` ≤ 8k 字符（超限注入会被截断）、`INDEX.md` 的 `@行号` 锚点有效、且**每篇日志的末节都已登记** |
 | `test-guards.mjs` | Node ESM | **两套守卫的自检**：在临时副本上造 10 种故障（记忆层 7 + 引用层 3）+ 2 条基线，断言每项检查仍能报致命（防「守卫被改哑但基线仍绿」） |
+| `check-all.mjs` | Node ESM | **一键跑全部自检**（上表三道串联 + 汇总）—— pre-commit 只在「本次提交触及相应资产」时才跑对应守卫，本脚本用于**全局体检** |
 
 ```powershell
-node scripts/check-skill-refs.mjs            # 有断链则退出码 1，可用作提交前自检
-node scripts/check-skill-refs.mjs --verbose  # 额外列出被跳过的候选，审计脚本自身盲区
-node scripts/check-memory.mjs                # 记忆层自检，退出码 1 = 存在致命项
-node scripts/test-guards.mjs                 # 改了任一守卫脚本后必跑，退出码 1 = 有用例失败
+node scripts/check-all.mjs                   # 一键跑全部三道自检，退出码 1 = 有任一失败
+node scripts/check-all.mjs --verbose         # 同上，并把 --verbose 透传给引用守卫
+
+node scripts/check-skill-refs.mjs            # 单跑：有断链则退出码 1，可用作提交前自检
+node scripts/check-skill-refs.mjs --verbose  # 单跑：额外列出被跳过的候选，审计脚本自身盲区
+node scripts/check-memory.mjs                # 单跑：记忆层自检，退出码 1 = 存在致命项
+node scripts/test-guards.mjs                 # 单跑：改了任一守卫脚本后必跑，退出码 1 = 有用例失败
 ```
 
 判定分级（细节见脚本头注释）：
