@@ -127,9 +127,39 @@ node scripts/test-guards.mjs                 # 单跑：改了任一守卫脚本
 
 | 文件 | 职责 |
 | --- | --- |
+| `corpus/fetch-raw.mjs` | **采集**：从 GitHub 拉原始语料到 `data/prompt-corpus/<源>/raw/`（已存在则跳过，`--only=<id>` 可单源重试） |
+| `corpus/normalize.mjs` | **归一化**：各源 → 统一 JSONL（`_normalized/prompts.jsonl`），只抽「能检索的最小字段集」 |
+| `corpus/search.mjs` | **检索**：在归一化语料上做「找相似镜头」（2-gram 打分，毫秒级，零依赖） |
 | `corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |
 | `corpus/analyze2.py` | 深挖 i18n / raw_p / category / spec |
-| `corpus/analyze3.py` | **主力脚本**：词表、结构特征、标签频次 |
+| `corpus/analyze3.py` | **主力统计脚本**：词表、结构特征、标签频次 |
+
+管线（三步，与上表前三个脚本一一对应）：
+
+```powershell
+node scripts/corpus/fetch-raw.mjs                                  # ① 采集
+node scripts/corpus/normalize.mjs                                  # ② 归一化 → prompts.jsonl
+node scripts/corpus/search.mjs --q-file=tmp/q.txt --top=5          # ③ 检索
+```
+
+> ⚠️ `search.mjs` 的查询**优先用 `--q-file`**（或 `CORPUS_QUERY` 环境变量）：
+> PowerShell 命令行直传中文参数会乱码。
+
+**已采集源 / 已排除源**（判据 = 许可证 + 真实性，全部实测过）：
+
+| 源 | 规模 | 许可 | 状态 |
+|---|---|---|---|
+| `GokuScraper/seedance-2-prompts-datasets` | 8755 条 | CC BY 4.0 | ✅ 已采集 |
+| `flaqai/awesome_seedance_2_5` | 120 场景（中英各 60） | MIT | ✅ 已采集 |
+| `Ericgood/seedance-prompt` | 112 条（英文 prompt + 中文元数据） | CC BY 4.0 | ✅ 已采集 |
+| `skylenage/FilmBench` | 1169 条（T2V 515 / R2V 654） | ⚠️ 待核 | ⏳ 待采 |
+| `Rapidata/awesome-text2video-prompts` | ~200 条 | 需确认 | ⏸ 只要其 14 类分类法 |
+| `tipi2v/TIP-I2V` | 170 万条 | **CC BY-NC 禁商用** | ❌ 只能内部统计，**不进语料库** |
+| `Semonxue/awesome-video-prompts` | 4.88 GB | **无 LICENSE** | ❌ 仅内部参考 |
+| `HitPaw` / `geekjourneyx` / `fantasylights` | **24 KB / 24 KB / 4 KB** | — | ❌ 实测**空壳**，0 条数据 |
+
+> ❌ 那三个空壳与 TIP-I2V 曾在外部流传的「清单」里被标为 ★★★★☆ / 第一优先级 —— 实测结论相反，
+> 故写在此处防止再被引回。
 
 ```powershell
 # 脚本自解析仓库根；也可用 SEEDANCE2_CORPUS=/abs/path/metadata.jsonl 覆盖
