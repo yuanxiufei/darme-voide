@@ -655,10 +655,14 @@ export async function runAgentWithInstructions(
           [{ role: 'user', content: message }],
           {
             maxSteps,
-            // 输出上限必须显式下发：此前从未传 ⇒ 落到服务端默认（实测 MiniMax ≈2048）⇒ 回复略长即被截断，
-            // 而模型是「先输出文本、再发起 tool call」，排在文本之后的 tool call 会整段丢失。
-            // 症状：回复写了 4000+ 字符、outputTokens 恰好顶在 2060、toolCalls 只剩一个读上下文的调用、业务数据一条没落库。
-            modelSettings: { maxOutputTokens: built.dbConfig?.maxTokens || 4096 },
+            // 模型参数必须显式下发 —— 此前两项都没传，DB 里的 max_tokens / temperature 是**死配置**：
+            //   · maxOutputTokens：不传则落到服务端默认（实测 MiniMax ≈2048），长回复被截断时，
+            //     排在文本之后的 tool call 会整段丢失（回复 4000+ 字符、outputTokens 恰好顶在 2060、业务数据一条没落库）。
+            //   · temperature：不传则用服务端默认（偏高）⇒ 同一输入时而「调工具」时而「写成长文」，落库成功率极不稳定（实测约 2/7）。
+            modelSettings: {
+              maxOutputTokens: built.dbConfig?.maxTokens || 4096,
+              temperature: built.dbConfig?.temperature ?? 0.7,
+            },
           },
         )
 
