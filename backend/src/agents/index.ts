@@ -16,6 +16,7 @@ import { createExtractTools } from './tools/extract-tools.js'
 import { createStoryboardTools } from './tools/storyboard-tools.js'
 import { createVoiceTools } from './tools/voice-tools.js'
 import { createGridPromptTools } from './tools/grid-prompt-tools.js'
+import { createCorpusTools } from './tools/corpus-tools.js'
 import { createRunSubagentTool } from './subagent.js'
 import { loadAgentSkills, resolveDefaultSkills } from './skills.js'
 import { discoverMcpTools } from './mcp.js'
@@ -340,9 +341,13 @@ export function createAgentTools(
   switch (type) {
     case 'script_rewriter': return createScriptTools(episodeId)
     case 'extractor': return createExtractTools(episodeId, dramaId)
-    case 'storyboard_breaker': return createStoryboardTools(episodeId, dramaId)
+    // 这两个 Agent 需要「找相似镜头」的参考 ⇒ 额外挂语料检索工具。
+    // ⚠️ 语料目录已 gitignore（不在仓库内），缺失时工具自身会降级返回 available:false，不影响其它能力。
+    case 'storyboard_breaker':
+      return { ...createStoryboardTools(episodeId, dramaId), ...createCorpusTools() }
     case 'voice_assigner': return createVoiceTools(episodeId, dramaId)
-    case 'grid_prompt_generator': return createGridPromptTools(episodeId, dramaId)
+    case 'grid_prompt_generator':
+      return { ...createGridPromptTools(episodeId, dramaId), ...createCorpusTools() }
     case 'orchestrator': return createRunSubagentTool({ dramaId, episodeId, parentType: type })
     default: return null
   }

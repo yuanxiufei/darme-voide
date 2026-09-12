@@ -129,7 +129,7 @@ node scripts/test-guards.mjs                 # 单跑：改了任一守卫脚本
 | --- | --- |
 | `corpus/fetch-raw.mjs` | **采集**：从 GitHub 拉原始语料到 `data/prompt-corpus/<源>/raw/`（已存在则跳过，`--only=<id>` 可单源重试） |
 | `corpus/normalize.mjs` | **归一化**：各源 → 统一 JSONL（`_normalized/prompts.jsonl`），只抽「能检索的最小字段集」 |
-| `corpus/search.mjs` | **检索**：在归一化语料上做「找相似镜头」（2-gram 打分，毫秒级，零依赖） |
+| `corpus/search.mjs` | **检索**：在归一化语料上做「找相似镜头」（2-gram 打分，毫秒级，零依赖）。⚠️ **同口径的 Agent 工具是 `backend/src/agents/tools/corpus-tools.ts`**（挂给 `storyboard_breaker` / `grid_prompt_generator`，语料缺失时降级 `available:false`）—— **改打分口径必须两处同步**，否则「命令行验证有效」与「Agent 实际效果」会分叉 |
 | `corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |
 | `corpus/analyze2.py` | 深挖 i18n / raw_p / category / spec |
 | `corpus/analyze3.py` | **主力统计脚本**：词表、结构特征、标签频次 |
