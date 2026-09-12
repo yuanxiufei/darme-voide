@@ -48,5 +48,5 @@ QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles
 ## 协作与提交
 - **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。
 - git 身份 `yuanxf`/`yuanxf@wedoctor.com`；远端 `git@github.com:yuanxiufei/darme-voide.git`。PowerShell 传中文 commit message 会乱码 → 统一英文。
-- **`.codebuddy/memory/` 无 gitignore 规则**：`MEMORY.md` 与历史日志（`08-29`~`09-11`）**已纳管**，`TOPICS.md`/`INDEX.md`/新日志为 **untracked** ⇒ 只提交前者会让 `MEMORY.md` 的读法指针在新克隆上**断链**（三者须同批）；状态用 `git ls-files` / `git check-ignore -v` 复查。
+- **`.codebuddy/memory/` 无 gitignore 规则，且现已全部纳管**（`MEMORY.md`/`TOPICS.md`/`INDEX.md` + 各日日志，自 2026-09-12 的 `abc6cac` 起同批提交）⇒ **新增日志 / 改索引后要随同批提交**，否则 `MEMORY.md` 的读法指针在新克隆上**断链**；状态用 `git ls-files` / `git check-ignore -v` 复查。
 - **`execute_command` 拉大文件/跑大正则易被转后台丢 stdout** → 用 `[System.IO.File]::WriteAllText(path, content, UTF8)` 落盘再读；`Get-Content` 必须显式 `-Encoding UTF8`（否则中文在控制台显示为乱码）。
