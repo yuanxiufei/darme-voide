@@ -5,7 +5,7 @@ import { success, badRequest, notFound, now, parseParamId } from '../utils/respo
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
 import { generateAgentConfig, persistAgentConfig } from '../agents/creator.js'
-import { validAgentTypes } from '../agents/index.js'
+import { getAgentDefaults, validAgentTypes } from '../agents/index.js'
 
 const app = new Hono()
 
@@ -15,6 +15,14 @@ app.get('/', async (c) => {
   const rows = db.select().from(schema.agentConfigs)
     .where(isNull(schema.agentConfigs.deletedAt)).all()
   return success(c, toSnakeCaseArray(rows))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// GET /agent-configs/defaults — 出厂默认配置（默认提示词 + 默认 Skill 绑定）
+// 注意：必须注册在 /:id 之前，否则 'defaults' 会被当成 id 解析
+app.get('/defaults', async (c) => {
+  try {
+    return success(c, getAgentDefaults())
   } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
 })
 

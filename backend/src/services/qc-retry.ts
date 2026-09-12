@@ -16,8 +16,9 @@ import { generateVideo } from './video-generation.js'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import {
-  STORYBOARD_IMAGE_NEGATIVE,
-  VIDEO_NEGATIVE,
+  buildStoryboardNegativePrompt,
+  buildVideoNegativePrompt,
+  resolveEffectiveArtStyle,
   getStoryboardReferenceImages,
   getStoryboardReferenceAudioUrls,
 } from '../shared/prompt-utils.js'
@@ -92,6 +93,8 @@ export async function retryFailedStoryboard(storyboardId: number): Promise<QcRet
     .run()
 
   // ===== 3. 重新提交首帧图并等待就绪 =====
+  // 画风收口：重跑也要与首次生成用同一套画风（正/负词同源），否则 QC 重试会变成「换风格重画」
+  const dramaStyle = resolveEffectiveArtStyle(ep.dramaId)
   const oldFirstFrame = updated.firstFrameImage
   const prompt = updated.firstFramePrompt || updated.imagePrompt || updated.description || '短剧分镜画面，电影感构图'
   const refImages = getStoryboardReferenceImages(storyboardId)
@@ -99,7 +102,7 @@ export async function retryFailedStoryboard(storyboardId: number): Promise<QcRet
     storyboardId,
     dramaId: ep.dramaId,
     prompt,
-    negativePrompt: updated.negativePrompt || STORYBOARD_IMAGE_NEGATIVE,
+    negativePrompt: updated.negativePrompt || buildStoryboardNegativePrompt(dramaStyle),
     frameType: 'first_frame',
     referenceImages: refImages.length ? refImages : undefined,
     configId: ep.imageConfigId ?? undefined,
@@ -138,7 +141,7 @@ export async function retryFailedStoryboard(storyboardId: number): Promise<QcRet
     storyboardId,
     dramaId: ep.dramaId,
     prompt: videoPrompt,
-    negativePrompt: VIDEO_NEGATIVE,
+    negativePrompt: buildVideoNegativePrompt(dramaStyle),
     referenceMode: isFl2vaRetry ? 'first_last' : (referenceImages.length ? 'multiple' : 'single'),
     imageUrl: isFl2vaRetry ? undefined : (finalSb?.firstFrameImage || undefined),
     firstFrameUrl: isFl2vaRetry ? (finalSb?.firstFrameImage || undefined) : undefined,

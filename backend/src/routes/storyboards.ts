@@ -13,7 +13,8 @@ import { generateImage } from '../services/image-generation.js'
 import { generateActionSuggestion, splitShotIntoSubShots, optimizeVideoPrompt } from '../services/text-generation.js'
 import {
   buildStoryboardImagePrompt,
-  STORYBOARD_IMAGE_NEGATIVE,
+  buildStoryboardNegativePrompt,
+  resolveEffectiveArtStyle,
   getStoryboardCharacterAppearances,
   getStoryboardSceneDescription,
   getStoryboardReferenceImages,
@@ -563,6 +564,10 @@ app.post('/:id/regenerate-image', async (c) => {
       ? body.reference_images
       : getStoryboardReferenceImages(id)
 
+    // 画风收口：统一解析链（请求体 style → 剧集 style → 全局默认 → realistic），
+    // 正/负提示词同源，避免「画风靠请求体、负面词却用通用词」的错配。
+    const dramaStyle = resolveEffectiveArtStyle(ep.dramaId, undefined, body.style)
+
     // 自定义 prompt 优先 → 分镜级 customImagePrompt → 标准构建器
     const prompt = body.prompt
       || sb.customImagePrompt
@@ -573,7 +578,7 @@ app.post('/:id/regenerate-image', async (c) => {
         sceneDescription: body.scene_description || sceneDesc || sb.location || '',
         shotType: sb.shotType || body.shot_type || '',
         cameraAngle: sb.angle || body.camera_angle || '',
-        dramaStyle: body.style,
+        dramaStyle,
       })
 
     logTaskStart('StoryboardAPI', 'regenerate-image', {
@@ -584,7 +589,7 @@ app.post('/:id/regenerate-image', async (c) => {
       storyboardId: id,
       dramaId: ep.dramaId,
       prompt,
-      negativePrompt: body.negative_prompt || sb.negativePrompt || STORYBOARD_IMAGE_NEGATIVE,
+      negativePrompt: body.negative_prompt || sb.negativePrompt || buildStoryboardNegativePrompt(dramaStyle),
       model: body.model,
       referenceImages,
       configId: ep.imageConfigId ?? undefined,
@@ -624,6 +629,9 @@ app.post('/:id/regenerate-frame', async (c) => {
       || (frameType === 'first_frame' ? sb.firstFramePrompt
         : frameType === 'last_frame' ? sb.lastFramePrompt : sb.keyframePrompt)
 
+    // 画风收口：与 regenerate-image 同一条解析链，保证同一镜头不同帧不会换画风
+    const dramaStyle = resolveEffectiveArtStyle(ep.dramaId, undefined, body.style)
+
     // 画面基底：标准构建器（始终注入角色外观 + 场景），帧画面内容作为附加描述叠加
     const basePrompt = buildStoryboardImagePrompt({
       description: sb.description || body.character_description || '',
@@ -632,7 +640,7 @@ app.post('/:id/regenerate-frame', async (c) => {
       sceneDescription: body.scene_description || sceneDesc || sb.location || '',
       shotType: sb.shotType || body.shot_type || '',
       cameraAngle: sb.angle || body.camera_angle || '',
-      dramaStyle: body.style,
+      dramaStyle,
     })
     const frameHint = frameType === 'first_frame'
       ? 'opening frame, establishing the scene, subject at start position, beginning of the shot'
@@ -649,7 +657,7 @@ app.post('/:id/regenerate-frame', async (c) => {
       storyboardId: id,
       dramaId: ep.dramaId,
       prompt,
-      negativePrompt: body.negative_prompt || sb.negativePrompt || STORYBOARD_IMAGE_NEGATIVE,
+      negativePrompt: body.negative_prompt || sb.negativePrompt || buildStoryboardNegativePrompt(dramaStyle),
       model: body.model,
       frameType,
       referenceImages,

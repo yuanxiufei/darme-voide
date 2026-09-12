@@ -44,10 +44,64 @@
                   <FileText :size="13" /> 绑定 Skills
                   <span class="dim" style="font-weight:400;font-size:11px">（仅已启用的会注入 Prompt）</span>
                 </span>
-                <button class="btn btn-ghost btn-sm" @click="resetAgentSkills(a.type)">恢复默认</button>
+                <span class="skill-bind-head-right">
+                  <span
+                    v-if="skillCharBudget"
+                    :class="['skill-bind-usage', { over: isBindOverBudget }]"
+                    title="已启用绑定的注入体量合计 / 注入预算（仅 enabled 的 Skill 会计入）"
+                  >{{ enabledSkillCount }} 项 · {{ fmtChars(boundChars) }} / {{ fmtChars(skillCharBudget) }} 字符</span>
+                  <button class="btn btn-ghost btn-sm" @click="showSkillPicker ? closeSkillPicker() : openSkillPicker()">
+                    <Plus :size="12" /> 添加
+                  </button>
+                  <button class="btn btn-ghost btn-sm" @click="resetAgentSkills(a.type)">恢复默认</button>
+                </span>
               </div>
+
+              <!-- 添加绑定：外部库 Skill 无 frontmatter 默认绑定、只能手动挂（skills.vue 也如此指引），
+                   而此前本面板只有「恢复默认」、无任何添加控件 → 用户被指到死路。此处为唯一 UI 挂载入口 -->
+              <div v-if="showSkillPicker" class="skill-picker">
+                <div class="skill-picker-head">
+                  <Search :size="12" />
+                  <input
+                    v-model="skillPickerQuery"
+                    class="skill-picker-input"
+                    placeholder="搜索 Skill（id / 名称 / 描述）"
+                  />
+                  <button class="btn btn-ghost btn-sm" @click="closeSkillPicker">完成</button>
+                </div>
+                <p v-if="!skillPickerCandidates.length" class="dim" style="font-size:11px;padding:8px">
+                  {{ skillPickerQuery ? '没有匹配的 Skill' : '所有可用 Skill 都已绑定' }}
+                </p>
+                <div v-else class="skill-picker-list">
+                  <button
+                    v-for="s in skillPickerCandidates"
+                    :key="s.id"
+                    type="button"
+                    class="skill-picker-item"
+                    @click="addSkillBinding(s.id)"
+                  >
+                    <span class="skill-picker-main">
+                      <span class="skill-picker-name">
+                        {{ s.name || s.id }}
+                        <span v-if="s.category === 'vendor'" class="skill-bind-tag">{{ s.sourceLabel || '外部库' }}</span>
+                        <span
+                          v-if="s.missingTools?.length"
+                          class="skill-bind-tag warn"
+                          :title="`依赖本项目未提供的工具：${s.missingTools.join(', ')}`"
+                        >缺 {{ s.missingTools.length }} 工具</span>
+                      </span>
+                      <span class="dim skill-picker-id">{{ s.id }}</span>
+                    </span>
+                    <span class="skill-bind-chars">{{ fmtChars(s.charCount) }}</span>
+                    <Plus :size="12" />
+                  </button>
+                </div>
+              </div>
+
               <p v-if="!agentSkillBindings.length" class="dim" style="font-size:11px;padding:8px 0">
-                暂无可用 Skill。请到「Skill 管理」页创建。
+                {{ availableSkills.length
+                  ? '尚未绑定任何 Skill，点击上方「添加」从可用列表中选择。'
+                  : '暂无可用 Skill，请到「Skill 管理」页创建。' }}
               </p>
               <div v-else class="skill-bind-list">
                 <div
@@ -66,14 +120,33 @@
                     <span></span>
                   </label>
                   <div class="skill-bind-info">
-                    <span class="skill-bind-name">{{ getSkillName(binding.id) || binding.id }}</span>
+                    <span class="skill-bind-name">
+                      {{ getSkillName(binding.id) || binding.id }}
+                      <span v-if="vendorLabel(binding.id)" class="skill-bind-tag">{{ vendorLabel(binding.id) }}</span>
+                      <span v-if="skillMissing(binding.id)" class="skill-bind-tag danger" title="该 Skill 已从磁盘移除，加载时会被跳过，请关闭开关或点右侧 ✕ 移除">已失效</span>
+                      <span
+                        v-if="missingToolsTip(binding.id)"
+                        class="skill-bind-tag warn"
+                        :title="missingToolsTip(binding.id)"
+                      >缺 {{ skillMissingTools(binding.id).length }} 个工具</span>
+                    </span>
                     <span class="dim" style="font-size:10px">{{ binding.id }}</span>
                   </div>
+                  <span class="skill-bind-chars" title="该 Skill 的注入体量（字符，含前置契约与协议字段段）">{{ fmtChars(getSkillChars(binding.id)) }}</span>
                   <span class="skill-bind-priority">#{{ idx + 1 }}</span>
+                  <button
+                    class="skill-bind-remove"
+                    title="移除该绑定（保存后生效）"
+                    @click.stop="removeSkillBinding(idx)"
+                  ><X :size="12" /></button>
                 </div>
               </div>
+              <p v-if="isBindOverBudget" class="skill-bind-warn">
+                已启用绑定合计已超出注入预算，超出的 Skill 会按列表顺序被跳过（即不生效）。请关闭部分开关，或拖拽降低大 Skill 的优先级。
+              </p>
               <p class="dim" style="font-size:10px;margin-top:6px">
-                拖拽可调整优先级，保存后按列表顺序决定 Skill 加载顺序，仅 enabled=true 的 Skill 会在运行时加载。
+                拖拽调整顺序，保存后按此顺序注入（超预算时末尾的会被跳过）；仅勾选的 Skill 会注入。
+                默认绑定来自各 SKILL.md 的 frontmatter 声明，外部库 Skill 需在此手动添加。
               </p>
             </div>
 
@@ -95,7 +168,7 @@
 </template>
 
 <script setup lang="ts">
-import { FileText, Check, Loader2, ChevronDown } from 'lucide-vue-next'
+import { FileText, Check, Loader2, ChevronDown, Plus, Search, X } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { agentConfigAPI, aiConfigAPI, skillsAPI } from '~/composables/useApi'
@@ -107,42 +180,34 @@ const agentSaving = ref(false)
 const agentSaved = ref(null)
 const agentForm = reactive({ model: '', temperature: 0.7, max_tokens: 4096, system_prompt: '' })
 const agentSkillBindings = ref([])   // 当前编辑中的 Agent 的 Skill 绑定 [{ id, enabled, priority }]
-const availableSkills = ref([])      // 全局可用 Skill 列表 { id, name, description }[]
+const availableSkills = ref([])      // 全局可用 Skill 列表 { id, name, description, charCount, category }[]
+const skillCharBudget = ref(0)       // 注入体量硬闸（来自 /skills/meta，超出的 Skill 会被静默跳过）
 const skillDragFrom = ref(null)      // 拖拽起始索引
 const skillDragOverIdx = ref(null)   // 当前悬停索引
+const showSkillPicker = ref(false)   // 「添加 Skill」候选面板是否展开
+const skillPickerQuery = ref('')     // 候选面板搜索词（外部库近 30 个，必须可搜）
 const cfgs = ref([])
 
-// 默认 Skill 映射（与后端 AGENT_SKILL_MAP 保持一致，含 MiniMax 技能库）
-const DEFAULT_AGENT_SKILLS = {
-  script_rewriter: [
-    'script_rewriter',
-    'minimax/installed/short-drama-screenwriter',
-    'minimax/installed/short-drama-series-writer',
-  ],
-  extractor: [
-    'extractor',
-    'minimax/installed/film-assets',
-  ],
-  storyboard_breaker: [
-    'storyboard_breaker',
-    'extractor',
-    'minimax/installed/film-shot',
-    'minimax/installed/storyboard',
-    'minimax/installed/coordinate-camera-control-designer',
-  ],
-  voice_assigner: [
-    'voice_assigner',
-    'minimax/installed/voice-clone',
-    'minimax/installed/voiceover-direction',
-  ],
-  grid_prompt_generator: [
-    'grid_prompt_generator',
-    'minimax/installed/film-reference-prompt-writer',
-    'minimax/installed/film-style-picker',
-    'minimax/installed/video-deconstruct-analyzer',
-    'minimax/builtin/video-deconstruct',
-    'minimax/installed/face-warp',
-  ],
+// 出厂默认配置由后端下发（GET /agent-configs/defaults），单一事实来源：
+//   提示词 = backend/src/agents/index.ts 的 DEFAULT_PROMPTS
+//   Skill 绑定 = 各 SKILL.md 的 frontmatter `agents:`（backend/src/agents/skills.ts 解析）
+// 前端不再本地维护副本 —— 历史副本会与后端漂移（曾长期挂在外部 skill 库上）
+type AgentDefault = { name?: string; instructions?: string; skills?: string[] }
+const agentDefaults = ref<Record<string, AgentDefault>>({})
+
+/** 某 Agent 的默认提示词（DB 未配置时回显） */
+function defaultInstructions(type: string): string {
+  return agentDefaults.value[type]?.instructions || ''
+}
+
+/** 某 Agent 的默认 Skill 绑定 id 列表 */
+function defaultSkillIds(type: string): string[] {
+  return agentDefaults.value[type]?.skills || []
+}
+
+/** id 列表 → 绑定项（priority 按顺序，默认全部启用） */
+function toBindings(ids: string[]) {
+  return ids.map((id, i) => ({ id, enabled: true, priority: i + 1 }))
 }
 
 const agentDefs = [
@@ -153,93 +218,6 @@ const agentDefs = [
   { type: 'grid_prompt_generator', label: '图片提示词生成', icon: '🖼' },
 ]
 
-const defaultPrompts = {
-  script_rewriter: `你是专业编剧，擅长将小说改编为短剧剧本。
-
-工作流程：
-1. 调用 read_episode_script 读取原始内容
-2. 根据读取到的内容，自己进行改写（输出格式化剧本格式）
-3. 调用 save_script 保存改写后的完整剧本
-
-格式化剧本格式：
-- 场景头：## S编号 | 内景/外景 · 地点 | 时间段
-- 动作描写：自然段落，不包含镜头语言
-- 对白：角色名：（状态/表情）台词内容
-- 每个场景 30-60 秒内容`,
-  extractor: `你是制片助理，擅长从剧本中提取角色和场景信息，并在提取时与项目已有数据进行智能去重。
-
-工作流程：
-1. 调用 read_script_for_extraction 读取格式化剧本
-2. 调用 read_existing_characters 读取项目中已存在的角色列表（用于去重）
-3. 调用 read_existing_scenes 读取项目中已存在的场景列表（用于去重）
-4. 分析剧本内容，提取所有角色信息
-5. 对每个角色：若同名已存在则合并更新，若不存在则新增
-6. 调用 save_dedup_characters 保存角色（去重合并，自动处理新增和更新）
-7. 分析剧本内容，提取所有场景信息
-8. 对每个场景：若同地点+时间段已存在则复用，若不存在则新增
-9. 调用 save_dedup_scenes 保存场景（去重合并，自动处理新增和复用）
-
-去重规则：
-- 角色：按名字精确匹配，同名保留现有（合并信息）
-- 场景：按【地点+时间段】精确匹配；同地点不同时段视为新场景
-
-提取要求：
-- 角色要包含完整的外貌特征描述（发型、服装、体态等）
-- 场景要包含光线、色调、氛围等视觉信息
-- 不要遗漏任何有台词或重要动作的角色`,
-  storyboard_breaker: `你是资深影视分镜师，擅长将剧本拆解为分镜方案。
-
-工作流程：
-1. 调用 read_storyboard_context 读取剧本、角色列表、场景列表
-2. 将剧本拆解为镜头序列（每个镜头 10-15 秒）
-3. 为每个镜头生成视频提示词（video_prompt）
-4. 调用 save_storyboards 保存所有分镜`,
-  voice_assigner: `你是配音导演，擅长为角色选择合适的音色。
-
-工作流程：
-1. 调用 list_voices 获取可用音色列表
-2. 调用 get_characters 获取所有角色信息
-3. 根据每个角色的性别、性格、年龄、角色定位，选择最匹配的音色
-4. 对每个角色调用 assign_voice 分配音色，并说明选择理由
-
-注意：每个角色都必须分配音色，不要遗漏。`,
-  grid_prompt_generator: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的英文提示词。
-
-你将收到用户的请求，告知要生成哪种类型的提示词：
-- "角色" → 生成角色图片提示词
-- "场景" → 生成场景图片提示词
-- "宫格" → 生成宫格图提示词
-
-## 角色图片提示词
-
-工作流程：
-1. 调用 read_characters 读取所有角色信息
-2. 根据角色外貌特征（appearance）、性格（personality）、定位（role）生成英文提示词
-3. 提示词结构：[外貌描述]，[性格/气质]，[角色定位]，[电影感]，[高质量]，[无文字水印]
-
-## 场景图片提示词
-
-工作流程：
-1. 调用 read_scenes 读取所有场景信息
-2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成英文提示词
-3. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[电影感场景]，[高质量]，[无文字水印]
-
-## 宫格图提示词（参考 skills/grid-image-generator/SKILL.md）
-
-工作流程：
-1. 调用 read_shots_for_grid 读取选中镜头的详细信息
-2. 根据 mode 调用 generate_grid_prompt：
-   - first_frame 模式：每格=一个镜头的首帧，NxN 风格统一
-   - first_last 模式：每个镜头占2格（左首右尾），同一行风格连续
-   - multi_ref 模式：所有格子都是同一镜头的不同参考角度
-3. 返回 grid_prompt（整体提示词）和 cell_prompts（每格提示词）
-
-提示词规范：
-- 使用英文提示词
-- 必须包含 "consistent art style" 保持风格统一
-- 必须包含 "cinematic quality"
-- 避免出现文字或水印`,
-}
 
 function getAgentCfg(type) {
   return agentCfgs.value.find(a => a.agent_type === type)
@@ -272,43 +250,154 @@ async function loadCfgs() {
   catch (e) { /* 非关键，模型下拉留空 */ }
 }
 
-/** 加载全局可用 Skill 列表（用于 Skill 绑定面板） */
+/** 拉取出厂默认配置（默认提示词 + 默认 Skill 绑定），供回显与「恢复默认」使用 */
+async function loadAgentDefaults() {
+  try {
+    const list = await agentConfigAPI.defaults()
+    agentDefaults.value = Object.fromEntries((list || []).map((d) => [d.agent_type, d]))
+  } catch (e) { /* 非关键：取不到时回显为空，「恢复默认」保持原值 */ }
+}
+
+/** 加载全局可用 Skill 列表（用于 Skill 绑定面板）+ 注入体量硬闸 */
 async function loadAvailableSkills() {
-  try { availableSkills.value = await skillsAPI.list() }
-  catch (e) { /* 静默失败，面板显示空状态 */ }
+  try {
+    const [list, meta] = await Promise.all([skillsAPI.list(), skillsAPI.meta()])
+    availableSkills.value = list
+    skillCharBudget.value = meta?.charBudget || 0
+  } catch (e) { /* 静默失败，面板显示空状态 */ }
+}
+
+/** 单个 Skill 的注入体量（与后端预算闸同口径；缺失按 0 计） */
+function getSkillChars(skillId: string): number {
+  return availableSkills.value.find(s => s.id === skillId)?.charCount || 0
+}
+
+/** 外部技能库 Skill 的来源标签（取 library.yaml 的 label）。
+ *  29 个 vendor 分属 2 个库，只标「外部库」无法区分来源；而两个库的用途与体量差异很大，
+ *  必须在选择/绑定时就能看出它来自哪个库。非 vendor 返回 ''（供 v-if 使用）。 */
+function vendorLabel(skillId: string): string {
+  const s = availableSkills.value.find(x => x.id === skillId)
+  if (!s || s.category !== 'vendor') return ''
+  return s.sourceLabel || '外部库'
+}
+
+/** 绑定项指向的 Skill 已不存在（DB 残留引用）：加载器会跳过，需提示用户清理 */
+function skillMissing(skillId: string): boolean {
+  return availableSkills.value.length > 0 && !availableSkills.value.some(s => s.id === skillId)
+}
+
+/** 该 Skill 声明依赖、但本项目（宿主）未提供的工具（后端 missingTools 直出）。
+ *  外部技能库多按另一套宿主平台编写，这类 Skill 的正文会教 Agent 调用不存在的工具 ——
+ *  绑定后**既不报错也不会生效**，用户只会觉得「勾了没用」，所以必须在绑定现场（以及候选列表里）提示。
+ *  仅作预警：MCP 外部工具是运行时动态发现的，存在误报可能，故不做硬拦截。 */
+function skillMissingTools(skillId: string): string[] {
+  return availableSkills.value.find(s => s.id === skillId)?.missingTools || []
+}
+
+/** 缺失工具提示文案（与 v-if 同源，避免模板内重复查找） */
+function missingToolsTip(skillId: string): string {
+  const list = skillMissingTools(skillId)
+  return list.length ? `该 Skill（frontmatter 声明或正文引用）依赖本项目未提供的工具：${list.join(', ')}` : ''
+}
+
+/** 已启用绑定的数量（只有 enabled 的会真正注入，统计与预警口径必须与之统一） */
+const enabledSkillCount = computed(() => agentSkillBindings.value.filter(b => b.enabled).length)
+
+/** 已启用绑定的注入体量合计 —— 与后端按同一「仅 enabled」口径统计，否则预警会误报 */
+const boundChars = computed(() =>
+  agentSkillBindings.value.filter(b => b.enabled).reduce((sum, b) => sum + getSkillChars(b.id), 0)
+)
+
+/** 合计超出注入预算 → 末尾 Skill 会被静默跳过，必须在绑定现场（而非事后）预警 */
+const isBindOverBudget = computed(() => skillCharBudget.value > 0 && boundChars.value > skillCharBudget.value)
+
+/** 体量格式化：≥1 万用 k 记（绑定列表里数字密集，避免一长串） */
+function fmtChars(n: number): string {
+  const v = Number(n) || 0
+  return v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v)
 }
 
 function toggleAgentEdit(type) {
+  closeSkillPicker()
   if (editingAgent.value === type) { editingAgent.value = null; agentSkillBindings.value = []; return }
   const cfg = getAgentCfg(type)
   agentForm.model = cfg?.model || ''
   agentForm.temperature = cfg?.temperature ?? 0.7
   agentForm.max_tokens = cfg?.max_tokens ?? 4096
-  agentForm.system_prompt = cfg?.system_prompt || defaultPrompts[type] || ''
-  // 加载 Skill 绑定配置
+  agentForm.system_prompt = cfg?.system_prompt || defaultInstructions(type)
+  // 加载 Skill 绑定配置。⚠️ 回显必须与后端 parseSkillsConfig 同口径（enabled 缺省视为「启用」），
+  // 否则缺 enabled 字段的老数据会显示成未勾选、且不计入体量合计，而后端照常注入 —— 显示与实际相反。
   if (cfg?.skills) {
-    try { agentSkillBindings.value = JSON.parse(cfg.skills) } catch { agentSkillBindings.value = [] }
+    try {
+      const parsed = JSON.parse(cfg.skills)
+      agentSkillBindings.value = Array.isArray(parsed)
+        ? parsed
+            .filter(b => b && typeof b.id === 'string')
+            .map(b => ({
+              id: b.id,
+              enabled: b.enabled !== false,   // 后端 parseSkillsConfig 同口径：缺省视为启用
+              priority: typeof b.priority === 'number' ? b.priority : 0,
+            }))
+        : []
+    } catch { agentSkillBindings.value = [] }
   } else {
-    const defaults = DEFAULT_AGENT_SKILLS[type] || []
-    agentSkillBindings.value = defaults.map((id, i) => ({ id, enabled: true, priority: i + 1 }))
+    agentSkillBindings.value = toBindings(defaultSkillIds(type))
   }
   agentSaved.value = null
   editingAgent.value = type
 }
 
 function resetAgentPrompt(type) {
-  agentForm.system_prompt = defaultPrompts[type] || ''
+  agentForm.system_prompt = defaultInstructions(type) || agentForm.system_prompt
   toast.info('已恢复默认提示词，点击保存生效')
 }
 
 function resetAgentSkills(type) {
-  const defaults = DEFAULT_AGENT_SKILLS[type] || []
-  agentSkillBindings.value = defaults.map((id, i) => ({ id, enabled: true, priority: i + 1 }))
+  agentSkillBindings.value = toBindings(defaultSkillIds(type))
   toast.info('已恢复默认 Skill 绑定，点击保存生效')
 }
 
 function getSkillName(skillId) {
   return availableSkills.value.find(s => s.id === skillId)?.name
+}
+
+/**
+ * 候选 Skill = 尚未绑定的可用 Skill，按关键词过滤；自有 skill 排在外部库之前。
+ * 必要性：外部库 Skill 无 frontmatter 默认绑定，**只能手动挂**（skills.vue 的空状态文案
+ * 也把用户指引到这里）—— 此前本面板只有「恢复默认」，没有任何添加控件，用户被指到死路。
+ */
+const skillPickerCandidates = computed(() => {
+  const bound = new Set(agentSkillBindings.value.map(b => b.id))
+  const q = skillPickerQuery.value.trim().toLowerCase()
+  return availableSkills.value
+    .filter(s => !bound.has(s.id))
+    .filter(s => !q
+      || String(s.id).toLowerCase().includes(q)
+      || String(s.name || '').toLowerCase().includes(q)
+      || String(s.description || '').toLowerCase().includes(q))
+    .sort((a, b) => (a.category === b.category ? 0 : a.category === 'core' ? -1 : 1)
+      || String(a.id).localeCompare(String(b.id)))
+})
+
+function openSkillPicker() { showSkillPicker.value = true; skillPickerQuery.value = '' }
+function closeSkillPicker() { showSkillPicker.value = false; skillPickerQuery.value = '' }
+
+/** 添加绑定：默认启用、置于列表末尾（保存时按列表顺序统一重写 priority，故此处不必算准） */
+function addSkillBinding(id: string) {
+  if (agentSkillBindings.value.some(b => b.id === id)) return
+  agentSkillBindings.value = [
+    ...agentSkillBindings.value,
+    { id, enabled: true, priority: agentSkillBindings.value.length + 1 },
+  ]
+  toast.info(`已添加「${getSkillName(id) || id}」，保存后生效`)
+}
+
+/** 移除绑定项（含指向已删除 Skill 的「已失效」项）—— 否则失效引用只能永远留在列表里 */
+function removeSkillBinding(idx: number) {
+  const removed = agentSkillBindings.value[idx]
+  if (!removed) return
+  agentSkillBindings.value = agentSkillBindings.value.filter((_, i) => i !== idx)
+  toast.info(`已移除「${getSkillName(removed.id) || removed.id}」，保存后生效`)
 }
 
 function onSkillDragStart(idx, e) {
@@ -367,7 +456,7 @@ async function saveAgentCfg(type) {
   }
 }
 
-onMounted(() => { loadAgents(); loadCfgs(); loadAvailableSkills() })
+onMounted(() => { loadAgents(); loadCfgs(); loadAvailableSkills(); loadAgentDefaults() })
 </script>
 
 <style scoped>
@@ -462,6 +551,31 @@ onMounted(() => { loadAgents(); loadCfgs(); loadAvailableSkills() })
 .skill-bind-name {
   font-size: 12px; font-weight: 500; color: var(--text-1);
 }
+.skill-bind-head-right { display: flex; align-items: center; gap: 8px; }
+/* 已启用体量合计 / 预算：超预算时转为警示色（超出的 Skill 会被静默跳过） */
+.skill-bind-usage { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); white-space: nowrap; }
+.skill-bind-usage.over { color: #b45309; font-weight: 600; }
+/* 单项注入体量 */
+.skill-bind-chars { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); flex-shrink: 0; white-space: nowrap; }
+/* 来源 / 失效标记 */
+.skill-bind-tag { font-size: 9px; padding: 1px 5px; border-radius: 999px; background: rgba(99,102,241,.1); color: #6366f1; font-weight: 500; margin-left: 4px; }
+.skill-bind-tag.danger { background: rgba(220,38,38,.1); color: #dc2626; }
+/* 依赖了本项目未提供的工具（预警而非错误：MCP 工具为运行时发现，可能误报） */
+.skill-bind-tag.warn { background: rgba(245,158,11,.12); color: #b45309; }
+.skill-bind-warn { margin-top: 6px; padding: 6px 9px; border-radius: 6px; background: rgba(245,158,11,.12); color: #b45309; font-size: 10px; line-height: 1.5; }
+/* 添加 Skill 候选面板：外部库 Skill 无默认绑定，这里是唯一的 UI 挂载入口 */
+.skill-picker { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.7); overflow: hidden; }
+.skill-picker-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-3); }
+.skill-picker-input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; font-size: 11px; color: var(--text-1); }
+.skill-picker-list { max-height: 190px; overflow-y: auto; }
+.skill-picker-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: none; background: transparent; cursor: pointer; text-align: left; color: var(--text-1); }
+.skill-picker-item:hover { background: var(--accent-bg); }
+.skill-picker-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.skill-picker-name { font-size: 11px; font-weight: 500; display: flex; align-items: center; }
+.skill-picker-id { font-size: 9px; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 移除绑定项 */
+.skill-bind-remove { flex-shrink: 0; border: none; background: transparent; color: var(--text-3); cursor: pointer; padding: 2px; border-radius: 4px; display: flex; }
+.skill-bind-remove:hover { color: #dc2626; background: rgba(220,38,38,.08); }
 .skill-bind-priority {
   font-size: 10px; font-weight: 700; font-family: var(--font-mono);
   color: var(--text-3); flex-shrink: 0;

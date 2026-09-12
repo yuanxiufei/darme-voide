@@ -246,6 +246,7 @@
 </template>
 
 <script setup>
+import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
 import { toast } from 'vue-sonner'
 import { dramaAPI, autoPipelineAPI } from '~/composables/useApi'
 import BaseSelect from '~/components/BaseSelect.vue'
@@ -304,15 +305,8 @@ function autoEpClass(s) {
   if (s === 'auto:failed') return 'is-failed'
   return 'is-running'
 }
-const styles = {
-  realistic: '写实',
-  anime: '动漫',
-  ghibli: '吉卜力',
-  cinematic: '电影感',
-  comic: '漫画',
-  watercolor: '水彩',
-}
-const styleSelectOptions = computed(() => Object.entries(styles).map(([value, label]) => ({ label, value })))
+// 画风选项统一取自 utils/artStyles.ts（列表/下拉用短名，避免下拉过长）
+const styleSelectOptions = computed(() => ART_STYLE_OPTIONS.map(o => ({ label: o.shortLabel, value: o.value })))
 
 const STATUS_LABELS = {
   draft: '草稿',

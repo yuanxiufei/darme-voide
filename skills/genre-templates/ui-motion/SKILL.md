@@ -133,7 +133,7 @@ Use the requested total video length as the explicit `-t` value. Do not use
 than a segment. Generated segment audio is not carried into the >15s final
 mix unless the user explicitly asks for a different audio policy.
 
-For multi-segment assembly, the bundled `scripts/stitch.mjs` handles ordered concat + mux in one call:
+For multi-segment assembly, the upstream bundle's `stitch.mjs` handles ordered concat + mux in one call (it ships with the upstream bundle, not with this repo):
 
 ```bash
 node .opencode-v2/skills/ui-motion/scripts/stitch.mjs \

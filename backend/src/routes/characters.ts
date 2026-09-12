@@ -5,7 +5,7 @@ import { success, badRequest, notFound, now, parseParamId } from '../utils/respo
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { buildCharacterImagePrompt, buildCharacterVisualsClause, buildEquipImagePrompt, buildEquipArtStyleSuffix, buildCharacterArtStyleSuffix, buildCharacterNegativePrompt, buildThreeViewNegative, buildEquipNegative, buildExpressionImagePrompt, buildExpressionNegative, buildItemImagePrompt, buildItemNegative, ITEM_IMAGE_SIZE, EXPRESSION_PRESETS, findExpressionPreset, THREE_VIEW_COMBINED_LAYOUT, THREE_VIEW_SIZE } from '../shared/prompt-utils.js'
+import { buildCharacterImagePrompt, buildCharacterVisualsClause, buildEquipImagePrompt, buildEquipArtStyleSuffix, buildCharacterArtStyleSuffix, buildCharacterNegativePrompt, buildThreeViewNegative, buildEquipNegative, buildExpressionImagePrompt, buildExpressionNegative, buildItemImagePrompt, buildItemNegative, ITEM_IMAGE_SIZE, EXPRESSION_PRESETS, findExpressionPreset, THREE_VIEW_COMBINED_LAYOUT, THREE_VIEW_SIZE, resolveEffectiveArtStyle, getDramaArtStyle } from '../shared/prompt-utils.js'
 import { splitCharacterVisuals } from '../services/text-generation.js'
 import { ensureCostumeId } from '../services/bible-ids.js'
 
@@ -24,25 +24,9 @@ function resolveDramaConfigId(dramaId: number, field: 'imageConfigId' | 'audioCo
   return undefined
 }
 
-/** 读取剧集视觉风格（dramas.style：realistic/anime/ghibli/cinematic/comic/watercolor） */
-function getDramaStyle(dramaId: number): string | null {
-  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
-  return drama?.style || null
-}
-
-/** 读取全局默认画风（app_settings.art_style），未设置返回 null */
-function getGlobalArtStyle(): string | null {
-  const [row] = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, 'art_style')).all()
-  return row?.value || null
-}
-
-/**
- * 三级画风解析：角色 style → 剧集 style → 全局默认 → realistic（与 dramas.style 默认一致）。
- * 角色/剧集均未指定时使用全局默认画风，保证全链路兜底一致。
- */
-function getEffectiveArtStyle(charStyle: string | null | undefined, dramaStyle: string | null): string {
-  return charStyle || dramaStyle || getGlobalArtStyle() || 'realistic'
-}
+// 画风解析统一收敛到 shared/prompt-utils.ts 的 resolveEffectiveArtStyle
+// （角色 style → 剧集 style → 全局默认 → realistic），本文件不再保留副本，
+// 避免「前端能看到 10 种画风、后端只有部分链路生效」这类分叉。
 
 /** 角色三视图横向长图（combined）localPath/URL 提取 */
 function getCharacterThreeViewCombinedImage(char: any): string | null {
@@ -416,7 +400,7 @@ app.post('/:id/generate-image', async (c) => {
   if (body.episode_id && !ep) return badRequest(c, 'Episode not found')
 
   // 自定义 prompt 优先 → 角色 customPrompt → 统一构建器；无论哪条路径都强制追加统一画风后缀
-  const dramaStyle = getEffectiveArtStyle(char.style, getDramaStyle(char.dramaId))
+  const dramaStyle = resolveEffectiveArtStyle(char.dramaId, char.style)
   const autoPrompt = buildCharacterImagePrompt({ ...char, ...body, dramaStyle })
   const visualsClause = buildCharacterVisualsClause({ ...char, ...body })
   const prompt = resolveCharacterPrompt(body.prompt || char.customPrompt, autoPrompt, dramaStyle, visualsClause)
@@ -467,7 +451,7 @@ app.post('/:id/generate-prompt', async (c) => {
     else if (key in body) merged[key] = body[key]
   }
 
-  const dramaStyle = getEffectiveArtStyle(merged.style, getDramaStyle(char.dramaId))
+  const dramaStyle = resolveEffectiveArtStyle(char.dramaId, merged.style)
   let prompt: string
   let negativePrompt: string
   if (type === 'character') {
@@ -497,7 +481,7 @@ app.post('/:id/generate-three-views', async (c) => {
     .filter((v: string) => ['front', 'side', 'back'].includes(v))
   if (views.length === 0) return badRequest(c, 'views 必须包含 front/side/back 之一')
 
-  const dramaStyle = getEffectiveArtStyle(char.style, getDramaStyle(char.dramaId))
+  const dramaStyle = resolveEffectiveArtStyle(char.dramaId, char.style)
   const autoPrompt = buildCharacterImagePrompt({ ...char, ...body, dramaStyle })
   const visualsClause = buildCharacterVisualsClause({ ...char, ...body })
   const basePrompt = resolveCharacterPrompt(body.prompt || char.customPrompt, autoPrompt, dramaStyle, visualsClause)
@@ -544,7 +528,7 @@ app.post('/:id/generate-equip-image', async (c) => {
     : undefined
   if (body.episode_id && !ep) return badRequest(c, 'Episode not found')
 
-  const dramaStyle = getEffectiveArtStyle(char.style, getDramaStyle(char.dramaId))
+  const dramaStyle = resolveEffectiveArtStyle(char.dramaId, char.style)
   // 模式：view（默认，三视角设定图，设计稿用）/ single（单件高清道具图，纯物品无人物，入库/分镜用）
   const singleMode = body.mode === 'single' || body.item_mode === true || body.single === true
   // 各对象类型独立提示词：服装/武器/首饰分别读取各自的 prompt 字段（角色立绘仍走 customPrompt）
@@ -618,7 +602,7 @@ app.post('/:id/generate-expressions', async (c) => {
     .filter((k: string) => findExpressionPreset(k))
   if (keys.length === 0) return badRequest(c, 'keys 中没有合法的表情 key')
 
-  const dramaStyle = getEffectiveArtStyle(char.style, getDramaStyle(char.dramaId))
+  const dramaStyle = resolveEffectiveArtStyle(char.dramaId, char.style)
   // 表单最新值覆盖（未保存也能按当前外貌/服装生成表情），未传字段保持库内值
   const mergedChar: any = { ...char }
   for (const k of ['appearance', 'clothing', 'costumes', 'coreFeatures', 'description']) {
@@ -664,11 +648,11 @@ app.post('/batch-generate-images', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
   const results: number[] = []
-  const dramaBaseStyle = getDramaStyle(ep.dramaId)
+  const dramaBaseStyle = getDramaArtStyle(ep.dramaId)
   for (const cid of ids) {
     const [char] = db.select().from(schema.characters).where(and(eq(schema.characters.id, cid), isNull(schema.characters.deletedAt))).all()
     if (!char) continue
-    const dramaStyle = getEffectiveArtStyle(char.style, dramaBaseStyle)
+    const dramaStyle = resolveEffectiveArtStyle(ep.dramaId, char.style, dramaBaseStyle)
     const prompt = buildCharacterImagePrompt({ ...char, dramaStyle })
     const negative = resolveCharacterNegative(char.negativePrompt, dramaStyle)
     try {

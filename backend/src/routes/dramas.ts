@@ -6,6 +6,7 @@ import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
 import { logTaskError } from '../utils/task-logger.js'
 import { extractDramaEraBackground, parseEraBackground } from '../services/era-background.js'
 import { ensureStyleId, ensureCostumeId } from '../services/bible-ids.js'
+import { getGlobalArtStyle } from '../shared/prompt-utils.js'
 
 const app = new Hono()
 
@@ -21,11 +22,8 @@ function pickFields(src: any, camelKeys: string[]): any {
   return out
 }
 
-/** 读取全局默认画风（app_settings.art_style），未设置返回 null */
-function getGlobalArtStyle(): string | null {
-  const [row] = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, 'art_style')).all()
-  return row?.value || null
-}
+// 全局默认画风读取统一收敛到 shared/prompt-utils.ts 的 getGlobalArtStyle
+// （此前本文件与 characters.ts 各存一份副本，画风体系一改就要改多处）
 
 // GET /dramas - List dramas
 app.get('/', async (c) => {

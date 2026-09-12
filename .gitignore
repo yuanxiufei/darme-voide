@@ -36,6 +36,9 @@ data/static/
 data/storage/
 data/traces/
 
+# Prompt corpora (third-party text, copyright — reference only, never commit)
+data/prompt-corpus/
+
 # Config
 configs/config.yaml
 
@@ -50,10 +53,13 @@ temp/
 ai-configs.md
 local-deploy-plan.md
 
+# CodeBuddy project-level model config (holds plaintext API keys; keep it user-level instead)
+.codebuddy/models.json
+
 # Playwright CLI test artifacts
 .playwright-cli/
 
-# Browser test DOM dumps
+# Local model manifest (machine-specific / generated)
 models.yaml
 
 # Reference projects (downloaded for learning)

@@ -192,7 +192,8 @@ function generateVariationCard(excludeFamily?: string):
 
 ### 如何基于此模板创建新 Skill
 
-1. **复刻本文件** → `skills/{your-skill-name}.md`
+1. **提炼正文到 Skill** → `skills/<agent-type>/<skill-name>/SKILL.md`（目录 + frontmatter 形式；
+   本文件是**设计文档，不直接放进 `skills/`**，目录约定见 `skills/README.md`）
 2. **替换所有 `{{PLACEHOLDER}}`** → 填入你的领域数据
 3. **填充数据池**（themeFamilies / mainFocalPoints / activities 等）
 4. **撰写 Style Lock** → 逐字精炼的风格描述块

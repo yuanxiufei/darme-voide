@@ -15,7 +15,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getDefaultInstructions, getDefaultName } from '../agents/index.js'
-import { AGENT_SKILL_MAP } from '../agents/skills.js'
+import { resolveDefaultSkills } from '../agents/skills.js'
 import { persistAgentConfig, type GeneratedAgentConfig } from '../agents/creator.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { llmFetch } from '../utils/llm-fetch.js'
@@ -45,20 +45,21 @@ function stripCodeFence(text: string): string {
 /**
  * 将优化出的最佳提示词组装为可落库配置。
  * 优化器只改 systemPrompt，因此 name/description/skills 优先沿用 DB 既有值，
- * 避免误覆盖用户自定义的显示名、描述与 skill 绑定；无既有值时回退默认映射。
+ * 避免误覆盖用户自定义的显示名、描述与 skill 绑定；无既有值时回退该 Agent 的默认绑定
+ * （由各 SKILL.md 的 frontmatter 自描述）。
  */
 function buildPersistCandidate(agentType: string, bestPrompt: string): GeneratedAgentConfig {
   const existing = db.select().from(schema.agentConfigs)
     .where(eq(schema.agentConfigs.agentType, agentType)).all()[0]
 
   let skills: Array<{ id: string; enabled: boolean; priority: number }> =
-    (AGENT_SKILL_MAP[agentType] || []).map((id, i) => ({ id, enabled: true, priority: i + 1 }))
+    resolveDefaultSkills(agentType).map((id, i) => ({ id, enabled: true, priority: i + 1 }))
   if (existing?.skills) {
     try {
       const parsed = JSON.parse(existing.skills)
       if (Array.isArray(parsed)) skills = parsed as typeof skills
     } catch {
-      // skills JSON 损坏时静默回退默认映射
+      // skills JSON 损坏时静默回退默认绑定
     }
   }
 

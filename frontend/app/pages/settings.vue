@@ -236,6 +236,7 @@
 import { ChevronDown, Loader2, HardDrive, Database, FolderOpen, History, Image as ImageIcon, Film, Clock, RefreshCw, FileText, Palette, Check } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { storageAPI, generationsAPI, appSettingsAPI, type StorageInfo, type GenerationRecord } from '~/composables/useApi'
+import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
 
 const tab = ref('history')
 const baseTabs = [
@@ -357,14 +358,9 @@ const artStyle = ref('')
 const artStyleLoading = ref(false)
 const artStyleSaving = ref(false)
 
-const artStyleOptions = [
-  { value: 'realistic', label: '写实电影', desc: '真人质感、电影级光影与景深' },
-  { value: 'anime', label: '日式动漫', desc: '赛璐璐上色、鲜明线条、典型动漫风' },
-  { value: 'ghibli', label: '吉卜力', desc: '手绘质感、温暖配色、治愈系' },
-  { value: 'cinematic', label: '电影感', desc: '商业电影帧、强氛围与色彩分级' },
-  { value: 'comic', label: '美漫漫画', desc: '美式漫画、粗线条、明快对比' },
-  { value: 'watercolor', label: '水彩', desc: '水彩晕染、柔和过渡、纸面纹理' },
-] as const
+// 画风选项统一取自前端单一数据源 utils/artStyles.ts；
+// 新增画风需同步后端 backend/src/shared/prompt-utils.ts 的 ART_STYLE_CATALOG 与画风词表
+const artStyleOptions = ART_STYLE_OPTIONS
 
 async function loadArtStyle() {
   artStyleLoading.value = true
@@ -555,7 +551,8 @@ onMounted(() => { loadStorageInfo(); loadGenerations(); loadArtStyle() })
 /* 画风设置 */
 .art-style-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* 画风卡片带说明文字，2 列更利于单行读完；10 种画风正好 5 行填满，3 列会末行落单 */
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
 }
 .art-style-card {

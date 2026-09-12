@@ -1,0 +1,59 @@
+#!/bin/sh
+#
+# 提交前自检（两道守卫 + 一道守卫自检）：
+#   1) 改动 skills/ 时校验路径引用完整性，防止「改名 / 挪库」造成的静默断链。
+#      → scripts/check-skill-refs.mjs（基线见 skills/README.md「十、改动 skills 后必跑的自检」）
+#   2) 改动 .codebuddy/memory/ 时校验记忆层，防止 MEMORY.md 超 8k 被注入截断、
+#      以及 INDEX.md 的 `@行号` 锚点指错位置。
+#      → scripts/check-memory.mjs（规则见脚本头）
+#   3) 改动**守卫脚本自身**时跑守卫自检：守卫被改哑后基线仍会是绿的（真实仓库本就合规）
+#      ⇒「不报错」≠「还能报错」，故此道只在守卫脚本被动时触发。
+#      → scripts/test-guards.mjs（8 用例，1 = 有用例失败）
+#
+# 启用（在仓库根目录执行一次，仓库不会自动生效）：
+#     git config core.hooksPath .githooks
+# 关闭：
+#     git config --unset core.hooksPath
+# 绕过（确知无碍时）：
+#     git commit --no-verify
+#
+# 退出码 1 = 存在致命项，提交被阻止。任一道未跑（本次提交未触及）则跳过。
+# 注意：POSIX 环境下需 `chmod +x .githooks/pre-commit`。
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACMRD)
+rc=0
+
+# ── 1) skills/ 引用完整性（守卫自身被改动时也跑）────────────────────────
+if printf '%s\n' "$staged" | grep -qE '^skills/|^scripts/check-skill-refs\.mjs$'; then
+	printf '%s\n' '[pre-commit] skills/ 有改动，校验路径引用完整性...'
+	if ! node scripts/check-skill-refs.mjs; then
+		printf '%s\n' '[pre-commit] FAIL: 存在致命断链，提交已阻止。' >&2
+		printf '%s\n' '            修复后重试；确认无碍可用 git commit --no-verify 绕过。' >&2
+		rc=1
+	fi
+fi
+
+# ── 2) 记忆层（8k 预算 + INDEX 锚点）──────────────────────────────────
+if printf '%s\n' "$staged" | grep -qE '^\.codebuddy/memory/|^scripts/check-memory\.mjs$'; then
+	printf '%s\n' '[pre-commit] .codebuddy/memory/ 有改动，校验记忆层（8k 预算 + INDEX 锚点）...'
+	if ! node scripts/check-memory.mjs; then
+		printf '%s\n' '[pre-commit] FAIL: 记忆层自检未通过，提交已阻止。' >&2
+		printf '%s\n' '            修复后重试；确认无碍可用 git commit --no-verify 绕过。' >&2
+		rc=1
+	fi
+fi
+
+# ── 3) 守卫自检（守卫脚本本身被改动时）──────────────────────────────────
+# 注意：第 2 道在守卫被改哑时**依然是绿的**，所以必须靠这一道兜住。
+if printf '%s\n' "$staged" | grep -qE '^scripts/check-memory\.mjs$|^scripts/test-guards\.mjs$'; then
+	printf '%s\n' '[pre-commit] 守卫脚本有改动，跑守卫自检（8 用例，临时副本上造故障）...'
+	if ! node scripts/test-guards.mjs; then
+		printf '%s\n' '[pre-commit] FAIL: 守卫自检未通过（某个检查已失效），提交已阻止。' >&2
+		printf '%s\n' '            修复后重试；确认无碍可用 git commit --no-verify 绕过。' >&2
+		rc=1
+	fi
+fi
+
+exit $rc

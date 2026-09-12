@@ -4,7 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, created, badRequest, notFound, now, parseParamId } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { buildSceneImagePrompt, SCENE_IMAGE_NEGATIVE } from '../shared/prompt-utils.js'
+import { buildSceneImagePrompt, SCENE_IMAGE_NEGATIVE, buildSceneNegativePrompt, resolveEffectiveArtStyle } from '../shared/prompt-utils.js'
 import { ensureLocationId } from '../services/bible-ids.js'
 
 const app = new Hono()
@@ -93,14 +93,15 @@ app.post('/:id/generate-image', async (c) => {
     : undefined
   if (body.episode_id && !ep) return badRequest(c, 'Episode not found')
 
-  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, scene.dramaId)).all()
+  // 画风收口：统一解析链（剧集 style → 全局默认 → realistic），并让正/负提示词同源
+  const dramaStyle = resolveEffectiveArtStyle(scene.dramaId)
   const prompt = body.prompt
     || scene.customPrompt
     || buildSceneImagePrompt({
       location: scene.location,
       time: scene.time,
       prompt: scene.prompt,
-      dramaStyle: drama?.style || undefined,
+      dramaStyle,
     })
 
   // 跨集一致：自动注入同剧同地点已生成的场景图作为参考图，让同地点不同时段/不同集的新场景
@@ -125,7 +126,7 @@ app.post('/:id/generate-image', async (c) => {
       sceneId: id,
       dramaId: scene.dramaId,
       prompt,
-      negativePrompt: body.negative_prompt || scene.negativePrompt || SCENE_IMAGE_NEGATIVE,
+      negativePrompt: body.negative_prompt || scene.negativePrompt || buildSceneNegativePrompt(dramaStyle),
       model: body.model,
       configId: ep?.imageConfigId ?? resolveDramaConfigId(scene.dramaId, 'imageConfigId'),
       referenceImages: locationRefs.length ? locationRefs : undefined,

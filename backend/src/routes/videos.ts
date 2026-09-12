@@ -11,7 +11,8 @@ import {
   getStoryboardSceneDescription,
   getStoryboardReferenceImages,
   getStoryboardReferenceAudioUrls,
-  VIDEO_NEGATIVE,
+  buildVideoNegativePrompt,
+  resolveEffectiveArtStyle,
 } from '../shared/prompt-utils.js'
 import { decideShotRoute } from '../services/shot-router.js'
 
@@ -31,6 +32,8 @@ app.post('/', async (c) => {
     let referenceAudioUrls: string[] | undefined = body.reference_audio_urls
     // 分镜行：上下文注入与逐镜路由共用同一次查询，保证「决策输入」与「请求输入」同源
     let sbRow: typeof schema.storyboards.$inferSelect | undefined = undefined
+    // 画风收口：视频统一解析链（剧集 → 全局 → realistic），供提示词与负面词共用
+    let dramaStyle: string | undefined
 
     // 分镜视频生成：注入角色外观+场景+风格上下文
     if (body.storyboard_id) {
@@ -40,6 +43,7 @@ app.post('/', async (c) => {
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (ep?.videoConfigId != null) configId = ep.videoConfigId
+        dramaStyle = resolveEffectiveArtStyle(ep?.dramaId)
 
         // 自动注入角色外观和场景描述到 prompt（除非明确跳过）
         if (!body._skip_enrich) {
@@ -53,7 +57,7 @@ app.post('/', async (c) => {
             scenePrompt: sceneDesc,
             action: sb.action,
             movement: sb.movement,
-            dramaStyle: undefined,
+            dramaStyle,
             backgroundAudio: sb.soundEffect, // H3 原生 [background_audio] 场景声标记
           })
 
@@ -135,7 +139,7 @@ app.post('/', async (c) => {
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
       prompt,
-      negativePrompt: body.negative_prompt || VIDEO_NEGATIVE,
+      negativePrompt: body.negative_prompt || buildVideoNegativePrompt(dramaStyle),
       model: body.model,
       referenceMode: effectiveMode,
       imageUrl: outImageUrl,
@@ -246,7 +250,8 @@ app.post('/:id/regenerate', async (c) => {
     storyboardId: row.storyboardId ?? undefined,
     dramaId: row.dramaId ?? undefined,
     prompt,
-    negativePrompt: body.negative_prompt || row.negativePrompt || VIDEO_NEGATIVE,
+    // 原记录负面词优先（可复现）；缺失时按剧集画风补，而不是用与画风无关的通用词
+    negativePrompt: body.negative_prompt || row.negativePrompt || buildVideoNegativePrompt(resolveEffectiveArtStyle(row.dramaId)),
     model: body.model || row.model,
     referenceMode: body.reference_mode || row.referenceMode,
     imageUrl: body.image_url || row.imageUrl,

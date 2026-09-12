@@ -224,7 +224,7 @@ If a limit here disagrees with `spec/metadata.yml`, the spec wins — and this d
 | `author-en` | ✅ | English author name (official → `MiniMax Design`; community → submitter's username) |
 | `author-cn` | ✅ | Chinese author name (official → `MiniMax Design`; community → submitter's username) |
 | `source` | ✅ | 3-value enum `official-featured` / `official` / `community`, must match dir (`skills/` → official-featured/official, `user-skills/` → community) |
-| `cover` | Optional | Cover media CDN URL (16:9). Use the repository's current upload path, then validate and write URLs with `scripts/set-cover.sh` |
+| `cover` | Optional | Cover media CDN URL (16:9). Use the upstream `hub-skill-market` repo's current upload path, then validate and write URLs with its `set-cover.sh` |
 | `cover-en` | Optional | Cover media for English locale (same format check). Empty → falls back to `cover` |
 
 The compatibility hard caps in `spec/metadata.yml` only keep unchanged historical metadata valid.

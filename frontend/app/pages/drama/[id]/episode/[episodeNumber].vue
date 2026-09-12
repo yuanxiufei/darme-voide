@@ -1883,15 +1883,15 @@
             </div>
             <label class="bgm-slider">
               <span class="field-label">音量 <span class="mono">{{ Math.round(bgmVolume * 100) }}%</span></span>
-              <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" />
+              <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" @input="markBgmDirty" />
             </label>
             <label class="bgm-num">
               <span class="field-label">淡入 (秒)</span>
-              <input v-model.number="bgmFadeIn" type="number" min="0" max="10" step="0.5" class="input" />
+              <input v-model.number="bgmFadeIn" type="number" min="0" max="10" step="0.5" class="input" @input="markBgmDirty" />
             </label>
             <label class="bgm-num">
               <span class="field-label">淡出 (秒)</span>
-              <input v-model.number="bgmFadeOut" type="number" min="0" max="10" step="0.5" class="input" />
+              <input v-model.number="bgmFadeOut" type="number" min="0" max="10" step="0.5" class="input" @input="markBgmDirty" />
             </label>
             <button class="btn btn-primary" :disabled="bgmSaving" @click="saveBgm">
               {{ bgmSaving ? '保存中…' : '保存配乐方案' }}
@@ -2069,6 +2069,7 @@
 </template>
 
 <script setup lang="ts">
+import { ART_STYLE_LABELS } from '~/utils/artStyles'
 import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
@@ -2225,6 +2226,8 @@ const bgmFadeOut = ref(2.0)
 const bgmUploading = ref(false)
 const bgmSaving = ref(false)
 const bgmInput = ref<HTMLInputElement | null>(null)
+// 用户已手工改动但尚未保存的配乐参数，不能被 refresh 用服务端值覆盖
+const bgmDirty = ref(false)
 const bgmName = computed(() => {
   if (!bgmUrl.value) return ''
   const seg = bgmUrl.value.split('/').pop() || ''
@@ -2526,10 +2529,7 @@ async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: 
 }
 
 // ===== 画风切换（剧集级 / 角色级）=====
-const styleLabels: Record<string, string> = {
-  realistic: '写实电影', anime: '日式动漫', ghibli: '吉卜力',
-  cinematic: '电影感', comic: '美漫漫画', watercolor: '水彩',
-}
+const styleLabels = ART_STYLE_LABELS
 const dramaStyleValue = computed(() => drama.value?.style || '')
 
 async function switchDramaStyle(style: string) {
@@ -3647,6 +3647,19 @@ const scriptSteps = computed(() => {
 watch(rawContent, v => { localRaw.value = v }, { immediate: true })
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
+// 进入页面时按已有产物定位一次步骤。必须与 refresh() 解耦：
+// refresh 会被「刷新数据」按钮和所有生成/编辑操作当作完成回调反复调用，
+// 若在其中定位步骤，用户每次点生成都会被拽回别的步骤（表现为「画面跳转」）。
+function initScriptStep() {
+  const epHasContent = !!(episode.value?.content)
+  const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
+  if (sbs.value.length) scriptStep.value = 4
+  else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
+  else if (epHasScript && chars.value.length) scriptStep.value = 2
+  else if (epHasScript || epHasContent) scriptStep.value = 1
+  else scriptStep.value = 0
+}
+
 async function refresh() {
   try {
     drama.value = await dramaAPI.get(dramaId)
@@ -3655,23 +3668,19 @@ async function refresh() {
       episode.value = ep
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
+      const keepSbId = selectedSb.value?.id
       sbs.value = await episodeAPI.storyboards(ep.id)
-      if (sbs.value.length && !selectedSb.value) selectedSb.value = sbs.value[0]
+      // sbs 每次都是全新对象数组，选中项必须按 id 重新绑定到新对象；
+      // 否则详情面板与选中高亮会一直指向旧对象，生成完看起来「选中态跳没了、生成的图没更新」
+      selectedSb.value = (keepSbId ? sbs.value.find(s => s.id === keepSbId) : null) || sbs.value[0] || null
 
-      const epHasContent = !!(episode.value?.content)
-      const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
-      const epHasSbs = sbs.value.length > 0
-
-      if (epHasSbs) scriptStep.value = 4
-      else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
-      else if (epHasScript && chars.value.length) scriptStep.value = 2
-      else if (epHasScript || epHasContent) scriptStep.value = 1
-      else scriptStep.value = 0
-      // 初始化统一配乐方案
-      bgmUrl.value = ep.bgm_url || ep.bgmUrl || ''
-      bgmVolume.value = Number(ep.bgm_volume ?? ep.bgmVolume ?? 0.3)
-      bgmFadeIn.value = Number(ep.bgm_fade_in ?? ep.bgmFadeIn ?? 1.5)
-      bgmFadeOut.value = Number(ep.bgm_fade_out ?? ep.bgmFadeOut ?? 2.0)
+      // 初始化统一配乐方案（用户已手工改过且未保存时不覆盖，否则调好的参数会被生成操作重置）
+      if (!bgmDirty.value) {
+        bgmUrl.value = ep.bgm_url || ep.bgmUrl || ''
+        bgmVolume.value = Number(ep.bgm_volume ?? ep.bgmVolume ?? 0.3)
+        bgmFadeIn.value = Number(ep.bgm_fade_in ?? ep.bgmFadeIn ?? 1.5)
+        bgmFadeOut.value = Number(ep.bgm_fade_out ?? ep.bgmFadeOut ?? 2.0)
+      }
       await loadLatestGridImage()
 
       // 自动加载配音验证状态（异步，不阻塞 UI）
@@ -3688,7 +3697,8 @@ function saveScr() { episodeAPI.update(epId.value, { script_content: localScript
 
 // ====== 统一配乐：上传 / 保存 ======
 function triggerBgmUpload() { bgmInput.value?.click() }
-function clearBgm() { bgmUrl.value = '' }
+function markBgmDirty() { bgmDirty.value = true }
+function clearBgm() { bgmUrl.value = ''; bgmDirty.value = true }
 async function onPickBgm(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -3697,6 +3707,7 @@ async function onPickBgm(e: Event) {
   try {
     const { url } = await uploadAPI.audio(file)
     bgmUrl.value = url
+    bgmDirty.value = true
     toast.success('配乐已上传')
   } catch (err: any) {
     toast.error(err?.message || '上传失败')
@@ -3721,6 +3732,7 @@ async function saveBgm() {
       episode.value.bgm_fade_in = bgmFadeIn.value
       episode.value.bgm_fade_out = bgmFadeOut.value
     }
+    bgmDirty.value = false
     toast.success('配乐方案已保存，下次拼接生效')
   } catch (err: any) {
     toast.error(err?.message || '保存失败')
@@ -4791,7 +4803,11 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadProps() })
+onMounted(async () => {
+  await refresh()
+  initScriptStep()
+  loadConfigs(); loadVoices(); loadProps()
+})
 </script>
 
 <style scoped>

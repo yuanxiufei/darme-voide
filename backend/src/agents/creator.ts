@@ -20,7 +20,7 @@ import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { llmFetch } from '../utils/llm-fetch.js'
 import { getDefaultInstructions, getDefaultName, validAgentTypes } from './index.js'
-import { AGENT_SKILL_MAP, listSkillIds } from './skills.js'
+import { listCoreSkillIds, resolveDefaultSkills } from './skills.js'
 import { now } from '../utils/response.js'
 
 export interface GeneratedAgentConfig {
@@ -32,8 +32,12 @@ export interface GeneratedAgentConfig {
   skills: Array<{ id: string; enabled: boolean; priority: number }>
 }
 
-/** 全部可用 skill id 集合（扫描 skills/ 目录，含 minimax 技能库；不再受默认映射子集限制） */
-const AVAILABLE_SKILL_IDS = listSkillIds()
+/**
+ * creator 可推荐给 Agent 的 skill 集合 = **项目自有 skill**（`skills/` 顶层含 SKILL.md 的目录）。
+ * 不含外部技能库（vendor）：那些是"按触发词独立启动"的会话式技能，绑给常驻 Agent 只会注入
+ * 半截指令（其正文引用的 references/*.md 加载器不读），详见 agents/skills.ts 文件头注释。
+ */
+const AVAILABLE_SKILL_IDS = listCoreSkillIds()
 
 const CREATOR_INSTRUCTIONS = `你是一名 AI Agent 配置生成专家。根据用户的一句话需求，为指定类型的 Agent 生成优化后的配置。
 
@@ -105,12 +109,12 @@ export async function generateAgentConfig(
     throw new Error(`生成器产出无效 systemPrompt（length=${systemPrompt.length}）`)
   }
 
-  // skills 过滤：只保留合法 id，非法静默丢弃；空则回退该类型的默认映射
+  // skills 过滤：只保留合法 id，非法静默丢弃；空则回退该 Agent 的默认绑定（frontmatter 自描述）
   const rawSkills: unknown = parsed.skills
   const requestedIds = Array.isArray(rawSkills)
     ? rawSkills.map(s => String(s)).filter(id => AVAILABLE_SKILL_IDS.includes(id))
     : []
-  const finalIds = requestedIds.length ? requestedIds : (AGENT_SKILL_MAP[agentType] || [])
+  const finalIds = requestedIds.length ? requestedIds : resolveDefaultSkills(agentType)
   const skills = finalIds.map((id, i) => ({ id, enabled: true, priority: i + 1 }))
 
   return {

@@ -9,7 +9,8 @@ import {
   getStoryboardCharacterAppearances,
   getStoryboardSceneDescription,
   getStoryboardReferenceImages,
-  STORYBOARD_IMAGE_NEGATIVE,
+  buildStoryboardNegativePrompt,
+  resolveEffectiveArtStyle,
   NEGATIVE_BASE,
 } from '../shared/prompt-utils.js'
 
@@ -24,6 +25,8 @@ app.post('/', async (c) => {
     let configId: number | undefined = body.config_id
     let prompt = body.prompt
     let referenceImages = body.reference_images
+    // 画风收口：分镜图统一解析链（角色 → 剧集 → 全局 → realistic），正/负提示词同源
+    let dramaStyle: string | undefined
 
     // 分镜图片生成：注入角色外观+场景+风格上下文
     if (body.storyboard_id) {
@@ -32,6 +35,7 @@ app.post('/', async (c) => {
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (ep?.imageConfigId != null) configId = ep.imageConfigId
+        dramaStyle = resolveEffectiveArtStyle(ep?.dramaId)
 
         // 自动注入角色外观和场景描述到 prompt
         if (!body._skip_enrich) {
@@ -46,7 +50,7 @@ app.post('/', async (c) => {
             location: sb.location,
             shotType: sb.shotType,
             cameraAngle: sb.angle,
-            dramaStyle: undefined, // 可通过 episode->drama 补充
+            dramaStyle,
           })
 
           // 自动添加角色图片 + 场景图作为 reference_images，保证人物与场景一致
@@ -72,7 +76,7 @@ app.post('/', async (c) => {
       sceneId: body.scene_id,
       characterId: body.character_id,
       prompt,
-      negativePrompt: body.negative_prompt || (body.storyboard_id ? STORYBOARD_IMAGE_NEGATIVE : NEGATIVE_BASE),
+      negativePrompt: body.negative_prompt || (body.storyboard_id ? buildStoryboardNegativePrompt(dramaStyle) : NEGATIVE_BASE),
       model: body.model,
       size: body.size,
       referenceImages,

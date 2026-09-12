@@ -24,7 +24,15 @@ import { composeStoryboard } from './ffmpeg-compose.js'
 import { mergeEpisodeVideos } from './ffmpeg-merge.js'
 import { logTaskStart, logTaskSuccess, logTaskError, logTaskWarn, logTaskProgress } from '../utils/task-logger.js'
 import { publishPipelineEvent } from '../utils/sse-hub.js'
-import { STORYBOARD_IMAGE_NEGATIVE, VIDEO_NEGATIVE, getStoryboardReferenceImages, getStoryboardReferenceAudioUrls } from '../shared/prompt-utils.js'
+import {
+  buildStoryboardArtStyleSuffix,
+  buildStoryboardNegativePrompt,
+  buildVideoArtStyleSuffix,
+  buildVideoNegativePrompt,
+  resolveEffectiveArtStyle,
+  getStoryboardReferenceImages,
+  getStoryboardReferenceAudioUrls,
+} from '../shared/prompt-utils.js'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { extractStoryboardTailFrames } from './frame-extractor.js'
 import { decideShotRoute } from './shot-router.js'
@@ -214,6 +222,9 @@ async function runVoiceStage(episodeId: number, dramaId: number): Promise<void> 
 /** 提交缺失的关键帧图（幂等：keyframe_prompt 存在但 keyframe_image 缺失且无进行中任务时提交） */
 async function submitMissingKeyframes(episodeId: number, dramaId: number, configId?: number): Promise<number> {
   const sbs = getStoryboards(episodeId)
+  // 画风收口：批量管线与手动路由共用同一套画风解析与后缀（skill 约定 agent 不写画风词，
+  // 故这里由后端统一注入，保证「批量出图」与「单张重跑」画风一致）
+  const artStyle = resolveEffectiveArtStyle(dramaId)
   let submitted = 0
   for (const sb of sbs) {
     if (!sb.keyframePrompt || sb.keyframeImage) continue
@@ -226,8 +237,8 @@ async function submitMissingKeyframes(episodeId: number, dramaId: number, config
     await generateImage({
       storyboardId: sb.id,
       dramaId,
-      prompt: sb.keyframePrompt,
-      negativePrompt: STORYBOARD_IMAGE_NEGATIVE,
+      prompt: `${sb.keyframePrompt}${buildStoryboardArtStyleSuffix(artStyle)}`,
+      negativePrompt: buildStoryboardNegativePrompt(artStyle),
       frameType: 'keyframe',
       configId,
     })
@@ -239,6 +250,7 @@ async function submitMissingKeyframes(episodeId: number, dramaId: number, config
 /** 提交缺失的首帧图（幂等：已有首帧 / 已有 processing/completed 任务则跳过） */
 async function submitMissingImages(episodeId: number, dramaId: number, configId?: number): Promise<number> {
   const sbs = getStoryboards(episodeId)
+  const artStyle = resolveEffectiveArtStyle(dramaId)
   let submitted = 0
   for (const sb of sbs) {
     if (sb.firstFrameImage) continue
@@ -252,8 +264,8 @@ async function submitMissingImages(episodeId: number, dramaId: number, configId?
     await generateImage({
       storyboardId: sb.id,
       dramaId,
-      prompt,
-      negativePrompt: STORYBOARD_IMAGE_NEGATIVE,
+      prompt: `${prompt}${buildStoryboardArtStyleSuffix(artStyle)}`,
+      negativePrompt: buildStoryboardNegativePrompt(artStyle),
       frameType: 'first_frame',
       configId,
     })
@@ -265,6 +277,7 @@ async function submitMissingImages(episodeId: number, dramaId: number, configId?
 /** 提交缺失的视频（幂等：需首帧已就绪 + 无 processing/completed 任务） */
 async function submitMissingVideos(episodeId: number, dramaId: number, configId?: number): Promise<number> {
   const sbs = getStoryboards(episodeId)
+  const artStyle = resolveEffectiveArtStyle(dramaId)
   const config = configId ? getConfigById(configId) : getActiveConfig('video')
   const provider = (config?.provider || '').toLowerCase()
   const canMultiRef = MULTI_REFERENCE_PROVIDERS.has(provider)
@@ -346,7 +359,8 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
       prevTail,
     })
 
-    const prompt = sb.videoPrompt || sb.imagePrompt || sb.description || '镜头缓慢推进，人物自然表演'
+    // 画风收口：agent 只写画面/运镜内容，画风英文词由后端统一追加（防止同剧画风漂移）
+    const prompt = `${sb.videoPrompt || sb.imagePrompt || sb.description || '镜头缓慢推进，人物自然表演'}${buildVideoArtStyleSuffix(artStyle)}`
     // FL2VA（首尾帧连接）：video adapter 契约要求 referenceMode='first_last' 才会派发
     // first_frame_image / last_frame_image。决策为 first_last 时：起帧 = 同场景顺接的真实尾帧
     // （连续性）或本镜设计首帧；尾帧目标 = 本镜 last_frame_image（grid 模式锁定结束画面）。
@@ -356,7 +370,7 @@ async function submitMissingVideos(episodeId: number, dramaId: number, configId?
       storyboardId: sb.id,
       dramaId,
       prompt,
-      negativePrompt: VIDEO_NEGATIVE,
+      negativePrompt: buildVideoNegativePrompt(artStyle),
       referenceMode: routeDecision.referenceMode,
       imageUrl: isFirstLast ? undefined : anchorImage,
       firstFrameUrl: isFirstLast ? (prevTail || sb.firstFrameImage || undefined) : (prevTail ? sb.firstFrameImage : undefined),

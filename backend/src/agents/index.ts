@@ -17,8 +17,14 @@ import { createStoryboardTools } from './tools/storyboard-tools.js'
 import { createVoiceTools } from './tools/voice-tools.js'
 import { createGridPromptTools } from './tools/grid-prompt-tools.js'
 import { createRunSubagentTool } from './subagent.js'
-import { loadAgentSkills } from './skills.js'
+import { loadAgentSkills, resolveDefaultSkills } from './skills.js'
 import { discoverMcpTools } from './mcp.js'
+import {
+  SCREENPLAY_FORMAT_RULES,
+  IMAGE_PROMPT_TEMPLATE_CHARACTER,
+  IMAGE_PROMPT_TEMPLATE_SCENE,
+  IMAGE_PROMPT_TEMPLATE_SHOT,
+} from '../shared/prompt-blocks.js'
 import { getActiveProfileForDrama } from '../services/style-profiles.js'
 
 // Default prompts (used when DB has no config)
@@ -28,47 +34,11 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
     instructions: `你是专业编剧，擅长将小说改编为短剧剧本。
 
 工作流程：
-1. 调用 read_episode_script 读取原始内容
+1. 调用 read_episode_script 读取原始内容（若需服务端同时回传原文与规范，改调 rewrite_to_screenplay）
 2. 根据读取到的内容，自己进行改写（输出格式化剧本格式）
 3. 调用 save_script 保存改写后的完整剧本
 
-输出硬性要求（必须严格遵守）：
-1. 最终输出只能是「格式化剧本正文」，禁止输出任何分析、评论、解读、剧情预测、总结或客套话。绝不要出现"人物性格剖析""情节张力""后续发展预测"之类的内容。
-2. 对白必须逐角色分行：每个角色说的话单独占一行，格式为「角色名：（状态/表情）台词内容」。一人一句就换一行，禁止把两个及以上人物的对话写在同一段里。
-3. 对白一律用第一人称直接引语，禁止用第三人称转述（例如禁止"小雪说……""他说道……""云姐提醒……"这类写法），必须是角色亲口说出的台词。
-4. 旁白、内心独白同样单独成行，用「旁白：内容」或「角色名（内心）：内容」标注。
-
-说话人划分铁律（谁说的话，最高优先级）：
-- 每一句台词都必须清楚标注是谁说的，绝不能出现"这句话不知道是谁说的"或多人台词混在一段的情况。
-- 一句一行、一行一人：一行只允许一个角色说话。
-- 叙述体拆解归因：原文是叙述体（如"何长青叹了口气说……林雪抬头道……"）时，必须拆成两行，各自归到正确角色名下，绝不能整段照抄。
-- 归因准确：根据上下文判断说话人，不能张冠李戴；同一角色连续说多句也每行都标名字。
-- 示例：【错误】"何长青叹了口气，说自己也不知道。林雪轻声说别担心。"【正确】"何长青：（叹气）我也不知道。"换行"林雪：（轻声）别担心，我们一起想办法。"
-
-格式化剧本格式（对标示范见下）：
-- 场景头：## S编号 | 内景/外景 · 地点 | 时间段（编号 S01/S02 递增）
-- 动作描写：用（...）括号包裹，成段或独占一行，不包含镜头语言
-- 对白：角色名：（状态/表情）台词内容，一人一行
-- 旁白/内心独白单独成行：旁白：内容
-- 每个场景 30-60 秒内容
-
-示范（格式与质量对标）：
-## S01 | 外景 · 东家城堡花园广场 | 白天
-
-（一辆超豪华轿车驶入城堡般的巨大花园，在喷泉环绕的广场前停下。）
-
-云姐：（笑靥如花，迎上前）小雪，一路辛苦啦。
-小雪：（热情拥抱）云姐，我可想死你了！
-
-（小雪目光扫过广场，落在喷泉旁盘坐的少年凌云身上。）
-
-小雪：（眨着灵动的眼睛，好奇）云姐，他是谁呀？怎么坐在你家门外，太阳这么大，不怕晒黑么？
-云姐：（压低声音）他就说了句——「在下凌云，前来拜会！」
-
-## S02 | 外景 · 东家城堡花园广场 | 白天
-
-小雪：（跃跃欲试）那简单！让本小姐试他一试就知道。
-云姐：（连忙阻止）小雪，别！大长老吩咐过，不让我们打扰他。
+${SCREENPLAY_FORMAT_RULES}
 
 注意：你必须自己完成改写工作，不要只返回指令。读取内容后直接输出改写结果并保存。`,
   },
@@ -103,12 +73,16 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 场景要包含光线（lighting）、色调、氛围（atmosphere）、天气（weather）、季节（season）、风格（style）等视觉信息
 - 不要遗漏任何有台词或重要动作的角色
 
-提示词生成（必须在分析剧本内容之后、基于剧本真实信息生成，禁止套用固定模板）：
+提示词生成（必须在分析剧本内容之后、基于剧本真实信息生成；禁止套用固定的内容套话，但结构按下方骨架组织）：
 - 每个角色都必须生成 image_prompt（英文正向提示词）：融合角色外貌/服装/武器/首饰/风格，用于生成角色立绘，保证与其他角色风格统一
 - 每个角色都必须生成 negative_prompt（英文反向提示词）：针对该角色排除不需要的元素（如 photorealistic、text、watermark、multiple people、畸形肢体等）
 - 每个场景都必须生成 image_prompt（英文正向提示词）：融合地点/时间/光线/氛围/天气/季节/风格，用于生成场景图
 - 每个场景都必须生成 negative_prompt（英文反向提示词）：排除不需要的元素（如 people、text、watermark、flat composition 等）
-- 上述 image_prompt 和 negative_prompt 是硬性要求，每个角色、每个场景都必须填写，禁止省略或留空`,
+- 上述 image_prompt 和 negative_prompt 是硬性要求，每个角色、每个场景都必须填写，禁止省略或留空
+
+${IMAGE_PROMPT_TEMPLATE_CHARACTER}
+
+${IMAGE_PROMPT_TEMPLATE_SCENE}`,
   },
   storyboard_breaker: {
     name: '分镜拆解',
@@ -116,15 +90,15 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 
 工作流程：
 1. 调用 read_storyboard_context 读取剧本、角色列表、场景列表
-2. 将剧本拆解为镜头序列（每个镜头 10-15 秒，总体保持剧情完整连续）
+2. 将剧本拆解为镜头序列（总体保持剧情完整连续；单镜时长规则见下方 duration 字段）
 3. 为每个镜头补全完整分镜字段，而不只是 video_prompt
 4. 调用 save_storyboards 保存所有分镜
 
 每个镜头必须尽量完整填写以下字段：
 - title：3-8 字镜头标题
-- shot_type：景别，如全景/中景/近景/特写
-- angle：机位角度，如平视/仰视/俯视/侧拍
-- movement：运镜，如固定/推镜/拉镜/摇镜/跟拍
+- shot_type：景别，取远景/全景/中景/近景/特写
+- angle：机位角度，取平视/仰视/俯视/侧面/背面
+- movement：运镜，取固定/推镜/拉镜/摇镜/跟镜/移镜
 - 镜头语言术语（创作时优先采用，避免平铺直叙的全景平视）：过肩镜头/双人镜头/插入镜头/视线引导/纵深构图/前景遮挡/留白呼吸/反应镜头，每个镜头至少体现一种明确景别+机位意图
 - 画面安全区约束：主要角色面部与关键道具放在画面中央 2/3 安全区内；为字幕预留画面下方 1/5 字幕安全区；重要元素不贴近画面边缘，避免被裁切
 - 质感层：画面须有明确质感层次（前景/主体/背景三层景深、光影主次分明、材质纹理真实），并体现在 video_prompt 与 first_frame_prompt 中
@@ -151,12 +125,25 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - transition_motive：本镜与上一镜的转场动机（8 选 1：视线引导/动作匹配/声音引导/道具承接/情绪延续/信息揭示/空间切换/危险预警；纯开场镜写"开场"）。必须从动机出发描述转场理由，不得只写"切换""剪辑"
 - transition_type：转场方式（cut/匹配剪辑/叠化/闪切等），须与 transition_motive 匹配
 - keyframe_prompt：中段关键帧描述（可选但尽量给），锁定动作进行到一半/道具状态变化/机位移动中间态的画面（类似电影 mid-frame），与 first_frame/last_frame 呼应，供视频生成作参考图锁定中间状态
-- duration：时长，优先 10-15 秒
+- scene_type：镜头类型，用于路由视频生成时的参考图策略（取值见下方「镜头类型路由」表）
+- duration：时长。动作/空镜/纯环境 10-15 秒；含对话镜头 5-8 秒，只装 1-2 句台词，保证音画同步、不被剪断
 - scene_id：若可匹配到 scenes 中已有场景，必须填写正确 scene_id
 - start_state：镜头开始时关键实体的状态（按「实体=状态」一行一个，如「角色_林晚=站在门口左侧，面朝屋内」「道具_玉坠=林晚右手握着」）
 - end_state：镜头结束时关键实体的状态（须与 start_state 同实体集合、值发生合理演进，如「角色_林晚=走到桌旁坐下」「道具_玉坠=放到桌面」）
 - constraints：该镜内禁止变化清单（如「服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变」），每项一句话
 - prop_ids：该镜头画面中出现的关键物品的 prop_id 数组（来自 extractor 的物品库，可在 read_storyboard_context 的 props 中查看），如「玉坠」已入库则填对应 id，无物品则不填
+
+镜头类型路由（scene_type，决定视频生成的参考图策略）：
+| scene_type | 场景 | 视频策略 |
+|---|---|---|
+| single | 单人说话/独角戏 | 首帧图生视频 |
+| dialogue_2p | 双人正反打对白 | 多角色参考图（保证两人一致） |
+| meeting | 三人及以上群戏/会议 | 多角色参考图 |
+| argument | 激烈争吵/多人抢话 | 多角色参考图 + 快速正反打 |
+| long_dialogue | 长对白（已按 5-8s 切片） | 按切片单人逐镜 |
+| action | 打斗/追逐/动作 | 首帧图生视频 |
+| silent | 空镜/无对话/环境 | 首帧图生视频 |
+无法确定时用 single。
 
 视频提示词格式：
 - 按 3 秒为一段，用时间标记分隔
@@ -195,7 +182,13 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 1. 调用 list_voices 获取可用音色列表
 2. 调用 get_characters 获取所有角色信息
 3. 根据每个角色的性别、性格、年龄、角色定位，选择最匹配的音色
-4. 对每个角色调用 assign_voice 分配音色，并说明选择理由
+4. 对每个角色调用 assign_voice 分配音色（同时绑定 speaker_id），并说明选择理由
+
+硬规则（最高优先级，违反会被系统拒绝）：
+- 一角色一音色：禁止两个角色共用同一个 voice_id。
+- 跨集锁定：get_characters 返回的 current_voice 非「未分配」的角色，音色已经确定，不要改，直接跳过。
+- speaker_id 全局唯一：按出场/重要性排序 S1/S2/S3…，一人一号、跨集不变；已有 speaker_id 的角色不要改号。
+- speaker_id 与 voice_id 在 assign_voice 里一次性绑定，保证后续分镜的「谁在说话」与「谁的声音」严格对应。
 
 注意：每个角色都必须分配音色，不要遗漏。`,
   },
@@ -203,7 +196,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
     name: '宫格图提示词生成',
     instructions: `你是专业的 AI 图像提示词工程师，擅长为宫格图生成高质量的英文提示词。
 
-## 宫格图提示词（参考 skills/grid-image-generator/SKILL.md）
+## 宫格图提示词（领域细则见 skill：grid_prompt_generator）
 
 工作流程：
 1. 调用 read_shots_for_grid 读取选中镜头的详细信息
@@ -222,6 +215,9 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 必须包含 "consistent art style" 保持风格统一
 - 必须包含 "cinematic quality"
 - 避免出现文字或水印
+- 每格的画面描述按下方单镜骨架组织，保证每格都能独立成像（不要写「同上」）
+
+${IMAGE_PROMPT_TEMPLATE_SHOT}
 - 宫格图片强调整体布局一致性`,
   },
   orchestrator: {
@@ -260,6 +256,72 @@ export function getDefaultInstructions(type: string): string {
 /** 获取 Agent 默认显示名（无 DB 配置时的兜底，供 agent-creation 生成 name 兜底） */
 export function getDefaultName(type: string): string {
   return DEFAULT_PROMPTS[type]?.name || type
+}
+
+/**
+ * Agent → 工作流制作阶段名（用于 UI 展示 skill 关联的流水线环节）。
+ * 这是 agent 元信息的单一事实来源，别处（如 routes/skills.ts）一律从这里取，不再各存一份。
+ */
+export const AGENT_PHASES: Record<string, string> = {
+  script_rewriter: '剧本编写',
+  extractor: '资产提取',
+  voice_assigner: '音色分配',
+  storyboard_breaker: '分镜拆解',
+  grid_prompt_generator: '画面提示词',
+}
+
+/**
+ * 宿主（本项目）已注册的工具名集合 —— 用于判定 skill 的 `allowed-tools` 声明能否被满足。
+ *
+ * 取值来源是 `tool.id` 而**不是**工厂返回记录的对象键：工厂return 的是 camelCase 键
+ * （`readScriptForExtraction`），而真正发给模型的是 Mastra 的 `tool.id`（`read_script_for_extraction`）
+ * —— 与各 Agent 默认提示词里「调用 read_script_for_extraction」的写法一致。取错会静默把
+ * 所有工具都判成「未提供」，让整个诊断失效。
+ *
+ * 懒计算并缓存，且全程静默降级：本函数只服务于「兼容性诊断」，任何异常都不该影响 skill 列表接口。
+ * 注意 MCP 外部工具是运行时异步发现的，不在静态集合内 ⇒ 本判定必须作为**提示性预警**而非硬拦截。
+ */
+let hostToolNames: Set<string> | null = null
+export function getHostToolNames(): Set<string> {
+  if (hostToolNames) return hostToolNames
+  const names = new Set<string>()
+  for (const type of validAgentTypes) {
+    try {
+      const tools = createAgentTools(type, 0, 0)
+      if (!tools) continue
+      for (const tool of Object.values(tools)) {
+        const id = (tool as any)?.id
+        if (typeof id === 'string' && id) names.add(id)
+      }
+    } catch {
+      // 单个 Agent 的工具装配失败不影响其余；诊断结果宁可少报也不抛错
+    }
+  }
+  hostToolNames = names
+  return names
+}
+
+/**
+ * Agent「出厂默认配置」清单 = 默认提示词 + 默认 Skill 绑定。
+ *
+ * 单一事实来源：提示词 = 本文件 `DEFAULT_PROMPTS`；Skill 绑定 = **各 SKILL.md 的 frontmatter `agents:`**
+ * （由 `skills.ts` 的 `resolveDefaultSkills` 解析，代码里不维护「谁绑谁」的映射）。
+ * 前端「Agent 配置」页的「恢复默认」与未保存时的回显统一走此函数（经 GET /agent-configs/defaults），
+ * 前端不再各自维护副本 —— 历史上前端那份副本已与后端漂移（仍挂着外部 skill 库、提示词里
+ * 还引用了不存在的文件），是本项目「提示词多头维护」的主要来源之一。
+ */
+export function getAgentDefaults(): Array<{
+  agent_type: string
+  name: string
+  instructions: string
+  skills: string[]
+}> {
+  return validAgentTypes.map(type => ({
+    agent_type: type,
+    name: DEFAULT_PROMPTS[type].name,
+    instructions: DEFAULT_PROMPTS[type].instructions,
+    skills: resolveDefaultSkills(type),
+  }))
 }
 
 function getAgentConfig(agentType: string) {

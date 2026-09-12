@@ -16,6 +16,28 @@ import { getCameraMovementComposition } from './camera-movement-guides.js'
 import { resolveVisualTerm } from './visual-graph.js'
 
 // ============================================================
+// 提示词分层契约（改前先读）
+// ------------------------------------------------------------
+// 本项目提示词分 5 层，越靠上越通用、越靠下越具体：
+//   L1 身份/工作流层  agents/index.ts 的 DEFAULT_PROMPTS（agent 是谁、按什么流程干活）
+//   L2 画风层         ART_STYLE_CATALOG + DRAMA/EQUIP_ART_STYLE_MAP（10 种画风的四段词表）
+//   L3 画质收口层     QUALITY_TAIL（中性基准，静帧/视频各持一个引用常量）
+//   L4 瑕疵锚点层     IMPERFECTION_ANCHORS（仅写实向白名单注入）
+//   L5 负面层         NEGATIVE_*（各链路负面词，统一拼 NEGATIVE_BASE）
+//
+// 硬性规则：
+//   1. 命中画风用 `art, ART_STYLE_TAIL`；未命中才回退 VISUAL_STYLE_MASTER ——
+//      **二者二选一，禁止叠加**（MASTER 含 cinematic illustration style，叠加会把水墨/动漫拉回写实插画）
+//   2. 视频链路只用 VIDEO_* 家族，不得引用 ART_STYLE_* / VISUAL_STYLE_MASTER
+//   3. 各路由与服务不得自建画风副本；唯一入口 resolveEffectiveArtStyle + build*ArtStyleSuffix
+//
+// 文件导航（约 1600 行）：
+//   L20+   全域风格常量（VISUAL_STYLE_*）
+//   L300+  画风收口层：ART_STYLE_CATALOG / 三张映射表 / resolveEffectiveArtStyle / build*Suffix
+//   其余   角色 / 装备 / 道具 / 表情 / 场景 / 分镜 / 宫格 / TTS 的正负词构建器
+// ============================================================
+
+// ============================================================
 // 风格预设常量（全域一致）
 // ============================================================
 
@@ -136,24 +158,100 @@ export const CHARACTER_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, photorealistic, reali
 // 与分镜/场景/视频的 dramaStyle 注入对齐，保证全链路画风一致。
 // ============================================================
 
-/** 戏剧视觉风格 → 英文画风描述（对齐前端创建/编辑剧集时的 6 选） */
-export const DRAMA_ART_STYLE_MAP: Record<string, string> = {
-  realistic: 'realistic cinematic character design, natural skin texture, film quality lighting',
-  anime: '2D anime illustration style, clean line art, cel shading, vibrant colors',
-  ghibli: 'ghibli-inspired hand-drawn animation style, soft watercolor background, gentle rounded character design',
-  cinematic: 'cinematic film still style, dramatic moody lighting, shallow depth of field',
-  comic: 'comic book illustration style, bold ink line work, halftone shading, dynamic comic character design',
-  watercolor: 'watercolor painting style, soft brush strokes, translucent washes, delicate pastel palette',
+/**
+ * 画风目录（画风的单一事实来源：key + 中文名 + 说明 + 分组）。
+ *
+ * 后端本文件为事实来源，前端 `frontend/app/utils/artStyles.ts` 为对齐镜像。
+ * 新增画风时必须同时改三处：本 catalog、下方 DRAMA_ART_STYLE_MAP、前端镜像文件，
+ * 否则前端下拉会出现「选了没效果」或「有词但选不到」。
+ */
+export interface ArtStyleOption {
+  /** 落库值（dramas.style / characters.style / app_settings.art_style） */
+  key: string
+  /** 完整中文名（下拉、详情页用） */
+  label: string
+  /** 紧凑短名（列表角标、切换按钮用） */
+  shortLabel: string
+  /** 一句话视觉说明 */
+  desc: string
+  /** 分组，便于前端分组展示 */
+  group: string
 }
 
-/** 各画风对应的对立风格负面词（防止模型混用动漫/真人） */
+export const ART_STYLE_CATALOG: ArtStyleOption[] = [
+  { key: 'realistic', label: '写实电影', shortLabel: '写实', desc: '真人质感、电影级镜头语言与胶片调色', group: '实拍质感' },
+  { key: 'cinematic', label: '电影感', shortLabel: '电影感', desc: '商业电影帧、强氛围与色彩分级', group: '实拍质感' },
+  { key: 'noir', label: '黑色电影', shortLabel: '黑色', desc: '黑白高反差、硬光影、1940s 侦探片质感', group: '实拍质感' },
+  { key: 'anime', label: '日式动漫', shortLabel: '动漫', desc: '赛璐璐上色、鲜明线条、动画 key visual', group: '绘画插画' },
+  { key: 'ghibli', label: '吉卜力', shortLabel: '吉卜力', desc: '手绘质感、温暖配色、治愈系', group: '绘画插画' },
+  { key: 'ink-wash', label: '国风水墨', shortLabel: '水墨', desc: '水墨晕染、留白意境、宣纸质感', group: '绘画插画' },
+  { key: 'watercolor', label: '水彩', shortLabel: '水彩', desc: '水彩晕染、柔和过渡、纸面纹理', group: '绘画插画' },
+  { key: 'comic', label: '美漫漫画', shortLabel: '漫画', desc: '美式漫画、粗线条、网点阴影', group: '三维与漫画' },
+  { key: 'cyberpunk', label: '赛博朋克', shortLabel: '赛博', desc: '霓虹雨夜、高饱和洋红青、全息光斑', group: '三维与漫画' },
+  { key: 'pixar3d', label: '三维动画', shortLabel: '3D', desc: '皮克斯式三维渲染、圆润造型、柔和全局光', group: '三维与漫画' },
+]
+
+/** 全部合法画风 key（校验用，避免各处重复写字符串数组） */
+export const ART_STYLE_KEYS: string[] = ART_STYLE_CATALOG.map(o => o.key)
+
+/** 画风是否合法（含空值放行，空值表示「跟随继承」） */
+export function isValidArtStyle(style: string | null | undefined): boolean {
+  if (!style) return true
+  return ART_STYLE_KEYS.includes(style)
+}
+
+/**
+ * 戏剧视觉风格 → 英文画风描述。
+ *
+ * 每条按「画风核心 + 镜头/光线 + 调色/质感 + 画质」四段组织，
+ * 而非单个形容词——模型对镜头规格、光位、胶片调色的响应远强于空泛的风格名。
+ * 写实向靠镜头/胶片锚点（35mm、anamorphic、film grain），动漫画向靠渲染方式锚点（cel shading、flat color）。
+ */
+export const DRAMA_ART_STYLE_MAP: Record<string, string> = {
+  realistic:
+    'photorealistic cinematic film still, 35mm anamorphic lens, shallow depth of field, natural skin texture, ' +
+    'practical light sources, subtle rim light, teal and orange color grading, fine film grain, Kodak film emulation',
+  cinematic:
+    'cinematic film still style, dramatic moody lighting, shallow depth of field, anamorphic lens flare, ' +
+    'high contrast low-key lighting, blockbuster color grading, volumetric atmosphere, letterbox composition',
+  noir:
+    'classic film noir style, black and white high contrast, hard chiaroscuro lighting, venetian blind shadow patterns, ' +
+    'deep blacks with silver highlights, 1940s cinematography, cigarette smoke haze, tense dutch angle framing',
+  anime:
+    '2D anime illustration style, clean line art, cel shading, flat color, vibrant saturated palette, ' +
+    'detailed hair highlights, expressive eyes, Japanese animation key visual quality',
+  ghibli:
+    'ghibli-inspired hand-drawn animation style, soft watercolor background, gentle rounded character design, ' +
+    'warm nostalgic palette, hand-painted texture, natural daylight, quiet slice-of-life atmosphere',
+  'ink-wash':
+    'Chinese ink wash painting style, expressive brush strokes, flowing ink diffusion, generous negative space, ' +
+    'muted mineral pigments, rice paper texture, traditional gongbi-and-freestyle fusion',
+  watercolor:
+    'watercolor painting style, soft brush strokes, translucent washes, delicate pastel palette, ' +
+    'visible paper grain, bleeding edges, light washes with dry brush accents',
+  comic:
+    'comic book illustration style, bold ink line work, halftone shading, dynamic comic character design, ' +
+    'high contrast primary colors, cross-hatching texture, American superhero comic inking',
+  cyberpunk:
+    'cyberpunk aesthetic, neon-lit rainy night, high saturation magenta and cyan glow, holographic signage bokeh, ' +
+    'wet reflective streets, strong contrast, dystopian metropolitan atmosphere',
+  pixar3d:
+    'stylized 3D animation render, Pixar-inspired character design, subsurface scattering skin, ' +
+    'soft global illumination, rounded appealing proportions, vibrant colors, shallow depth of field',
+}
+
+/** 各画风对应的对立风格负面词（防止模型混用动漫/真人/三维，是画风稳定的关键） */
 const DRAMA_ART_NEGATIVE_MAP: Record<string, string> = {
   realistic: 'anime style, cartoon, illustration, cel shading, line art, 3d render',
+  cinematic: 'anime style, cartoon, illustration, flat coloring',
+  noir: 'color, vibrant colors, saturated palette, anime, cartoon, flat coloring',
   anime: 'photorealistic, realistic photo, live action, 3d render',
   ghibli: 'photorealistic, realistic photo, live action, 3d render',
-  cinematic: 'anime style, cartoon, illustration, flat coloring',
-  comic: 'photorealistic, realistic photo, live action',
+  'ink-wash': 'photorealistic, realistic photo, 3d render, harsh digital outline, oil painting, neon colors',
   watercolor: 'photorealistic, realistic photo, live action, harsh outline',
+  comic: 'photorealistic, realistic photo, live action',
+  cyberpunk: 'anime style, cartoon, flat 2d illustration, dull desaturated colors, daylight',
+  pixar3d: 'photorealistic, realistic photo, live action, 2d anime, cel shading, flat coloring',
 }
 
 /**
@@ -176,11 +274,15 @@ export function buildCharacterArtStyleSuffix(dramaStyle?: string | null): string
  */
 const EQUIP_ART_STYLE_MAP: Record<string, string> = {
   realistic: 'professional product photography, studio softbox lighting, clean neutral background, sharp fabric and metal texture detail',
+  cinematic: 'cinematic concept art style, dramatic moody lighting, shallow depth of field',
+  noir: 'black and white product photography, hard directional lighting, deep shadows, high contrast silver highlights',
   anime: '2D anime prop illustration style, clean line art, cel shading, vibrant colors',
   ghibli: 'ghibli-inspired hand-drawn art style, soft colors, gentle shading',
-  cinematic: 'cinematic concept art style, dramatic moody lighting, shallow depth of field',
-  comic: 'comic book illustration style, bold ink line work, halftone shading',
+  'ink-wash': 'Chinese ink wash painting of a single object, expressive brush strokes, rice paper texture, muted mineral pigments',
   watercolor: 'watercolor painting style, soft brush strokes, translucent washes, delicate pastel palette',
+  comic: 'comic book illustration style, bold ink line work, halftone shading',
+  cyberpunk: 'cyberpunk product shot, neon magenta and cyan rim lighting, wet reflective surface, dark background',
+  pixar3d: 'stylized 3D product render, soft global illumination, rounded appealing form, clean studio background',
 }
 
 /** 装备图统一画风/无人物后缀：追加在 equip prompt 末尾 */
@@ -201,6 +303,110 @@ export function buildCharacterNegativePrompt(dramaStyle?: string | null): string
   return `${NEGATIVE_BASE}, ${artNegative}, cluttered background, busy background, multiple characters, multiple people, duplicated character, inconsistent character, cropped head, cut off face`
 }
 
+// ============================================================
+// 画风收口层（全链路唯一入口）
+//
+// 背景：画风此前只在「角色/装备/道具/表情」图像链路生效。场景图、分镜图、宫格图、
+// 视频链路都只是把原始落库 key（如 ink-wash）拼成 `${key} visual style`，
+// DRAMA_ART_STYLE_MAP 的四段词表在这些链路从未参与；视频更是无条件叠加 cinematic
+// 镜头词 → 「选了水墨/动漫，成片仍被拉回电影实拍」。
+//
+// 现统一为：一处解析（resolveArtStyleKey）+ 一组后缀（build*ArtStyleSuffix），
+// 所有生成链路复用；新增画风只需维护本文件的两个映射与前端镜像文件。
+// ============================================================
+
+/** 通用画质收口基准词（中性、不含任何画风倾向，避免与具体绘画/实拍画风互斥） */
+const QUALITY_TAIL = 'consistent art style, high quality, no text, no watermark'
+
+/**
+ * 静帧画风层尾部收口。
+ * 与 VIDEO_STYLE_TAIL 当前取值相同（同为中性收口），但**语义独立**：
+ * 静帧与视频允许各自演进（改视频不得影响静帧），故保留两个常量名、共用同一基准词。
+ */
+const ART_STYLE_TAIL = QUALITY_TAIL
+
+/** 视频通用运动层：全画风共用，刻意不含 lens / film grain 等写实专属词 */
+export const VIDEO_MOTION_BASE =
+  'cinematic motion, smooth camera movement, consistent character design, lighting continuity'
+
+/** 视频画风层尾部收口（写实/绘画通用，不含写实专属词） */
+const VIDEO_STYLE_TAIL = QUALITY_TAIL
+
+/**
+ * 反 AI 感锚点（仅写实/实拍向画风注入）。
+ *
+ * 来源：Seedance2 语料实测高频词族——「可控的现实缺陷」（构图不完美 / 对焦不完美 /
+ * 环境瑕疵 / 轻微手持不稳 / 自然高感颗粒）比堆砌 `8k, ultra detailed` 更能压掉塑料感。
+ * 绘画向画风（动漫/水墨/水彩/漫画/三维）注入这些词会直接破坏风格，故按白名单注入。
+ */
+export const IMPERFECTION_ANCHORS =
+  'natural imperfect composition, slightly imperfect autofocus, believable environmental imperfections, ' +
+  'subtle handheld micro-shake, natural high-ISO grain'
+
+/** 需要注入镜头/胶片/现实瑕疵锚点的写实向画风 */
+const PHOTOREAL_ART_STYLES = ['realistic', 'cinematic', 'noir', 'cyberpunk']
+
+/** 读取全局默认画风（app_settings.art_style），未设置返回 null */
+export function getGlobalArtStyle(): string | null {
+  const [row] = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, 'art_style')).all()
+  return row?.value || null
+}
+
+/** 读取剧集视觉风格（dramas.style），剧集不存在或未设置返回 null */
+export function getDramaArtStyle(dramaId?: number | null): string | null {
+  if (!dramaId) return null
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, Number(dramaId))).all()
+  return drama?.style || null
+}
+
+/**
+ * 画风候选链解析（纯函数）：返回第一个「合法画风 key」。
+ * 非法/未知 key 被跳过而非透传，避免脏值静默打断整条 prompt 的画风收口。
+ */
+export function resolveArtStyleKey(...candidates: Array<string | null | undefined>): string {
+  for (const c of candidates) {
+    if (c && DRAMA_ART_STYLE_MAP[c]) return c
+  }
+  return 'realistic'
+}
+
+/**
+ * 全链路画风解析入口（DB 感知）：
+ * 角色 style → 剧集 style → 全局默认（app_settings.art_style）→ realistic。
+ *
+ * 各路由/生成服务统一调用本函数，不要再各自复制一份解析逻辑
+ * （历史上有 dramas.ts / characters.ts 两处重复实现）。
+ *
+ * @param dramaId    剧集 id（用于查 dramas.style；已显式传 dramaStyle 时不再查库）
+ * @param charStyle  角色级画风（characters.style），优先级最高
+ * @param dramaStyle 已知的剧集画风，避免重复查库
+ */
+export function resolveEffectiveArtStyle(
+  dramaId?: number | null,
+  charStyle?: string | null,
+  dramaStyle?: string | null,
+): string {
+  const resolvedDrama = dramaStyle ?? getDramaArtStyle(dramaId)
+  return resolveArtStyleKey(charStyle, resolvedDrama, getGlobalArtStyle())
+}
+
+/**
+ * 场景图（无人物环境）画风尾：与角色立绘共用同一份画风词表，
+ * 保证同剧的「人」与「景」不会各自跑偏。
+ */
+export function buildSceneArtStyleSuffix(dramaStyle?: string | null): string {
+  const art = (dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle]) || ''
+  if (!art) return `, ${VISUAL_STYLE_SCENE}, ${VISUAL_STYLE_MASTER}`
+  return `, ${art}, ${ART_STYLE_TAIL}`
+}
+
+/** 分镜静帧画风尾（含人物，与角色/场景链路同源） */
+export function buildStoryboardArtStyleSuffix(dramaStyle?: string | null): string {
+  const art = (dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle]) || ''
+  if (!art) return `, ${VISUAL_STYLE_MASTER}`
+  return `, ${art}, ${ART_STYLE_TAIL}`
+}
+
 /**
  * 场景背景负面提示词
  * 排除人物角色（场景图只保留环境）、特写人脸与空洞扁平构图
@@ -218,6 +424,54 @@ export const STORYBOARD_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, inconsistent charact
  * 排除运动瑕疵、闪烁、形变、角色漂移与镜头抖动
  */
 export const VIDEO_NEGATIVE = `${NEGATIVE_BASE}, motion blur, jittery, flickering, flicker, warping, morphing, melting, distorted face, inconsistent character, character drift, frame inconsistency, jump cuts, camera shake, static image, frozen frame`
+
+/**
+ * 视频画风层（画风核心 + 运动层 + 现实瑕疵锚点 + 克制结尾）。
+ *
+ * 视频不能复用静帧的 `cinematic illustration style` 收口，也不能无条件叠加写实镜头词，
+ * 故单独组织：绘画向画风只保留「画风核心 + 运动层」；写实向额外注入镜头/胶片/瑕疵锚点。
+ * 未指定画风时回退 VISUAL_STYLE_VIDEO，保持历史行为不变。
+ */
+export function buildVideoArtStyleSuffix(dramaStyle?: string | null): string {
+  const art = (dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle]) || ''
+  if (!art) return `, ${VISUAL_STYLE_VIDEO}`
+  const parts = [art, VIDEO_MOTION_BASE]
+  if (PHOTOREAL_ART_STYLES.includes(dramaStyle as string)) parts.push(IMPERFECTION_ANCHORS)
+  parts.push('restrained ending (no explosion, no victory pose, no text overlay)')
+  // 尾部用中性收口，不使用 VISUAL_STYLE_MASTER（其 `cinematic illustration style` 会把
+  // 动漫/水墨等绘画向画风拉回写实插画）
+  parts.push(VIDEO_STYLE_TAIL)
+  return `, ${parts.join(', ')}`
+}
+
+/** 是否命中有效画风 key（用于判断是否需要走画风层而非默认视觉层） */
+function hasArtStyleKey(dramaStyle?: string | null): boolean {
+  return !!(dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle])
+}
+
+/**
+ * 视频负面提示词：在通用运动瑕疵基础上追加画风对立词。
+ * 与图像链路（buildCharacterNegativePrompt）同源，是防止「同一剧里动漫/真人/三维混用」的关键。
+ */
+export function buildVideoNegativePrompt(dramaStyle?: string | null): string {
+  const artNegative = (dramaStyle && DRAMA_ART_NEGATIVE_MAP[dramaStyle]) || ''
+  if (!artNegative) return VIDEO_NEGATIVE
+  return `${VIDEO_NEGATIVE}, ${artNegative}`
+}
+
+/** 场景图负面提示词：通用 + 画风对立词（与 buildSceneArtStyleSuffix 成对使用） */
+export function buildSceneNegativePrompt(dramaStyle?: string | null): string {
+  const artNegative = (dramaStyle && DRAMA_ART_NEGATIVE_MAP[dramaStyle]) || ''
+  if (!artNegative) return SCENE_IMAGE_NEGATIVE
+  return `${SCENE_IMAGE_NEGATIVE}, ${artNegative}`
+}
+
+/** 分镜静帧负面提示词：通用 + 画风对立词（与 buildStoryboardArtStyleSuffix 成对使用） */
+export function buildStoryboardNegativePrompt(dramaStyle?: string | null): string {
+  const artNegative = (dramaStyle && DRAMA_ART_NEGATIVE_MAP[dramaStyle]) || ''
+  if (!artNegative) return STORYBOARD_IMAGE_NEGATIVE
+  return `${STORYBOARD_IMAGE_NEGATIVE}, ${artNegative}`
+}
 
 /** 预设图片负面提示词（兼容旧引用，基于统一负面基础） */
 export const PRESET_IMAGE_NEGATIVE = `${NEGATIVE_BASE}, mutated body parts`
@@ -640,9 +894,9 @@ export function buildSceneImagePrompt(options: {
     parts.push(options.location)
     if (options.time) parts.push(`${options.time} lighting and atmosphere`)
   }
-  if (options.dramaStyle) parts.push(`${options.dramaStyle} visual style`)
-
-  return `${parts.join(', ')}, ${VISUAL_STYLE_SCENE}, ${VISUAL_STYLE_MASTER}`
+  // 画风收口：统一走 DRAMA_ART_STYLE_MAP 四段词表（此前把落库 key 直接拼成 `<key> visual style`，
+  // 等于画风体系在场景图链路完全没生效）；跨链路保证「人 / 景 / 镜」同一画风。
+  return `${parts.join(', ')}${buildSceneArtStyleSuffix(options.dramaStyle)}`
 }
 
 // ============================================================
@@ -694,13 +948,11 @@ export function buildStoryboardImagePrompt(options: {
     parts.push(options.description)
   }
 
-  // 5. 风格
-  if (options.dramaStyle) parts.push(`${options.dramaStyle} visual style`)
-
   // 底线
-  if (parts.length === 0) return `cinematic shot, ${VISUAL_STYLE_MASTER}`
+  if (parts.length === 0) return `cinematic shot${buildStoryboardArtStyleSuffix(options.dramaStyle)}`
 
-  return `${parts.join('. ')}, ${VISUAL_STYLE_MASTER}`
+  // 5. 画风收口：统一走 DRAMA_ART_STYLE_MAP 四段词表（与角色/场景链路同源）
+  return `${parts.join('. ')}${buildStoryboardArtStyleSuffix(options.dramaStyle)}`
 }
 
 /**
@@ -745,10 +997,7 @@ export function buildStoryboardVideoPrompt(options: {
     parts.push(`Camera movement: ${moveEn || options.movement}`)
   }
 
-  // 5. 风格
-  if (options.dramaStyle) parts.push(`${options.dramaStyle} cinematic style`)
-
-  // 6. 声音策略（对齐 Mx-Shell sound policy：画面内不混音，音乐后期叠加）
+  // 5. 声音策略（对齐 Mx-Shell sound policy：画面内不混音，音乐后期叠加）
   const soundPolicy = 'Sound: production audio only, no background music in frame (music is mixed in post-production)'
 
   // 7. UI 屏幕留白规则（ui_plate 约束）：分镜含屏幕/UI 元素时强制只留白、文字后期叠加
@@ -762,7 +1011,12 @@ export function buildStoryboardVideoPrompt(options: {
     ? ` [background_audio] ${options.backgroundAudio.trim()}`
     : ''
 
-  return `${parts.join('. ')}, ${soundPolicy}.${uiRule}${bgAudio} ${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
+  // 画风层与本句之间用空格衔接（去掉后缀自带的逗号前缀），保持与历史 prompt 的分句形态一致。
+  // 命中画风时用「画风层」（自带中性收口）；未命中时保持历史默认视觉层不变。
+  const styleLayer = hasArtStyleKey(options.dramaStyle)
+    ? buildVideoArtStyleSuffix(options.dramaStyle).replace(/^,\s*/, '')
+    : `${VISUAL_STYLE_VIDEO}, ${VISUAL_STYLE_MASTER}`
+  return `${parts.join('. ')}, ${soundPolicy}.${uiRule}${bgAudio} ${styleLayer}`
 }
 
 // ============================================================
@@ -1252,7 +1506,8 @@ export function buildGridPrompt(
   dramaStyle: string,
   referenceAssets: GridReferenceAsset[],
 ): string {
-  const style = dramaStyle || 'cinematic'
+  // 画风收口：宫格图同样走统一画风词表（此前直接拼落库 key，四段词表不参与）
+  const style = (dramaStyle && DRAMA_ART_STYLE_MAP[dramaStyle]) || 'cinematic illustration style'
   const legend = buildReferenceLegend(referenceAssets)
   const storyboardCharacterIds = getStoryboardCharacterIds(storyboards.map((sb) => sb.id))
   const charAppearanceMap = buildCharacterAppearanceMap(storyboardCharacterIds)

@@ -311,6 +311,8 @@ export const localModelsAPI = {
 
 export const agentConfigAPI = {
   list: () => api.get('/agent-configs'),
+  /** 出厂默认配置（默认提示词 + 默认 Skill 绑定），来源为后端单一事实来源 */
+  defaults: () => api.get('/agent-configs/defaults'),
   get: (id: number) => api.get(`/agent-configs/${id}`),
   create: (d: any) => api.post('/agent-configs', d),
   update: (id: number, d: any) => api.put(`/agent-configs/${id}`, d),
@@ -319,6 +321,8 @@ export const agentConfigAPI = {
 
 export const skillsAPI = {
   list: () => api.get('/skills'),
+  /** 侧栏元信息：主流程 Agent 列表 + 外部技能库列表（均由后端目录结构推导，前端不硬编码） */
+  meta: () => api.get('/skills/meta'),
   get: (id: string) => api.get(`/skills/${id}`),
   create: (data: { id: string; name: string; description?: string }) => api.post('/skills', data),
   update: (id: string, content: string) => api.put(`/skills/${id}`, { content }),

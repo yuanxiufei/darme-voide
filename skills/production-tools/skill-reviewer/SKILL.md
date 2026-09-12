@@ -73,7 +73,7 @@ Outside the repo (e.g. reviewing a user's local skill), apply the quality dimens
 | Category accuracy | Tags genuinely cover the skill's output stage | Padded with unrelated verticals |
 | `source` | Matches the real origin | BPO-produced official skill left at default `community` |
 
-Naming details: `skills/skill-creator/references/NAMING.md`.
+Naming details: `../skill-creator/references/NAMING.md`.
 Field style details: `.ci/prompts/summary-*.md`, `.ci/prompts/desc-*.md`.
 
 **Pre-publish field-mapping checklist** (any failure blocks submission):

@@ -182,13 +182,25 @@
 | POST | `/` | 创建 |
 | DELETE | `/*` | 删除 |
 
+**GET `/meta` 侧栏元信息**（必须注册在 `GET /*` 之前）：Agent 与外部技能库清单均由后端推导，前端不硬编码。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agents` | `{type,label,phase,skillCount}[]` | 主流程 Agent + 各自默认绑定的 skill 数（label/phase 取自 `agents/index.ts`） |
+| `sources` | `{id,label,description,skillCount}[]` | **外部技能库**：由 `skills/<lib>/library.yaml` 显式声明（`name` = 库标识、`label` = 展示名、`description` = 说明）—— 加库 / 换库 / 改展示名皆零代码 |
+| `coreCount` | number | 项目自有 skill 数量 |
+
 **GET `/` 列表项扩展字段**：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `category` | string | 来源分类：`core`（内置 Agent）/ `minimax-builtin` / `minimax-installed` / `custom`（自定义） |
+| `category` | `'core' \| 'vendor'` | 来源分类：`core` = 项目自有 skill；`vendor` = 外部技能库（**按库声明文件推导，不看目录名**） |
+| `source` | `string \| null` | 所属技能库标识（仅 `vendor` 有，取自 `library.yaml` 的 `name`）；`core` 为 `null` |
+| `sourceLabel` | `string \| null` | 所属技能库展示名（取自 `library.yaml` 的 `label`，供 UI 直接渲染）；`core` 为 `null` |
 | `workflows` | string[] | SKILL.md frontmatter `workflows:` 声明的适用工作流/阶段（可缺省 = 空数组） |
-| `boundAgents` | string[] | 反向查询 `agent_configs.skills` 得到的绑定该 skill 的 agent_type 列表（含已禁用项） |
+| `agents` | string[] | frontmatter `agents:` 自描述的默认绑定 Agent（决定默认注入） |
+| `priority` | number | frontmatter `priority:` 注入顺序，越小越靠前（缺省 100） |
+| `boundAgents` | string[] | 绑定该 skill 的 agent_type 列表（DB `agent_configs.skills` 优先；DB 未配置时回退 `agents:` 自描述） |
 | `phases` | string[] | 工作流制作阶段 = 绑定 Agent 对应阶段 + frontmatter 声明，去重（`script_rewriter→剧本编写 / extractor→资产提取 / voice_assigner→音色分配 / storyboard_breaker→分镜拆解 / grid_prompt_generator→画面提示词`） |
 
 ### 2.15 音色 aiVoices —— `/api/v1/ai-voices`

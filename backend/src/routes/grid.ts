@@ -6,7 +6,7 @@ import { generateImage } from '../services/image-generation.js'
 import { splitGridImage } from '../services/grid-split.js'
 import { runAgentWithRetry } from '../agents/index.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
-import { STORYBOARD_IMAGE_NEGATIVE, buildGridPrompt, buildGridCellPrompts, collectGridReferenceAssets, buildReferenceLegend } from '../shared/prompt-utils.js'
+import { buildGridPrompt, buildGridCellPrompts, collectGridReferenceAssets, buildReferenceLegend, buildStoryboardNegativePrompt, resolveEffectiveArtStyle } from '../shared/prompt-utils.js'
 
 const app = new Hono()
 
@@ -137,11 +137,8 @@ app.post('/prompt', async (c) => {
 
   if (!storyboards.length) return badRequest(c, 'No storyboards found')
 
-  let dramaStyle = ''
-  if (drama_id) {
-    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, drama_id)).all()
-    dramaStyle = drama?.style || ''
-  }
+  // 画风收口：统一解析链（剧集 style → 全局默认 → realistic）
+  const dramaStyle = resolveEffectiveArtStyle(drama_id)
 
   const actualCols = cols
   const actualRows = rows
@@ -234,12 +231,8 @@ app.post('/generate', async (c) => {
 
   if (!storyboards.length) return badRequest(c, 'No storyboards found')
 
-  // Get drama style
-  let dramaStyle = ''
-  if (drama_id) {
-    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, drama_id)).all()
-    dramaStyle = drama?.style || ''
-  }
+  // 画风收口：统一解析链（剧集 style → 全局默认 → realistic），宫格图不再退化成无画风
+  const dramaStyle = resolveEffectiveArtStyle(drama_id)
 
   const referenceAssets = collectGridReferenceAssets(storyboards)
   const prompt = custom_prompt || buildGridPrompt(mode, storyboards, rows, cols, dramaStyle, referenceAssets)
@@ -255,7 +248,7 @@ app.post('/generate', async (c) => {
     const genId = await generateImage({
       dramaId: drama_id,
       prompt,
-      negativePrompt: STORYBOARD_IMAGE_NEGATIVE,
+      negativePrompt: buildStoryboardNegativePrompt(dramaStyle),
       size,
       frameType: `grid_${mode}_${actualRows}x${actualCols}`,
       referenceImages,

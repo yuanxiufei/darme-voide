@@ -292,12 +292,7 @@
             <span>画风（留空跟随剧集）</span>
             <select v-model="form.style" class="input">
               <option value="">跟随剧集</option>
-              <option value="realistic">写实电影</option>
-              <option value="anime">日式动漫</option>
-              <option value="ghibli">吉卜力</option>
-              <option value="cinematic">电影感</option>
-              <option value="comic">美漫漫画</option>
-              <option value="watercolor">水彩</option>
+              <option v-for="o in artStyleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
             </select>
           </label>
         </section>
@@ -375,6 +370,10 @@
 </template>
 
 <script setup lang="ts">
+import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
+
+// 画风下拉选项统一取自 utils/artStyles.ts（前端单一数据源）
+const artStyleOptions = ART_STYLE_OPTIONS
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from '#app'
 

@@ -7,7 +7,7 @@
  * 数据并调用统一构建器，避免与 grid 路由层重复实现、逻辑分叉。
  */
 import { createTool } from '@mastra/core/tools'
-import { buildGridPrompt, buildGridCellPrompts, collectGridReferenceAssets } from '../../shared/prompt-utils.js'
+import { buildGridPrompt, buildGridCellPrompts, collectGridReferenceAssets, resolveEffectiveArtStyle } from '../../shared/prompt-utils.js'
 import { z } from 'zod'
 import { db, schema } from '../../db/index.js'
 import { eq } from 'drizzle-orm'
@@ -70,8 +70,8 @@ export function createGridPromptTools(episodeId: number, dramaId: number) {
         .map(n => allStoryboards.find(sb => sb.storyboardNumber === n))
         .filter(Boolean)
 
-      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
-      const dramaStyle = drama?.style || ''
+      // 画风收口：与路由 fallback 走同一解析链，保证 agent 路径与兜底路径同画风
+      const dramaStyle = resolveEffectiveArtStyle(dramaId)
 
       const referenceAssets = collectGridReferenceAssets(ordered)
       const gridPrompt = buildGridPrompt(mode, ordered, rows, cols, dramaStyle, referenceAssets)
