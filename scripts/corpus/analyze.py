@@ -7,9 +7,16 @@ P = (_os.environ.get('SEEDANCE2_CORPUS')
      or str(_pathlib.Path(__file__).resolve().parents[2]
             / 'data' / 'prompt-corpus' / 'seedance2' / 'metadata.jsonl'))
 
+# 按需开关（**不设 = 输出与历史逐字一致**）：
+#   SEEDANCE2_LIMIT=N   只读前 N 条（本脚本是 schema 探查，需看原始结构，
+#                       故不能像 analyze3 那样投影；调试时用 N 可免全量解析 37 MB）
+LIMIT = int(_os.environ.get('SEEDANCE2_LIMIT') or 0)
+
 recs = []
 with open(P, encoding='utf-8') as f:
     for line in f:
+        if LIMIT and len(recs) >= LIMIT:
+            break
         line = line.strip()
         if line:
             recs.append(json.loads(line))

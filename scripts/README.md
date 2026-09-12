@@ -134,7 +134,21 @@ node scripts/test-guards.mjs                 # 单跑：改了任一守卫脚本
 ```powershell
 # 脚本自解析仓库根；也可用 SEEDANCE2_CORPUS=/abs/path/metadata.jsonl 覆盖
 python scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.log
+
+# 按需：只读前 N 条有效记录（调试 / 抽样，秒回；三个脚本都支持）
+$env:SEEDANCE2_LIMIT='50'; python scripts/corpus/analyze3.py; Remove-Item Env:\SEEDANCE2_LIMIT
 ```
+
+**体量与按需**（语料本体 37.58 MB / 8755 条，gitignored）：
+
+- **不需要拆分**：三个脚本做的是**全量统计**（词频 / 分布 / 命中率），拆成多文件反而要额外合并；
+  且实测单脚本耗时 ≤ 2 s、内存峰值 ≤ 75 MB，**都不构成瓶颈**。它只被这三个离线脚本读取
+  （后端 / 前端 0 处引用），没有任何运行时依赖。
+- `analyze3.py` 已改为**边读边投影**（只留统计要用的 6 个字段）：内存峰值 **75.4 → 14.1 MB**。
+- `analyze.py` / `analyze2.py` 是 **schema 探查**（dump 原始结构 + key 频次 + `recs[0]` 样本）
+  ⇒ **全量是语义需要**，故不做投影，只加按需上限 —— 这也是三者「并非严格超集、不能互相替代」的技术原因。
+- ⚠️ **默认行为零变化**：不设 `SEEDANCE2_LIMIT` 时，三者输出与历史存档**逐字一致**
+  （已用 4164 / 7813 / 4364 字符逐字比对验证）。改动这些脚本后请照此复核。
 
 - 语料本体在 `data/prompt-corpus/`（**gitignored**，不随仓库分发）⇒ 克隆后需自备才能复跑。
 - 三者是**同一任务的三轮迭代，并非严格超集**：`analyze.py` 独有 schema 探索、

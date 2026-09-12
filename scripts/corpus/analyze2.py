@@ -6,7 +6,17 @@ import os as _os, pathlib as _pathlib
 P = (_os.environ.get('SEEDANCE2_CORPUS')
      or str(_pathlib.Path(__file__).resolve().parents[2]
             / 'data' / 'prompt-corpus' / 'seedance2' / 'metadata.jsonl'))
-recs = [json.loads(l) for l in open(P, encoding='utf-8') if l.strip()]
+# 按需开关（**不设 = 输出与历史逐字一致**）：SEEDANCE2_LIMIT=N 只读前 N 条。
+# 本脚本做 i18n / spec 深挖，要保留原始对象（含 recs[0] 样本），故不做投影。
+LIMIT = int(_os.environ.get('SEEDANCE2_LIMIT') or 0)
+
+recs = []
+with open(P, encoding='utf-8') as f:
+    for l in f:
+        if LIMIT and len(recs) >= LIMIT:
+            break
+        if l.strip():
+            recs.append(json.loads(l))
 
 print('TOTAL =', len(recs))
 print()
