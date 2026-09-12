@@ -21,6 +21,9 @@ dist/
 # Python
 __pycache__/
 *.pyc
+# Python 后端（backend-py）虚拟环境：只提交 requirements.txt，不入库 site-packages
+.venv/
+venv/
 
 # OS
 .DS_Store
