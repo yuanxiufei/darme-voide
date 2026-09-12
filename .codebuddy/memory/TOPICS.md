@@ -28,6 +28,11 @@
 - **本工具怪癖**：`search_content` 的 **`glob` 不生效**（`**/SKILL.md` 恒 0 命中）→ 改用 `path` 收窄。
 - **守卫「示意引用」判据**：标记（`e.g.`/`such as`/`例如`）**必须紧邻**路径之前（标记后只允许非字母数字非汉字字符，含 token 前的开启反引号）；放宽成「同行出现过 e.g.」会**连真断链一起吞掉**（已用负向测试证实）。基线约定见 `scripts/check-skill-refs.mjs` 脚本头。
 
+## 画风体系细节（自 MEMORY.md §画风体系 下移）
+- **视频与静帧必须分开**：静帧收口词 `cinematic illustration style` 会把动漫/水墨拉回写实 ⇒ 视频用中性 `VIDEO_STYLE_TAIL` + `VIDEO_MOTION_BASE`，且**命中画风时不追加** `VISUAL_STYLE_MASTER`。
+- **反 AI 感白名单**：`IMPERFECTION_ANCHORS` **仅按 `PHOTOREAL_ART_STYLES`（写实系 4 种）注入** —— 注入到动漫/水墨会破坏风格。
+- **画风词一律后端收口**：`auto-pipeline` 直接拼 `buildVideoArtStyleSuffix(artStyle)`，**现算不落库**。⚠️ **若今后放开 agent 自写画风英文词，这里的幂等校验必须同步改**（否则同一剧内画风漂移）。
+
 ## 前端验证与测试工具（自 MEMORY.md §前端约定 下移）
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。

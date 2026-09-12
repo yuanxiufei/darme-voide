@@ -22,8 +22,7 @@ QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles
 - key：realistic / cinematic / noir / anime / ghibli / ink-wash / watercolor / comic / cyberpunk / pixar3d。**词表四段**「画风核心+镜头光线+调色质感+画质」，**负面词负责排除对立风格**。
 - **单一事实来源 2 处必须同步**：后端 `shared/prompt-utils.ts`（`ART_STYLE_CATALOG`+`DRAMA_ART_STYLE_MAP`/`DRAMA_ART_NEGATIVE_MAP`/`EQUIP_ART_STYLE_MAP`）与前端 `app/utils/artStyles.ts`；**加画风只改这 2 个文件**。`prompt-utils.ts` **不拆**；找副本顺序 = 后端常量 → skill 正文 → 工具 instruction → 前端硬编码。
 - 解析链 `characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`，**唯一入口** `resolveEffectiveArtStyle()`（脏值跳过不透传），各路由不得存副本。
-- **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。**视频与静帧必须分开**：静帧收口词 `cinematic illustration style` 会把动漫/水墨拉回写实 → 视频用中性 `VIDEO_STYLE_TAIL`+`VIDEO_MOTION_BASE`，命中画风时不追加 `VISUAL_STYLE_MASTER`。
-- `IMPERFECTION_ANCHORS`（反 AI 感）仅按 `PHOTOREAL_ART_STYLES`（写实系 4 种）白名单注入；skill **不得输出画风英文词**（画风一律后端 suffix 收口 → auto-pipeline 直接拼 `buildVideoArtStyleSuffix(artStyle)`，现算不落库）。**若放开 agent 写画风词，此处必须改幂等校验**。
+- **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。**细节（反 AI 感白名单、视频与静帧为何必须分开、放开写词要改什么）见 `TOPICS.md` §画风体系细节**。
 
 ## Skill 体系（详见 `skills/README.md`，改前先读）
 - **库由声明文件识别，与目录名解耦**：`skills/<lib>/library.yaml` 的 `name`（API/前端分组 key）、`label`、`description`。现 2 库 `genre-templates`（9 片型）、`production-tools`（20 工序）；自有 **8** 个顶层 skill，**其中 5 个即 Agent 类型**（`extractor`/`grid_prompt_generator`/`script_rewriter`/`storyboard_breaker`/`voice_assigner`），另 3 个 `prompt-style-library`/`video-prompt-library`/`style-reference-reverse` **不是 Agent**（`style-reference-reverse` 已 **`agents: []` 停注入** ⇒ **无执行入口的 skill 不要写进 `agents:`**，否则每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**。**提示词词库已按介质分家**：`prompt-style-library`（图像：七段/镜头/光线/调色/Danbooru tag）｜`video-prompt-library`（视频：写法判定/时间码/散文式/中文标签，**仅绑 `storyboard_breaker`**）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（拆因：`grid_prompt_generator` 是纯出图 Agent 却白吃该文件 55% 的视频内容）。**加库/换库/改展示名 = 零代码**。
@@ -44,6 +43,8 @@ QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles
 
 ## 视频提示词语料
 **详见 `TOPICS.md`**。三条：他人提示词正文**不得搬运进仓库**（合规红线）；落盘三分（语料 `data/prompt-corpus/<源>/` gitignored｜脚本 `scripts/corpus/`｜结论 `docs/`）；选源看 `size`(KB)+真实文件树而非 star，**许可证是硬约束**。
+- **检索管线已就绪**：`fetch-raw` → `normalize` → `search`（8987 条 / 3 源，2-gram 零依赖）⇒ **别另起一套**；语料 gitignored ⇒ 消费方**须在缺失时优雅降级**。
+- **已排除源勿引回**（判据见 `scripts/README.md`）：TIP-I2V（CC BY-NC）｜Semonxue（无 LICENSE）｜`HitPaw`/`geekjourneyx`/`fantasylights`（**实测空壳**）。
 
 ## 协作与提交
 - **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。
