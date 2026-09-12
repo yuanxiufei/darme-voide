@@ -25,6 +25,7 @@
 - **守卫的采集范围与启用状态**：`check-skill-refs.mjs` 的 `collectTokens` **只采集反引号 code span 与 markdown 链接目标** ⇒ **裸路径文本不在检测范围**（要受保护必须写成 `` `references/x.md` ``）；这不是 bug 而是有意取舍（裸路径多为叙述）。识别为候选后还需首段属 `references`/`scripts`/`agents` 且文档在某个含 SKILL.md 的 skill 内，否则计入「基准不明」跳过。钩子 `.githooks/pre-commit` 三分支已实测（触发校验 / 空暂存早退 / 真断链红灯），但 **`core.hooksPath` 默认未设置 ⇒ 守卫当前不生效**，需手动 `git config core.hooksPath .githooks` 启用。
 - **无执行入口的 skill 不要默认注入**：`style-reference-reverse`（参考图反推画风）于 2026-09-12 由 `agents: [grid_prompt_generator]` 改为 **`agents: []`**。判据是「**三查皆空**」：后端 0 处引用其 protocol 字段（`suggested_style_key`/`reusable_anchors`）、前端 0 处「反推」文案、无专属 Agent 承接。它此前占 `grid_prompt_generator` 注入的 3,068 字符。**文件保留**（UI 仍可手动绑），将来接入该能力时改回 `agents:` 即可。
 - **注入体量的两次治理（2026-09-12）**：① 第 6 节视频范式从 `prompt-style-library` 整体拆为 `video-prompt-library`（仅绑 `storyboard_breaker`）；② 停掉 `style-reference-reverse` 的默认注入。累计 **37,263 → 27,842 字符（−25.3%）**，其中 `grid_prompt_generator` **18,898 → 8,485（−55%）**。**复现命令**（无需起后端、不碰 DB、无 `agents/index.ts` 清洗副作用）：`loadAgentSkills(agent, null)` 遍历 5 个 Agent 累加 `.length` —— 脚本放 `tmp/`（gitignored），跑 `npx tsx tmp/xxx.ts`。
+- **词库为什么必须按介质分家（拆因）**：`prompt-style-library` 原有 14,241 字符、第 6 节「中文视频提示词范式」独占该文件 **55%（270/486 行）**，而它的消费方 `grid_prompt_generator` 是**纯出图** Agent（其 SKILL 明写"只负责宫格"）⇒ 每次出图白吃整套视频范式。拆出 `video-prompt-library`（`agents: [storyboard_breaker]`、`priority: 30`）后：grid 18,898 → 11,818、psl 27,099 B → 11,176 B。**拆分手法**是整章机械搬家（按行范围切分，保留 CRLF），原库位置留占位说明 ⇒ **§7/§8 编号不变、零交叉引用破坏**。
 - **本工具怪癖**：`search_content` 的 **`glob` 不生效**（`**/SKILL.md` 恒 0 命中）→ 改用 `path` 收窄。
 - **守卫「示意引用」判据**：标记（`e.g.`/`such as`/`例如`）**必须紧邻**路径之前（标记后只允许非字母数字非汉字字符，含 token 前的开启反引号）；放宽成「同行出现过 e.g.」会**连真断链一起吞掉**（已用负向测试证实）。基线约定见 `scripts/check-skill-refs.mjs` 脚本头。
 
@@ -36,3 +37,17 @@
 ## 前端验证与测试工具（自 MEMORY.md §前端约定 下移）
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。
+
+## `backend-py/`（Python 后端 / 绞杀者迁移，2026-09-12 起）
+- **为什么不是一次性重写**：原始体量 **133 TS / 27,389 行 / 226 端点 / 29 表**且**零自动化测试** ⇒ 重写期没有任何可验证中间态。故 FastAPI 作新入口（**5790**），**未迁移的域反代到 Node（5789）**，每迁一域就 `include_router` 一行并把该域从 Node 停用；全迁完后 `PY_PORT=5789` 切单端口。
+- **端口铁律**：`app/config.py` **刻意不读 `config.yaml` 的 `server.port`**（那是 Node 的端口，并存期读同一个必然抢占）。优先级 `PY_PORT > PORT > 5790`。
+- **三条契约对齐约定**：① 信封 `{code,data,message}`、**错误响应无 `data` 键**（前端 `useApi.ts` 用原生 fetch，判据 `!resp.ok || json.code >= 400`，文案取 `json.message`）⇒ FastAPI 默认的 `{"detail"}` 会让文案变「请求失败 (422)」，故三类异常全部收口；特例 `/api/v1/health` 是**裸对象**。② `GET /dramas/:id/prompts` 聚合视图**本来就是 camelCase**（`customPrompt`/`imageUrl`），照抄勿「顺手统一」。③ **SQLAlchemy `**kwargs` ≠ JS 对象展开**：`values(**fields, title=...)` 同名键直接 `TypeError: got multiple values for keyword argument`，必须 `values = {**fields, ...}` 再覆盖 —— **已在 `PUT /dramas/:id/episodes` 真实踩到**。
+- **为什么用 SQLAlchemy Core 而不是 ORM**：Core 的行**本身就是 snake_case = HTTP 契约形状** ⇒ 原 Node 的 `toSnakeCase()` 转换层在 Python 侧**不存在**，少一层字段漂移源，也不必维护「Python 属性名 ↔ DB 列名」映射。
+- **模式核对用真实库、别只对 `schema.ts`**：`backend-py/tests/smoke_test.py` 拿 `data/drama.db` 的 `PRAGMA table_info` 逐列比对，实测**真实库比 Node 模型多 2 表（`assets` / `props`）与 2 列（`image_generations.minio_url` / `video_generations.minio_url`）** —— 全是旧版本 MinIO 遗留（Node `db/index.ts` 只建 **29** 表、全仓库零引用）⇒ 两边都不建模。**列序差异不影响正确性**（SQLAlchemy 全程按列名生成 SQL，不做位置化 INSERT/SELECT）。
+- **回归唯一入口**：`backend-py/tests/smoke_test.py`（**64 用例**：模式 + 信封 + **错误文案逐字** + 软删 + 反代 501）。写操作**全部落在 `data/drama.db` 的副本**上（`DATA_ROOT` 指向临时目录），**真实库只读**。改 Python 侧代码后必跑。
+- **已迁移域**：`dramas`（9 端点，含 `ensureStyleId`/`ensureCostumeId`）+ `episodes`（8 端点，含十步 `pipeline-status` 与 `script-fingerprint` 门禁）；依赖 LLM / 视觉模型 / 节奏服务的端点**刻意不注册**（`dramas/:id/rhythm`、`dramas/:id/era-background/extract`、`episodes/:id/continue-script`、`episodes/:id/consistency-qc`）走反代 —— 比返回 501 更可用。
+- **分支约定**：Node/TS 侧修复提交到 **`main`**；Python 迁移工作在 **`feat/python-backend`**。`backend/probe-*.ts` 是临时探针（头部自述「用完即删」）⇒ **不入提交**。
+- **JS 语义坑（第二次踩，务必对照）**：① `??`（空值合并）**不等于** `||` —— `ep.scriptContent ?? ep.content` 在 `script_content=''` 时**不回退**，写成 Python `a or b` 会让门禁/取值与 Node 分叉；同一份代码里两种都有（`era-background` 用 `||`、`script-fingerprint` 用 `??`），**必须逐个确认**。② `GET /episodes/:id/pipeline-status` 的「有图」判据是 `composed_image` **单字段**，而 `GET /dramas` 的 `progress` 是 `composed_image || first_frame_image` —— 原 TS 就是两套，**照抄勿合并**（已各写各的）。③ 数值字段的 `Number(x)` 语义：`Number(null)=0`、`Number('')=0`、`Number('abc')=NaN` ⇒ Python 侧实现 `_js_number`，仅 `NaN` 分支返回 `None`（写 NULL 而非 NaN，属有意偏差且该列本可空）。
+- **跨域复用**：读请求体统一走 `app/request_utils.py` 的 `read_json`（对齐 Hono `c.req.json()` 的容错：坏 JSON → 空 dict → 业务校验给 400，而非 500）。
+- **下一个域的 SOP**：见 `backend-py/README.md`。要点：静态子路径必须声明在 `/{id}` 之前；**只注册已实现的**；依赖 LLM/子进程/长任务的服务**放到最后**（其行为只能真调验证）。
+- **工具坑**：`tempfile.mkdtemp()` 在 Windows 返回 **8.3 短路径**，与 `resolve()` 后的长路径做子串比较会**假红** ⇒ 比较 resolve 后路径；`sqlalchemy` 顶层导出的是 **`REAL` 而非 `Real`**；PowerShell 组合命令含 `&` / `@{...}` 会被路由到 cmd（报「不是内部或外部命令」）⇒ **写 `.ps1` 落盘再执行**；`Start-Process` 的相对 `-WorkingDirectory` + 相对 exe 路径会报「系统找不到指定的路径」⇒ 用字面绝对路径。

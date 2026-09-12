@@ -6,13 +6,14 @@
 Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ Hono（`backend`，**非 Express**）+ Mastra（5 Agent）+ Drizzle + better-sqlite3。
 - 后端 **5789**（`config.ts`）、前端 **3013**（proxy `/api`、`/static`）；前缀 `/api/v1`，另有 `/webhooks/*`、`/static/*`；无登录页。页面 `/`、`/settings`、`/drama/[id]`、`/library/*`。
 - 启动 `cd backend && npx tsx src/index.ts`；`cd frontend && npx nuxt dev --port 3013`。Node v22。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；Docker 未装，不依赖 postgres/redis/qdrant。
+- **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，已迁 `dramas` 域，未迁移域 `PROXY_TO_NODE=1` 反代 Node；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`——那是 Node 的 5789）；回归跑 `backend-py/tests/smoke_test.py`，动手前读其 `README.md`。
 
 ## 本地模型 + H3 视频推理
 **详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
 
 ## 后端能力（9 项）
-QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles.ts`｜`script-fingerprint.ts`｜`take-budget.ts`（默认 3）｜`rhythm-phase.ts`｜`jianying-draft.ts`｜`estimate-service.ts`｜`usage-tracking.ts`。
-**约定**：`appendStyleProfile()` 同步（内部 `require`）；门禁统一支持 `force`；无指纹/无相位视为旧产物不阻断；`storyboards` 无 resolution/fps（在 `video_generations`）；Windows ZIP 内路径转 posix。
+QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget（默认 3）｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking（全在 `backend/src/services/`）。
+**约定**：`appendStyleProfile()` 同步；门禁统一支持 `force`；无指纹/无相位视为旧产物不阻断；`storyboards` 无 resolution/fps（在 `video_generations`）；Windows ZIP 内路径转 posix。
 
 ## 前端约定
 - 复用型 `refresh()` **禁止写 UI 定位副作用**（切 panel/tab、重置选中、重置编辑中表单）——被刷新按钮与所有生成/编辑回调反复调用（含合成 poll 每 4s）→「画面跳转」；UI 定位只在 `onMounted` 一次。refresh 重赋列表后选中项须**按 id 重绑**，未存表单值需 **dirty 标记**保护。
@@ -25,7 +26,7 @@ QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles
 - **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。**细节（反 AI 感白名单、视频与静帧为何必须分开、放开写词要改什么）见 `TOPICS.md` §画风体系细节**。
 
 ## Skill 体系（详见 `skills/README.md`，改前先读）
-- **库由声明文件识别，与目录名解耦**：`skills/<lib>/library.yaml` 的 `name`（API/前端分组 key）、`label`、`description`。现 2 库 `genre-templates`（9 片型）、`production-tools`（20 工序）；自有 **8** 个顶层 skill，**其中 5 个即 Agent 类型**（`extractor`/`grid_prompt_generator`/`script_rewriter`/`storyboard_breaker`/`voice_assigner`），另 3 个 `prompt-style-library`/`video-prompt-library`/`style-reference-reverse` **不是 Agent**（`style-reference-reverse` 已 **`agents: []` 停注入** ⇒ **无执行入口的 skill 不要写进 `agents:`**，否则每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**。**提示词词库已按介质分家**：`prompt-style-library`（图像：七段/镜头/光线/调色/Danbooru tag）｜`video-prompt-library`（视频：写法判定/时间码/散文式/中文标签，**仅绑 `storyboard_breaker`**）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（拆因：`grid_prompt_generator` 是纯出图 Agent 却白吃该文件 55% 的视频内容）。**加库/换库/改展示名 = 零代码**。
+- **库由声明文件识别，与目录名解耦**：`skills/<lib>/library.yaml` 的 `name`（API/前端分组 key）、`label`、`description`。现 2 库 `genre-templates`（9 片型）、`production-tools`（20 工序）；自有 **8** 个顶层 skill，**其中 5 个即 Agent 类型**（`extractor`/`grid_prompt_generator`/`script_rewriter`/`storyboard_breaker`/`voice_assigner`），另 3 个 `prompt-style-library`/`video-prompt-library`/`style-reference-reverse` **不是 Agent**（`style-reference-reverse` 已 **`agents: []` 停注入** ⇒ **无执行入口的 skill 不要写进 `agents:`**，否则每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**。**词库按介质分家**：`prompt-style-library`（图像）｜`video-prompt-library`（视频，仅绑 `storyboard_breaker`）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（拆因与展开见 `TOPICS.md`）。**加库/换库/改展示名 = 零代码**。
 - **命名**：core 目录名 = Agent 类型（`agent_configs.agent_type`，**勿改名**）；库内 skill id **勿重命名**（`references/` 互引静默断链）。
 - **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（越小越靠前，缺省 100）；解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`。**改绑定 = 改 md**；`AGENT_SKILL_MAP` 已删。
 - **注入闸**：默认只注自有；外部库**按需手动绑**。`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过 + 末尾「未注入：…」诊断。**口径 = `renderSkill(parseSkill(...)).length`**（≠ 字节数）。外部库单体最大 ~2.7 万字符 ⇒ 只勾两个即逼近上限。
@@ -43,8 +44,8 @@ QC `technical-qc.ts`+`consistency-qc.ts`｜`asset-versions.ts`｜`style-profiles
 
 ## 视频提示词语料
 **详见 `TOPICS.md`**。三条：他人提示词正文**不得搬运进仓库**（合规红线）；落盘三分（语料 `data/prompt-corpus/<源>/` gitignored｜脚本 `scripts/corpus/`｜结论 `docs/`）；选源看 `size`(KB)+真实文件树而非 star，**许可证是硬约束**。
-- **检索管线已就绪**：`fetch-raw` → `normalize` → `search`（8987 条 / 3 源，2-gram 零依赖）⇒ **别另起一套**；语料 gitignored ⇒ 消费方**须在缺失时优雅降级**。
-- **已排除源勿引回**（判据见 `scripts/README.md`）：TIP-I2V（CC BY-NC）｜Semonxue（无 LICENSE）｜`HitPaw`/`geekjourneyx`/`fantasylights`（**实测空壳**）。
+- **检索管线已就绪**：`fetch-raw` → `normalize` → `search`（8987 条 / 3 源）⇒ **别另起一套**；语料 gitignored ⇒ 消费方**须在缺失时优雅降级**。
+- **已排除源勿引回**（判据见 `scripts/README.md`）：TIP-I2V｜Semonxue｜`HitPaw`/`geekjourneyx`/`fantasylights`。
 
 ## 协作与提交
 - **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。
