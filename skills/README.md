@@ -81,7 +81,7 @@ priority: 20                                          # 注入顺序，越小越
 3. 所有注入受**字符预算**约束：默认 60000 字符，超出部分按优先级跳过并在注入文本末尾注明；
    用环境变量 `AGENT_SKILL_BUDGET` 覆盖（设为 `0` 关闭限制）
 
-实测：5 个 Agent 默认注入合计 **27,318 字符、零跳过**。
+实测：5 个 Agent 默认注入合计 **28,128 字符、零跳过**。
 
 > **2026-09-12 两轮体量治理**（结论只对**默认绑定**成立；DB `agent_configs.skills` 一旦有值就按 DB 走，见 §三.1）：
 >
@@ -95,8 +95,13 @@ priority: 20                                          # 注入顺序，越小越
 > `grid_prompt_generator` 上纯属白占上下文。已改 `agents: []`
 > （**文件保留**、UI 仍可手动绑；将来接入该能力时改回 `agents:` 即可）。
 >
-> **累计**：总注入 **37,263 → 27,318（−26.7%）**；`grid_prompt_generator` **18,898 → 8,223（−56.5%）**；
-> `storyboard_breaker` 15,315 → 16,045（略增 = 拆分后两个 skill 各自的 frontmatter 固定开销）。
+> **累计**：总注入 **37,263 → 28,128（−24.5%）**；`grid_prompt_generator` **18,898 → 8,517（−54.9%）**；
+> `storyboard_breaker` 15,315 → 16,561。
+>
+> 其中 `storyboard_breaker` / `grid_prompt_generator` 各有 **+516 / +294** 是**有意加的**：
+> 把 `search_reference_prompts`（本地语料检索工具，见 `backend/src/agents/tools/corpus-tools.ts`）
+> 的**使用时机与红线**写进了这两个 skill —— **工具注册了不等于模型会调用**，
+> 不写进 skill 就等于白注册。多花 810 字符换「9000 条语料真被用上」，这笔是值的。
 
 > ⚠️ **加 skill 前先问一句：它有没有执行入口？** 没有（无 Agent / 无 UI 触发点 / 无代码消费其
 > protocol 字段）就不要写进 `agents:` —— 那只会让每次生成都背上一段用不上的上下文。
