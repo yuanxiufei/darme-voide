@@ -475,6 +475,8 @@ export function createAgent(type: string, episodeId: number, dramaId: number): A
     instructions: built.instructions,
     model: provider.chat(modelName),
     tools: built.tools,
+    // 注：输出上限不能在此处设（AgentConfig 无 modelSettings 字段），
+    // 需在调用 agent.generate 时经 options.modelSettings.maxOutputTokens 下发，见 runAgentWithInstructions。
   })
 }
 
@@ -651,7 +653,13 @@ export async function runAgentWithInstructions(
       try {
         const result = await agent.generate(
           [{ role: 'user', content: message }],
-          { maxSteps },
+          {
+            maxSteps,
+            // 输出上限必须显式下发：此前从未传 ⇒ 落到服务端默认（实测 MiniMax ≈2048）⇒ 回复略长即被截断，
+            // 而模型是「先输出文本、再发起 tool call」，排在文本之后的 tool call 会整段丢失。
+            // 症状：回复写了 4000+ 字符、outputTokens 恰好顶在 2060、toolCalls 只剩一个读上下文的调用、业务数据一条没落库。
+            modelSettings: { maxOutputTokens: built.dbConfig?.maxTokens || 4096 },
+          },
         )
 
         const allToolCalls = result.toolCalls || []
