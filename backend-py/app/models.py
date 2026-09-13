@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     REAL,
+    Boolean,
     Column,
     Integer,
     MetaData,
@@ -63,8 +64,14 @@ def _real(name: str, nn: bool = False, default: object = None) -> Column:
 
 
 def _bool(name: str, default: bool = False) -> Column:
-    """SQLite 里布尔就是 0/1 整数（对齐 drizzle integer({mode:'boolean'})）。"""
-    return Column(name, Integer, server_default=_dflt(default))
+    """布尔列（对齐 drizzle ``integer({mode:'boolean'})``）。
+
+    ⚠️ **必须用 ``Boolean`` 而不是 ``Integer``**：存储层两者都是 SQLite INTEGER，完全兼容；
+    但 drizzle 的 ``mode:'boolean'`` 在 JS 侧读出的是**真布尔**，``JSON.stringify`` 得
+    ``true``/``false``；用 ``Integer`` 会让 Python 原样吐出 ``1``/``0`` —— 前端只要用
+    ``=== true`` 严格比较就会挂。这个偏差曾真实存在于所有已迁移域（冒烟测试才发现）。
+    """
+    return Column(name, Boolean, server_default=_dflt(default))
 
 
 # ===== 核心实体 =====

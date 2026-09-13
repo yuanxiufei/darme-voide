@@ -57,6 +57,8 @@ from ..services.script_fingerprint import (
     check_episode_fingerprint,
     refresh_episode_script_hash,
 )
+from ..services.task_logger import log_task_error
+from ..services.text_generation import continue_script
 
 router = APIRouter(prefix="/api/v1/episodes", tags=["episodes"])
 
@@ -465,4 +467,39 @@ def get_script_fingerprint(episode_id: str, conn: Connection = Depends(get_conn)
             return not_found("Invalid episode id")
         return success(check_episode_fingerprint(conn, eid))
     except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# POST /{id}/continue-script — AI 续写剧本（原始内容或格式化剧本）
+# ---------------------------------------------------------------------------
+
+@router.post("/{episode_id}/continue-script")
+async def continue_episode_script(episode_id: str, request: Request,
+                                  conn: Connection = Depends(get_tx)):
+    """AI 续写剧本（**不落库**，回执 ``{continuation}``）。
+
+    ⚠️ 三处保真点：① 集查询**不带软删过滤**，但拿到后显式判 ``deleted_at`` ⇒ 软删集是 404；
+    ② ``mode`` 只有等于 ``'script'`` 才是剧本模式，其余（含缺省/非法值）一律 ``'raw'``；
+    ③ ``text`` **必须是字符串**（数字/对象都当空 ⇒ ``text is required``）。
+    """
+    try:
+        eid = parse_param_id(episode_id)
+        if eid is None:
+            return not_found("Invalid episode id")
+        episode = _fetch_episode(conn, eid)
+        if episode is None or episode.deleted_at:
+            return not_found("Episode not found")
+
+        body = await read_json(request)
+        mode = "script" if body.get("mode") == "script" else "raw"
+        text = body.get("text") if isinstance(body.get("text"), str) else ""
+        if not text.strip():
+            return bad_request("text is required")
+
+        continuation = await continue_script(conn, {"text": text, "mode": mode})
+        return success({"continuation": continuation})
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("EpisodesAPI", "continue-script",
+                       {"error": str(exc), "id": episode_id})
         return bad_request(str(exc))

@@ -217,7 +217,10 @@ async def create_drama(request: Request, conn: Connection = Depends(get_tx)):
             "title": body.get("title"),
             "description": body.get("description"),
             "genre": body.get("genre"),
-            "tags": json.dumps(body["tags"], ensure_ascii=False) if body.get("tags") else None,
+            # ⚠️ 紧凑分隔符（Node 是 `JSON.stringify(body.tags)`）
+            "tags": json.dumps(body["tags"], ensure_ascii=False, separators=(",", ":"))
+            if body.get("tags")
+            else None,
             "metadata": body.get("metadata"),
             "status": "draft",
             "created_at": ts,
@@ -332,7 +335,7 @@ async def update_drama(drama_id: str, request: Request, conn: Connection = Depen
             if key in body:
                 updates[key] = body[key]
         if "tags" in body:
-            updates["tags"] = json.dumps(body["tags"], ensure_ascii=False)
+            updates["tags"] = json.dumps(body["tags"], ensure_ascii=False, separators=(",", ":"))
         if "metadata" in body:
             updates["metadata"] = body["metadata"]
 
@@ -343,7 +346,9 @@ async def update_drama(drama_id: str, request: Request, conn: Connection = Depen
                 updates["era_background"] = ""
             elif isinstance(era_raw, (str, dict)):
                 norm = parse_era_background(
-                    era_raw if isinstance(era_raw, str) else json.dumps(era_raw, ensure_ascii=False)
+                    era_raw
+            if isinstance(era_raw, str)
+            else json.dumps(era_raw, ensure_ascii=False, separators=(",", ":"))
                 )
                 if norm is None:
                     return bad_request(

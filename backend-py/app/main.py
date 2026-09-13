@@ -19,13 +19,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles  # noqa: F401  (保留给后续完全迁移后使用)
-from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import (
@@ -35,9 +33,54 @@ from .config import (
     get_storage_root,
     server,
 )
+from .passthrough import (
+    close_proxy_client,
+    delegate,
+    init_proxy_client,
+)
 from .response import not_found
+from .routers.ai_voices import router as ai_voices_router
+from .routers.characters import router as characters_router
 from .routers.dramas import router as dramas_router
 from .routers.episodes import router as episodes_router
+from .routers.export import router as export_router
+from .routers.app_settings import router as app_settings_router
+from .routers.asset_versions import router as asset_versions_router
+from .routers.ai_configs import providers_router as ai_providers_router
+from .routers.ai_configs import router as ai_configs_router
+from .routers.agent_configs import router as agent_configs_router
+from .routers.generations import router as generations_router
+from .routers.storage import router as storage_router
+from .routers.style_profiles import router as style_profiles_router
+from .routers.traces import router as traces_router
+from .routers.usage import router as usage_router
+from .routers.libraries import (
+    character_library_router,
+    costume_library_router,
+    scene_library_router,
+    weapon_library_router,
+)
+from .routers.presets import router as presets_router
+from .routers.agent import router as agent_router
+from .routers.auto_pipeline import router as auto_pipeline_router
+from .routers.local_models import router as local_models_router
+from .routers.compose import router as compose_router
+from .routers.grid import router as grid_router
+from .routers.images import router as images_router
+from .routers.visual_graph import router as visual_graph_router
+from .routers.webhooks import router as webhooks_router
+from .routers.merge import router as merge_router
+from .routers.preset_framework import router as preset_framework_router
+from .routers.evaluation import router as evaluation_router
+from .services.auto_pipeline import recover_auto_pipeline_on_startup
+from .services.evaluation_scheduler import start_evaluation_scheduler
+from .routers.mcp import router as mcp_router
+from .routers.props import router as props_router
+from .routers.videos import router as videos_router
+from .routers.scenes import router as scenes_router
+from .routers.skills import router as skills_router
+from .routers.upload import router as upload_router
+from .routers.storyboards import router as storyboards_router
 
 # Node ``index.ts`` 的 STATIC_MIME：显式声明以覆盖 mimetypes 猜不到的扩展名
 # （尤其 .srt / .vtt 字幕 —— 猜错会让字幕轨加载失败）
@@ -51,30 +94,23 @@ STATIC_MIME: dict[str, str] = {
 }
 
 # 逐跳首部（RFC 7230）：转发时必须剥掉，否则会污染下游连接语义
-_HOP_BY_HOP = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade",
-}
-
-# 反代到 Node 的共享客户端（连接池复用；SSE 长连接也走它）
-_proxy_client: httpx.AsyncClient | None = None
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    global _proxy_client
     # 启动日志刻意用 ASCII：Windows 控制台默认代码页会把中文打成乱码（见 .codebuddy/memory）
+    init_proxy_client()
+    # 评测→优化 无人值守调度器（**默认关闭**，仅 evaluation.auto_optimize.enabled=true 时启动；
+    # 关闭时只打一条 warn —— 与原 TS 的 index.ts 行为一致）
+    start_evaluation_scheduler()
+    # 全自动管线**崩溃恢复**：扫描中间态 episode 自动续跑（幂等，空库时直接返回）
+    recover_auto_pipeline_on_startup()
     if PROXY_TO_NODE:
-        _proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
         print(f"[py] strangler ON: unmigrated domains -> {NODE_BACKEND_URL}")
     else:
         print("[py] PROXY_TO_NODE=0: unmigrated domains return 501")
     try:
         yield
     finally:
-        if _proxy_client is not None:
-            await _proxy_client.aclose()
-            _proxy_client = None
+        await close_proxy_client()
 
 
 app = FastAPI(
@@ -136,7 +172,43 @@ def health() -> dict[str, str]:
 
 app.include_router(dramas_router)
 app.include_router(episodes_router)
-# 下一个域迁完后在这里 include（characters / scenes / storyboards / props / ...）
+app.include_router(characters_router)
+app.include_router(ai_voices_router)
+app.include_router(scenes_router)
+app.include_router(props_router)
+app.include_router(preset_framework_router)
+app.include_router(storyboards_router)
+app.include_router(videos_router)
+app.include_router(compose_router)
+app.include_router(agent_router)
+app.include_router(auto_pipeline_router)
+app.include_router(local_models_router)
+app.include_router(mcp_router)
+app.include_router(evaluation_router)
+app.include_router(merge_router)
+app.include_router(grid_router)
+app.include_router(images_router)
+app.include_router(visual_graph_router)
+app.include_router(webhooks_router)
+app.include_router(character_library_router)
+app.include_router(scene_library_router)
+app.include_router(weapon_library_router)
+app.include_router(costume_library_router)
+app.include_router(presets_router)
+app.include_router(app_settings_router)
+app.include_router(asset_versions_router)
+app.include_router(traces_router)
+app.include_router(storage_router)
+app.include_router(usage_router)
+app.include_router(agent_configs_router)
+app.include_router(style_profiles_router)
+app.include_router(generations_router)
+app.include_router(ai_configs_router)
+app.include_router(ai_providers_router)
+app.include_router(skills_router)
+app.include_router(upload_router)
+app.include_router(export_router)
+# 下一个域迁完后在这里 include（ai-configs / 本地模型 / evaluation / ...）
 
 
 # ---------------------------------------------------------------------------
@@ -171,53 +243,7 @@ def serve_static(rel: str) -> Response:
 # ---------------------------------------------------------------------------
 
 async def _proxy_to_node(request: Request, path: str) -> Response:
-    assert _proxy_client is not None
-    target = f"{NODE_BACKEND_URL}/{path}"
-    headers = [
-        (k, v) for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
-    ]
-    try:
-        upstream_request = _proxy_client.build_request(
-            request.method,
-            target,
-            headers=headers,
-            content=await request.body(),
-            params=list(request.query_params.multi_items()),
-        )
-        upstream = await _proxy_client.send(upstream_request, stream=True)
-    except httpx.HTTPError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "code": 502,
-                "message": (
-                    f"反代到 Node 后端失败（{NODE_BACKEND_URL}）：{exc}。"
-                    "请确认 Node 后端已启动，或关闭 PROXY_TO_NODE。"
-                ),
-            },
-        )
-
-    resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
-    # aiter_raw 保证 SSE 不被缓冲（管线进度流依赖），且透传压缩体与 content-encoding 一致
-    return StreamingResponse(
-        upstream.aiter_raw(),
-        status_code=upstream.status_code,
-        headers=resp_headers,
-        background=BackgroundTask(upstream.aclose),
-    )
-
-
-def _not_migrated(path: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=501,
-        content={
-            "code": 501,
-            "message": (
-                f"/{path} 尚未迁移到 Python 后端。"
-                "设置 PROXY_TO_NODE=1 可反代到 Node 后端保持可用。"
-            ),
-        },
-    )
+    return await delegate(request, path)
 
 
 @app.api_route(
@@ -226,9 +252,13 @@ def _not_migrated(path: str) -> JSONResponse:
     include_in_schema=False,
 )
 async def api_v1_fallback(request: Request, path: str) -> Response:
-    if not PROXY_TO_NODE:
-        return _not_migrated(f"api/v1/{path}")
-    return await _proxy_to_node(request, f"api/v1/{path}")
+    """兜底：未被任何已迁移路由命中的 /api/v1/* 一律走委派（反代 Node 或 501）。
+
+    ⚠️ 兜底只能兜「没被别的路由先命中」的路径。像 ``GET /agent-configs/defaults``
+    会被 ``GET /agent-configs/{id}`` 抢走 —— 那类遮蔽必须在各自 router 里显式声明委派，
+    见 ``passthrough.py`` 与 ``tests/route_parity_test.py``。
+    """
+    return await delegate(request, f"api/v1/{path}")
 
 
 @app.api_route(
@@ -237,9 +267,7 @@ async def api_v1_fallback(request: Request, path: str) -> Response:
     include_in_schema=False,
 )
 async def webhooks_fallback(request: Request, path: str) -> Response:
-    if not PROXY_TO_NODE:
-        return _not_migrated(f"webhooks/{path}")
-    return await _proxy_to_node(request, f"webhooks/{path}")
+    return await delegate(request, f"webhooks/{path}")
 
 
 # ---------------------------------------------------------------------------

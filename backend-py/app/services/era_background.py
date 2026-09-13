@@ -14,6 +14,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.engine import Connection
+
+from ..models import dramas
+
 _EraBackground = dict[str, str]
 
 
@@ -45,8 +50,9 @@ def _js_str(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, (dict, list)):
-        # TS 侧对对象会得到 "[object Object]"，但那属于脏输入；这里保留 JSON 便于排查
-        return json.dumps(value, ensure_ascii=False)
+        # TS 侧对对象会得到 "[object Object]"，但那属于脏输入；这里保留 JSON 便于排查。
+        # 用紧凑分隔符，保持全仓 JSON 文本风格一致（Node 的 JSON.stringify 无空格）
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
 
 
@@ -77,3 +83,35 @@ def parse_era_background(raw: str | None) -> _EraBackground | None:
 def era_background_to_json(norm: _EraBackground) -> str:
     """落库用：与 TS 的 ``JSON.stringify(norm)`` 等价（键序固定为 era/summary/imageHint）。"""
     return json.dumps(norm, ensure_ascii=False, separators=(",", ":"))
+
+
+def get_era_background(conn: Connection, drama_id: Any = None) -> _EraBackground | None:
+    """读某剧的时代背景（``dramas.era_background`` 解析后）。
+
+    ``if (!dramaId) return null`` 是 **JS 假值判断**：0 / 空串 / None 都返回 None。
+    """
+    if not drama_id:
+        return None
+    row = conn.execute(
+        select(dramas.c.era_background).where(dramas.c.id == drama_id)
+    ).first()
+    if row is None:
+        return None
+    return parse_era_background(row[0])
+
+
+def apply_era_image_clause(conn: Connection, prompt: str, drama_id: Any = None) -> str:
+    """时代背景注入：``imageHint`` 存在时作为「时代/环境画面指令」**追加到 prompt 尾部**。
+
+    不改变调用方原有 prompt 结构；无背景时原样返回。
+    末尾点的处理：已有句号就不再加（``hint.endsWith('.') ? hint : `${hint}.```
+    ``），最终拼成 ``"<prompt>, <hint>."``。
+    """
+    if not drama_id:
+        return prompt
+    era = get_era_background(conn, drama_id)
+    hint = ((era or {}).get("imageHint") or "").strip()
+    if not hint:
+        return prompt
+    clause = hint if hint.endswith(".") else f"{hint}."
+    return f"{prompt}, {clause}"

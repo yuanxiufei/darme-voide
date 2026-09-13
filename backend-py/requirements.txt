@@ -5,3 +5,5 @@ uvicorn[standard]>=0.32.0
 SQLAlchemy>=2.0.36
 PyYAML>=6.0.2
 httpx>=0.27.2
+# multipart/form-data 解析（Starlette 的 request.form() / UploadFile 依赖它，upload 域必需）
+python-multipart>=0.0.9
