@@ -59,6 +59,7 @@ TESTS = [
     ("物品/场景出图 2 端点", "props_scenes_generate_test.py"),
     ("分镜 TTS/出图/LLM 5 端点", "storyboards_generate_test.py"),
     ("剧集续写端点", "episodes_continue_script_test.py"),
+    ("导出服务 + EDL/ZIP 2 端点", "export_service_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

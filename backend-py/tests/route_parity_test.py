@@ -519,6 +519,7 @@ _JSON_DUMPS_ALLOW = {
     "task_logger.py",  # 深拷贝 + 日志格式化（indent=2 是有意的）
     "optimizer.py",  # 优化历史文件：镜像 `JSON.stringify(history, null, 2)`（indent=2 有意）
     "local_model_scan.py",  # configs/model-paths.json：镜像 `JSON.stringify(cfg, null, 2)`（indent=2 有意）
+    "jianying_draft.py",  # 剪映草稿 JSON：镜像 `JSON.stringify(content, null, 2)`（indent=2 有意）
 }
 
 

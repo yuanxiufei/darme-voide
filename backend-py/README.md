@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 1948 项全绿**（冒烟 482 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 1972 项全绿**（冒烟 482 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -210,8 +210,9 @@ backend-py/
    ├─ props_scenes_generate_test.py 物品/场景出图（跨集参考图防串图，23 用例）
    ├─ storyboards_generate_test.py 分镜 TTS/出图/LLM 5 端点（两套回执/拆分顺延，39 用例）
    ├─ episodes_continue_script_test.py 剧集续写（软删 404 / mode 判定，8 用例）
+   ├─ export_service_test.py  导出：EDL 时间码 + ZIP 打包（22 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上四十项
+   └─ run_all.py                一次跑完以上四十一项
 ```
 
 ## 厂商适配器层（S3）要点

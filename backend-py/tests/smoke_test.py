@@ -185,10 +185,23 @@ def _unregistered_samples(limit: int = 5) -> list[tuple[str, str]]:
     **Node 侧路径 − Python 已注册路径 = 仍未迁移**，再用守卫的 ``_concrete()``
     把 ``/{id}`` 换成可请求的具体路径。
 
-    ⚠️ 守卫模块**懒导入**：它在模块级会改 ``DATA_ROOT`` / ``PROXY_TO_NODE`` 等环境变量，
-    必须在 smoke 自己完成 ``app`` 导入之后才 import，否则会顶掉 smoke 的数据根。
+    ⚠️ 守卫模块**懒导入**：它在模块级会**硬改** ``DATA_ROOT`` / ``PROXY_TO_NODE`` 环境变量，
+    所以导入前要**快照环境变量、导入后原样还原** —— 否则会把 smoke 自己的数据根顶掉
+    （实测会让后面「traces list」这类**读文件系统**的断言失败）。
+    守卫模块只会真正执行一次（``sys.modules`` 缓存）⇒ 后续调用不会再有副作用。
     """
-    import route_parity_test as guard  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    env_keys = ("DATA_ROOT", "PROXY_TO_NODE")
+    saved = {key: _os.environ.get(key) for key in env_keys}
+    try:
+        import route_parity_test as guard  # noqa: PLC0415
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = value
 
     from app.main import app as _app  # noqa: PLC0415
 
@@ -951,19 +964,11 @@ with TestClient(app) as client:
           raw.execute("SELECT COUNT(*) FROM storyboard_props WHERE storyboard_id=?", (sb_id,)).fetchone()[0] == 1)
     raw.close()
 
-    # --- 未迁移端点仍走 501 ---
-    # ⚠️ 原先这里固定断言 `generate-tts`、`split` 是 501 —— 二者**已经实现**
-    #    （见 `storyboards_generate_test.py`）⇒ 改用**仍未迁移**的 4 条（抽帧 / QC 打分）。
-    #    501 走的是兜底中间件、不碰数据库，所以这里用已删除的 sb_id 也没问题。
-    for label, sub_path in (
-        ("regenerate-frame", "regenerate-frame"),
-        ("set-frame", "set-frame"),
-        ("qc", "qc"),
-        ("retry-qc", "retry-qc"),
-    ):
-        check(f"sb: {label} not migrated -> 501",
-              client.post(f"/api/v1/storyboards/{sb_id}/{sub_path}",
-                          json={}).status_code == 501)
+    # --- 未迁移端点仍走 501（**动态派生**，同上）---
+    # 这里原先写死过 `generate-tts` / `split`，二者实现后即失效 ⇒ 改为动态抽样
+    for method, path in _unregistered_samples(limit=4):
+        code = client.request(method, path, json={}).status_code
+        check(f"sb 兜底: {method} {path} -> 501", code == 501, code)
 
     client.delete(f"/api/v1/dramas/{sb_drama_id}")
 
@@ -2129,11 +2134,12 @@ with TestClient(app) as client:
     check("export ledger: 非法 id -> 404 'Invalid drama id'",
           r.status_code == 404 and r.json()["message"] == "Invalid drama id", r.text[:200])
 
-    for path in ["edl", "jianying-draft", "qc-report", "contact-sheet"]:
-        code = client.get(f"/api/v1/export/dramas/{ex_drama}/{path}").status_code
-        check(f"export not migrated: /{path} -> 501", code == 501, str(code))
-    code = client.get(f"/api/v1/export/dramas/{ex_drama}").status_code
-    check("export not migrated: 打包 ZIP（/dramas/{id}）-> 501", code == 501, str(code))
+    # ⚠️ 这里原先写死「edl / jianying-draft / qc-report / contact-sheet + 打包 ZIP 都未迁移」
+    #    —— `edl` 与「打包 ZIP」**已实现**（见 `export_service_test.py`）⇒ 改用**动态抽样**
+    #    （与上面 episodes/storyboards 两处同源：口径来自 `route_parity_test.py`，不会过期）。
+    for method, path in _unregistered_samples(limit=3):
+        code = client.request(method, path, json={}).status_code
+        check(f"export 兜底: {method} {path} -> 501", code == 501, code)
 
     client.delete(f"/api/v1/dramas/{ex_drama}")
 
