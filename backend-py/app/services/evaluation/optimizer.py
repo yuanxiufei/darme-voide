@@ -31,6 +31,7 @@ from sqlalchemy.engine import Connection
 
 from ...models import agent_configs
 from ..agent_prompts import get_default_instructions
+from .catalog import benchmarks_dir
 from ..agent_registry import get_default_name
 from ..agents.creator import GeneratedAgentConfig, persist_agent_config
 from ..agents.runtime import default_generate
@@ -167,7 +168,11 @@ async def optimize_agent_prompt(
     options = options or {}
     # ⚠️ `??` 语义：显式传 0 就是 0
     iterations = options["iterations"] if options.get("iterations") is not None else 3
-    history_dir = options.get("historyDir") or str(Path.cwd() / "benchmarks" / "history")
+    # ⚠️ 默认值与 TS 的 `Path.cwd()/benchmarks/history` **行为等价但不再依赖 cwd**：
+    #    Node 那边 cwd 恒为 `backend/` ⇒ 历史就写在 case 文件旁的 `benchmarks/history`；
+    #    S7 把 case 搬到 `<项目根>/benchmarks` 后，这里改成同一个目录下的 `history`
+    #    （否则从 `backend-py/` 启动会另开一份历史，与 case 目录脱节）。
+    history_dir = options.get("historyDir") or str(benchmarks_dir() / "history")
     auto_persist = (options["autoPersist"] if options.get("autoPersist") is not None else True)
     reference_prompt = get_default_instructions(agent_type)
 

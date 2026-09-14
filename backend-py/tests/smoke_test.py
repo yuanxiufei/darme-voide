@@ -1561,12 +1561,18 @@ with TestClient(app) as client:
     check("aic delete: 重复删除 -> 404 'Config not found'",
           r.status_code == 404 and r.json()["message"] == "Config not found", r.text[:200])
 
-    for path, method in [
-        ("/api/v1/ai-configs/gpu/status", "GET"),
-        ("/api/v1/ai-configs/gpu/release-all", "POST"),
-    ]:
-        code = client.request(method, path).status_code
-        check(f"aic not migrated: {method} {path} -> 501（GPU 租约是进程内状态）", code == 501, str(code))
+    # ⚠️ 这两条**已迁**（原先断言 501）：GPU 显存管理器搬到 `services/gpu_manager.py`，
+    #    `/gpu/status` 返回**裸 JSON**（不是信封）、`/gpu/release-all` 返回信封 —— 语义差异在
+    #    `gpu_manager_test.py` 里逐条锁；这里只做「不再走 501 兜底」的接缝断言。
+    gpu_status = client.get("/api/v1/ai-configs/gpu/status")
+    check("aic gpu/status: 已迁移（裸 JSON，HTTP 200）",
+          gpu_status.status_code == 200 and "code" not in gpu_status.json()
+          and gpu_status.json()["totalVRAM_GB"] == 24, gpu_status.text[:120])
+    gpu_release = client.post("/api/v1/ai-configs/gpu/release-all")
+    check("aic gpu/release-all: 已迁移（信封 {message,status}）",
+          gpu_release.status_code == 200
+          and gpu_release.json()["data"]["message"] == "All GPU models released",
+          gpu_release.text[:120])
 
     # --- ai-configs：Ollama / 模型列举 / 连通性探测（用本地假 Ollama 让结果确定）---
     import threading  # noqa: E402
@@ -1861,8 +1867,13 @@ with TestClient(app) as client:
           r.json()["data"]["profile"]["storytelling"] == "{}"
           and r.json()["data"]["profile"]["preferences"] == "[]", str(r.json()["data"]["profile"]))
 
-    check("sp distill: NOT migrated (LLM + ffprobe) -> 501",
-          client.post(f"/api/v1/style-profiles/{sp_id}/distill").status_code == 501)
+    # ⚠️ 已迁（原先断言 501）。这里**故意不打通真实提炼**：契约冒烟不该发起 LLM 调用
+    #    （慢且受环境抖动），用不存在的 id 触发「Profile not found」即可证明
+    #    「路由已注册、不再走 501 兜底」。提炼行为本身由 era_style_distill_test.py 覆盖。
+    distill = client.post("/api/v1/style-profiles/999999/distill")
+    check("sp distill: 已迁移（不存在 -> 400 'Profile not found'，而不是 501）",
+          distill.status_code == 400 and distill.json()["message"] == "Profile not found",
+          distill.text[:160])
 
     r = client.delete(f"/api/v1/style-profiles/{sp_id}")
     check("sp delete: {deleted: true}", r.json()["data"] == {"deleted": True}, r.text[:200])

@@ -18,7 +18,7 @@ GET     ``/{id}/prompts``           聚合全剧提示词
 
 **刻意未迁移 2 个端点**（依赖尚未移植的服务层，不注册，交给 ``main.py`` 的兜底路由）：
 
-* ``GET  /{id}/rhythm``                   依赖 ``services/rhythm-phase.ts``
+* ``GET  /{id}/rhythm``                   ✅ 已迁（多集节奏相位报告）
 * ``POST /{id}/era-background/extract``   依赖 ``services/text-generation.ts``（LLM 链路）
 
 这两个路径在 ``PROXY_TO_NODE=1`` 时由 Node 后端继续服务 —— 这正是绞杀者模式
@@ -51,7 +51,13 @@ from ..response import (
     success,
 )
 from ..services.bible_ids import ensure_costume_id, ensure_style_id
-from ..services.era_background import era_background_to_json, parse_era_background
+from ..services.era_background import (
+    era_background_to_json,
+    extract_drama_era_background,
+    parse_era_background,
+)
+from ..services.rhythm_phase import get_drama_rhythm
+from ..services.task_logger import log_task_error
 
 router = APIRouter(prefix="/api/v1/dramas", tags=["dramas"])
 
@@ -365,8 +371,56 @@ async def update_drama(drama_id: str, request: Request, conn: Connection = Depen
 
 
 # ---------------------------------------------------------------------------
+# POST /{id}/era-background/extract — AI 从剧本提炼时代背景并落库（前端「AI 自动提炼」）
+# ---------------------------------------------------------------------------
+
+@router.post("/{drama_id}/era-background/extract")
+async def extract_era_background(drama_id: str, request: Request,
+                                 conn: Connection = Depends(get_tx)):
+    try:
+        did = parse_param_id(drama_id)
+        if did is None:
+            return not_found("Invalid drama id")
+        # ⚠️ 这里**带软删判断**（与路由层其它端点一致），而服务内层查剧时不带
+        exists = conn.execute(
+            select(dramas.c.id).where(and_(dramas.c.id == did, dramas.c.deleted_at.is_(None)))
+        ).first()
+        if exists is None:
+            return not_found("剧本不存在")
+
+        body = await read_json(request)
+        # `body.source_text ?? body.sourceText` —— **nullish**：显式传 null 才回退另一个键
+        source_text = body.get("source_text")
+        if source_text is None:
+            source_text = body.get("sourceText")
+
+        result = await extract_drama_era_background(conn, did, source_text)
+        return success(result)
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("DramasAPI", "era-extract", {"error": str(exc), "id": drama_id})
+        return bad_request(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # DELETE /{id} — 软删（管线执行中拒绝）
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# GET /{id}/rhythm — 多集节奏相位报告
+# ---------------------------------------------------------------------------
+
+@router.get("/{drama_id}/rhythm")
+def drama_rhythm(drama_id: str, conn: Connection = Depends(get_conn)):
+    try:
+        did = parse_param_id(drama_id)
+        if did is None:
+            return not_found("Invalid drama id")
+        # ⚠️ 原 TS **不检查剧是否存在**：查不到就回全零的空报告（HTTP 200），别自作聪明加 404
+        return success(get_drama_rhythm(conn, did))
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("DramasAPI", "rhythm", {"error": str(exc), "id": drama_id})
+        return bad_request(str(exc))
+
 
 @router.delete("/{drama_id}")
 def delete_drama(drama_id: str, conn: Connection = Depends(get_tx)):

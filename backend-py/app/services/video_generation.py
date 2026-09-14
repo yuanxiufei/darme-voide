@@ -19,7 +19,9 @@
 2. ``duration ?? undefined`` 与 ``meta ? {...} : undefined`` —— 值为空时**整个键不写**
    （对齐 JS ``JSON.stringify`` 丢 ``undefined``），**不是**写 ``null``。
 
-⚠️ 已知的、有意的差异：**GPU 显存租约未迁**；**镜头 QC 打分未迁**（见 ``_run_qc_after_video_complete``）。
+⚠️ 已知的、有意的差异：**镜头 QC 打分未迁**（见 ``_run_qc_after_video_complete``）。
+✅ **GPU 显存租约已接线**（本地配置才申请；**长租约**：提交时持有、完成/失败/重试时释放，
+见 ``_video_gpu_leases`` 与 ``release_video_gpu_lease``）。
 """
 from __future__ import annotations
 
@@ -39,7 +41,9 @@ from .ai_configs import is_local_config
 from .ai_providers import get_active_config, get_active_config_by_provider, get_config_by_id
 from .asset_versions import record_asset_version
 from .file_storage import download_file, read_image_as_compressed_data_url
+from .gpu_manager import gpu_manager
 from .prompt_utils import strip_video_prompt_tags
+from .qc_scoring import run_qc_after_video_complete
 from .script_fingerprint import check_storyboard_gate
 from .take_budget import check_take_budget, consume_take
 from .task_logger import (
@@ -104,6 +108,22 @@ def _stringify(value: Any) -> str:
 # ===========================================================================
 # 入队
 # ===========================================================================
+
+#: 视频任务的 GPU 租约（**长租约**：提交时申请、完成/失败/重试时释放）。
+#: ⚠️ 与 text/tts 的「请求内即用即放」不同 —— 视频是**提交后轮询**型，租约必须跨轮询持有；
+#: 对应原 TS 的 ``const videoGpuLeases = new Map<number, GpuLease>()``。
+_video_gpu_leases: dict[int, Any] = {}
+
+
+def release_video_gpu_lease(video_id: int) -> None:
+    """释放视频任务的 GPU 租约（幂等：没有就什么都不做）。
+
+    调用点与原 TS 一致：**重试前**、**最后一次尝试失败**、**完成**。
+    """
+    lease = _video_gpu_leases.pop(video_id, None)
+    if lease is not None:
+        lease.release()
+
 
 async def generate_video(conn: Connection, params: dict[str, Any]) -> int:
     """入队一次视频生成，返回 ``video_generations.id``。
@@ -269,9 +289,21 @@ async def _process_video_generation(video_id: int, config: dict[str, Any]) -> No
                 .values(model=model, updated_at=now())
             )
 
-        # ⚠️ 原 TS 在此 releaseVideoGpuLease / gpuManager.acquire —— gpu-manager 未迁（见模块头）
+        # ── 非首次尝试：释放上一次的 GPU 租约 ──
+        if attempt > 0:
+            release_video_gpu_lease(video_id)
 
         is_local = is_local_config(config.get("baseUrl") or "", config.get("provider") or "")
+
+        # ── 本地 GPU 模型：申请显存租约（**失败只告警，不中断任务** —— 与原 TS 一致）──
+        if is_local:
+            try:
+                _video_gpu_leases[video_id] = await gpu_manager.acquire(
+                    "video", config.get("provider"), model, config.get("baseUrl")
+                )
+            except Exception as err:  # noqa: BLE001
+                log_task_warn("VideoTask", "gpu-acquire-failed",
+                              {"id": video_id, "model": model, "error": str(err)})
 
         # 用量记账：**units = 时长（秒）**（图片是 1 张）—— 视频按秒计费
         with _tx() as conn:
@@ -390,6 +422,7 @@ async def _process_video_generation(video_id: int, config: dict[str, Any]) -> No
             log_task_warn("VideoTask", "all-models-failed" if is_last_attempt else "model-fallback", warn_meta)
 
             if is_last_attempt:
+                release_video_gpu_lease(video_id)
                 with _tx() as conn:
                     _mark_usage_by_video_gen(conn, video_id, "failed")
                     log_task_error("VideoTask", "process", {
@@ -537,6 +570,7 @@ async def _handle_video_complete(
     ⚠️ ``storyboard_id`` 为 None 时**不更新分镜行**（同步完成路径就是这样）——
     但版本留档与 QC 会用「形参 ?? 记录里的 storyboard_id」回退，仍然生效。
     """
+    release_video_gpu_lease(video_id)
     with _tx() as conn:
         _mark_usage_by_video_gen(conn, video_id, "completed")
     local_path = await download_file(video_url, "videos")
@@ -606,17 +640,21 @@ async def _handle_video_complete(
 
 
 def _run_qc_after_video_complete(storyboard_id: Any, video_generation_id: int) -> None:
-    """镜头级 QC 打分 —— **未迁移**（``qc-scoring.ts`` 253 行 + ``technical-qc.ts`` 259 行）。
+    """视频完成后的镜头级 QC（**fire-and-forget 增强**，失败只 warn、绝不影响成片）。
 
-    它依赖 ``execFile`` 调 ffmpeg/ffprobe 做技术质检 + 写 ``storyboards.qc_*`` 字段，
-    是**生成完成后的 fire-and-forget 增强**，不影响成片本身。整块留到独立一批，
-    与「媒体收尾域」一起做（届时把本函数替换为真实调用即可 —— 调用点已就位）。
+    ✅ **规则打分已接线**（``qc_scoring.run_qc_after_video_complete`` ⇒ 写 ``video_quality_checks``）。
+    ⚠️ 技术维度（``technical-qc.ts``：ffmpeg 黑场/冻帧/响度/帧率硬检）**仍未移植** ⇒ 服务内部会记
+    一条 ``tech-qc-skipped`` warn；等它落地后只需改服务内部，这个调用点不用再动。
     """
-    log_task_warn("VideoTask", "qc-skipped", {
-        "storyboardId": storyboard_id,
-        "videoGenerationId": video_generation_id,
-        "reason": "qc-scoring not migrated yet",
-    })
+    try:
+        with _tx() as conn:
+            run_qc_after_video_complete(conn, storyboard_id, video_generation_id)
+    except Exception as err:  # noqa: BLE001 —— fire-and-forget：绝不让 QC 影响成片流程
+        log_task_warn("VideoTask", "qc-failed", {
+            "storyboardId": storyboard_id,
+            "videoGenerationId": video_generation_id,
+            "error": str(err),
+        })
 
 
 def _mark_recover_failed(conn: Connection, video_id: int, reason: str) -> None:

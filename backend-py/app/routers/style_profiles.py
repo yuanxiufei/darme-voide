@@ -26,10 +26,12 @@ from ..services.style_profiles import (
     apply_distill_result,
     create_style_profile,
     delete_style_profile,
+    distill_style_profile,
     get_style_profile,
     list_style_profiles,
     update_style_profile,
 )
+from ..services.task_logger import log_task_error
 
 router = APIRouter(prefix="/api/v1/style-profiles", tags=["style-profiles"])
 
@@ -114,6 +116,21 @@ def activate_profile(profile_id: str, conn: Connection = Depends(get_tx)):
     if profile is None:
         return not_found("Profile not found")
     return success({"profile": profile})
+
+
+@router.post("/{profile_id}/distill")
+async def distill_profile(profile_id: str, conn: Connection = Depends(get_tx)):
+    """用 LLM 分析参考素材，提炼 house style（**不落库**，返回待用户确认的结果）。"""
+    try:
+        # ⚠️ 原 TS 是裸 ``Number(id)``（``'abc'`` -> NaN）⇒ Python 用 ``_num`` 给 None，
+        #    两者都会在 ``get_style_profile`` 里「查不到」而返回同一句 Profile not found。
+        result = await distill_style_profile(conn, _num(profile_id))
+        if not result.get("ok"):
+            return bad_request(result.get("error") or "distill failed")
+        return success({"result": result.get("result")})
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StyleProfilesAPI", "distill", {"error": str(exc)})
+        return bad_request(str(exc) or "distill failed")
 
 
 @router.post("/{profile_id}/apply")

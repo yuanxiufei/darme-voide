@@ -33,6 +33,7 @@ from ..models import ai_voices
 from .adapters.registry import get_tts_adapter
 from .ai_configs import is_local_config
 from .ai_providers import get_audio_config_by_id
+from .gpu_manager import gpu_manager
 from .task_logger import (
     log_task_error,
     log_task_payload,
@@ -120,7 +121,11 @@ async def generate_tts(conn: Connection, params: dict[str, Any]) -> str:
             "params": params,
         })
 
-        # ⚠️ 原 TS 在此 gpuManager.acquire('audio', …) —— gpu-manager 未迁（见模块头）
+        # ── 本地 GPU 模型：申请显存租约 ──
+        lease = None
+        if is_local:
+            lease = await gpu_manager.acquire("audio", config.get("provider"), model,
+                                              config.get("baseUrl"))
 
         try:
             adapter = get_tts_adapter(config.get("provider"))
@@ -197,6 +202,10 @@ async def generate_tts(conn: Connection, params: dict[str, Any]) -> str:
             log_task_error("AudioTask", "all-models-failed" if is_last_attempt else "model-fallback", meta)
             if is_last_attempt:
                 raise
+        finally:
+            # ⚠️ 与 TS 的 `finally { if (lease) lease.release() }` 一致（每轮尝试各自释放）
+            if lease is not None:
+                lease.release()
 
     raise ValueError("All TTS models failed")
 

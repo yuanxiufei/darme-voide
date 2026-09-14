@@ -1,0 +1,172 @@
+import { Hono } from 'hono'
+import { eq, isNull, and } from 'drizzle-orm'
+import { db, schema } from '../db/index.js'
+import { success, badRequest, notFound, now, parseParamId } from '../utils/response.js'
+import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
+import { logTaskError } from '../utils/task-logger.js'
+import { generateAgentConfig, persistAgentConfig } from '../agents/creator.js'
+import { getAgentDefaults, validAgentTypes } from '../agents/index.js'
+
+const app = new Hono()
+
+// GET /agent-configs
+app.get('/', async (c) => {
+  try {
+  const rows = db.select().from(schema.agentConfigs)
+    .where(isNull(schema.agentConfigs.deletedAt)).all()
+  return success(c, toSnakeCaseArray(rows))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// GET /agent-configs/defaults — 出厂默认配置（默认提示词 + 默认 Skill 绑定）
+// 注意：必须注册在 /:id 之前，否则 'defaults' 会被当成 id 解析
+app.get('/defaults', async (c) => {
+  try {
+    return success(c, getAgentDefaults())
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// GET /agent-configs/:id
+app.get('/:id', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
+  const [row] = db.select().from(schema.agentConfigs)
+    .where(and(eq(schema.agentConfigs.id, id), isNull(schema.agentConfigs.deletedAt))).all()
+  if (!row) return notFound(c, 'Not found')
+  return success(c, toSnakeCase(row))
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+// POST /agent-configs/generate（一句话需求 → Agent 配置；dry_run=true 只预览不落库）
+app.post('/generate', async (c) => {
+  try {
+    const body = await c.req.json()
+    const agentType: string = body.agent_type
+    const requirement: string = body.requirement
+    const dryRun: boolean = body.dry_run === true
+
+    if (!agentType) return badRequest(c, 'agent_type required')
+    if (!validAgentTypes.includes(agentType)) {
+      return badRequest(c, `未知 Agent 类型：${agentType}（可用：${validAgentTypes.join(', ')}）`)
+    }
+    if (!requirement?.trim()) return badRequest(c, 'requirement required')
+
+    const candidate = await generateAgentConfig(agentType, requirement)
+    if (dryRun) return success(c, { candidate })
+
+    const saved = persistAgentConfig(candidate)
+    return success(c, { candidate, saved: toSnakeCase(saved) })
+  } catch (err: any) {
+    logTaskError('AgentConfigsAPI', 'generate', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /agent-configs (upsert by agent_type)
+app.post('/', async (c) => {
+  try {
+  const body = await c.req.json()
+  if (!body.agent_type) return badRequest(c, 'agent_type required')
+  const ts = now()
+
+  // Validate skills format if provided
+  let skillsStr: string | undefined
+  if (body.skills) {
+    try {
+      const parsed = JSON.parse(typeof body.skills === 'string' ? body.skills : JSON.stringify(body.skills))
+      if (!Array.isArray(parsed)) return badRequest(c, 'skills must be a JSON array')
+      for (const item of parsed) {
+        if (!item.id || typeof item.id !== 'string') return badRequest(c, 'each skill must have an id field')
+      }
+      skillsStr = JSON.stringify(parsed)
+    } catch { return badRequest(c, 'skills is not valid JSON') }
+  }
+
+  // Check if exists (including soft-deleted)
+  const [existing] = db.select().from(schema.agentConfigs)
+    .where(eq(schema.agentConfigs.agentType, body.agent_type)).all()
+
+  if (existing) {
+    // Update existing
+    db.update(schema.agentConfigs).set({
+      name: body.name || existing.name,
+      model: body.model ?? existing.model,
+      systemPrompt: body.system_prompt ?? existing.systemPrompt,
+      temperature: body.temperature ?? existing.temperature,
+      maxTokens: body.max_tokens ?? existing.maxTokens,
+      maxIterations: body.max_iterations ?? existing.maxIterations,
+      skills: skillsStr ?? existing.skills,
+      isActive: body.is_active ?? true,
+      deletedAt: null,
+      updatedAt: ts,
+    }).where(eq(schema.agentConfigs.id, existing.id)).run()
+    const [row] = db.select().from(schema.agentConfigs).where(eq(schema.agentConfigs.id, existing.id)).all()
+    return success(c, toSnakeCase(row))
+  }
+
+  const res = db.insert(schema.agentConfigs).values({
+    agentType: body.agent_type,
+    name: body.name || '',
+    description: body.description || '',
+    model: body.model || '',
+    systemPrompt: body.system_prompt || '',
+    temperature: body.temperature ?? 0.7,
+    maxTokens: body.max_tokens ?? 4096,
+    maxIterations: body.max_iterations ?? 10,
+    skills: skillsStr || null,
+    isActive: body.is_active ?? true,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+  const [result] = db.select().from(schema.agentConfigs)
+    .where(eq(schema.agentConfigs.id, Number(res.lastInsertRowid))).all()
+  return success(c, toSnakeCase(result))
+  } catch (err: any) { logTaskError('AgentConfigsAPI', 'create', { error: err.message }); return badRequest(c, err.message) }
+})
+
+// PUT /agent-configs/:id
+app.put('/:id', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
+  const body = await c.req.json()
+  const updates: Record<string, any> = { updatedAt: now() }
+
+  if ('model' in body) updates.model = body.model
+  if ('temperature' in body) updates.temperature = body.temperature
+  if ('max_tokens' in body) updates.maxTokens = body.max_tokens
+  if ('max_iterations' in body) updates.maxIterations = body.max_iterations
+  if ('is_active' in body) updates.isActive = body.is_active
+  if ('system_prompt' in body) updates.systemPrompt = body.system_prompt
+  if ('name' in body) updates.name = body.name
+  if ('description' in body) updates.description = body.description
+  if ('skills' in body) {
+    try {
+      const parsed = JSON.parse(typeof body.skills === 'string' ? body.skills : JSON.stringify(body.skills))
+      if (!Array.isArray(parsed)) return badRequest(c, 'skills must be a JSON array')
+      for (const item of parsed) {
+        if (!item.id || typeof item.id !== 'string') return badRequest(c, 'each skill must have an id field')
+      }
+      updates.skills = JSON.stringify(parsed)
+    } catch { return badRequest(c, 'skills is not valid JSON') }
+  }
+
+  db.update(schema.agentConfigs).set(updates).where(eq(schema.agentConfigs.id, id)).run()
+  const [row] = db.select().from(schema.agentConfigs).where(eq(schema.agentConfigs.id, id)).all()
+  return success(c, toSnakeCase(row))
+  } catch (err: any) { logTaskError('AgentConfigsAPI', 'update', { error: err.message, id: c.req.param('id') }); return badRequest(c, err.message) }
+})
+
+// DELETE /agent-configs/:id
+app.delete('/:id', async (c) => {
+  try {
+  const id = parseParamId(c)
+  if (id == null) return notFound(c, 'Invalid agent config id')
+  db.update(schema.agentConfigs).set({ deletedAt: now() })
+    .where(and(eq(schema.agentConfigs.id, id), isNull(schema.agentConfigs.deletedAt))).run()
+  return success(c)
+  } catch (err: any) { return c.json({ code: 500, data: null, message: err.message }) }
+})
+
+export default app

@@ -1,27 +1,37 @@
-"""风格 Profile CRUD —— 移植 ``backend/src/services/style-profiles.ts`` 的**非 LLM 部分**。
+"""风格 Profile CRUD + 提炼 —— 移植 ``backend/src/services/style-profiles.ts``（307 行，**整域关闭**）。
 
 从参考素材提炼可复用的 house style，分四类规则：``storytelling``（叙事节奏）、
 ``shot_patterns``（景别/机位/运镜）、``audio_captions``（音效/配乐/字幕）、``qc_rules``（验收标准）。
 来源三分类：measurement facts（客观测量）/ visual inference（模型推断）/ user preference（用户偏好）。
 
-⚠️ ``distillStyleProfile``（LLM 分析 + ffprobe 探测）**未移植** —— 它依赖 ``@mastra`` 的 Agent、
-``@ai-sdk`` 的 OpenAI provider 与 ``fluent-ffmpeg`` 的 ffprobe，属媒体/Agent 域。
-⇒ ``POST /style-profiles/:id/distill`` 不注册（走反代），但 ``/apply`` 已迁：
-   用户可以把**在 Node 侧提炼好**的结果贴回来落库，链路不阻塞。
+⚠️ 提炼（``distill_style_profile``）**不落库**：返回结果等用户确认，再由 ``/apply`` 写入
+   （对齐 H3-Codex-Drama 的 user confirmation gate）。
+
+⚠️ 与 TS 版的两处**有意差异**（都是「用仓内既有链路替代外部依赖」）：
+
+1. TS 用 ``@mastra`` 的 ``Agent`` + ``@ai-sdk`` 的 ``createOpenAI`` **直连** provider
+   （绕过自家 adapter）；Python 侧统一走 ``text_generation.generate_text``
+   —— 它自带多模型 fallback，且是全仓「直连 LLM」的既定入口 ⇒ 行为等价、错误面更小。
+2. TS 用 ``fluent-ffmpeg`` 的 ``ffprobe`` 探测；Python 侧直接起 ``ffprobe`` 进程
+   （与 ``frame_extractor`` / ``qc_report`` 同一套做法）。
 
 ⚠️ 行形状是 **camelCase**（原 TS 用 ``mapRow`` 显式改名，返回的不是 drizzle 原始行）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from typing import Any
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
 from ..models import style_profiles
-from ..response import js_truthy, now, row_to_dict
+from ..response import js_round, js_truthy, now, row_to_dict
+from .file_storage import get_absolute_path
+from .task_logger import log_task_error
 
 #: 五个 JSON 列的列名（原 TS 里 ``preferences`` 与其余四个一样走 JSON.stringify）
 _JSON_FIELDS = ("storytelling", "shot_patterns", "audio_captions", "qc_rules", "preferences")
@@ -218,7 +228,7 @@ def activate_style_profile(conn: Connection, profile_id: Any) -> dict[str, Any] 
 
 
 def apply_distill_result(conn: Connection, profile_id: Any, result: dict[str, Any]) -> bool:
-    """把（用户在 Node 侧提炼并确认后的）结果写入 Profile。
+    """把（用户确认后的）提炼结果写入 Profile。
 
     ⚠️ 与原 TS 一致：这里五个键**总是**写入（不做 undefined 判断），
     所以 ``facts`` / ``inferences`` 两列**不在**写入范围内（它们由提炼流程单独维护）。
@@ -234,3 +244,142 @@ def apply_distill_result(conn: Connection, profile_id: Any, result: dict[str, An
             "preferences": result.get("preferences", []),
         },
     )
+
+
+# ===========================================================================
+# 提炼（对齐 H3-Codex-Drama distill_house_style 的 LLM 分析）
+# ===========================================================================
+
+#: 提炼用的系统提示词（**逐字**对齐 TS 的 ``instructions``）
+_DISTILL_INSTRUCTIONS = """你是资深影视风格分析专家。根据用户提供的参考素材描述，提炼可复用的「house style」短片风格档案。
+
+必须严格输出 JSON（不要包含任何其他文字、markdown 代码块或注释），结构如下：
+{
+  "storytelling": { 叙事节奏、悬念密度、转场动机偏好、信息揭示节奏 },
+  "shot_patterns": { 景别分布偏好、机位、运镜、构图习惯、镜头时长规律 },
+  "audio_captions": { 配乐风格、音效密度、字幕风格、静场偏好 },
+  "qc_rules": { 验收时的画面/音频/连续性硬性标准，如「同场景相邻镜头相似度须≥0.55」「响度 I=-14 LUFS」 },
+  "facts": ["可测量的客观事实，来自参考素材本身，如分辨率/时长/镜头数等"],
+  "inferences": ["你从素材风格推断出的结论（可能是主观判断，需人工复核）"],
+  "preferences": ["用户明确表达的风格偏好（最高优先级）"]
+}
+
+原则：
+- facts 只放可验证的客观测量；inferences 是推断；preferences 来自用户原话的偏好
+- qc_rules 要具体到可执行数值/判定标准
+- 中文输出，JSON 字段名保持英文"""
+
+
+def _int_if_integral(value: Any) -> Any:
+    """ffprobe 给的是整数语义的数值 —— 落成 int，避免 JSON 里出现 ``340000.0``。"""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+async def _probe_measurement_facts(source: str | None) -> dict[str, Any]:
+    """用 ffprobe 探测参考视频的**测量事实**（可选，失败静默返回 ``{}``）。
+
+    ⚠️ 与 ``qc_report.ffprobe_info`` 的形状**不同**（那份是归一化后的全字段），
+    这份是「有才写」的稀疏事实，且 ``fps`` 保留 ffprobe 的**原始分数串**（如 ``30000/1001``）
+    —— 给 LLM 看的是事实原文，不做换算，照抄 TS。
+    """
+    if not source:
+        return {}
+    facts: dict[str, Any] = {}
+    try:
+        absolute = get_absolute_path(source)
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", absolute,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await process.communicate()
+        if process.returncode != 0:
+            return {}
+        meta = json.loads(stdout.decode("utf-8", errors="replace") or "")
+    except Exception:  # noqa: BLE001 —— 非本地文件/探测失败时忽略（与 TS 的裸 catch 等价）
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+
+    streams = meta.get("streams") if isinstance(meta.get("streams"), list) else []
+    video = next((s for s in streams
+                  if isinstance(s, dict) and s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams
+                  if isinstance(s, dict) and s.get("codec_type") == "audio"), None)
+    if video:
+        facts["resolution"] = f"{video.get('width')}x{video.get('height')}"
+        facts["fps"] = video.get("r_frame_rate") or video.get("avg_frame_rate") or None
+        facts["video_codec"] = video.get("codec_name") or None
+    if audio:
+        facts["audio_codec"] = audio.get("codec_name") or None
+
+    fmt = meta.get("format") if isinstance(meta.get("format"), dict) else {}
+    if fmt.get("duration"):
+        facts["duration_seconds"] = js_round(float(fmt["duration"]))
+    if fmt.get("size"):
+        facts["file_size_bytes"] = _int_if_integral(float(fmt["size"]))
+    return facts
+
+
+async def distill_style_profile(conn: Connection, profile_id: Any) -> dict[str, Any]:
+    """用文本 LLM 分析参考素材，提炼 house style（四类规则 + 三分类来源）。
+
+    **不修改数据**，返回 ``{"ok": bool, "result"?: ..., "error"?: str}`` 供用户确认后写入。
+    ⚠️ 与原 TS 一致：**所有异常都吞成 ``{"ok": False, "error": ...}``**（路由据此回 400）。
+    """
+    profile = get_style_profile(conn, profile_id)
+    if profile is None:
+        return {"ok": False, "error": "Profile not found"}
+
+    try:
+        measurements = await _probe_measurement_facts(profile.get("source"))
+
+        user_msg = "\n\n".join([part for part in [
+            f"参考素材说明：{profile.get('source') or '（未提供，仅凭 Profile 名称/描述）'}",
+            f"Profile 名称：{profile.get('name')}",
+            f"描述：{profile['description']}" if profile.get("description") else "",
+            # ⚠️ indent=2 是**有意**的：对齐 TS 的 `JSON.stringify(measurements, null, 2)`
+            (f"参考素材测量事实（ffprobe 探测，可信）："
+             f"{json.dumps(measurements, ensure_ascii=False, indent=2)}") if measurements else "",
+            f"已知用户偏好（若有）：{profile.get('preferences') or '（无）'}",
+        ] if part])
+
+        from .text_generation import generate_text  # noqa: PLC0415 —— 惰性导入避免环
+
+        text = await generate_text(conn, user_msg, {"system": _DISTILL_INSTRUCTIONS})
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text or "", flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end < 0:
+            return {"ok": False, "error": "LLM output is not JSON"}
+
+        parsed = json.loads(cleaned[start:end + 1])
+        if not isinstance(parsed, dict):
+            return {"ok": False, "error": "LLM output is not JSON"}
+
+        def _obj(key: str) -> dict[str, Any]:
+            value = parsed.get(key)
+            return value if isinstance(value, dict) else {}
+
+        def _list(key: str) -> list[Any]:
+            value = parsed.get(key)
+            return value if isinstance(value, list) else []
+
+        return {"ok": True, "result": {
+            "storytelling": _obj("storytelling"),
+            "shot_patterns": _obj("shot_patterns"),
+            "audio_captions": _obj("audio_captions"),
+            "qc_rules": _obj("qc_rules"),
+            "facts": _list("facts"),
+            "inferences": _list("inferences"),
+            "preferences": _list("preferences"),
+        }}
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StyleProfile", "distill-failed",
+                       {"profileId": profile_id, "error": str(exc)})
+        return {"ok": False, "error": str(exc)}

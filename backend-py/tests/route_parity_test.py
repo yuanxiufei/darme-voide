@@ -30,6 +30,13 @@ os.environ["DATA_ROOT"] = tempfile.mkdtemp(prefix="parity_")
 os.environ["PROXY_TO_NODE"] = "0"
 
 REPO = Path(__file__).resolve().parents[2]
+
+#: TS 源码根：**真源码优先**（迁移期），删掉 ``backend/`` 后**自动回退到冻结快照**
+#: （``tests/frozen_ts/``，由 ``tests/freeze_ts_snapshot.py`` 在删库前生成）。
+#: ⚠️ ``PARITY_USE_FROZEN=1`` 可**强制**用快照 —— 用来在真源码还在时就验证「删库后守卫照样能跑」。
+_TS_SRC = REPO / "backend" / "src"
+_FROZEN_TS = Path(__file__).resolve().parent / "frozen_ts"
+_SRC_ROOT = _FROZEN_TS if (os.environ.get("PARITY_USE_FROZEN") == "1" or not _TS_SRC.is_dir()) else _TS_SRC
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -139,7 +146,7 @@ def _registry_drift() -> list[str]:
         HOST_TOOL_NAMES,
     )
 
-    agents_dir = REPO / "backend" / "src" / "agents"
+    agents_dir = _SRC_ROOT / "agents"
     problems: list[str] = []
 
     # ① 宿主工具名 = tools/*.ts 与 subagent.ts 里的 `id: 'xxx'` 并集
@@ -238,7 +245,7 @@ def _prompt_utils_drift() -> list[str]:
     """
     from app.services import prompt_utils as pu
 
-    src = (REPO / "backend" / "src" / "shared" / "prompt-utils.ts").read_text(encoding="utf-8")
+    src = (_SRC_ROOT / "shared" / "prompt-utils.ts").read_text(encoding="utf-8")
     resolved = _extract_ts_string_constants(src)
 
     expected = {
@@ -307,7 +314,7 @@ def _prompt_utils_drift() -> list[str]:
 #: ② 默认模型名改了（行为变了但不报错）；
 #: ③ 端点路径改了（请求打到 404）；
 #: ④ 报错文案改了（用户看不懂，且前端可能按文案匹配）。
-_ADAPTER_TS_DIR = REPO / "backend" / "src" / "services" / "adapters"
+_ADAPTER_TS_DIR = _SRC_ROOT / "services" / "adapters"
 _ADAPTER_PY_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "adapters"
 
 #: TS 注册表名 → Python 字典名
@@ -449,7 +456,7 @@ def _adapters_drift() -> list[str]:
 #: 这里面的漂移最隐蔽：
 #: * **提示词常量**是直接喂给模型的系统指令，改一个字模型行为就变；
 #: * **词表**（38/32/29/7/56 条）里打错一个字，拆分结果就会悄悄不同。
-_TEXT_GEN_TS = REPO / "backend" / "src" / "services" / "text-generation.ts"
+_TEXT_GEN_TS = _SRC_ROOT / "services" / "text-generation.ts"
 
 _TEXT_GEN_PROMPTS = [
     "ACTION_SYSTEM_PROMPT",
@@ -519,6 +526,7 @@ _JSON_DUMPS_ALLOW = {
     "task_logger.py",  # 深拷贝 + 日志格式化（indent=2 是有意的）
     "optimizer.py",  # 优化历史文件：镜像 `JSON.stringify(history, null, 2)`（indent=2 有意）
     "local_model_scan.py",  # configs/model-paths.json：镜像 `JSON.stringify(cfg, null, 2)`（indent=2 有意）
+    "style_profiles.py",  # 提炼 prompt 里的测量事实：镜像 `JSON.stringify(measurements, null, 2)`（indent=2 有意）
     "jianying_draft.py",  # 剪映草稿 JSON：镜像 `JSON.stringify(content, null, 2)`（indent=2 有意）
 }
 
@@ -570,7 +578,7 @@ def _json_dumps_drift() -> list[str]:
 #: `VISUAL_GRAPH` 是一张**数据契约表**：`zh` 别名要与 DB 里的实际取值对得上
 #: （对不上就退化成「中文混进英文 prompt」），`en` 会直接进 prompt 文本。
 #: 41 个节点、上百个别名，靠肉眼比对不现实 ⇒ 逐条机械比对。
-_VISUAL_GRAPH_TS = REPO / "backend" / "src" / "shared" / "visual-graph.ts"
+_VISUAL_GRAPH_TS = _SRC_ROOT / "shared" / "visual-graph.ts"
 
 
 def _visual_graph_drift() -> list[str]:
@@ -608,8 +616,8 @@ def _visual_graph_drift() -> list[str]:
 #: ── 运镜表 / 宫格角度表镜像检查 ──────────────────────────────────────────
 #: 这两张表**直接进 prompt**（中文构图指导是用户可见的画面描述），
 #: 且运镜表的**顺序就是匹配优先级**（错序会让「跟拍」被「斜线跟拍」捕获）⇒ 逐条比对。
-_CMG_TS = REPO / "backend" / "src" / "shared" / "camera-movement-guides.ts"
-_PU_TS = REPO / "backend" / "src" / "shared" / "prompt-utils.ts"
+_CMG_TS = _SRC_ROOT / "shared" / "camera-movement-guides.ts"
+_PU_TS = _SRC_ROOT / "shared" / "prompt-utils.ts"
 
 
 def _prompt_tables_drift() -> list[str]:
@@ -651,7 +659,7 @@ def _prompt_tables_drift() -> list[str]:
 #: ── 提示词规范块镜像检查（S5 前置） ──────────────────────────────────────
 #: 这四个块被 Agent 的 system prompt、工具 instruction、SKILL 文档**共同引用**，
 #: 当初就是因为散成三份出现表述差异才收口到一处 ⇒ 必须逐字镜像（含示例英文与中文标点）。
-_PROMPT_BLOCKS_TS = REPO / "backend" / "src" / "shared" / "prompt-blocks.ts"
+_PROMPT_BLOCKS_TS = _SRC_ROOT / "shared" / "prompt-blocks.ts"
 
 _PROMPT_BLOCK_NAMES = (
     "SCREENPLAY_FORMAT_RULES",
@@ -699,7 +707,7 @@ def _prompt_blocks_drift() -> list[str]:
 #: 被排除的那个，于是测试表现为「偶发失败」（单跑 6 次挂 2 次）。这类漂移文本比对
 #: 抓不到（路径是对的），只能查**参数名**。
 def _query_param_drift() -> list[str]:
-    routes_dir = REPO / "backend" / "src" / "routes"
+    routes_dir = _SRC_ROOT / "routes"
     py_dir = REPO / "backend-py" / "app" / "routers"
     py_text = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(py_dir.glob("*.py"))
@@ -722,7 +730,7 @@ def _query_param_drift() -> list[str]:
 #: ── Agent 类型清单镜像 ──────────────────────────────────────────────
 #: ``validAgentTypes`` = ``Object.keys(DEFAULT_PROMPTS)`` ⇒ **顺序即声明序**。
 #: 路由用它做合法性判定（顺序不影响判定，但「默认配置 / 类型列表」的展示顺序会漂）。
-_AGENTS_TS = REPO / "backend" / "src" / "agents" / "index.ts"
+_AGENTS_TS = _SRC_ROOT / "agents" / "index.ts"
 
 
 def _agent_types_drift() -> list[str]:
@@ -784,7 +792,7 @@ def _agent_prompts_drift() -> list[str]:
 
 
 def main() -> int:
-    routes_dir = REPO / "backend" / "src" / "routes"
+    routes_dir = _SRC_ROOT / "routes"
 
     node_routes: set[tuple[str, str]] = set()
     for filename, prefix in MIGRATED.items():

@@ -73,6 +73,7 @@ from ..services.storyboard_helpers import (
     validate_tts_speaker,
 )
 from ..services.image_generation import generate_image
+from ..services.qc_scoring import score_storyboard
 from ..services.prompt_utils import (
     build_storyboard_image_prompt,
     build_storyboard_negative_prompt,
@@ -411,6 +412,24 @@ def _get_character_voice_params(conn: Connection, character_id: Any) -> dict[str
         "pitch": char.voice_pitch,
         "model": char.voice_model,
     }
+
+
+@router.post("/{storyboard_id}/qc")
+def score_storyboard_qc(storyboard_id: str, conn: Connection = Depends(get_tx)):
+    """镜头级 QC 打分（三规则维度 + 落 ``video_quality_checks``）。"""
+    try:
+        sid = parse_param_id(storyboard_id)
+        if sid is None:
+            return not_found("Invalid storyboard id")
+        exists = conn.execute(
+            select(storyboards.c.id).where(storyboards.c.id == sid)).first()
+        if exists is None:
+            return not_found("镜头不存在")
+        return success(score_storyboard(conn, sid))
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StoryboardAPI", "qc-score",
+                       {"storyboardId": storyboard_id, "error": str(exc)})
+        return bad_request(str(exc))
 
 
 @router.post("/{storyboard_id}/generate-tts")

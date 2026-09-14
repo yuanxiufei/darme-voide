@@ -4,10 +4,9 @@
 * ``list_benchmark_cases`` / ``load_case_by_id``：运行时发现与按 id 加载（供 HTTP 路由使用）。
 
 ⚠️ **基准目录位置**：TS 是从模块位置推 ``backend/benchmarks``（与 cwd 解耦，兼容 Docker
-``WORKDIR /app``）。Python 侧同样不依赖 cwd：``PROJECT_ROOT/backend/benchmarks``，
-可用 ``BENCHMARKS_DIR`` 环境变量覆盖。
-**🔴 S7 删 ``backend/`` 时必须处理这里**：把那 4 个 case JSON 挪到 ``PROJECT_ROOT/benchmarks``
-并改默认值（或用 env 覆盖）—— 已记入待办。
+``WORKDIR /app``）。**S7 已把 4 个 case JSON 搬到 ``PROJECT_ROOT/benchmarks``**（逐字节一致），
+默认值随之改到新位置，仍可用 ``BENCHMARKS_DIR`` 环境变量覆盖 —— 这样删掉 ``backend/`` 之后
+本域不再依赖它。history 目录同源（见 ``optimizer`` 的 ``historyDir`` 默认值）。
 
 ⚠️ 两处**有意差异**：
 
@@ -36,11 +35,15 @@ __all__ = [
 
 
 def benchmarks_dir() -> Path:
-    """基准目录：``BENCHMARKS_DIR`` 优先，否则 ``<项目根>/backend/benchmarks``。"""
+    """基准目录：``BENCHMARKS_DIR`` 优先，否则 ``<项目根>/benchmarks``。
+
+    ⚠️ 项目根是「与 cwd 解耦」的写法（Docker 里 cwd 可能是 ``/app``）；
+    S7 起 case JSON 就在这一层，**不再指向 ``backend/benchmarks``**。
+    """
     override = os.environ.get("BENCHMARKS_DIR")
     if override:
         return Path(override)
-    return PROJECT_ROOT / "backend" / "benchmarks"
+    return PROJECT_ROOT / "benchmarks"
 
 
 def scan_case_files() -> list[dict[str, str]]:

@@ -1,0 +1,28 @@
+{
+  "id": "voice-assigner-001",
+  "kind": "voice_assigner",
+  "statement": {
+    "script": "## S01 | 内景 · 市医院走廊 | 清晨\n林晚抱着病历小跑进手术室，额角沁着汗。\n林晚：（喘）顾医生，三床病人指标异常！\n顾沉头也不抬，只淡淡扫了一眼心电监护仪。\n顾沉：（沉声）准备除颤，肾上腺素一毫克静推。\n\n## S02 | 内景 · 深夜值班室 | 深夜\n林晚推开虚掩的门，撞见顾沉正对着一张泛黄病历出神。\n林晚：（轻声）顾医生，你……还好吗？\n顾沉迅速合上病历，目光恢复冷峻。\n顾沉：（冷淡）出去。",
+    "characters": [
+      {
+        "name": "林晚",
+        "role": "女主",
+        "personality": "温柔坚韧、善良细心，刚毕业的实习医生，声音应温柔甜美"
+      },
+      {
+        "name": "顾沉",
+        "role": "男主",
+        "personality": "冷面寡言、外冷内热，外科主任，声音应低沉稳重"
+      },
+      {
+        "name": "陆霆",
+        "role": "反派",
+        "personality": "阴狠城府深、位高权重，医院院长，声音应深沉有力"
+      }
+    ]
+  },
+  "rubric": {
+    "legalVoiceIds": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+    "requireReason": true
+  }
+}

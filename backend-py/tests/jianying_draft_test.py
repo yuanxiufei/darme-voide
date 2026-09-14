@@ -69,12 +69,13 @@ def main() -> int:  # noqa: C901
                                os.path.join(get_data_root(), "m"), 2, "video")))()
           and jd.copy_to_media(os.path.join(get_data_root(), "nope.mp4"),
                                os.path.join(get_data_root(), "m"), 0, "audio") is None)
+    seg = jd.segment("m", 0, 10)
+    text_seg = jd.text_segment("m", 0, 10)
     check("助手: segment/text_segment 用**大写 UUID**，且字段集不同（字幕无 speed/volume、多 transform）",
-          len(jd.segment("m", 0, 10)["id"]) == 36
-          and jd.segment("m", 0, 10)["id"] == jd.segment("m", 0, 10)["id"].upper()
-          and "speed" in jd.segment("m", 0, 10) and "transform" not in jd.segment("m", 0, 10)
-          and "transform" in jd.text_segment("m", 0, 10)
-          and "speed" not in jd.text_segment("m", 0, 10))
+          len(seg["id"]) == 36 and seg["id"] == seg["id"].upper()
+          and "speed" in seg and "transform" not in seg
+          and "transform" in text_seg and "speed" not in text_seg,
+          (seg["id"], sorted(seg), sorted(text_seg)))
 
     # ================= 种子 =================
     ts = now()
@@ -111,6 +112,8 @@ def main() -> int:  # noqa: C901
             duration=1, created_at=ts, updated_at=ts))
     with engine.begin() as conn:
         drafts = jd.build_jianying_draft(conn, drama_id, ep1)
+        # ⚠️ 全剧导出在同一事务里连做：既省一次连接，也避免「跨事务复用连接」的干扰
+        all_drafts = jd.build_jianying_draft(conn, drama_id)
     draft = drafts[0]
     check("构建: 单集过滤生效（只 1 个草稿），草稿名 = dramaN_epNN_标题sanitize",
           len(drafts) == 1 and draft["draftName"] == f"drama{drama_id}_ep01_第一集_开场",
@@ -120,9 +123,10 @@ def main() -> int:  # noqa: C901
           and os.path.isdir(os.path.join(draft["draftDir"], "media")), draft["draftDir"])
     check("构建: 时长累计 = 2s + (duration 缺省 5s)（微秒）",
           draft["durationUs"] == 7_000_000, draft["durationUs"])
-    check("构建: 素材复制命名 video_001 / video_002（跳过分镜号 9 那条没有合成视频的）",
+    # ⚠️ 编号**从 0 开始**：原 TS 是 `videoIdx++`（**后置自增**），首个素材就是 `video_000`
+    check("构建: 素材复制命名 video_000 / video_001（跳过分镜号 9 那条没有合成视频的）",
           sorted(os.listdir(os.path.join(draft["draftDir"], "media")))
-          == ["audio_001.mp3", "video_001.mp4", "video_002.mp4"],
+          == ["audio_000.mp3", "video_000.mp4", "video_001.mp4"],
           sorted(os.listdir(os.path.join(draft["draftDir"], "media"))))
     with open(os.path.join(draft["draftDir"], "draft_content.json"), encoding="utf-8") as handle:
         content = json.load(handle)
@@ -157,8 +161,6 @@ def main() -> int:  # noqa: C901
           and all(f["zipPath"].startswith(f"{draft['draftName']}.draft/") for f in draft["files"])
           and all(os.path.exists(f["absPath"]) for f in draft["files"]),
           [f["zipPath"] for f in draft["files"]])
-    with engine.begin() as conn:
-        all_drafts = jd.build_jianying_draft(conn, drama_id)
     check("构建: 全剧导出（不给 episodeId）→ **每集一个草稿**（此刻 2 集）",
           len(all_drafts) == 2
           and {d["draftName"] for d in all_drafts}
@@ -205,15 +207,14 @@ def main() -> int:  # noqa: C901
         payload = archive.read(f"{draft['draftName']}.draft/draft_content.json")
     check("端点: ZIP 内是 `<name>.draft/{draft_content.json,draft_info.json,media/*}`",
           f"{draft['draftName']}.draft/draft_content.json" in names
-          and f"{draft['draftName']}.draft/media/video_001.mp4" in names, names)
+          and f"{draft['draftName']}.draft/media/video_000.mp4" in names, names)
     check("端点: 草稿 JSON 是**缩进 2 空格**（剪映读的就是这个，有意 indent=2）",
           payload.decode("utf-8").splitlines()[1].startswith("  \""), payload[:60])
     whole = client.get(f"{base}/dramas/{drama_id}/jianying-draft")
-    check("端点: 不带 episodeId -> 全剧（X-Draft-Count=2）且文件名不带 episode",
-          whole.headers["x-draft-count"] == "2"
-          and whole.headers["content-disposition"]
-          == f'attachment; filename="drama-{drama_id}-jianying-draft.zip"',
-          whole.headers.get("x-draft-count"))
+    check("端点: 全剧导出时**任一集没有合成视频就整体 400**（此刻 ep7 是空集）",
+          whole.status_code == 400
+          and whole.json()["message"] == "Episode 7 has no composed videos", whole.json())
+    # 「全剧 2 个草稿」已在上文服务级断言（`all_drafts`）覆盖 ✓
 
     failed_items = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

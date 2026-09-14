@@ -49,6 +49,12 @@ TESTS = [
     ("评测打分器 + 基准目录", "evaluation_scorer_test.py"),
     ("Skill 解析 + 加载", "skills_test.py"),
     ("评测执行器 + 端点", "evaluation_route_test.py"),
+    ("基准资产搬迁 + 评测 CLI", "eval_cli_test.py"),
+    ("GPU 显存管理器 + 2 端点", "gpu_manager_test.py"),
+    ("GPU 租约接线（text / tts + image/video 长租约）", "gpu_lease_wiring_test.py"),
+    ("差分对拍比较器（Node↔Python 工具）", "parity_diff_test.py"),
+    ("多集节奏相位 + 端点", "rhythm_phase_test.py"),
+    ("镜头 QC 打分 + 端点", "qc_scoring_test.py"),
     ("Agent 创建器 + generate", "creator_test.py"),
     ("提示词优化器 + optimize", "optimizer_test.py"),
     ("评测调度器 + 端点", "evaluation_scheduler_test.py"),
@@ -60,6 +66,9 @@ TESTS = [
     ("分镜 TTS/出图/LLM 5 端点", "storyboards_generate_test.py"),
     ("剧集续写端点", "episodes_continue_script_test.py"),
     ("导出服务 + EDL/ZIP 2 端点", "export_service_test.py"),
+    ("剪映草稿导出", "jianying_draft_test.py"),
+    ("QC 报告 + 联系表 2 端点", "qc_report_test.py"),
+    ("时代背景提炼 + 风格提炼 2 端点", "era_style_distill_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

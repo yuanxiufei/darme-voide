@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 1972 项全绿**（冒烟 482 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2212 项全绿**（冒烟 482 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -32,8 +32,8 @@
 | S3 厂商适配器 | `registry` + `types` + 16 个适配器(1611 行) | ✅ **完成**（17 家 / 纯函数，`adapters_test.py` 101 用例 + 守卫覆盖） |
 | S4 媒体服务 | image/video/TTS 生成、`compose`(ffmpeg)、宫格、合并、视觉图 | ✅ **主链全通**：`vendor-errors` + text/image/video/TTS+voice-clone 四条链路 + 逐镜路由 + `videos`(6) + `compose`(3) + `merge`(2) + **`grid`(4)**；仅剩**像素处理(校色/参考图压缩)**与**镜头 QC 打分**（调用点均已占位） |
 | S5 **Mastra 替换** | Agent 循环 + 工具调用 + 协议 + **运行时** + 6 组工具(~2900 行) + `agent`(2) | ✅ **完成**：`protocol` + `tool` + **6 组工具** + **`runtime`(运行时：失败分类/退避/模型 fallback/风格注入)** + `agent`(2 端点，**非流式**)；✅ **`DEFAULT_PROMPTS` 已搬**（`services/agent_prompts.py` + 逐字守卫，2026-09-12 决策变更）；⚠️ 未迁 `subagent`/`rhythm-phase`（`skills`/`mcp` 已迁）；⚠️ **Gemini 函数调用循环未支持**（显式报错） |
-| S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | 🔄 **MCP 已迁**（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）；**`auto-pipeline` 已整域关闭**（8 阶段编排 + SSE）；剩 `/gpu/*`（GPU 租约，S7 前须补）、**`evaluation` 域已整域关闭**（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）、崩溃恢复 |
-| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 待做 |
+| S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | 🔄 **MCP 已迁**（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）；**`auto-pipeline` 已整域关闭**（8 阶段编排 + SSE）；剩 **9 条**（storyboards 4 / gpu 2 / dramas 1 / episodes 1 / storage/change）、**`evaluation` 域已整域关闭**（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）、崩溃恢复 |
+| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **进行中**：benchmarks 4 个 case JSON 已搬到 `<项目根>/benchmarks`（逐字节一致，`catalog.benchmarks_dir()` 默认值已切、`optimizer` 的 `historyDir` 同源对齐）、评测 CLI 已迁（`app/services/evaluation/cli.py`）；**`app/` 对 `backend/` 的路径依赖为 0**（只剩 `tests/route_parity_test.py` 的漂移守卫要读 TS 源码）。已迁 **GPU 显存管理器**（`services/gpu_manager.py` 473 行 + `GET /gpu/status`、`POST /gpu/release-all`，租约接线见待办）；租约接线**已完成 text / tts**（本地才申请、每轮尝试各自申请/释放、异常也释放），**image / video 长租约也已接线**（提交时申请、重试/失败/完成三处释放；image 另含 base64 完成路径）+ Node↔Python 全量对拍 + 删 `backend/` |
 
 顺序是按**依赖**排的：S1 是所有适配器/Agent 的入口，S2/S3 被 S4/S5 依赖，S5 被 S6 依赖。
 **`backend/` 只能在 S7 删** —— 删之前必须先证明等价（129→224 端点的全量对拍）。
@@ -53,6 +53,41 @@
 
 迁完一个域，就在 `app/main.py` 里 `include_router(...)` 一行，然后把该域从 Node 侧停用。
 全部迁完后去掉反代，Python 独占端口即可（`PY_PORT=5789`）。
+
+## 删 `backend/` 前的等价性对拍（S7 第 5 步）
+
+     两侧**并排起**（Node 5789 / Python 5790），**指向同一份数据**，然后跑差分对拍：
+
+    ```bash
+    # 1) 先起 Node（它会初始化库/种服务商）
+    cd backend; $env:DATA_ROOT='<空目录>'; npx tsx src/index.ts
+    # 2) 再起 Python（同一个 DATA_ROOT）
+    cd ../backend-py; $env:DATA_ROOT='<同一目录>'; .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
+    # 3) 对拍（逐字段 diff；new 差异会以退出码 1 报出来）
+    .venv\Scripts\python.exe tests/parity_diff.py --report ..\tmp\parity.json
+    # 或一条命令编排（起两侧 + 对拍 + 收尾）：python tests/parity_run.py
+
+    **2026-09-14 实测：一致 10 ｜ 已知差异 0 ｜ 不存在路径 4 ｜ 新差异 0**（已覆盖 14 条只读路径逐字段等价）。
+    ⚠️ MISSING 类 = 「两边都不该有」的路径（Node 404 未匹配 / Python 501 兜底），**Node 回 200 才算 new**。
+    ```
+
+    ⚠️ **`<项目根>/.data-root` 标记文件优先级高于 `DATA_ROOT` 环境变量**（Node 侧）⇒ 有它就会读到别处的库、
+    对拍结果无意义；跑之前先确认它不存在（本仓当前**不存在**）。⚠️ 只比对**只读端点**（表里全是 GET），
+    因为两侧启动时都会写库。
+
+## 删 `backend/` 之后：守卫靠**冻结快照**继续工作（S7 第 6 步）
+
+九道漂移守卫原先是**读 TS 源码**来证明「Python 的路由表/常量/提示词没漂移」。删库前先冻结：
+
+```bash
+python tests/freeze_ts_snapshot.py          # 把守卫读到的 73 个 .ts 复制到 tests/frozen_ts/（707 KB）
+python tests/freeze_ts_snapshot.py --check  # 校验完整性（真源码还在时会逐个核对）
+python tests/route_parity_test.py           # 照常跑
+PARITY_USE_FROZEN=1 python tests/route_parity_test.py   # 强制用快照（验证「删库后照样能跑」）
+```
+
+守卫里的源码根是 ``_SRC_ROOT``：**真源码优先，缺失自动回退快照**。已实测：真源码与快照两条路径
+结论**完全一致**（Node 224 / Python 220 / 未注册 7 / 0 漂移）⇒ 删库后守卫价值完整保留。
 
 ## 运行
 
@@ -211,8 +246,17 @@ backend-py/
    ├─ storyboards_generate_test.py 分镜 TTS/出图/LLM 5 端点（两套回执/拆分顺延，39 用例）
    ├─ episodes_continue_script_test.py 剧集续写（软删 404 / mode 判定，8 用例）
    ├─ export_service_test.py  导出：EDL 时间码 + ZIP 打包（22 用例）
+   ├─ jianying_draft_test.py  剪映草稿：UUID 引用 + 微秒计时（25 用例）
+   ├─ qc_report_test.py      QC 报告 + 联系表（探测回退链 / 60 分边界，42 用例）
+   ├─ era_style_distill_test.py 时代背景提炼 + 风格提炼（截断/围栏/异常包装，31 用例）
+   ├─ eval_cli_test.py        基准资产搬迁 + 评测 CLI（22 用例）
+   ├─ gpu_manager_test.py     GPU 显存调度（队列/驱逐/卸载策略，28 用例）
+   ├─ gpu_lease_wiring_test.py GPU 租约接线（text/tts 即用即放 + image/video 长租约，20 用例）
+   ├─ parity_diff_test.py     差分对拍**比较器**（归一化/三态判定/白名单越界/MISSING 类，21 用例）
+   ├─ rhythm_phase_test.py    多集节奏相位（阈值/累计占比/加权 balance，22 用例）
+   ├─ qc_scoring_test.py      镜头 QC 打分（加权总体分/三态 status/upsert/接线，29 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上四十一项
+   └─ run_all.py                一次跑完以上五十一项
 ```
 
 ## 厂商适配器层（S3）要点
@@ -416,7 +460,7 @@ cd backend-py
 
 | 项 | 说明 |
 |---|---|
-| ⚠️ **本地模型的 GPU 显存租约未迁** | `generate_text` 在原 TS 里会为**本地**配置调 `gpuManager.acquire('text', …)`，让文本请求参与「模型启动/卸载调度」。`gpu-manager` 未移植（`/gpu/*` 整段留在 Node）⇒ Python 侧**不申请租约**。后果：对本地模型（Ollama/本地 H3/LocalSD）的并发请求不再受显存调度保护，可能 OOM。**Node 下线前必须补齐（S7）** |
+| ✅ **已补齐**：本地模型的 GPU 显存租约 | `gpu-manager.ts` 已整域移植（`services/gpu_manager.py`）+ `/gpu/*` 两端点已注册 + 四个调用点接线：`text`/`tts` 即用即放（每轮模型尝试各自申请/释放）、`image`/`video` **长租约**（提交时持有，重试/失败/完成三处释放）。`acquire` 失败只 warn 不中断任务（与原 TS 一致） |
 | 🔧 `format_vendor_http_error` 比原实现**更稳**（有意差异） | 原 TS 在 `((apiErr?.code \|\| parsed?.topCode) \|\| '').toLowerCase()` 处，若厂商返回**数字** code（`{"error":{"code":404}}`）会抛 `TypeError`，把整个归因流程打断、把中文说明变成 500。这里统一 `str()` 归一 —— 只会得到一条中文错误。已用用例锁住（`vendor_errors_test.py` 的「健壮性」两条） |
 | ⚠️ **参考图压缩未迁**（`read_image_as_compressed_data_url`） | 原实现是 sharp 的「长边 ≤768 等比缩放（不放大）→ 有 alpha 则 flatten 白底 → JPEG q68」。Python 侧需要 Pillow ⇒ 当前**退化为原图 data URL**并告警一次：**内容与画质不变**，只是发给厂商的载荷更大（768/q68 本来是为控制体积与厂商限制）。装上 Pillow 后替换函数体即可（参数已写在 docstring 里） |
 | ⚠️ **像素级校色未迁**（`apply_color_grade_to_file`） | 原实现是 sharp 的 RGB 增益 / gamma / 白平衡 / 曝光 / 饱和度 / 对比度 / 肤色 / 阴影高光（142 行）。Pillow 与 sharp 的重采样与 JPEG 编码**不会逐字节一致**，而校色结果是**持久化且用户可见**的资产 ⇒ 不在没有对照验证的情况下换实现。当前行为**与原实现的失败路径完全一致**：无参数原样返回；有参数抛错 → 调用方记 `color-grade-failed` 并**保留未校色图**（Node 校色失败时也是这个结果） |

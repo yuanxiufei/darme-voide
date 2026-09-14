@@ -15,11 +15,13 @@
 3. **崩溃恢复绝不重提交**：重启后只对「已提交拿到 ``taskId``」的任务**续跑轮询**，
    其余判 failed —— 避免按次计费的厂商**重复扣费**。
 
-⚠️ 三处已知的、**有意**的行为差异（详见 README「已知差异」表）：
+⚠️ 两处已知的、**有意**的行为差异（详见 README「已知差异」表）：
 
-* **GPU 显存租约未迁**（``gpuManager.acquire``/``release``）—— 本地模型并发不再受显存调度保护；
 * **校色**与**参考图压缩**未迁（都需要 sharp / Pillow）。校色走「与原实现**失败时**相同」
   的分支（告警 + 保留原图），参考图退化为原图 data URL。
+
+✅ **GPU 显存租约已接线**（本地配置才申请，**长租约**：提交时持有、完成/失败/重试时释放，
+见 ``_image_gpu_leases`` 与 ``release_image_gpu_lease``）。
 """
 from __future__ import annotations
 
@@ -53,6 +55,7 @@ from .file_storage import (
     read_image_as_compressed_data_url,
     save_base64_image,
 )
+from .gpu_manager import gpu_manager
 from .script_fingerprint import check_storyboard_gate
 from .take_budget import check_take_budget, consume_take
 from .task_logger import (
@@ -140,6 +143,22 @@ def _stringify(value: Any) -> str:
 # ===========================================================================
 # 入队
 # ===========================================================================
+
+#: 图片任务的 GPU 租约（**长租约**：提交时申请、完成/失败/重试时释放）。
+#: ⚠️ 与 text/tts 的「请求内即用即放」不同 —— 图片是**提交后轮询**型，租约必须跨轮询持有；
+#: 对应原 TS 的 ``const imageGpuLeases = new Map<number, GpuLease>()``。
+_image_gpu_leases: dict[int, Any] = {}
+
+
+def release_image_gpu_lease(image_id: int) -> None:
+    """释放图片任务的 GPU 租约（幂等：没有就什么都不做）。
+
+    调用点与原 TS 一致：**重试前**、**最后一次尝试失败**、**完成**（下载/base64 两条路径）。
+    """
+    lease = _image_gpu_leases.pop(image_id, None)
+    if lease is not None:
+        lease.release()
+
 
 async def generate_image(conn: Connection, params: dict[str, Any]) -> int:
     """入队一次图片生成，返回 ``image_generations.id``。
@@ -293,9 +312,21 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
                 .values(model=model, updated_at=now())
             )
 
-        # ⚠️ 原 TS 在此 releaseImageGpuLease / gpuManager.acquire —— gpu-manager 未迁（见模块头）
+        # ── 非首次尝试：释放上一次的 GPU 租约 ──
+        if attempt > 0:
+            release_image_gpu_lease(image_id)
 
         is_local = is_local_config(config.get("baseUrl") or "", config.get("provider") or "")
+
+        # ── 本地 GPU 模型：申请显存租约（**失败只告警，不中断任务** —— 与原 TS 一致）──
+        if is_local:
+            try:
+                _image_gpu_leases[image_id] = await gpu_manager.acquire(
+                    "image", config.get("provider"), model, config.get("baseUrl")
+                )
+            except Exception as err:  # noqa: BLE001
+                log_task_warn("ImageTask", "gpu-acquire-failed",
+                              {"id": image_id, "model": model, "error": str(err)})
 
         # 用量记账：每次模型尝试（含 fallback）记一条 submitted，完成/失败后收口
         with _tx() as conn:
@@ -419,6 +450,7 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
 
             if is_last_attempt:
                 with _tx() as conn:
+                    release_image_gpu_lease(image_id)
                     _mark_usage_by_image_gen(conn, image_id, "failed")
                     log_task_error("ImageTask", "process", {
                         "id": image_id, "provider": config.get("provider"),
@@ -799,6 +831,7 @@ async def _finalize_image(
 
 async def _handle_image_complete(image_id: int, provider: str, image_url: str) -> None:
     """下载远程图片并落盘，然后收尾。"""
+    release_image_gpu_lease(image_id)
     with _tx() as conn:
         _mark_usage_by_image_gen(conn, image_id, "completed")
         record = _fetch_record(conn, image_id)
@@ -815,6 +848,7 @@ async def _handle_image_complete_base64(
     image_id: int, provider: str, base64_data: str, mime_type: str
 ) -> None:
     """保存 base64 图片，然后收尾（**不写 image_url**，与 TS 一致）。"""
+    release_image_gpu_lease(image_id)
     with _tx() as conn:
         _mark_usage_by_image_gen(conn, image_id, "completed")
         record = _fetch_record(conn, image_id)

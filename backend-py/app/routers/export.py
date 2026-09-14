@@ -29,6 +29,12 @@ from ..services.export_service import (
     collect_drama_export_files,
 )
 from ..services.jianying_draft import build_jianying_draft
+from ..services.qc_report import (
+    build_contact_sheet_html,
+    build_qc_report,
+    build_qc_report_html,
+    build_qc_report_markdown,
+)
 from ..services.task_logger import log_task_error
 from ..response import bad_request, js_nullish, js_number, js_truthy, not_found, parse_param_id
 from ..services.project_ledger import (
@@ -201,6 +207,73 @@ def export_jianying_draft(drama_id: str, request: Request,
         )
     except Exception as exc:  # noqa: BLE001
         log_task_error("ExportAPI", "jianying-draft", {"error": str(exc), "dramaId": drama_id})
+        return bad_request(str(exc))
+
+
+@router.get("/dramas/{drama_id}/qc-report")
+async def export_qc_report(drama_id: str, request: Request,
+                           conn: Connection = Depends(get_conn)):
+    """导出 QC 报告交付物（``format=json|md|html``；默认 json）。"""
+    try:
+        did = parse_param_id(drama_id)
+        if did is None:
+            return not_found("Invalid drama id")
+        if not _require_drama(conn, did):
+            return not_found("Drama not found")
+
+        episode_id = js_number(request.query_params.get("episodeId"))
+        fmt = js_nullish(request.query_params.get("format"), "json")
+        opts = {"episodeId": episode_id}
+
+        if fmt in ("md", "markdown"):
+            markdown = await build_qc_report_markdown(conn, did, opts)
+            return Response(
+                content=markdown,
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="drama-{did}-qc-report.md"'},
+            )
+        if fmt == "html":
+            html = await build_qc_report_html(conn, did, opts)
+            return Response(
+                content=html,
+                media_type="text/html; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="drama-{did}-qc-report.html"'},
+            )
+
+        report = await build_qc_report(conn, did, opts)
+        return Response(
+            # ⚠️ `c.json(report)` 是**紧凑**的
+            content=json.dumps(report, ensure_ascii=False, separators=(",", ":")),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="drama-{did}-qc-report.json"'},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("ExportAPI", "qc-report", {"error": str(exc), "dramaId": drama_id})
+        return bad_request(str(exc))
+
+
+@router.get("/dramas/{drama_id}/contact-sheet")
+async def export_contact_sheet(drama_id: str, request: Request,
+                               conn: Connection = Depends(get_conn)):
+    """导出联系表 HTML（每镜首/尾帧缩略图 + 元信息网格，可浏览器打印/转 PDF）。"""
+    try:
+        did = parse_param_id(drama_id)
+        if did is None:
+            return not_found("Invalid drama id")
+        if not _require_drama(conn, did):
+            return not_found("Drama not found")
+
+        episode_id = js_number(request.query_params.get("episodeId"))
+        html = await build_contact_sheet_html(conn, did, {"episodeId": episode_id})
+        filename = (f"drama-{did}-episode-{episode_id}-contact-sheet.html" if episode_id
+                    else f"drama-{did}-contact-sheet.html")
+        return Response(
+            content=html,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("ExportAPI", "contact-sheet", {"error": str(exc), "dramaId": drama_id})
         return bad_request(str(exc))
 
 

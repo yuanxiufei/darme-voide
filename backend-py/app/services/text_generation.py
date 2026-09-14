@@ -10,10 +10,9 @@
   （8 张词表 + 相邻子句合并算法）、防幻觉校验、打标过滤 —— 全部可离线单测；
 * **I/O**：``generate_text`` 里的取配置 + HTTP 调用 + 多模型 fallback。
 
-⚠️ ``generate_text`` 在原 TS 里会为**本地**配置申请 GPU 显存租约
-（``gpuManager.acquire('text', …)``，参与模型启动/卸载调度）。**S3/本阶段未移植
-gpu-manager**（``/gpu/*` 路由整段留在 Node，见 README「已知差异」）⇒ 这里**不申请租约**。
-后果：Python 侧对本地模型的并发文本请求不再受显存调度保护。在 Node 下线前必须补齐（S7）。
+⚠️ ``generate_text`` 会为**本地**配置申请 GPU 显存租约（``gpu_manager.acquire('text', …)``，
+参与模型启动/卸载调度）—— 与 TS 一致：**每个模型尝试各自申请、``finally`` 里释放**
+（fallback 到下一个模型会重新申请，不跨模型持有）。
 """
 from __future__ import annotations
 
@@ -27,6 +26,7 @@ from ..response import js_truthy
 from .adapters.registry import get_text_adapter
 from .ai_configs import is_local_config
 from .ai_providers import get_text_config
+from .gpu_manager import gpu_manager
 from .task_logger import log_task_error, log_task_progress, log_task_start, log_task_success
 from .vendor_errors import fetch_with_retry, format_vendor_http_error
 
@@ -84,8 +84,11 @@ async def generate_text(
     last_error: Exception | None = None
 
     for model in models:
-        # ⚠️ 原 TS 在这里为本地配置申请 GPU 租约（gpuManager.acquire）——
-        #    gpu-manager 未移植，故此处**刻意跳过**（见模块 docstring 与 README）
+        # 本地 GPU 文本模型（如 Ollama qwen3）：申请显存租约，参与模型启动/卸载调度
+        lease = None
+        if is_local:
+            lease = await gpu_manager.acquire("text", config.get("provider"), model,
+                                              config.get("baseUrl"))
         try:
             request = adapter.build_request(
                 config,
@@ -131,6 +134,11 @@ async def generate_text(
         except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch (err: any) 等价
             last_error = err
             log_task_error("TextGen", "model-error", {"model": model, "error": str(err)})
+        finally:
+            # ⚠️ 与 TS 的 `finally { if (lease) lease.release() }` 一致：**每轮模型尝试各自释放**
+            #    （fallback 到下一个模型时会重新申请，不会跨模型持有）
+            if lease is not None:
+                lease.release()
 
     if last_error is not None:
         raise last_error

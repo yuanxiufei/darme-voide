@@ -1,9 +1,9 @@
 """``/api/v1/ai-configs`` + ``/api/v1/ai-providers`` —— 对齐 ``routes/aiConfigs.ts``。
 
-**已迁移 9 个纯 DB 端点**：列表 / 新建(201) / 一键配置 / 一键本地 / 详情 / 更新 / 删除 /
-本地配置列表 / 服务商目录(``ai-providers``)
-**未迁移 8 个**（全部依赖外部进程或网络）：``/ollama/*``(4)、``POST /models``、``POST /test``、
-``GET /gpu/status``、``POST /gpu/release-all``、``GET /runtime/health``
+**已迁移 12 个端点**：列表 / 新建(201) / 一键配置 / 一键本地 / 详情 / 更新 / 删除 /
+本地配置列表 / 服务商目录(``ai-providers``) + ``GET /runtime/health``（本地四大运行时探测）
++ **``GET /gpu/status``、``POST /gpu/release-all``（GPU 显存管理器，配 ``services/gpu_manager.py``）**
+**未迁移 6 个**（全部依赖外部进程或网络）：``/ollama/*``(4)、``POST /models``、``POST /test``
 
 ⚠️ 四处易错点：
 
@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.engine import Connection
 
@@ -51,6 +51,8 @@ from ..services.ai_configs import (
     is_local_config,
     map_config_row,
 )
+from ..services.gpu_manager import get_nvidia_smi, gpu_manager
+from ..services.task_logger import log_task_error
 from ..services.ollama import (
     LOCAL_RUNTIMES,
     find_ollama_exe,
@@ -675,6 +677,50 @@ async def test_config(request: Request):
                 "response_preview": "",
             }
         )
+
+
+# ─── GPU 显存监控 ──────────────────────────────────────────────
+
+@router.get("/gpu/status")
+async def gpu_status():
+    """GPU 显存使用状态（管理器快照 + ``nvidia-smi`` 实时硬件数据）。
+
+    ⚠️ 本端点**返回裸 JSON**（不是 ``{code,data,message}`` 信封）—— 与原 TS 的 ``c.json(result)``
+    一致；失败时也是 HTTP 200 + ``{"code":500,...}``（``c.json`` 没带状态码）。
+    """
+    try:
+        result = {
+            **gpu_manager.get_status(),
+            "isLocalMode": False,
+            "hardware": None,
+        }
+        smi = await get_nvidia_smi()
+        result["isLocalMode"] = smi is not None
+        if smi:
+            result["hardware"] = {
+                "gpuName": smi["gpuName"],
+                "totalMemoryMB": smi["totalMemoryMB"],
+                "usedMemoryMB": smi["usedMemoryMB"],
+                "freeMemoryMB": smi["freeMemoryMB"],
+                "utilizationPercent": smi["utilizationPercent"],
+                "temperatureC": smi["temperatureC"],
+            }
+        return JSONResponse(
+            content=json.loads(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(content={"code": 500, "data": None, "message": str(exc)})
+
+
+@router.post("/gpu/release-all")
+async def gpu_release_all():
+    """强制释放所有本地模型显存（调试用）。"""
+    try:
+        await gpu_manager.release_all()
+        return success({"message": "All GPU models released", "status": gpu_manager.get_status()})
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("AIConfig", "gpu-release-all", {"error": str(exc)})
+        return bad_request(str(exc))
 
 
 @router.get("/runtime/health")

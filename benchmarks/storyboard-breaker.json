@@ -1,0 +1,27 @@
+{
+  "id": "sb-case-001",
+  "kind": "storyboard",
+  "statement": {
+    "script": "## S1 | 内景 · 咖啡厅 | 白天\n\n小明坐在靠窗的位置，低头刷着手机，眉头微皱。他抬头看了一眼门口，似乎在等人。\n\n小明：她怎么还没到。\n\n小红推开咖啡厅的门，门铃叮当响起。她环顾四周，看到小明后露出微笑，快步走过去坐下。\n\n小红：（歉意地）不好意思，路上堵车了。\n\n小明：没关系，先点杯喝的吧。\n\n## S2 | 内景 · 公司办公室 | 夜晚\n\n小明和小红并排坐在工位上，电脑屏幕的光映在两人脸上。他们正一起修改方案。\n\n小明：这里的数据再核对一遍。\n\n小红：好，我马上改。",
+    "characters": [
+      { "name": "小明", "role": "主角", "appearance": "25岁，短发，穿浅蓝色休闲衬衫" },
+      { "name": "小红", "role": "女主", "appearance": "24岁，长直发，穿白色连衣裙" }
+    ],
+    "scenes": [
+      { "location": "咖啡厅", "time": "白天", "prompt": "温馨明亮的现代咖啡厅，靠窗座位" },
+      { "location": "公司办公室", "time": "夜晚", "prompt": "现代化开放式办公室，工位亮着电脑屏幕" }
+    ]
+  },
+  "rubric": {
+    "minShots": 4,
+    "maxShots": 8,
+    "requiredFields": [
+      "title", "shot_type", "angle", "movement", "location", "time",
+      "action", "dialogue", "description", "result", "atmosphere",
+      "image_prompt", "video_prompt", "bgm_prompt", "sound_effect", "duration"
+    ],
+    "videoPromptTags": ["<location>", "<role>", "<n>"],
+    "durationRange": [10, 15],
+    "titleLengthRange": [3, 8]
+  }
+}
