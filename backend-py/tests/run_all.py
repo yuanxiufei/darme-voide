@@ -64,6 +64,7 @@ TESTS = [
     ("像素级校色（ffmpeg）", "color_grade_test.py"),
     ("子 Agent 调度工具", "subagent_test.py"),
     ("请求日志中间件", "http_logger_test.py"),
+    ("参考图压缩（ffmpeg）", "compressed_data_url_test.py"),
     ("TS 源码快照反漂移", "freeze_snapshot_test.py"),
     ("Agent 创建器 + generate", "creator_test.py"),
     ("提示词优化器 + optimize", "optimizer_test.py"),

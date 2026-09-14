@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2383 项全绿**（冒烟 477 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2399 项全绿**（冒烟 477 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -261,7 +261,7 @@ backend-py/
    ├─ consistency_qc_test.py   图像连续性 QC（真实图 dHash：ok/info/warning 三档，28 用例）
    ├─ freeze_snapshot_test.py    TS 源码快照反漂移（守卫读到的文件必须在快照里，7 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十项
+   └─ run_all.py                一次跑完以上六十一项
 ```
 
 ## 厂商适配器层（S3）要点
@@ -467,7 +467,7 @@ cd backend-py
 |---|---|
 | ✅ **已补齐**：本地模型的 GPU 显存租约 | `gpu-manager.ts` 已整域移植（`services/gpu_manager.py`）+ `/gpu/*` 两端点已注册 + 四个调用点接线：`text`/`tts` 即用即放（每轮模型尝试各自申请/释放）、`image`/`video` **长租约**（提交时持有，重试/失败/完成三处释放）。`acquire` 失败只 warn 不中断任务（与原 TS 一致） |
 | 🔧 `format_vendor_http_error` 比原实现**更稳**（有意差异） | 原 TS 在 `((apiErr?.code \|\| parsed?.topCode) \|\| '').toLowerCase()` 处，若厂商返回**数字** code（`{"error":{"code":404}}`）会抛 `TypeError`，把整个归因流程打断、把中文说明变成 500。这里统一 `str()` 归一 —— 只会得到一条中文错误。已用用例锁住（`vendor_errors_test.py` 的「健壮性」两条） |
-| ⚠️ **参考图压缩仍未迁**（`read_image_as_compressed_data_url`） | 原实现是 sharp 的「长边 ≤768 等比缩放（不放大）→ 有 alpha 则 flatten 白底 → JPEG q68」。Pillow 仍未装 ⇒ 当前**退化为原图 data URL**：内容/画质不变，只是发给厂商的载荷更大。**可用 ffmpeg 等价实现**（`scale=…:force_original_aspect_ratio=decrease` + 对齐 q68，与校色同一套手法）—— 这是**当前唯一剩下的功能性缺口** |
+| ✅ **参考图压缩已迁**（`read_image_as_compressed_data_url`，ffmpeg 实现） | 2026-09-15 落地：`scale=min(W\,iw):min(H\,ih):force_original_aspect_ratio=decrease:flags=lanczos`（等比、**不放大**，`<=0` 视为该维不约束）+ 有 alpha 走 `geq` **白底合成**（⚠️ 取 alpha 的函数名是 `alpha(X\,Y)`，写成 `a(X\,Y)` 会报 `Unknown function`）+ 末尾 `trunc(iw/2)*2` 保偶数（mjpeg 4:2:0 要求，与 sharp 最多差 1px）⇒ mjpeg。⚠️ **编码器不同 ⇒ 体积不相等**：实测 1024×768，sharp `q68+mozjpeg`=**17399 B** vs ffmpeg `-q:v 10`=**29039 B**（同视觉质量约大 1.4~1.7×，mozjpeg 本就是压缩率优化版）⇒ `quality→-q:v` 用**线性近似**（q68→10）优先保视觉质量，想要更小体积就调低 `quality` |
 | ✅ **像素级校色已迁**（`apply_color_grade_to_file`，ffmpeg 实现） | 2026-09-15 落地：8 步链中 7 步是逐通道点式 ⇒ 合成 ``RGB乘法LUT → eq=saturation → 对比度/肤色 LUT``，**不装 Pillow**。⭐ 用真实 sharp 实测（`backend/probe-sharp.cjs`）才发现 **`.gamma()` 在无 resize 时是 no-op**（128→127、200,100,50→199,9?,4? 只差 ±1 取整）⇒ Python 侧**有意跳过** ⑥⑦ 两步；`modulate({brightness})` 是 **L 星感知乘法**（128→199，非 192）⇒ 用 RGB 乘法近似、约 3% 差异（已写进模块 docstring 与 `tests/color_grade_test.py`）。校准/对比度/白平衡/肤色与 Node **逐值一致**（192 / 236 / 154 / 136…） |
 | ⚠️ **`ai_service_configs.model` 存的是 JSON 数组字符串** | 不是单模型名。读侧两边都是 `JSON.parse(row.model)` 再取 `models[0]`；接口入参则是**数组**（路由会 `json.dumps` 后落库）。写成裸字符串 `"dall-e-3"` 会让 `model` 解析成**空串**（Node 同样如此）—— 排查"模型没生效"时先看这里 |
 | ✅ **镜头 QC 打分已迁**（`qc_scoring.py` + `technical_qc.py`） | 规则打分与技术维度均已接线（`_run_qc_after_video_complete` / webhook / 合并前置）。🔴 但技术维度里**冻帧 / 音频真峰 / 集成响度三项是两侧共同的继承缺陷**（正则与 ffmpeg 真实输出格式不符 ⇒ 永不生效；黑场/帧率/时长正常）—— 详见 `technical_qc.py` 的「继承缺陷」段与 `tests/technical_qc_test.py`，**要修必须两边一起修** |
@@ -499,7 +499,7 @@ cd backend-py
 | ✅ `/gpu/status` 与 `/gpu/release-all` **已迁**（2026-09-15） | `gpu_manager.py` 473 行 + 两端点 + 四个调用点接线：text/tts 即用即放、image/video **长租约**（提交持有，完成/失败/重试释放）。「绞杀期两侧各有租约视图」的顾虑随 Node 下线消失 |
 | **`quick-preset` / `quick-local` 会覆盖既有配置** | 它们是 upsert（按 `service_type`+`provider`）。⇒ **冒烟测试跑在数据库副本上**没问题，但**不要对着真实库调这两个端点**（会覆盖用户配置）。真机验证时我只跑只读接口 |
 | ✅ `export` **整域关闭 7/7** | `/edl`、ZIP 打包、`/jianying-draft`、`/qc-report`(JSON/MD/HTML)、`/contact-sheet` 全部已迁（2026-09-15） |
-| `utils/storage.ts` 的搬移状态 | `downloadFile` **已迁**（httpx，媒体适配器在用）；`readImageAsCompressedDataUrl` **仍未迁**（见上表「参考图压缩」条，可用 ffmpeg 做） |
+| ✅ `utils/storage.ts` **已全搬** | `downloadFile`（httpx）与 `readImageAsCompressedDataUrl`（ffmpeg）均已迁（2026-09-15）|
 | `upload` 的类型判据是**客户端 Content-Type** | 与原 TS 一致（浏览器的 `file.type`），**不做文件头嗅探**。刻意不"顺手加固"：改成嗅探会让原本能上传的文件被拒，属契约变更 |
 | `ai_service_providers`（服务商目录）**不由 Python seed** | Node 启动时 `seedServiceProviders()` 幂等写入；那张表**没有唯一约束**，两边同时 seed 有产生重复行的风险 ⇒ Python 只读，不重复 seed。将来 Node 下线、或需要支持全新空库时，再把这个调用搬到 Python 的 lifespan |
 | `weapon-library` / `costume-library` **没有 `/apply`** | Node 侧就没实现（只有 `character` 与 `scene` 有）⇒ 调用会落到反代/501，属预期 |
