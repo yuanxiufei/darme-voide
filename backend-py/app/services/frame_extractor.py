@@ -32,7 +32,8 @@ from ..models import storyboards
 from ..response import now
 from .task_logger import log_task_success
 
-__all__ = ["extract_storyboard_tail_frames", "extract_tail_frame", "to_abs_media_path"]
+__all__ = ["extract_frame", "extract_storyboard_tail_frames", "extract_tail_frame",
+           "to_abs_media_path"]
 
 #: 尾帧相对 seek（秒）：从时长末尾往前退一点，避免落在**最后一帧之外**取不到图
 _TAIL_SEEK_OFFSET = 0.2
@@ -77,25 +78,38 @@ async def _probe_duration_seconds(abs_path: str) -> float:
 
 
 async def extract_tail_frame(video_url: str) -> str | None:
-    """从视频提取尾帧，返回**可访问的相对图片路径**（``static/frames/<uuid>.jpg``）；失败 ``None``。"""
+    """从视频提取**尾帧**（``extract_frame(url, "last_frame")`` 的薄封装，保持既有调用点不变）。"""
+    return await extract_frame(video_url, "last_frame")
+
+
+async def extract_frame(video_url: str, frame_type: str = "first_frame") -> str | None:
+    """从视频提取**首帧 / 尾帧**，返回可访问的相对图片路径（``static/frames/<uuid>.jpg``）；失败 ``None``。
+
+    * ``last_frame``：先 ffprobe 拿时长，从**末尾回退 0.2s** 处 seek（避免落在最后一帧之外取不到图）；
+    * ``first_frame``：**不 seek**，ffmpeg 默认从 0 取第 1 帧；
+    * 时长探测失败（``duration <= 0``）在尾帧路径下**直接返回 None**（原实现如此）。
+    """
+    is_last = str(frame_type or "") == "last_frame"
     abs_path = to_abs_media_path(video_url)
     if not os.path.exists(abs_path):
         return None
 
-    duration = await _probe_duration_seconds(abs_path)
-    if duration <= 0:
-        return None
+    seek_args: list[str] = []
+    if is_last:
+        duration = await _probe_duration_seconds(abs_path)
+        if duration <= 0:
+            return None
+        seek_args = ["-ss", str(max(0.0, duration - _TAIL_SEEK_OFFSET))]
 
     output_dir = Path(get_storage_root()) / "frames"
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid4()}.jpg"
     out_path = output_dir / filename
-    seek = max(0.0, duration - _TAIL_SEEK_OFFSET)
 
     try:
         # 对齐 fluent-ffmpeg：`seekInput` 落在 `-i` **之前**，再取 1 帧、质量 2
         await _run_ffmpeg([
-            "-ss", str(seek), "-i", abs_path,
+            *seek_args, "-i", abs_path,
             "-frames:v", "1", "-q:v", "2", str(out_path),
         ])
     except Exception:  # noqa: BLE001 —— 与 TS 的 catch 等价

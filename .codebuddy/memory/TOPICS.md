@@ -16,6 +16,8 @@
 - **两类写法并存**：PromptMart（短剧/漫剧）**时间码分段** → 范式 6.1–6.9；Seedance2（平台通用短视频）**散文式多段**（时间码仅 14%）→ 6.10。
 - **三条实测修正**：① 「一镜到底」仅 4%，高频是 旋转/手持/环绕/推进/定格/跟随；② 一致性写法 = **部位清单式锚定**（面部比例/眼型/下颌线/发型轮廓/皮肤质感）；③ 有**反 AI 感词族**（不完美自然构图 / 自动对焦不完美 / 环境瑕疵 / 轻微手持不稳），比堆 `8k, ultra detailed` 更压塑料感。
 - **语料源筛选**：核仓库看 `size`(KB) 与真实文件树，**不要看 star**；**许可证是硬约束**（TIP-I2V 禁商用仅内部统计、Seedance2 CC BY 4.0 需署名、Semonxue 无 LICENSE 不得搬运）。
+- **检索管线已就绪（自 MEMORY.md 下移 2026-09-15）**：`fetch-raw` → `normalize` → `search`（**8987 条 / 3 源**）⇒ **别另起一套**；语料 gitignored ⇒ 消费方**须在缺失时优雅降级**（不可硬依赖语料存在）。
+- **已排除源勿引回（判据见 `scripts/README.md`）**：TIP-I2V｜Semonxue｜`HitPaw` / `geekjourneyx` / `fantasylights`。
 
 ## Skill 体系细节（自 MEMORY.md §Skill 下移，红线仍留在 MEMORY.md）
 - **注入可见性 UI**：`/skills/meta` 给 `charBudget`+各 Agent `charCount`；`/skills` 每项给 `charCount`/`referenceCount`/`protected`/`category`/`source`/`sourceLabel`（库展示名；vendor 分属 2 库须可辨）。消费：`skills.vue`（已用/预算、超预算预警、受保护、侧栏分组、选中值 `'all'|agentType|'lib:<库名>'`）与 `agents.vue` 绑定面板（单个体量+已启用合计/预算+超预算预警+「外部库」/「已失效」）。

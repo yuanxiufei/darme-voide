@@ -855,11 +855,40 @@ def main() -> int:
         + _query_param_drift()
         + _agent_types_drift()
         + _agent_prompts_drift()
+        + _consistency_thresholds_drift()
     )
     for line in drift:
         print(f"  DRIFT   {line}")
     print(f"{'FAIL' if drift else 'OK'}: 镜像常量漂移 {len(drift)} 条")
     return 1 if (shadow or drift) else 0
+
+
+def _consistency_thresholds_drift() -> list[str]:
+    """校验 ``consistency_qc.CONSISTENCY_QC_THRESHOLDS`` 与 TS 同名常量**逐值**一致。
+
+    守卫里其余镜像多为**字符串**常量；这一条是**数值**型：阈值直接决定 warning/info 的判定
+    边界，两边不一致时**不会报任何错**，只会「同一集在两套后端下得到不同的严重度」。
+    """
+    from app.services import consistency_qc as cq
+
+    src = (_SRC_ROOT / "services" / "consistency-qc.ts").read_text(encoding="utf-8")
+    block = re.search(r"CONSISTENCY_QC_THRESHOLDS\s*=\s*\{(.*?)\}\s*as const", src, re.S)
+    if block is None:
+        return ["consistency-qc.ts: 找不到 CONSISTENCY_QC_THRESHOLDS 块（解析失败，需人工核对）"]
+
+    # 块内的 `name: 0.55` 形态（注释里没有「冒号 + 数字」，不会误匹配）
+    ts_values = {name: float(value)
+                 for name, value in re.findall(r"(\w+)\s*:\s*([0-9.]+)", block.group(1))}
+    drift: list[str] = []
+    for key, value in cq.CONSISTENCY_QC_THRESHOLDS.items():
+        if key not in ts_values:
+            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key} 在 TS 侧不存在")
+        elif abs(ts_values[key] - value) > 1e-12:
+            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key}: TS={ts_values[key]} / py={value}")
+    for key in ts_values:
+        if key not in cq.CONSISTENCY_QC_THRESHOLDS:
+            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key}: TS 有但 Python 侧缺")
+    return drift
 
 
 if __name__ == "__main__":

@@ -2523,9 +2523,16 @@ with TestClient(app) as client:
           pu.build_scene_image_prompt({"location": "客栈", "time": "夜晚"})[:120])
 
     # --- 绞杀者接缝 ---
+    # ⚠️ 这条断言**必须跟着「未迁移清单」走**（清单会随迁移推进变短）：
+    #    `GET /dramas/{id}/rhythm` 早已迁移 ⇒ 不再 501，这里改成正向断言；
+    #    兜底样本换成当前**仅剩**的未迁移端点 `POST /storage/change`。
     r = client.get(f"/api/v1/dramas/{new_id}/rhythm")
-    dump("GET /api/v1/dramas/{id}/rhythm (not migrated)", r)
-    check("strangler: unmigrated sub-path -> 501", r.status_code == 501 and r.json()["code"] == 501)
+    dump("GET /api/v1/dramas/{id}/rhythm (已迁移，不应再 501)", r)
+    check("strangler: 已迁移子路径**不再** 501（rhythm）", r.status_code != 501, r.text[:120])
+    r2 = client.post("/api/v1/storage/change", json={})
+    dump("POST /api/v1/storage/change (not migrated)", r2)
+    check("strangler: unmigrated sub-path -> 501",
+          r2.status_code == 501 and r2.json()["code"] == 501, r2.text[:120])
     check("strangler: other domain -> 501", client.get("/api/v1/storyboards").status_code == 501)
 
     # --- 静态站 ---

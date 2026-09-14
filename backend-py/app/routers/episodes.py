@@ -1,6 +1,4 @@
-"""episodes 域 —— 与 ``backend/src/routes/episodes.ts`` 逐端点对齐。
-
-**已迁移 8 个端点**
+"""episodes 域 —— 与 ``backend/src/routes/episodes.ts`` 逐端点对齐（**整域关闭 10/10**）。
 
 ======  ==================================  ==================================
 方法    路径                                 说明
@@ -13,12 +11,14 @@ GET     ``/{id}/scenes``                     该集关联场景
 GET     ``/{episode_id}/storyboards``        该集分镜（含角色/服装/道具关联）
 GET     ``/{id}/pipeline-status``            流水线十步进度
 GET     ``/{id}/script-fingerprint``         剧本指纹门禁状态
+POST    ``/{id}/continue-script``            剧本续写（``text-generation`` 的 LLM 链路）
+POST    ``/{id}/consistency-qc``             图像连续性检测（report 模式，本地 dHash 比对）
 ======  ==================================  ==================================
 
-**刻意未迁移 2 个端点**（不注册 → 走反代/501）：
-
-* ``POST /{id}/continue-script``   依赖 ``services/text-generation.ts`` 的 LLM 链路
-* ``POST /{id}/consistency-qc``    依赖 ``services/consistency-qc.ts``（视觉模型 + 多图输入）
+⚠️ 早先本文件曾把 ``continue-script`` 与 ``consistency-qc`` 列为「刻意未迁移」，两者**都已迁**
+（前者依赖的 LLM 链路、后者依赖的图像比对链路都在 Python 侧落地）—— 那段说明已过时，勿再引用。
+另注：``consistency-qc.ts`` **不是**视觉模型/多图任务，它只用本地图像哈希（dHash + 汉明距离），
+早先待办表里「视觉模型 + 多图输入」的归类是误记。
 
 ⚠️ ``GET /{id}/pipeline-status`` 与 dramas 列表里的同名概念**判据不同**，不要合并：
 前者用 ``composed_image`` 单字段，后者（`GET /dramas` 的 progress）用
@@ -53,6 +53,7 @@ from ..response import (
     parse_param_id,
     success,
 )
+from ..services.consistency_qc import run_episode_consistency_qc
 from ..services.script_fingerprint import (
     check_episode_fingerprint,
     refresh_episode_script_hash,
@@ -501,5 +502,33 @@ async def continue_episode_script(episode_id: str, request: Request,
         return success({"continuation": continuation})
     except Exception as exc:  # noqa: BLE001
         log_task_error("EpisodesAPI", "continue-script",
+                       {"error": str(exc), "id": episode_id})
+        return bad_request(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# POST /{id}/consistency-qc — 图像连续性检测（手动触发，report 模式）
+# ---------------------------------------------------------------------------
+
+@router.post("/{episode_id}/consistency-qc")
+async def episode_consistency_qc(episode_id: str, conn: Connection = Depends(get_tx)):
+    """对一集相邻分镜画面做连续性检测。
+
+    **report 模式**：只写回各分镜最新 QC 记录的 ``continuity_vision`` 维度与 ``issues``，
+    不动总分/状态（避免误伤，未来可升级 block 模式）。
+    """
+    try:
+        eid = parse_param_id(episode_id)
+        if eid is None:
+            return not_found("Invalid episode id")
+        ep = conn.execute(select(episodes).where(episodes.c.id == eid)).first()
+        # ⚠️ 与 TS 一致：**软删过的也当不存在**
+        if ep is None or ep.deleted_at:
+            return not_found("Episode not found")
+
+        report = await run_episode_consistency_qc(conn, eid, ep.drama_id)
+        return success(report)
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("EpisodesAPI", "consistency-qc",
                        {"error": str(exc), "id": episode_id})
         return bad_request(str(exc))

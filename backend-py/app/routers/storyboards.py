@@ -31,6 +31,7 @@ GET     ``/{id}/qc``                   最近一次 QC 打分
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -72,7 +73,9 @@ from ..services.storyboard_helpers import (
     validate_storyboard_bindings,
     validate_tts_speaker,
 )
+from ..services.frame_extractor import extract_frame
 from ..services.image_generation import generate_image
+from ..services.qc_retry import retry_failed_storyboard
 from ..services.qc_scoring import score_storyboard
 from ..services.prompt_utils import (
     build_storyboard_image_prompt,
@@ -432,6 +435,66 @@ def score_storyboard_qc(storyboard_id: str, conn: Connection = Depends(get_tx)):
         return bad_request(str(exc))
 
 
+#: 视频素材的扩展名判定（原 TS 的裸正则，含 m4v/avi/mpeg/mkv）
+_VIDEO_EXT_RE = re.compile(r"\.(mp4|mov|webm|m4v|avi|mpeg|mkv)$", re.IGNORECASE)
+
+
+@router.post("/{storyboard_id}/set-frame")
+async def set_storyboard_frame(storyboard_id: str, request: Request,
+                              conn: Connection = Depends(get_tx)):
+    """把一段**素材**设成该镜头的首帧或尾帧（视频素材先抽帧，图片素材直接采用）。"""
+    try:
+        sid = parse_param_id(storyboard_id)
+        if sid is None:
+            return not_found("Invalid storyboard id")
+        body = await read_json(request)
+        # ⚠️ 只认 `last_frame`，其余一律 first_frame（原 TS 是真值判断，不是白名单报错）
+        frame_type = "last_frame" if body.get("frame_type") == "last_frame" else "first_frame"
+        source_url = body.get("source_url") or ""
+        exists = conn.execute(select(storyboards.c.id).where(storyboards.c.id == sid)).first()
+        if exists is None:
+            return not_found("镜头不存在")
+        if not source_url:
+            return bad_request("source_url required")
+
+        is_video = bool(_VIDEO_EXT_RE.search(source_url))
+        frame_url = await extract_frame(source_url, frame_type) if is_video else source_url
+        if not frame_url:
+            # 抽帧失败：原 TS 的 extractVideoFrame 会 reject ⇒ 这里同样抛成 400
+            raise ValueError("抽帧失败（ffmpeg 提取不到该帧）")
+
+        column = "first_frame_image" if frame_type == "first_frame" else "last_frame_image"
+        conn.execute(storyboards.update().where(storyboards.c.id == sid)
+                     .values(**{column: frame_url}, updated_at=now()))
+        log_task_success("StoryboardAPI", "set-frame", {
+            "storyboardId": sid, "frameType": frame_type, "sourceUrl": source_url,
+            "frameUrl": frame_url, "isVideo": is_video,
+        })
+        return success({"frame_type": frame_type, "frame_url": frame_url})
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StoryboardAPI", "set-frame",
+                       {"storyboardId": storyboard_id, "error": str(exc)})
+        return bad_request(str(exc))
+
+
+@router.post("/{storyboard_id}/retry-qc")
+async def retry_storyboard_qc(storyboard_id: str, conn: Connection = Depends(get_tx)):
+    """审片重跑：只重写该失败镜 → 软删旧产物 → 重提首帧/视频（闭环）。"""
+    try:
+        sid = parse_param_id(storyboard_id)
+        if sid is None:
+            return not_found("Invalid storyboard id")
+        exists = conn.execute(
+            select(storyboards.c.id).where(storyboards.c.id == sid)).first()
+        if exists is None:
+            return not_found("镜头不存在")
+        return success(await retry_failed_storyboard(conn, sid))
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StoryboardAPI", "retry-qc",
+                       {"storyboardId": storyboard_id, "error": str(exc)})
+        return bad_request(str(exc) or "Failed to retry storyboard")
+
+
 @router.post("/{storyboard_id}/generate-tts")
 async def generate_storyboard_tts(storyboard_id: str, request: Request,
                                   conn: Connection = Depends(get_tx)):
@@ -637,6 +700,104 @@ async def regenerate_storyboard_image(storyboard_id: str, request: Request,
     except Exception as exc:  # noqa: BLE001
         log_task_error("StoryboardAPI", "regenerate-image",
                        {"storyboardId": sid, "error": str(exc)})
+        return bad_request(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# POST /{id}/regenerate-frame — 重新生成镜头首帧/尾帧/关键帧
+# ---------------------------------------------------------------------------
+
+#: 帧类型白名单（原 TS：`['last_frame','keyframe'].includes(...)` ⇒ 其余一律 first_frame）
+_FRAME_TYPES = ("last_frame", "keyframe")
+
+#: 三种帧的画面提示词（英文，逐字对齐 TS）
+_FRAME_HINTS = {
+    "first_frame": "opening frame, establishing the scene, subject at start position, "
+                   "beginning of the shot",
+    "last_frame": "closing frame, final composition, subject at end position, end of the shot",
+    "keyframe": "mid-action keyframe, subject mid-motion, action or prop state in transition, "
+                "intermediate moment of the shot",
+}
+
+
+@router.post("/{storyboard_id}/regenerate-frame")
+async def regenerate_storyboard_frame(storyboard_id: str, request: Request,
+                                     conn: Connection = Depends(get_tx)):
+    """重新生成首帧/尾帧/关键帧（注入角色外观 + 场景 + 参考图；与 regenerate-image 同一条画风链）。"""
+    sid = parse_param_id(storyboard_id)
+    if sid is None:
+        return not_found("Invalid storyboard id")
+    body = await read_json(request)
+    # ⚠️ 白名单判定：只有 last_frame/keyframe 被认，其余（含未传）一律 first_frame
+    raw_type = body.get("frame_type")
+    frame_type = raw_type if raw_type in _FRAME_TYPES else "first_frame"
+    sb = _fetch_storyboard(conn, sid)
+    if sb is None:
+        return not_found("镜头不存在")
+    episode = conn.execute(
+        select(episodes).where(episodes.c.id == sb.episode_id)).first()
+    if episode is None:
+        return bad_request("Episode not found")
+
+    try:
+        # 注入角色外观 + 场景描述 + 角色/场景参考图，保证首尾帧人物与场景一致
+        char_appearances = get_storyboard_character_appearances(conn, sid)
+        scene_desc = get_storyboard_scene_description(conn, sid)
+        explicit_refs = body.get("reference_images")
+        reference_images = (explicit_refs if explicit_refs
+                            else get_storyboard_reference_images(conn, sid))
+
+        # 画风收口：与 regenerate-image 同一条解析链，保证同一镜头不同帧不会换画风
+        drama_style = resolve_effective_art_style(conn, episode.drama_id, None, body.get("style"))
+
+        # 帧画面内容：**请求体 prompt 优先**，其次分镜存库的对应帧 prompt
+        stored_frame_prompt = getattr(sb, {
+            "first_frame": "first_frame_prompt",
+            "last_frame": "last_frame_prompt",
+            "keyframe": "keyframe_prompt",
+        }[frame_type])
+        frame_content = body.get("prompt") or stored_frame_prompt
+
+        # 画面基底：标准构建器（始终注入角色外观 + 场景），帧画面内容作为附加描述叠加
+        base_prompt = build_storyboard_image_prompt({
+            "description": sb.description or body.get("character_description") or "",
+            "storyboardDescription": sb.description,
+            "characterDescription": "；".join(char_appearances) if char_appearances else None,
+            "sceneDescription": (body.get("scene_description") or scene_desc
+                                 or sb.location or ""),
+            "shotType": sb.shot_type or body.get("shot_type") or "",
+            "cameraAngle": sb.angle or body.get("camera_angle") or "",
+            "dramaStyle": drama_style,
+        })
+        prompt = ", ".join(
+            part for part in (base_prompt, frame_content, _FRAME_HINTS[frame_type])
+            if part
+        )
+
+        log_task_start("StoryboardAPI", "regenerate-frame", {
+            "storyboardId": sid, "episodeId": sb.episode_id, "dramaId": episode.drama_id,
+            "frameType": frame_type, "model": body.get("model") or "default",
+        })
+
+        gen_id = await generate_image(conn, {
+            "storyboardId": sid,
+            "dramaId": episode.drama_id,
+            "prompt": prompt,
+            "negativePrompt": (body.get("negative_prompt") or sb.negative_prompt
+                               or build_storyboard_negative_prompt(drama_style)),
+            "model": body.get("model"),
+            "frameType": frame_type,
+            "referenceImages": reference_images,
+            "configId": episode.image_config_id,
+            "force": body.get("force"),
+        })
+
+        log_task_success("StoryboardAPI", "regenerate-frame",
+                         {"storyboardId": sid, "frameType": frame_type, "generationId": gen_id})
+        return success({"image_generation_id": gen_id, "frame_type": frame_type})
+    except Exception as exc:  # noqa: BLE001
+        log_task_error("StoryboardAPI", "regenerate-frame",
+                       {"storyboardId": sid, "frameType": frame_type, "error": str(exc)})
         return bad_request(str(exc))
 
 

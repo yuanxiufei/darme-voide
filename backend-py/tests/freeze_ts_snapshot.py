@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -43,13 +44,52 @@ DIRS: tuple[str, ...] = (
     "agents",
 )
 
+#: 扫描哪些文件来发现「守卫还引用了哪些 .ts」
+_GUARD_SOURCES = ("route_parity_test.py", "parity_diff_test.py")
+
+#: ``_SRC_ROOT / "a" / "b.ts"``（**可能由多段字符串字面量拼出来**，故要整链捕获）
+_SRC_REF = re.compile(r'_SRC_ROOT((?:\s*/\s*r?"[^"]+")+)')
+_SEGMENT = re.compile(r'"([^"]+)"')
+
+
+def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """从守卫源码里**自动发现**它引用的 TS 文件 / 目录（相对 ``backend/src``）。
+
+    ⚠️ 为什么必须自动发现：``FILES`` 是手写清单，**新增一处「守卫读文件」时极易漏加** ——
+    漏了不会立刻报错，直到「删掉 ``backend/`` 后跑冻结模式」才炸。本项目**真实发生过**：
+    ``services/consistency-qc.ts`` 就是补守卫（连续性 QC 阈值镜像）当天漏进快照的，
+    而快照恰是删库的唯一保险。这里扫 ``_SRC_ROOT / "…" / "…"`` 形态，
+    以 ``.ts`` 结尾的当文件、其余当目录，与手写清单**取并集**。
+    """
+    here = Path(__file__).resolve().parent
+    files: set[str] = set()
+    dirs: set[str] = set()
+    for name in _GUARD_SOURCES:
+        path = here / name
+        if not path.is_file():
+            continue
+        for match in _SRC_REF.finditer(path.read_text(encoding="utf-8")):
+            relative = "/".join(_SEGMENT.findall(match.group(1)))
+            (files if relative.endswith(".ts") else dirs).add(relative)
+    return tuple(sorted(files)), tuple(sorted(dirs))
+
+
+def _effective() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """手写清单 ∪ 自动发现（**顺序即去重后的并集**）。"""
+    extra_files, extra_dirs = discover_refs()
+    files = tuple(dict.fromkeys((*FILES, *extra_files)))
+    dirs = tuple(dict.fromkeys((*DIRS, *extra_dirs)))
+    return files, dirs
+
 
 def freeze() -> int:
     if not TS_SRC.is_dir():
         print(f"❌ 找不到 TS 源码目录：{TS_SRC}（已删 backend/？那就不该再冻结）", file=sys.stderr)
         return 2
+    files_to_copy, dirs_to_copy = _effective()
+    auto = len(files_to_copy) - len(FILES)
     copied = 0
-    for relative in FILES:
+    for relative in files_to_copy:
         source = TS_SRC / relative
         if not source.is_file():
             print(f"❌ 缺少文件：{relative}", file=sys.stderr)
@@ -58,34 +98,36 @@ def freeze() -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         copied += 1
-    for relative in DIRS:
+    for relative in dirs_to_copy:
         source_dir = TS_SRC / relative
         # ⚠️ **递归**：守卫会读 `agents/tools/*.ts` 这类子目录（漏了就会「TS 侧抽到空集 ⇒ 满屏 Python 独有」）
-        files = sorted(source_dir.rglob("*.ts"))
-        if not files:
+        found = sorted(source_dir.rglob("*.ts"))
+        if not found:
             print(f"❌ 目录里没有 .ts：{relative}", file=sys.stderr)
             return 2
-        for source in files:
+        for source in found:
             target = FROZEN / relative / source.relative_to(source_dir)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
             copied += 1
     total = sum(p.stat().st_size for p in FROZEN.rglob("*.ts"))
     print(f"✅ 冻结完成：{copied} 个文件 / {total / 1024:.0f} KB -> {FROZEN}")
+    print(f"   手写清单 {len(FILES)} 个 + 自动发现 {auto} 个文件；目录 {len(dirs_to_copy)} 个")
     return 0
 
 
 def check() -> int:
+    files_needed, dirs_needed = _effective()
     missing: list[str] = []
-    for relative in FILES:
+    for relative in files_needed:
         if not (FROZEN / relative).is_file():
             missing.append(relative)
-    for relative in DIRS:
+    for relative in dirs_needed:
         if not sorted((FROZEN / relative).rglob("*.ts")):
             missing.append(relative + "/**/*.ts")
     # 真源码还在时：逐个核对「源码树里的每个 .ts 都有对应快照」（防冻结后又改了 TS 却忘了重冻）
     if TS_SRC.is_dir():
-        for relative in DIRS:
+        for relative in dirs_needed:
             for source in (TS_SRC / relative).rglob("*.ts"):
                 target = FROZEN / relative / source.relative_to(TS_SRC / relative)
                 if not target.is_file():
@@ -94,7 +136,7 @@ def check() -> int:
         print("❌ 快照不完整，缺：" + "、".join(missing), file=sys.stderr)
         return 1
     total = sum(p.stat().st_size for p in FROZEN.rglob("*.ts"))
-    print(f"✅ 快照完整（{total / 1024:.0f} KB）")
+    print(f"✅ 快照完整（{total / 1024:.0f} KB）；需覆盖 {len(files_needed)} 个文件 + {len(dirs_needed)} 个目录")
     return 0
 
 
