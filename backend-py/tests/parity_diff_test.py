@@ -27,6 +27,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from parity_diff import (  # noqa: E402
     CASES,
+    strip_timestamps,
     KNOWN_DIFFS,
     MISSING_CASES,
     MISSING_EXPECT,
@@ -110,6 +111,18 @@ def main() -> int:  # noqa: C901
     check("表: 白名单每条都写了理由与字段前缀（不许留空手套白狼的条目）",
           all(entry.get("why") and entry.get("fields") for entry in KNOWN_DIFFS.values()),
           KNOWN_DIFFS)
+
+    # ── S7 新增覆盖：只读 GET 补齐 + 文本响应的处理策略 ──
+    check("表: S7 新增的只读 GET 已纳入（rhythm / qc-report?format=json）",
+          any("/rhythm" in path for _m, path, _n in CASES)
+          and any("qc-report?format=json" in path for _m, path, _n in CASES),
+          [path for _m, path, _n in CASES][-3:])
+    check("表: **文本响应故意不入表**（contact-sheet / qc-report?format=html —— 噪声大、JSON 用例已覆盖数据等价）",
+          not any("contact-sheet" in path or "format=html" in path for _m, path, _n in CASES),
+          [path for _m, path, _n in CASES])
+    check("文本响应: ISO 时间戳被抹成 `<ts>`（否则毫秒差会伪装成新差异）",
+          strip_timestamps("x 2026-09-15T06:24:43.123Z y") == "x <ts> y"
+          and strip_timestamps("无时间戳") == "无时间戳")
 
     failed_items = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

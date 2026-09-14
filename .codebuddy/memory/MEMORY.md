@@ -6,7 +6,7 @@
 Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ Hono（`backend`，**非 Express**）+ Mastra（5 Agent）+ Drizzle + better-sqlite3。
 - 后端 **5789**（`config.ts`）、前端 **3013**（proxy `/api`、`/static`）；前缀 `/api/v1`，另有 `/webhooks/*`、`/static/*`；无登录页。页面 `/`、`/settings`、`/drama/[id]`、`/library/*`。
 - 启动 `cd backend && npx tsx src/index.ts`；`cd frontend && npx nuxt dev --port 3013`。Node v22。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；Docker 未装，不依赖 postgres/redis/qdrant。
-- **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，已迁 `dramas` 域，未迁移域 `PROXY_TO_NODE=1` 反代 Node；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`——那是 Node 的 5789）；回归跑 `backend-py/tests/smoke_test.py`，动手前读其 `README.md`。
+- **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，已迁 `dramas` 域，未迁移域 `PROXY_TO_NODE=1` 反代 Node；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`——那是 Node 的 5789）；回归跑 `backend-py/tests/smoke_test.py`，动手前读其 `README.md`。**删 `backend/` 的三条前置见 `TOPICS.md`**（对拍 / 快照 / 零依赖）。
 
 ## 本地模型 + H3 视频推理
 **详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。

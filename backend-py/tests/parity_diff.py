@@ -28,11 +28,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from typing import Any
 
 __all__ = ["CASES", "KNOWN_DIFFS", "MISSING_CASES", "MISSING_EXPECT", "VOLATILE_KEYS",
-           "classify", "classify_missing", "diff", "normalize"]
+           "classify", "classify_missing", "diff", "normalize", "strip_timestamps"]
+
+#: 文本响应里的 ISO 时间戳。JSON 体可以按**键**归一化，文本体（HTML/Markdown 导出物）不行，
+#: 只能按**形态**抹掉，否则同一次数据渲染出的两份正文会因为毫秒差被判成「新差异」。
+_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+
+
+def strip_timestamps(text: str) -> str:
+    """把文本里的 ISO 时间戳抹成 ``<ts>``（**只动时间戳**，其余逐字保留）。"""
+    return _ISO_TS.sub("<ts>", text)
 
 #: 值不参与比较的键（各域通用）。⚠️ 只放**真的易变**的：生成时刻、审计时间戳。
 VOLATILE_KEYS = frozenset({
@@ -52,6 +62,14 @@ CASES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/v1/ai-providers", "服务商目录"),
     ("GET", "/api/v1/evaluation/cases", "评测基准 case 列表"),
     ("GET", "/api/v1/ai-configs/gpu/status", "GPU 显存状态"),
+    # ── 以下为 S7 新增的只读 GET（补齐覆盖；此前只有上面 10 条）──
+    ("GET", "/api/v1/dramas/{drama_id}/rhythm", "节奏相位（S7 迁）"),
+    # ⚠️ `?format=json` **显式**写死：不传时两侧默认虽同为 json，但显式更稳，也避免哪天改了默认值
+    #    就悄悄变成文本比对
+    ("GET", "/api/v1/export/dramas/{drama_id}/qc-report?format=json", "QC 报告 JSON（S7 迁）"),
+    # ⚠️ **故意不加** `/contact-sheet` 与 `qc-report?format=html|md`：它们是**文本响应**，正文内嵌
+    #    `generatedAt`（每次请求不同）⇒ 只能靠 `strip_timestamps` 抹掉后逐字比，而「整段 HTML 像不像」
+    #    这类比对噪声大、收益低；**数据等价已由上面那条 JSON 用例覆盖**（同一份 report 渲染）。
 )
 
 #: 有意差异白名单：``(method, path) -> {"why": 理由, "fields": (差异路径前缀…)}``。
@@ -191,10 +209,16 @@ def selftest() -> int:
     if allowed != KNOWN_DIFFS[("GET", "/api/v1/ai-configs/gpu/status")]["fields"]:
         failures.append("白名单常量被改动")
 
+    # 文本响应的时间戳归一化（HTML/Markdown 导出物靠它才能参与比对）
+    if strip_timestamps("at 2026-09-15T06:24:43.123Z end") != "at <ts> end":
+        failures.append("时间戳归一化：ISO 串未被抹成 <ts>")
+    if strip_timestamps("no stamp here") != "no stamp here":
+        failures.append("时间戳归一化：无时间戳的文本不该被改动")
+
     for failure in failures:
         print("FAIL  " + failure)
     print()
-    print(f"SELFTEST: {len(cases) + 3 - len(failures)}/{len(cases) + 3} passed")
+    print(f"SELFTEST: {len(cases) + 5 - len(failures)}/{len(cases) + 5} passed")
     return 1 if failures else 0
 
 
@@ -204,7 +228,8 @@ def _fetch(client: Any, base: str, method: str, path: str) -> Any:
     try:
         body = response.json()
     except Exception:  # noqa: BLE001
-        body = {"__raw__": response.text[:500]}
+        # 文本响应（HTML/Markdown 导出物）：先抹时间戳，否则毫秒差会伪装成「新差异」
+        body = {"__raw__": strip_timestamps(response.text[:500])}
     if not isinstance(body, dict):
         body = {"__body__": body}
     return {"__status__": response.status_code, **body}
