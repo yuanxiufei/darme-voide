@@ -13,9 +13,12 @@ DELETE  ``/{id}``                      硬删（连带 storyboard_characters）
 GET     ``/{id}/qc``                   最近一次 QC 打分
 ======  ==============================  ==========================================
 
-**未迁移**（不注册 → 走反代/501）：``POST /{id}/generate-tts``、``regenerate-image``、
-``regenerate-frame``、``set-frame``(ffmpeg 抽帧)、``action-suggestion``、``split``、
-``optimize-prompt``、``qc``、``retry-qc``。
+**已整域迁移（14/14）** —— 2026-09-15 校正：此处原先列着 9 个「未迁移」端点
+（``generate-tts`` / ``regenerate-image`` / ``regenerate-frame`` / ``set-frame`` /
+``action-suggestion`` / ``split`` / ``optimize-prompt`` / ``qc`` / ``retry-qc``），
+它们**后来全部迁完**（出图 / 出音 / ffmpeg 抽帧 / LLM 链路都已落地）。
+⚠️ 「哪些没迁」**以 ``tests/route_parity_test.py`` 的机械扫描为准**，别再信任文件头的手写清单
+（本仓多处手写清单已过期 —— 已在清理）。
 
 ⚠️ 本域的三处注意点：
 

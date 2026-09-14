@@ -16,13 +16,14 @@ PUT     ``/{id}/episodes``          批量保存剧集（白名单字段）
 GET     ``/{id}/prompts``           聚合全剧提示词
 ======  ==========================  ==================================
 
-**刻意未迁移 2 个端点**（依赖尚未移植的服务层，不注册，交给 ``main.py`` 的兜底路由）：
+**本域端点已全部注册**（2026-09-15 校正；早先此处列着 2 个「刻意未迁移」）：
 
 * ``GET  /{id}/rhythm``                   ✅ 已迁（多集节奏相位报告）
-* ``POST /{id}/era-background/extract``   依赖 ``services/text-generation.ts``（LLM 链路）
+* ``POST /{id}/era-background/extract``   ✅ 已迁（LLM 走 ``text_generation``，剧本聚合 + 8000 字首尾截断）
 
-这两个路径在 ``PROXY_TO_NODE=1`` 时由 Node 后端继续服务 —— 这正是绞杀者模式
-「逐域切换、边界可见、随时可回退」的落地方式，比一次性重写安全得多。
+⇒ 「哪些没迁」**以 ``tests/route_parity_test.py`` 的机械扫描为准**（当前未注册仅 1 条：``storage/change``）；
+文件头的手写清单在本仓已有多次过期。绞杀者模式（``PROXY_TO_NODE=1`` 反代、逐域切换、随时可回退）
+的说明保留在 ``backend-py/README.md``。
 """
 
 from __future__ import annotations

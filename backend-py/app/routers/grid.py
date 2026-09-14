@@ -17,8 +17,10 @@
 * ``/split`` 的 ``reference`` 分支是把格子**追加**到分镜已有 ``reference_images`` 数组末尾，
   且该列与 Node 共用 ⇒ **必须紧凑 JSON**。
 
-⚠️ ``runAgentWithRetry``（Mastra Agent 编排，S5）**尚未移植** ⇒ ``try_agent_grid_prompt``
-恒返回 None，端点走确定性回落路径（与原实现「Agent 报错即回落」同形）。
+✅ ``runAgentWithRetry`` 等价物**已可用**（``services/agents/runtime.run_agent_with_retry``）⇒
+  ``try_agent_grid_prompt`` 已按原 TS 接通（2026-09-15 校正，早先这里是「恒返回 None」的存根：
+  端点此前**永远**走本地构建器，而 Node 会优先用 Agent ⇒ 曾是真行为缺口）。
+  仍保留「Agent 不可用即回落」的语义：任何异常都吞掉返回 ``None`` ⇒ ``source='fallback'``。
 """
 
 from __future__ import annotations
@@ -147,7 +149,8 @@ def _find_grid_payload(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def try_agent_grid_prompt(
+async def try_agent_grid_prompt(
+    conn: Connection,
     episode_id: int,
     drama_id: int,
     storyboard_ids: list[int],
@@ -156,13 +159,38 @@ def try_agent_grid_prompt(
     mode: str,
     reference_legend: str,
 ) -> dict[str, Any] | None:
-    """让 Agent 生成宫格 prompt —— **尚未移植（S5 的 Mastra 编排）**，恒返回 None。
+    """让 Agent 生成宫格 prompt（``grid_prompt_generator``）—— 抠 ``{grid_prompt, cell_prompts}``。
 
-    Node 侧这里跑 ``runAgentWithRetry('grid_prompt_generator', ...)``，从工具结果或正文里
-    抠 ``{grid_prompt, cell_prompts}``；任何异常都吞掉返回 null ⇒ 端点改用本地构建器。
-    现在直接把「Agent 不可用」表现为同一件事：**确定性回落**（``source='fallback'``）。
+    与原 TS 逐字对齐：消息由 9 段拼接（**空段丢弃**、``\\n`` 连接，镜头 ID 走紧凑 JSON）；
+    先看**工具结果**再看**正文**；**任何异常都吞掉返回 ``None``** ⇒ 端点回落本地构建器。
     """
-    return None
+    message = "\n".join(part for part in (
+        "请为宫格图生成提示词，并优先调用工具完成。",
+        "选中镜头ID：" + json.dumps(storyboard_ids, ensure_ascii=False, separators=(",", ":")),
+        f"行数：{rows}",
+        f"列数：{cols}",
+        f"模式：{mode}",
+        f"参考图映射：{reference_legend}" if reference_legend else "",
+        "当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，"
+        "例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。",
+        f"必须严格按 {rows}x{cols} 生成，总共 exactly {rows * cols} visible panels。"
+        f"不要合并格子，不要缺格。",
+        '必须返回 JSON，结构为：{"grid_prompt":"...","cell_prompts":'
+        '[{"shot_number":1,"frame_type":"first_frame","prompt":"..."}]}',
+    ) if part)
+
+    try:
+        # 惰性导入：避免 routing → services.agents 的导入环（与其它路由同一手法）
+        from ..services.agents.runtime import run_agent_with_retry  # noqa: PLC0415
+
+        result = await run_agent_with_retry(
+            conn, "grid_prompt_generator", episode_id, drama_id, message, {"maxSteps": 10})
+        from_tools = _find_grid_payload(result.tool_results)
+        if from_tools:
+            return from_tools
+        return _find_grid_payload(result.text)
+    except Exception:  # noqa: BLE001 —— 与原 TS 的裸 catch 等价：Agent 失败即回落
+        return None
 
 
 def _fetch_storyboards(conn: Connection, storyboard_ids: list[Any]) -> list[Any]:
@@ -178,7 +206,7 @@ def _fetch_storyboards(conn: Connection, storyboard_ids: list[Any]) -> list[Any]
 
 
 @router.post("/prompt")
-async def grid_prompt(request: Request, conn: Connection = Depends(get_conn)):
+async def grid_prompt(request: Request, conn: Connection = Depends(get_tx)):
     """生成宫格 prompt（Agent 优先，失败则本地确定性构建）。"""
     try:
         body = await read_json(request)
@@ -208,8 +236,8 @@ async def grid_prompt(request: Request, conn: Connection = Depends(get_conn)):
             return bad_request("episode_id required")
 
         try:
-            agent_payload = try_agent_grid_prompt(
-                resolved_episode_id, int(drama_id or 0), storyboard_ids,
+            agent_payload = await try_agent_grid_prompt(
+                conn, resolved_episode_id, int(drama_id or 0), storyboard_ids,
                 actual_rows, actual_cols, mode, reference_legend,
             )
             if agent_payload and agent_payload.get("grid_prompt"):

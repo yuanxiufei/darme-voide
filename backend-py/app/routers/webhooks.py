@@ -38,6 +38,7 @@ from ..services.task_logger import (
 )
 from ..services.vendor_errors import format_vendor_task_error
 from ..services.video_probe import probe_video_duration
+from ..services.qc_scoring import run_qc_after_video_complete
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
@@ -45,9 +46,11 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or ""
 
 
-def run_qc_after_video_complete(storyboard_id: int, generation_id: int) -> None:
-    """镜头级 QC 打分（fire-and-forget）——**保留调用点，逻辑未移植**（≈510 行）。"""
-    return None
+# ⚠️ 2026-09-15 校正：此处原先是一个**空实现**（``return None`` + 「逻辑未移植 ≈510 行」的说明），
+#    但 ``services/qc_scoring.run_qc_after_video_complete``（规则打分 + 技术维度）**早已迁完**，
+#    Node 的 ``webhooks.ts`` 也正是直接调 ``runQcAfterVideoComplete`` —— 于是 Python 的 vidu 回调
+#    此前**从不打分**，而 Node 会 ⇒ 真行为缺口。现在直接复用服务层实现（薄包装会多一份抄本）。
+#    调用点已改为显式传 ``conn``（写回要用同一个连接）。
 
 
 @router.post("/vidu")
@@ -108,8 +111,8 @@ async def vidu_webhook(request: Request, conn: Connection = Depends(get_tx)):
                 conn.execute(
                     update(storyboards).where(storyboards.c.id == row.storyboard_id).values(**values)
                 )
-                # 触发镜头级 QC 打分（fire-and-forget）
-                run_qc_after_video_complete(row.storyboard_id, row.id)
+                # 触发镜头级 QC 打分（fire-and-forget；规则分 + 技术维度，见 qc_scoring）
+                run_qc_after_video_complete(conn, row.storyboard_id, row.id)
 
             log_task_success("Webhook", "vidu-video-updated", {
                 "taskId": task_id, "generationId": row.id,

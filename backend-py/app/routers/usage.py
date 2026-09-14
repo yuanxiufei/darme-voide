@@ -1,8 +1,9 @@
 """``/api/v1/usage`` —— 用量与成本。
 
-**已迁移 2 个端点**：``GET /summary``（用量汇总）、``GET /board``（多集成本看板）
-**未迁移 1 个**：``GET /estimate``（生成前费用预估）—— 它依赖 ``estimate-service.ts``
-与 ``cost-catalog.ts``（各厂商单价目录），属媒体域的前置，随那一批一起做。
+**已整域迁移**：``GET /summary``（用量汇总）、``GET /board``（多集成本看板）、
+``GET /estimate``（生成前费用预估）—— 后者 2026-09-15 校正：**后来已迁**
+（``estimate-service`` / ``cost-catalog`` 均已落地）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准。
 
 用正常信封（``code: 200``）。注意 ``/summary`` 的顶层是 camelCase、``records`` 与分组条目
 内部是 snake_case；``/board`` 整体 snake_case —— 都是原 TS 的形状，别统一。

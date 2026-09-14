@@ -1,7 +1,8 @@
 """``/api/v1/style-profiles`` —— 与 ``backend/src/routes/style-profiles.ts`` 对齐（7 / 8 端点）。
 
-**已迁移 7 个**：列表 / 详情 / 创建 / 更新 / 激活 / 写入提炼结果 / 软删
-**未迁移 1 个**：``POST /:id/distill``（LLM 分析 + ffprobe，属媒体/Agent 域 ⇒ 走反代）
+**已整域迁移**：列表 / 详情 / 创建 / 更新 / 激活 / 写入提炼结果 / 软删 / **提炼（``distill``）**
+—— 2026-09-15 校正：``POST /:id/distill`` 后来已迁（LLM 走 ``text_generation``、媒探测走 ffprobe 子进程）。
+⚠️ 「哪些没迁」**以 ``tests/route_parity_test.py`` 的机械扫描为准**，文件头的手写清单本仓已有多次过期。
 
 ⚠️ 两处 ``Number(param)`` **不带**有限性校验（与 ``parseParamId`` 不同）：
 ``Number("abc")`` 得到 NaN，JS 侧会一路带到 SQL 查出空结果 ⇒ 返回

@@ -59,6 +59,7 @@ TESTS = [
     ("设置分镜首尾帧 + 抽帧泛化", "set_frame_test.py"),
     ("重生成镜头帧 + 端点", "regenerate_frame_test.py"),
     ("图像连续性 QC + 端点", "consistency_qc_test.py"),
+    ("技术维度 QC + 接线", "technical_qc_test.py"),
     ("TS 源码快照反漂移", "freeze_snapshot_test.py"),
     ("Agent 创建器 + generate", "creator_test.py"),
     ("提示词优化器 + optimize", "optimizer_test.py"),

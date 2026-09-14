@@ -1,8 +1,9 @@
-"""``/api/v1/export`` —— 与 ``backend/src/routes/export.ts`` 对齐（**已迁移 2 / 7 端点**）。
+"""``/api/v1/export`` —— 与 ``backend/src/routes/export.ts`` 对齐（**整域关闭 7/7**）。
 
-**已迁移**：工程账本 JSON/Markdown、断点续作 stale 扫描（这两个是**纯 DB**）
-**未迁移**：``/edl``（需 ffprobe 探时长）、``/dramas/:id`` 打包 ZIP、``/jianying-draft``（339 行 +
-时长探测）、``/qc-report``（ffprobe）、``/contact-sheet``（515 行 + 媒体探测）
+**已迁移**：工程账本 JSON/Markdown、断点续作 stale 扫描（**纯 DB**）、``/edl``（ffprobe 探时长）、
+``/dramas/:id`` 打包 ZIP、``/jianying-draft``（草稿 + 时长探测）、``/qc-report``（JSON/MD/HTML）、
+``/contact-sheet``（逐镜缩略图网格）—— 后五项 2026-09-15 校正：**后来都已迁**。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准。
 
 ⚠️ **本域没有统一信封**：这些端点返回的是**文件本体**（JSON / Markdown / ZIP / EDL），
 并带 ``Content-Disposition: attachment``。所以这里用的是裸 ``Response``，不是 ``success()``。

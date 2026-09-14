@@ -1,7 +1,8 @@
 """物品库（props）域 —— 与 ``backend/src/routes/props.ts`` 对齐。
 
-**已迁移 5 个端点**：`GET /`（列表）、`GET /{id}`、`POST /`、`PUT /{id}`、`DELETE /{id}`
-**未迁移 1 个**：`POST /{id}/generate-image`（依赖 ``services/image-generation.ts``）
+**已整域迁移**：`GET /`（列表）、`GET /{id}`、`POST /`、`PUT /{id}`、`DELETE /{id}`、
+`POST /{id}/generate-image` —— 后者 2026-09-15 校正：**后来已迁**（``services/image_generation.py``）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准。
 
 ⚠️ 三处本域特有、别抄错的地方：
 

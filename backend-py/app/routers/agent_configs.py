@@ -1,12 +1,14 @@
 """``/api/v1/agent-configs`` —— 与 ``backend/src/routes/agentConfigs.ts`` 对齐（5 / 7 端点）。
 
-**已迁移 5 个**：``GET /``、``GET /:id``、``POST /``（按 agent_type upsert）、``PUT /:id``、``DELETE /:id``
-**未迁移 2 个**：
+**已整域迁移（7/7）** —— 2026-09-15 校正：早先此处把 ``GET /defaults`` 与 ``POST /generate`` 列为未迁，
+两者**后来都已迁**：
 
-* ``GET /defaults`` —— 依赖 ``agents/index.ts`` 的 ``DEFAULT_PROMPTS``（5 个 Agent 的完整提示词）
-  与 ``skills.ts`` 解析各 SKILL.md frontmatter 的 ``agents:`` 绑定 ⇒ 属**提示词/skills 资产域**，
-  随那一批一起做（那里是「提示词多头维护」的单一事实来源，不能在这里另存一份副本）。
-* ``POST /generate`` —— 调 LLM 生成 Agent 配置（``agents/creator.js``）。
+* ``GET /defaults`` —— ``DEFAULT_PROMPTS``（5 个 Agent 提示词）+ ``resolveDefaultSkills`` 的 skill 绑定
+  都在 Python 侧（``services/agent_prompts.py`` / ``agent_registry``），仍是**提示词的唯一出口**，
+  前端不得硬编码；此文件不另存副本。
+* ``POST /generate`` —— 调 LLM 生成 Agent 配置（``agent_configs`` 的 creator 链路已落地）。
+
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准。
 
 ⚠️ 返回形状是 **snake_case**（原 TS 显式 ``toSnakeCase``），且**错误码两种**：
 ``GET /`` 与 ``GET /:id``、``DELETE`` 的 catch 走 **500** ``{code,data:null,message}``，

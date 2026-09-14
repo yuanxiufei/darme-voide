@@ -855,7 +855,7 @@ def main() -> int:
         + _query_param_drift()
         + _agent_types_drift()
         + _agent_prompts_drift()
-        + _consistency_thresholds_drift()
+        + _numeric_thresholds_drift()
     )
     for line in drift:
         print(f"  DRIFT   {line}")
@@ -863,31 +863,42 @@ def main() -> int:
     return 1 if (shadow or drift) else 0
 
 
-def _consistency_thresholds_drift() -> list[str]:
-    """校验 ``consistency_qc.CONSISTENCY_QC_THRESHOLDS`` 与 TS 同名常量**逐值**一致。
+def _numeric_thresholds_drift() -> list[str]:
+    """校验**数值型**镜像常量：``(TS 文件, 常量名, Python 模块)`` 三者逐值一致。
 
-    守卫里其余镜像多为**字符串**常量；这一条是**数值**型：阈值直接决定 warning/info 的判定
-    边界，两边不一致时**不会报任何错**，只会「同一集在两套后端下得到不同的严重度」。
+    守卫里其余镜像多为**字符串**常量；这一条专管**数值**阈值 —— 它们直接决定
+    warning/info/缺陷的判定边界，两边不一致时**不会报任何错**，只会「同一份素材在两套后端下
+    得到不同的严重度/分数」。新增此类常量时，把它加进下面的表即可。
     """
-    from app.services import consistency_qc as cq
+    import importlib  # noqa: PLC0415
 
-    src = (_SRC_ROOT / "services" / "consistency-qc.ts").read_text(encoding="utf-8")
-    block = re.search(r"CONSISTENCY_QC_THRESHOLDS\s*=\s*\{(.*?)\}\s*as const", src, re.S)
-    if block is None:
-        return ["consistency-qc.ts: 找不到 CONSISTENCY_QC_THRESHOLDS 块（解析失败，需人工核对）"]
-
-    # 块内的 `name: 0.55` 形态（注释里没有「冒号 + 数字」，不会误匹配）
-    ts_values = {name: float(value)
-                 for name, value in re.findall(r"(\w+)\s*:\s*([0-9.]+)", block.group(1))}
+    sources = (
+        ("services/consistency-qc.ts", "CONSISTENCY_QC_THRESHOLDS", "app.services.consistency_qc"),
+        ("services/technical-qc.ts", "TECH_QC_THRESHOLDS", "app.services.technical_qc"),
+    )
     drift: list[str] = []
-    for key, value in cq.CONSISTENCY_QC_THRESHOLDS.items():
-        if key not in ts_values:
-            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key} 在 TS 侧不存在")
-        elif abs(ts_values[key] - value) > 1e-12:
-            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key}: TS={ts_values[key]} / py={value}")
-    for key in ts_values:
-        if key not in cq.CONSISTENCY_QC_THRESHOLDS:
-            drift.append(f"CONSISTENCY_QC_THRESHOLDS.{key}: TS 有但 Python 侧缺")
+    for relative, const, module_path in sources:
+        source = _SRC_ROOT / relative
+        if not source.is_file():
+            drift.append(f"{relative}: 文件不存在（守卫依赖的 TS 源码缺失）")
+            continue
+        src = source.read_text(encoding="utf-8")
+        block = re.search(rf"{const}\s*=\s*\{{(.*?)\}}\s*as const", src, re.S)
+        if block is None:
+            drift.append(f"{relative}: 找不到 {const} 块（解析失败，需人工核对）")
+            continue
+        # 块内的 `name: 0.55` 形态（注释里没有「冒号 + 数字」，不会误匹配）
+        ts_values = {name: float(value)
+                     for name, value in re.findall(r"(\w+)\s*:\s*(-?[0-9.]+)", block.group(1))}
+        py_values: dict[str, float] = getattr(importlib.import_module(module_path), const)
+        for key, value in py_values.items():
+            if key not in ts_values:
+                drift.append(f"{const}.{key} 在 TS 侧不存在")
+            elif abs(ts_values[key] - value) > 1e-12:
+                drift.append(f"{const}.{key}: TS={ts_values[key]} / py={value}")
+        for key in ts_values:
+            if key not in py_values:
+                drift.append(f"{const}.{key}: TS 有但 Python 侧缺")
     return drift
 
 

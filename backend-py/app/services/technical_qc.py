@@ -19,6 +19,22 @@
 
 ⚠️ ``execFileP`` 的判失败条件很特别：**只有「非零退出且 stderr 为空」才算失败** ——
 ffmpeg 的滤镜输出全在 stderr，正常结束也可能非零退出。这里逐字镜像（``_run``）。
+⇒ 连带后果：**坏文件/不存在的视频也会「成功」**（ffprobe 非零退出但打了 stderr）⇒ 不扣分、
+后续检测全部空转，最终 100 分。与原 TS 一致，**不要顺手改成非零即失败**。
+
+## 🔴 三项检测是**继承缺陷（两边都死）**，照抄未修
+
+2026-09-15 实测 ffmpeg 真实输出后确认：**冻帧 / 音频真峰 / 集成响度**三项在 Node 与 Python
+**都永远判不出来**（正则与 ffmpeg 实际输出格式不符；黑场、帧率、时长三项正常）：
+
+* ``freezedetect`` 输出是**带前缀的多行**：``[Parsed_freezedetect_0 @ 0x…] lavfi.freezedetect.freeze_start: 0``
+  ⇒ 而正则是 ``freeze_start: N <空白> freeze_duration: N``（要求两者相邻）⇒ 永不匹配；
+* ``ebur128`` 现代版本打的是**逐帧进度行**（``t: 0.09 … I: -70.0 LUFS … TPK: -16.5 dBFS``），
+  **根本没有** ``Integrated loudness:`` / ``True peak:`` 这种 summary 行 ⇒ 两个正则都永不匹配。
+
+⇒ 于是 ``drain`` 里「真峰防削波」「响度偏离 ±1 LUFS」两条**永不触发**（``integratedLoudness`` 恒 null）。
+**要修必须两侧一起改**（并同步 ``TECH_QC_THRESHOLDS`` 的语义），只改一边会造成真正的行为分叉 ——
+``tests/technical_qc_test.py`` 已用「真实输出格式 ⇒ 解析为空」的用例把当前行为钉住，修好时会红 = 预期信号。
 """
 
 from __future__ import annotations

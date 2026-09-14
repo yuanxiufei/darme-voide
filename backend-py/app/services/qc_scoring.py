@@ -41,6 +41,7 @@ from ..models import (
 )
 from ..response import js_round, now
 from .task_logger import log_task_success, log_task_warn
+from .technical_qc import run_technical_qc
 
 __all__ = ["parse_entity_states", "run_qc_after_video_complete", "score_storyboard"]
 
@@ -322,11 +323,14 @@ def score_storyboard(conn: Connection, storyboard_id: Any) -> dict[str, Any]:
 
 def run_qc_after_video_complete(conn: Connection, storyboard_id: Any,
                                 video_generation_id: Any) -> None:
-    """视频生成完成后自动触发 QC（fire-and-forget 语义：**失败只 warn，不向上抛**）。
+    """视频生成完成后自动触发 QC（**失败只 warn，不向上抛**）。
 
-    ⚠️ 技术维度 QC（``technical-qc.ts``：黑场/冻帧/响度/帧率硬性检测）**尚未移植** ⇒
-    这里只跑规则打分，技术维度留一条 warn（与 ``video_generation`` 里原来的 ``qc-skipped`` 相比，
-    至少规则分与 ``video_quality_checks`` 记录已经真实产出）。
+    与 TS 一致：**规则打分**先跑（失败 warn ``auto-score-failed``），随后**独立**跑**技术维度**
+    （``technical_qc``：黑场/冻帧/响度/帧率/时长），失败 warn ``tech-qc-failed`` —— 两者互不影响。
+
+    ⚠️ 与 TS 的差异：Node 的 ``runTechnicalQc`` 是 **fire-and-forget**（``.catch()`` 不 await），
+    Python 侧**同事务等待完成** —— 写回必须用调用方的连接，detached task 极可能跑在连接提交/关闭
+    之后（已写成 ``technical_qc`` 模块 docstring 里的第一条差异）。
     """
     try:
         score_storyboard(conn, storyboard_id)
@@ -335,7 +339,11 @@ def run_qc_after_video_complete(conn: Connection, storyboard_id: Any,
             "storyboardId": storyboard_id, "videoGenerationId": video_generation_id,
             "error": str(err),
         })
-    log_task_warn("QcScoring", "tech-qc-skipped", {
-        "storyboardId": storyboard_id, "videoGenerationId": video_generation_id,
-        "reason": "technical-qc 未移植（ffmpeg 黑场/冻帧/响度检测）",
-    })
+    # 技术维度 QC（黑场/冻帧/响度/帧率/时长硬性数值），独立一步 —— 失败不影响上面的规则分
+    try:
+        run_technical_qc(conn, storyboard_id, video_generation_id)
+    except Exception as err:  # noqa: BLE001 —— 与 TS 的 `.catch()` 等价
+        log_task_warn("QcScoring", "tech-qc-failed", {
+            "storyboardId": storyboard_id, "videoGenerationId": video_generation_id,
+            "error": str(err),
+        })

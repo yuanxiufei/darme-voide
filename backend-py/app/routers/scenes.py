@@ -1,7 +1,8 @@
 """scenes 域 —— 与 ``backend/src/routes/scenes.ts`` 对齐。
 
-**已迁移 4 个端点**：`GET /{id}`、`POST /`、`PUT /{id}`、`DELETE /{id}`
-**未迁移 1 个**：`POST /{id}/generate-image`（依赖 ``services/image-generation.ts``）
+**已整域迁移**：`GET /{id}`、`POST /`、`PUT /{id}`、`DELETE /{id}`、
+`POST /{id}/generate-image` —— 后者 2026-09-15 校正：**后来已迁**（``services/image_generation.py``）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准。
 
 ⚠️ 三处容易照抄错的语义（原 TS 就是这样，逐条对齐）：
 

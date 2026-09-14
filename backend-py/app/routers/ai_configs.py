@@ -3,7 +3,9 @@
 **已迁移 12 个端点**：列表 / 新建(201) / 一键配置 / 一键本地 / 详情 / 更新 / 删除 /
 本地配置列表 / 服务商目录(``ai-providers``) + ``GET /runtime/health``（本地四大运行时探测）
 + **``GET /gpu/status``、``POST /gpu/release-all``（GPU 显存管理器，配 ``services/gpu_manager.py``）**
-**未迁移 6 个**（全部依赖外部进程或网络）：``/ollama/*``(4)、``POST /models``、``POST /test``
+**已全部注册**（2026-09-15 校正）：``/ollama/*``(4)、``POST /models``、``POST /test`` **后来都已迁**
+（依赖外部进程/网络的那几条走既有 HTTP/子进程链路，不再 501 兜底）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册仅 1 条**：``storage/change``）。
 
 ⚠️ 四处易错点：
 
