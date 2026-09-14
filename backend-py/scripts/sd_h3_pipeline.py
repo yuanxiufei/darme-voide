@@ -9,12 +9,12 @@
     probe    →   调用 sd_h3_compat_probe.py 做静态判定（--live 真机 load）
 
 用法：
-    python scripts/sd_h3_pipeline.py                 # 顺序执行 doctor→download→build→probe
-    python scripts/sd_h3_pipeline.py doctor          # 单步：仅体检
-    python scripts/sd_h3_pipeline.py download        # 单步：仅下载
-    python scripts/sd_h3_pipeline.py build           # 单步：仅编译
-    python scripts/sd_h3_pipeline.py probe [--live]  # 单步：仅判定
-    python scripts/sd_h3_pipeline.py --help
+    python backend-py/scripts/sd_h3_pipeline.py                 # 顺序执行 doctor→download→build→probe
+    python backend-py/scripts/sd_h3_pipeline.py doctor          # 单步：仅体检
+    python backend-py/scripts/sd_h3_pipeline.py download        # 单步：仅下载
+    python backend-py/scripts/sd_h3_pipeline.py build           # 单步：仅编译
+    python backend-py/scripts/sd_h3_pipeline.py probe [--live]  # 单步：仅判定
+    python backend-py/scripts/sd_h3_pipeline.py --help
 
 依赖：Python 3.8+ 标准库 + 同目录 model_manager.py（复用 download_url/check_bin）。
 编译依赖：Git、CMake 3.x+、Visual Studio 2019/2022（C++ 桌面开发）、CUDA Toolkit。
@@ -28,7 +28,8 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+# ⚠️ 与 model_manager.py 同理：本文件在 ``backend-py/scripts/`` ⇒ 仓库根上跳**两级**
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 
 from model_manager import check_bin, download_url  # noqa: E402

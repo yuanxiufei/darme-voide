@@ -176,8 +176,8 @@ skills/<lib>/<任意层级>/<skill>/SKILL.md
 那些文件引用一旦断链，只在读者真走到那一行时才表现为「指向空处」。所以有一条守卫：
 
 ```bash
-node scripts/check-skill-refs.mjs          # 退出码 1 = 存在致命断链
-node scripts/check-skill-refs.mjs --verbose # 额外列出被跳过的候选，审计盲区
+python backend-py/scripts/check_skill_refs.py          # 退出码 1 = 存在致命断链
+python backend-py/scripts/check_skill_refs.py --verbose # 额外列出被跳过的候选，审计盲区
 ```
 
 **基线约定**：**141 文件 / 96 处待校验 / 致命 0 / 非致命 0**

@@ -72,7 +72,7 @@ SYSTEM_DIRS = frozenset([
     "onedrive", "onedrivetemp", "intel", "amd", "nvidia", "drivers",
 ])
 
-#: ComfyUI 安装位置探测候选（与 ``scripts/model_manager.py`` 保持一致）
+#: ComfyUI 安装位置探测候选（与 ``backend-py/scripts/model_manager.py`` 保持一致）
 COMFYUI_CANDIDATES = [
     "D:/Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI",
     "D:/Comfy-Desktop/ComfyUI-Shared",

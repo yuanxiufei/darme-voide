@@ -4,7 +4,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import os as _os, pathlib as _pathlib
 P = (_os.environ.get('SEEDANCE2_CORPUS')
-     or str(_pathlib.Path(__file__).resolve().parents[2]
+     or str(_pathlib.Path(__file__).resolve().parents[3]  # 本文件在 backend-py/scripts/corpus/ 下（2026-09-15 从 scripts/corpus/ 搬来）
             / 'data' / 'prompt-corpus' / 'seedance2' / 'metadata.jsonl'))
 
 # 按需开关（**不设 = 输出与历史逐字一致**）：

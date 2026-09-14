@@ -70,7 +70,7 @@ os.environ["DATA_ROOT"] = str(_smoke_root)
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
-from app.config import PROJECT_ROOT, get_db_path, server  # noqa: E402
+from app.config import PROJECT_ROOT, get_data_root, get_db_path, server  # noqa: E402
 from app.models import metadata  # noqa: E402
 
 check("config: PROJECT_ROOT == repo root", PROJECT_ROOT == REPO, str(PROJECT_ROOT))
@@ -789,7 +789,9 @@ with TestClient(app) as client:
     #   都被后续迁移打破且只有全量才暴露 ⇒ 见 `_unregistered_samples` 的说明）
     cs_ep_id = client.get(f"/api/v1/dramas/{cs_drama_id}").json()["data"]["episodes"][0]["id"]
     samples = _unregistered_samples()
-    check("未迁移兜底: 仍有未迁移端点（动态抽样非空）", len(samples) > 0, len(samples))
+    # ⚠️ 2026-09-15 起**未迁移清单已空**（`storage/change` 是最后一条）⇒ 断言由「非空」**翻转**为
+    #    「必须为空」：以后谁新增了 TS 端点却忘了注册，这里会以「意外多出一条」先红。
+    check("未迁移兜底: 未迁移清单**已清空**（0 条，绞杀者收口）", len(samples) == 0, samples)
     for method, path in samples:
         code = client.request(method, path, json={}).status_code
         check(f"未迁移兜底: {method} {path} -> 501", code == 501, code)
@@ -1372,8 +1374,19 @@ with TestClient(app) as client:
           Path(si["dataRoot"]).resolve() == Path(os.environ["DATA_ROOT"]).resolve(), si["dataRoot"])
     check("storage info: dbExists true + dbSizeBytes > 0",
           si["dbExists"] is True and si["dbSizeBytes"] > 0, str(si["dbSizeBytes"]))
-    check("storage change: NOT migrated (shared .data-root marker) -> 501",
-          client.post("/api/v1/storage/change", json={"path": "x"}).status_code == 501)
+    # ⚠️ 2026-09-15：`POST /storage/change` 已迁移（删 `backend/` 的最后一块阻塞）。
+    #    这里**必须用「必然被拒」的入参**：早先写 `{"path": "x"}` 时它只返回 501 所以无害，
+    #    迁移后相对路径会被 resolve 成真实目录并**真的切换数据根**（还会写仓库根 `.data-root`）——
+    #    我第一版没改这条，冒烟当场把数据根切到了 `backend-py/x`（已清理）。改用「项目根」入参，
+    #    并额外断言**数据根没变**，把「零副作用」也钉住。
+    _root_before = get_data_root()
+    _r = client.post("/api/v1/storage/change", json={"path": str(PROJECT_ROOT)})
+    dump("POST /api/v1/storage/change (项目根 -> 应 400)", _r)
+    check("storage change: 已迁移（项目根被拒 -> 400）", _r.status_code == 400, _r.text[:160])
+    check("storage change: 被拒时**数据根不变**（零副作用）",
+          get_data_root() == _root_before
+          and Path(get_data_root()).resolve() == Path(os.environ["DATA_ROOT"]).resolve(),
+          get_data_root())
 
     # --- usage ---
     raw = sqlite3.connect(get_db_path())
@@ -2529,11 +2542,15 @@ with TestClient(app) as client:
     r = client.get(f"/api/v1/dramas/{new_id}/rhythm")
     dump("GET /api/v1/dramas/{id}/rhythm (已迁移，不应再 501)", r)
     check("strangler: 已迁移子路径**不再** 501（rhythm）", r.status_code != 501, r.text[:120])
+    # ⚠️ 这条断言**必须跟着「未迁移清单」走**：`POST /storage/change` 现已迁移（它是删
+    #    `backend/` 的最后一块阻塞）⇒ **未迁移清单已空**，故这里改成正向断言 +
+    #    保留一条「兜底接缝仍在」的样本（绞杀者接缝本身不能拆，删库前它是安全网）。
     r2 = client.post("/api/v1/storage/change", json={})
-    dump("POST /api/v1/storage/change (not migrated)", r2)
-    check("strangler: unmigrated sub-path -> 501",
-          r2.status_code == 501 and r2.json()["code"] == 501, r2.text[:120])
-    check("strangler: other domain -> 501", client.get("/api/v1/storyboards").status_code == 501)
+    dump("POST /api/v1/storage/change (已迁移，空 body 应 400 而非 501)", r2)
+    check("strangler: 已迁移子路径**不再** 501（storage/change 空 body -> 400）",
+          r2.status_code == 400 and r2.json()["message"] == "请填写目标目录路径", r2.text[:120])
+    check("strangler: 未注册路径**仍**走 501 兜底（接缝保留）",
+          client.get("/api/v1/storyboards").status_code == 501)
 
     # --- 静态站 ---
     check("static: missing file -> 404", client.get("/static/not-exist.png").status_code == 404)

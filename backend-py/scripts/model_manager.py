@@ -11,13 +11,13 @@ Drama Studio 通用本地模型安装与管理工具（Python 标准库零依赖
   - manual  : 仅打印部署指引，不自动安装（如 Wan 2.6 GGUF）
 
 用法：
-  python scripts/model_manager.py list [--category X] [--runtime Y] [--missing]
-  python scripts/model_manager.py download [--key ...] [--category ...] [--required] [--all] [--force]
-  python scripts/model_manager.py remove --key ...
-  python scripts/model_manager.py doctor
-  python scripts/model_manager.py install-nodes [--only ...]
-  python scripts/model_manager.py add-model --key ... --name ... --category ... --runtime ... [...]
-  python scripts/model_manager.py remove-model --key ...
+  python backend-py/scripts/model_manager.py list [--category X] [--runtime Y] [--missing]
+  python backend-py/scripts/model_manager.py download [--key ...] [--category ...] [--required] [--all] [--force]
+  python backend-py/scripts/model_manager.py remove --key ...
+  python backend-py/scripts/model_manager.py doctor
+  python backend-py/scripts/model_manager.py install-nodes [--only ...]
+  python backend-py/scripts/model_manager.py add-model --key ... --name ... --category ... --runtime ... [...]
+  python backend-py/scripts/model_manager.py remove-model --key ...
 """
 
 import argparse
@@ -39,7 +39,10 @@ if sys.platform == "win32":
             pass
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+# ⚠️ 本文件在 ``backend-py/scripts/`` 下 ⇒ 仓库根要**上跳两级**（2026-09-15 从仓库根
+#    ``scripts/`` 搬来时一并修正；只跳一级会得到 ``backend-py``，于是 models.json 与
+#    ``local_services`` 全找不到，且**不会报错**、只是清单为空）。
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 CATALOG_PATH = os.path.join(PROJECT_ROOT, "configs", "models.json")
 PATHS_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "model-paths.json")
 

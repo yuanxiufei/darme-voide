@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Drama Studio 本地模型统一清单：多类模型（文本/图片/视频/TTS）+ ComfyUI 自定义节点。由 scripts/model_manager.py 读取，增删模型无需改代码。",
+  "description": "Drama Studio 本地模型统一清单：多类模型（文本/图片/视频/TTS）+ ComfyUI 自定义节点。由 backend-py/scripts/model_manager.py 读取，增删模型无需改代码。",
   "models": [
     {
       "key": "dit_fl2va_int8",

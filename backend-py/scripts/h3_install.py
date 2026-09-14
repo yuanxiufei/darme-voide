@@ -8,11 +8,11 @@
 broken；数据一律从 models.json 读取，增删模型无需再改本文件。
 
 新能力（多类模型：文本/图片/视频/TTS；ollama/git/manual 安装；add-model/remove-model）
-请直接使用 `scripts/model_manager.py`：
+请直接使用 `backend-py/scripts/model_manager.py`：
 
-    python scripts/model_manager.py list
-    python scripts/model_manager.py download --required
-    python scripts/model_manager.py doctor
+    python backend-py/scripts/model_manager.py list
+    python backend-py/scripts/model_manager.py download --required
+    python backend-py/scripts/model_manager.py doctor
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# 让 `from scripts.h3_install import ...` 与直接 `python scripts/h3_install.py` 均可工作
+# 让 `from h3_install import ...` 与直接 `python backend-py/scripts/h3_install.py` 均可工作
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from model_manager import (  # noqa: E402
@@ -67,6 +67,12 @@ def _load_from_catalog():
     models: dict[str, H3Model] = {}
     for m in cat.get("models", []):
         if m.get("category") == "video" and m.get("runtime") == "comfyui":
+            # ⚠️ 目录里**并非每条都有 url**（2026-09-15 实测 16 条中 7 条没有）⇒ 旧版直接
+            #    `m["url"]` 会在 import 期 KeyError，整个 shim 连 `--help` 都跑不起来。
+            #    缺 url 的条目本 shim 也下载不了 ⇒ 跳过并留痕，交给 model_manager.py 处理。
+            if not m.get("url"):
+                print(f"[h3_install] 跳过无 url 的条目：{m.get('key')}", file=sys.stderr)
+                continue
             models[m["key"]] = H3Model(
                 m["key"],
                 m["filename"],

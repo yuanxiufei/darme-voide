@@ -12,9 +12,9 @@ sd.cpp 官方 docs/minimax_h3.md 只支持 base H3（time-embedder DiT / AdaLN c
 => arch 同名 ≠ 一定能加载，需实证。
 
 用法：
-  python scripts/sd_h3_compat_probe.py --gguf <path.gguf>          # 静态判定
-  python scripts/sd_h3_compat_probe.py --gguf <path.gguf> --live   # 真机 load
-  python scripts/sd_h3_compat_probe.py --list                      # 支持矩阵
+  python backend-py/scripts/sd_h3_compat_probe.py --gguf <path.gguf>          # 静态判定
+  python backend-py/scripts/sd_h3_compat_probe.py --gguf <path.gguf> --live   # 真机 load
+  python backend-py/scripts/sd_h3_compat_probe.py --list                      # 支持矩阵
 """
 from __future__ import annotations
 

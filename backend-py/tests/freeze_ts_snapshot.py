@@ -124,7 +124,9 @@ def freeze() -> int:
             shutil.copyfile(source, target)
             copied += 1
     total = sum(p.stat().st_size for p in FROZEN.rglob("*.ts"))
-    print(f"✅ 冻结完成：{copied} 个文件 / {total / 1024:.0f} KB -> {FROZEN}")
+    distinct = len(list(FROZEN.rglob("*.ts")))
+    print(f"✅ 冻结完成：{distinct} 个不同 .ts / {total / 1024:.0f} KB -> {FROZEN}"
+          f"（本次复制 {copied} 次；清单与目录有重叠是正常的）")
     print(f"   手写清单 {len(FILES)} 个 + 自动发现 {auto} 个文件；目录 {len(dirs_to_copy)} 个")
     return 0
 

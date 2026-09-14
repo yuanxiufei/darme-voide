@@ -4,7 +4,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import os as _os, pathlib as _pathlib
 P = (_os.environ.get('SEEDANCE2_CORPUS')
-     or str(_pathlib.Path(__file__).resolve().parents[2]
+     or str(_pathlib.Path(__file__).resolve().parents[3]  # 本文件在 backend-py/scripts/corpus/ 下（2026-09-15 从 scripts/corpus/ 搬来）
             / 'data' / 'prompt-corpus' / 'seedance2' / 'metadata.jsonl'))
 # 按需开关（**不设 = 输出与历史逐字一致**）：SEEDANCE2_LIMIT=N 只读前 N 条。
 # 本脚本做 i18n / spec 深挖，要保留原始对象（含 recs[0] 样本），故不做投影。

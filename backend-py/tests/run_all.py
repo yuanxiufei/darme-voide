@@ -1,16 +1,25 @@
 """跑完全部后端自检（每迁完一块请跑这个）。
 
-五个自检各自独立、**都不碰真实库**：
+**本文件的 ``TESTS`` 就是套件权威清单**（README 里那棵树只是摘录，别去数它）。
 
-* ``smoke_test.py``          契约冒烟（跑在数据库副本上）
-* ``adapters_test.py``       适配器层（纯函数，无需网络/密钥）
-* ``vendor_errors_test.py``  厂商错误归因 + 重试（``MockTransport``，零真实网络）
-* ``text_generation_test.py``文本生成纯逻辑（提示词 / 规则拆分器）
-* ``route_parity_test.py``   路径守卫（0 遮蔽）+ 镜像常量漂移守卫
+规模（2026-09-15 实测）：**62 个套件 / 2437 项断言**。各套件**各自独立进程**、都不碰真实库：
+
+* 契约冒烟 ``smoke_test.py``（跑在**数据库副本**上，覆盖每一条已注册端点）
+* 纯逻辑/适配层：``adapters_test.py``、``vendor_errors_test.py``（``MockTransport``，零真实网络）、
+  ``text_generation_test.py``、``prompt_storyboard_test.py``、``grid_prompt_test.py`` 等
+* 迁移域回归：各 ``*_route_test.py`` / ``*_generate_test.py``（事件与落盘都打桩）
+* 机械守卫：``route_parity_test.py``（路径 0 遮蔽 + 九道镜像常量漂移）、
+  ``freeze_snapshot_test.py``（TS 快照反漂移）、``parity_diff_test.py``（Node↔Python 差分比较器）
+* ⚠️ 少数套件会用 **ffmpeg 现场造真实媒体**（``consistency_qc_test.py`` / ``color_grade_test.py`` /
+  ``compressed_data_url_test.py``）⇒ 机器上没有 ffmpeg 时这几套会失败，属环境依赖（见 README）。
 
 用法::
 
-    ./.venv/Scripts/python.exe tests/run_all.py
+    ./.venv/Scripts/python.exe tests/run_all.py          # 全量
+    ./.venv/Scripts/python.exe tests/<某个>_test.py      # 单跑（改哪儿跑哪儿）
+
+⚠️ 单跑很快，全量偏慢（分钟级）；若被上层环境截断，可按 ``run_all.TESTS[a:b]`` 切片分批跑，
+   结论等价（本项目实测过：三批 = 61 套件一次全绿）。
 """
 from __future__ import annotations
 
@@ -80,6 +89,7 @@ TESTS = [
     ("剪映草稿导出", "jianying_draft_test.py"),
     ("QC 报告 + 联系表 2 端点", "qc_report_test.py"),
     ("时代背景提炼 + 风格提炼 2 端点", "era_style_distill_test.py"),
+    ("数据根切换 + 存储 2 端点", "storage_change_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

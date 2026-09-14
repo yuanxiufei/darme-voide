@@ -3,7 +3,7 @@
 > 语料：`GokuScraper/seedance-2-prompts-datasets` → `metadata.jsonl`
 > 许可：**CC BY 4.0（可商用，需署名）**
 > 落盘位置：`data/prompt-corpus/seedance2/metadata.jsonl`（37.58 MB，`data/prompt-corpus/` 已 gitignore）
-> 分析时间：2026-09-12　分析脚本：`scripts/corpus/analyze3.py`
+> 分析时间：2026-09-12　分析脚本：`backend-py/scripts/corpus/analyze3.py`
 
 ---
 
@@ -247,7 +247,7 @@ for l in open('data/prompt-corpus/seedance2/metadata.jsonl', encoding='utf-8'):
 
 # 重跑统计（词频 / 结构 / 标签）
 # 脚本自解析仓库根；也可用 SEEDANCE2_CORPUS=/abs/path/metadata.jsonl 覆盖
-python scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.log
+python backend-py/scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.log
 ```
 
 **合规**：
@@ -266,6 +266,6 @@ python scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.log
 |---|---|
 | `data/prompt-corpus/seedance2/metadata.jsonl` | 37.58 MB，8755 条（**语料本体**，gitignored） |
 | `data/prompt-corpus/analyze*.log` | 各轮输出存档 |
-| `scripts/corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |
-| `scripts/corpus/analyze2.py` | 深挖 i18n / raw_p / category / spec |
-| `scripts/corpus/analyze3.py` | **主力脚本**：词表、结构特征、标签频次 |
+| `backend-py/scripts/corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |
+| `backend-py/scripts/corpus/analyze2.py` | 深挖 i18n / raw_p / category / spec |
+| `backend-py/scripts/corpus/analyze3.py` | **主力脚本**：词表、结构特征、标签频次 |

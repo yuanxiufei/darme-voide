@@ -1,12 +1,12 @@
 """语料检索工具（移植自 ``agents/tools/corpus-tools.ts``，148 行）—— 让 Agent 能「找相似镜头」。
 
-数据源：``data/prompt-corpus/_normalized/prompts.jsonl``（由 ``scripts/corpus/`` 产出）。
+数据源：``data/prompt-corpus/_normalized/prompts.jsonl``（由 ``backend-py/scripts/corpus/`` 产出）。
 
 ⚠️ 该目录**已 gitignore**（第三方语料不进仓库）⇒ 新克隆的仓库里文件不存在，所以本工具
 **必须在语料缺失时优雅降级**：返回 ``available=false`` + 提示，而不是抛错 ——
 否则「没采语料」会直接变成「Agent 跑不动」。
 
-⚠️ 打分口径与 ``scripts/corpus/search.mjs`` **保持一致**（2-gram + 位置加权）：改这里要同步改那边，
+⚠️ 打分口径与 ``backend-py/backend-py/scripts/corpus/search.py`` **保持一致**（2-gram + 位置加权）：改这里要同步改那边，
 否则「命令行验证有效」与「Agent 实际效果」会分叉。
 
 ⚠️ 返回的 ``prompt_excerpt`` **截断到 400 字符**且压平空白：参考是给模型看的，过长会挤占上下文；
@@ -78,7 +78,7 @@ def tokenize(text: str) -> list[str]:
 
 _NOT_AVAILABLE_HINT = (
     "本地语料未安装（data/prompt-corpus/ 已 gitignore，不在仓库内）。"
-    "请先执行 node scripts/corpus/fetch-raw.mjs 采集、node scripts/corpus/normalize.mjs 归一化。"
+    "请先执行 python backend-py/backend-py/scripts/corpus/fetch_raw.py 采集、python backend-py/backend-py/scripts/corpus/normalize.py 归一化。"
     "在语料就绪前，请改用 SKILL 里已有的词表与锚点，不要假设能检索到参考。"
 )
 

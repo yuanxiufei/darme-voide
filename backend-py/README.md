@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2400 项全绿**（冒烟 477 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2437 项全绿**（冒烟 475 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -32,8 +32,8 @@
 | S3 厂商适配器 | `registry` + `types` + 16 个适配器(1611 行) | ✅ **完成**（17 家 / 纯函数，`adapters_test.py` 101 用例 + 守卫覆盖） |
 | S4 媒体服务 | image/video/TTS 生成、`compose`(ffmpeg)、宫格、合并、视觉图 | ✅ **主链全通**：`vendor-errors` + text/image/video/TTS+voice-clone 四条链路 + 逐镜路由 + `videos`(6) + `compose`(3) + `merge`(2) + **`grid`(4)**；仅剩**像素处理(校色/参考图压缩)**与**镜头 QC 打分**（调用点均已占位） |
 | S5 **Mastra 替换** | Agent 循环 + 工具调用 + 协议 + **运行时** + 6 组工具(~2900 行) + `agent`(2) | ✅ **完成**：`protocol` + `tool` + **6 组工具** + **`runtime`(运行时：失败分类/退避/模型 fallback/风格注入)** + `agent`(2 端点，**非流式**)；✅ **`DEFAULT_PROMPTS` 已搬**（`services/agent_prompts.py` + 逐字守卫，2026-09-12 决策变更）；⚠️ 未迁 `subagent`/`rhythm-phase`（`skills`/`mcp` 已迁）；⚠️ **Gemini 函数调用循环未支持**（显式报错） |
-| S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | 🔄 **MCP 已迁**（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）；**`auto-pipeline` 已整域关闭**（8 阶段编排 + SSE）；剩 **9 条**（storyboards 4 / gpu 2 / dramas 1 / episodes 1 / storage/change）、**`evaluation` 域已整域关闭**（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）、崩溃恢复 |
-| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **只剩「删 `backend/`」本身（等用户点头）**：benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册仅 1 条**（`storage/change`，有意延后）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（2026-09-14 实测 0 新差异；CASES 仅 10 条只读 GET，**删库当天建议补齐 S7 新增 GET 再跑一次**）｜守卫快照已重冻 **76 文件 / 728 KB**，且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
+| S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | ✅ **全部迁完（剩 0 条）**：MCP（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）｜`auto-pipeline` 整域关闭（8 阶段编排 + SSE）｜`evaluation` 整域关闭（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）｜GPU 显存管理 + 租约接线｜崩溃恢复（项目台账 / 资产版本 / SSE 总线 / 提取尾帧）|
+| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **只剩「删 `backend/`」本身（等用户点头）**：benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册 0 条**（绞杀者已收口：`storage/change` 是最后一条，2026-09-15 迁完）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（**2026-09-15 实测：一致 12 / 已知差异 0 / 不存在路径 4 / 新差异 0**，CASES 已补齐 S7 新增只读 GET）｜守卫快照已重冻 **74 文件 / 728 KB**，且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
 
 顺序是按**依赖**排的：S1 是所有适配器/Agent 的入口，S2/S3 被 S4/S5 依赖，S5 被 S6 依赖。
 **`backend/` 只能在 S7 删** —— 删之前必须先证明等价（129→224 端点的全量对拍）。
@@ -80,14 +80,14 @@
 九道漂移守卫原先是**读 TS 源码**来证明「Python 的路由表/常量/提示词没漂移」。删库前先冻结：
 
 ```bash
-python tests/freeze_ts_snapshot.py          # 把守卫读到的 76 个 .ts 复制到 tests/frozen_ts/（728 KB；清单 = 手写 ∪ 自动发现两种形态）
+python tests/freeze_ts_snapshot.py          # 把守卫读到的 74 个不同 .ts 复制到 tests/frozen_ts/（728 KB；清单 = 手写 ∪ 自动发现**两种形态**）
 python tests/freeze_ts_snapshot.py --check  # 校验完整性（真源码还在时会逐个核对）
 python tests/route_parity_test.py           # 照常跑
 PARITY_USE_FROZEN=1 python tests/route_parity_test.py   # 强制用快照（验证「删库后照样能跑」）
 ```
 
 守卫里的源码根是 ``_SRC_ROOT``：**真源码优先，缺失自动回退快照**。已实测：真源码与快照两条路径
-结论**完全一致**（2026-09-15 实测：Node 224 / Python 226 / 未注册 1 / 0 漂移；由 `tests/freeze_snapshot_test.py` 守着「快照覆盖每个守卫读文件」）⇒ 删库后守卫价值完整保留。
+结论**完全一致**（2026-09-15 实测：Node 224 / Python 227 / 未注册 0 / 0 漂移；由 `tests/freeze_snapshot_test.py` 守着「快照覆盖每个守卫读文件」）⇒ 删库后守卫价值完整保留。
 
 ## 运行
 
@@ -260,8 +260,13 @@ backend-py/
    ├─ regenerate_frame_test.py 重生成镜头帧（帧类型白名单/帧提示词/拼接顺序，17 用例）
    ├─ consistency_qc_test.py   图像连续性 QC（真实图 dHash：ok/info/warning 三档，28 用例）
    ├─ freeze_snapshot_test.py    TS 源码快照反漂移（守卫读到的文件必须在快照里，7 用例）
+   ├─ grid_agent_prompt_test.py 宫格 Agent 提示词 + 端点（12 用例）
+   ├─ subagent_test.py        子 Agent 调度工具（16 用例）
+   ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
+   ├─ compressed_data_url_test.py 参考图压缩（ffmpeg，16 用例）
+   ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十一项
+   └─ run_all.py                一次跑完以上六十二项（**套件权威清单就在这个文件里**，本树只是摘录）
 ```
 
 ## 厂商适配器层（S3）要点
@@ -482,11 +487,11 @@ cd backend-py
 | 媒体生成端点（`characters` 的 `generate-image`/`three-views`/`equip-image`/`expressions`/`batch-generate-images`/`generate-voice-sample`、`scenes` 与 `props` 的 `generate-image`、`storyboards` 的 `generate-tts`/`regenerate-image`/`regenerate-frame`/`set-frame`） | 依赖 `services/image-generation.ts` / TTS / ffmpeg，**不注册** → 走反代（或 501） |
 | `DELETE /storyboards/:id` **只清 `storyboard_characters`，不清 `storyboard_props`** | **继承自 Node 的行为**（会留下 props 关联孤儿行）。照抄未改，但要知情 —— 若日后要清，需同时改两边 |
 | `POST /characters/:id/generate-prompt` | 纯函数但依赖 `shared/prompt-utils.ts`（1456 行、含全部画风词表）⇒ 需作为**独立一次移植**，不宜夹在 CRUD 域里做 |
-| ✅ 节奏相位 / 时代背景 AI 提炼 / 续写剧本 / 一致性 QC / 宫格 Agent 提示词 —— **均已迁**（2026-09-15） | 对应端点全部注册（未注册只剩 `POST /storage/change` 一条） |
+| ✅ 节奏相位 / 时代背景 AI 提炼 / 续写剧本 / 一致性 QC / 宫格 Agent 提示词 —— **均已迁**（2026-09-15） | 对应端点全部注册（**未注册 0 条**，绞杀者收口） |
 | ⚠️ **`PUT /app-settings` 的画风白名单只有 6 种，而画风体系有 10 种** | **真缺陷（继承自 Node，有意照抄未修）**：`noir` / `ink-wash` / `cyberpunk` / `pixar3d` 会被 400 拒绝。权威列表在 `prompt-utils.ts` 的 `ART_STYLE_CATALOG` 与前端 `artStyles.ts`，`app-settings.ts` 那份是**过期的第三份副本**。**要修就两边一起修** —— 单边修会让切域那一刻行为静默改变 |
 | 资源库的「兜底枚举」几乎不会生效 | 同样继承自 Node：兜底只在「该表一条非空值都没有」时触发，而创建时未传的字段会被写成 `''`，`IS NOT NULL` 对 `''` 成立 ⇒ 实际很少走到。已用直删数据的方式验证兜底分支本身是通的 |
 | **`GET /traces/stats` 在真实数据上恒为 `runs=0`** | **预期行为，不是 bug**：真实 trace 里 token 值被**脱敏成字符串** `"***"`（实测 20 个 trace 全如此），而 `Number("***")` 是 `NaN`、`NaN‖NaN‖NaN` 为假 ⇒ 整条被跳过。Node 同样如此（已用直造 trace 的用例把这条行为锁住） |
-| `POST /storage/change` **未迁移** | 它写项目级 `.data-root` 标记文件，而 **Node 启动时也读该文件** ⇒ 从 Python 切目录会连带把 Node 的数据根一起挪走（跨进程副作用），且需关库重开。等 Node 下线再迁 |
+| ✅ `POST /storage/change` **已迁**（2026-09-15，**最后一个未注册端点**） | 写项目级 `.data-root` 标记文件 + 关库重开（`db.reopen_engine()`）。⚠️ 绞杀期仍会连带挪动 Node 的数据根（共享标记），故**并存期不要随手调**；Node 下线后由单后端正常使用。自检锁住「复制不是移动 / 失败回滚 / `migrate !== false` 只认字面量 false / 探针不可写」等语义 |
 | ✅ `GET /usage/estimate` **已迁** | `estimate-service` / `cost-catalog` 都已落地（2026-09-15 复核） |
 | ✅ trace **写入侧**（`append_trace_event`）**已实现**（`trace_store.py`） | 与只读侧同文件、JSONL 追加；绞杀期两侧同写一份文件（纯文件、无锁竞争） |
 | ✅ `GET /agent-configs/defaults` **已迁** | `DEFAULT_PROMPTS` 等价物在 `agent_prompts.py` + `agent_registry.py`（**只镜像静态度量，不镜像提示词正文** —— 历史上吃过「提示词多头维护」的亏）。⚠️ 它会被 `GET /agent-configs/{id}` 遮蔽 ⇒ **必须显式声明且注册在参数路由之前**（这条坑仍有效） |
