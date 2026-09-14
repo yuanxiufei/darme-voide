@@ -20,9 +20,10 @@
 * 切片顺序按 ``storyboard_number`` 升序（不是 id）；
 * 中间文件**用完即删**：concat 列表、无 BGM 的中间成片、响度归一化前的文件。
 
-⚠️ ``run_consistency_qc_before_merge`` 是**保留的调用点**：Node 侧动态 import
-``consistency-qc.js`` 做穿帮筛查，而镜头 QC 打分（≈510 行）**尚未移植** ⇒ 这里是空实现，
-与 ``video_generation`` 里的处置一致（接口在、逻辑待补）。
+✅ ``run_consistency_qc_before_merge`` **已接线**（2026-09-15 校正）：Node 侧动态 import
+``consistency-qc.js`` 做穿帮筛查，Python 侧直接复用 ``services.consistency_qc``
+（此前是空实现 —— 即「合并前从不做穿帮筛查」，而 Node 会做）。
+**独立事务 + 失败静默**：写入不受拼接主流程成败影响（对齐原 fire-and-forget 语义）。
 """
 from __future__ import annotations
 
@@ -45,13 +46,20 @@ from .video_probe import probe_video_duration
 __all__ = ["merge_episode_videos"]
 
 
-def run_consistency_qc_before_merge(episode_id: int, drama_id: int) -> None:
-    """合并前的图像连续性检测（穿帮筛查）——**保留调用点，逻辑未移植**。
+async def run_consistency_qc_before_merge(episode_id: int, drama_id: int) -> None:
+    """合并前的图像连续性检测（穿帮筛查）—— 复用 ``services.consistency_qc``。
 
-    Node 侧是 fire-and-forget 动态 import，失败静默；这里同样不阻塞拼接主流程。
-    镜头 QC 打分移植后在此接入。
+    与 Node 的动态 import + ``.catch(() => {})`` 等价：**用独立事务跑**（这样即使拼接主流程
+    随后失败，筛查结果也已落库），**任何异常都吞掉**（不阻塞拼接）。
     """
-    return None
+    try:
+        from .consistency_qc import run_episode_consistency_qc  # noqa: PLC0415 —— 惰性导入避免环
+
+        with engine.begin() as conn:
+            await run_episode_consistency_qc(conn, episode_id, drama_id)
+    except Exception as exc:  # noqa: BLE001 —— 与原实现的静默失败一致
+        log_task_error("MergeTask", "consistency-qc-failed",
+                       {"episodeId": episode_id, "dramaId": drama_id, "error": str(exc)})
 
 
 def _to_abs_path(relative_path: str) -> str:
@@ -277,7 +285,10 @@ def merge_episode_videos(episode_id: int, drama_id: int) -> int:
         })
 
         # 合并前自动做图像连续性检测（穿帮筛查，不影响拼接主流程）
-        run_consistency_qc_before_merge(episode_id, drama_id)
+        # ⚠️ **fire-and-forget**：与下面起后台拼接同一手法（本函数虽同步，但由异步端点调用，
+        #    事件循环在跑）。任务自带独立事务 ⇒ 可以安全 detach；且它内部吞掉所有异常，
+        #    不会产生「task exception was never retrieved」告警。
+        asyncio.create_task(run_consistency_qc_before_merge(episode_id, drama_id))
 
         merge_id = int(conn.execute(
             video_merges.insert().values(

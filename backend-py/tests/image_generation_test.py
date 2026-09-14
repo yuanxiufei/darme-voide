@@ -43,7 +43,7 @@ from app.services import file_storage as fs  # noqa: E402
 from app.services import image_generation as ig  # noqa: E402
 from app.services import take_budget as tb  # noqa: E402
 from app.services import usage_tracking as ut  # noqa: E402
-from app.services.color_grade import ColorGradeUnavailable, apply_color_grade_to_file  # noqa: E402
+from app.services.color_grade import apply_color_grade_to_file  # noqa: E402
 from app.services.era_background import apply_era_image_clause, get_era_background  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -177,18 +177,21 @@ def main() -> int:  # noqa: C901
             apply_era_image_clause(conn, "p", drama_id),
         )
 
-    # ================= 校色：未移植时的降级行为 =================
+    # ================= 校色：无参数短路 + 失败降级 =================
     check(
         "colorgrade: 无参数 -> 原样返回路径（与 Node 相同）",
         run(apply_color_grade_to_file("static/images/none.png", None)) == "static/images/none.png"
         and run(apply_color_grade_to_file("static/images/none.png", "{}")) == "static/images/none.png",
     )
+    # ⚠️ 像素管线已于 2026-09-15 落地（ffmpeg，见 color_grade.py 与 color_grade_test.py）。
+    #    这里只验**失败路径**：文件不存在 ⇒ ffmpeg 非零退出 ⇒ 抛错 ⇒ 调用方记
+    #    `color-grade-failed` 并**保留原图**（与 Node 校色抛错时同形）。
     try:
         run(apply_color_grade_to_file("static/images/x.png", '{"exposure":0.5}'))
-        check("colorgrade: 有参数 -> 抛 ColorGradeUnavailable（调用方记 warn 并保留原图）", False, "未抛错")
-    except ColorGradeUnavailable as err:
-        check("colorgrade: 有参数 -> 抛 ColorGradeUnavailable（调用方记 warn 并保留原图）",
-              "Pillow" in str(err), str(err))
+        check("colorgrade: 文件不存在 -> 抛错（调用方记 warn 并保留原图）", False, "未抛错")
+    except RuntimeError as err:
+        check("colorgrade: 文件不存在 -> 抛错且**不带半成品**（调用方记 warn 并保留原图）",
+              "校色失败" in str(err), str(err))
 
     # ================= 入队（generate_image） =================
     # ⚠️ `force=True` 是**必要的**：take 预算是**按分镜累计**的（默认 3 次），

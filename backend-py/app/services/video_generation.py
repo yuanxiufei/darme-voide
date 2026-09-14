@@ -642,9 +642,10 @@ async def _handle_video_complete(
 def _run_qc_after_video_complete(storyboard_id: Any, video_generation_id: int) -> None:
     """视频完成后的镜头级 QC（**fire-and-forget 增强**，失败只 warn、绝不影响成片）。
 
-    ✅ **规则打分已接线**（``qc_scoring.run_qc_after_video_complete`` ⇒ 写 ``video_quality_checks``）。
-    ⚠️ 技术维度（``technical-qc.ts``：ffmpeg 黑场/冻帧/响度/帧率硬检）**仍未移植** ⇒ 服务内部会记
-    一条 ``tech-qc-skipped`` warn；等它落地后只需改服务内部，这个调用点不用再动。
+    ✅ **规则打分 + 技术维度都已接线**（``qc_scoring.run_qc_after_video_complete`` ⇒ 写
+    ``video_quality_checks``；技术维度见 ``technical_qc``，2026-09-15 起不再是 ``tech-qc-skipped`` 存根）。
+    ⚠️ 技术维度是**同事务同步**跑的（Node 侧是 fire-and-forget 不等待）——理由见 ``technical_qc``
+    模块 docstring；失败只 warn，绝不影响成片。
     """
     try:
         with _tx() as conn:

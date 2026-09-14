@@ -778,7 +778,7 @@ async def _finalize_image(
     ⚠️ 与原实现的差异都在这里，且**都是刻意的**：
 
     * ``image_url`` 只有 URL 模式才写（base64 模式不写远程 URL，与 TS 一致）；
-    * 校色的 ``try/except`` 保留 —— 校色未移植会抛错，被记成 ``color-grade-failed`` 并
+    * 校色的 ``try/except`` 保留 —— 校色（ffmpeg 实现，2026-09-15 起已落地）失败时被记成 ``color-grade-failed`` 并
       **保留未校色图**，这正是 Node 校色失败时的行为。
     """
     final_path = local_path

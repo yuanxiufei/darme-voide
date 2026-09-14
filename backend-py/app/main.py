@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles  # noqa: F401  (保留给后续完全迁移后使用)
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .http_logger import request_logger
 from .config import (
     FRONTEND_DIST,
     NODE_BACKEND_URL,
@@ -128,6 +129,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 请求日志（对齐 Node 的 `app.use('*', requestLogger)`）；`HTTP_LOG=0` 可关（自检降噪）
+app.middleware("http")(request_logger)
 
 
 # ---------------------------------------------------------------------------

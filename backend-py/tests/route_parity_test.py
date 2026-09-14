@@ -856,6 +856,7 @@ def main() -> int:
         + _agent_types_drift()
         + _agent_prompts_drift()
         + _numeric_thresholds_drift()
+        + _subagent_registry_drift()
     )
     for line in drift:
         print(f"  DRIFT   {line}")
@@ -899,6 +900,32 @@ def _numeric_thresholds_drift() -> list[str]:
         for key in ts_values:
             if key not in py_values:
                 drift.append(f"{const}.{key}: TS 有但 Python 侧缺")
+    return drift
+
+
+def _subagent_registry_drift() -> list[str]:
+    """校验 ``agents/subagent.py`` 的 ``SUBAGENT_REGISTRY`` / ``MAX_SUBAGENT_DEPTH`` 与 TS 逐字一致。
+
+    ⚠️ 这些 ``name``/``capability`` 文案是**发给模型看的能力清单**（orchestrator 据此决定把子任务
+    派给谁）⇒ 改一边不改另一边会让两侧的 Agent 调度行为分叉，而且**不会报任何错**。
+    """
+    from app.services.agents import subagent as sa  # noqa: PLC0415
+
+    src = (_SRC_ROOT / "agents" / "subagent.ts").read_text(encoding="utf-8")
+    entries = re.findall(
+        r"\{\s*type:\s*'([^']+)'\s*,\s*name:\s*'([^']+)'\s*,\s*capability:\s*'([^']+)'\s*\}",
+        src)
+    drift: list[str] = []
+    if len(entries) != len(sa.SUBAGENT_REGISTRY):
+        drift.append(f"SUBAGENT_REGISTRY 条数：TS={len(entries)} / py={len(sa.SUBAGENT_REGISTRY)}")
+    for (ts_type, ts_name, ts_capability), entry in zip(entries, sa.SUBAGENT_REGISTRY):
+        if (ts_type, ts_name, ts_capability) != (entry["type"], entry["name"], entry["capability"]):
+            drift.append(f"SUBAGENT_REGISTRY[{ts_type}]：TS=({ts_name}/{ts_capability}) "
+                         f"vs py=({entry['name']}/{entry['capability']})")
+    depth = re.search(r"MAX_SUBAGENT_DEPTH\s*=\s*(\d+)", src)
+    if depth is None or int(depth.group(1)) != sa.MAX_SUBAGENT_DEPTH:
+        drift.append(f"MAX_SUBAGENT_DEPTH：TS={depth.group(1) if depth else '?'} "
+                     f"/ py={sa.MAX_SUBAGENT_DEPTH}")
     return drift
 
 

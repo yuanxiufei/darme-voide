@@ -9,9 +9,10 @@
     skills/<name>/SKILL.md        → 自有（core）：可被 frontmatter agents 默认注入
     skills/<lib>/library.yaml     → 外部技能库（vendor）：**库由声明文件识别**，库内 skill 不默认注入
 
-⚠️ ``loadAgentSkills``（注入文本组装 + 体量预算闸）**未移植** —— 它的唯一调用方是 Agent 运行链
-（``agents/index.ts`` 的 createAgent），属 Agent 域；且它的正确性只能在真实 LLM 调用下验证。
-本文件只搬**路由实际用到的三个能力**：core 列表 / 默认绑定 / 全量列表（外加预算常量的读法）。
+✅ ``loadAgentSkills``（注入文本组装 + 体量预算闸）**已迁** —— 见 ``services/agents/skills.py``
+的 ``load_agent_skills``（Agent 运行链在 ``agents/runtime.py`` 里真调用它，skill 段 2026-09-15 起
+**真的会注入**）。本文件只搬**路由实际用到的三个能力**：core 列表 / 默认绑定 / 全量列表
+（外加预算常量的读法）。
 """
 
 from __future__ import annotations

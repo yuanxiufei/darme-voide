@@ -1,15 +1,13 @@
 """评测域 —— 与 ``backend/src/routes/evaluation.ts``（62 行，5 端点）对齐。
 
-**已迁 2 个**：
+**已整域迁移（5/5）** —— 2026-09-15 校正：早先此处只列了 2 个已迁、3 个「未迁交给 catch-all 兜底」，
+但那 3 个**后来都已迁**（``optimizer`` / ``creator`` / scheduler 链路均已落地）：
 
 * ``GET  /api/v1/evaluation/cases``  列出可用基准 case（id / kind / agentType）；
-* ``POST /api/v1/evaluation/evaluate/{case_id}``  用 **Reference 提示词**评测指定 case。
+* ``POST /api/v1/evaluation/evaluate/{case_id}``  用 **Reference 提示词**评测指定 case；
+* ``POST /optimize/{case_id}``、``GET /scheduler``、``POST /run`` —— 优化器与调度器均已实现。
 
-**未迁 3 个**（依赖未迁件 ⇒ **交给 catch-all 兜底**：`PROXY_TO_NODE=1` 时反代到 Node，否则 501）：
-
-* ``POST /optimize/{case_id}`` —— 依赖 ``optimizer``（还需 ``creator.ts``）；
-* ``GET  /scheduler``         —— 依赖 ``evaluation-scheduler``；
-* ``POST /run``               —— 同上。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册仅 1 条**：``storage/change``）。
 
 ⚠️ 这 3 条**不需要显式委派**：显式委派只用于「会被已注册的**参数路由遮蔽**」的路径
 （如 ``GET /agent-configs/defaults`` 被 ``/{config_id}`` 吞掉）。这里 ``/optimize/{id}``、

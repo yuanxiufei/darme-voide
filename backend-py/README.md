@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2318 项全绿**（冒烟 477 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2383 项全绿**（冒烟 477 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -166,13 +166,13 @@ backend-py/
 │  ├─ passthrough.py             绞杀者接缝共享实现（反代 / 501 / **显式委派**）
 │  └─ services/
 │     ├─ adapters/                ✅ **厂商适配器层（S3）**：17 家 / 纯函数；含 jscompat.py（JS 语义垫片）
-│     ├─ era_background.py        时代背景解析（纯函数；AI 提炼未迁）
+│     ├─ era_background.py        时代背景（解析 + AI 提炼，整域）
 │     ├─ bible_ids.py             六键 Bible：STYLE_ / COST_ / LOC_ 三键
 │     ├─ script_fingerprint.py    剧本指纹门禁（整服务，纯逻辑）
 │     ├─ character_match.py       台词说话人 → 角色别名归一匹配
 │     ├─ storyboard_helpers.py    分镜关联同步 + 台词解析 + TTS 匹配校验
 │     ├─ resource_library.py      资源库共享实现（规格驱动 + 原生 SQL 封装）
-│     ├─ color_grade.py           校色参数规整（纯函数；像素处理未迁）
+│     ├─ color_grade.py           校色（规整 + ffmpeg 像素管线，整域）
 │     ├─ asset_versions.py        资产版本留档 / 回滚 / 写回主表
 │     ├─ trace_store.py           trace 回放（只读侧）
 │     ├─ data_storage.py          数据存储信息（只读侧）
@@ -261,7 +261,7 @@ backend-py/
    ├─ consistency_qc_test.py   图像连续性 QC（真实图 dHash：ok/info/warning 三档，28 用例）
    ├─ freeze_snapshot_test.py    TS 源码快照反漂移（守卫读到的文件必须在快照里，7 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上五十六项
+   └─ run_all.py                一次跑完以上六十项
 ```
 
 ## 厂商适配器层（S3）要点
@@ -467,10 +467,10 @@ cd backend-py
 |---|---|
 | ✅ **已补齐**：本地模型的 GPU 显存租约 | `gpu-manager.ts` 已整域移植（`services/gpu_manager.py`）+ `/gpu/*` 两端点已注册 + 四个调用点接线：`text`/`tts` 即用即放（每轮模型尝试各自申请/释放）、`image`/`video` **长租约**（提交时持有，重试/失败/完成三处释放）。`acquire` 失败只 warn 不中断任务（与原 TS 一致） |
 | 🔧 `format_vendor_http_error` 比原实现**更稳**（有意差异） | 原 TS 在 `((apiErr?.code \|\| parsed?.topCode) \|\| '').toLowerCase()` 处，若厂商返回**数字** code（`{"error":{"code":404}}`）会抛 `TypeError`，把整个归因流程打断、把中文说明变成 500。这里统一 `str()` 归一 —— 只会得到一条中文错误。已用用例锁住（`vendor_errors_test.py` 的「健壮性」两条） |
-| ⚠️ **参考图压缩未迁**（`read_image_as_compressed_data_url`） | 原实现是 sharp 的「长边 ≤768 等比缩放（不放大）→ 有 alpha 则 flatten 白底 → JPEG q68」。Python 侧需要 Pillow ⇒ 当前**退化为原图 data URL**并告警一次：**内容与画质不变**，只是发给厂商的载荷更大（768/q68 本来是为控制体积与厂商限制）。装上 Pillow 后替换函数体即可（参数已写在 docstring 里） |
-| ⚠️ **像素级校色未迁**（`apply_color_grade_to_file`） | 原实现是 sharp 的 RGB 增益 / gamma / 白平衡 / 曝光 / 饱和度 / 对比度 / 肤色 / 阴影高光（142 行）。Pillow 与 sharp 的重采样与 JPEG 编码**不会逐字节一致**，而校色结果是**持久化且用户可见**的资产 ⇒ 不在没有对照验证的情况下换实现。当前行为**与原实现的失败路径完全一致**：无参数原样返回；有参数抛错 → 调用方记 `color-grade-failed` 并**保留未校色图**（Node 校色失败时也是这个结果） |
+| ⚠️ **参考图压缩仍未迁**（`read_image_as_compressed_data_url`） | 原实现是 sharp 的「长边 ≤768 等比缩放（不放大）→ 有 alpha 则 flatten 白底 → JPEG q68」。Pillow 仍未装 ⇒ 当前**退化为原图 data URL**：内容/画质不变，只是发给厂商的载荷更大。**可用 ffmpeg 等价实现**（`scale=…:force_original_aspect_ratio=decrease` + 对齐 q68，与校色同一套手法）—— 这是**当前唯一剩下的功能性缺口** |
+| ✅ **像素级校色已迁**（`apply_color_grade_to_file`，ffmpeg 实现） | 2026-09-15 落地：8 步链中 7 步是逐通道点式 ⇒ 合成 ``RGB乘法LUT → eq=saturation → 对比度/肤色 LUT``，**不装 Pillow**。⭐ 用真实 sharp 实测（`backend/probe-sharp.cjs`）才发现 **`.gamma()` 在无 resize 时是 no-op**（128→127、200,100,50→199,9?,4? 只差 ±1 取整）⇒ Python 侧**有意跳过** ⑥⑦ 两步；`modulate({brightness})` 是 **L 星感知乘法**（128→199，非 192）⇒ 用 RGB 乘法近似、约 3% 差异（已写进模块 docstring 与 `tests/color_grade_test.py`）。校准/对比度/白平衡/肤色与 Node **逐值一致**（192 / 236 / 154 / 136…） |
 | ⚠️ **`ai_service_configs.model` 存的是 JSON 数组字符串** | 不是单模型名。读侧两边都是 `JSON.parse(row.model)` 再取 `models[0]`；接口入参则是**数组**（路由会 `json.dumps` 后落库）。写成裸字符串 `"dall-e-3"` 会让 `model` 解析成**空串**（Node 同样如此）—— 排查"模型没生效"时先看这里 |
-| ⚠️ **镜头 QC 打分未迁**（`qc-scoring.ts` + `technical-qc.ts`，共约 510 行） | 视频完成后的 fire-and-forget 增强（`execFile` 调 ffmpeg/ffprobe 做技术质检 + 写 `storyboards.qc_*`）。调用点已就位 `_run_qc_after_video_complete`，当前只记一条 `qc-skipped` 告警。与「媒体收尾域」一起做 |
+| ✅ **镜头 QC 打分已迁**（`qc_scoring.py` + `technical_qc.py`） | 规则打分与技术维度均已接线（`_run_qc_after_video_complete` / webhook / 合并前置）。🔴 但技术维度里**冻帧 / 音频真峰 / 集成响度三项是两侧共同的继承缺陷**（正则与 ffmpeg 真实输出格式不符 ⇒ 永不生效；黑场/帧率/时长正常）—— 详见 `technical_qc.py` 的「继承缺陷」段与 `tests/technical_qc_test.py`，**要修必须两边一起修** |
 | ⚠️ **`probe_video_duration` 需要系统 `ffprobe`** | 异步提供商不返回 `duration` 时用它补时长。**没装 ffprobe 不报错**，返回 0 ⇒ 分镜的 `duration` 键不写（保留旧值）——与原实现的 `resolve(0)` 一致 |
 | ⚠️ **CosyVoice 的接口是「按猜想写的」** | `voice-clone.ts` 原文注释即写明：``/inference_zero_shot`` 约定参考 CosyVoice 官方 FastAPI 封装，**本地服务部署后需按实际接口核对**。因此 Python 侧也只做等价移植，未额外加固 —— 真机联调时以实际响应为准 |
 | ⚠️ **参考音频的绝对 URL 默认指向 5789（Node 的端口）** | `to_public_media_url` 沿用原 TS 的默认基址 `http://localhost:5789`。**只跑 Python 后端时必须设 `PUBLIC_BASE_URL=http://localhost:5790`**，否则本地 H3 服务按 5789 拉参考音频会 404（绞杀期两边都在则无感） |
@@ -478,28 +478,28 @@ cd backend-py
 | 真实库比 Node 模型多 2 张表 | `assets`、`props` —— 旧版本残留，Node 侧 `db/index.ts` 不建、代码零引用，Python 同样不建模 |
 | `image_generations` / `video_generations` 各有 `minio_url` 列 | 同上，旧 MinIO 存储遗留，Node 的 Drizzle 模型里也没有，全仓库零引用 |
 | 列序与 DB 不同 | 若干表的列序与 DB `PRAGMA` 顺序不一致。**不影响正确性**（SQLAlchemy 全程按列名生成 SQL，不会位置化 INSERT/SELECT）；仅让 JSON 的键顺序不同，而 JSON 对象键序无语义 |
-| 剧本指纹的**过期判定**已迁移，但**写入侧**未全 | `checkEpisodeFingerprint` / `refreshEpisodeScriptHash` / `checkStoryboardGate` / `stampStoryboardsScriptHash` 都已具备；`stampStoryboardsScriptHash` 要等 `storyboards` 域迁移时接上 |
+| 剧本指纹的**写入侧** `stamp_storyboards_script_hash` **两边都没接线** | 2026-09-15 实测：Node 侧 `stampStoryboardsScriptHash` 也**只有定义、零调用**（全仓 grep 只 1 处定义）⇒ Python 现状与 Node **一致**，不算缺口；哪天真要接线，两边一起改 |
 | 媒体生成端点（`characters` 的 `generate-image`/`three-views`/`equip-image`/`expressions`/`batch-generate-images`/`generate-voice-sample`、`scenes` 与 `props` 的 `generate-image`、`storyboards` 的 `generate-tts`/`regenerate-image`/`regenerate-frame`/`set-frame`） | 依赖 `services/image-generation.ts` / TTS / ffmpeg，**不注册** → 走反代（或 501） |
 | `DELETE /storyboards/:id` **只清 `storyboard_characters`，不清 `storyboard_props`** | **继承自 Node 的行为**（会留下 props 关联孤儿行）。照抄未改，但要知情 —— 若日后要清，需同时改两边 |
 | `POST /characters/:id/generate-prompt` | 纯函数但依赖 `shared/prompt-utils.ts`（1456 行、含全部画风词表）⇒ 需作为**独立一次移植**，不宜夹在 CRUD 域里做 |
-| 节奏相位 / 时代背景 AI 提炼 / 续写剧本 / 一致性 QC / 自动拆分视觉特征 | 尚未移植（依赖 LLM 或视觉模型），对应端点不注册 → 走反代（或 501） |
+| ✅ 节奏相位 / 时代背景 AI 提炼 / 续写剧本 / 一致性 QC / 宫格 Agent 提示词 —— **均已迁**（2026-09-15） | 对应端点全部注册（未注册只剩 `POST /storage/change` 一条） |
 | ⚠️ **`PUT /app-settings` 的画风白名单只有 6 种，而画风体系有 10 种** | **真缺陷（继承自 Node，有意照抄未修）**：`noir` / `ink-wash` / `cyberpunk` / `pixar3d` 会被 400 拒绝。权威列表在 `prompt-utils.ts` 的 `ART_STYLE_CATALOG` 与前端 `artStyles.ts`，`app-settings.ts` 那份是**过期的第三份副本**。**要修就两边一起修** —— 单边修会让切域那一刻行为静默改变 |
 | 资源库的「兜底枚举」几乎不会生效 | 同样继承自 Node：兜底只在「该表一条非空值都没有」时触发，而创建时未传的字段会被写成 `''`，`IS NOT NULL` 对 `''` 成立 ⇒ 实际很少走到。已用直删数据的方式验证兜底分支本身是通的 |
 | **`GET /traces/stats` 在真实数据上恒为 `runs=0`** | **预期行为，不是 bug**：真实 trace 里 token 值被**脱敏成字符串** `"***"`（实测 20 个 trace 全如此），而 `Number("***")` 是 `NaN`、`NaN‖NaN‖NaN` 为假 ⇒ 整条被跳过。Node 同样如此（已用直造 trace 的用例把这条行为锁住） |
 | `POST /storage/change` **未迁移** | 它写项目级 `.data-root` 标记文件，而 **Node 启动时也读该文件** ⇒ 从 Python 切目录会连带把 Node 的数据根一起挪走（跨进程副作用），且需关库重开。等 Node 下线再迁 |
-| `GET /usage/estimate` **未迁移** | 依赖 `estimate-service.ts` + `cost-catalog.ts`（各厂商单价目录）⇒ 属媒体域前置，随那一批一起做 |
-| trace **写入侧**（`appendTraceEvent`）未迁移 | 唯一调用方是 Agent 链路（尚未迁移）。Python 只读、Node 写，纯文件无锁竞争，可共存 |
-| `GET /agent-configs/defaults` **仍未迁移**（`skills` 域迁完后依然如此） | SKILL.md 那半边（`agents:` 绑定）**已经可以算了**，卡点只剩 `DEFAULT_PROMPTS[].instructions` —— **5 个 Agent 数百行提示词正文**。我**刻意不搬**：Node 侧源码注释明确写过本项目吃过「提示词多头维护」的亏（前端曾自留一份副本并与后端漂移、还引用了已不存在的文件），把这份资产复制进 Python 等于**重建那个问题**。等 Node 下线（单一后端）再搬，那时它就是唯一来源。⚠️ 它会被 `GET /agent-configs/{id}` 遮蔽，所以**必须在 router 里显式声明委派且注册在参数路由之前** |
+| ✅ `GET /usage/estimate` **已迁** | `estimate-service` / `cost-catalog` 都已落地（2026-09-15 复核） |
+| ✅ trace **写入侧**（`append_trace_event`）**已实现**（`trace_store.py`） | 与只读侧同文件、JSONL 追加；绞杀期两侧同写一份文件（纯文件、无锁竞争） |
+| ✅ `GET /agent-configs/defaults` **已迁** | `DEFAULT_PROMPTS` 等价物在 `agent_prompts.py` + `agent_registry.py`（**只镜像静态度量，不镜像提示词正文** —— 历史上吃过「提示词多头维护」的亏）。⚠️ 它会被 `GET /agent-configs/{id}` 遮蔽 ⇒ **必须显式声明且注册在参数路由之前**（这条坑仍有效） |
 | `agent_registry.py` 是 **TS 常量的第二份副本** | 只镜像**静态度量**（5 个阶段名 / 6 个 Agent 显示名 / 22 个宿主工具名），**不镜像任何提示词正文**。`tests/route_parity_test.py` 的**漂移守卫**直接从 `agents/index.ts` 与 `tools/*.ts` 抽取这些值比对，改名/加工具而未同步会立刻红（现为 0 漂移） |
-| `POST /agent-configs/generate`、`POST /style-profiles/:id/distill` 未迁移 | 前者调 LLM 生成配置；后者依赖 `@mastra` Agent + `@ai-sdk` + `ffprobe`。但 `/style-profiles/:id/apply` **已迁**，用户可把 Node 侧提炼好的结果贴回来落库，链路不阻塞 |
+| ✅ `POST /agent-configs/generate`、`POST /style-profiles/:id/distill` **均已迁** | creator 链路 + distill（LLM 走 `text_generation`、探测走 ffprobe 子进程）；`/apply` 仍在 |
 | **布尔列曾返回 `1`/`0` 而非 `true`/`false`** | 真 bug，已修：`models._bool` 原用 `Integer`，而 drizzle 的 `integer({mode:'boolean'})` 在 JS 侧读出的是**真布尔**。改为 SQLAlchemy `Boolean`（存储层同为 SQLite INTEGER，兼容既有库）。前端只要用 `=== true` 严格比较就会挂 —— 这个偏差曾存在于**全部**已迁移域 |
 | **成功信封曾错误地省略 `data` 键** | 真 bug，已修（详见下节第 5 条）：误判 `success(c, undefined)` 会让 `data` 键消失，实际 JS 默认参数会把它换成 `null`。`PUT /storyboards/:id` 与 `DELETE /agent-configs/:id` 已改回带 `data:null`；`success_without_data()` 已删除 |
 | **`js_number` 曾把整数返回成 float** | 真 bug，已修：`Number("37")` 在 JS 里序列化成 `37`，而 Python 的 `json.dumps(37.0)` 是 `37.0`。**宽松比较看不出**（`37 == 37.0` 为真），但会出现在响应体字节里 —— 前端用 `===` 严格比较、或把值拼进字符串（`scope: "drama-37.0"`）就会暴露。现 `js_number` 在 `\|x\| ≤ 2^53` 内返回 `int`（更大 JS 用指数形式，转 int 反而更不像） |
 | ~~`aiConfigs` 的 8 个外部依赖端点未迁移~~ | **已迁移 7 个**：`/ollama/*`(4)、`POST /models`、`POST /test`、`GET /runtime/health` —— 它们依赖的只是**子进程与 HTTP**（`where ollama` / `Popen` / nvidia-smi / 厂商探测），Python 完全等价。我一度误判成"不可迁"，实际是**能迁但当时没排上** |
-| **`/gpu/status` 与 `/gpu/release-all` 刻意不迁** | 它们依赖 423 行的 GPU 租约管理器，而租约是**进程内状态**：绞杀期两个后端会各有各的租约视图 ⇒ VRAM 协调失效。**真正的 GPU 工作（媒体生成）仍在 Node，租约就该跟它在一起**。等媒体域迁完再整体搬 |
+| ✅ `/gpu/status` 与 `/gpu/release-all` **已迁**（2026-09-15） | `gpu_manager.py` 473 行 + 两端点 + 四个调用点接线：text/tts 即用即放、image/video **长租约**（提交持有，完成/失败/重试释放）。「绞杀期两侧各有租约视图」的顾虑随 Node 下线消失 |
 | **`quick-preset` / `quick-local` 会覆盖既有配置** | 它们是 upsert（按 `service_type`+`provider`）。⇒ **冒烟测试跑在数据库副本上**没问题，但**不要对着真实库调这两个端点**（会覆盖用户配置）。真机验证时我只跑只读接口 |
-| `export` 的 **5 个**端点未迁移 | `/edl`（需 ffprobe 探时长）、`/dramas/:id` 打包 ZIP（archiver）、`/jianying-draft`（339 行 + 时长）、`/qc-report`（ffprobe）、`/contact-sheet`（515 行 + 媒体探测）。已迁的是**纯 DB** 的工程账本两个端点 |
-| `utils/storage.ts` 只搬了**纯存储**部分 | `readImageAsCompressedDataUrl`（缩放 + mozjpeg，需 Pillow）与 `downloadFile`（httpx 抓远程，调用方是媒体适配器）**未迁** ⇒ 后者会随媒体域一起做 |
+| ✅ `export` **整域关闭 7/7** | `/edl`、ZIP 打包、`/jianying-draft`、`/qc-report`(JSON/MD/HTML)、`/contact-sheet` 全部已迁（2026-09-15） |
+| `utils/storage.ts` 的搬移状态 | `downloadFile` **已迁**（httpx，媒体适配器在用）；`readImageAsCompressedDataUrl` **仍未迁**（见上表「参考图压缩」条，可用 ffmpeg 做） |
 | `upload` 的类型判据是**客户端 Content-Type** | 与原 TS 一致（浏览器的 `file.type`），**不做文件头嗅探**。刻意不"顺手加固"：改成嗅探会让原本能上传的文件被拒，属契约变更 |
 | `ai_service_providers`（服务商目录）**不由 Python seed** | Node 启动时 `seedServiceProviders()` 幂等写入；那张表**没有唯一约束**，两边同时 seed 有产生重复行的风险 ⇒ Python 只读，不重复 seed。将来 Node 下线、或需要支持全新空库时，再把这个调用搬到 Python 的 lifespan |
 | `weapon-library` / `costume-library` **没有 `/apply`** | Node 侧就没实现（只有 `character` 与 `scene` 有）⇒ 调用会落到反代/501，属预期 |

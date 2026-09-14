@@ -208,11 +208,15 @@ def main() -> int:  # noqa: C901
           "全局镜头偏好" in global_prof, global_prof[:80])
 
     # ================= 工具装配 =================
-    check("工具: 未知类型 -> None（该类型不可运行）",
-          rt.create_agent_tools("no_such_agent", 1, drama_id) is None)
-    ids_by_type = {t: rt.create_agent_tools(t, 1, drama_id).ids()
-                   for t in ("script_rewriter", "extractor", "voice_assigner",
-                             "grid_prompt_generator", "storyboard_breaker", "orchestrator")}
+    # ⚠️ `create_agent_tools` 自 2026-09-15 起需要 `conn`（orchestrator 的子 Agent 委托要跑真实 run）；
+    #    这里装配阶段不触库，借一个只读连接即可。
+    with engine.connect() as tools_conn:
+        check("工具: 未知类型 -> None（该类型不可运行）",
+              rt.create_agent_tools(tools_conn, "no_such_agent", 1, drama_id) is None)
+        ids_by_type = {t: rt.create_agent_tools(tools_conn, t, 1, drama_id).ids()
+                       for t in ("script_rewriter", "extractor", "voice_assigner",
+                                 "grid_prompt_generator", "storyboard_breaker",
+                                 "orchestrator")}
     check("工具: script_rewriter -> 剧本工具",
           "save_script" in ids_by_type["script_rewriter"], ids_by_type["script_rewriter"])
     check("工具: extractor -> 提取工具（含四个 read_existing_*）",
@@ -227,8 +231,12 @@ def main() -> int:  # noqa: C901
           and "search_reference_prompts" in ids_by_type["grid_prompt_generator"]
           and "search_reference_prompts" not in ids_by_type["voice_assigner"],
           ids_by_type["storyboard_breaker"])
-    check("工具: orchestrator 的 subagent 工具**未迁** -> 空注册表（占位）",
-          ids_by_type["orchestrator"] == [], ids_by_type["orchestrator"])
+    check("工具: orchestrator -> **subagent 两件套**（2026-09-15 起已迁，不再是空占位）",
+          sorted(ids_by_type["orchestrator"]) == ["list_available_agents", "run_subagent"],
+          ids_by_type["orchestrator"])
+    check("工具: 子 Agent 工具**只给 orchestrator**（领域 Agent 拿到会失去天然终止保证）",
+          all("run_subagent" not in ids_by_type[t]
+              for t in ids_by_type if t != "orchestrator"), ids_by_type)
 
     # ================= 配置装配 =================
     with engine.begin() as conn:

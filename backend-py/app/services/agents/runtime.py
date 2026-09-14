@@ -12,7 +12,8 @@
 ⚠️ 与 Node 的**已知且刻意**的差异（都是「依赖未迁」而非取舍）：
 
 * **``rhythm_phase`` 未迁** ⇒ ``storyboard_breaker`` 少一段跨集节奏引导；
-* **``subagent`` 未迁** ⇒ ``orchestrator`` 的工具集为空（``list_available_agents`` 也不在）；
+* **``subagent`` 已迁**（``agents/subagent.py``）⇒ ``orchestrator`` 装 ``run_subagent`` +
+  ``list_available_agents``，可自主委托领域专家（深度 2、防自调用/防环形）；
 * （``DEFAULT_PROMPTS`` **已落地** —— 见 ``services/agent_prompts.py``，出厂提示词现在是真回落值；
   ``skills`` **已落地** —— 见 ``agents/skills.py``，skill 段现在真的会注入。）
 
@@ -294,12 +295,13 @@ def _as_registry(value: Any) -> ToolRegistry:
     return ToolRegistry(dict(value or {}))
 
 
-def create_agent_tools(type: str, episode_id: int, drama_id: int) -> ToolRegistry | None:
+def create_agent_tools(conn: Connection, type: str, episode_id: int,
+                       drama_id: int) -> ToolRegistry | None:
     """按 Agent 类型装配工具集（未知类型返回 None ⇒ 该类型不可运行）。
 
-    ⚠️ ``orchestrator`` 在 Node 侧装的是 ``run_subagent`` + ``list_available_agents``，
-    而 ``subagent.ts`` **未迁** ⇒ 这里返回**空注册表**（占位）：Agent 类型本身仍存在
-    （``validAgentTypes`` 含它、显示名/阶段表都对得上），但它现在**没有可调工具**。
+    ``orchestrator`` 装的是 ``run_subagent`` + ``list_available_agents``（``agents/subagent.py``，
+    2026-09-15 起**已迁**；早先这里是空注册表占位 + 一条 ``orchestrator-tools-missing`` warn）。
+    ⇒ 因此本函数需要 ``conn``（子 Agent 委托要跑一次真实 Agent run）。
     """
     if type == "script_rewriter":
         return _as_registry(create_script_tools(episode_id))
@@ -320,11 +322,10 @@ def create_agent_tools(type: str, episode_id: int, drama_id: int) -> ToolRegistr
             _as_registry(create_corpus_tools()),
         )
     if type == "orchestrator":
-        log_task_warn("AgentFactory", "orchestrator-tools-missing", {
-            "reason": "subagent.ts 未迁（run_subagent / list_available_agents 暂缺）",
-            "episodeId": episode_id, "dramaId": drama_id,
-        })
-        return ToolRegistry({})
+        from .subagent import create_run_subagent_tools  # noqa: PLC0415 —— 打破循环导入
+
+        return ToolRegistry(create_run_subagent_tools(
+            conn, drama_id, episode_id, parent_type=type))
     return None
 
 
@@ -390,7 +391,7 @@ def build_agent_config(
     conn: Connection, type: str, episode_id: int, drama_id: int
 ) -> AgentConfig | None:
     """装配一次 run 所需的全部材料（无工具/未知类型 ⇒ None）。"""
-    tools = create_agent_tools(type, episode_id, drama_id)
+    tools = create_agent_tools(conn, type, episode_id, drama_id)
     if tools is None:
         return None
 
