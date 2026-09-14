@@ -58,6 +58,22 @@ def main() -> int:
     check("快照规模: 至少覆盖 routes/ + adapters/ + agents/ 三个目录",
           {"routes", "services/adapters", "agents"} <= set(dirs_needed), dirs_needed[:8])
 
+    # ── ⭐ 端到端：冻结模式跑一遍守卫，必须与真源码同结论（0 漂移）──
+    # 这条才是真正的「删库保险」验收：它不关心清单怎么写，只看**快照够不够用**。
+    # （本轮就是靠它发现 `services/technical-qc.ts` 漏冻结 —— 上面的存在性检查当时是绿的。）
+    import subprocess  # noqa: PLC0415
+
+    env = {**os.environ, "PARITY_USE_FROZEN": "1", "PYTHONIOENCODING": "utf-8"}
+    completed = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent / "route_parity_test.py")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, timeout=300, cwd=str(Path(__file__).resolve().parents[1]))
+    output = completed.stdout + completed.stderr
+    drift_zero = "漂移 0 条" in output and "镜像常量漂移 0 条" in output
+    check("⭐ 端到端: **冻结模式**跑守卫 -> 退出码 0 且 0 漂移（快照足以支撑删库后的守卫）",
+          completed.returncode == 0 and drift_zero,
+          [line.strip() for line in output.splitlines() if "漂移" in line or "FAIL" in line][:4])
+
     failed = [item for item in _R if not item[1]]
     for name, passed, detail in _R:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

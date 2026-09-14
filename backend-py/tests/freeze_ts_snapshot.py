@@ -51,15 +51,23 @@ _GUARD_SOURCES = ("route_parity_test.py", "parity_diff_test.py")
 _SRC_REF = re.compile(r'_SRC_ROOT((?:\s*/\s*r?"[^"]+")+)')
 _SEGMENT = re.compile(r'"([^"]+)"')
 
+#: **普通字符串字面量**形态的相对路径（如 `("services/technical-qc.ts", "CONST", "mod")`）。
+#: ⚠️ 两种写法都要认：本项目**两次**漏件都栽在「守卫换了种写法写路径」上 ——
+#: 第一次是 `services/consistency-qc.ts`（跨字面量拼接），第二次是 `services/technical-qc.ts`
+#: （**表驱动的普通字符串**，只扫前一种形态就漏了）。
+_PLAIN_TS = re.compile(r'"((?:[\w.-]+/)+[\w.-]+\.ts)"')
+
 
 def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """从守卫源码里**自动发现**它引用的 TS 文件 / 目录（相对 ``backend/src``）。
 
     ⚠️ 为什么必须自动发现：``FILES`` 是手写清单，**新增一处「守卫读文件」时极易漏加** ——
-    漏了不会立刻报错，直到「删掉 ``backend/`` 后跑冻结模式」才炸。本项目**真实发生过**：
-    ``services/consistency-qc.ts`` 就是补守卫（连续性 QC 阈值镜像）当天漏进快照的，
-    而快照恰是删库的唯一保险。这里扫 ``_SRC_ROOT / "…" / "…"`` 形态，
-    以 ``.ts`` 结尾的当文件、其余当目录，与手写清单**取并集**。
+    漏了不会立刻报错，直到「删掉 ``backend/`` 后跑冻结模式」才炸。本项目**真实发生过两次**：
+    ``services/consistency-qc.ts``（跨字面量拼接形态）与 ``services/technical-qc.ts``
+    （表驱动普通字符串形态）。这里**两种形态都扫**，与手写清单**取并集**。
+
+    普通字符串形态只在**真源码还在**时按「文件确实存在」过滤（防注释/文档里的幽灵路径
+    被当成必需件）；``_SRC_ROOT`` 形态本就带目录结构，不加存在性过滤。
     """
     here = Path(__file__).resolve().parent
     files: set[str] = set()
@@ -68,9 +76,14 @@ def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
         path = here / name
         if not path.is_file():
             continue
-        for match in _SRC_REF.finditer(path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        for match in _SRC_REF.finditer(text):
             relative = "/".join(_SEGMENT.findall(match.group(1)))
             (files if relative.endswith(".ts") else dirs).add(relative)
+        if TS_SRC.is_dir():  # 真源码在 ⇒ 普通字符串形态可校验存在性
+            for candidate in _PLAIN_TS.findall(text):
+                if (TS_SRC / candidate).is_file():
+                    files.add(candidate)
     return tuple(sorted(files)), tuple(sorted(dirs))
 
 
