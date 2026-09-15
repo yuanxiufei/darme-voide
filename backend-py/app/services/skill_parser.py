@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from ..response import js_number
+from ..core.response import js_number
 
 #: 开头的 YAML frontmatter（--- 包裹），非贪婪，避免误匹配正文里的 --- 分隔线
 FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n?", re.S)

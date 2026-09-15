@@ -31,9 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (
+from app.core.models import (
     characters,
     episode_characters,
     episode_props,
@@ -41,7 +41,7 @@ from app.models import (
     prop_templates,
     scenes,
 )  # noqa: E402
-from app.services.agents.tools.extract_tools import create_extract_tools  # noqa: E402
+from app.agent.tools.extract_tools import create_extract_tools  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

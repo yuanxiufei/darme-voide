@@ -20,9 +20,9 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn
-from ..models import image_generations, video_generations
-from ..response import js_number, js_truthy, success
+from ..core.db import get_conn
+from ..core.models import image_generations, video_generations
+from ..core.response import js_number, js_truthy, success
 
 router = APIRouter(prefix="/api/v1/generations", tags=["generations"])
 

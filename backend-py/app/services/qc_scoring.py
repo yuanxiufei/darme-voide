@@ -29,7 +29,7 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..models import (
+from ..core.models import (
     characters,
     continuity_states,
     episodes,
@@ -39,7 +39,7 @@ from ..models import (
     video_generations,
     video_quality_checks,
 )
-from ..response import js_round, now
+from ..core.response import js_round, now
 from .task_logger import log_task_success, log_task_warn
 from .technical_qc import run_technical_qc
 

@@ -19,8 +19,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..response import bad_request, js_number, js_truthy, not_found, success
+from ..core.db import get_conn, get_tx
+from ..core.response import bad_request, js_number, js_truthy, not_found, success
 from ..services.style_profiles import (
     UNSET,
     activate_style_profile,

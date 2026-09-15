@@ -33,10 +33,10 @@ from uuid import uuid4
 
 from sqlalchemy import select, update
 
-from ..config import get_storage_root
-from ..db import engine
-from ..models import characters, episodes, storyboards
-from ..response import now
+from ..core.config import get_storage_root
+from ..core.db import engine
+from ..core.models import characters, episodes, storyboards
+from ..core.response import now
 from .character_match import match_character_by_speaker_name
 from .file_storage import get_absolute_path
 from .storyboard_helpers import parse_dialogue_for_tts

@@ -1,9 +1,11 @@
 import { fileURLToPath } from 'node:url'
 
-// 后端地址：Python 后端默认 **5790**（Node 旧后端是 5789）。
+// 后端地址：Python 后端默认 **5790**（Node 旧后端 5789 已随 `backend/` 删除）。
 // ⚠️ 2026-09-15 从 5789 切到 5790 —— Python 侧已**全量覆盖**（227 端点 / 未注册 0），
-// 且未注册路径仍会由它反代给 Node（PROXY_TO_NODE）⇒ 前端对着它跑是自足的。
-// 需要临时对着 Node 调试：`NUXT_API_TARGET=http://localhost:5789 npm run dev`
+// 未实现的路径会回 **501 + 说明**（不再有反代兜底）。
+// ⚠️⚠️ 这里**必须**被下面 `vite.server.proxy` 真正引用：2026-09-15 修过一次「改了本变量、
+// 却忘了改 proxy 里硬编码的 5789」⇒ dev 模式整套代理打到已删除的 Node 上（静默失效 ✗）。
+// 需要临时指向别的上游（如自建服务）：`NUXT_API_TARGET=http://localhost:1234 npm run dev`
 // （注意这只是 **dev 代理**；生产静态产物走同源，由部署侧决定）
 const backendTarget = process.env.NUXT_API_TARGET || 'http://localhost:5790'
 
@@ -41,9 +43,10 @@ export default defineNuxtConfig({
   },
   vite: {
     server: {
+      // ⚠️ 一律用 `backendTarget`（**别再硬编码**：上一版这里写死 5789 ⇒ 删库后 dev 代理全打到空端口）
       proxy: {
-        '/api': { target: 'http://localhost:5789', changeOrigin: true },
-        '/static': { target: 'http://localhost:5789', changeOrigin: true },
+        '/api': { target: backendTarget, changeOrigin: true },
+        '/static': { target: backendTarget, changeOrigin: true },
       },
     },
   },

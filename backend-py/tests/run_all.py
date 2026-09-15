@@ -2,7 +2,7 @@
 
 **本文件的 ``TESTS`` 就是套件权威清单**（README 里那棵树只是摘录，别去数它）。
 
-规模（2026-09-15 实测）：**65 个套件 / 2473 项断言**（删 `backend/` 后实测；比删库前少 2 项
+规模（2026-09-15 实测）：**66 个套件 / 2481 项断言**（删 `backend/` 后实测；比删库前少 2 项
 **显式 `[skip]`**，见 README；另**新增 2 个套件**，都是「删库后 Python 成为唯一后端」才存在的不变量：
 ``frontend_api_coverage_test.py``（前端每个调用点都在后端路由表里）与 ``contract_mirror_test.py``
 （``frontend/app/types/contracts.ts`` 的字段在后端源码里都能找到 —— 共享契约只许单向同步：后端改 ⇒ 镜像跟）。各套件**各自独立进程**、都不碰真实库：
@@ -96,6 +96,7 @@ TESTS = [
     ("生产镜像布局一致性", "dockerfile_contract_test.py"),
     ("前端调用点 ↔ 后端路由覆盖", "frontend_api_coverage_test.py"),
     ("共享契约镜像（contracts.ts ↔ 后端）", "contract_mirror_test.py"),
+    ("层级守卫（app/ 内单向依赖）", "layering_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

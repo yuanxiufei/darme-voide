@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
-from ..models import characters, dramas, scenes
+from ..core.models import characters, dramas, scenes
 
 _LOC_RE = re.compile(r"^LOC_(\d+)$")
 

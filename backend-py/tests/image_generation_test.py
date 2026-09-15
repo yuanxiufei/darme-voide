@@ -29,9 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.models import (  # noqa: E402
     api_usage,
     asset_versions,
     characters,
@@ -558,13 +558,13 @@ def main() -> int:  # noqa: C901
 
 
 def _iso_now() -> str:
-    from app.response import now
+    from app.core.response import now
 
     return now()
 
 
 def _insert_character(drama_id: int, name: str) -> int:
-    from app.response import now
+    from app.core.response import now
 
     values: dict[str, object] = {"drama_id": drama_id, "name": name}
     for column in ("created_at", "updated_at"):

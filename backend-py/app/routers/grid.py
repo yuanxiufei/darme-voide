@@ -34,10 +34,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import image_generations, storyboards
-from ..request_utils import read_json
-from ..response import bad_request, not_found, now, parse_param_id, success
+from ..core.db import get_conn, get_tx
+from ..core.models import image_generations, storyboards
+from ..core.request_utils import read_json
+from ..core.response import bad_request, not_found, now, parse_param_id, success
 from ..services.grid_split import split_grid_image
 from ..services.image_generation import generate_image
 from ..services.prompt_utils import (
@@ -181,7 +181,7 @@ async def try_agent_grid_prompt(
 
     try:
         # 惰性导入：避免 routing → services.agents 的导入环（与其它路由同一手法）
-        from ..services.agents.runtime import run_agent_with_retry  # noqa: PLC0415
+        from app.agent.runtime import run_agent_with_retry  # noqa: PLC0415
 
         result = await run_agent_with_retry(
             conn, "grid_prompt_generator", episode_id, drama_id, message, {"maxSteps": 10})

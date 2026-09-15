@@ -31,10 +31,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import dramas, episodes, style_profiles  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import dramas, episodes, style_profiles  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import era_background as eb  # noqa: E402
 from app.services import style_profiles as sp  # noqa: E402
 from app.services import text_generation as tg  # noqa: E402

@@ -27,16 +27,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.models import (  # noqa: E402
     api_usage,
     asset_versions,
     storyboard_characters,
     storyboards,
     video_generations,
 )
-from app.response import now  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import prompt_utils as pu  # noqa: E402
 from app.services import video_generation as vg  # noqa: E402
 from app.services import video_probe  # noqa: E402
@@ -99,7 +99,7 @@ def main() -> int:  # noqa: C901
     episode_id = client.get(f"/api/v1/dramas/{drama_id}").json()["data"]["episodes"][0]["id"]
     sb_id = client.post("/api/v1/storyboards", json={"episode_id": episode_id, "title": "镜头"}).json()["data"]["id"]
 
-    from app.models import characters  # noqa: PLC0415
+    from app.core.models import characters  # noqa: PLC0415
 
     def insert_character(name: str, deleted: bool = False) -> int:
         values = {"drama_id": drama_id, "name": name}

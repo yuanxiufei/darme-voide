@@ -14,8 +14,8 @@ import os
 import re
 from pathlib import Path
 
-from ..config import get_storage_root
-from ..response import js_round
+from ..core.config import get_storage_root
+from ..core.response import js_round
 
 __all__ = ["probe_video_duration"]
 

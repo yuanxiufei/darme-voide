@@ -23,8 +23,8 @@ from pathlib import Path
 os.environ.setdefault("DATA_ROOT", tempfile.mkdtemp(prefix="agentproto_"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.agents.protocol import build_protocol_contract, parse_agent_protocol  # noqa: E402
-from app.services.agents.tool import (  # noqa: E402
+from app.agent.protocol import build_protocol_contract, parse_agent_protocol  # noqa: E402
+from app.agent.tool import (  # noqa: E402
     Tool,
     ToolRegistry,
     array_of,

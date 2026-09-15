@@ -37,9 +37,9 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..config import get_data_root, get_storage_root
-from ..models import episodes, storyboards, video_generations
-from ..response import js_round
+from ..core.config import get_data_root, get_storage_root
+from ..core.models import episodes, storyboards, video_generations
+from ..core.response import js_round
 from .task_logger import log_task_start, log_task_success, log_task_warn
 
 __all__ = [

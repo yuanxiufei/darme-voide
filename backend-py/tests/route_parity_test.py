@@ -551,6 +551,12 @@ def _json_dumps_drift() -> list[str]:
     app_dir = Path(__file__).resolve().parents[1] / "app"
     problems: list[str] = []
     for path in sorted(app_dir.rglob("*.py")):
+        # ⚠️ 2026-09-15 三目录并入 `app/` 后，`app/scripts/`（工具链）与 `app/skills/`（技能附带的
+        #    脚本，如 `production-tools/beat-sync-editor/scripts/*.py`）也落在 `app/` 下 ——
+        #    它们**不是** TS 镜像代码，`json.dumps` 用于 CLI/日志格式化，不该按「镜像紧凑性」判。
+        #    实测：不加此排除会误报 **7 条** ✗。
+        if {"scripts", "skills"} & set(path.relative_to(app_dir).parts):
+            continue
         if path.name in _JSON_DUMPS_ALLOW:
             continue
         source = path.read_text(encoding="utf-8")
@@ -916,7 +922,7 @@ def _subagent_registry_drift() -> list[str]:
     ⚠️ 这些 ``name``/``capability`` 文案是**发给模型看的能力清单**（orchestrator 据此决定把子任务
     派给谁）⇒ 改一边不改另一边会让两侧的 Agent 调度行为分叉，而且**不会报任何错**。
     """
-    from app.services.agents import subagent as sa  # noqa: PLC0415
+    from app.agent import subagent as sa  # noqa: PLC0415
 
     src = (_SRC_ROOT / "agents" / "subagent.ts").read_text(encoding="utf-8")
     entries = re.findall(

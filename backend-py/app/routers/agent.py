@@ -26,11 +26,11 @@ import time
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn
-from ..request_utils import read_json
-from ..response import bad_request, js_truthy, success
+from ..core.db import get_conn
+from ..core.request_utils import read_json
+from ..core.response import bad_request, js_truthy, success
 from ..services.agent_registry import VALID_AGENT_TYPES
-from ..services.agents.runtime import run_agent_with_retry
+from app.agent.runtime import run_agent_with_retry
 from ..services.task_logger import (
     log_task_error,
     log_task_payload,

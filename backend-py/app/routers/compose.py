@@ -23,9 +23,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..db import engine, get_conn, get_tx
-from ..models import storyboards
-from ..response import bad_request, not_found, parse_param_id, success
+from ..core.db import engine, get_conn, get_tx
+from ..core.models import storyboards
+from ..core.response import bad_request, not_found, parse_param_id, success
 from ..services.ffmpeg_compose import compose_storyboard
 from ..services.task_logger import log_task_error, log_task_start, log_task_success
 

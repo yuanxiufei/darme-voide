@@ -26,10 +26,10 @@ from uuid import uuid4
 
 from sqlalchemy import and_, select, update
 
-from ..config import get_data_root, get_storage_root
-from ..db import engine
-from ..models import storyboards
-from ..response import now
+from ..core.config import get_data_root, get_storage_root
+from ..core.db import engine
+from ..core.models import storyboards
+from ..core.response import now
 from .task_logger import log_task_success
 
 __all__ = ["extract_frame", "extract_storyboard_tail_frames", "extract_tail_frame",

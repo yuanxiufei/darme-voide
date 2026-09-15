@@ -110,7 +110,7 @@ curl.exe -L -o metadata.jsonl \
 ```
 
 **✅ 已于 2026-09-12 下载**：`data/prompt-corpus/seedance2/metadata.jsonl`（`data/prompt-corpus/` 已 gitignore，
-第三方文本不入库；分析脚本在 `backend-py/scripts/corpus/`）。
+第三方文本不入库；分析脚本在 `backend-py/app/scripts/corpus/`）。
 
 **实测数据结构（比预期好）**：
 
@@ -173,7 +173,7 @@ ds = load_dataset("WenhaoWang/TIP-I2V", split="Subset", streaming=True)
 第 1 步 ✅ 已完成（2026-09-12）
   下载 Seedance2 metadata.jsonl（37.58 MB，CC BY 4.0）
   → 8755 条中文原始提示词，已落盘 data/prompt-corpus/seedance2/
-     （分析脚本 backend-py/scripts/corpus/analyze*.py）
+     （分析脚本 backend-py/app/scripts/corpus/analyze*.py）
   → 已提炼词频与模板，写入 skill 第 6.10 节
      （分析见 docs/seedance2-corpus-analysis.md）
 
@@ -197,7 +197,7 @@ ds = load_dataset("WenhaoWang/TIP-I2V", split="Subset", streaming=True)
 
 ## 4. 落到本项目怎么用
 
-采集到的语料**不是**要抄进仓库，而是提炼成 `backend-py/skills/prompt-style-library` 的**范式与词表**：
+采集到的语料**不是**要抄进仓库，而是提炼成 `backend-py/app/skills/prompt-style-library` 的**范式与词表**：
 
 | 语料 | 提炼目标 |
 |---|---|
@@ -219,5 +219,5 @@ ds = load_dataset("WenhaoWang/TIP-I2V", split="Subset", streaming=True)
 - 本机 `huggingface.co` **直连超时**，一律走镜像：
   - 命令行：`$env:HF_ENDPOINT = "https://hf-mirror.com"`
   - 直链：把 `https://huggingface.co/...` 替换为 `https://hf-mirror.com/...`
-- 项目内已有三源切换逻辑（HF / hf-mirror / ModelScope），见 `backend-py/scripts/model_manager.py`，
+- 项目内已有三源切换逻辑（HF / hf-mirror / ModelScope），见 `backend-py/app/scripts/model_manager.py`，
   大规模下载应复用它自带的**断点续传**，不要另写一套

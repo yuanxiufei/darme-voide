@@ -8,7 +8,7 @@
 ## 1. 通用约定
 
 - **Base URL**：后端 `http://localhost:5790`（**现行**；Node 时代的 5789 已随 `backend/` 删除），API 前缀 `/api/v1`（`/webhooks` 除外，挂载在根路径下）
-- **统一响应格式**（原 `backend/src/shared/` 封装 ⇒ **现行** `backend-py/app/response.py`）：
+- **统一响应格式**（原 `backend/src/shared/` 封装 ⇒ **现行** `backend-py/app/core/response.py`）：
 
 ```jsonc
 // 成功（HTTP 200，code=0）
@@ -188,7 +188,7 @@
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `agents` | `{type,label,phase,skillCount}[]` | 主流程 Agent + 各自默认绑定的 skill 数（label/phase 取自 `agents/index.ts`） |
-| `sources` | `{id,label,description,skillCount}[]` | **外部技能库**：由 `backend-py/skills/<lib>/library.yaml` 显式声明（`name` = 库标识、`label` = 展示名、`description` = 说明）—— 加库 / 换库 / 改展示名皆零代码 |
+| `sources` | `{id,label,description,skillCount}[]` | **外部技能库**：由 `backend-py/app/skills/<lib>/library.yaml` 显式声明（`name` = 库标识、`label` = 展示名、`description` = 说明）—— 加库 / 换库 / 改展示名皆零代码 |
 | `coreCount` | number | 项目自有 skill 数量 |
 
 **GET `/` 列表项扩展字段**：

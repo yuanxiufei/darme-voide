@@ -41,8 +41,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import and_, delete, select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import (
+from ..core.db import get_conn, get_tx
+from ..core.models import (
     characters,
     dramas,
     episodes,
@@ -51,8 +51,8 @@ from ..models import (
     storyboards,
     video_quality_checks,
 )
-from ..request_utils import read_json
-from ..response import (
+from ..core.request_utils import read_json
+from ..core.response import (
     bad_request,
     created,
     js_round,
@@ -78,7 +78,7 @@ from ..services.storyboard_helpers import (
 )
 from ..services.frame_extractor import extract_frame
 from ..services.image_generation import generate_image
-from ..services.qc_retry import retry_failed_storyboard
+from app.agent.qc_retry import retry_failed_storyboard
 from ..services.qc_scoring import score_storyboard
 from ..services.prompt_utils import (
     build_storyboard_image_prompt,

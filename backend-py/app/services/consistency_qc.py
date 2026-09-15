@@ -34,8 +34,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..models import storyboards, video_quality_checks
-from ..response import js_round, now
+from ..core.models import storyboards, video_quality_checks
+from ..core.response import js_round, now
 from .file_storage import get_absolute_path
 from .task_logger import log_task_warn
 

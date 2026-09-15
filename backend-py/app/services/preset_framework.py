@@ -33,9 +33,9 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..db import engine
-from ..models import dramas, episodes, storyboards
-from ..response import now
+from ..core.db import engine
+from ..core.models import dramas, episodes, storyboards
+from ..core.response import now
 from .image_generation import generate_image
 from .prompt_utils import (
     PRESET_IMAGE_NEGATIVE,

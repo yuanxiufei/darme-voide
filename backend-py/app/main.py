@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: F401  (保留给后续完�
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .http_logger import request_logger
-from .config import (
+from .core.config import (
     FRONTEND_DIST,
     NODE_BACKEND_URL,
     PROXY_TO_NODE,
@@ -39,7 +39,7 @@ from .passthrough import (
     delegate,
     init_proxy_client,
 )
-from .response import not_found
+from .core.response import not_found
 from .routers.ai_voices import router as ai_voices_router
 from .routers.characters import router as characters_router
 from .routers.dramas import router as dramas_router
@@ -73,8 +73,8 @@ from .routers.webhooks import router as webhooks_router
 from .routers.merge import router as merge_router
 from .routers.preset_framework import router as preset_framework_router
 from .routers.evaluation import router as evaluation_router
-from .services.auto_pipeline import recover_auto_pipeline_on_startup
-from .services.evaluation_scheduler import start_evaluation_scheduler
+from app.agent.auto_pipeline import recover_auto_pipeline_on_startup
+from app.agent.evaluation_scheduler import start_evaluation_scheduler
 from .routers.mcp import router as mcp_router
 from .routers.props import router as props_router
 from .routers.videos import router as videos_router
@@ -165,7 +165,7 @@ async def _unhandled_exception_handler(_request: Request, exc: Exception) -> JSO
 
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
-    from .response import now
+    from .core.response import now
 
     return {"status": "ok", "timestamp": now()}
 

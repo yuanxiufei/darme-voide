@@ -24,8 +24,8 @@ from typing import Any
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
-from ..models import asset_versions, characters, prop_templates, scenes, storyboards
-from ..response import now, row_to_camel
+from ..core.models import asset_versions, characters, prop_templates, scenes, storyboards
+from ..core.response import now, row_to_camel
 
 STORYBOARD_FRAME_TYPES = ("composed", "first_frame", "last_frame", "keyframe")
 

@@ -33,8 +33,11 @@ backend/    — ❌ 已于 2026-09-15 **删除**（Node/Hono 后端；能力全�
               守卫靠 backend-py/tests/frozen_ts_source.py 的 TS 快照继续做「Python vs TS 当初」比对）
 configs/    — config.yaml 配置文件
 data/       — SQLite 数据库 + 生成资源文件
-backend-py/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/skills/README.md）
-backend-py/local_services/ — 本地服务根（模型工具链 `git clone` 的第三方服务 + 项目自带 h3 8765 薄封装）
+backend-py/app/        — 后端代码包（装配 main.py + 平台层 core/ + HTTP 层 routers/ + 业务层 services/
+                        + Agent 运行时 agent/ + MCP 客户端 mcp/；层间**单向依赖**由
+                        backend-py/tests/layering_test.py 机械守卫）
+backend-py/app/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/app/skills/README.md）
+backend-py/app/local_services/ — 本地服务根（模型工具链 `git clone` 的第三方服务 + 项目自带 h3 8765 薄封装）
 ```
 
 ### 🎥 作品展示 / Demo Videos
@@ -83,7 +86,7 @@ backend-py/local_services/ — 本地服务根（模型工具链 `git clone` 的
 
 ### 🤖 AI Agents
 
-内置 5 类 Agent（Python 侧 `app/services/agents/`），支持数据库配置和 Skill 扩展：
+内置 5 类 Agent（Python 侧 `backend-py/app/agent/`），支持数据库配置和 Skill 扩展：
 
 | Agent | 职责 |
 |---|---|
@@ -312,7 +315,7 @@ backend-py/       # 唯一的后端（Python；Node 后端已于 2026-09-15 删�
 frontend/dist/    # 前端构建产物
 configs/config.yaml
 data/             # 数据目录（首次运行自动创建）
-backend-py/skills/           # Agent 技能文件
+backend-py/app/skills/           # Agent 技能文件
 ```
 
 #### Nginx 反向代理
@@ -340,7 +343,7 @@ server {
 - **运行时**: Python 3.12
 - **Web 框架**: FastAPI（+ SQLAlchemy Core）
 - **数据库**: SQLite（WAL；`database.path` / `DATA_ROOT` 可切）
-- **AI Agent**: 自研 Agent 运行时 + OpenAI 兼容协议（`backend-py/app/services/agents/`）
+- **AI Agent**: 自研 Agent 运行时 + OpenAI 兼容协议（`backend-py/app/agent/`）
 - **视频处理**: FFmpeg（CLI：合成 / 拼接 / 校色 / 抽帧 / 连续性 QC）
 - **图片处理**: FFmpeg（**刻意不依赖 Pillow/Sharp**，见 `backend-py/README.md`）
 
@@ -389,7 +392,7 @@ A: 后端会在首次启动时自动创建所有表，检查日志确认初始�
 常用检查命令：
 
 ```bash
-cd backend-py && .venv\Scripts\python.exe tests\run_all.py    # 后端自检（65 套件 / 2473 项）
+cd backend-py && .venv\Scripts\python.exe tests\run_all.py    # 后端自检（66 套件 / 2481 项）
 cd ../frontend && npm run build
 ```
 

@@ -28,8 +28,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..config import get_storage_root
-from ..models import ai_voices
+from ..core.config import get_storage_root
+from ..core.models import ai_voices
 from .adapters.registry import get_tts_adapter
 from .ai_configs import is_local_config
 from .ai_providers import get_audio_config_by_id

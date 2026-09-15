@@ -27,10 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ⚠️ Windows 控制台默认 GBK：检查名里带 emoji 时**打印阶段**会 UnicodeEncodeError
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from app.config import PROJECT_ROOT  # noqa: E402
+from app.core.config import PROJECT_ROOT  # noqa: E402
 from app.services.agent_prompts import get_default_instructions  # noqa: E402
-from app.services.evaluation import catalog as cat  # noqa: E402
-from app.services.evaluation import cli  # noqa: E402
+from app.agent.evaluation import catalog as cat  # noqa: E402
+from app.agent.evaluation import cli  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

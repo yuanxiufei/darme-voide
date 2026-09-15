@@ -28,8 +28,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..models import storyboards
-from ..response import now
+from ..core.models import storyboards
+from ..core.response import now
 from .task_logger import log_task_progress
 
 __all__ = [

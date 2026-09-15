@@ -41,10 +41,10 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from ..db import engine
-from ..models import ai_service_configs
-from ..request_utils import read_json
-from ..response import bad_request, now, success
+from ..core.db import engine
+from ..core.models import ai_service_configs
+from ..core.request_utils import read_json
+from ..core.response import bad_request, now, success
 from ..services.ai_configs import map_config_row, parse_settings_object
 from ..services.local_model_scan import (
     ScanCancelledError,

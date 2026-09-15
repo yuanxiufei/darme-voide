@@ -26,9 +26,9 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from ..request_utils import read_json
-from ..response import bad_request, not_found, parse_param_id, server_error, success
-from ..services.auto_pipeline import (
+from ..core.request_utils import read_json
+from ..core.response import bad_request, not_found, parse_param_id, server_error, success
+from app.agent.auto_pipeline import (
     get_auto_pipeline_status,
     resume_auto_pipeline,
     run_auto_pipeline,

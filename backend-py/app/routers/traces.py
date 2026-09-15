@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from ..response import bad_request, success
+from ..core.response import bad_request, success
 from ..services.trace_store import list_traces, read_trace
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])

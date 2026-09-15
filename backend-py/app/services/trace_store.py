@@ -24,7 +24,7 @@ import re
 import threading
 from typing import Any
 
-from ..config import get_data_root
+from ..core.config import get_data_root
 
 #: 连续下划线折叠成单个（原 TS 是两次 replace，第二次带 g 标志）
 _MULTI_UNDERSCORE = re.compile(r"_{2,}")

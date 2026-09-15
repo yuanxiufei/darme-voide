@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.services.agents import mcp as mcpmod  # noqa: E402
-from app.services.agents.tool import Tool, ToolRegistry  # noqa: E402
+from app.mcp import client as mcpmod  # noqa: E402  （mcp 已是顶层包；模块名不能写在 agent 的 import 位）
+from app.agent.tool import Tool, ToolRegistry  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

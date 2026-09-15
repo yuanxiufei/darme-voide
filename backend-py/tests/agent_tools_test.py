@@ -25,11 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import scenes, storyboards  # noqa: E402
-from app.response import now  # noqa: E402
-from app.services.agents.tools.grid_prompt_tools import create_grid_prompt_tools  # noqa: E402
+from app.core.models import scenes, storyboards  # noqa: E402
+from app.core.response import now  # noqa: E402
+from app.agent.tools.grid_prompt_tools import create_grid_prompt_tools  # noqa: E402
 from app.services import prompt_utils as pu  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []

@@ -6,8 +6,8 @@
 
 目录约定（决定 skill 属「自有」还是「外部库」）::
 
-    backend-py/skills/<name>/SKILL.md      → 自有（core）：可被 frontmatter agents 默认注入
-    backend-py/skills/<lib>/library.yaml   → 外部技能库（vendor）：**库由声明文件识别**，库内 skill 不默认注入
+    backend-py/app/skills/<name>/SKILL.md      → 自有（core）：可被 frontmatter agents 默认注入
+    backend-py/app/skills/<lib>/library.yaml   → 外部技能库（vendor）：**库由声明文件识别**，库内 skill 不默认注入
 
 ✅ ``loadAgentSkills``（注入文本组装 + 体量预算闸）**已迁** —— 见 ``services/agents/skills.py``
 的 ``load_agent_skills``（Agent 运行链在 ``agents/runtime.py`` 里真调用它，skill 段 2026-09-15 起
@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..config import skills_dir
+from ..core.config import skills_dir
 from .skill_parser import parse_skill
 
 #: 技能库目录 —— **唯一权威是 ``app/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前

@@ -21,9 +21,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn
-from ..models import dramas
-from ..response import bad_request, js_number, not_found
+from ..core.db import get_conn
+from ..core.models import dramas
+from ..core.response import bad_request, js_number, not_found
 from ..services.visual_graph import (
     build_visual_graph_guidance,
     get_visual_graph,

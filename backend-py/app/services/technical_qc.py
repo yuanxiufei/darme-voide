@@ -47,8 +47,8 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..models import storyboards, video_generations, video_quality_checks
-from ..response import now
+from ..core.models import storyboards, video_generations, video_quality_checks
+from ..core.response import now
 from .file_storage import get_absolute_path
 from .task_logger import log_task_warn
 

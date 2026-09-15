@@ -35,10 +35,10 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import and_, desc, select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import app_settings, characters, dramas, episodes, scenes, storyboards
-from ..request_utils import read_json
-from ..response import (
+from ..core.db import get_conn, get_tx
+from ..core.models import app_settings, characters, dramas, episodes, scenes, storyboards
+from ..core.request_utils import read_json
+from ..core.response import (
     bad_request,
     conflict,
     created,

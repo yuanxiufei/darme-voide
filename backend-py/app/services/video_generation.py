@@ -33,9 +33,9 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection, Row
 
-from ..db import engine
-from ..models import api_usage, storyboards, video_generations
-from ..response import js_truthy, now
+from ..core.db import engine
+from ..core.models import api_usage, storyboards, video_generations
+from ..core.response import js_truthy, now
 from .adapters.registry import get_video_adapter, video_adapters
 from .ai_configs import is_local_config
 from .ai_providers import get_active_config, get_active_config_by_provider, get_config_by_id

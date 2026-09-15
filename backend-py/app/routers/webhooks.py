@@ -25,10 +25,10 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_tx
-from ..models import storyboards, video_generations
-from ..request_utils import read_json
-from ..response import bad_request, now, success
+from ..core.db import get_tx
+from ..core.models import storyboards, video_generations
+from ..core.request_utils import read_json
+from ..core.response import bad_request, now, success
 from ..services.file_storage import download_file
 from ..services.task_logger import (
     log_task_error,

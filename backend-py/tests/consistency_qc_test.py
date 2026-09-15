@@ -33,10 +33,10 @@ import asyncio  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import dramas, episodes, storyboards, video_quality_checks  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import dramas, episodes, storyboards, video_quality_checks  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import consistency_qc  # noqa: E402
 from app.services.consistency_qc import run_episode_consistency_qc  # noqa: E402
 from app.services.file_storage import get_storage_root  # noqa: E402

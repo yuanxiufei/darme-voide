@@ -20,7 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..models import (
+from ..core.models import (
     characters,
     dramas,
     episodes,
@@ -30,7 +30,7 @@ from ..models import (
     storyboards,
     video_generations,
 )
-from ..response import now
+from ..core.response import now
 from .usage_tracking import get_episode_cost_board
 
 #: 路由标识 → 中文标签（Markdown 用）

@@ -28,13 +28,13 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, inspect  # noqa: E402
 
-from app import config  # noqa: E402
-from app import db  # noqa: E402
+from app.core import config  # noqa: E402
+from app.core import db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services import data_storage as ds  # noqa: E402
 
-# ⚠️ **必须用 `db.engine`（模块属性），不能 `from app.db import engine`**：
-#    `reopen_engine()` 换的是 `app.db.engine` 这个**名字**，而 `from ... import` 拿到的是
+# ⚠️ **必须用 `db.engine`（模块属性），不能 `from app.core.db import engine`**：
+#    `reopen_engine()` 换的是 `app.core.db.engine` 这个**名字**，而 `from ... import` 拿到的是
 #    导入那一刻的对象**快照** ⇒ 用它断言「已指向新库」会永远看到旧库（我第一版就这么错，
 #    还让「新库已建表」那条**假通过**了：它在旧库上当然有表）。
 

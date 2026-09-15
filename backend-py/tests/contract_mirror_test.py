@@ -104,11 +104,26 @@ def main() -> int:
           not bad_top and "import " not in body, bad_top[:3])
 
     # ⑤ nuxt 别名 `~contracts` 仍在（丢了前端直接构建失败）
-    if NUXT_CONFIG.is_file():
-        config_text = NUXT_CONFIG.read_text(encoding="utf-8")
-        check("规则2: nuxt.config.ts 里 `~contracts` 别名仍在", "~contracts" in config_text)
-    else:
-        check("规则2: 找到 frontend/nuxt.config.ts", False, NUXT_CONFIG)
+    config_text = NUXT_CONFIG.read_text(encoding="utf-8") if NUXT_CONFIG.is_file() else ""
+    check("规则2: nuxt.config.ts 里 `~contracts` 别名仍在", "~contracts" in config_text, NUXT_CONFIG)
+
+    # ⑥ 前端 dev 代理必须指向 `backendTarget`（**不许硬编码端口**）
+    #    ⚠️ 2026-09-15 真踩过：变量切到 5790，而 `vite.server.proxy` 里仍写死 5789（已删的 Node）
+    #    ⇒ `npm run dev` 的 /api、/static 全打到空端口，且**不报错**、只是请求失败 ✗
+    code = re.sub(r"/\*.*?\*/", "", config_text, flags=re.S)
+    # ⚠️ 只切「不在 `:` 之后的 `//`」—— 否则会把 URL 的 `http://` 也切掉
+    #    （我第一版就这么错：`http://localhost:5790` 变成 `http:` ⇒ 正则扑空 ✗）
+    code = re.sub(r"(?<!:)//[^\n]*", "", code)
+    target = re.search(r"backendTarget\s*=\s*process\.env\.NUXT_API_TARGET\s*\|\|\s*'([^']+)'", code)
+    check("规则3: dev 代理默认目标 = Python 后端端口 5790",
+          bool(target) and target.group(1).endswith(":5790"),
+          target.group(1) if target else "未找到 backendTarget 定义")
+    idx = code.find("proxy:")
+    window = code[idx: idx + 400] if idx >= 0 else ""
+    check("规则3: `vite.server.proxy` 用 `backendTarget`（无硬编码端口）",
+          window.count("backendTarget") >= 2 and not re.search(r"localhost:\d{4}", window),
+          window[:140] or "未找到 proxy 块")
+    check("规则3: nuxt.config.ts 的**代码**里不再出现已删除的 5789", "5789" not in code)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

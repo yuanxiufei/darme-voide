@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from app.services.agent_registry import VALID_AGENT_TYPES  # noqa: E402
-from app.services.agents import runtime, subagent  # noqa: E402
+from app.agent import runtime, subagent  # noqa: E402
 
 _R: list[tuple[str, bool, object]] = []
 _SEEN: dict[str, object] = {}

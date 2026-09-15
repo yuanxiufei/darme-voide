@@ -25,15 +25,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn
-from ..request_utils import read_json
-from ..response import bad_request, not_found, success
+from ..core.db import get_conn
+from ..core.request_utils import read_json
+from ..core.response import bad_request, not_found, success
 from ..services.agent_prompts import get_default_instructions
-from ..services.evaluation.catalog import list_benchmark_cases, load_case_by_id
-from ..services.evaluation.evaluator import evaluate_case
-from ..services.evaluation.optimizer import optimize_agent_prompt
-from ..services.evaluation_scheduler import get_scheduler_state, run_evaluation_cycle
-from ..services.evaluation.types import AGENT_BY_KIND
+from app.agent.evaluation.catalog import list_benchmark_cases, load_case_by_id
+from app.agent.evaluation.evaluator import evaluate_case
+from app.agent.evaluation.optimizer import optimize_agent_prompt
+from app.agent.evaluation_scheduler import get_scheduler_state, run_evaluation_cycle
+from app.agent.evaluation.types import AGENT_BY_KIND
 from ..services.task_logger import log_task_error
 
 router = APIRouter(prefix="/api/v1/evaluation", tags=["evaluation"])

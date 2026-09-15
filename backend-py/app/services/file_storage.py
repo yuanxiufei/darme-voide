@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from ..config import get_storage_root
+from ..core.config import get_storage_root
 from .task_logger import log_task_warn
 
 #: mimeType ↔ 扩展名映射（与 TS 的两张表一字不差）

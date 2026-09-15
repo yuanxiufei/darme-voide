@@ -26,8 +26,8 @@ from typing import Any
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
-from ..models import dramas, episodes
-from ..response import now
+from ..core.models import dramas, episodes
+from ..core.response import now
 from .task_logger import log_task_error, log_task_progress, log_task_start, log_task_success
 
 _EraBackground = dict[str, str]

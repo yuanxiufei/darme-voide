@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from ..response import bad_request, success
+from ..core.response import bad_request, success
 from ..services.file_storage import save_uploaded_file
 
 router = APIRouter(prefix="/api/v1/upload", tags=["upload"])

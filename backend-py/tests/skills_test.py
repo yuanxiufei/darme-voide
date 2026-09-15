@@ -29,13 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.config import PROJECT_ROOT  # noqa: E402
-from app.db import engine  # noqa: E402
+from app.core.config import PROJECT_ROOT  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import dramas  # noqa: E402
-from app.services.agents import skill_parser as sp  # noqa: E402
-from app.services.agents import skills as sk  # noqa: E402
-from app.services.agents import runtime as rt  # noqa: E402
+from app.core.models import dramas  # noqa: E402
+from app.agent import skill_parser as sp  # noqa: E402
+from app.agent import skills as sk  # noqa: E402
+from app.agent import runtime as rt  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -236,8 +236,8 @@ def main() -> int:  # noqa: C901
     # ================= skills：真实目录 =================
     os.environ.pop("SKILLS_DIR", None)
     sk._parsed_cache.clear()  # noqa: SLF001
-    check("真实目录: 定位到 `backend-py/skills`（2026-09-15 并入后端；删 backend/ 不受影响）",
-          sk.skills_dir() == PROJECT_ROOT / "backend-py" / "skills"
+    check("真实目录: 定位到 `backend-py/app/skills`（2026-09-15 并入 app/；删 backend/ 不受影响）",
+          sk.skills_dir() == PROJECT_ROOT / "backend-py" / "app" / "skills"
           and sk.skills_dir().is_dir())
     core = sk.list_core_skill_ids()
     check("真实目录: core 非空、已排序、每个都真有 SKILL.md",

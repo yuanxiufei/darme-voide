@@ -33,9 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.models import (  # noqa: E402
     characters,
     dramas,
     episodes,
@@ -43,7 +43,7 @@ from app.models import (  # noqa: E402
     storyboard_characters,
     storyboards,
 )
-from app.response import now  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.routers import storyboards as sr  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []

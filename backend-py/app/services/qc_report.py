@@ -33,8 +33,8 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..models import dramas, episodes, storyboards, video_generations, video_quality_checks
-from ..response import js_round
+from ..core.models import dramas, episodes, storyboards, video_generations, video_quality_checks
+from ..core.response import js_round
 from .export_service import to_local_abs_path
 
 __all__ = [

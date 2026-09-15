@@ -21,8 +21,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from ..response import bad_request, success
-from ..services.agents.mcp import get_mcp_status, refresh_mcp, test_mcp_server
+from ..core.response import bad_request, success
+from app.mcp.client import get_mcp_status, refresh_mcp, test_mcp_server
 
 router = APIRouter(prefix="/api/v1/mcp", tags=["mcp"])
 

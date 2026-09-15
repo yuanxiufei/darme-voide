@@ -70,8 +70,8 @@ os.environ["DATA_ROOT"] = str(_smoke_root)
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
-from app.config import PROJECT_ROOT, get_data_root, get_db_path, server  # noqa: E402
-from app.models import metadata  # noqa: E402
+from app.core.config import PROJECT_ROOT, get_data_root, get_db_path, server  # noqa: E402
+from app.core.models import metadata  # noqa: E402
 
 check("config: PROJECT_ROOT == repo root", PROJECT_ROOT == REPO, str(PROJECT_ROOT))
 # ⚠️ 必须比较 resolve() 后的路径：Windows 上 tempfile.mkdtemp() 返回 8.3 短路径
@@ -1270,7 +1270,7 @@ with TestClient(app) as client:
     r = client.post("/api/v1/storyboards", json={"episode_id": av_ep, "title": "SMOKE AV 镜头"})
     av_sb_id = r.json()["data"]["id"]
 
-    from app.db import engine as av_engine  # noqa: E402
+    from app.core.db import engine as av_engine  # noqa: E402
     from app.services.asset_versions import record_asset_version  # noqa: E402
 
     with av_engine.begin() as av_conn:
@@ -1633,6 +1633,19 @@ with TestClient(app) as client:
             else:
                 self.send_response(404)
                 self.end_headers()
+
+        def do_POST(self):  # noqa: N802
+            # ⚠️ 必须补这个：连通性探测里 gemini 发的是 **POST**（`…:generateContent`），
+            #    而 `BaseHTTPRequestHandler` 对**未实现的方法**会回 501 且**不读 body**
+            #    ⇒ 单线程 `HTTPServer` 上留下未读字节、偶发连接层异常（本机实测出现过一次
+            #    「475/476 · 请求失败」，重跑即绿 ✗）。这里明确回 404（正是本用例要判的
+            #    「404 不在可达白名单」），并把 body 读干净 ⇒ 判据确定、不再偶发。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, *args):  # 静音
             pass
@@ -2215,7 +2228,7 @@ with TestClient(app) as client:
 
     # ⚠️ 整数值必须序列化成 int：JS 的 JSON.stringify(Number('37')) 得 37，
     # Python 的 json.dumps(37.0) 得 37.0 —— 宽松比较看不出来，但会出现在响应体字节里
-    from app.response import js_number  # noqa: E402
+    from app.core.response import js_number  # noqa: E402
 
     check("js_number: 整数值返回 int / 小数保留 / 空串为 0 / 非法为 None",
           isinstance(js_number("37"), int) and js_number("37") == 37
@@ -2350,7 +2363,7 @@ with TestClient(app) as client:
     raw.close()
 
     # ============ S2 第 1 块：prompt_utils 画风层 / 负面词层 ============
-    from app.response import js_number  # noqa: F401  (已在上面导入过，这里保证可用)
+    from app.core.response import js_number  # noqa: F401  (已在上面导入过，这里保证可用)
     from app.services import prompt_utils as pu  # noqa: E402
 
     check("prompt: 画风目录 10 项且 key/分组齐全",
@@ -2369,7 +2382,7 @@ with TestClient(app) as client:
           pu.resolve_art_style_key(None, "bogus", "anime"))
     # ⚠️ resolve_effective_art_style 会**无条件**读一次全局画风（TS 的 getGlobalArtStyle() 同样如此），
     # 所以 conn 是必需参数 —— 只传 drama_style 也逃不掉这次查询。
-    from app.db import engine as _art_engine  # noqa: E402
+    from app.core.db import engine as _art_engine  # noqa: E402
 
     with _art_engine.connect() as _art_conn:
         check("prompt: 角色 style 优先于剧集 style",

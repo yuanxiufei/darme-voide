@@ -29,11 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.config import get_storage_root  # noqa: E402
-from app.db import engine  # noqa: E402
+from app.core.config import get_storage_root  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import episodes, storyboards, video_merges  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import episodes, storyboards, video_merges  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.routers import merge as merge_router  # noqa: E402
 from app.services import ffmpeg_merge as fm  # noqa: E402
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...response import js_nullish
+from ...core.response import js_nullish
 from .jscompat import as_dict, dig, is_pure_hex, js_base64_to_hex
 from .url import join_provider_url
 

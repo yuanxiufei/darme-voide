@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy.engine import Row
 
-from ..response import js_truthy, row_to_dict
+from ..core.response import js_truthy, row_to_dict
 
 #: 本地 provider 白名单（运行在本机 GPU 上的服务）
 LOCAL_PROVIDERS = {"ollama", "local-sd", "cosyvoice"}

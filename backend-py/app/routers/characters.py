@@ -45,8 +45,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import (
+from ..core.db import get_conn, get_tx
+from ..core.models import (
     asset_versions,
     characters,
     episode_characters,
@@ -54,8 +54,8 @@ from ..models import (
     image_generations,
     storyboard_characters,
 )
-from ..request_utils import read_json
-from ..response import (
+from ..core.request_utils import read_json
+from ..core.response import (
     bad_request,
     camel_to_snake,
     js_number,

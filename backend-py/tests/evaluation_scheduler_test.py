@@ -29,9 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.response import now as response_now  # noqa: E402
+from app.core.response import now as response_now  # noqa: E402
 from app.routers import evaluation as ev_route  # noqa: E402
-from app.services import evaluation_scheduler as sch  # noqa: E402
+from app.agent import evaluation_scheduler as sch  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

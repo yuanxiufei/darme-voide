@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from ..request_utils import read_json
-from ..response import bad_request, success
+from ..core.request_utils import read_json
+from ..core.response import bad_request, success
 from ..services.data_storage import change_data_root, get_storage_info
 
 router = APIRouter(prefix="/api/v1/storage", tags=["storage"])

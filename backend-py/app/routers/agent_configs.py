@@ -24,14 +24,14 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import agent_configs
-from ..request_utils import read_json
+from ..core.db import get_conn, get_tx
+from ..core.models import agent_configs
+from ..core.request_utils import read_json
 from ..services.agent_registry import VALID_AGENT_TYPES
-from ..services.agents.creator import generate_agent_config, persist_agent_config
-from ..services.agents.runtime import get_agent_defaults
+from app.agent.creator import generate_agent_config, persist_agent_config
+from app.agent.runtime import get_agent_defaults
 from ..services.task_logger import log_task_error
-from ..response import (
+from ..core.response import (
     bad_request,
     internal_error,
     js_nullish,

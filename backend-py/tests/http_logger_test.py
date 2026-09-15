@@ -27,9 +27,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from starlette.responses import JSONResponse  # noqa: E402
 
 from app import http_logger  # noqa: E402
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import dramas  # noqa: E402
+from app.core.models import dramas  # noqa: E402
 
 _R: list[tuple[str, bool, object]] = []
 

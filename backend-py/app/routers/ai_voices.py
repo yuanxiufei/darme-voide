@@ -40,11 +40,11 @@ from sqlalchemy import and_, delete as sql_delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
-from ..config import get_storage_root
-from ..db import get_conn, get_tx
-from ..models import ai_service_configs, ai_voices, characters, dramas, episodes
-from ..request_utils import read_json
-from ..response import bad_request, not_found, now, success
+from ..core.config import get_storage_root
+from ..core.db import get_conn, get_tx
+from ..core.models import ai_service_configs, ai_voices, characters, dramas, episodes
+from ..core.request_utils import read_json
+from ..core.response import bad_request, not_found, now, success
 from ..services.adapters.url import join_provider_url
 from ..services.ai_providers import get_audio_config
 from ..services.task_logger import log_task_error

@@ -28,19 +28,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import agent_configs, dramas  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import agent_configs, dramas  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import agent_prompts as ap  # noqa: E402
 from app.services.agent_registry import (  # noqa: E402
     AGENT_DEFAULT_NAMES,
     VALID_AGENT_TYPES,
     get_default_name,
 )
-from app.services.agents import runtime as rt  # noqa: E402
-from app.services.agents import skills as sk  # noqa: E402
-from app.services.agents.protocol import build_protocol_contract  # noqa: E402
+from app.agent import runtime as rt  # noqa: E402
+from app.agent import skills as sk  # noqa: E402
+from app.agent.protocol import build_protocol_contract  # noqa: E402
 from app.services.prompt_blocks import (  # noqa: E402
     IMAGE_PROMPT_TEMPLATE_CHARACTER,
     IMAGE_PROMPT_TEMPLATE_SCENE,

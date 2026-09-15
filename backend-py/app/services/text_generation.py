@@ -22,7 +22,7 @@ from typing import Any
 
 from sqlalchemy.engine import Connection
 
-from ..response import js_truthy
+from ..core.response import js_truthy
 from .adapters.registry import get_text_adapter
 from .ai_configs import is_local_config
 from .ai_providers import get_text_config

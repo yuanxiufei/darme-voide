@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...response import js_nullish
+from ...core.response import js_nullish
 from .jscompat import add_query_param, as_dict, dig
 from .url import join_provider_url
 

@@ -22,8 +22,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..models import ai_service_configs, episodes, storyboards, video_generations
-from ..response import js_round, now
+from ..core.models import ai_service_configs, episodes, storyboards, video_generations
+from ..core.response import js_round, now
 from .cost_catalog import estimate_cost
 from .task_logger import log_task_start, log_task_success
 

@@ -35,7 +35,7 @@ def publish_pipeline_event(drama_id: int, event: dict[str, Any]) -> None:
     subscribers = _channels.get(drama_id)
     if not subscribers:
         return
-    from ..response import now as _now
+    from ..core.response import now as _now
 
     full = {**event, "ts": _now()}
     for handler in list(subscribers):

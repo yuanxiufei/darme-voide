@@ -20,7 +20,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .config import NODE_BACKEND_URL, PROXY_TO_NODE
+from .core.config import NODE_BACKEND_URL, PROXY_TO_NODE
 
 #: 逐跳首部（RFC 7230）：转发时必须剥掉，否则会污染下游连接语义
 HOP_BY_HOP = {

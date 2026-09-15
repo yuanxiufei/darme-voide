@@ -27,7 +27,7 @@ import json
 import re
 from typing import Any
 
-from ...response import js_number, js_round
+from ...core.response import js_number, js_round
 from .jscompat import as_dict, dig, js_json_stringify, random_seed
 from .url import join_provider_url
 

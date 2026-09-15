@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.engine import Connection
 
-from ..models import (
+from ..core.models import (
     characters as characters_table,
     episode_characters,
     episode_scenes,

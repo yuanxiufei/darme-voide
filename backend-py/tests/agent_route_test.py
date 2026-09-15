@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
 from app.routers import agent as agent_route  # noqa: E402
 from app.services.agent_registry import VALID_AGENT_TYPES  # noqa: E402
-from app.services.agents.runtime import AgentRunResult, TokenUsage  # noqa: E402
+from app.agent.runtime import AgentRunResult, TokenUsage  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

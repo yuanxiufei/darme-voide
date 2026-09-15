@@ -34,10 +34,10 @@ from sqlalchemy import delete as sql_delete
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import episodes, storyboards, video_generations
-from ..request_utils import read_json
-from ..response import (
+from ..core.db import get_conn, get_tx
+from ..core.models import episodes, storyboards, video_generations
+from ..core.request_utils import read_json
+from ..core.response import (
     bad_request,
     created,
     js_number,

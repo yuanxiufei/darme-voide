@@ -28,8 +28,8 @@ from typing import Any
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
-from ..models import style_profiles
-from ..response import js_round, js_truthy, now, row_to_dict
+from ..core.models import style_profiles
+from ..core.response import js_round, js_truthy, now, row_to_dict
 from .file_storage import get_absolute_path
 from .task_logger import log_task_error
 

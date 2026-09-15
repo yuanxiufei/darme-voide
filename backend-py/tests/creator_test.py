@@ -33,14 +33,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import agent_configs  # noqa: E402
-from app.response import now, row_to_dict  # noqa: E402
+from app.core.models import agent_configs  # noqa: E402
+from app.core.response import now, row_to_dict  # noqa: E402
 from app.routers import agent_configs as ac_route  # noqa: E402
 from app.services.agent_registry import VALID_AGENT_TYPES, get_default_name  # noqa: E402
-from app.services.agents import creator as cr  # noqa: E402
-from app.services.agents import skills as sk  # noqa: E402
+from app.agent import creator as cr  # noqa: E402
+from app.agent import skills as sk  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

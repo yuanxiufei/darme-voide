@@ -26,11 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import ai_service_configs, ai_voices, characters  # noqa: E402
-from app.response import now  # noqa: E402
-from app.services.agents.tools.voice_tools import create_voice_tools, infer_gender  # noqa: E402
+from app.core.models import ai_service_configs, ai_voices, characters  # noqa: E402
+from app.core.response import now  # noqa: E402
+from app.agent.tools.voice_tools import create_voice_tools, infer_gender  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -208,7 +208,7 @@ def _insert_voice(provider: str, voice_id: str, name: str, description: str,
 
 def _set_audio_config(drama_id: int, episode_id: int, provider: str) -> None:
     """给该集挂一个 audio 配置（工具的 provider 取自它）。"""
-    from app.models import episodes
+    from app.core.models import episodes
 
     with engine.begin() as conn:
         values = {

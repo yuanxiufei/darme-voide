@@ -21,10 +21,10 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import app_settings as app_settings_table
-from ..request_utils import read_json
-from ..response import bad_request, now, success
+from ..core.db import get_conn, get_tx
+from ..core.models import app_settings as app_settings_table
+from ..core.request_utils import read_json
+from ..core.response import bad_request, now, success
 
 router = APIRouter(prefix="/api/v1/app-settings", tags=["app-settings"])
 

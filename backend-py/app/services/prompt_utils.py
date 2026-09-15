@@ -41,7 +41,7 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..models import (
+from ..core.models import (
     app_settings,
     characters,
     dramas,
@@ -51,7 +51,7 @@ from ..models import (
     storyboard_props,
     storyboards,
 )
-from ..response import js_truthy
+from ..core.response import js_truthy
 from .camera_movement_guides import get_camera_movement_composition
 from .storyboard_helpers import parse_dialogue_for_tts
 from .visual_graph import resolve_visual_term

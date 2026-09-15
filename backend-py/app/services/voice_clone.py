@@ -15,7 +15,7 @@ import json
 import re
 from typing import Any
 
-from ..response import js_number
+from ..core.response import js_number
 from .task_logger import log_task_error, log_task_start, log_task_success
 from .vendor_errors import fetch_with_retry
 

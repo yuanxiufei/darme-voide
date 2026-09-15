@@ -51,7 +51,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from ..response import js_round
+from ..core.response import js_round
 from .ai_configs import LOCAL_PROVIDERS as _AI_CONFIGS_LOCAL_PROVIDERS
 from .ai_configs import is_local_config
 from .task_logger import log_task_error, log_task_progress, log_task_warn

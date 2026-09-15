@@ -21,8 +21,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..models import episodes, storyboards
-from ..response import now
+from ..core.models import episodes, storyboards
+from ..core.response import now
 
 
 def get_episode_script_source(script_content: str | None, content: str | None) -> str:

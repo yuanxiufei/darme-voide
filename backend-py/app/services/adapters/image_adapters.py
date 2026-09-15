@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...response import js_number, js_truthy
+from ...core.response import js_number, js_truthy
 from ..file_storage import parse_data_url
 from .jscompat import (
     add_query_param,

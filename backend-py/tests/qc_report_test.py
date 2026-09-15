@@ -30,17 +30,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import get_data_root  # noqa: E402
-from app.db import engine  # noqa: E402
+from app.core.config import get_data_root  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.models import (  # noqa: E402
     dramas,
     episodes,
     storyboards,
     video_generations,
     video_quality_checks,
 )
-from app.response import now  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import qc_report as qr  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []

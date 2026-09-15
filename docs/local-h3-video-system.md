@@ -61,17 +61,17 @@ Ref2VA 的参考音频是 **reference conditioning**，不是最终对白音频�
 - 本地 H3 复用现有 `minimax` 视频 adapter，**只改 baseUrl 指向本地 H3 服务**（项目已有设计，代码注释已写死此接法）。
 - 本地推理运行时（ComfyUI / diffusers / 官方脚本）是**部署细节**，与项目解耦，不作为项目要「接入」的东西。
 - A5000 跑法：INT8 + offload（FL2VA INT8 ≈ 19.5GB）；第一版**不上 Turbo**，先跑通人物 / 声音 / 嘴型 / 连续性。
-- **模型安装统一入口** `backend-py/scripts/model_manager.py`（Python 标准库零依赖，清单外置 `configs/models.json`）：
+- **模型安装统一入口** `backend-py/app/scripts/model_manager.py`（Python 标准库零依赖，清单外置 `configs/models.json`）：
 
 | 命令 | 作用 |
 |---|---|
-| `python backend-py/scripts/model_manager.py list [--category video\|text\|image\|tts] [--missing]` | 列清单与安装状态 |
-| `python backend-py/scripts/model_manager.py download --required \| --category video \| --all` | 按需批量安装 |
-| `python backend-py/scripts/model_manager.py install-nodes [--required]` | 装 ComfyUI 自定义节点 |
-| `python backend-py/scripts/model_manager.py doctor` | 体检（底座/git/ollama/磁盘/模型/节点） |
-| `python backend-py/scripts/model_manager.py add-model/remove-model` | 增删清单条目（无需改代码） |
+| `python backend-py/app/scripts/model_manager.py list [--category video\|text\|image\|tts] [--missing]` | 列清单与安装状态 |
+| `python backend-py/app/scripts/model_manager.py download --required \| --category video \| --all` | 按需批量安装 |
+| `python backend-py/app/scripts/model_manager.py install-nodes [--required]` | 装 ComfyUI 自定义节点 |
+| `python backend-py/app/scripts/model_manager.py doctor` | 体检（底座/git/ollama/磁盘/模型/节点） |
+| `python backend-py/app/scripts/model_manager.py add-model/remove-model` | 增删清单条目（无需改代码） |
 
-  旧入口 `backend-py/scripts/h3_install.py` 已降级为兼容 shim（H3 8 模型 + 4 节点），数据源同样指向 `models.json`，新模型请走 `model_manager.py`。
+  旧入口 `backend-py/app/scripts/h3_install.py` 已降级为兼容 shim（H3 8 模型 + 4 节点），数据源同样指向 `models.json`，新模型请走 `model_manager.py`。
 
 ## 8. 测试计划（第一轮 A–G）
 
@@ -81,7 +81,7 @@ A 男+女 6s 男说一句；B 6s 女说一句；C 12s 男→女两镜头；D 24s
 
 - ✅ `speaker_id` / `scene_type` / ONE_SHOT_ONE_SPEAKER / 音色跨集锁定（schema + storyboard-tools + voice-tools + 2 个 SKILL）。
 - ✅ `checkpoint_map` 落库（2026-08-28）：`ai_service_configs.settings` 支持写入 `checkpoint_map{fl2va,ref2va}` —— aiConfigs 路由 `buildSettings`/`parseSettingsObject` 合并读写（不再被 `negative_prompt` 覆盖丢失），settings 页视频类新增 FL2VA/Ref2VA 双字段 UI；`resolveH3Checkpoint` 已按 scene_type 正则路由 FL2VA/Ref2VA 并从 `config.settings?.checkpoint_map` 取值。
-- ✅ 本地 H3 服务代码就绪：复用 `minimax` adapter + baseUrl（无需新写 ComfyUI adapter）；模型清单统一外置 `configs/models.json`，通用工具 `backend-py/scripts/model_manager.py` 下载/安装/体检；后端 `services/local-model-scan.ts` + `routes/localModels.ts` 扫描本机模型并注册到 `ai_service_configs`（含 H3 `checkpoint_map` 派生）。**仅剩启动 ComfyUI(8188) + 本地 H3 服务(8765) 跑通推理**。
+- ✅ 本地 H3 服务代码就绪：复用 `minimax` adapter + baseUrl（无需新写 ComfyUI adapter）；模型清单统一外置 `configs/models.json`，通用工具 `backend-py/app/scripts/model_manager.py` 下载/安装/体检；后端 `services/local-model-scan.ts` + `routes/localModels.ts` 扫描本机模型并注册到 `ai_service_configs`（含 H3 `checkpoint_map` 派生）。**仅剩启动 ComfyUI(8188) + 本地 H3 服务(8765) 跑通推理**。
 - ✅ 参考音频两层语义：`getStoryboardReferenceAudioUrls` 取出场角色 `voiceSampleUrl`（≤3 条、声线样本非最终对白）→ `auto-pipeline` 对话类镜头填入 → `minimax-video` 以 `reference_audio` 发送（reference conditioning）。
 - ✅ `LOCATION_ID` / `COSTUME_ID` / `STYLE_ID` 三键：`services/bible-ids.ts`（现 Python 侧 `backend-py/app/services/bible_ids.py`）`ensureLocationId/ensureCostumeId/ensureStyleId`，routes 落库。
 - ✅ QC 启发式：`services/qc-scoring.ts`（现 Python 侧 `backend-py/app/services/qc_scoring.py`）`lip_sync*0.4 + consistency*0.3 + continuity*0.3`，视频完成自动触发。⬜ 真实唇形/相似度 AI 检测未挂载。

@@ -28,12 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import episodes  # noqa: E402
+from app.core.models import episodes  # noqa: E402
 from app.services import text_slice  # noqa: E402
-from app.services.agents.tools import corpus_tools as ct  # noqa: E402
-from app.services.agents.tools.script_tools import create_script_tools  # noqa: E402
+from app.agent.tools import corpus_tools as ct  # noqa: E402
+from app.agent.tools.script_tools import create_script_tools  # noqa: E402
 from app.services.prompt_blocks import SCREENPLAY_FORMAT_RULES  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -83,7 +83,7 @@ def main() -> int:  # noqa: C901
     episode_id = client.get(f"/api/v1/dramas/{drama_id}").json()["data"]["episodes"][0]["id"]
 
     # 指纹刷新：替换成记录器（真身会重算并写 episodes.script_hash）
-    import app.services.agents.tools.script_tools as st  # noqa: E402
+    import app.agent.tools.script_tools as st  # noqa: E402
 
     original_refresh = st.refresh_episode_script_hash
 

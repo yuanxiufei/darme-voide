@@ -9,6 +9,8 @@ data/drama.db*
 data/static
 data/storage
 data/*.bak*
+backend-py/app/scripts
+backend-py/app/local_services
 frontend/.nuxt
 frontend/.output
 frontend/node_modules
@@ -18,12 +20,13 @@ temp
 .superpowers
 .claude
 
-# Python 后端（2026-09-15）：镜像里只需 `app/` 与 `skills/`，其余一律不进构建上下文
+# Python 后端（2026-09-15）：镜像只需 `app/`（它已含 skills/）；
+# ⚠️ `app/scripts/`（工具链）与 `app/local_services/`（clone 落点）**必须排除** ——
+#    否则 `COPY backend-py/app` 会把工具链和本机 clone 的第三方服务一起打进镜像 ✗
 # ⚠️ `.venv` 必须排除（本机 venv 有几百 MB，COPY backend-py/ 会把它全拖进去）
 backend-py/.venv
 backend-py/__pycache__
 **/__pycache__
 backend-py/tests
-backend-py/scripts
 .codebuddy
 reference

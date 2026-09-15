@@ -24,9 +24,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.models import (  # noqa: E402
     characters,
     continuity_states,
     dramas,
@@ -37,7 +37,7 @@ from app.models import (  # noqa: E402
     video_generations,
     video_quality_checks,
 )
-from app.response import now  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import qc_scoring as qs  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -195,7 +195,7 @@ def main() -> int:  # noqa: C901
           == {"code": 404, "message": "镜头不存在"})
 
     # ── 视频完成后的接线（video_generation 的 _run_qc_after_video_complete）──
-    from app.models import video_generations as vg_model  # noqa: PLC0415
+    from app.core.models import video_generations as vg_model  # noqa: PLC0415
     from app.services import video_generation as vgen  # noqa: PLC0415
 
     with engine.begin() as conn:

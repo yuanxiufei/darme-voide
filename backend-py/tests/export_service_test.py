@@ -24,10 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import characters, dramas, episodes, scenes, storyboards  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import characters, dramas, episodes, scenes, storyboards  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services.export_service import (  # noqa: E402
     build_export_zip,
     collect_drama_export_files,

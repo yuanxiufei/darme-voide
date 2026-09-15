@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from app import config  # noqa: E402
+from app.core import config  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "Dockerfile"
@@ -68,7 +68,8 @@ def main() -> int:
 
     # ③ 每个 COPY 源都得真实存在（否则 `docker build` 直接失败）
     for relative in ("backend-py/requirements.txt", "configs/config.example.yaml",
-                     "backend-py/app/main.py", "backend-py/skills/README.md",
+                     "backend-py/app/main.py", "backend-py/app/skills/README.md",
+                     "backend-py/app/agent/runtime.py", "backend-py/app/mcp/client.py",
                      "frontend/package.json", "frontend/package-lock.json"):
         check(f"COPY 源存在: {relative}", (REPO / relative).exists(), relative)
 
@@ -83,9 +84,20 @@ def main() -> int:
     for stale in ("COPY skills/", "COPY backend/src", "backend/package.json", "tsx", "5789"):
         check(f"指令里已无旧引用: {stale}", stale not in code, stale)
 
-    # ⑥ 技能库必须落在 backend-py/ 下（代码按**自身文件位置**解析技能根，靠 COPY 目标保持相对布局）
-    check("技能库: COPY 到 ./backend-py/skills/",
-          re.search(r"COPY backend-py/skills\s+\./backend-py/skills", code) is not None)
+    # ⑥ `skills/`、`scripts/`、`local_services/` 现在都在 `app/` 之内（2026-09-15 合并）
+    #    ⇒ `COPY backend-py/app` 一条覆盖全部；**不该**再单独 COPY（漏了会把工具链与
+    #    本机 clone 的第三方服务一起打进镜像 ✗）。后两者还必须在 .dockerignore 里排除。
+    for inner in ("skills", "scripts", "local_services"):
+        check(f"app/{inner} 不单独 COPY（在 app/ 之内）",
+              re.search(rf"COPY backend-py/{inner}\s", code) is None)
+    for inner in ("scripts", "local_services"):
+        check(f"dockerignore: 排除 app/{inner}", f"backend-py/app/{inner}" in ignore)
+
+    # ⑥b `agent/`、`mcp/` 是 `app/` 的**子包**（方案 A）⇒ 必须**没有**单独的顶层 COPY：
+    #     若哪天又把它们提到顶层而忘了加 COPY，容器里会 `ModuleNotFoundError`。
+    for package in ("agent", "mcp"):
+        check(f"子包: {package}/ 不单独 COPY（在 app/ 之内）",
+              re.search(rf"COPY backend-py/{package}\s", code) is None)
 
     # ⑦ .dockerignore 必须排除 venv / __pycache__（否则构建上下文白拖几百 MB）
     check("dockerignore: 排除 backend-py/.venv", "backend-py/.venv" in ignore)

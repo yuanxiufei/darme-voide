@@ -30,8 +30,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from ..models import episodes, storyboards
-from ..response import js_round
+from ..core.models import episodes, storyboards
+from ..core.response import js_round
 
 __all__ = [
     "RHYTHM_PHASE_LABELS",

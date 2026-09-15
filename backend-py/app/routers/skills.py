@@ -28,9 +28,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn
-from ..models import agent_configs
-from ..response import bad_request, internal_error, js_truthy, success
+from ..core.db import get_conn
+from ..core.models import agent_configs
+from ..core.response import bad_request, internal_error, js_truthy, success
 from ..services.agent_registry import AGENT_PHASES, get_default_name, get_host_tool_names
 from ..services.skill_parser import parse_skill, render_skill
 from ..services.skills import (

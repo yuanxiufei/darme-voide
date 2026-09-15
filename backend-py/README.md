@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
-> **自检 2473 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 5**）
+> **自检 2481 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 8**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -133,6 +133,30 @@ curl -i http://127.0.0.1:5799/static/nope.png     # 404
 （2026-09-15 删库当天实测全通过：真进程启动 ✓ / health ✓ / dramas 信封 ✓ / 501 新文案 ✓ / 静态站 404 ✓ /
 有前端产物时 `/` 直出 HTML ✓。）
 
+**UI 层冒烟（可选，改前端 / 静态站 / 路由后值得跑一次）**：上面两条都碰不到浏览器。本仓装了 `playwright-cli`，
+实测走法（2026-09-15）：
+
+```bash
+# ① 起后端（临时数据根，别碰真库）；SPA 由 Python 直接服务 ⇒ **不需要**起 nuxt dev
+cd backend-py; $env:DATA_ROOT="$env:TEMP\e2e_root"; .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
+playwright-cli open "http://127.0.0.1:5790/"
+playwright-cli eval "document.title"            # => "短剧工坊"
+playwright-cli snapshot --filename=e2e.yaml     # ⚠️ 落在**当前目录**（见坑②）
+playwright-cli goto "http://127.0.0.1:5790/skills"
+playwright-cli close                            # 记得收尾（浏览器 + 后端进程）
+```
+
+实测结论：标题 ✓｜导航五栏（项目 / 资源库 / Skill / 模型 / Agent）✓｜`innerText` 200 字符 / 15 个可交互元素 ✓｜
+**console 0 error** ✓｜后端访问日志里能看到浏览器真发的 `GET /api/v1/dramas` → 200、`GET /api/v1/dramas/stats` → 200、
+`GET /api/v1/skills` → 200、`GET /api/v1/skills/meta` → 200 ✓（即「浏览器 → Python 后端 → SKILL.md」整链通 ✓）。
+
+⚠️ 三个坑（0.1.13 实测）：
+1. **没有 `network` 子命令**（技能文档列了、但这个版本不支持）⇒ 想看「前端真打了哪些请求」，**用后端访问日志**
+   （uvicorn stdout）最可靠；
+2. `snapshot --filename=x.yaml` 落在**当前工作目录**，不是 `.playwright-cli/`（跑完记得删，别提交）；
+3. **refs 会随重渲染失效**：点导航 `e25`（Skill）却没跳转（`location.pathname` 仍是 `/`）⇒
+   要验证某个路由，**直接 `goto <路由>`** 比点导航稳。
+
 它做三件事：把表/列定义与真实 `data/drama.db` 的 `PRAGMA table_info` 逐列比对（并与 **TS 快照**里的
 `db/index.ts` 建表清单交叉印证 —— Node 已删 ⇒ 走 `frozen_ts_source.py`）、打真实接口核对响应信封与**错误文案逐字**、写操作全部落在
 数据库副本上（真实库只读）。报告落在系统临时目录，路径在结尾打印。
@@ -144,7 +168,7 @@ curl -i http://127.0.0.1:5799/static/nope.png     # 404
 | `PY_PORT` | `5790` | 本后端端口。**刻意不读 `config.yaml` 的 `server.port`** —— 那是 Node 时代的端口（5789），并存期读同一个必然抢占；Node 已删，保留这条是为了「端口来源确定」 |
 | `PORT` | — | 兼容用，优先级低于 `PY_PORT` |
 | `HOST` | `0.0.0.0` | |
-| `CORS_ORIGINS` | 见 `app/config.py` | 逗号分隔 |
+| `CORS_ORIGINS` | 见 `app/core/config.py` | 逗号分隔 |
 | `DATA_ROOT` | `configs/config.yaml` 的 `database.path` 所在目录 | 数据根目录（DB + static + traces） |
 | `DB_PATH` / `STORAGE_PATH` | — | 仅在未显式指定 `DATA_ROOT` / `.data-root` 时生效（与 Node 同规则） |
 | `CONFIG_PATH` | `configs/config.yaml` | |
@@ -153,10 +177,28 @@ curl -i http://127.0.0.1:5799/static/nope.png     # 404
 
 ## 目录结构
 
+> ### 五棵树的层级（为什么是这五棵、要不要再套一层？）
+>
+> | 树 | 是什么 | 谁写 | 谁读 / 调用 | 进镜像 |
+> |---|---|---|---|---|
+> | `app/` | **后端代码**：装配（`main.py`）+ 平台层（`core/`）+ HTTP 层（`routers/`）+ 业务层（`services/`）；层间**单向依赖**由 `tests/layering_test.py` 机械守卫 | 开发者 | uvicorn `import` | ✅ `COPY backend-py/app` |
+> | `skills/` | **内容资产**（SKILL.md + `library.yaml`） | **运行时可写**：`PUT/POST/DELETE /api/v1/skills` | 加载器用 `Path` 读；前端技能页 | ✅ `COPY backend-py/skills` |
+> | `tests/` | **行为契约自检**（`run_all.py` = 权威清单） | 开发者 | 人 / CI；**不参与产品运行时** | ❌ |
+> | `scripts/` | **仓库守卫 + 工具链 + 语料**（四类，见 `scripts/README.md`） | 开发者 | `.githooks/pre-commit`、人；**不 `import app.*`** | ❌ |
+> | `local_services/` | **本地服务根**（clone 来的第三方服务 + 自带 `h3` 薄封装） | `scripts/model_manager.py --runtime git`（**机器相关**） | 后端经 subprocess / HTTP | ❌ |
+>
+> **结论：不需要再套一层**（`src/`、`assets/`、`tools/` 之类只会把「哪棵树属于哪种生命周期」重新搅浑）。
+> `Dockerfile` 的 COPY 面已经把「运行时必需」与「开发期工具」分开了 —— 这张表就是那个事实的展开。
+> 什么情况下才值得动：① `skills/` 变成**只读**（没有写端点）⇒ 才能考虑并进 `app/`；
+> ② `scripts/` 涨到远多于现在的 17 个文件 ⇒ 才值得按四类拆子目录（且要同步改 `.githooks/pre-commit`
+> 里的硬编码路径 + 守卫自检）；③ `local_services/` 长期为空（没人 clone）⇒ 才考虑删掉；
+> ④ `app/services/` 只有在「不再需要与 TS 逐条比对」之后，才谈得上按域分子目录（现在它是**迁移索引**）。
+
 > **先分清楚两类东西**：`app/`（含 `tests/`、`scripts/`）是**代码**；`skills/`、`local_services/`、
 > `configs/`、`data/` 是**内容资产 / 运行时状态**。
 >
-> 常被问的那一对 —— **`app/services/agents/`（Agent 运行时：协议 / 工具 / 循环，Python 代码）
+> 常被问的那一对 —— **`app/agent/`（Agent 运行时：协议 / 工具 / 循环，Python 代码；2026-09-15 从
+> `app/services/agents/` 提到 `app/` 内、与 `core/ routers/ services/` **同层级**的子包）
 > 与 `skills/`（SKILL.md 内容库）为什么分开放**：
 >
 > 1. **一个是被 `import` 的代码，一个是被**读写**的资产**：`skills/` 会被 `/api/v1/skills` 的
@@ -165,11 +207,11 @@ curl -i http://127.0.0.1:5799/static/nope.png     # 404
 >    按**资产**管；代码由 `tests/run_all.py` 按**行为契约**管，两者判据、跑法都不同；
 > 3. **打包边界**：`.dockerignore` 写明「镜像里只需 `app/` 与 `skills/`」—— 两者都要进镜像，
 >    但一个是**依赖树**、一个是**内容树**；
-> 4. **路径只留一处权威**：`app/config.py::skills_dir()`（`SKILLS_DIR` 环境变量可覆盖）；
->    `services/skills.py` 与 `services/agents/skills.py` 现在都**转发**它
+> 4. **路径只留一处权威**：`app/core/config.py::skills_dir()`（`SKILLS_DIR` 环境变量可覆盖）；
+>    `app/services/skills.py` 与 `agent/skills.py` 现在都**转发**它
 >    （2026-09-15 收口：此前三处各写一遍、靠注释互相提醒「必须一致」✗）。
 >
-> ⚠️ 反过来，`app/services/*.py` **刻意保持扁平**（59 个模块同层）：它是**迁移索引** ——
+> ⚠️ 反过来，`app/services/*.py` **刻意保持扁平**（65 个模块同层）：它是**迁移索引** ——
 > 守卫按「TS 文件 → Python 模块」逐条比对常量（如 `services/technical-qc.ts` ↔
 > `app.services.technical_qc`），重排目录会**成片打断这些映射** ⇒ 结构优化应落在
 > 「文档 / 常量收口」上，**不要动这一层**。
@@ -177,11 +219,12 @@ curl -i http://127.0.0.1:5799/static/nope.png     # 404
 ```
 backend-py/
 ├─ app/
-│  ├─ config.py                  配置解析（与 backend/src/config.ts 逐项对齐）
-│  ├─ db.py                      SQLite 连接（WAL + busy_timeout，对齐 connection.ts）
-│  ├─ models.py                  29 张表的 SQLAlchemy Core 定义（对齐 db/schema.ts）
-│  ├─ response.py                统一响应层 + 行→dict / 字段映射工具
-│  ├─ request_utils.py           读请求体（对齐 Hono c.req.json() 的容错）
+│  ├─ core/                      **平台层**（与业务无关的基础设施；**不许 import routers/ services/**）
+│  │  ├─ config.py               配置解析（PROJECT_ROOT / BACKEND_PY_ROOT / skills_dir() 的**唯一权威**）
+│  │  ├─ db.py                   SQLite 连接（WAL + busy_timeout，对齐 connection.ts）
+│  │  ├─ models.py               29 张表的 SQLAlchemy Core 定义（对齐 db/schema.ts）
+│  │  ├─ response.py             统一响应层 + 行→dict / 字段映射工具
+│  │  └─ request_utils.py        读请求体（对齐 Hono c.req.json() 的容错）
 │  ├─ main.py                    FastAPI 入口：信封兜底 / 静态 Range / SPA / 反代接缝
 │  ├─ routers/
 │  │  ├─ dramas.py               ✅ 9 端点（返回 snake_case）
@@ -205,6 +248,29 @@ backend-py/
 │  │  ├─ upload.py               ✅ 3 端点（multipart 上传：图片/音频/视频）
 │  │  └─ export.py               ✅ **整域完成**（工程账本 JSON/MD + stale + EDL/ZIP…；**裸响应无信封**）
 │  ├─ passthrough.py             绞杀者接缝共享实现（反代 / 501 / **显式委派**）
+│  ├─ agent/                   **Agent 运行时**（协议 / 工具 / 循环 / tools/；六组工具）
+│  │  └─ + evaluation/ auto_pipeline.py qc_retry.py evaluation_scheduler.py
+│  │     ↑ **用 Agent 干活的上层编排**同住这层：它们要调 agent ⇒ 若留在 `services/` 会形成
+│  │       `services ↔ agent` 双向依赖（层级守卫实测抓过 ✗，2026-09-15 收口）
+│  ├─ mcp/                     **MCP 客户端**（手写 JSON-RPC over HTTP，**不依赖任何 MCP SDK**）
+│  │  ⚠️ 依赖方向由 `tests/layering_test.py` 机械守卫：`routers → agent → services → core`
+│  ├─ skills/                      Agent 技能库（**2026-09-15 从仓库根 skills/ 并入**；自有 SKILL.md + 外部技能库）
+│  │  ├─ README.md                 技能库权威约定（改 skill 前必读）
+│  │  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
+│  │  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
+│  ├─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
+│  │  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
+│  │  ├─ check_skill_refs.py       skills 引用完整性守卫
+│  │  ├─ test_guards.py            两套守卫的自检（13 例，含 ④b「步骤小节必须有锚点」）
+│  │  ├─ check_all.py              一键跑全部三道自检
+│  │  ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
+│  │  └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
+│  │     ↑ 细节见 `app/scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
+│  ├─ local_services/              **本地服务根**（2026-09-15 从仓库根 local_services/ 并入）
+│     └─ h3/{server.py,requirements.txt}  项目自带的 H3 薄封装（端口 8765，复用 minimax adapter）
+│     ↑ ⚠️ 其余子目录是 `app/scripts/model_manager.py --runtime git` **clone 来的第三方服务**
+│       （机器相关，已 gitignore）；默认值三处同步：本目录 / `app/services/local_model_scan.py`
+│       / TS 侧 `local-model-scan.ts`
 │  └─ services/
 │     ├─ adapters/                ✅ **厂商适配器层（S3）**：17 家 / 纯函数；含 jscompat.py（JS 语义垫片）
 │     ├─ era_background.py        时代背景（解析 + AI 提炼，整域）
@@ -274,7 +340,7 @@ backend-py/
    ├─ mcp_test.py             MCP 接入层（假 stdio server 端到端）+ 3 端点（32 用例）
    ├─ agent_prompts_test.py   Agent 出厂提示词（完整性/插值/接上运行时，20 用例）
    ├─ evaluation_scorer_test.py 评测打分器（位精对齐 JS/契约校验真实基准文件，39 用例）
-   ├─ skills_test.py          Skill 解析/加载（隔离目录 + 真实 backend-py/skills/ 集成，45 用例）
+   ├─ skills_test.py          Skill 解析/加载（隔离目录 + 真实 backend-py/app/skills/ 集成，45 用例）
    ├─ evaluation_route_test.py 评测执行器（seed 提交/抽取口径/清理）+ 2 端点（28 用例）
    ├─ creator_test.py         Agent 创建器 + POST /agent-configs/generate（28 用例）
    ├─ optimizer_test.py       提示词优化器状态机 + POST /optimize/{id}（28 用例）
@@ -306,35 +372,11 @@ backend-py/
    ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
    ├─ compressed_data_url_test.py 参考图压缩（ffmpeg，16 用例）
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
-   ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口 ↔ 代码常量，23 用例）
+   ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口/子包不单独 COPY ↔ 代码常量，27 用例）
    ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，5 用例）
-   ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端，5 用例）
+   ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端 + 前端 dev 代理端口，8 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十五项（**套件权威清单就在这个文件里**，本树只是摘录）
-├─ skills/                      Agent 技能库（**2026-09-15 从仓库根 skills/ 并入**；自有 SKILL.md + 外部技能库）
-│  ├─ README.md                 技能库权威约定（改 skill 前必读）
-│  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
-│  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
-├─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
-│  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
-│  ├─ check_skill_refs.py       skills 引用完整性守卫
-│  ├─ test_guards.py            两套守卫的自检（13 例，含 ④b「步骤小节必须有锚点」）
-│  ├─ check_all.py              一键跑全部三道自检
-│  ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
-│  └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
-│     ↑ 细节见 `scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
-└─ local_services/              **本地服务根**（2026-09-15 从仓库根 local_services/ 并入）
-   └─ h3/{server.py,requirements.txt}  项目自带的 H3 薄封装（端口 8765，复用 minimax adapter）
-   ↑ ⚠️ 其余子目录是 `model_manager.py --runtime git` **clone 来的第三方服务**（机器相关，已 gitignore）；
-     默认值三处同步：本目录 / `app/services/local_model_scan.py` / TS 侧 `local-model-scan.ts`
-```
-
-## 厂商适配器层（S3）要点
-
-**这一层全是纯函数** —— 这是移植时最重要的发现，也是它好迁的原因：
-
-```python
-adapter.build_generate_request(config, record)  # → {"url", "method", "headers", "body"}（不发请求）
+   └─ run_all.py                一次跑完以上六十六项（**套件权威清单就在这个文件里**，本树只是摘录）
 adapter.parse_generate_response(result)         # → {"isAsync", "taskId"/"imageUrl"}（不解析 HTTP）
 ```
 
@@ -607,7 +649,7 @@ cd backend-py
    「现有快照优先于 git」是刻意的：快照是**删库前现场**，git HEAD 可能落后（曾差点静默回退一次改动）。
 
 结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓（**当时**的实测值；此后新增
-`frontend_api_coverage_test.py` 与 `contract_mirror_test.py` ⇒ 现为 **65 套件 / 2473 项**），
+`frontend_api_coverage_test.py`、`contract_mirror_test.py` 与 `layering_test.py` ⇒ 现为 **66 套件 / 2481 项**），
 快照 **76 条 / 674 KB** ✓。
 
 ⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：
@@ -617,8 +659,8 @@ cd backend-py
 干跑**暴露并已修掉**的三类问题（都不在「代码常量」里，所以只有真删一次才会现形）：
 
 1. **技能文档里 13 处指向 `backend/src/…` 的引用** ⇒ 删库即断链。已全部改指 Python 侧对应实现
-   （`app/services/agents/skills.py`、`app/routers/skills.py`、`app/services/prompt_utils.py`、
-   `prompt_blocks.py`、`agents/tools/corpus_tools.py`、`agents/runtime.py`），
+   （`agent/skills.py`、`app/routers/skills.py`、`app/services/prompt_utils.py`、
+   `prompt_blocks.py`、`agent/tools/corpus_tools.py`、`agent/runtime.py`），
    并给其中 6 处**原本没加反引号**的写法补上反引号 —— 否则守卫（只采集反引号 token）看不见它们。
 2. **守卫对 `backend/…` 的旧前缀不设防** ⇒ 已加入 `_LEGACY_HINTS`，写旧前缀一律判**致命**并给改法。
 3. **冻结脚本的自动发现依赖真源码存在** ⇒ 删库后「表驱动普通字符串形态」会**静默扫不到**。
@@ -630,7 +672,7 @@ cd backend-py
 |---|---|---|
 ✅ 1 | **前端代理已切到 Python**（2026-09-15 提前做） | `frontend/nuxt.config.ts` 的 `/api`、`/static` 由 **5789 → 5790**，并留了逃生门：`NUXT_API_TARGET=http://localhost:5789 npm run dev` 可临时对着 Node 调试。⚠️ 只影响 **dev 代理**（生产同源静态产物由部署侧决定） |
 ✅ 2 | **共享契约类型已搬到前端**（2026-09-15 提前做） | `git mv backend/src/shared/contracts.ts frontend/app/types/contracts.ts`（git 记为 `R`，79 行纯类型零 import）+ nuxt 别名两处 + 唯一 importer `app/composables/useApi.ts`；Node 侧 `era-background.ts` 同步改成跨项目 import（它随 `backend/` 一起消失）。**已用 `npm run generate` 真构建验证**（`✔ Server built` / `Prerendered 15 routes` / `✔ Generated public .output/public`） |
-✅ 3 | **`Dockerfile` 已重写为 Python 镜像**（2026-09-15 提前做） | 运行时 `python:3.12-slim` + uvicorn（Node 只留前端构建阶段）、端口 **5790**、`COPY backend-py/skills/`、前端产物落 `frontend/dist`（与 `FRONTEND_DIST` 一致）、`.dockerignore` 补排除 `.venv` / `__pycache__` / `tests` / `scripts`。⚠️ **本机无 Docker ⇒ 未做真构建**；布局/端口/产物路径已由新增自检 `dockerfile_contract_test.py`（**23 用例**）钉在代码常量上，改任一侧立刻报错 |
+✅ 3 | **`Dockerfile` 已重写为 Python 镜像**（2026-09-15 提前做） | 运行时 `python:3.12-slim` + uvicorn（Node 只留前端构建阶段）、端口 **5790**、`COPY backend-py/app/skills/`、前端产物落 `frontend/dist`（与 `FRONTEND_DIST` 一致）、`.dockerignore` 补排除 `.venv` / `__pycache__` / `tests` / `scripts`。⚠️ **本机无 Docker ⇒ 未做真构建**；布局/端口/产物路径已由新增自检 `dockerfile_contract_test.py`（**23 用例**）钉在代码常量上，改任一侧立刻报错 |
 ✅ 4 | **`parity_run.py` / `parity_diff.py` 已写明生命周期**（2026-09-15） | 两者 docstring 顶部都加了「本工具与 `backend/` 绑定 ⇒ 删库后失效；留作历史证据」，并指明日常回归走 `run_all.py` + `route_parity_test.py` 的快照模式（**不需要 Node**） |
 5 | **文档/记忆里的溯源引用** | 全仓还有 ~137 处提到 `backend/src/…`，**绝大多数是「移植自 X」的溯源注释**（应保留，正是它们的价值）。只需清理那些「把它当权威源去查」的指路语（`docs/api-contract.md` 等） |
 

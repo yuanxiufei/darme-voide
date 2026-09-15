@@ -29,8 +29,8 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
-from ..models import characters, dramas, episodes, scenes, storyboards
-from ..response import js_round
+from ..core.models import characters, dramas, episodes, scenes, storyboards
+from ..core.response import js_round
 from .frame_extractor import to_abs_media_path
 
 __all__ = [

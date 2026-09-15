@@ -21,9 +21,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..db import get_conn, get_tx
-from ..models import episodes, video_merges
-from ..response import bad_request, not_found, parse_param_id, success
+from ..core.db import get_conn, get_tx
+from ..core.models import episodes, video_merges
+from ..core.response import bad_request, not_found, parse_param_id, success
 from ..services.ffmpeg_merge import merge_episode_videos
 from ..services.task_logger import log_task_error, log_task_start, log_task_success
 

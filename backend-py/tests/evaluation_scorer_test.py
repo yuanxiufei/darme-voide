@@ -25,9 +25,9 @@ from pathlib import Path
 os.environ.setdefault("DATA_ROOT", tempfile.mkdtemp(prefix="eval_"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.evaluation import catalog as cat  # noqa: E402
-from app.services.evaluation import scorer as sc  # noqa: E402
-from app.services.evaluation import types as et  # noqa: E402
+from app.agent.evaluation import catalog as cat  # noqa: E402
+from app.agent.evaluation import scorer as sc  # noqa: E402
+from app.agent.evaluation import types as et  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 

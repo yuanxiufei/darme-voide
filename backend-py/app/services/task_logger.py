@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from ..response import now
+from ..core.response import now
 from .provider_probe import redact_url  # noqa: F401  (再导出，保持与原 TS 的模块归属直觉一致)
 from .trace_store import append_trace_event
 

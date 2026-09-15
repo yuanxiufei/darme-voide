@@ -10,7 +10,7 @@ Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 
 - **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，**全部域已迁完（未注册 0 条，Node 侧 224 条路径已 100% 覆盖）**；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`）；回归跑 `backend-py/tests/run_all.py`（**63 套件 / 2463 项**），动手前读 `backend-py/README.md`。**`backend/` 已于 2026-09-15 删除**：TS 原文现只存于 `backend-py/tests/frozen_ts_source.py`（76 条 / 674 KB），**守卫与自检读 TS 一律走「真源码优先 → 快照」**；`PROXY_TO_NODE` 已无对象（接缝保留只为兜底 501）。
 
 ## 本地模型 + H3 视频推理
-**详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
+**详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/app/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
 
 ## 后端能力（9 项）
 QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking —— **明细见 `TOPICS.md`**（Python 实现全在 `backend-py/app/services/`）。
@@ -26,8 +26,8 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - 解析链 `characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`，**唯一入口** `resolveEffectiveArtStyle()`（脏值跳过不透传），各路由不得存副本。
 - **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。**细节（反 AI 感白名单、视频与静帧为何必须分开、放开写词要改什么）见 `TOPICS.md` §画风体系细节**。
 
-## Skill 体系（详见 `backend-py/skills/README.md`，改前先读）
-- **库由声明文件识别，与目录名解耦**：`backend-py/skills/<lib>/library.yaml` 的 `name`/`label`/`description` ⇒ **加库/换库/改展示名零代码**。自有 **8** 个顶层 skill（**5 个即 Agent 类型**），另 3 个非 Agent：`style-reference-reverse` 已 `agents: []` 停注入 ⇒ **无执行入口的 skill 勿写进 `agents:`**（每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**；**词库按介质分家**（`prompt-style-library` 图像｜`video-prompt-library` 视频，仅绑 `storyboard_breaker`）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（清单与拆因见 `TOPICS.md`）。
+## Skill 体系（详见 `backend-py/app/skills/README.md`，改前先读）
+- **库由声明文件识别，与目录名解耦**：`backend-py/app/skills/<lib>/library.yaml` 的 `name`/`label`/`description` ⇒ **加库/换库/改展示名零代码**。自有 **8** 个顶层 skill（**5 个即 Agent 类型**），另 3 个非 Agent：`style-reference-reverse` 已 `agents: []` 停注入 ⇒ **无执行入口的 skill 勿写进 `agents:`**（每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**；**词库按介质分家**（`prompt-style-library` 图像｜`video-prompt-library` 视频，仅绑 `storyboard_breaker`）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（清单与拆因见 `TOPICS.md`）。
 - **命名**：core 目录名 = Agent 类型（`agent_configs.agent_type`，**勿改名**）；库内 skill id **勿重命名**（`references/` 互引静默断链）。
 - **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（越小越靠前，缺省 100）；解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`。**改绑定 = 改 md**；`AGENT_SKILL_MAP` 已删。
 - **注入闸**：默认只注自有；外部库**按需手动绑**。`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过 + 末尾「未注入：…」诊断。**口径 = `renderSkill(parseSkill(...)).length`**（≠ 字节数）。外部库单体最大 ~2.7 万字符 ⇒ 只勾两个即逼近上限。
@@ -35,11 +35,11 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - **agent 出厂默认唯一出口**：`getAgentDefaults()`（`DEFAULT_PROMPTS`+`resolveDefaultSkills`）→ `GET /agent-configs/defaults` → `agents.vue`；**前端不得硬编码默认提示词/默认绑定**。
 - **同一规则只留一处**：`shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`、`IMAGE_PROMPT_TEMPLATE_CHARACTER/SCENE/SHOT`。
 - **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达**（22 个含 references 的全是 vendor，core 零引用）→ **有意取舍非 bug**；前端以 `referenceCount` 标注「N 个参考文件（不注入）」。
-- **删除保护**：`DELETE /skills/<id>` 拒删 = **顶层（id 不含 `/`）** *且* **`agents:` 非空**（core 删掉永久丢失）；`backend-py/skills/<agent>/<name>/` 不受保护；**顶层但 agents 空可删**；解析失败传 `undefined` → 保守拒删。
+- **删除保护**：`DELETE /skills/<id>` 拒删 = **顶层（id 不含 `/`）** *且* **`agents:` 非空**（core 删掉永久丢失）；`backend-py/app/skills/<agent>/<name>/` 不受保护；**顶层但 agents 空可删**；解析失败传 `undefined` → 保守拒删。
 - **注入可见性**：`agents.vue` 绑定面板 = 外部库 Skill **唯一 UI 挂载入口**；⚠️ 合计**只算 `enabled=true`**；**拖拽真实生效**（列表顺序 = 注入顺序 = 超预算跳过顺序）。字段清单与 UI 细节见 `TOPICS.md`。
 - **兜底库**：顶层目录无 `library.yaml` → `/meta.sources` 补合成条目（`declared:false`，label = 目录名）→ 保证「core + Σ各库 = 总数」自洽且侧栏可达。
 - **宿主工具兼容性**：外部库依赖的 `hub_*` 等工具本项目**从未注册**；依赖 = `allowed-tools` ∪ 正文 `hub_*` 引用（**只认 `hub_` 前缀**，宽泛猜会被字段名污染）；**工具集须取 `tool.id`**（取错把 21 个工具全误判为缺失）。**完整判据见 `TOPICS.md`**。
-- **`meta.yaml` 是死数据（改它不生效）**：全仓库零读取；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删**（丢溯源）。见 `backend-py/skills/README.md` §一。
+- **`meta.yaml` 是死数据（改它不生效）**：全仓库零读取；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删**（丢溯源）。见 `backend-py/app/skills/README.md` §一。
 - **改名/挪库后必核对 DB 绑定**：`agent_configs.skills` 存 skill id ⇒ 旧绑定失效；核对用 `better-sqlite3` **`{ readonly: true }`** 直开（绕开清洗副作用，坑⑦）。**实测 5 行全 `NULL` ⇒ 改名零影响**。步骤见 `TOPICS.md`。
 - **坑⑨条已下移**（渲染/前端 import type/路由注册顺序/回读校验/回显规范化/DB 清洗副作用/守卫触发）⇒ `TOPICS.md` §Skill 体系坑清单（2026-09-15 腾 8k 预算：本文件逼近上限时**尾部区块最先被截断**）。
 

@@ -22,15 +22,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from app.db import engine  # noqa: E402
-from app.models import (  # noqa: E402
+from app.core.db import engine  # noqa: E402
+from app.core.models import (  # noqa: E402
     dramas,
     episodes,
     storyboards,
     video_generations,
     video_quality_checks,
 )
-from app.response import now  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import technical_qc as tq  # noqa: E402
 from app.services.file_storage import get_storage_root  # noqa: E402
 

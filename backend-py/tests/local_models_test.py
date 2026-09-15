@@ -33,9 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.db import engine  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import ai_service_configs  # noqa: E402
+from app.core.models import ai_service_configs  # noqa: E402
 from app.routers import local_models as r  # noqa: E402
 from app.services import local_model_scan as ls  # noqa: E402
 

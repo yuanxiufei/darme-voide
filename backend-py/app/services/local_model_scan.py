@@ -32,8 +32,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .. import config
-from ..config import PROJECT_ROOT
+from ..core import config
+from ..core.config import PROJECT_ROOT
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
@@ -81,7 +81,7 @@ SYSTEM_DIRS = frozenset([
     "onedrive", "onedrivetemp", "intel", "amd", "nvidia", "drivers",
 ])
 
-#: ComfyUI 安装位置探测候选（与 ``backend-py/scripts/model_manager.py`` 保持一致）
+#: ComfyUI 安装位置探测候选（与 ``backend-py/app/scripts/model_manager.py`` 保持一致）
 COMFYUI_CANDIDATES = [
     "D:/Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI",
     "D:/Comfy-Desktop/ComfyUI-Shared",
@@ -309,7 +309,7 @@ def get_default_roots() -> list[str]:
     comfyui_models_dir = os.path.join(comfyui_root, "models") if comfyui_root else ""
     models_dir = os.environ.get("MODELS_DIR") or cfg.get("models_dir") or comfyui_models_dir
     services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
-                    or str(BACKEND_PY_ROOT / "local_services"))
+                    or str(BACKEND_PY_ROOT / "app" / "local_services"))
 
     # 模型存储目录与 ComfyUI 默认模型目录**并存**扫描（设置自定义存储目录后，ComfyUI 目录仍会被扫）
     for candidate in (models_dir, comfyui_models_dir, services_dir, comfyui_root):

@@ -35,10 +35,10 @@ from uuid import uuid4
 
 from sqlalchemy import select, update
 
-from ..config import get_storage_root
-from ..db import engine
-from ..models import episodes, storyboards, video_merges
-from ..response import now
+from ..core.config import get_storage_root
+from ..core.db import engine
+from ..core.models import episodes, storyboards, video_merges
+from ..core.response import now
 from .file_storage import get_absolute_path
 from .task_logger import log_task_error, log_task_start, log_task_success
 from .video_probe import probe_video_duration

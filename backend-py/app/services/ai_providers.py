@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from ..models import ai_service_configs
+from ..core.models import ai_service_configs
 from .provider_probe import join_provider_url
 from .task_logger import log_task_progress, log_task_warn
 

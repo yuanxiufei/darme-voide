@@ -27,11 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from app.config import get_data_root, get_storage_root  # noqa: E402
-from app.db import engine  # noqa: E402
+from app.core.config import get_data_root, get_storage_root  # noqa: E402
+from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import storyboards  # noqa: E402
-from app.response import now  # noqa: E402
+from app.core.models import storyboards  # noqa: E402
+from app.core.response import now  # noqa: E402
 from app.services import frame_extractor as fr  # noqa: E402
 from app.services import sse_hub  # noqa: E402
 
@@ -239,7 +239,7 @@ def main() -> int:  # noqa: C901
 
 
 def _insert_episode(drama_id: int, title: str) -> int:
-    from app.models import episodes
+    from app.core.models import episodes
 
     values: dict[str, object] = {"drama_id": drama_id, "created_at": now(), "updated_at": now()}
     if "title" in episodes.c:
