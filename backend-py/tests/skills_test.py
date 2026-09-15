@@ -236,8 +236,9 @@ def main() -> int:  # noqa: C901
     # ================= skills：真实目录 =================
     os.environ.pop("SKILLS_DIR", None)
     sk._parsed_cache.clear()  # noqa: SLF001
-    check("真实目录: 定位到 `<项目根>/skills`（**不在 backend/ 下，S7 删 backend 不受影响**）",
-          sk.skills_dir() == PROJECT_ROOT / "skills")
+    check("真实目录: 定位到 `backend-py/skills`（2026-09-15 并入后端；删 backend/ 不受影响）",
+          sk.skills_dir() == PROJECT_ROOT / "backend-py" / "skills"
+          and sk.skills_dir().is_dir())
     core = sk.list_core_skill_ids()
     check("真实目录: core 非空、已排序、每个都真有 SKILL.md",
           len(core) >= 5 and core == sorted(core)

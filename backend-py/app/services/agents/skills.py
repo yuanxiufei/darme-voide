@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...config import PROJECT_ROOT
 from .skill_parser import ParsedSkill, parse_skill, render_skill
 
 __all__ = [
@@ -52,11 +51,17 @@ SKILL_CHAR_BUDGET_DEFAULT = 60_000
 
 
 def skills_dir() -> Path:
-    """``<项目根>/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。"""
+    """``backend-py/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。
+
+    ⚠️ 2026-09-15 起技能库**并入后端**（原仓库根 ``skills/``）⇒ 这里**不能再**用
+    ``config.PROJECT_ROOT``（那是仓库根，会指向已不存在的 ``<仓库根>/skills``）。
+    改用**本文件位置**推导（``backend-py/app/services/agents/`` 上跳三级 = ``backend-py``），
+    与 ``services/skills.py`` 的 ``SKILLS_DIR``、守卫的 ``SKILLS_DIR`` 保持一致。
+    """
     override = os.environ.get("SKILLS_DIR")
     if override:
         return Path(override)
-    return PROJECT_ROOT / "skills"
+    return Path(__file__).resolve().parents[3] / "skills"
 
 
 def skill_char_budget() -> int:

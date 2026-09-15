@@ -6,7 +6,7 @@
 ## 本地模型下载 + H3 视频推理
 - **下载闭环**：`routes/localModels.ts` + `aiConfigs.ts`/`settings.vue`/`backend-py/scripts/model_manager.py` + `configs/models.json`；三源 HF / hf-mirror / ModelScope + 断点续传（`.part` + Range）。**本机直连 HF 全超时 → 必须 `hf-mirror.com`**；大文件复用此机制，勿另写。
 - **H3**：ComfyUI(**8188**) 驻留 DiT/VAE/text_encoder；**8765** 薄封装（`POST /v1/video_generation`、`GET .../task/:id`）；卸载 GPU 走 ComfyUI `POST /free`。权重扫描 → `runtime='h3'`、`baseUrl='http://localhost:8765'`。FL2VA / Ref2VA 双路线；六键 Bible `CHAR_ID/SPEAKER_ID/VOICE_ID/LOCATION_ID/COSTUME_ID/STYLE_ID` 跨集锁定。方法论 `docs/local-h3-video-system.md`。
-- ⚠️ 此链路 provider 名 `minimax` 是 **AI 服务商标识**，与 `skills/` 下外部技能库**无关**。
+- ⚠️ 此链路 provider 名 `minimax` 是 **AI 服务商标识**，与 `backend-py/skills/` 下外部技能库**无关**。
 - **GPU**：RTX A5000 22 GiB；CUDA UMD 13.3；PyTorch 2.13.0+cu130。**无 nvcc** → 编不了 CUDA 版 sd.cpp；H3 Turbo 唯一可用路线 = Turbo LoRA/int8 + ComfyUI（1–3min）。
 
 ## 视频提示词语料
@@ -22,7 +22,7 @@
 ## Skill 体系细节（自 MEMORY.md §Skill 下移，红线仍留在 MEMORY.md）
 - **注入可见性 UI**：`/skills/meta` 给 `charBudget`+各 Agent `charCount`；`/skills` 每项给 `charCount`/`referenceCount`/`protected`/`category`/`source`/`sourceLabel`（库展示名；vendor 分属 2 库须可辨）。消费：`skills.vue`（已用/预算、超预算预警、受保护、侧栏分组、选中值 `'all'|agentType|'lib:<库名>'`）与 `agents.vue` 绑定面板（单个体量+已启用合计/预算+超预算预警+「外部库」/「已失效」）。
 - **宿主工具兼容性（完整判据）**：外部库按**另一套宿主平台**编写 → 依赖的工具（`hub_*`/`question`/`task`/`read`）本项目**从未注册**。**依赖 = frontmatter `allowed-tools`（声明）∪ 正文 `hub_*` 反引号引用（`ParsedSkill.foreignToolRefs`）**，二者缺一即漏报（实测 9→15/36，漏的 6 个只在正文）。`allowed-tools` 归一须兼容 `[a,b]`/`a,b`/换行三种写法；正文提取**只认 `hub_` 前缀**，不可做「未知 snake_case 即工具」的宽泛猜测（`shot_type`/`bgm_url` 等字段名会污染）。路由比对直出 `missingTools` → UI 标「缺 N 个工具」（`agents.vue` 绑定+候选、`skills.vue`）。**工具集必须取 `tool.id`，不能用工厂返回记录键**（工厂给 camelCase `readScriptForExtraction`，发给模型的是 `read_script_for_extraction`），取错会把 21 个工具全误判为缺失。MCP 工具运行时异步发现 ⇒ 只作预警、不硬拦截。
-- **`meta.yaml` 为何是「死数据」**：`production-tools` 20 个各带 1 个（`genre-templates` 9 个全无），**全仓库零引用、零读取**（`routes/skills.ts` 只读顶层 `library.yaml`，加载器只读 `SKILL.md`，无 `*.yaml` 泛化 glob）⇒ 它不像 `library.yaml` 那样是配置。但它是 `version`/`display-name-zh`/`author-*`/`source` 的**唯一载体**（SKILL.md frontmatter 无这些字段）⇒ 删 = 丢上游溯源。已记入 `skills/README.md` §一。
+- **`meta.yaml` 为何是「死数据」**：`production-tools` 20 个各带 1 个（`genre-templates` 9 个全无），**全仓库零引用、零读取**（`routes/skills.ts` 只读顶层 `library.yaml`，加载器只读 `SKILL.md`，无 `*.yaml` 泛化 glob）⇒ 它不像 `library.yaml` 那样是配置。但它是 `version`/`display-name-zh`/`author-*`/`source` 的**唯一载体**（SKILL.md frontmatter 无这些字段）⇒ 删 = 丢上游溯源。已记入 `backend-py/skills/README.md` §一。
 - **改名后核对 DB 绑定的步骤**：用 `better-sqlite3` **`{ readonly: true }`** 直开 `data/drama.db`（绕开 `agents/index.ts` 的清洗副作用，坑⑦）。**2026-09-12 于 36 文件改名后复测**：`agent_configs` 5 行 `skills` **全为 `NULL`**、旧 `minimax/*` 命中 0、绑定 id 不在磁盘 0 ⇒ **改名对 DB 零影响**。DB 为空 ⇒ **默认绑定（frontmatter `agents:`）是唯一生效来源**，故改名风险集中在路径引用（由守卫覆盖）而非 DB。
 - **守卫的采集范围与启用状态**：`check_skill_refs.py` 的 `collectTokens` **只采集反引号 code span 与 markdown 链接目标** ⇒ **裸路径文本不在检测范围**（要受保护必须写成 `` `references/x.md` ``）；这不是 bug 而是有意取舍（裸路径多为叙述）。识别为候选后还需首段属 `references`/`scripts`/`agents` 且文档在某个含 SKILL.md 的 skill 内，否则计入「基准不明」跳过。钩子 `.githooks/pre-commit` 三分支已实测（触发校验 / 空暂存早退 / 真断链红灯），但 **`core.hooksPath` 默认未设置 ⇒ 守卫当前不生效**，需手动 `git config core.hooksPath .githooks` 启用。
 - **无执行入口的 skill 不要默认注入**：`style-reference-reverse`（参考图反推画风）于 2026-09-12 由 `agents: [grid_prompt_generator]` 改为 **`agents: []`**。判据是「**三查皆空**」：后端 0 处引用其 protocol 字段（`suggested_style_key`/`reusable_anchors`）、前端 0 处「反推」文案、无专属 Agent 承接。它此前占 `grid_prompt_generator` 注入的 3,068 字符。**文件保留**（UI 仍可手动绑），将来接入该能力时改回 `agents:` 即可。
@@ -154,4 +154,19 @@
 - **工具坑**：`tempfile.mkdtemp()` 在 Windows 返回 **8.3 短路径**，与 `resolve()` 后的长路径做子串比较会**假红** ⇒ 比较 resolve 后路径；`sqlalchemy` 顶层导出的是 **`REAL` 而非 `Real`**；PowerShell 组合命令含 `&` / `@{...}` 会被路由到 cmd（报「不是内部或外部命令」）⇒ **写 `.ps1` 落盘再执行**；`Start-Process` 的相对 `-WorkingDirectory` + 相对 exe 路径会报「系统找不到指定的路径」⇒ 用字面绝对路径。⚠️ 另：`execute_command` 报「已转后台/skipped」时**命令常常真的在跑**，输出落在重定向文件里 ⇒ **别急着重跑，先 `Get-Content` 那个文件**（本项目多次据此拿到完整结论）。⚠️ 再：PowerShell 的 `>` 重定向写 **UTF-16**（带 BOM），后续用 Python `read_text(encoding='utf-8')` 汇总会**静默得到 0 条**（正则全不匹配）⇒ 汇总脚本按 `utf-16` 解码，且汇总结果要先与「行数」对一眼再当结论。
 - **`from m import x` 是对象快照，不是活引用**：本项目 `db.reopen_engine()` 换的是**模块属性** `app.db.engine`，而测试里 `from app.db import engine` 拿到的仍是旧对象 ⇒ 断言「engine 已指向新库」永远看到旧库（还会让「新库有表」**假通过**）。**要么 `import app.db as db` 后取 `db.engine`，要么断言前重新导入**。
 - **「原本只会返回 501」的断言，在端点迁移后会真的执行** ⇒ 必须重新审入参副作用。本项目实测：smoke 里 `POST /storage/change {"path": "x"}`（相对路径）在迁移后真的切了数据根并写了仓库根 `.data-root`。规则：**能改全局状态的端点，测试一律用「必然被拒」的入参**（如项目根/空串），并额外断言「状态未变」。
-- **删 `backend/` 的三条前置（2026-09-15 起）**：① **差分对拍 0 新差异** —— `tests/parity_run.py`（两侧并排 + 逐字段 diff）；**只比只读 GET**，`parity_diff.py` 的 `CASES` 表要随迁移补齐（2026-09-15 实测 **一致 12 / 已知 0 / 不存在 4 / 新差异 0**；文本响应靠 `strip_timestamps()` 抹掉 ISO 时间戳才能参与比对，HTML/Markdown 导出物**故意不入表**）；② **守卫快照完整** —— `tests/freeze_ts_snapshot.py`（清单 = 手写 ∪ **从守卫源码自动发现** `_SRC_ROOT / "…" / "x.ts"`，防「新增守卫读文件 ⇒ 快照静默缺件」；删库后 `_SRC_ROOT` 自动回退 `tests/frozen_ts/`，真源码/冻结两路结论必须一致）；③ **`app/` 对 `backend/` 的路径依赖 = 0**（只剩守卫读 TS 源码，已由 ② 兜住）。
+- **JS → Python 逐条移植的六个口径坑**（2026-09-15 把 7 个 `.mjs` 守卫/语料脚本移植成 `.py` 时全部实测踩出；**任何 JS 行为对齐都先想这六条**）：
+  1. **换行转换**：Python `Path.read_text()` 默认做 universal newlines（CRLF→LF），Node `readFileSync` **不做** ⇒ 字符数会少「行数」那么多（实测 7651 → 7598）。要逐字对齐必须 `open(..., newline="")`。
+  2. **`\w` 语义**：JS 的 `\w` 只认 `[A-Za-z0-9_]`，Python 默认认 Unicode 词字符 ⇒ 正则补 `re.ASCII`。
+  3. **数字转字符串**：JS `String(1.0)` → `"1"`，Python `str(1.0)` → `"1.0"`（语料 8987 行里 **206 行**受影响）⇒ 写 `_js_num_str()`（整数值浮点去 `.0`）。
+  4. **取整**：`Math.round` 是 **half-up**，Python `round()` 是**银行家舍入** ⇒ 用 `math.floor(x + 0.5)`。
+  5. **`toFixed`**：同为 half-up ⇒ 统一 `Decimal(repr(x)).quantize(..., ROUND_HALF_UP)`（本仓库已被 `round()`/`:.0f` 坑过三次）。
+  6. **字符串长度/切片**：JS 数的是 **UTF-16 码元** ⇒ `len(s.encode("utf-16-le")) // 2`；按 JS 语义截断要 `_js_slice()`。
+  - 落地手法：**移植期间不要删 Node 原版**，用「同一输入跑两边、逐字节 diff」验收（本项目 5/6 个脚本做到 IDENTICAL，剩一个因故意改成确定性排序而用**多重集**比对）。
+- **搬目录的静默杀手（本仓库工具链）**：`scripts/` 下的脚本用 `dirname(SCRIPT_DIR)` 当仓库根 ⇒ 搬进 `backend-py/scripts/` 后**必须上跳两级**（`parents[2]`→`parents[3]` 同理）。只跳一级**不报错**，只是 `configs/models.json` 读不到 ⇒ 清单为空。
+- **`.mjs` / `.ps1` 已不存在**：仓库自检（`check_memory.py` / `check_skill_refs.py` / `test_guards.py` / `check_all.py`）与语料管线/工具链**全在 `backend-py/scripts/`（纯 Python）**；TS 源码快照是 **Python 模块** `backend-py/tests/frozen_ts_source.py`（守卫侧物化到临时目录）。`.githooks/pre-commit` 的解释器解析顺序：venv → `python3` → `python` → `py -3`。
+- **仓库根已无 `scripts/`、`skills/`**（2026-09-15 双双并入 `backend-py/`）：
+  - **技能库根 = `backend-py/skills/`**，是**三处必须同步的不变量**：`app/services/skills.py` 的 `SKILLS_DIR`（`parents[2]`）｜`app/services/agents/skills.py` 的 `skills_dir()`（同文件相对推导，**别拼 `PROJECT_ROOT/"backend-py"/...`**）｜`backend-py/scripts/check_skill_refs.py` 的 `SKILLS_DIR`。
+  - 引用守卫对旧写法 `skills/…` **判致命**（`_LEGACY_SKILLS_PREFIX`）；skill 正文里的仓库根相对引用请写 `backend-py/skills/…`。
+  - ⚠️ `backend/src/**`（Node 侧 `../../../skills`）**已失效** —— Node 仅剩被删的命，删库前若要启动它会退化。
+- **批量改路径的正确手法**：**单趟正则 + 负向断言**（如 `(?<![\w./~-])skills/`）一次替换完，既防二次命中已改好的前缀（双前缀 bug 的根治），又不误伤 `~/…/skills/` 这类外部路径；**改完必须跑行为测试**（守卫绿 ≠ 行为绿）。
+- **删 `backend/` 的三条前置（2026-09-15 起）**：① **差分对拍 0 新差异** —— `tests/parity_run.py`（两侧并排 + 逐字段 diff）；**只比只读 GET**，`parity_diff.py` 的 `CASES` 表要随迁移补齐（2026-09-15 实测 **一致 12 / 已知 0 / 不存在 4 / 新差异 0**；文本响应靠 `strip_timestamps()` 抹掉 ISO 时间戳才能参与比对，HTML/Markdown 导出物**故意不入表**）；② **守卫快照完整** —— `tests/freeze_ts_snapshot.py`（清单 = 手写 ∪ **从守卫源码自动发现**两种形态：`_SRC_ROOT / "…" / "x.ts"` 拼接 **与** 表驱动普通字符串路径，防「新增守卫读文件 ⇒ 快照静默缺件」；快照 2026-09-15 起存为 **Python 模块** `tests/frozen_ts_source.py`（74 条 / 625 KB，仓库内**已无 .ts**），守卫侧 `frozen_ts.snapshot_root()` **物化到临时目录**后再照常按 `Path` 读 ⇒ 调用点零改动；真源码/冻结两路结论必须一致）；③ **`app/` 对 `backend/` 的路径依赖 = 0**（只剩守卫读 TS 源码，已由 ② 兜住）。

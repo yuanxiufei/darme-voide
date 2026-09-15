@@ -187,7 +187,7 @@
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `agents` | `{type,label,phase,skillCount}[]` | 主流程 Agent + 各自默认绑定的 skill 数（label/phase 取自 `agents/index.ts`） |
-| `sources` | `{id,label,description,skillCount}[]` | **外部技能库**：由 `skills/<lib>/library.yaml` 显式声明（`name` = 库标识、`label` = 展示名、`description` = 说明）—— 加库 / 换库 / 改展示名皆零代码 |
+| `sources` | `{id,label,description,skillCount}[]` | **外部技能库**：由 `backend-py/skills/<lib>/library.yaml` 显式声明（`name` = 库标识、`label` = 展示名、`description` = 说明）—— 加库 / 换库 / 改展示名皆零代码 |
 | `coreCount` | number | 项目自有 skill 数量 |
 
 **GET `/` 列表项扩展字段**：

@@ -45,7 +45,7 @@ MEM = ROOT / ".codebuddy" / "memory"
 SCRIPTS = ROOT / "backend-py" / "scripts"
 GUARD = SCRIPTS / "check_memory.py"
 REFS_GUARD = SCRIPTS / "check_skill_refs.py"
-SKILLS = ROOT / "skills"
+SKILLS = ROOT / "backend-py" / "skills"  # 2026-09-15 起技能库并入后端
 
 SECTION_RE = re.compile(r"^(#{1,4}\s|-\s*【)")
 LOG_MARKER_RE = re.compile(r"\*\*`(\d{4}-\d{2}-\d{2}\.md)`\*\*")

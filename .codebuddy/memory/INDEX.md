@@ -1,14 +1,14 @@
 # 记忆索引 —— 会话开始读这里，不要整读日志
 
 > **三层读法**：`MEMORY.md`（不变量与约定，**必读**）→ `TOPICS.md`（低频长专题，按需）→ 本索引（日志定位）。
-> 日志是**过程存档**，其结论/红线**已提炼**进 `MEMORY.md` / `TOPICS.md` / `docs/` / `skills/README.md`，**通常不需要读原文**。
+> 日志是**过程存档**，其结论/红线**已提炼**进 `MEMORY.md` / `TOPICS.md` / `docs/` / `backend-py/skills/README.md`，**通常不需要读原文**。
 > 确需过程细节/证据/命令时：按下方 `@行号` 用 `read_file(offset, limit)` **只读那一节**。
 > ⚠️ 下方**体量与行号为 2026-09-12 快照**；日志只追加 ⇒ **`@行号` 锚点不会失效**（只有总行数在涨）。
 
 ## 日志清单（按需跳读）
 
 **`2026-09-15.md`**（2.2k / 27 行，S7：QC 打分 + 原 TS 死分支发现）
-S7 第 9 步：镜头 QC 打分（三维累加扣分 / 加权总体分 / 三态 status / **原 TS 死分支**）@3｜S7 第 10 步：QC 接线（视频完成→自动打分写库，闭环）@26｜S7 第 11 步：审片重跑闭环（软删产物/FL2VA/首帧等待，/retry-qc 关闭）@41｜S7 第 12 步：set-frame + 抽帧泛化（⚠️ 自检未跑，见日记）@59｜S7 第 13 步：重生成镜头帧（帧类型白名单/帧提示词/拼接，17 用例）@87｜S7 第 14 步：图像连续性 QC（真实图 dHash 三档/并发缓存竞态，28 用例）@105｜S7 第 15 步：快照重冻结 + 自动发现（守卫读文件必须在快照里；真源码/冻结结论一致）@120｜S7 第 16 步：对拍补齐新增 GET（实测 一致 12 / 新差异 0；文本响应时间戳归一化）@133｜S7 第 17 步：技术维度 QC（补行为缺口；三项检测是两侧共同的继承缺陷）@142｜S7 第 18 步：清过期 docstring + 修两个真缺口（webhook QC 空实现 / grid Agent 存根）@157｜S7 第 19 步：全面体检（修 merge 空实现；结论=剩校色/subagent 工具/storage.change）@170｜S7 第 20 步：校色落地（ffmpeg；实测 sharp 的 gamma 是 no-op / exposure 是 L 星乘法）@191｜S7 第 21 步：子 Agent 调度工具（ALS→ContextVar；注册表逐字镜像）@205｜S7 第 22 步：请求日志中间件（入口级行为已对齐，未实现清单清零）@215｜S7 第 23 步：清 tmp + README 遗留物表校真（剩唯一缺口=参考图压缩）@225｜S7 第 24 步：参考图压缩落地（功能性缺口清零；geq/夹具两坑）@240｜S7 第 25 步：对账抓出快照第二次缺件（自动发现补两种形态 + 端到端验收）@255｜S7 第 26 步：全量 61 套件一次跑绿（实测 2401 项 / 0 失败，分批取证）@269｜S7 第 27 步：迁完 storage/change（**未注册 0 条**，Python 227 全量覆盖 Node 224；含一处「旧 501 断言迁移后真切数据根」的险情）@278｜S7 第 28 步：scripts 收拾（体检健康 + 补第四类指路牌 + 修 run_all 陈旧 docstring）@295｜待办（删库决策）@302
+S7 第 9 步：镜头 QC 打分（三维累加扣分 / 加权总体分 / 三态 status / **原 TS 死分支**）@3｜S7 第 10 步：QC 接线（视频完成→自动打分写库，闭环）@26｜S7 第 11 步：审片重跑闭环（软删产物/FL2VA/首帧等待，/retry-qc 关闭）@41｜S7 第 12 步：set-frame + 抽帧泛化（⚠️ 自检未跑，见日记）@59｜S7 第 13 步：重生成镜头帧（帧类型白名单/帧提示词/拼接，17 用例）@87｜S7 第 14 步：图像连续性 QC（真实图 dHash 三档/并发缓存竞态，28 用例）@105｜S7 第 15 步：快照重冻结 + 自动发现（守卫读文件必须在快照里；真源码/冻结结论一致）@120｜S7 第 16 步：对拍补齐新增 GET（实测 一致 12 / 新差异 0；文本响应时间戳归一化）@133｜S7 第 17 步：技术维度 QC（补行为缺口；三项检测是两侧共同的继承缺陷）@142｜S7 第 18 步：清过期 docstring + 修两个真缺口（webhook QC 空实现 / grid Agent 存根）@157｜S7 第 19 步：全面体检（修 merge 空实现；结论=剩校色/subagent 工具/storage.change）@170｜S7 第 20 步：校色落地（ffmpeg；实测 sharp 的 gamma 是 no-op / exposure 是 L 星乘法）@191｜S7 第 21 步：子 Agent 调度工具（ALS→ContextVar；注册表逐字镜像）@205｜S7 第 22 步：请求日志中间件（入口级行为已对齐，未实现清单清零）@215｜S7 第 23 步：清 tmp + README 遗留物表校真（剩唯一缺口=参考图压缩）@225｜S7 第 24 步：参考图压缩落地（功能性缺口清零；geq/夹具两坑）@240｜S7 第 25 步：对账抓出快照第二次缺件（自动发现补两种形态 + 端到端验收）@255｜S7 第 26 步：全量 61 套件一次跑绿（实测 2401 项 / 0 失败，分批取证）@269｜S7 第 27 步：迁完 storage/change（**未注册 0 条**，Python 227 全量覆盖 Node 224；含一处「旧 501 断言迁移后真切数据根」的险情）@278｜S7 第 28 步：scripts 收拾（体检健康 + 补第四类指路牌 + 修 run_all 陈旧 docstring）@295｜S7 第 29 步：全仓去 Node 化（scripts/ 与 frozen_ts 全改 Python 并收进 backend-py；JS→Py 六坑）@302｜S7 第 30 步：去 Node 化后全量回归（实测 62 套件 / 2441 项 / 0 失败；抓修 1 处替换双前缀回归）@328｜S7 第 31 步：技能库并入后端（skills/ → backend-py/skills/；三处根同步 + 旧写法判致命）@338｜待办（删库决策）@351
 
 **`2026-09-14.md`**（4.6k / 87 行，S7 收尾：GPU 租约接线补完）
 S7 第 4 步：GPU 租约接线补完（image/video 长租约；4/3 处释放点，少一处即锁泄漏）@3｜S7 第 5 步：Node↔Python 差分对拍工具（三态判定/白名单越界/PowerShell 退格坑）@24｜S7 第 5-7 步：真对拍 0 新差异（MISSING 类）· 守卫冻结快照：**跑通真对拍**（一致10/新差异4：4 条裸列表端点 501；路数守卫有盲点）@42｜S7 第 7 步：守卫冻结快照（72 个 .ts / 707 KB，两条路径结论一致）@87｜S7 第 8 步：多集节奏相位（**修掉原 TS 无限递归**）@105｜待办（storyboards 4 条 · consistency-qc · 删库决策 · MEMORY 已满）@124
@@ -32,7 +32,7 @@ S6 第 4 步：评测执行器 + cases/evaluate 两端点（seed 提交/抽取�
 | 本地模型评估/下载 | `docs/local-model-evaluation.md`、`TOPICS.md` |
 | 语料源与合规 | `docs/video-prompt-data-sources.md`、`docs/seedance2-corpus-analysis.md` |
 | preset skill 模板 | `docs/preset-skill-template.md` |
-| **Skill 体系（改前必读）** | `skills/README.md` + `MEMORY.md §Skill` + `TOPICS.md §Skill 体系细节` |
+| **Skill 体系（改前必读）** | `backend-py/skills/README.md` + `MEMORY.md §Skill` + `TOPICS.md §Skill 体系细节` |
 | **Python 后端（绞杀者迁移）** | `backend-py/README.md`（运行/环境变量/迁移 SOP）+ `TOPICS.md §backend-py` + `backend-py/tests/smoke_test.py` |
 | 引用完整性守卫（skills 路径） | `backend-py/scripts/check_skill_refs.py`（基线见脚本头） |
 | 记忆层自检（8k 预算 + 锚点/登记/落点路径）+ 守卫自检 | `backend-py/scripts/check_memory.py`、`backend-py/scripts/test_guards.py`（规则见脚本头） |

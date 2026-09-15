@@ -2,8 +2,8 @@
 #
 # 提交前自检（两道守卫 + 一道守卫自检）。三道守卫都已从 Node 迁移到 Python
 # （2026-09-15，随 backend-py/scripts/ 一起收口）：
-#   1) 改动 skills/ 或 docs/ 时校验路径引用完整性，防止「改名 / 挪库」造成的静默断链。
-#      → backend-py/scripts/check_skill_refs.py（基线见 skills/README.md「十、改动 skills 后必跑的自检」）
+#   1) 改动 backend-py/skills/ 或 docs/ 时校验路径引用完整性，防止「改名 / 挪库」造成的静默断链。
+#      → backend-py/scripts/check_skill_refs.py（基线见 backend-py/skills/README.md「十、改动 skills 后必跑的自检」）
 #   2) 改动 .codebuddy/memory/ 时校验记忆层，防止 MEMORY.md 超 8k 被注入截断、
 #      以及 INDEX.md 的 `@行号` 锚点指错位置。
 #      → backend-py/scripts/check_memory.py（规则见脚本头）
@@ -42,10 +42,11 @@ if [ -z "$PY" ] && command -v py >/dev/null 2>&1; then
 	PYARG="-3"
 fi
 
-# ── 1) skills/ 引用完整性（守卫自身被改动时也跑）────────────────────────
+# ── 1) 技能库引用完整性（守卫自身被改动时也跑）──────────────────────────
 # 注意：docs/ 也在列 —— skill 正文会引用 `docs/*.md`，改了/删了 docs 同样会断链。
-if printf '%s\n' "$staged" | grep -qE '^skills/|^docs/|^backend-py/scripts/check_skill_refs\.py$'; then
-	printf '%s\n' '[pre-commit] skills/ 或 docs/ 有改动，校验路径引用完整性...'
+# 另：技能库 2026-09-15 已从仓库根 skills/ 并入 backend-py/skills/，触发路径随之更新。
+if printf '%s\n' "$staged" | grep -qE '^backend-py/skills/|^docs/|^backend-py/scripts/check_skill_refs\.py$'; then
+	printf '%s\n' '[pre-commit] backend-py/skills/ 或 docs/ 有改动，校验路径引用完整性...'
 	if [ -z "$PY" ]; then
 		printf '%s\n' '[pre-commit] FAIL: 找不到 python 解释器，无法跑引用守卫（装了 python3 后重试）。' >&2
 		rc=1

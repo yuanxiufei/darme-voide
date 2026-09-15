@@ -4,7 +4,8 @@
 > 本文件是 ``scripts/check-skill-refs.mjs`` 的**逐条对齐移植**（2026-09-15，Node 版已删）。
 > 判据、文案、退出码保持不变；改动它是「改守卫」，请连 ``test_guards.py`` 一起改。
 
-为什么需要它：skill 库按 ``skills/<库名>/<skill名>/`` 组织，库层级与 skill 名都可能变动。
+为什么需要它：skill 库按 ``backend-py/skills/<库名>/<skill名>/`` 组织（**2026-09-15 起并入
+后端**，原为仓库根 ``skills/``），库层级与 skill 名都可能变动。
 而正文里的路径引用**改坏了不会报任何错** —— 加载器只读 ``SKILL.md``，没人会去点那些路径，
 断链只会在读者真的走到那一行时表现为「指向空处」。本脚本把引用全部拉出来逐个验存在性。
 
@@ -40,10 +41,13 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 技能库根：**2026-09-15 起并入后端**（`backend-py/skills/`，原为仓库根 `skills/`）。
+#: ⚠️ 必须与后端代码一致：``app/services/skills.py`` 的 ``SKILLS_DIR`` 与
+#: ``app/services/agents/skills.py`` 的 ``skills_dir()``（三处同步改）。
 #: 可被 ``SKILL_REFS_DIR`` 覆盖：供 ``test_guards.py`` 在**临时副本**上做负向实证
 #: （真仓库全程只读）。只覆盖 skills 树，``docs/`` 等 repo 根相对引用仍按真实 REPO_ROOT 解析。
 SKILLS_DIR = (Path(os.environ["SKILL_REFS_DIR"]).resolve()
-              if os.environ.get("SKILL_REFS_DIR") else REPO_ROOT / "skills")
+              if os.environ.get("SKILL_REFS_DIR") else REPO_ROOT / "backend-py" / "skills")
 VERBOSE = "--verbose" in sys.argv
 
 FILE_EXT = "md|json|ya?ml|txt|py|js|ts|mjs|cjs|sh|jsonl"
@@ -56,7 +60,11 @@ UPSTREAM_PREFIXES = (".ci/", "spec/", "hub-skill-market", ".opencode-v2/", ".age
 #: ``docs/`` 于 2026-09-12 补入（skill 正文常引用 ``docs/*.md`` 作为细节落点）。
 #: ``backend-py/`` 于 2026-09-15 补入：Python 后端已是仓库一等公民（``backend/`` 即将下线），
 #: 少了它，指向 ``backend-py/…`` 的引用会落进「基准不明」被静默跳过 —— 与当初漏 ``docs/`` 同病。
-REPO_ROOT_PREFIXES = ("skills/", "backend/", "frontend/", "docs/", "backend-py/")
+#: ⚠️ **`skills/` 已从本表移除**：技能库当天并入 ``backend-py/skills/`` ⇒ 现在写 ``skills/…``
+#: 就是**失效引用**，由下面的 ``_LEGACY_SKILLS_PREFIX`` 判**致命**（不给它「基准不明」的静默出口）。
+REPO_ROOT_PREFIXES = ("backend/", "frontend/", "docs/", "backend-py/")
+#: 旧位置前缀：挪库后最危险的是「看着像路径、其实已失效」的写法 ⇒ 一律致命并给出改法。
+_LEGACY_SKILLS_PREFIX = "skills/"
 #: 基准为 skill 根的资产目录（文档不在任何 skill 内时基准不明，跳过）
 SKILL_ROOT_ASSET_DIRS = ("references", "scripts", "agents")
 #: 这些目录的缺失只提示、不判失败
@@ -157,6 +165,13 @@ def main() -> int:
                 skipped.append(f"[上游/外来宿主路径] {pos}  →  {clean}")
                 continue
 
+            # 旧位置（技能库已并入 backend-py/skills/）⇒ 致命：这类引用「看着对、其实指空」，
+            # 正是本守卫存在的理由；给提示比让它落进「基准不明」被跳过有用得多。
+            if clean.startswith(_LEGACY_SKILLS_PREFIX):
+                checked += 1
+                fatal.append((pos, f"{clean}（skills/ 已并入 backend-py/skills/，请改前缀）"))
+                continue
+
             # 同一行内、token 之前若出现「举例」措辞 → 该路径泛指而非依赖，跳过
             line_start = text.rfind("\n", 0, offset) + 1
             if ILLUSTRATIVE_RE.search(text[line_start:offset]):
@@ -203,7 +218,7 @@ def main() -> int:
         if skipped:
             print("")
 
-    print(f"扫描 skills/**/*.md 共 {len(docs)} 个文件")
+    print(f"扫描 backend-py/skills/**/*.md 共 {len(docs)} 个文件")
     print(
         f"待校验 {checked} 处 ｜ 致命断链 {len(fatal)} 处 ｜ 非致命缺脚本 {len(notes)} 处 ｜ "
         f"跳过：上游/外来宿主 {upstream} 处 / 示意引用 {illustrative} 处 / 基准不明 {ambiguous} 处"

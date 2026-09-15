@@ -6,8 +6,8 @@
 
 目录约定（决定 skill 属「自有」还是「外部库」）::
 
-    skills/<name>/SKILL.md        → 自有（core）：可被 frontmatter agents 默认注入
-    skills/<lib>/library.yaml     → 外部技能库（vendor）：**库由声明文件识别**，库内 skill 不默认注入
+    backend-py/skills/<name>/SKILL.md      → 自有（core）：可被 frontmatter agents 默认注入
+    backend-py/skills/<lib>/library.yaml   → 外部技能库（vendor）：**库由声明文件识别**，库内 skill 不默认注入
 
 ✅ ``loadAgentSkills``（注入文本组装 + 体量预算闸）**已迁** —— 见 ``services/agents/skills.py``
 的 ``load_agent_skills``（Agent 运行链在 ``agents/runtime.py`` 里真调用它，skill 段 2026-09-15 起
@@ -23,9 +23,12 @@ from typing import Any
 
 from .skill_parser import parse_skill
 
-#: skills/ 目录：从本文件（backend-py/app/services/）上溯到仓库根。
-#: 与原 TS 一样**与 process.cwd() 解耦**，兼容任意工作目录启动。
-SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "skills"
+#: skills/ 目录：**2026-09-15 起并入后端**（`backend-py/skills/`）。从本文件
+#: （`backend-py/app/services/`）上跳**两级**即 `backend-py`，故是 ``parents[2]``。
+#: 与原 TS 一样**与 process.cwd() 解耦**，兼容任意工作目录启动，也不受目录改名影响。
+#: ⚠️ 搬库时同步点：本常量 + ``agents/skills.py`` 的 ``skills_dir()`` + 守卫
+#: ``backend-py/scripts/check_skill_refs.py`` 的 ``SKILLS_DIR``（三处必须一致）。
+SKILLS_DIR: Path = Path(__file__).resolve().parents[2] / "skills"
 
 #: SKILL.md 解析缓存（按 mtime 失效）：默认绑定查询会反复扫同一批文件
 _parsed_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}

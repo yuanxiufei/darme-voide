@@ -1,4 +1,4 @@
-# skills/ 目录约定
+# backend-py/skills/ 目录约定
 
 本目录存放 **Agent 的提示词层（Skill）**，只有两种角色：**项目自有 skill** 与 **外部技能库**。
 
@@ -10,14 +10,14 @@
 
 | 路径 | 角色 | 默认注入 |
 |---|---|---|
-| `skills/<name>/SKILL.md` | **自有 skill（core）** — 与工作流、工具名、字段契约严格对齐 | ✅ 由该 `SKILL.md` 的 `agents:` 声明 |
-| `skills/<lib>/library.yaml` + `skills/<lib>/**/SKILL.md` | **外部技能库（vendor）** — 库内 skill 一律不默认注入 | ❌ 需在「Agent 配置 → 绑定 Skills」手动启用 |
+| `backend-py/skills/<name>/SKILL.md` | **自有 skill（core）** — 与工作流、工具名、字段契约严格对齐 | ✅ 由该 `SKILL.md` 的 `agents:` 声明 |
+| `backend-py/skills/<lib>/library.yaml` + `backend-py/skills/<lib>/**/SKILL.md` | **外部技能库（vendor）** — 库内 skill 一律不默认注入 | ❌ 需在「Agent 配置 → 绑定 Skills」手动启用 |
 
 **库靠显式声明识别，不靠目录名、也不靠层级猜测**：顶层目录里含 `library.yaml` 就是一个技能库，
 库标识取声明里的 `name`（缺省 = 目录名）。于是**加库 / 换库 / 改中文展示名都是纯文件操作，零代码**。
 
 ```
-skills/
+backend-py/skills/
 ├── README.md
 ├── <8 个自有 skill>/SKILL.md
 ├── genre-templates/          # 片型模板库（9 个）—— 按「成片类型」组织的端到端入口
@@ -140,23 +140,23 @@ priority: 20                                          # 注入顺序，越小越
 
 ## 七、新增自有 SKILL
 
-1. 建目录 `skills/<name>/`（目录名即 skill id，小写 + 连字符或下划线），内含 `SKILL.md`
+1. 建目录 `backend-py/skills/<name>/`（目录名即 skill id，小写 + 连字符或下划线），内含 `SKILL.md`
 2. frontmatter 填 `name` / `description` / `preconditions` / `protocol` / `workflows`，
    需要默认注入时再加 `agents:` 与 `priority:`
 3. 只写**领域知识**（词库、范式、判定规则），**不要重复** `DEFAULT_PROMPTS` 里的身份与工作流
 4. 引用的外部资源文件（`references/` 等）**不会被加载**，需内联进 `SKILL.md` 或改用工具读取
 5. 单文件建议 ≤ 30 KB；超过说明应拆分职责或改为按需加载
 
-前端「Skill 管理 → 选中某 Agent → 新增 Skill」会在 `skills/<agent>/<id>/` 下创建骨架
+前端「Skill 管理 → 选中某 Agent → 新增 Skill」会在 `backend-py/skills/<agent>/<id>/` 下创建骨架
 （模板自带 `agents: []` = 不默认注入，仅手动绑定）。
 
 ## 八、新增 / 替换外部技能库
 
-在 `skills/` 顶层建一个目录，放入 `library.yaml` 与 skill 子目录即可：
+在 `backend-py/skills/` 顶层建一个目录，放入 `library.yaml` 与 skill 子目录即可：
 
 ```
-skills/<lib>/library.yaml      # name / label / description
-skills/<lib>/<任意层级>/<skill>/SKILL.md
+backend-py/skills/<lib>/library.yaml      # name / label / description
+backend-py/skills/<lib>/<任意层级>/<skill>/SKILL.md
 ```
 
 后端按声明自动识别为 vendor、前端侧栏自动出现该库分组 —— **零代码、零配置**。
@@ -165,10 +165,10 @@ skills/<lib>/<任意层级>/<skill>/SKILL.md
 ## 九、相关位置
 
 - 画风词表（单一事实来源）：`backend/src/shared/prompt-utils.ts`
-- 图像提示词范式（七段结构 / 镜头 / 光线 / 调色 / Danbooru tag）：`skills/prompt-style-library/SKILL.md`
-- 视频提示词范式（写法判定 / 时间码分段 / 散文式多段 / 中文标签 / 合规红线）：`skills/video-prompt-library/SKILL.md`
+- 图像提示词范式（七段结构 / 镜头 / 光线 / 调色 / Danbooru tag）：`backend-py/skills/prompt-style-library/SKILL.md`
+- 视频提示词范式（写法判定 / 时间码分段 / 散文式多段 / 中文标签 / 合规红线）：`backend-py/skills/video-prompt-library/SKILL.md`
 - 提示词**取词来源**（人工维护用，**不注入 Agent**）：`docs/prompt-style-sources.md`
-- 参考图反推：`skills/style-reference-reverse/SKILL.md`（⚠️ 当前 `agents: []`，**未默认注入**，见 §三）
+- 参考图反推：`backend-py/skills/style-reference-reverse/SKILL.md`（⚠️ 当前 `agents: []`，**未默认注入**，见 §三）
 
 ## 十、改动 skills 后必跑的自检
 
@@ -188,7 +188,7 @@ python backend-py/scripts/check_skill_refs.py --verbose # 额外列出被跳过�
 > 2026-09-12 补一处盲区：`docs/…` 形式的引用此前不在 `REPO_ROOT_PREFIXES` 里，
 > 会落进「基准不明」被**静默跳过** —— 即 skill 正文写 `` `docs/xxx.md` `` 指到空处也不报警。
 > 已把 `docs/` 纳入候选前缀：现有 `docs/` 引用里**被真校验的 2 处**
-> （`skills/prompt-style-library/SKILL.md` 与本文档 §九 各 1 处）从「跳过」转为**真校验**
+> （`backend-py/skills/prompt-style-library/SKILL.md` 与本文档 §九 各 1 处）从「跳过」转为**真校验**
 > （待校验 93 → 96，基准不明 5 → 3），并用「临时改名 → 应报红」做过负向验证。
 > 本文档 §十 里另外两处 `docs/…` 是**举例**（用双反引号转义），按「示意」不采集。
 
@@ -199,5 +199,5 @@ git config core.hooksPath .githooks   # 启用
 git config --unset core.hooksPath     # 关闭
 ```
 
-启用后，**仅当本次提交改到 `skills/` 时**才运行守卫，致命断链会阻止提交
+启用后，**仅当本次提交改到 `backend-py/skills/` 时**才运行守卫，致命断链会阻止提交
 （确知无碍可用 `git commit --no-verify` 绕过）。钩子文件：`.githooks/pre-commit`。

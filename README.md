@@ -32,7 +32,7 @@ frontend/   — Nuxt 3 + Vue 3 + TypeScript (纯 CSS，无 UI 框架)
 backend/    — Hono + Drizzle ORM + Mastra AI Agents + better-sqlite3
 configs/    — config.yaml 配置文件
 data/       — SQLite 数据库 + 生成资源文件
-skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 skills/README.md）
+backend-py/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/skills/README.md）
 ```
 
 ### 🎥 作品展示 / Demo Videos
@@ -309,7 +309,7 @@ backend/          # 后端源码 + node_modules
 frontend/dist/    # 前端构建产物
 configs/config.yaml
 data/             # 数据目录（首次运行自动创建）
-skills/           # Agent 技能文件
+backend-py/skills/           # Agent 技能文件
 ```
 
 #### Nginx 反向代理

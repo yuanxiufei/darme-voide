@@ -31,12 +31,19 @@ os.environ["PROXY_TO_NODE"] = "0"
 
 REPO = Path(__file__).resolve().parents[2]
 
-#: TS 源码根：**真源码优先**（迁移期），删掉 ``backend/`` 后**自动回退到冻结快照**
-#: （``tests/frozen_ts/``，由 ``tests/freeze_ts_snapshot.py`` 在删库前生成）。
+#: TS 源码根：**真源码优先**（迁移期），删掉 ``backend/`` 后**自动回退到 Python 快照**
+#: （``tests/frozen_ts_source.py``，由 ``tests/freeze_ts_snapshot.py`` 在删库前生成）。
 #: ⚠️ ``PARITY_USE_FROZEN=1`` 可**强制**用快照 —— 用来在真源码还在时就验证「删库后守卫照样能跑」。
 _TS_SRC = REPO / "backend" / "src"
-_FROZEN_TS = Path(__file__).resolve().parent / "frozen_ts"
-_SRC_ROOT = _FROZEN_TS if (os.environ.get("PARITY_USE_FROZEN") == "1" or not _TS_SRC.is_dir()) else _TS_SRC
+
+if os.environ.get("PARITY_USE_FROZEN") == "1" or not _TS_SRC.is_dir():
+    # 快照**物化到临时目录**再当普通目录读 ⇒ 下面 15 处 `_SRC_ROOT / ...` 一行都不用改。
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from frozen_ts import snapshot_root  # noqa: E402
+
+    _SRC_ROOT = snapshot_root()
+else:
+    _SRC_ROOT = _TS_SRC
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402

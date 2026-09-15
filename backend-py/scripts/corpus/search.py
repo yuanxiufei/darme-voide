@@ -18,9 +18,9 @@
 
 用法（⚠️ PowerShell 直接传中文参数会乱码 ⇒ 优先用 ``--q-file``）::
 
-    python backend-py/backend-py/scripts/corpus/search.py --q-file=tmp/q.txt --top=5
-    python backend-py/backend-py/scripts/corpus/search.py "rainy neon street" --top=5
-    CORPUS_QUERY=雨夜霓虹 python backend-py/backend-py/scripts/corpus/search.py   # 环境变量亦可
+    python backend-py/scripts/corpus/search.py --q-file=tmp/q.txt --top=5
+    python backend-py/scripts/corpus/search.py "rainy neon street" --top=5
+    CORPUS_QUERY=雨夜霓虹 python backend-py/scripts/corpus/search.py   # 环境变量亦可
 
 参数：``--top=N``（默认 5）｜``--lang=zh|en``｜``--source=<id 前缀>``｜``--full``（打印完整 prompt）
 """
@@ -93,7 +93,7 @@ def main() -> int:
 
     if not JSONL.exists():
         print("缺少 data/prompt-corpus/_normalized/prompts.jsonl —— "
-              "先跑 python backend-py/backend-py/scripts/corpus/normalize.py", file=sys.stderr)
+              "先跑 python backend-py/scripts/corpus/normalize.py", file=sys.stderr)
         return 2
 
     rows = []

@@ -9,7 +9,7 @@ Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 
 - **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，已迁 `dramas` 域，未迁移域 `PROXY_TO_NODE=1` 反代 Node；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`——那是 Node 的 5789）；回归跑 `backend-py/tests/smoke_test.py`，动手前读其 `README.md`。**删 `backend/` 的三条前置见 `TOPICS.md`**（对拍 / 快照 / 零依赖）。
 
 ## 本地模型 + H3 视频推理
-**详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
+**详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
 
 ## 后端能力（9 项）
 QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget（默认 3）｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking（全在 `backend/src/services/`）。
@@ -25,8 +25,8 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - 解析链 `characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`，**唯一入口** `resolveEffectiveArtStyle()`（脏值跳过不透传），各路由不得存副本。
 - **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。**细节（反 AI 感白名单、视频与静帧为何必须分开、放开写词要改什么）见 `TOPICS.md` §画风体系细节**。
 
-## Skill 体系（详见 `skills/README.md`，改前先读）
-- **库由声明文件识别，与目录名解耦**：`skills/<lib>/library.yaml` 的 `name`（API/前端分组 key）、`label`、`description`。现 2 库 `genre-templates`（9 片型）、`production-tools`（20 工序）；自有 **8** 个顶层 skill，**其中 5 个即 Agent 类型**（`extractor`/`grid_prompt_generator`/`script_rewriter`/`storyboard_breaker`/`voice_assigner`），另 3 个 `prompt-style-library`/`video-prompt-library`/`style-reference-reverse` **不是 Agent**（`style-reference-reverse` 已 **`agents: []` 停注入** ⇒ **无执行入口的 skill 不要写进 `agents:`**，否则每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**。**词库按介质分家**：`prompt-style-library`（图像）｜`video-prompt-library`（视频，仅绑 `storyboard_breaker`）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（拆因与展开见 `TOPICS.md`）。**加库/换库/改展示名 = 零代码**。
+## Skill 体系（详见 `backend-py/skills/README.md`，改前先读）
+- **库由声明文件识别，与目录名解耦**：`backend-py/skills/<lib>/library.yaml` 的 `name`（API/前端分组 key）、`label`、`description`。现 2 库 `genre-templates`（9 片型）、`production-tools`（20 工序）；自有 **8** 个顶层 skill，**其中 5 个即 Agent 类型**（`extractor`/`grid_prompt_generator`/`script_rewriter`/`storyboard_breaker`/`voice_assigner`），另 3 个 `prompt-style-library`/`video-prompt-library`/`style-reference-reverse` **不是 Agent**（`style-reference-reverse` 已 **`agents: []` 停注入** ⇒ **无执行入口的 skill 不要写进 `agents:`**，否则每次生成白背一段上下文）。磁盘实测 **37 = 8 core + 9 + 20**。**词库按介质分家**：`prompt-style-library`（图像）｜`video-prompt-library`（视频，仅绑 `storyboard_breaker`）⇒ **改词库前先确认改哪个，别把视频范式写回图像库**（拆因与展开见 `TOPICS.md`）。**加库/换库/改展示名 = 零代码**。
 - **命名**：core 目录名 = Agent 类型（`agent_configs.agent_type`，**勿改名**）；库内 skill id **勿重命名**（`references/` 互引静默断链）。
 - **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（越小越靠前，缺省 100）；解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`。**改绑定 = 改 md**；`AGENT_SKILL_MAP` 已删。
 - **注入闸**：默认只注自有；外部库**按需手动绑**。`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过 + 末尾「未注入：…」诊断。**口径 = `renderSkill(parseSkill(...)).length`**（≠ 字节数）。外部库单体最大 ~2.7 万字符 ⇒ 只勾两个即逼近上限。
@@ -34,16 +34,16 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - **agent 出厂默认唯一出口**：`getAgentDefaults()`（`DEFAULT_PROMPTS`+`resolveDefaultSkills`）→ `GET /agent-configs/defaults` → `agents.vue`；**前端不得硬编码默认提示词/默认绑定**。
 - **同一规则只留一处**：`shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`、`IMAGE_PROMPT_TEMPLATE_CHARACTER/SCENE/SHOT`。
 - **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达**（22 个含 references 的全是 vendor，core 零引用）→ **有意取舍非 bug**；前端以 `referenceCount` 标注「N 个参考文件（不注入）」。
-- **删除保护**：`DELETE /skills/<id>` 拒删 = **顶层（id 不含 `/`）** *且* **`agents:` 非空**（core 删掉永久丢失）；`skills/<agent>/<name>/` 不受保护；**顶层但 agents 空可删**；解析失败传 `undefined` → 保守拒删。
+- **删除保护**：`DELETE /skills/<id>` 拒删 = **顶层（id 不含 `/`）** *且* **`agents:` 非空**（core 删掉永久丢失）；`backend-py/skills/<agent>/<name>/` 不受保护；**顶层但 agents 空可删**；解析失败传 `undefined` → 保守拒删。
 - **注入可见性**：`agents.vue` 绑定面板 = 外部库 Skill **唯一 UI 挂载入口**；⚠️ 合计**只算 `enabled=true`**；**拖拽真实生效**（列表顺序 = 注入顺序 = 超预算跳过顺序）。字段清单与 UI 细节见 `TOPICS.md`。
 - **兜底库**：顶层目录无 `library.yaml` → `/meta.sources` 补合成条目（`declared:false`，label = 目录名）→ 保证「core + Σ各库 = 总数」自洽且侧栏可达。
 - **宿主工具兼容性**：外部库依赖的 `hub_*` 等工具本项目**从未注册**；依赖 = `allowed-tools` ∪ 正文 `hub_*` 引用（**只认 `hub_` 前缀**，宽泛猜会被字段名污染）；**工具集须取 `tool.id`**（取错把 21 个工具全误判为缺失）。**完整判据见 `TOPICS.md`**。
-- **`meta.yaml` 是死数据（改它不生效）**：全仓库零读取；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删**（丢溯源）。见 `skills/README.md` §一。
+- **`meta.yaml` 是死数据（改它不生效）**：全仓库零读取；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删**（丢溯源）。见 `backend-py/skills/README.md` §一。
 - **改名/挪库后必核对 DB 绑定**：`agent_configs.skills` 存 skill id ⇒ 旧绑定失效；核对用 `better-sqlite3` **`{ readonly: true }`** 直开（绕开清洗副作用，坑⑦）。**实测 5 行全 `NULL` ⇒ 改名零影响**。步骤见 `TOPICS.md`。
-- **坑**：① `renderSkill()` **不含 frontmatter name** → 验证注入用正文特征串；② `prompt-utils.ts` 有顶层副作用 ⇒ 前端只能 `import type`；③ **`/skills/meta` 与 `/agent-configs/defaults` 必须注册在通配路由之前**（否则被当 id 吃掉）；④ 本工具 `search_content` 的 `glob` 不生效（详见 `TOPICS.md`）；⑤ `PUT /skills/<id>` 保存后回读校验 frontmatter，缺 `---` 头或 `agents` 为空则返 `{ warning }`（不阻断）→ 前端 `toast.warning`（防「改正文 → 默认注入静默消失」）；⑥ 前端回显 DB `skills` **必须规范化**（`enabled !== false`、`priority` 缺省 `0`、过滤无 `id` 项、非数组兜 `[]`），否则**显示与实际相反**；⑦ 导入 `agents/index.ts` 有 DB 清洗副作用（`[db] sanitized…`）→ 验证脚本会改数据；⑧ **改 skill 名/挪库/引 `docs/` 后必跑 `python backend-py/scripts/check_skill_refs.py`**（1 = 断链）——基线 **141 文件 / 95 处 / 致命 0 / 非致命 0**（跳过 5/2/3）⇒ **任何非零即真回归**。路径须写成 `` `references/x.md` `` **才受保护**（裸路径不采集）；`docs/` 已于 09-12 纳入；⚠️ **守卫默认未启用**（需手动 `git config core.hooksPath .githooks`）。详见 `TOPICS.md`；⑨ **改 `.codebuddy/memory/` 后必跑 `check_memory.py`**（8k 预算 + 锚点 + 日志登记 + 落点表有效；1 = 致命，**逼近上限先下移 `TOPICS.md`**）；**改守卫脚本本身再跑 `test_guards.py`**（1 = 有用例失败）；**整体体检用 `check_all.py`**（三道串联）——判据详见各脚本头。
+- **坑**：① `renderSkill()` **不含 frontmatter name** → 验证注入用正文特征串；② `prompt-utils.ts` 有顶层副作用 ⇒ 前端只能 `import type`；③ **`/skills/meta` 与 `/agent-configs/defaults` 必须注册在通配路由之前**（否则被当 id 吃掉）；④ 本工具 `search_content` 的 `glob` 不生效（详见 `TOPICS.md`）；⑤ `PUT /skills/<id>` 保存后回读校验 frontmatter，缺 `---` 头或 `agents` 为空则返 `{ warning }`（不阻断）→ 前端 `toast.warning`（防「改正文 → 默认注入静默消失」）；⑥ 前端回显 DB `skills` **必须规范化**（`enabled !== false`、`priority` 缺省 `0`、过滤无 `id` 项、非数组兜 `[]`），否则**显示与实际相反**；⑦ 导入 `agents/index.ts` 有 DB 清洗副作用（`[db] sanitized…`）→ 验证脚本会改数据；⑧ **改 skill 名/挪库/引 `docs/` 后必跑 `python backend-py/scripts/check_skill_refs.py`**（1 = 断链；基线 **0 致命 / 0 非致命**（96 处）⇒ **非零即真回归**）。路径须写成 `` `references/x.md` `` 才受采集；⚠️ 守卫**默认未启用**（需 `git config core.hooksPath .githooks`）；⑨ 改记忆必跑 `check_memory.py`、改守卫自身再跑 `test_guards.py`、体检 `check_all.py` —— 判据与基线详见 `backend-py/scripts/README.md`。
 
 ## 视频提示词语料
-**详见 `TOPICS.md`**（检索管线已就绪 8987 条/3 源 + 已排除源清单都在那儿）。三条红线：他人提示词正文**不得搬运进仓库**；落盘三分（语料 `data/prompt-corpus/<源>/` gitignored｜脚本 `backend-py/scripts/corpus/`｜结论 `docs/`）；选源看 `size`(KB)+真实文件树而非 star，**许可证是硬约束**。
+**详见 `TOPICS.md`**（检索管线 8987 条/3 源、已排除源清单、落盘三分都在那儿）。一条红线：他人提示词正文**不得搬运进仓库**（只提炼范式，结论落 `docs/`）。
 
 ## 协作与提交
 - **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。

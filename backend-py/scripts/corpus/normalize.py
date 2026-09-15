@@ -22,8 +22,8 @@ tags / mode / duration / aspect。
 
 用法::
 
-    python backend-py/backend-py/scripts/corpus/normalize.py             # 归一化全部已采集的源
-    python backend-py/backend-py/scripts/corpus/normalize.py --source=flaqai
+    python backend-py/scripts/corpus/normalize.py             # 归一化全部已采集的源
+    python backend-py/scripts/corpus/normalize.py --source=flaqai
 
 产物
   ``data/prompt-corpus/_normalized/prompts.jsonl``   （每行一条，UTF-8）

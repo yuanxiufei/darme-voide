@@ -197,7 +197,7 @@ ds = load_dataset("WenhaoWang/TIP-I2V", split="Subset", streaming=True)
 
 ## 4. 落到本项目怎么用
 
-采集到的语料**不是**要抄进仓库，而是提炼成 `skills/prompt-style-library` 的**范式与词表**：
+采集到的语料**不是**要抄进仓库，而是提炼成 `backend-py/skills/prompt-style-library` 的**范式与词表**：
 
 | 语料 | 提炼目标 |
 |---|---|

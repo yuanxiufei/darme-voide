@@ -17,9 +17,9 @@
 
 用法::
 
-    python backend-py/backend-py/scripts/corpus/fetch_raw.py             # 跳过已存在的文件
-    python backend-py/backend-py/scripts/corpus/fetch_raw.py --force     # 重新下载
-    python backend-py/backend-py/scripts/corpus/fetch_raw.py --only=<id 前缀>   # 只跑某个源
+    python backend-py/scripts/corpus/fetch_raw.py             # 跳过已存在的文件
+    python backend-py/scripts/corpus/fetch_raw.py --force     # 重新下载
+    python backend-py/scripts/corpus/fetch_raw.py --only=<id 前缀>   # 只跑某个源
 
 退出码：0 = 全部成功（含跳过）；1 = 有源失败（失败清单在日志末尾）。
 """

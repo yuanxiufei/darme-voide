@@ -65,11 +65,11 @@ Ref2VA 的参考音频是 **reference conditioning**，不是最终对白音频�
 
 | 命令 | 作用 |
 |---|---|
-| `python backend-py/backend-py/scripts/model_manager.py list [--category video\|text\|image\|tts] [--missing]` | 列清单与安装状态 |
-| `python backend-py/backend-py/scripts/model_manager.py download --required \| --category video \| --all` | 按需批量安装 |
-| `python backend-py/backend-py/scripts/model_manager.py install-nodes [--required]` | 装 ComfyUI 自定义节点 |
-| `python backend-py/backend-py/scripts/model_manager.py doctor` | 体检（底座/git/ollama/磁盘/模型/节点） |
-| `python backend-py/backend-py/scripts/model_manager.py add-model/remove-model` | 增删清单条目（无需改代码） |
+| `python backend-py/scripts/model_manager.py list [--category video\|text\|image\|tts] [--missing]` | 列清单与安装状态 |
+| `python backend-py/scripts/model_manager.py download --required \| --category video \| --all` | 按需批量安装 |
+| `python backend-py/scripts/model_manager.py install-nodes [--required]` | 装 ComfyUI 自定义节点 |
+| `python backend-py/scripts/model_manager.py doctor` | 体检（底座/git/ollama/磁盘/模型/节点） |
+| `python backend-py/scripts/model_manager.py add-model/remove-model` | 增删清单条目（无需改代码） |
 
   旧入口 `backend-py/scripts/h3_install.py` 已降级为兼容 shim（H3 8 模型 + 4 节点），数据源同样指向 `models.json`，新模型请走 `model_manager.py`。
 

@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2437 项全绿**（冒烟 475 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2441 项全绿**（冒烟 475 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -33,7 +33,7 @@
 | S4 媒体服务 | image/video/TTS 生成、`compose`(ffmpeg)、宫格、合并、视觉图 | ✅ **主链全通**：`vendor-errors` + text/image/video/TTS+voice-clone 四条链路 + 逐镜路由 + `videos`(6) + `compose`(3) + `merge`(2) + **`grid`(4)**；仅剩**像素处理(校色/参考图压缩)**与**镜头 QC 打分**（调用点均已占位） |
 | S5 **Mastra 替换** | Agent 循环 + 工具调用 + 协议 + **运行时** + 6 组工具(~2900 行) + `agent`(2) | ✅ **完成**：`protocol` + `tool` + **6 组工具** + **`runtime`(运行时：失败分类/退避/模型 fallback/风格注入)** + `agent`(2 端点，**非流式**)；✅ **`DEFAULT_PROMPTS` 已搬**（`services/agent_prompts.py` + 逐字守卫，2026-09-12 决策变更）；⚠️ 未迁 `subagent`/`rhythm-phase`（`skills`/`mcp` 已迁）；⚠️ **Gemini 函数调用循环未支持**（显式报错） |
 | S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | ✅ **全部迁完（剩 0 条）**：MCP（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）｜`auto-pipeline` 整域关闭（8 阶段编排 + SSE）｜`evaluation` 整域关闭（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）｜GPU 显存管理 + 租约接线｜崩溃恢复（项目台账 / 资产版本 / SSE 总线 / 提取尾帧）|
-| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **只剩「删 `backend/`」本身（等用户点头）**：benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册 0 条**（绞杀者已收口：`storage/change` 是最后一条，2026-09-15 迁完）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（**2026-09-15 实测：一致 12 / 已知差异 0 / 不存在路径 4 / 新差异 0**，CASES 已补齐 S7 新增只读 GET）｜守卫快照已重冻 **74 文件 / 728 KB**，且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
+| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **只剩「删 `backend/`」本身（等用户点头）**：benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册 0 条**（绞杀者已收口：`storage/change` 是最后一条，2026-09-15 迁完）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（**2026-09-15 实测：一致 12 / 已知差异 0 / 不存在路径 4 / 新差异 0**，CASES 已补齐 S7 新增只读 GET）｜守卫快照已重冻为 **Python 模块快照**（74 条 / 625 KB，`tests/frozen_ts_source.py`），且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
 
 顺序是按**依赖**排的：S1 是所有适配器/Agent 的入口，S2/S3 被 S4/S5 依赖，S5 被 S6 依赖。
 **`backend/` 只能在 S7 删** —— 删之前必须先证明等价（129→224 端点的全量对拍）。
@@ -80,8 +80,9 @@
 九道漂移守卫原先是**读 TS 源码**来证明「Python 的路由表/常量/提示词没漂移」。删库前先冻结：
 
 ```bash
-python tests/freeze_ts_snapshot.py          # 把守卫读到的 74 个不同 .ts 复制到 tests/frozen_ts/（728 KB；清单 = 手写 ∪ 自动发现**两种形态**）
-python tests/freeze_ts_snapshot.py --check  # 校验完整性（真源码还在时会逐个核对）
+python tests/freeze_ts_snapshot.py          # 把守卫读到的 74 个 .ts **逐字**收进 tests/frozen_ts_source.py（625 KB；清单 = 手写 ∪ 自动发现**两种形态**）
+python tests/freeze_ts_snapshot.py --check  # 校验覆盖完整性（真源码还在时会逐个核对）
+python tests/freeze_ts_snapshot.py --dump tmp/frozen_ts   # 物化成 .ts 文件树，仅供人读
 python tests/route_parity_test.py           # 照常跑
 PARITY_USE_FROZEN=1 python tests/route_parity_test.py   # 强制用快照（验证「删库后照样能跑」）
 ```
@@ -207,7 +208,7 @@ backend-py/
 │     ├─ video_probe.py           本地视频时长探测（ffprobe；失败即 0）
 │     └─ take_budget.py           per-shot take 预算（生成次数收敛门禁）
 └─ tests/
-   ├─ smoke_test.py             冒烟测试（模式 + 契约，482 用例）
+   ├─ smoke_test.py             冒烟测试（模式 + 契约，475 用例）
    ├─ adapters_test.py          适配器层自检（JS 语义逐条对齐，101 用例）
    ├─ vendor_errors_test.py     错误归因 + 重试（MockTransport，零真实网络，58 用例）
    ├─ text_generation_test.py   文本生成纯逻辑（提示词 / 规则拆分器，67 用例）
@@ -233,7 +234,7 @@ backend-py/
    ├─ mcp_test.py             MCP 接入层（假 stdio server 端到端）+ 3 端点（32 用例）
    ├─ agent_prompts_test.py   Agent 出厂提示词（完整性/插值/接上运行时，20 用例）
    ├─ evaluation_scorer_test.py 评测打分器（位精对齐 JS/契约校验真实基准文件，39 用例）
-   ├─ skills_test.py          Skill 解析/加载（隔离目录 + 真实 skills/ 集成，45 用例）
+   ├─ skills_test.py          Skill 解析/加载（隔离目录 + 真实 backend-py/skills/ 集成，45 用例）
    ├─ evaluation_route_test.py 评测执行器（seed 提交/抽取口径/清理）+ 2 端点（28 用例）
    ├─ creator_test.py         Agent 创建器 + POST /agent-configs/generate（28 用例）
    ├─ optimizer_test.py       提示词优化器状态机 + POST /optimize/{id}（28 用例）
@@ -259,7 +260,7 @@ backend-py/
    ├─ set_frame_test.py       设置首尾帧 + 抽帧泛化（首帧不 seek/尾帧回退 0.2s，14 用例）
    ├─ regenerate_frame_test.py 重生成镜头帧（帧类型白名单/帧提示词/拼接顺序，17 用例）
    ├─ consistency_qc_test.py   图像连续性 QC（真实图 dHash：ok/info/warning 三档，28 用例）
-   ├─ freeze_snapshot_test.py    TS 源码快照反漂移（守卫读到的文件必须在快照里，7 用例）
+   ├─ freeze_snapshot_test.py    TS 快照反漂移（Python 模块快照 + 物化逐字一致，12 用例）
    ├─ grid_agent_prompt_test.py 宫格 Agent 提示词 + 端点（12 用例）
    ├─ subagent_test.py        子 Agent 调度工具（16 用例）
    ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
@@ -267,6 +268,18 @@ backend-py/
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
    └─ run_all.py                一次跑完以上六十二项（**套件权威清单就在这个文件里**，本树只是摘录）
+├─ skills/                      Agent 技能库（**2026-09-15 从仓库根 skills/ 并入**；自有 SKILL.md + 外部技能库）
+│  ├─ README.md                 技能库权威约定（改 skill 前必读）
+│  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
+│  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
+└─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
+   ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
+   ├─ check_skill_refs.py       skills 引用完整性守卫
+   ├─ test_guards.py            两套守卫的自检（12 例）
+   ├─ check_all.py              一键跑全部三道自检
+   ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
+   └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
+   ↑ 细节见 `scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
 ```
 
 ## 厂商适配器层（S3）要点

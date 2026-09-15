@@ -17,13 +17,13 @@
 | **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改） | Python 3.8+，**仅标准库** |
 
 > 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
-> （`run_all.py` = 62 套件 / 2437 项，那份清单才是权威；改后端代码请跑它）。
+> （`run_all.py` = 62 套件 / 2441 项，那份清单才是权威；改后端代码请跑它）。
 
 ## 仓库自检脚本（pre-commit 会按资产自动触发）
 
 | 文件 | 职责 |
 | --- | --- |
-| `check_skill_refs.py` | 校验 `skills/**/*.md` 里的路径引用是否都能落地（`references/` 资产、跨 skill `../`、及 `skills/`+`backend/`+`backend-py/`+`frontend/`+`docs/` repo 根相对路径），防「改 skill 名 / 挪库 / 改 docs 名」造成的**静默断链** |
+| `check_skill_refs.py` | 校验 `backend-py/skills/**/*.md` 里的路径引用是否都能落地（`references/` 资产、跨 skill `../`、及 `backend-py/skills/`+`backend/`+`backend-py/`+`frontend/`+`docs/` repo 根相对路径），防「改 skill 名 / 挪库 / 改 docs 名」造成的**静默断链** |
 | `check_memory.py` | 校验 `.codebuddy/memory/` 三层记忆：`MEMORY.md` ≤ 8k 字符（超限注入会被截断）、`INDEX.md` 的 `@行号` 锚点有效、且**每篇日志的末节都已登记**、磁盘日志都已登记、落点表路径有效 |
 | `test_guards.py` | **两套守卫的自检**：在临时副本上造 12 种场景（记忆层 8 + 引用层 4），断言每项检查仍能报致命（防「守卫被改哑但基线仍绿」） |
 | `check_all.py` | **一键跑全部自检**（上表三道串联 + 汇总）—— pre-commit 只在「本次提交触及相应资产」时才跑对应守卫，本脚本用于**全局体检** |
@@ -40,7 +40,7 @@ python backend-py/scripts/test_guards.py                 # 单跑：改了任一
 
 判定分级（细节见脚本头注释）：
 
-- **致命**：`references/…`、跨 skill `../…`、repo 根相对路径（`backend/`、`backend-py/`、`frontend/`、`skills/`、`docs/`）指向不存在 → 退出码 1
+- **致命**：`references/…`、跨 skill `../…`、repo 根相对路径（`backend/`、`backend-py/`、`frontend/`、`backend-py/skills/`、`docs/`）指向不存在 → 退出码 1
 - **非致命**：缺 `scripts/…` —— 外部技能库只随行 `SKILL.md` + `references/`，上游 `scripts/` 普遍未 vendored，故只列出
 - **跳过**：上游 / 外来宿主路径（`.ci/`、`spec/`、`.opencode-v2/`、`.claude/`、`.agents/`）、含通配符的模式、**示意引用**（`e.g.` / `such as` / `例如` **紧邻**于路径之前）、基准不明（不在任何 skill 内 / 非资产目录开头）
 - 各类跳过**分别计数**且可 `--verbose` 逐条审计 —— 「跳过」不是静默丢弃
@@ -155,7 +155,7 @@ sd_h3_compat_probe.py（独立，零依赖）
 
 ## 与 `.githooks/pre-commit` 的关系
 
-改了 `skills/` 或 `docs/` ⇒ 跑引用守卫；改了 `.codebuddy/memory/` ⇒ 跑记忆守卫；
+改了 `backend-py/skills/` 或 `docs/` ⇒ 跑引用守卫；改了 `.codebuddy/memory/` ⇒ 跑记忆守卫；
 改了本目录的三个守卫脚本 ⇒ 跑守卫自检。钩子**按资产条件触发**（快），
 **全局体检请用 `check_all.py`**。钩子里的 Python 解释器解析顺序：
 `backend-py/.venv` → `python3` → `python` → `py -3`（守卫只用标准库，任一个都行）。

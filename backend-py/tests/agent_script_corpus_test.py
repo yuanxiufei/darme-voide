@@ -163,7 +163,7 @@ def main() -> int:  # noqa: C901
         "语料缺失: available=false + 安装指引（**不抛错**，否则 Agent 直接跑不动）",
         degraded["available"] is False and degraded["results"] == []
         and "data/prompt-corpus/ 已 gitignore" in degraded["hint"]
-        and "fetch-raw.mjs" in degraded["hint"],
+        and "fetch_raw.py" in degraded["hint"],
         degraded["hint"][:40],
     )
 
