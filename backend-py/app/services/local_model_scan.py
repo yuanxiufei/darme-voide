@@ -32,13 +32,15 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .. import config
 from ..config import PROJECT_ROOT
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
 #: 的独立服务 + 项目自带的 ``h3`` 薄封装」的落脚点，属后端资产，与后端代码同包更归拢。
-#: ⚠️ 三处必须同步（本文件 / ``scripts/model_manager.py`` / TS 侧 ``local-model-scan.ts``）。
-BACKEND_PY_ROOT = Path(__file__).resolve().parents[2]
+#: ⚠️ **唯一权威在 ``app/config.py``**（2026-09-15 收口：本文件原先自己算一遍 ``parents[2]`` ✗）；
+#: ``scripts/model_manager.py`` 那份是同名独立实现（scripts 不 import ``app.*``），靠注释同步。
+BACKEND_PY_ROOT = config.BACKEND_PY_ROOT
 
 __all__ = [
     "MODEL_EXTS",

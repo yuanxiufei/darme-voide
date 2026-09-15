@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
-> **自检 2463 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2473 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 5**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -307,8 +307,10 @@ backend-py/
    ├─ compressed_data_url_test.py 参考图压缩（ffmpeg，16 用例）
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
    ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口 ↔ 代码常量，23 用例）
+   ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，5 用例）
+   ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端，5 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十三项（**套件权威清单就在这个文件里**，本树只是摘录）
+   └─ run_all.py                一次跑完以上六十五项（**套件权威清单就在这个文件里**，本树只是摘录）
 ├─ skills/                      Agent 技能库（**2026-09-15 从仓库根 skills/ 并入**；自有 SKILL.md + 外部技能库）
 │  ├─ README.md                 技能库权威约定（改 skill 前必读）
 │  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
@@ -604,7 +606,9 @@ cd backend-py
    得回溯到「最后一个还含该文件」的提交（本项目实测：`HEAD` 已无 `db/index.ts`，上一提交里还在）。
    「现有快照优先于 git」是刻意的：快照是**删库前现场**，git HEAD 可能落后（曾差点静默回退一次改动）。
 
-结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓，快照 **76 条 / 674 KB** ✓。
+结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓（**当时**的实测值；此后新增
+`frontend_api_coverage_test.py` 与 `contract_mirror_test.py` ⇒ 现为 **65 套件 / 2473 项**），
+快照 **76 条 / 674 KB** ✓。
 
 ⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：
 `freeze_snapshot_test.py` 的「自动发现的路径在真源码下确实存在」、`eval_cli_test.py` 的

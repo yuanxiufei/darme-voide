@@ -40,6 +40,18 @@
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。
 
+## Skill 体系坑清单（2026-09-15 自 `MEMORY.md` 下移，腾 8k 预算 —— 本文件逼近上限时**尾部区块最先被截断**）
+
+- ① `renderSkill()` **不含 frontmatter name** → 验证注入要用正文特征串；
+- ② `prompt-utils.ts` 有顶层副作用 ⇒ 前端只能 `import type`；
+- ③ **`/skills/meta` 与 `/agent-configs/defaults` 必须注册在通配路由之前**（否则被当 id 吃掉）；
+- ④ 本工具 `search_content` 的 `glob` 不生效（按 path 收窄代替）；
+- ⑤ `PUT /skills/<id>` 保存后回读校验 frontmatter：缺 `---` 头或 `agents` 为空 ⇒ 返 `{ warning }`（不阻断）→ 前端 `toast.warning`（防「改正文 → 默认注入静默消失」）；
+- ⑥ 前端回显 DB `skills` **必须规范化**（`enabled !== false`、`priority` 缺省 `0`、过滤无 `id` 项、非数组兜 `[]`），否则**显示与实际相反**；
+- ⑦ 导入 `agents/index.ts` 有 DB 清洗副作用（`[db] sanitized…`）⇒ 验证脚本会改数据；
+- ⑧ **改 skill 名 / 挪库 / 引 `docs/` 后必跑 `python backend-py/scripts/check_skill_refs.py`**（1 = 断链；基线 **0 致命 / 0 非致命**（96 处）⇒ **非零即真回归**）。路径须写成 `` `references/x.md` `` 才受采集；⚠️ 守卫**默认未启用**（需 `git config core.hooksPath .githooks`）；
+- ⑨ 改记忆必跑 `check_memory.py`、改守卫自身再跑 `test_guards.py`、体检 `check_all.py` —— 判据与基线详见 `backend-py/scripts/README.md`。
+
 ## `backend-py/`（Python 后端 / 绞杀者迁移，2026-09-12 起）
 - **为什么不是一次性重写**：原始体量 **133 TS / 27,389 行 / 226 端点 / 29 表**且**零自动化测试** ⇒ 重写期没有任何可验证中间态。故 FastAPI 作新入口（**5790**），**未迁移的域反代到 Node（5789）**，每迁一域就 `include_router` 一行并把该域从 Node 停用；全迁完后 `PY_PORT=5789` 切单端口。
 - **端口铁律**：`app/config.py` **刻意不读 `config.yaml` 的 `server.port`**（那是 Node 的端口，并存期读同一个必然抢占）。优先级 `PY_PORT > PORT > 5790`。

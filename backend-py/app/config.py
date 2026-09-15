@@ -23,6 +23,10 @@ except ImportError:  # pragma: no cover - 缺依赖时降级为「全部走默�
 # backend-py/app/config.py -> backend-py -> 仓库根（对齐 TS 的 path.resolve(__dirname, '../..')）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+#: 后端包根（``backend-py/``）—— **唯一权威**。凡「属于后端、又不该放仓库根」的路径（技能库、
+#: 本地服务根…）都从这里派生；⚠️ 与 ``scripts/`` 侧的同名常量靠注释同步（scripts 不 import ``app.*``）。
+BACKEND_PY_ROOT = Path(__file__).resolve().parents[1]
+
 CONFIG_PATH = Path(os.environ["CONFIG_PATH"]) if os.environ.get("CONFIG_PATH") else (
     PROJECT_ROOT / "configs" / "config.yaml"
 )
@@ -43,7 +47,7 @@ def skills_dir() -> Path:
     override = os.environ.get("SKILLS_DIR")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[1] / "skills"
+    return BACKEND_PY_ROOT / "skills"
 
 
 def _load_raw() -> dict[str, Any]:

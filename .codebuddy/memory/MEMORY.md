@@ -41,7 +41,7 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - **宿主工具兼容性**：外部库依赖的 `hub_*` 等工具本项目**从未注册**；依赖 = `allowed-tools` ∪ 正文 `hub_*` 引用（**只认 `hub_` 前缀**，宽泛猜会被字段名污染）；**工具集须取 `tool.id`**（取错把 21 个工具全误判为缺失）。**完整判据见 `TOPICS.md`**。
 - **`meta.yaml` 是死数据（改它不生效）**：全仓库零读取；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删**（丢溯源）。见 `backend-py/skills/README.md` §一。
 - **改名/挪库后必核对 DB 绑定**：`agent_configs.skills` 存 skill id ⇒ 旧绑定失效；核对用 `better-sqlite3` **`{ readonly: true }`** 直开（绕开清洗副作用，坑⑦）。**实测 5 行全 `NULL` ⇒ 改名零影响**。步骤见 `TOPICS.md`。
-- **坑**：① `renderSkill()` **不含 frontmatter name** → 验证注入用正文特征串；② `prompt-utils.ts` 有顶层副作用 ⇒ 前端只能 `import type`；③ **`/skills/meta` 与 `/agent-configs/defaults` 必须注册在通配路由之前**（否则被当 id 吃掉）；④ 本工具 `search_content` 的 `glob` 不生效（详见 `TOPICS.md`）；⑤ `PUT /skills/<id>` 保存后回读校验 frontmatter，缺 `---` 头或 `agents` 为空则返 `{ warning }`（不阻断）→ 前端 `toast.warning`（防「改正文 → 默认注入静默消失」）；⑥ 前端回显 DB `skills` **必须规范化**（`enabled !== false`、`priority` 缺省 `0`、过滤无 `id` 项、非数组兜 `[]`），否则**显示与实际相反**；⑦ 导入 `agents/index.ts` 有 DB 清洗副作用（`[db] sanitized…`）→ 验证脚本会改数据；⑧ **改 skill 名/挪库/引 `docs/` 后必跑 `python backend-py/scripts/check_skill_refs.py`**（1 = 断链；基线 **0 致命 / 0 非致命**（96 处）⇒ **非零即真回归**）。路径须写成 `` `references/x.md` `` 才受采集；⚠️ 守卫**默认未启用**（需 `git config core.hooksPath .githooks`）；⑨ 改记忆必跑 `check_memory.py`、改守卫自身再跑 `test_guards.py`、体检 `check_all.py` —— 判据与基线详见 `backend-py/scripts/README.md`。
+- **坑⑨条已下移**（渲染/前端 import type/路由注册顺序/回读校验/回显规范化/DB 清洗副作用/守卫触发）⇒ `TOPICS.md` §Skill 体系坑清单（2026-09-15 腾 8k 预算：本文件逼近上限时**尾部区块最先被截断**）。
 
 ## 视频提示词语料
 **详见 `TOPICS.md`**（检索管线 8987 条/3 源、已排除源清单、落盘三分都在那儿）。一条红线：他人提示词正文**不得搬运进仓库**（只提炼范式，结论落 `docs/`）。

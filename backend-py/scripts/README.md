@@ -17,7 +17,7 @@
 | **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改） | Python 3.8+，**仅标准库** |
 
 > 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
-> （`run_all.py` = 63 套件 / 2464 项，那份清单才是权威；改后端代码请跑它）。
+> （`run_all.py` = 65 套件 / 2473 项，那份清单才是权威；改后端代码请跑它）。
 
 ## 仓库自检脚本（pre-commit 会按资产自动触发）
 
@@ -150,6 +150,24 @@ python backend-py/scripts/sd_h3_compat_probe.py --list     # 支持矩阵
 ⚠️ **路径推导是个坑**：这几个脚本原来在仓库根 `scripts/`，仓库根 = `dirname(SCRIPT_DIR)` 一级；
 搬进 `backend-py/scripts/` 后必须**上跳两级**（`model_manager.py` / `sd_h3_pipeline.py` 已改）。
 只跳一级不会报错，只是 `models.json` 读不到 ⇒ **清单为空**。
+
+## 路径推导（**唯一容易静默出错的地方**）
+
+⚠️ 本目录脚本全靠 `__file__` 反推仓库根 —— **级数错一级不会报错**，只会「清单/语料/技能读不到」，
+表现为**空结果**（本项目真实踩过：`model_manager.py` 随 `scripts/` 从仓库根搬进 `backend-py/scripts/`
+时只上跳一级 ⇒ `models.json` 与 `local_services` 全找不到，却一声不响）。
+
+| 脚本位置 | 到仓库根 | 到 `backend-py/` |
+|---|---|---|
+| `scripts/*.py`（守卫 / 工具链） | `parents[2]`（`scripts` → `backend-py` → 仓库根） | `parents[1]` |
+| `scripts/corpus/*.py` | `parents[3]` | `parents[2]` |
+
+（`Path(__file__).resolve()` 口径；`model_manager.py` / `sd_h3_pipeline.py` 用的是等价的 `os.path.dirname` 版。）
+
+⚠️ **应用侧（`app/`）不要各自算**：唯一权威是 `app/config.py` —— `PROJECT_ROOT`（仓库根）、
+`BACKEND_PY_ROOT`（`backend-py/`）、`skills_dir()`（技能库，`SKILLS_DIR` 可覆盖）。
+2026-09-15 收口前，`services/skills.py`、`services/agents/skills.py`、`services/local_model_scan.py`
+各自算过一遍 ✗ —— 那类重复**改漏一处不会报错**，只会静默读错目录。
 
 ## 依赖关系
 
