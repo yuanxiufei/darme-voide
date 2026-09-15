@@ -157,6 +157,11 @@
 - ⚠️ **「HTTP 状态码」不是端点在不在的可靠判据 —— 只要本机存在前端产物**：Node `src/index.ts` 有一道**无条件**兜底 `app.get('*', serveStatic({root: 'frontend/dist', path: 'index.html'}))` ⇒ 任何**未匹配的 GET** 都会回 **200 + HTML**（谁跑过一次 `npm run generate` 就有 `.output/public/index.html`，而 `frontend/dist` 常是指向它的**联接**）。本项目因此**连栽两次**：① 冒烟两条「dist 不存在 ⇒ 404 / 穿越被拦」；② 对拍里 4 条裸列表路径被判成「Node 有而 Python 没有」的 `new`。
   ⇒ 规则：写测试/工具时**先问「有前端产物时会怎样」**；判定「端点是否存在」要看**响应形态**（非 JSON / HTML ⇒ 是兜底）而不是只看状态码；能在夹具里打桩的（`FRONTEND_DIST`）就打桩。
 - ⚠️ **自检用例的「分母」要手数准**：`parity_diff.py --selftest` 原写 `len(cases) + 5`，实际有 6 处额外断言 ⇒ 打印的分母偏小（不影响失败判定与退出码，但会让人误信覆盖度）。加断言时同步改那个常量（现在叫 `EXTRA_CHECKS`）。
+- ⚠️ **「自动发现」的覆盖面才是命门**：快照的自动发现只看 `_GUARD_SOURCES` 里那几个文件 ⇒ **自检（`smoke_test.py`）里写死的 TS 路径会漏网**，直到删库当天才以「导入期 FileNotFoundError、整套崩」现形（2026-09-15 实测）。规则：**任何读 TS 源码的测试文件都要进 `_GUARD_SOURCES`**；删库类操作要按「谁还读真源码」而不是「谁是守卫」来清点。
+- ⚠️ **删库当天 `HEAD` 往往已不含被删内容**（现场被提交成「删除」）⇒ `git show HEAD:<path>` 直接 fatal。取回旧内容的正确姿势：`git log --all --format=%H -- <path>` 后**逐个提交回溯到第一个存在的版本**。且**「现有快照/现场优先于 git」**：git HEAD 可能落后于删除时的现场（本项目险些把一次未提交的改动**静默回退**）。
+- **「去 Node 化 / 删旧后端」要分两类引用**：**历史溯源**（`移植自 backend/src/xxx.ts`）**保留**（那是价值所在）；**可执行指令**（端口、启动命令、env 开关、Docker/nginx、部署清单）**必须改** —— 否则文档会教人去起一个已删除的服务（本项目实测：README 里 5789/npm start、`PROXY_TO_NODE=1 可反代`、501 的**运行时文案**全在教人起 Node ✗）。顺带：**改运行时文案前先确认没有测试断言那段文本**。
+- **批量改文档用「落盘脚本 + MISS 报告」**，别在内联 `python -c` 里拼引号：PowerShell 会把 `\"`、`\\` 吃掉或报 `unterminated string literal`（本项目内联版直接失败过一次）。落盘脚本还能逐条打印 `OK/MISS`，避免「静默改错」。⚠️ 同理：命令里带**工作区之外**的路径（哪怕只作环境变量值）会触发权限拦截并超时 ⇒ 探针路径用工作区内目录。
+- **「优化目录结构」先分清两层：代码层 vs 资产层**（本项目：`app/`＝代码；`skills/`、`local_services/`、`configs/`、`data/`＝内容/运行时）。迁移期为「逐条比对」而刻意**扁平/镜像**的目录（`app/services/*.py` ↔ TS `services/*.ts`）**不能重排** —— 守卫按映射表比常量，重排会成片打断 ⇒ 优化只该落在「常量收口（同一规则只留一处）+ 文档边界说明 + 清过期标注」。
 - **JS → Python 逐条移植的六个口径坑**（2026-09-15 把 7 个 `.mjs` 守卫/语料脚本移植成 `.py` 时全部实测踩出；**任何 JS 行为对齐都先想这六条**）：
   1. **换行转换**：Python `Path.read_text()` 默认做 universal newlines（CRLF→LF），Node `readFileSync` **不做** ⇒ 字符数会少「行数」那么多（实测 7651 → 7598）。要逐字对齐必须 `open(..., newline="")`。
   2. **`\w` 语义**：JS 的 `\w` 只认 `[A-Za-z0-9_]`，Python 默认认 Unicode 词字符 ⇒ 正则补 `re.ASCII`。

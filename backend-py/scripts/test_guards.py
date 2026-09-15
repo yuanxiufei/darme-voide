@@ -17,7 +17,7 @@
 
 用例（``check_memory.py``：基线 1 + 负向 7 ｜ ``check_skill_refs.py``：基线 1 + 负向 3）
   基线  副本未改动          ⇒ 0 致命（防「用例自身把基线弄坏」）
-  ① 缺 TOPICS.md ｜② MEMORY.md 超 8k ｜③ 锚点越界 ｜④ 末节未登记锚点
+  ① 缺 TOPICS.md ｜② MEMORY.md 超 8k ｜③ 锚点越界 ｜④ 末节未登记锚点 ｜④b 中间**步骤小节**未登记锚点
   ⑤ 磁盘日志未登记 ｜⑥ 落点表路径不存在 ｜⑥b 落点表 §小节指针落空
   ⑦ 引用真断链 ｜⑧ ``docs/`` 引用断链（守住 2026-09-12 才补上的 ``docs/`` 前缀）
   ⑨ 示意引用不误报（``e.g.`` 紧邻的路径必须被跳过，否则真信号会被噪声淹没）
@@ -163,6 +163,29 @@ def _case_last_section_unregistered() -> None:
     raise AssertionError(f"夹具失配：INDEX.md 的 {block['log']} 块内找不到 @{last}")
 
 
+def _case_step_section_unregistered() -> None:
+    """抹掉**倒数第二个步骤小节**的锚点（末节已被 ④ 覆盖，这里专测「中间小节被挤掉」）。
+
+    ⚠️ 2026-09-15 真实事故：一条 `re.sub` 把索引里的第 40/41 步与「待办」条目一起改写掉，
+    而末节（第 42 步）锚点还在 ⇒ ④ 全绿、**三条跳读入口静默消失** ✗。本用例锁住 ④b。
+    """
+    block = max(_blocks(_read("INDEX.md")), key=lambda item: item["log"])
+    log_lines = _lines_of(_read(block["log"]))
+    steps = [index + 1 for index, line in enumerate(log_lines)
+             if re.match(r"^##\s*S7 第\s*\d+\s*步", line)]
+    if len(steps) < 2:
+        raise AssertionError(f"夹具失配：{block['log']} 内步骤小节不足 2 个")
+    target = steps[-2]
+    lines = list(block["lines"])
+    pattern = re.compile(rf"@{target}\b")
+    for index in range(block["at"], block["end"]):
+        if pattern.search(lines[index]):
+            lines[index] = pattern.sub("", lines[index])
+            _write("INDEX.md", "\n".join(lines))
+            return
+    raise AssertionError(f"夹具失配：INDEX.md 的 {block['log']} 块内找不到 @{target}")
+
+
 def _case_disk_log_unregistered() -> None:
     _write("2099-12-31.md", "# 探针\n")
 
@@ -183,6 +206,8 @@ MEM_CASES: list[tuple[str, int, str, object]] = [
     ("③ 锚点越界（首个日志块改用 @9999）", 1, "锚点越界", _case_anchor_out_of_range),
     ("④ 日志末节未登记锚点（抹掉最新日志末节锚点）", 1, "日志末节未登记锚点",
      _case_last_section_unregistered),
+    ("④b 中间步骤小节未登记锚点（抹掉倒数第二个步骤锚点）", 1, "步骤小节未登记锚点",
+     _case_step_section_unregistered),
     ("⑤ 磁盘日志未登记（造 2099-12-31.md）", 1, "日志未登记进 INDEX.md",
      _case_disk_log_unregistered),
     ("⑥ 落点表路径不存在", 1, "落点表引用的路径不存在", _case_ref_path_missing),
@@ -275,7 +300,7 @@ def main() -> int:
     for item in failed:
         print(f"✗ {item}")
     print(
-        f"守卫自检：{len(passed)}/{total} 通过 ｜ check_memory.py 基线+①~⑥（{len(MEM_CASES)} 例）｜ "
+        f"守卫自检：{len(passed)}/{total} 通过 ｜ check_memory.py 基线+①~⑥（含 ④b，{len(MEM_CASES)} 例）｜ "
         f"check_skill_refs.py 基线+⑦~⑨（{len(REF_CASES)} 例）"
     )
     return 1 if failed else 0

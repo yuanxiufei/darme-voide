@@ -88,6 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=90.0)
     args = parser.parse_args(argv)
 
+    # ⚠️ 删库后**先拦一道**（2026-09-15 补）：`backend/` 没了以后，本脚本原先会先起 Node、
+    #    干等 `--timeout`（默认 90 秒）才报错 ⇒ 体验是「卡住」。这里立刻说清它是历史工具。
+    if not (BACKEND / "node_modules" / "tsx" / "dist" / "cli.mjs").is_file():
+        print(f"❌ 找不到 Node 侧（{BACKEND}）—— Node 后端已于 2026-09-15 删除。")
+        print("   本工具**只能用于「删库前」证明两侧等价**，现已失效；")
+        print("   日常等价性由 `tests/route_parity_test.py` 的**快照模式**保证（不需要 Node）。")
+        return 2
+
     marker = REPO / ".data-root"
     if marker.exists():
         print(f"❌ 拒绝运行：{marker} 存在（标记文件优先于 DATA_ROOT，会让两侧读到别处的库）")

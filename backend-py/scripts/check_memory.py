@@ -18,6 +18,9 @@
         ② MEMORY.md 字符数 ≤ BUDGET（默认 8000）
         ③ INDEX.md 每个 ``@N``：所属日志存在、N 在范围内、第 N 行是「小节首行」
         ④ 每篇日志的**最后一节**都有登记锚点（防「写了日志忘登记索引」→ 新内容不可达）
+        ④b 每个**步骤小节**（``## S7 第 N 步…``）都有登记锚点
+           ⚠️ ④ 只看末节 ⇒ **中间小节被就地覆盖**时全绿（2026-09-15 真实发生：索引里
+           第 40/41 步与「待办」条目被一条正则改写掉，守卫照样 exit 0 ✗）
         ⑤ 磁盘上每篇日志都已在 INDEX.md 登记（防「新的一天建了日志忘登记」→ 整篇不可跳读）
         ⑥ 「已出栈的落点」表里的路径引用必须存在，且 ``文件 §小节`` 的**小节名**要在该
            文件内真的出现（只扫本小节，日志摘要里的历史文件名是叙述、不算引用）
@@ -61,6 +64,8 @@ DIGITS_RE = re.compile(r"\d+")
 LOG_MARKER_RE = re.compile(r"\*\*`(\d{4}-\d{2}-\d{2}\.md)`\*\*")
 LOG_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 H2_RE = re.compile(r"^##\s")
+#: 「步骤小节」：本项目日志里 `## S7 第 N 步：…` 这类小节**每节都该是跳读入口**（④b 用）
+STEP_SECTION_RE = re.compile(r"^##\s*S7 第\s*\d+\s*步")
 REF_TABLE_RE = re.compile(r"^##\s*已出栈的落点")
 LOG_LIST_RE = re.compile(r"^##\s*日志清单")
 TICK_RE = re.compile(r"`([^`]+)`")
@@ -169,6 +174,16 @@ def main() -> int:
             fatal.append(
                 f"日志末节未登记锚点  {name} @{last}（共 {len(lines)} 行，末节从第 {last} 行起）"
             )
+
+    # ④b 每个「步骤小节」也要有锚点：④ 只兜末节 ⇒ 索引条目被**就地覆盖/挤掉**时无感
+    #     （2026-09-15 实测：一条 `re.sub` 把第 40/41 步与「待办」条目一起改掉，而末节
+    #     第 42 步的锚点还在 ⇒ 守卫全绿，丢了三条跳读入口）
+    for name, (lines, nums) in by_log.items():
+        for index, line in enumerate(lines):
+            if STEP_SECTION_RE.match(line) and (index + 1) not in nums:
+                fatal.append(
+                    f"步骤小节未登记锚点  {name} @{index + 1}  → {line[:44]}"
+                )
 
     # ⑤ 磁盘上的每日日志必须都已登记进 INDEX.md（新的一天最容易漏；漏了则整篇不可跳读）
     disk_logs = 0

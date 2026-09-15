@@ -29,7 +29,8 @@ Drama Studio 是一个基于 AI 的短剧自动化生产平台，实现从剧本
 
 ```
 frontend/   — Nuxt 3 + Vue 3 + TypeScript (纯 CSS，无 UI 框架)
-backend/    — Hono + Drizzle ORM + Mastra AI Agents + better-sqlite3
+backend/    — ❌ 已于 2026-09-15 **删除**（Node/Hono 后端；能力全部迁至 backend-py/，
+              守卫靠 backend-py/tests/frozen_ts_source.py 的 TS 快照继续做「Python vs TS 当初」比对）
 configs/    — config.yaml 配置文件
 data/       — SQLite 数据库 + 生成资源文件
 backend-py/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/skills/README.md）
@@ -82,7 +83,7 @@ backend-py/local_services/ — 本地服务根（模型工具链 `git clone` 的
 
 ### 🤖 AI Agents
 
-内置 5 个 Mastra Agent，支持数据库配置和 Skill 扩展：
+内置 5 类 Agent（Python 侧 `app/services/agents/`），支持数据库配置和 Skill 扩展：
 
 | Agent | 职责 |
 |---|---|
@@ -108,8 +109,9 @@ backend-py/local_services/ — 本地服务根（模型工具链 `git clone` 的
 
 | 软件 | 版本要求 | 说明 |
 |---|---|---|
-| **Node.js** | 22.x（推荐 22.20.0，**勿用 24**，better-sqlite3 原生模块与 Node 24 ABI 不兼容） | 前后端运行环境 |
-| **npm** | 9+ | 包管理工具 |
+| **Node.js** | 22.x（推荐 22.20.0） | **仅前端**（Nuxt 构建 / dev） |
+| **npm** | 9+ | 前端包管理 |
+| **Python** | 3.12（`backend-py/.venv` 已备好） | **后端**（FastAPI + SQLAlchemy，唯一后端） |
 | **FFmpeg** | 4.0+ | 视频处理（**必需**） |
 
 #### 安装 FFmpeg
@@ -152,7 +154,7 @@ app:
 storage:
   type: "local"
   local_path: "./data/static"
-  base_url: "http://localhost:5789/static"
+  base_url: "http://localhost:5790/static"
 
 ai:
   default_text_provider: "openai"
@@ -185,9 +187,9 @@ cd ../frontend && npm install
 前后端分离，支持热重载：
 
 ```bash
-# 终端1：启动后端
-cd backend
-npm run dev
+# 终端1：启动后端（Python）
+cd backend-py
+.venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 
 # 终端2：启动前端
 cd frontend
@@ -195,7 +197,7 @@ npm run dev
 ```
 
 - 前端地址: `http://localhost:3013`
-- 后端 API: `http://localhost:5789/api/v1`
+- 后端 API: `http://localhost:5790/api/v1`
 - 前端自动代理 `/api` 和 `/static` 到后端
 
 #### 方式二：单服务模式
@@ -206,18 +208,18 @@ npm run dev
 # 1. 构建前端
 cd frontend && npm run generate
 
-# 2. 启动后端
-cd ../backend && npm start
+# 2. 启动后端（单服务：同时提供 API 与前端静态文件）
+cd ../backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 ```
 
-访问: `http://localhost:5789`
+访问: `http://localhost:5790`
 
 ### 🗄️ 数据库
 
 数据库表在首次启动时自动创建，无需手动迁移。默认路径 `data/drama.db`，可通过环境变量覆盖：
 
 ```bash
-DB_PATH=/path/to/your.db npm start
+DB_PATH=/path/to/your.db .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790   # 在 backend-py/ 下
 ```
 
 ---
@@ -245,7 +247,7 @@ docker compose down
 # 从 Docker Hub 运行
 docker run -d \
   --name drama-studio \
-  -p 5789:5789 \
+  -p 5790:5790 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/configs/config.yaml:/app/configs/config.yaml \
   --restart unless-stopped \
@@ -261,7 +263,7 @@ docker logs -f drama-studio
 
 ```bash
 docker build -t drama-studio:latest .
-docker run -d --name drama-studio -p 5789:5789 \
+docker run -d --name drama-studio -p 5790:5790 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/configs/config.yaml:/app/configs/config.yaml \
   drama-studio:latest
@@ -299,14 +301,14 @@ docker run -d --name drama-studio -p 5789:5789 \
 # 1. 构建前端
 cd frontend && npm run generate && cd ..
 
-# 2. 启动后端
-cd backend && npm start
+# 2. 启动后端（Python；默认 5790，会直接服务 frontend/dist）
+cd backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 ```
 
 需要上传到服务器的文件：
 
 ```
-backend/          # 后端源码 + node_modules
+backend-py/       # 唯一的后端（Python；Node 后端已于 2026-09-15 删除）
 frontend/dist/    # 前端构建产物
 configs/config.yaml
 data/             # 数据目录（首次运行自动创建）
@@ -321,7 +323,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://localhost:5789;
+        proxy_pass http://localhost:5790;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -335,12 +337,12 @@ server {
 
 ### 后端
 
-- **运行时**: Node.js 22.x
-- **Web 框架**: Hono
-- **ORM**: Drizzle ORM + better-sqlite3
-- **AI Agent**: Mastra + AI SDK (OpenAI compatible)
-- **视频处理**: FFmpeg (fluent-ffmpeg)
-- **图片处理**: Sharp
+- **运行时**: Python 3.12
+- **Web 框架**: FastAPI（+ SQLAlchemy Core）
+- **数据库**: SQLite（WAL；`database.path` / `DATA_ROOT` 可切）
+- **AI Agent**: 自研 Agent 运行时 + OpenAI 兼容协议（`backend-py/app/services/agents/`）
+- **视频处理**: FFmpeg（CLI：合成 / 拼接 / 校色 / 抽帧 / 连续性 QC）
+- **图片处理**: FFmpeg（**刻意不依赖 Pillow/Sharp**，见 `backend-py/README.md`）
 
 ### 前端
 
@@ -387,7 +389,7 @@ A: 后端会在首次启动时自动创建所有表，检查日志确认初始�
 常用检查命令：
 
 ```bash
-cd backend && npm run typecheck
+cd backend-py && .venv\Scripts\python.exe tests\run_all.py    # 后端自检（63 套件 / 2463 项）
 cd ../frontend && npm run build
 ```
 

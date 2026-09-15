@@ -53,15 +53,14 @@ SKILL_CHAR_BUDGET_DEFAULT = 60_000
 def skills_dir() -> Path:
     """``backend-py/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。
 
-    ⚠️ 2026-09-15 起技能库**并入后端**（原仓库根 ``skills/``）⇒ 这里**不能再**用
-    ``config.PROJECT_ROOT``（那是仓库根，会指向已不存在的 ``<仓库根>/skills``）。
-    改用**本文件位置**推导（``backend-py/app/services/agents/`` 上跳三级 = ``backend-py``），
-    与 ``services/skills.py`` 的 ``SKILLS_DIR``、守卫的 ``SKILLS_DIR`` 保持一致。
+    ⚠️ **唯一权威在 ``app/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前本文件、
+    ``services/skills.py`` 的常量、守卫脚本三处各写一遍 ✗）。这里只转发 —— 保留同名函数是因为
+    运行链（``load_agent_skills`` 等）与测试都按这个名字调用，且它们需要**每次调用都重读
+    ``SKILLS_DIR``**（常量版做不到，测试隔离时就会失灵）。
     """
-    override = os.environ.get("SKILLS_DIR")
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parents[3] / "skills"
+    from ...config import skills_dir as _skills_dir  # noqa: PLC0415 —— 惰性导入，避免任何循环依赖风险
+
+    return _skills_dir()
 
 
 def skill_char_budget() -> int:

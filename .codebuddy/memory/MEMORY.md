@@ -3,11 +3,11 @@
 > 只留**会导致 bug 的不变量**与约定；细节看 `docs/`、代码。**读法：本文件（必读）→ `TOPICS.md`（低频长专题）→ `INDEX.md`（日志定位；默认只读索引、按 `@行号` 跳读日志，勿整读）**。**本文件须 ≤8k 字符**，超限会被注入截断（实测 9.4k 即截断，且断在半句——**尾部 `## 协作与提交` 最先丢**）。**逼近上限时把细节下移 `TOPICS.md`，勿硬塞**。
 
 ## 项目与运行
-Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ Hono（`backend`，**非 Express**）+ Mastra（5 Agent）+ Drizzle + better-sqlite3。
+Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ **FastAPI + SQLAlchemy Core**（`backend-py/`，唯一后端）。⚠️ **Node 后端（Hono + Drizzle + better-sqlite3，`backend/`）已于 2026-09-15 删除**，能力 100% 迁到 `backend-py/`。
 - 后端 **5789**（`config.ts`）、前端 **3013**（proxy `/api`、`/static`）；前缀 `/api/v1`，另有 `/webhooks/*`、`/static/*`；无登录页。页面 `/`、`/settings`、`/drama/[id]`、`/library/*`。
-- 启动 `cd backend && npx tsx src/index.ts`；`cd frontend && npx nuxt dev --port 3013`。Node v22。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；Docker 未装，不依赖 postgres/redis/qdrant。
+- 启动：`cd backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790`；`cd frontend && npx nuxt dev --port 3013`（dev 代理已指 5790）。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；不依赖 postgres/redis/qdrant。（Node 5789 已随 `backend/` 删除，仅历史。）
 - **前端 dev 代理现在指向 Python 后端 5790**（2026-09-15 起；旧 Node 5789 可用 `NUXT_API_TARGET` 临时覆盖）；**共享契约类型在前端** `frontend/app/types/contracts.ts`（前端侧镜像，**字段权威在 Python 后端**，改后端字段要同步它）。技能库 / 脚本 / 快照也都在 `backend-py/` 下。
-- **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，已迁 `dramas` 域，未迁移域 `PROXY_TO_NODE=1` 反代 Node；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`——那是 Node 的 5789）；回归跑 `backend-py/tests/smoke_test.py`，动手前读其 `README.md`。**删 `backend/` 的三条前置见 `TOPICS.md`**（对拍 / 快照 / 零依赖）。
+- **`backend-py/` = Python 后端（绞杀者迁移，2026-09-12 起）**：FastAPI + SQLAlchemy **Core**，**全部域已迁完（未注册 0 条，Node 侧 224 条路径已 100% 覆盖）**；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`）；回归跑 `backend-py/tests/run_all.py`（**63 套件 / 2463 项**），动手前读 `backend-py/README.md`。**`backend/` 已于 2026-09-15 删除**：TS 原文现只存于 `backend-py/tests/frozen_ts_source.py`（76 条 / 674 KB），**守卫与自检读 TS 一律走「真源码优先 → 快照」**；`PROXY_TO_NODE` 已无对象（接缝保留只为兜底 501）。
 
 ## 本地模型 + H3 视频推理
 **详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。

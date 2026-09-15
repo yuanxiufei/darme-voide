@@ -7,8 +7,8 @@
 
 ## 1. 通用约定
 
-- **Base URL**：后端 `http://localhost:5789`，API 前缀 `/api/v1`（`/webhooks` 除外，挂载在根路径下）
-- **统一响应格式**（`backend/src/shared/` 封装）：
+- **Base URL**：后端 `http://localhost:5790`（**现行**；Node 时代的 5789 已随 `backend/` 删除），API 前缀 `/api/v1`（`/webhooks` 除外，挂载在根路径下）
+- **统一响应格式**（原 `backend/src/shared/` 封装 ⇒ **现行** `backend-py/app/response.py`）：
 
 ```jsonc
 // 成功（HTTP 200，code=0）

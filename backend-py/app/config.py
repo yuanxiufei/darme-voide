@@ -28,6 +28,24 @@ CONFIG_PATH = Path(os.environ["CONFIG_PATH"]) if os.environ.get("CONFIG_PATH") e
 )
 
 
+def skills_dir() -> Path:
+    """技能库目录（``backend-py/skills``）—— **唯一权威**；``SKILLS_DIR`` 环境变量可覆盖（测试隔离用）。
+
+    ⚠️ 2026-09-15 收口：此前这个路径在**三处**各写一遍（``services/skills.py`` 的常量、
+    ``services/agents/skills.py`` 的 ``skills_dir()``、``scripts/check_skill_refs.py`` 的常量），
+    并靠注释互相提醒「必须一致」✗ —— 那是「搬库漏改一处**不会报错**、只是静默读不到技能」的坑。
+    现在前两处都从这里取；``scripts/`` 那份**刻意保留**独立实现（scripts 不 import ``app.*``，
+    见 ``scripts/README.md`` 的依赖约定），由守卫自检对齐。
+
+    与 ``PROJECT_ROOT`` 的区别：技能库**已并入后端**（``backend-py/skills/``），故这里从
+    **本文件位置**推导（``app/config.py`` 上跳一级 = ``backend-py``），与 ``process.cwd()`` 解耦。
+    """
+    override = os.environ.get("SKILLS_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[1] / "skills"
+
+
 def _load_raw() -> dict[str, Any]:
     """解析 config.yaml；缺失/解析失败时降级为空对象（全部走默认值，不阻塞启动）。"""
     if yaml is None or not CONFIG_PATH.exists():
@@ -155,9 +173,10 @@ evaluation = {
     }
 }
 
-# ===== 绞杀者（strangler）相关 =====
-# 未迁移到 Python 的 /api/v1/*、/webhooks/* 请求反代到 Node 后端；
-# 关掉时返回 501 并说明「该域尚未迁移」，避免静默 404。
+# ===== 绞杀者（strangler）遗留开关 =====
+# ⚠️ 2026-09-15：Node 后端（`backend/`）**已删除** ⇒ 这两个开关**没有反代对象**了。
+# 保留只为「接缝」语义：未实现的路径仍然回 501 并说明原因（比静默 404 好排查）。
+# 换句话说：**现在不要设 PROXY_TO_NODE=1** —— 那只会连不上并返 502。
 PROXY_TO_NODE = os.environ.get("PROXY_TO_NODE", "0") == "1"
 NODE_BACKEND_URL = (os.environ.get("NODE_BACKEND_URL") or "http://127.0.0.1:5789").rstrip("/")
 

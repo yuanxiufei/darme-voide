@@ -11,18 +11,28 @@
 ⚠️ 2026-09-15 起快照**不再存 ``.ts`` 文件树**（改存 Python 模块）：仓库里不再有 TS 文件，
 且 diff 能直接看到改的是哪一条文本。要**看原文**用 ``--dump``：
 
-用法（**必须在删 ``backend/`` 之前跑一次**）::
+用法::
 
     python tests/freeze_ts_snapshot.py              # 冻结（生成/覆盖 frozen_ts_source.py）
     python tests/freeze_ts_snapshot.py --check       # 只检查覆盖是否完整
     python tests/freeze_ts_snapshot.py --dump tmp/frozen_ts   # 物化成 .ts 文件便于人读
+
+⚠️ **删 ``backend/`` 之后仍可跑**（2026-09-15 补的能力）：取源顺序是
+**真源码 → 现有快照（逐字）→ git 历史**（``HEAD`` 里已含删除时，回溯到「最后一个还有该文件」
+的提交 —— 删库当天现场常已被提交成删除，只试 ``HEAD`` 会直接 fatal）。
+- 「现有快照优先于 git」是**刻意的**：快照冻结于「删库前的现场」，而 git HEAD 可能落后于现场
+  （本项目真实发生过：删库前改过 ``services/local-model-scan.ts`` 但没提交 ⇒ 若一律从 git 重建，
+  那次改动会被**静默回退成旧版**）。所以已冻结的条目**逐字保留**，只有**新增件**才去 git 取。
+- 因此本脚本在删库后仍能「扩快照」（例如给守卫/自检新加一处 TS 读取）。
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +50,10 @@ FILES: tuple[str, ...] = (
     "shared/camera-movement-guides.ts",
     "services/text-generation.ts",
     "agents/index.ts",
+    # ⚠️ 这两份是 **smoke_test.py** 要的（校验「models 表集/列集 == Node DDL」）：守卫不读它们，
+    #    但自检读 ⇒ 删 ``backend/`` 后同样必须能在快照里找到（2026-09-15 删库当天补进来）。
+    "db/index.ts",
+    "db/schema.ts",
 )
 
 #: 守卫按**目录**读取/列举的（整目录 ``*.ts`` 都要）
@@ -49,8 +63,11 @@ DIRS: tuple[str, ...] = (
     "agents",
 )
 
-#: 扫描哪些文件来发现「守卫还引用了哪些 .ts」
-_GUARD_SOURCES = ("route_parity_test.py", "parity_diff_test.py")
+#: 扫描哪些文件来发现「谁还引用了哪些 .ts」
+#: ⚠️ **不止守卫**：任何**自检**里写死的 TS 路径都要在快照里，否则删 ``backend/`` 当天才炸。
+#: 本项目真实栽过：``smoke_test.py`` 读 ``db/index.ts`` / ``db/schema.ts``（校验表和列集），
+#: 不在这个清单里 ⇒ 自动发现漏了 ⇒ 删库后**导入期 FileNotFoundError**、整套冒烟直接崩（2026-09-15）。
+_GUARD_SOURCES = ("route_parity_test.py", "parity_diff_test.py", "smoke_test.py")
 
 #: ``_SRC_ROOT / "a" / "b.ts"``（**可能由多段字符串字面量拼出来**，故要整链捕获）
 _SRC_REF = re.compile(r'_SRC_ROOT((?:\s*/\s*r?"[^"]+")+)')
@@ -156,34 +173,114 @@ def _write_module(data: dict[str, str]) -> None:
     FROZEN_MODULE.write_text("\n".join(body), encoding="utf-8")
 
 
+def _git_run(*args: str) -> tuple[bool, str]:
+    """跑一条**只读** git 命令，返回 ``(是否成功, 输出)``。"""
+    try:
+        done = subprocess.run(["git", *args], cwd=str(REPO), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", check=False)
+    except OSError:
+        return False, ""
+    return done.returncode == 0, done.stdout
+
+
+def _git_text(relative: str) -> str | None:
+    """从 git 历史里取该文件的**最后一个还存在的版本**。
+
+    ⚠️ 不能只试 ``HEAD``：删库当天现场往往**已被提交成「删除」** ⇒ ``HEAD:…`` 直接 fatal。
+    本项目实测：删掉 ``backend/`` 后 ``HEAD`` 已不含 ``backend/src/db/index.ts``，
+    但它在上一个提交里还在（`git log --all -- <path>` 能看到）。所以在那些提交里逐个试。
+    """
+    path = f"backend/src/{relative}"
+    ok, text = _git_run("show", f"HEAD:{path}")
+    if ok:
+        return text
+    ok, revs = _git_run("log", "--all", "--format=%H", "--", path)
+    for rev in (revs.split() if ok else []):
+        ok, text = _git_run("show", f"{rev}:{path}")
+        if ok:
+            return text
+    return None
+
+
+def _existing_snapshot() -> dict[str, str]:
+    """读现有快照（没有/读不了就空 dict）—— 用于**逐字保留删库前的现场**。"""
+    if not FROZEN_MODULE.is_file():
+        return {}
+    try:
+        from frozen_ts import load  # noqa: PLC0415
+        return dict(load())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _resolve(relative: str, snapshot: dict[str, str]) -> tuple[str | None, str]:
+    """取一份 TS 文本：**真源码 → 现有快照 → git 历史**。返回 ``(文本, 来源标签)``。"""
+    source = TS_SRC / relative
+    if source.is_file():
+        return source.read_text(encoding="utf-8"), "真源码"
+    if relative in snapshot:
+        return snapshot[relative], "快照"
+    text = _git_text(relative)
+    if text is not None:
+        return text, "git 历史"
+    return None, "缺失"
+
+
+def _dir_names(relative: str, snapshot: dict[str, str]) -> list[str]:
+    """某目录下要收的 ``*.ts``（真源码 ∪ 现有快照 —— **取并集**，只增不减）。
+
+    ⚠️ 删库后**不再去 git 列目录**：HEAD 已不含那棵树（见 ``_git_text`` 的注释），
+    而目录类清单（routes / services/adapters / agents）本来就已经在快照里了 ⇒
+    「快照做底 + 真源码在时取并集」既够用，又不会凭空丢条目。
+    """
+    names: set[str] = set()
+    source_dir = TS_SRC / relative
+    if source_dir.is_dir():
+        # ⚠️ **递归**：守卫会读 `agents/tools/*.ts` 这类子目录（漏了就会「TS 侧抽到空集」）
+        names |= {p.relative_to(source_dir).as_posix() for p in source_dir.rglob("*.ts")}
+    prefix = relative + "/"
+    names |= {key[len(prefix):] for key in snapshot if key.startswith(prefix)}
+    return sorted(names)
+
+
 def freeze() -> int:
-    if not TS_SRC.is_dir():
-        print(f"❌ 找不到 TS 源码目录：{TS_SRC}（已删 backend/？那就不该再冻结）", file=sys.stderr)
-        return 2
+    """冻结/扩快照。⚠️ 删 ``backend/`` 后照样能跑（见模块 docstring 的取源顺序）。"""
     files_to_copy, dirs_to_copy = _effective()
     auto = len(files_to_copy) - len(FILES)
+    snapshot = _existing_snapshot()
     data: dict[str, str] = {}
+    origins: Counter[str] = Counter()
     for relative in files_to_copy:
-        source = TS_SRC / relative
-        if not source.is_file():
-            print(f"❌ 缺少文件：{relative}", file=sys.stderr)
+        text, origin = _resolve(relative, snapshot)
+        if text is None:
+            print(f"❌ 缺少文件：{relative}（真源码 / 快照 / git 历史 都没有）", file=sys.stderr)
             return 2
-        data[relative] = source.read_text(encoding="utf-8")
+        # ⚠️ 只有**首次**写入才计来源：手写清单与目录清单有重叠（如 `agents/index.ts`），
+        #    否则「来源统计」会大于实际条目数（本文件刚踩过：76 条却打出 78 ✗）。
+        if relative not in data:
+            origins[origin] += 1
+        data[relative] = text
     for relative in dirs_to_copy:
-        source_dir = TS_SRC / relative
-        # ⚠️ **递归**：守卫会读 `agents/tools/*.ts` 这类子目录（漏了就会「TS 侧抽到空集」）
-        found = sorted(source_dir.rglob("*.ts"))
-        if not found:
-            print(f"❌ 目录里没有 .ts：{relative}", file=sys.stderr)
+        names = _dir_names(relative, snapshot)
+        if not names:
+            print(f"❌ 目录里没有 .ts：{relative}（真源码 / 快照 / git 历史 都没有）", file=sys.stderr)
             return 2
-        for source in found:
-            data[(Path(relative) / source.relative_to(source_dir)).as_posix()] = (
-                source.read_text(encoding="utf-8"))
+        for name in names:
+            key = f"{relative}/{name}"
+            text, origin = _resolve(key, snapshot)
+            if text is None:
+                print(f"❌ 缺少文件：{key}", file=sys.stderr)
+                return 2
+            if key not in data:  # 同上：重叠条目只计一次
+                origins[origin] += 1
+            data[key] = text
     _write_module(data)
 
     total = sum(len(text) for text in data.values())
-    print(f"✅ 冻结完成：{len(data)} 个文件 / {total / 1024:.0f} KB -> {FROZEN_MODULE.name}"
-          f"（手写清单 {len(FILES)} 个 + 自动发现 {auto} 个；目录 {len(dirs_to_copy)} 个）")
+    how = "、".join(f"{name} {count} 个" for name, count in origins.most_common())
+    print(f"✅ 冻结完成：{len(data)} 个文件 / {total / 1024:.0f} KB -> {FROZEN_MODULE.name}")
+    print(f"   手写清单 {len(FILES)} 个 + 自动发现 {auto} 个；目录 {len(dirs_to_copy)} 个；取源：{how}"
+          + ("" if TS_SRC.is_dir() else "（真源码已删 ⇒ 新增件来自现有快照 / git HEAD）"))
     return 0
 
 

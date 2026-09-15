@@ -83,5 +83,5 @@ A 男+女 6s 男说一句；B 6s 女说一句；C 12s 男→女两镜头；D 24s
 - ✅ `checkpoint_map` 落库（2026-08-28）：`ai_service_configs.settings` 支持写入 `checkpoint_map{fl2va,ref2va}` —— aiConfigs 路由 `buildSettings`/`parseSettingsObject` 合并读写（不再被 `negative_prompt` 覆盖丢失），settings 页视频类新增 FL2VA/Ref2VA 双字段 UI；`resolveH3Checkpoint` 已按 scene_type 正则路由 FL2VA/Ref2VA 并从 `config.settings?.checkpoint_map` 取值。
 - ✅ 本地 H3 服务代码就绪：复用 `minimax` adapter + baseUrl（无需新写 ComfyUI adapter）；模型清单统一外置 `configs/models.json`，通用工具 `backend-py/scripts/model_manager.py` 下载/安装/体检；后端 `services/local-model-scan.ts` + `routes/localModels.ts` 扫描本机模型并注册到 `ai_service_configs`（含 H3 `checkpoint_map` 派生）。**仅剩启动 ComfyUI(8188) + 本地 H3 服务(8765) 跑通推理**。
 - ✅ 参考音频两层语义：`getStoryboardReferenceAudioUrls` 取出场角色 `voiceSampleUrl`（≤3 条、声线样本非最终对白）→ `auto-pipeline` 对话类镜头填入 → `minimax-video` 以 `reference_audio` 发送（reference conditioning）。
-- ✅ `LOCATION_ID` / `COSTUME_ID` / `STYLE_ID` 三键：`services/bible-ids.ts` `ensureLocationId/ensureCostumeId/ensureStyleId`，routes 落库。
-- ✅ QC 启发式：`services/qc-scoring.ts` `lip_sync*0.4 + consistency*0.3 + continuity*0.3`，视频完成自动触发。⬜ 真实唇形/相似度 AI 检测未挂载。
+- ✅ `LOCATION_ID` / `COSTUME_ID` / `STYLE_ID` 三键：`services/bible-ids.ts`（现 Python 侧 `backend-py/app/services/bible_ids.py`）`ensureLocationId/ensureCostumeId/ensureStyleId`，routes 落库。
+- ✅ QC 启发式：`services/qc-scoring.ts`（现 Python 侧 `backend-py/app/services/qc_scoring.py`）`lip_sync*0.4 + consistency*0.3 + continuity*0.3`，视频完成自动触发。⬜ 真实唇形/相似度 AI 检测未挂载。

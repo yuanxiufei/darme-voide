@@ -71,8 +71,9 @@ async def proxy_to_node(request: Request, path: str) -> Response:
             content={
                 "code": 502,
                 "message": (
-                    f"反代到 Node 后端失败（{NODE_BACKEND_URL}）：{exc}。"
-                    "请确认 Node 后端已启动，或关闭 PROXY_TO_NODE。"
+                    f"反代到上游后端失败（{NODE_BACKEND_URL}）：{exc}。"
+                    "⚠️ Node 后端已于 2026-09-15 删除 ⇒ 除非你自己起了别的上游，"
+                    "否则请把 PROXY_TO_NODE 设为 0：未实现的路径会回 501 并说明原因。"
                 ),
             },
         )
@@ -88,14 +89,19 @@ async def proxy_to_node(request: Request, path: str) -> Response:
 
 
 def not_migrated(path: str) -> JSONResponse:
-    """未迁移且关闭了反代时的明确回执（比静默 404 好排查）。"""
+    """**未实现**路径的明确回执（比静默 404 好排查）。
+
+    ⚠️ 2026-09-15 改措辞：Node 后端**已删除** ⇒ 原来那句「设置 ``PROXY_TO_NODE=1`` 可反代到
+    Node 保持可用」已**不可能成立**（照做只会去起一个不存在的服务）。现在如实说明「这条路径
+    没有实现」，并指出该去哪儿补。
+    """
     return JSONResponse(
         status_code=501,
         content={
             "code": 501,
             "message": (
-                f"/{path} 尚未迁移到 Python 后端。"
-                "设置 PROXY_TO_NODE=1 可反代到 Node 后端保持可用。"
+                f"/{path} 未实现（Node 后端已于 2026-09-15 删除）。"
+                "如需该能力，请在 backend-py/app/routers/ 下补实现。"
             ),
         },
     )

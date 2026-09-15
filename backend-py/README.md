@@ -11,19 +11,20 @@
 > `scenes`(4)、`props`(5)、`storyboards`(5, 含台词匹配与 TTS 过期检测)、
 > 四个资源库 `character/scene/weapon/costume-library`(10+11+10+10，**规格驱动共享实现**)、
 > `presets`(4)、`app-settings`(2)、`asset-versions`(2, 含回滚写回主表)、`traces`(3, **只读侧**)、
-> `storage`(1, 只 info)、`usage`(**3/3**: 汇总 / 成本看板 / **生成前费用预估**)、
-> `agent-configs`(5, 纯 DB 部分)、`style-profiles`(7, 不含 LLM 提炼)、
-> `generations`(1, 双表聚合)、**`ai-configs`(15/17: 含 Ollama 启停/拉取/删除、模型列举、连通性探测、
+> `storage`(**2/2** 整域：info + change)、`usage`(**3/3**: 汇总 / 成本看板 / **生成前费用预估**)、
+> `agent-configs`(**5/5** 整域，含 defaults/generate)、`style-profiles`(**7/7** 整域，含 LLM 提炼 distill)、
+> `generations`(1, 双表聚合)、**`ai-configs`(**17/17**: 含 Ollama 启停/拉取/删除、模型列举、连通性探测、
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
-> `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2465 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
+> **自检 2463 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
-> 其余端点由 `PROXY_TO_NODE=1` 反代到 Node，**系统始终可用**。
+> ⚠️ 2026-09-15 起 **Node 后端已删除、未注册端点 0 条** ⇒ 不再有「反代兜底」这回事；
+> 未实现的路径一律 **501 + 说明**（接缝保留只为把「没实现」说清楚）。
 
-## 全量迁移路线（S1–S7，`backend/` 只在最后删）
+## 全量迁移路线（S1–S7，**已完成：`backend/` 已删**）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -33,10 +34,11 @@
 | S4 媒体服务 | image/video/TTS 生成、`compose`(ffmpeg)、宫格、合并、视觉图 | ✅ **主链全通**：`vendor-errors` + text/image/video/TTS+voice-clone 四条链路 + 逐镜路由 + `videos`(6) + `compose`(3) + `merge`(2) + **`grid`(4)**；仅剩**像素处理(校色/参考图压缩)**与**镜头 QC 打分**（调用点均已占位） |
 | S5 **Mastra 替换** | Agent 循环 + 工具调用 + 协议 + **运行时** + 6 组工具(~2900 行) + `agent`(2) | ✅ **完成**：`protocol` + `tool` + **6 组工具** + **`runtime`(运行时：失败分类/退避/模型 fallback/风格注入)** + `agent`(2 端点，**非流式**)；✅ **`DEFAULT_PROMPTS` 已搬**（`services/agent_prompts.py` + 逐字守卫，2026-09-12 决策变更）；⚠️ 未迁 `subagent`/`rhythm-phase`（`skills`/`mcp` 已迁）；⚠️ **Gemini 函数调用循环未支持**（显式报错） |
 | S6 编排/长任务 | `auto-pipeline`、`local-model-scan`、`evaluation`、崩溃恢复 | ✅ **全部迁完（剩 0 条）**：MCP（`agents/mcp.ts` 285 行自写 JSON-RPC 客户端 + 3 端点）｜`auto-pipeline` 整域关闭（8 阶段编排 + SSE）｜`evaluation` 整域关闭（types/catalog/scorer/evaluator/optimizer/scheduler + **5/5 端点**）｜GPU 显存管理 + 租约接线｜崩溃恢复（项目台账 / 资产版本 / SSE 总线 / 提取尾帧）|
-| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | 🔄 **只剩「删 `backend/`」本身（等用户点头）**：benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册 0 条**（绞杀者已收口：`storage/change` 是最后一条，2026-09-15 迁完）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（**2026-09-15 实测：一致 12 / 已知差异 0 / 不存在路径 4 / 新差异 0**，CASES 已补齐 S7 新增只读 GET）｜守卫快照已重冻为 **Python 模块快照**（74 条 / 625 KB，`tests/frozen_ts_source.py`），且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
+| S7 收尾 | 剩余 AI 端点 + 全量回归等价验证 + **删 `backend/`** | ✅ **全部完成 —— 含「删 `backend/`」本身（2026-09-15 真删并复核）**：删后守卫自动回退快照，结论与删前**逐字一致**（Node 224 / Python 227 / 未注册 0 / 0 漂移）｜benchmarks 4 个 case JSON 已搬（逐字节一致、`catalog`/`optimizer` 默认路径已切）｜评测 CLI 已迁｜GPU 显存租约已迁（`/ai-configs/gpu/*`）｜**未注册 0 条**（绞杀者已收口：`storage/change` 是最后一条，2026-09-15 迁完）｜`app/` 对 `backend/` 的**路径依赖为 0**｜对拍工具与差分比较器就绪（**2026-09-15 实测：一致 12 / 已知差异 0 / 不存在路径 4 / 新差异 0**，CASES 已补齐 S7 新增只读 GET）｜守卫快照已重冻为 **Python 模块快照**（74 条 / 625 KB，`tests/frozen_ts_source.py`），且「真源码 vs 冻结」结论一致 ⇒ 删库后九道守卫价值保留 |
 
 顺序是按**依赖**排的：S1 是所有适配器/Agent 的入口，S2/S3 被 S4/S5 依赖，S5 被 S6 依赖。
-**`backend/` 只能在 S7 删** —— 删之前必须先证明等价（129→224 端点的全量对拍）。
+✅ **`backend/` 已于 S7 删除（2026-09-15）** —— 删前已证明等价：Node 224 条路径全量对照 +
+差分对拍 **0 新差异**；删后守卫自动回退快照，结论逐字一致。
 
 ## 为什么不一次性重写
 
@@ -47,25 +49,27 @@
 绞杀者模式下每一天都有可跑、可回退的产物：
 
 ```
-浏览器 ──► FastAPI :5790 ──┬─► 已迁移的域：Python 直接服务
-                            └─► 未迁移的域：反代 ──► Node :5789
+浏览器 ──► FastAPI :5790 ────► 全部域：Python 直接服务（34 域 / 227 条路径）
+                            └─► 未实现的路径：501 + 说明（⚠️ 不再是反代）
 ```
 
-迁完一个域，就在 `app/main.py` 里 `include_router(...)` 一行，然后把该域从 Node 侧停用。
-全部迁完后去掉反代，Python 独占端口即可（`PY_PORT=5789`）。
+迁移期每迁完一个域，就在 `app/main.py` 里 `include_router(...)` 一行，再把该域从 Node 侧停用；
+**现在已全部迁完**（Node 侧 224 条路径 100% 覆盖），Python 独占 `5790` 即可。
 
 ## 删 `backend/` 前的等价性对拍（S7 第 5 步）
 
-     两侧**并排起**（Node 5789 / Python 5790），**指向同一份数据**，然后跑差分对拍：
+> ⚠️ **本节已进入历史**：`backend/` 已于 2026-09-15 删除 ⇒ 这里的两侧并排对拍**不可能再跑**
+> （`tests/parity_run.py` / `parity_diff.py` 保留为「当时如何证明等价」的证据）。
+> 最后一次对拍（删除当天）结论：**一致 12 ｜ 已知差异 0 ｜ 不存在路径 4 ｜ 新差异 0** ✓。
+> 日常回归由 `route_parity_test.py` 的**快照模式**继续保等价性，不需要 Node。
+
+     两侧**并排起**（Node 5789 / Python 5790），**指向同一份数据**，然后跑差分对拍。
+     ⚠️ **以下为历史命令**（Node 侧已删 ⇒ 现在跑不了，仅供回看当时怎么做）：
 
     ```bash
-    # 1) 先起 Node（它会初始化库/种服务商）
-    cd backend; $env:DATA_ROOT='<空目录>'; npx tsx src/index.ts
-    # 2) 再起 Python（同一个 DATA_ROOT）
-    cd ../backend-py; $env:DATA_ROOT='<同一目录>'; .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
-    # 3) 对拍（逐字段 diff；new 差异会以退出码 1 报出来）
-    .venv\Scripts\python.exe tests/parity_diff.py --report ..\tmp\parity.json
-    # 或一条命令编排（起两侧 + 对拍 + 收尾）：python tests/parity_run.py
+    cd backend; $env:DATA_ROOT='<空目录>'; npx tsx src/index.ts        # ① Node(5789)
+    cd ../backend-py; $env:DATA_ROOT='<同一目录>'; .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790   # ② Python(5790)
+    .venv\Scripts\python.exe tests/parity_diff.py --report ..\tmp\parity.json    # ③ 逐字段对拍（退出码 1 = 有新差异）
 
     **2026-09-15 实测：一致 12 ｜ 已知差异 0 ｜ 不存在路径 4 ｜ 新差异 0**（覆盖 16 条只读路径逐字段等价；CASES 已补齐 S7 新增的 `dramas/*/rhythm` 与 `export/dramas/*/qc-report?format=json`）。
     ⚠️ MISSING 类 = 「两边都不该有」的路径（Node 404 未匹配 / Python 501 兜底），**Node 回 200 才算 new**。
@@ -80,7 +84,7 @@
 九道漂移守卫原先是**读 TS 源码**来证明「Python 的路由表/常量/提示词没漂移」。删库前先冻结：
 
 ```bash
-python tests/freeze_ts_snapshot.py          # 把守卫读到的 74 个 .ts **逐字**收进 tests/frozen_ts_source.py（625 KB；清单 = 手写 ∪ 自动发现**两种形态**）
+python tests/freeze_ts_snapshot.py          # 把**守卫与自检**读到的 76 个 .ts **逐字**收进 tests/frozen_ts_source.py（674 KB；清单 = 手写 ∪ 自动发现**两种形态**）。⚠️ 删 `backend/` 后**照样能跑**：取源顺序是「真源码 → 现有快照（逐字保留删库前现场）→ git 历史」，可用来扩快照
 python tests/freeze_ts_snapshot.py --check  # 校验覆盖完整性（真源码还在时会逐个核对）
 python tests/freeze_ts_snapshot.py --dump tmp/frozen_ts   # 物化成 .ts 文件树，仅供人读
 python tests/route_parity_test.py           # 照常跑
@@ -100,10 +104,11 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt   # Windows
 # source .venv/bin/activate && pip install -r requirements.txt  # macOS / Linux
 
-# 2) 启动（默认 5790；与 Node 的 5789 并存）
+# 2) 启动（默认 5790；**现在它是唯一后端**）
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 5790
 
-# 3) 想让它把未迁移的域转发给 Node（需要 Node 后端已在 5789 运行）
+# 3)（可选）把未实现的路径转发给**别的**上游 —— Node 已删除，只在你自建上游时才有意义。
+#    ⚠️ 保持 0（默认）时未实现路径回 501 并说明；设 1 但没有上游 ⇒ 只会 502。
 set PROXY_TO_NODE=1
 .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 ```
@@ -114,25 +119,60 @@ set PROXY_TO_NODE=1
 .venv\Scripts\python.exe tests\smoke_test.py      # 退出码 0 = 全过
 ```
 
-它做三件事：把表/列定义与真实 `data/drama.db` 的 `PRAGMA table_info` 逐列比对（并与 Node 的
-`db/index.ts` 建表清单交叉印证）、打真实接口核对响应信封与**错误文案逐字**、写操作全部落在
+**进程级冒烟（可选，改动启动/静态站/兜底文案时值得跑一次）**：`smoke_test.py` 走的是
+`TestClient`（不起真进程）⇒ 它验不到「真端口 + 真 HTTP + 真静态站」。手跑一次（**用临时数据根，别碰真库**）：
+
+```bash
+$env:DATA_ROOT=$env:TEMP\py-check; .venv\Scripts\python.exe -m uvicorn app.main:app --port 5799
+# 另开一个终端：
+curl http://127.0.0.1:5799/api/v1/health          # 200 + {"status","timestamp"}
+curl -i http://127.0.0.1:5799/api/v1/episodes     # 501 + 「未实现（Node 后端已于 2026-09-15 删除）」
+curl -i http://127.0.0.1:5799/static/nope.png     # 404
+```
+
+（2026-09-15 删库当天实测全通过：真进程启动 ✓ / health ✓ / dramas 信封 ✓ / 501 新文案 ✓ / 静态站 404 ✓ /
+有前端产物时 `/` 直出 HTML ✓。）
+
+它做三件事：把表/列定义与真实 `data/drama.db` 的 `PRAGMA table_info` 逐列比对（并与 **TS 快照**里的
+`db/index.ts` 建表清单交叉印证 —— Node 已删 ⇒ 走 `frozen_ts_source.py`）、打真实接口核对响应信封与**错误文案逐字**、写操作全部落在
 数据库副本上（真实库只读）。报告落在系统临时目录，路径在结尾打印。
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PY_PORT` | `5790` | 本后端端口。**刻意不读 `config.yaml` 的 `server.port`** —— 那是 Node 的端口，并存期读同一个必然抢占 |
+| `PY_PORT` | `5790` | 本后端端口。**刻意不读 `config.yaml` 的 `server.port`** —— 那是 Node 时代的端口（5789），并存期读同一个必然抢占；Node 已删，保留这条是为了「端口来源确定」 |
 | `PORT` | — | 兼容用，优先级低于 `PY_PORT` |
 | `HOST` | `0.0.0.0` | |
 | `CORS_ORIGINS` | 见 `app/config.py` | 逗号分隔 |
 | `DATA_ROOT` | `configs/config.yaml` 的 `database.path` 所在目录 | 数据根目录（DB + static + traces） |
 | `DB_PATH` / `STORAGE_PATH` | — | 仅在未显式指定 `DATA_ROOT` / `.data-root` 时生效（与 Node 同规则） |
 | `CONFIG_PATH` | `configs/config.yaml` | |
-| `PROXY_TO_NODE` | `0` | `1` = 未迁移的域反代到 Node；`0` = 返回 501 并说明未迁移 |
-| `NODE_BACKEND_URL` | `http://127.0.0.1:5789` | 反代目标 |
+| `PROXY_TO_NODE` | `0` | ⚠️ **遗留开关**（Node 已删 ⇒ 无对象）：`1` = 把未实现路径转发到 `NODE_BACKEND_URL`；`0` = 回 501 并说明。**建议保持 0** |
+| `NODE_BACKEND_URL` | `http://127.0.0.1:5789` | 遗留反代目标（只有你自建上游时才用得上）|
 
 ## 目录结构
+
+> **先分清楚两类东西**：`app/`（含 `tests/`、`scripts/`）是**代码**；`skills/`、`local_services/`、
+> `configs/`、`data/` 是**内容资产 / 运行时状态**。
+>
+> 常被问的那一对 —— **`app/services/agents/`（Agent 运行时：协议 / 工具 / 循环，Python 代码）
+> 与 `skills/`（SKILL.md 内容库）为什么分开放**：
+>
+> 1. **一个是被 `import` 的代码，一个是被**读写**的资产**：`skills/` 会被 `/api/v1/skills` 的
+>    PUT/DELETE **真的改写**（前端「技能」页就是它的 UI，用户可自己加 skill、装外部技能库）；
+> 2. **守卫与生命周期不同**：技能内容由 `scripts/check_skill_refs.py` + `.githooks/pre-commit`
+>    按**资产**管；代码由 `tests/run_all.py` 按**行为契约**管，两者判据、跑法都不同；
+> 3. **打包边界**：`.dockerignore` 写明「镜像里只需 `app/` 与 `skills/`」—— 两者都要进镜像，
+>    但一个是**依赖树**、一个是**内容树**；
+> 4. **路径只留一处权威**：`app/config.py::skills_dir()`（`SKILLS_DIR` 环境变量可覆盖）；
+>    `services/skills.py` 与 `services/agents/skills.py` 现在都**转发**它
+>    （2026-09-15 收口：此前三处各写一遍、靠注释互相提醒「必须一致」✗）。
+>
+> ⚠️ 反过来，`app/services/*.py` **刻意保持扁平**（59 个模块同层）：它是**迁移索引** ——
+> 守卫按「TS 文件 → Python 模块」逐条比对常量（如 `services/technical-qc.ts` ↔
+> `app.services.technical_qc`），重排目录会**成片打断这些映射** ⇒ 结构优化应落在
+> 「文档 / 常量收口」上，**不要动这一层**。
 
 ```
 backend-py/
@@ -154,16 +194,16 @@ backend-py/
 │  │  ├─ presets.py              ✅ 4 端点
 │  │  ├─ app_settings.py         ✅ 2 端点（⚠️ 内含一个照抄的过期白名单，见下）
 │  │  ├─ asset_versions.py       ✅ 2 端点（列表 / 回滚）
-│  │  ├─ traces.py               ✅ 3 端点（只读侧；写入侧仍在 Node）
-│  │  ├─ storage.py              ✅ 1 端点（只 info；change 见下）
-│  │  ├─ usage.py                ✅ 2 端点（summary / board；estimate 见下）
-│  │  ├─ agent_configs.py        ✅ 5 端点（defaults / generate 走委派）
-│  │  ├─ style_profiles.py       ✅ 7 端点（distill 走委派）
+│  │  ├─ traces.py               ✅ 3 端点（**含写入侧**；Node 已删）
+│  │  ├─ storage.py              ✅ 2 端点（info + change：切数据根，含关库重开）
+│  │  ├─ usage.py                ✅ 2 端点（summary / board）
+│  │  ├─ agent_configs.py        ✅ 5 端点（defaults / generate 均已落地）
+│  │  ├─ style_profiles.py       ✅ 7 端点（含 distill）
 │  │  ├─ generations.py          ✅ 1 端点（image+video 双表聚合）
-│  │  ├─ ai_configs.py           ✅ 15/17 端点 + ai-providers(1)（仅 /gpu/* 走委派）
+│  │  ├─ ai_configs.py           ✅ **整域完成** + ai-providers(1)（含 /gpu/* 显存管理）
 │  │  ├─ skills.py               ✅ 6 端点（**纯文件系统域**：SKILL.md 扫描/解析/增删改）
 │  │  ├─ upload.py               ✅ 3 端点（multipart 上传：图片/音频/视频）
-│  │  └─ export.py               ✅ 2/7 端点（工程账本 JSON/MD + stale；**裸响应无信封**）
+│  │  └─ export.py               ✅ **整域完成**（工程账本 JSON/MD + stale + EDL/ZIP…；**裸响应无信封**）
 │  ├─ passthrough.py             绞杀者接缝共享实现（反代 / 501 / **显式委派**）
 │  └─ services/
 │     ├─ adapters/                ✅ **厂商适配器层（S3）**：17 家 / 纯函数；含 jscompat.py（JS 语义垫片）
@@ -208,7 +248,7 @@ backend-py/
 │     ├─ video_probe.py           本地视频时长探测（ffprobe；失败即 0）
 │     └─ take_budget.py           per-shot take 预算（生成次数收敛门禁）
 └─ tests/
-   ├─ smoke_test.py             冒烟测试（模式 + 契约，475 用例）
+   ├─ smoke_test.py             冒烟测试（模式 + 契约，476 用例；删 `backend/` 后 TS 侧走快照）
    ├─ adapters_test.py          适配器层自检（JS 语义逐条对齐，101 用例）
    ├─ vendor_errors_test.py     错误归因 + 重试（MockTransport，零真实网络，58 用例）
    ├─ text_generation_test.py   文本生成纯逻辑（提示词 / 规则拆分器，67 用例）
@@ -260,7 +300,7 @@ backend-py/
    ├─ set_frame_test.py       设置首尾帧 + 抽帧泛化（首帧不 seek/尾帧回退 0.2s，14 用例）
    ├─ regenerate_frame_test.py 重生成镜头帧（帧类型白名单/帧提示词/拼接顺序，17 用例）
    ├─ consistency_qc_test.py   图像连续性 QC（真实图 dHash：ok/info/warning 三档，28 用例）
-   ├─ freeze_snapshot_test.py    TS 快照反漂移（Python 模块快照 + 物化逐字一致，12 用例）
+   ├─ freeze_snapshot_test.py    TS 快照反漂移（Python 模块快照 + 物化逐字一致，11 用例；删库后 1 条真源码存在性检查按设计 [skip]）
    ├─ grid_agent_prompt_test.py 宫格 Agent 提示词 + 端点（12 用例）
    ├─ subagent_test.py        子 Agent 调度工具（16 用例）
    ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
@@ -276,7 +316,7 @@ backend-py/
 ├─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
 │  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
 │  ├─ check_skill_refs.py       skills 引用完整性守卫
-│  ├─ test_guards.py            两套守卫的自检（12 例）
+│  ├─ test_guards.py            两套守卫的自检（13 例，含 ④b「步骤小节必须有锚点」）
 │  ├─ check_all.py              一键跑全部三道自检
 │  ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
 │  └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
@@ -548,6 +588,27 @@ cd backend-py
 `freeze_snapshot_test.py` 11/11（真源码缺失时自动跳过存在性检查）、
 `route_parity_test.py` rc=0（**自动回退 Python 快照**：224 / 227 / 未注册 0 / 0 漂移）、
 `skills_test.py` 45/45。
+
+### 真删当天（2026-09-15）又现形 1 处 —— 干跑没抓到，**必须记**
+
+删掉 `backend/` 后跑全量：**契约冒烟 `smoke_test.py` 在导入期 FileNotFoundError** ✗（它直接读
+`backend/src/db/index.ts` / `schema.ts` 来校验「models 表集/列集 == Node DDL」）。
+干跑没抓到它，是因为**冻结脚本的自动发现只扫守卫**（`route_parity_test.py` / `parity_diff_test.py`），
+`smoke_test.py` 不在清单里 ⇒ 那两处硬读**从来没进过快照**。
+
+修法（三处，都已落地）：
+1. `smoke_test.py` 改走 `_ts_path()`：**真源码优先、缺失回退快照**（与守卫同一策略）；
+2. `freeze_ts_snapshot.py` 的 `FILES` 补 `db/index.ts` / `db/schema.ts`，
+   并把 `smoke_test.py` **加进 `_GUARD_SOURCES`**（以后它再读新的 TS，自动发现能拦住）；
+3. 取源新增 **git 历史**兜底 —— ⚠️ 删库当天现场常已被提交成「删除」⇒ `git show HEAD:…` 直接 fatal，
+   得回溯到「最后一个还含该文件」的提交（本项目实测：`HEAD` 已无 `db/index.ts`，上一提交里还在）。
+   「现有快照优先于 git」是刻意的：快照是**删库前现场**，git HEAD 可能落后（曾差点静默回退一次改动）。
+
+结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓，快照 **76 条 / 674 KB** ✓。
+
+⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：
+`freeze_snapshot_test.py` 的「自动发现的路径在真源码下确实存在」、`eval_cli_test.py` 的
+「benchmarks 与 Node 侧逐字节一致」—— 两条都只在真源码还在时才有意义。
 
 干跑**暴露并已修掉**的三类问题（都不在「代码常量」里，所以只有真删一次才会现形）：
 

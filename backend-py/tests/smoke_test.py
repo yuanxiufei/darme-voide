@@ -105,6 +105,28 @@ LEGACY_DB_ONLY_COLUMNS = {"minio_url"}
 # 真实库里比 Node 模型多出的**遗留表**（同上：旧版本残留，当前代码零引用）
 LEGACY_DB_ONLY_TABLES = {"assets", "props"}
 
+
+# ---------------------------------------------------------------------------
+# TS 原文读取：**真源码优先，缺失回退快照**（与 route_parity_test 的 _SRC_ROOT 同一策略）
+# ---------------------------------------------------------------------------
+# ⚠️ 背景（2026-09-15 删 `backend/` 当天现形）：本文件原先直接读
+#    ``<repo>/backend/src/db/index.ts`` ⇒ 删库后**导入期就 FileNotFoundError**，
+#    整套冒烟直接崩（不是「跳过」，是红 ✗）。改成走快照 —— 那份快照正是「删库后唯一还能
+#    拿到 TS 原文」的地方（`tests/frozen_ts_source.py`，由 `freeze_ts_snapshot.py` 生成；
+#    这两个文件已被加进 FILES 清单，否则又是「删库才炸」）。
+def _ts_path(relative: str) -> Path:
+    """TS 源码根下的一个相对路径（真源码在就返回真路径，否则返回快照物化出来的路径）。"""
+    real = REPO / "backend" / "src" / relative
+    if real.exists():
+        return real
+    from frozen_ts import snapshot_root  # noqa: PLC0415
+
+    return snapshot_root() / relative
+
+
+def _ts_text(relative: str) -> str:
+    return _ts_path(relative).read_text(encoding="utf-8")
+
 only_db = sorted(set(db_tables) - set(model_schema))
 only_model = sorted(set(model_schema) - set(db_tables))
 
@@ -131,11 +153,11 @@ ddl_tables = sorted(
     set(
         re.findall(
             r"CREATE TABLE IF NOT EXISTS (\w+)",
-            (REPO / "backend" / "src" / "db" / "index.ts").read_text(encoding="utf-8"),
+            _ts_text("db/index.ts"),
         )
     )
 )
-ts_schema = (REPO / "backend" / "src" / "db" / "schema.ts").read_text(encoding="utf-8")
+ts_schema = _ts_text("db/schema.ts")
 
 log()
 log("=" * 72)
@@ -205,7 +227,9 @@ def _unregistered_samples(limit: int = 5) -> list[tuple[str, str]]:
 
     from app.main import app as _app  # noqa: PLC0415
 
-    routes_dir = guard.REPO / "backend" / "src" / "routes"
+    # ⚠️ 同样走「真源码优先、缺失回退快照」：删 `backend/` 后这里若还写死真路径，
+    #    `_unregistered_samples()` 会**抛异常或被当成空集**（后者更坏：断言会假绿 ✗）。
+    routes_dir = _ts_path("routes")
     node: set[tuple[str, str]] = set()
     for filename, prefix in guard.MIGRATED.items():
         text = (routes_dir / filename).read_text(encoding="utf-8")
