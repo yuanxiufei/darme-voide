@@ -2,7 +2,7 @@
 
 **本文件的 ``TESTS`` 就是套件权威清单**（README 里那棵树只是摘录，别去数它）。
 
-规模（2026-09-15 实测）：**62 个套件 / 2441 项断言**。各套件**各自独立进程**、都不碰真实库：
+规模（2026-09-15 实测）：**63 个套件 / 2465 项断言**。各套件**各自独立进程**、都不碰真实库：
 
 * 契约冒烟 ``smoke_test.py``（跑在**数据库副本**上，覆盖每一条已注册端点）
 * 纯逻辑/适配层：``adapters_test.py``、``vendor_errors_test.py``（``MockTransport``，零真实网络）、
@@ -90,6 +90,7 @@ TESTS = [
     ("QC 报告 + 联系表 2 端点", "qc_report_test.py"),
     ("时代背景提炼 + 风格提炼 2 端点", "era_style_distill_test.py"),
     ("数据根切换 + 存储 2 端点", "storage_change_test.py"),
+    ("生产镜像布局一致性", "dockerfile_contract_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

@@ -7,7 +7,7 @@ Drama Studio 通用本地模型安装与管理工具（Python 标准库零依赖
 与多种安装方式（runtime）：
   - comfyui : HTTP 下载权重到 ComfyUI/models/<kind>/（支持断点续传）
   - ollama  : ollama pull / rm
-  - git     : git clone 到 local_services/<key>（如 CosyVoice 2 独立服务）
+  - git     : git clone 到 backend-py/local_services/<key>（如 CosyVoice 2 独立服务）
   - manual  : 仅打印部署指引，不自动安装（如 Wan 2.6 GGUF）
 
 用法：
@@ -43,6 +43,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 #    ``scripts/`` 搬来时一并修正；只跳一级会得到 ``backend-py``，于是 models.json 与
 #    ``local_services`` 全找不到，且**不会报错**、只是清单为空）。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+#: 后端包根（``backend-py/``）—— 「本地服务根」的默认值落在这里（2026-09-15 从仓库根
+#: ``local_services/`` 迁入）。它是 `git clone` 下来的独立服务与项目自带 `h3` 薄封装的落脚点。
+#: ⚠️ 同步常量：``app/services/local_model_scan.py`` 与 TS 侧 ``local-model-scan.ts``。
+BACKEND_PY_ROOT = os.path.dirname(SCRIPT_DIR)
 CATALOG_PATH = os.path.join(PROJECT_ROOT, "configs", "models.json")
 PATHS_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "model-paths.json")
 
@@ -94,7 +98,7 @@ def resolve_paths(cli_comfyui=None, cli_models=None, cli_nodes=None, cli_service
     )
     default_models = os.path.join(comfyui_root, "models") if comfyui_root else ""
     default_nodes = os.path.join(comfyui_root, "custom_nodes") if comfyui_root else ""
-    default_services = os.path.join(PROJECT_ROOT, "local_services")
+    default_services = os.path.join(BACKEND_PY_ROOT, "local_services")
     return Paths(
         comfyui_root,
         cli_models or os.environ.get("MODELS_DIR") or cfg.get("models_dir") or default_models,

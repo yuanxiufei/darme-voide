@@ -1,13 +1,16 @@
 /**
- * 前后端共享契约（single source of truth）
+ * **前端侧**共享契约类型（HTTP 传输层请求/响应 DTO）
  *
- * 用途：HTTP 传输层的请求/响应 DTO 唯一定义处。
- * 后端路由/服务 import type 校验自己的实现；前端 useApi.ts 通过
- * nuxt alias `~contracts` 引用同一份类型，消灭字段双写与漂移。
+ * ⚠️ 2026-09-15 从 `backend/src/shared/contracts.ts` 迁到这里：那个位置属于 **TS 旧后端**
+ * （`backend/` 已完成使命、待删），留在那儿会让**前端构建失败**（`~contracts` 别名指过去）。
+ * 现在本文件属于**前端**，通过 nuxt alias `~contracts` 被 `app/composables/useApi.ts` 引用。
+ *
+ * 字段**权威在后端**（Python：`backend-py/app/` 的模型与响应层）—— 本文件是前端侧镜像，
+ * 后端改字段时**必须同步这里**（这条不变量和「画风词表两处同步」同类）。
  *
  * 规则：
- * 1. 本文件只允许 export type / interface，禁止任何运行时逻辑与第三方依赖，
- *    保证前后端可安全地 `import type` 而不引入对方依赖树。
+ * 1. 本文件只允许 export type / interface，禁止任何运行时逻辑与第三方依赖
+ *    （保证前端可安全 `import type` 而不引入后端依赖树）。
  * 2. HTTP 传输字段统一 **snake_case**（对齐后端 toSnakeCase 输出与 DB 列名）。
  * 3. 新增 DTO 时保持最小可用，不照抄 DB 全列——只声明确实被消费的字段。
  */

@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parents[2]
 TS_SRC = REPO / "backend" / "src"
 TESTS = Path(__file__).resolve().parent
 FROZEN_MODULE = TESTS / "frozen_ts_source.py"
+sys.path.insert(0, str(TESTS))  # 便于 `from frozen_ts import load`（快照读取器就在同目录）
 
 #: 守卫读到的**具体文件**（相对 ``backend/src``）；与自动发现取并集
 FILES: tuple[str, ...] = (
@@ -57,6 +58,22 @@ _SRC_REF = re.compile(r'_SRC_ROOT((?:\s*/\s*r?"[^"]+")+)')
 _PLAIN_TS = re.compile(r'"((?:[\w.-]+/)+[\w.-]+\.ts)"')
 
 
+def _ts_exists(relative: str) -> bool:
+    """该相对路径算不算「守卫真读的文件」。
+
+    * 真源码还在 ⇒ 看 ``backend/src/<relative>`` 是否存在（滤掉注释/文档里的幽灵路径）；
+    * 真源码已删（**删库之后**）⇒ 改看**快照里有没有它** —— 这样 ``--check`` 仍能拦住
+      「守卫新增了读文件、却没进快照」这类漂移（否则删库后这条能力会**静默消失**）。
+    """
+    if TS_SRC.is_dir():
+        return (TS_SRC / relative).is_file()
+    try:
+        from frozen_ts import load  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - 快照缺失时按「不认为是必需件」处理，由 check() 报警
+        return False
+    return relative in load()
+
+
 def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """从守卫源码里**自动发现**它引用的 TS 文件 / 目录（相对 ``backend/src``）。
 
@@ -65,8 +82,8 @@ def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
     ``services/consistency-qc.ts``（跨字面量拼接形态）与 ``services/technical-qc.ts``
     （表驱动普通字符串形态）。这里**两种形态都扫**，与手写清单**取并集**。
 
-    普通字符串形态只在**真源码还在**时按「文件确实存在」过滤（防注释/文档里的幽灵路径
-    被当成必需件）；``_SRC_ROOT`` 形态本就带目录结构，不加存在性过滤。
+    普通字符串形态按 ``_ts_exists()`` 过滤（真源码在时看文件、删库后看快照）；
+    ``_SRC_ROOT`` 形态本就带目录结构，不加存在性过滤。
     """
     files: set[str] = set()
     dirs: set[str] = set()
@@ -78,10 +95,9 @@ def discover_refs() -> tuple[tuple[str, ...], tuple[str, ...]]:
         for match in _SRC_REF.finditer(text):
             relative = "/".join(re.findall(r'"([^"]+)"', match.group(1)))
             (files if relative.endswith(".ts") else dirs).add(relative)
-        if TS_SRC.is_dir():  # 真源码在 ⇒ 普通字符串形态可校验存在性
-            for candidate in _PLAIN_TS.findall(text):
-                if (TS_SRC / candidate).is_file():
-                    files.add(candidate)
+        for candidate in _PLAIN_TS.findall(text):
+            if _ts_exists(candidate):
+                files.add(candidate)
     return tuple(sorted(files)), tuple(sorted(dirs))
 
 

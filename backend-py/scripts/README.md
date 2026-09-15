@@ -17,7 +17,7 @@
 | **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改） | Python 3.8+，**仅标准库** |
 
 > 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
-> （`run_all.py` = 62 套件 / 2441 项，那份清单才是权威；改后端代码请跑它）。
+> （`run_all.py` = 63 套件 / 2464 项，那份清单才是权威；改后端代码请跑它）。
 
 ## 仓库自检脚本（pre-commit 会按资产自动触发）
 
@@ -114,6 +114,13 @@ python backend-py/scripts/corpus/search.py --q-file=tmp/q.txt --top=5      # ③
 - 详见 `docs/seedance2-corpus-analysis.md`（§6 复用方式、§附 目录）。
 
 ## AI/GPU 工具链（本地模型）
+
+> **「本地服务根」在哪**：`backend-py/local_services/`（**2026-09-15 从仓库根 `local_services/` 迁入**）。
+> `model_manager.py --runtime git` 会把第三方服务 `git clone` 到 `local_services/<key>/`，项目自带的
+> H3 薄封装在 `local_services/h3/`（纳管）；**克隆来的子目录不入库**（见 `.gitignore` 的
+> `backend-py/local_services/*` + `!backend-py/local_services/h3/`）。默认值可用 `LOCAL_SERVICES_DIR`
+> 或 `configs/model-paths.json` 的 `local_services_dir` 覆盖（优先级：CLI > 环境变量 > 配置 > 默认）。
+
 
 | 文件 | 语言 | 职责 |
 | --- | --- | --- |

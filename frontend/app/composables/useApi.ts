@@ -1,4 +1,5 @@
-// 共享契约：字段唯一来源，禁止在前端再手工双写一遍（见 backend/src/shared/contracts.ts）
+// 共享契约：字段权威在后端（Python），本文件只是前端侧镜像（见 app/types/contracts.ts）——
+// 禁止在前端各处再手工双写类型
 import type { DramaDetailDTO, DramaListResponse, DramaUpdateBody, EraBackground } from '~contracts'
 
 const BASE = '/api/v1'
@@ -71,7 +72,7 @@ export const dramaAPI = {
   del: (id: number) => api.del(`/dramas/${id}`),
   stats: () => api.get<{ total: number; by_status: { status: string; count: number }[] }>('/dramas/stats'),
   prompts: (id: number) => api.get(`/dramas/${id}/prompts`),
-  /** AI 从剧本提炼时代背景并落库（与 PUT 时代背景同构，三字段规范见 shared/contracts EraBackground） */
+  /** AI 从剧本提炼时代背景并落库（与 PUT 时代背景同构，三字段规范见 `~contracts` 的 `EraBackground`） */
   eraExtract: (id: number, data?: { source_text?: string }) => api.post<EraBackground>(`/dramas/${id}/era-background/extract`, data || {}),
 }
 

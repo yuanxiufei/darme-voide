@@ -1,4 +1,17 @@
-# ── Stage 1: Build frontend ──────────────────────────────────
+# Drama Studio —— 生产镜像（**Python 后端版**，2026-09-15 重写）
+#
+# 与旧版的差别（旧版是 Node 时代产物，随 `backend/` 一起退役）：
+#   · 运行时从 `node:20-slim` + tsx 换成 `python:3.12-slim` + uvicorn；Node **只**留在前端构建阶段
+#   · 端口 5789 → **5790**；CMD 从 `tsx backend/src/index.ts` 换成 `uvicorn app.main:app`
+#   · 技能库从仓库根 `skills/` 改成 `backend-py/skills/`（2026-09-15 并入后端）
+#   · Python 侧自己托管前端静态产物与 SPA 回退（见 `backend-py/app/main.py` 第 6 条路由）
+#
+# ⚠️ **本文件在本机未实测**：这台机器没装 Docker（见 `.codebuddy/memory`），
+#    只做了静态核对（路径/端口/产物目录与代码里的常量逐一对齐）。首次真构建请留意：
+#    `FRONTEND_DIST = PROJECT_ROOT/frontend/dist`、数据根 = `PROJECT_ROOT/data`（`PROJECT_ROOT`
+#    由 `backend-py/app/config.py` 上溯两级得到 ⇒ 容器内必须是 `/app/backend-py/app/...`）。
+
+# ── Stage 1: 构建前端静态产物 ──────────────────────────────────
 FROM node:20-slim AS frontend-build
 
 WORKDIR /app/frontend
@@ -7,52 +20,40 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run generate
 
-# ── Stage 2: Build backend native modules ────────────────────
-FROM node:20-slim AS backend-build
+# ── Stage 2: 运行时（Python，不带 Node）────────────────────────
+FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ \
+# ffmpeg：合成 / 拼接 / 抽帧 / 校色 / 参考图压缩 / 连续性 QC 全靠它（Python 侧刻意不引入 Pillow/OpenCV）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app/backend
-COPY backend/package.json backend/package-lock.json ./
-
-# Production deps only (native modules compiled here)
-RUN npm ci --omit=dev
-
-# ── Stage 3: Production image (lean) ────────────────────────
-FROM node:20-slim
-
-# ffmpeg (runtime) + tsx (runs TS directly)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm i -g tsx
 
 WORKDIR /app
 
-# Pre-built node_modules (production only, native modules ready)
-COPY --from=backend-build /app/backend/node_modules ./backend/node_modules
-COPY backend/package.json backend/package-lock.json ./backend/
+# 依赖先装（利用层缓存：改代码不必重装依赖）
+COPY backend-py/requirements.txt ./backend-py/
+RUN pip install --no-cache-dir -r backend-py/requirements.txt
 
-# Backend source
-COPY backend/src ./backend/src
-COPY backend/tsconfig.json ./backend/
+# 应用代码 + 技能库（技能库已并入后端；**必须在 backend-py/ 下**，代码按自身文件位置解析技能根）
+COPY backend-py/app ./backend-py/app
+COPY backend-py/skills ./backend-py/skills
 
-# Frontend static output
-COPY --from=frontend-build /app/frontend/.output/public ./frontend/dist
-
-# Skills
-COPY skills/ ./skills/
-
-# Config
+# 配置：示例配置直接落成运行时配置（与原 Dockerfile 同策略；真实配置请挂载覆盖）
 COPY configs/config.example.yaml ./configs/config.yaml
 
-RUN mkdir -p data/static
+# 前端静态产物：Python 侧按 `PROJECT_ROOT/frontend/dist` 找它
+COPY --from=frontend-build /app/frontend/.output/public ./frontend/dist
 
-ENV NODE_ENV=production
-ENV PORT=5789
+# 数据根（SQLite + static）：PROJECT_ROOT/data ⇒ /app/data
+RUN mkdir -p /app/data/static
 
-EXPOSE 5789
+WORKDIR /app/backend-py
+
+ENV PYTHONUNBUFFERED=1
+ENV PORT=5790
+
+EXPOSE 5790
 VOLUME ["/app/data"]
 
-CMD ["tsx", "backend/src/index.ts"]
+# 用 exec 形式（不是 shell）以便正确接收 SIGTERM；⚠️ 改端口要**同时**改这里与上面的 EXPOSE
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5790"]

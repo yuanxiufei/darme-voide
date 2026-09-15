@@ -2554,12 +2554,38 @@ with TestClient(app) as client:
 
     # --- 静态站 ---
     check("static: missing file -> 404", client.get("/static/not-exist.png").status_code == 404)
-    check("static: traversal blocked", client.get("/static/../configs/config.yaml").status_code == 404)
+    # ⚠️ 穿越必须用**百分号编码**形态：写 `/static/../configs/config.yaml` 时 httpx 会在
+    #    **客户端**就把 `..` 规范化掉（实测变成 `/configs/config.yaml` 打进来）⇒ 那样测的是
+    #    「未知路径」，根本没碰穿越防护。`%2e%2e%2f` 不经规范化直达 handler，
+    #    才真的在验证「resolve + 前缀包含」那道判定（`main.serve_static` / `serve_frontend` 各有一道）。
+    traversal = client.get("/static/%2e%2e%2fconfigs%2fconfig.yaml")
+    check("static: traversal blocked（编码形态，绕过客户端规范化）",
+          traversal.status_code == 404, traversal.status_code)
 
     # --- SPA ---
-    r = client.get("/")
-    log(f"\nGET / -> {r.status_code} {r.text[:200]}")
-    check("spa: 404 when frontend/dist absent (dev mode hint)", r.status_code == 404)
+    # ⚠️ 这两条原来**依赖环境**：旧写法断言「frontend/dist 不存在 -> 404」，可只要谁跑过一次
+    #    `npm run generate`，`frontend/dist`（指向 `.output/public` 的联接）就有了 ⇒ **必红**
+    #    （本机实测 2 条红，根因就是这个）。改成把 `FRONTEND_DIST` **临时指向夹具目录**，
+    #    「未构建 / 已构建」两条分支都确定性地测到，与「本机是否构建过前端」彻底解耦。
+    from app import main as main_module  # noqa: PLC0415
+
+    original_dist = main_module.FRONTEND_DIST
+    try:
+        main_module.FRONTEND_DIST = Path(tempfile.mkdtemp(prefix="spa_missing_")) / "no-dist"
+        r = client.get("/")
+        log(f"\nGET / (dist 指向不存在的目录) -> {r.status_code} {r.text[:200]}")
+        check("spa: dist 不存在 -> 404 + 开发模式提示（夹具，与是否构建过前端无关）",
+              r.status_code == 404 and "开发模式" in r.text, r.text[:160])
+
+        built = Path(tempfile.mkdtemp(prefix="spa_built_"))
+        (built / "index.html").write_text(
+            "<!doctype html><title>SPA-FIXTURE</title>", encoding="utf-8")
+        main_module.FRONTEND_DIST = built
+        r2 = client.get("/")
+        check("spa: dist 存在 -> 200 且直出 index.html（夹具）",
+              r2.status_code == 200 and "SPA-FIXTURE" in r2.text, r2.text[:160])
+    finally:
+        main_module.FRONTEND_DIST = original_dist
 
 # ---------------------------------------------------------------------------
 # 3) 汇总

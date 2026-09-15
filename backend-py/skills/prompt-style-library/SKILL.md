@@ -9,7 +9,7 @@ workflows:
   - 分镜拆解
   - 图片提示词
   - 视频提示词
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts）
+# 默认注入的 Agent（skill 自描述绑定，机制见 backend-py/app/services/agents/skills.py）
 agents: [storyboard_breaker, grid_prompt_generator]
 # 注入顺序，越小越靠前（自身 skill 为 10，本词库作为补充素材排在其后）
 priority: 20
@@ -28,7 +28,7 @@ priority: 20
 
 **画风英文词不由你拼，由后端收口。**
 
-项目画风（写实电影 / 日式动漫 / 国风水墨 …）由后端 `backend/src/shared/prompt-utils.ts`
+项目画风（写实电影 / 日式动漫 / 国风水墨 …）由后端 `backend-py/app/services/prompt_utils.py`
 按统一解析链（`characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`）
 **自动追加**到提示词末尾，并在负面词里排除对立风格。链路已**全覆盖且正负成对**：角色 / 装备 / 道具 / 表情、场景图、分镜静帧 / 宫格图、视频
 （正向追加当前画风速写，负向排除对立风格）—— 具体函数名与你无关，不必知道。

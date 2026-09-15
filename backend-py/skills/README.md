@@ -2,8 +2,8 @@
 
 本目录存放 **Agent 的提示词层（Skill）**，只有两种角色：**项目自有 skill** 与 **外部技能库**。
 
-- 加载器：`backend/src/agents/skills.ts`
-- 列表 / 编辑 API：`backend/src/routes/skills.ts`（`readLibrary` / `listLibraries` / `classify`）
+- 加载器：`backend-py/app/services/agents/skills.py`
+- 列表 / 编辑 API：`backend-py/app/routers/skills.py`（`/skills`、`/skills/meta`、`/skills/{id}`）
 - 前端管理页：`frontend/app/pages/skills.vue`
 
 ## 一、目录结构
@@ -44,7 +44,7 @@ description: …          # 侧栏悬浮提示
 它是**上游 Hub 技能市场的上架卡片**，字段为 `display-name-zh` / `version` / `tag-en|cn` /
 `complete-tags-*` / `summary-*` / `desc-*` / `cover` / `author-*` / `source`。
 
-- 本项目**只读 `SKILL.md`**（加载器）、**只读顶层 `library.yaml`**（`backend/src/routes/skills.ts`），
+- 本项目**只读 `SKILL.md`**（加载器）、**只读顶层 `library.yaml`**（`backend-py/app/routers/skills.py`），
   全仓库没有任何 `*.yaml` 泛化扫描 ⇒ **改 `meta.yaml` 不会影响任何行为**。
   ⚠️ 它和 `library.yaml` 性质完全不同 —— **不要把它当配置改**。
 - 但它是 `version` / `display-name-zh` / `author-*` / `source` 的**唯一载体**
@@ -70,9 +70,9 @@ priority: 20                                          # 注入顺序，越小越
 
 | 位置 | 用途 |
 |---|---|
-| `backend/src/agents/skills.ts` → `loadAgentSkills` | DB 无配置时决定实际注入哪些 skill |
-| `backend/src/agents/index.ts` → `getAgentDefaults` | `GET /agent-configs/defaults` 的出厂默认值 |
-| `backend/src/routes/skills.ts` → `/skills`、`/skills/meta` | 反向查询「该 skill 被谁绑定」与前端侧栏分组 |
+| `backend-py/app/services/agents/skills.py` → `loadAgentSkills` | DB 无配置时决定实际注入哪些 skill |
+| `backend-py/app/services/agents/runtime.py` 的 `get_agent_defaults`（+ `agent_registry.py`） | `GET /agent-configs/defaults` 的出厂默认值 |
+| `backend-py/app/routers/skills.py` → `/skills`、`/skills/meta` | 反向查询「该 skill 被谁绑定」与前端侧栏分组 |
 
 ## 三、注入规则
 
@@ -99,7 +99,7 @@ priority: 20                                          # 注入顺序，越小越
 > `storyboard_breaker` 15,315 → 16,561。
 >
 > 其中 `storyboard_breaker` / `grid_prompt_generator` 各有 **+516 / +294** 是**有意加的**：
-> 把 `search_reference_prompts`（本地语料检索工具，见 `backend/src/agents/tools/corpus-tools.ts`）
+> 把 `search_reference_prompts`（本地语料检索工具，见 `backend-py/app/services/agents/tools/corpus_tools.py`）
 > 的**使用时机与红线**写进了这两个 skill —— **工具注册了不等于模型会调用**，
 > 不写进 skill 就等于白注册。多花 810 字符换「9000 条语料真被用上」，这笔是值的。
 
@@ -164,7 +164,7 @@ backend-py/skills/<lib>/<任意层级>/<skill>/SKILL.md
 
 ## 九、相关位置
 
-- 画风词表（单一事实来源）：`backend/src/shared/prompt-utils.ts`
+- 画风词表（单一事实来源）：`backend-py/app/services/prompt_utils.py`
 - 图像提示词范式（七段结构 / 镜头 / 光线 / 调色 / Danbooru tag）：`backend-py/skills/prompt-style-library/SKILL.md`
 - 视频提示词范式（写法判定 / 时间码分段 / 散文式多段 / 中文标签 / 合规红线）：`backend-py/skills/video-prompt-library/SKILL.md`
 - 提示词**取词来源**（人工维护用，**不注入 Agent**）：`docs/prompt-style-sources.md`

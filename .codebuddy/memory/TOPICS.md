@@ -154,6 +154,9 @@
 - **工具坑**：`tempfile.mkdtemp()` 在 Windows 返回 **8.3 短路径**，与 `resolve()` 后的长路径做子串比较会**假红** ⇒ 比较 resolve 后路径；`sqlalchemy` 顶层导出的是 **`REAL` 而非 `Real`**；PowerShell 组合命令含 `&` / `@{...}` 会被路由到 cmd（报「不是内部或外部命令」）⇒ **写 `.ps1` 落盘再执行**；`Start-Process` 的相对 `-WorkingDirectory` + 相对 exe 路径会报「系统找不到指定的路径」⇒ 用字面绝对路径。⚠️ 另：`execute_command` 报「已转后台/skipped」时**命令常常真的在跑**，输出落在重定向文件里 ⇒ **别急着重跑，先 `Get-Content` 那个文件**（本项目多次据此拿到完整结论）。⚠️ 再：PowerShell 的 `>` 重定向写 **UTF-16**（带 BOM），后续用 Python `read_text(encoding='utf-8')` 汇总会**静默得到 0 条**（正则全不匹配）⇒ 汇总脚本按 `utf-16` 解码，且汇总结果要先与「行数」对一眼再当结论。
 - **`from m import x` 是对象快照，不是活引用**：本项目 `db.reopen_engine()` 换的是**模块属性** `app.db.engine`，而测试里 `from app.db import engine` 拿到的仍是旧对象 ⇒ 断言「engine 已指向新库」永远看到旧库（还会让「新库有表」**假通过**）。**要么 `import app.db as db` 后取 `db.engine`，要么断言前重新导入**。
 - **「原本只会返回 501」的断言，在端点迁移后会真的执行** ⇒ 必须重新审入参副作用。本项目实测：smoke 里 `POST /storage/change {"path": "x"}`（相对路径）在迁移后真的切了数据根并写了仓库根 `.data-root`。规则：**能改全局状态的端点，测试一律用「必然被拒」的入参**（如项目根/空串），并额外断言「状态未变」。
+- ⚠️ **「HTTP 状态码」不是端点在不在的可靠判据 —— 只要本机存在前端产物**：Node `src/index.ts` 有一道**无条件**兜底 `app.get('*', serveStatic({root: 'frontend/dist', path: 'index.html'}))` ⇒ 任何**未匹配的 GET** 都会回 **200 + HTML**（谁跑过一次 `npm run generate` 就有 `.output/public/index.html`，而 `frontend/dist` 常是指向它的**联接**）。本项目因此**连栽两次**：① 冒烟两条「dist 不存在 ⇒ 404 / 穿越被拦」；② 对拍里 4 条裸列表路径被判成「Node 有而 Python 没有」的 `new`。
+  ⇒ 规则：写测试/工具时**先问「有前端产物时会怎样」**；判定「端点是否存在」要看**响应形态**（非 JSON / HTML ⇒ 是兜底）而不是只看状态码；能在夹具里打桩的（`FRONTEND_DIST`）就打桩。
+- ⚠️ **自检用例的「分母」要手数准**：`parity_diff.py --selftest` 原写 `len(cases) + 5`，实际有 6 处额外断言 ⇒ 打印的分母偏小（不影响失败判定与退出码，但会让人误信覆盖度）。加断言时同步改那个常量（现在叫 `EXTRA_CHECKS`）。
 - **JS → Python 逐条移植的六个口径坑**（2026-09-15 把 7 个 `.mjs` 守卫/语料脚本移植成 `.py` 时全部实测踩出；**任何 JS 行为对齐都先想这六条**）：
   1. **换行转换**：Python `Path.read_text()` 默认做 universal newlines（CRLF→LF），Node `readFileSync` **不做** ⇒ 字符数会少「行数」那么多（实测 7651 → 7598）。要逐字对齐必须 `open(..., newline="")`。
   2. **`\w` 语义**：JS 的 `\w` 只认 `[A-Za-z0-9_]`，Python 默认认 Unicode 词字符 ⇒ 正则补 `re.ASCII`。
@@ -163,10 +166,15 @@
   6. **字符串长度/切片**：JS 数的是 **UTF-16 码元** ⇒ `len(s.encode("utf-16-le")) // 2`；按 JS 语义截断要 `_js_slice()`。
   - 落地手法：**移植期间不要删 Node 原版**，用「同一输入跑两边、逐字节 diff」验收（本项目 5/6 个脚本做到 IDENTICAL，剩一个因故意改成确定性排序而用**多重集**比对）。
 - **搬目录的静默杀手（本仓库工具链）**：`scripts/` 下的脚本用 `dirname(SCRIPT_DIR)` 当仓库根 ⇒ 搬进 `backend-py/scripts/` 后**必须上跳两级**（`parents[2]`→`parents[3]` 同理）。只跳一级**不报错**，只是 `configs/models.json` 读不到 ⇒ 清单为空。
+- ⚠️ **Windows 目录联接会让 `.resolve()` 骗人**：本仓库 `frontend/dist` 是指向 `frontend/.output/public` 的联接 ⇒ 校验「某常量是否指向某路径」时用 `.resolve()` 比对会**跳到联接目标**而假红；比**原始路径**（`os.path.normcase` 归一大小写）。同理「不得出现旧写法」这类文本校验**要排除注释行**（注释里常有意保留旧写法做对照）。
 - **`.mjs` / `.ps1` 已不存在**：仓库自检（`check_memory.py` / `check_skill_refs.py` / `test_guards.py` / `check_all.py`）与语料管线/工具链**全在 `backend-py/scripts/`（纯 Python）**；TS 源码快照是 **Python 模块** `backend-py/tests/frozen_ts_source.py`（守卫侧物化到临时目录）。`.githooks/pre-commit` 的解释器解析顺序：venv → `python3` → `python` → `py -3`。
+- **后端 9 项能力（Python 侧全在 `backend-py/app/services/`）**：QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget（默认 3 次）｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking（成本/用量记录）。
+- **共享契约类型 `frontend/app/types/contracts.ts`**（2026-09-15 从 `backend/src/shared/contracts.ts` 搬来）：**前端侧镜像**，字段**权威在 Python 后端**；改后端字段必须同步它。前端 dev 代理默认指 **5790**（`NUXT_API_TARGET` 可临时指回 5789）。
 - **仓库根已无 `scripts/`、`skills/`**（2026-09-15 双双并入 `backend-py/`）：
   - **技能库根 = `backend-py/skills/`**，是**三处必须同步的不变量**：`app/services/skills.py` 的 `SKILLS_DIR`（`parents[2]`）｜`app/services/agents/skills.py` 的 `skills_dir()`（同文件相对推导，**别拼 `PROJECT_ROOT/"backend-py"/...`**）｜`backend-py/scripts/check_skill_refs.py` 的 `SKILLS_DIR`。
   - 引用守卫对旧写法 `skills/…` **判致命**（`_LEGACY_SKILLS_PREFIX`）；skill 正文里的仓库根相对引用请写 `backend-py/skills/…`。
   - ⚠️ `backend/src/**`（Node 侧 `../../../skills`）**已失效** —— Node 仅剩被删的命，删库前若要启动它会退化。
 - **批量改路径的正确手法**：**单趟正则 + 负向断言**（如 `(?<![\w./~-])skills/`）一次替换完，既防二次命中已改好的前缀（双前缀 bug 的根治），又不误伤 `~/…/skills/` 这类外部路径；**改完必须跑行为测试**（守卫绿 ≠ 行为绿）。
+- **「删目录/删服务」的前置验证：真删一次（可回滚干跑）** —— `重命名 → 跑全部守门脚本与自检 → finally 还原`。本项目实测：一轮干跑抓出三类**静态扫描根本看不到**的问题（① 文档里指向被删目录的引用 ② 守卫对旧前缀不设防 ③ 脚本里「真源码在才走某分支」的早期 return 在删后静默失效）。**只跑「代码常量排查 + 全量自检」是查不出来的**，因为它们只在「目录真的不在」时才走到那条分支。
+- ⚠️ **引用守卫只采集反引号 token 与 markdown 链接**（`` `path/x.md` ``）：写在注释/正文里的裸路径**不受保护**，挪库后不会报错 ⇒ 想让某条引用受守卫保护，**先给它加反引号**。
 - **删 `backend/` 的三条前置（2026-09-15 起）**：① **差分对拍 0 新差异** —— `tests/parity_run.py`（两侧并排 + 逐字段 diff）；**只比只读 GET**，`parity_diff.py` 的 `CASES` 表要随迁移补齐（2026-09-15 实测 **一致 12 / 已知 0 / 不存在 4 / 新差异 0**；文本响应靠 `strip_timestamps()` 抹掉 ISO 时间戳才能参与比对，HTML/Markdown 导出物**故意不入表**）；② **守卫快照完整** —— `tests/freeze_ts_snapshot.py`（清单 = 手写 ∪ **从守卫源码自动发现**两种形态：`_SRC_ROOT / "…" / "x.ts"` 拼接 **与** 表驱动普通字符串路径，防「新增守卫读文件 ⇒ 快照静默缺件」；快照 2026-09-15 起存为 **Python 模块** `tests/frozen_ts_source.py`（74 条 / 625 KB，仓库内**已无 .ts**），守卫侧 `frozen_ts.snapshot_root()` **物化到临时目录**后再照常按 `Path` 读 ⇒ 调用点零改动；真源码/冻结两路结论必须一致）；③ **`app/` 对 `backend/` 的路径依赖 = 0**（只剩守卫读 TS 源码，已由 ② 兜住）。

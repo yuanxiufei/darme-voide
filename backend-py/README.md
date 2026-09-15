@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**2/7**: 工程账本 JSON/MD + 断点续作 stale)。
-> **自检 2441 项全绿**（冒烟 475 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
+> **自检 2465 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -266,20 +266,25 @@ backend-py/
    ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
    ├─ compressed_data_url_test.py 参考图压缩（ffmpeg，16 用例）
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
+   ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口 ↔ 代码常量，23 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十二项（**套件权威清单就在这个文件里**，本树只是摘录）
+   └─ run_all.py                一次跑完以上六十三项（**套件权威清单就在这个文件里**，本树只是摘录）
 ├─ skills/                      Agent 技能库（**2026-09-15 从仓库根 skills/ 并入**；自有 SKILL.md + 外部技能库）
 │  ├─ README.md                 技能库权威约定（改 skill 前必读）
 │  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
 │  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
-└─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
-   ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
-   ├─ check_skill_refs.py       skills 引用完整性守卫
-   ├─ test_guards.py            两套守卫的自检（12 例）
-   ├─ check_all.py              一键跑全部三道自检
-   ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
-   └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
-   ↑ 细节见 `scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
+├─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
+│  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
+│  ├─ check_skill_refs.py       skills 引用完整性守卫
+│  ├─ test_guards.py            两套守卫的自检（12 例）
+│  ├─ check_all.py              一键跑全部三道自检
+│  ├─ corpus/                   语料管线（fetch_raw → normalize → search + analyze{,2,3}）
+│  └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
+│     ↑ 细节见 `scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
+└─ local_services/              **本地服务根**（2026-09-15 从仓库根 local_services/ 并入）
+   └─ h3/{server.py,requirements.txt}  项目自带的 H3 薄封装（端口 8765，复用 minimax adapter）
+   ↑ ⚠️ 其余子目录是 `model_manager.py --runtime git` **clone 来的第三方服务**（机器相关，已 gitignore）；
+     默认值三处同步：本目录 / `app/services/local_model_scan.py` / TS 侧 `local-model-scan.ts`
 ```
 
 ## 厂商适配器层（S3）要点
@@ -535,6 +540,37 @@ cd backend-py
 5. 把该域的用例加进 `tests/smoke_test.py`，跑通（含错误路径的文案断言）。
 6. 域内依赖、且输入输出明确的纯函数，先移植成 `app/services/<x>.py`；
    **依赖 LLM / 子进程 / 长任务的服务放到最后**，它们的行为需要真实调用才能验证。
+
+## 删 `backend/` 清单（2026-09-15 **干跑实测**得出）
+
+做法：把 `backend/` 临时改名成 `backend__dryrun_off` → 跑守卫与自检 → 立刻改回（**全程可回滚**）。
+干跑结论：**删库后仓库自检全绿** —— `check_all.py` rc=0（引用 / 记忆 / 守卫自检 12/12）、
+`freeze_snapshot_test.py` 11/11（真源码缺失时自动跳过存在性检查）、
+`route_parity_test.py` rc=0（**自动回退 Python 快照**：224 / 227 / 未注册 0 / 0 漂移）、
+`skills_test.py` 45/45。
+
+干跑**暴露并已修掉**的三类问题（都不在「代码常量」里，所以只有真删一次才会现形）：
+
+1. **技能文档里 13 处指向 `backend/src/…` 的引用** ⇒ 删库即断链。已全部改指 Python 侧对应实现
+   （`app/services/agents/skills.py`、`app/routers/skills.py`、`app/services/prompt_utils.py`、
+   `prompt_blocks.py`、`agents/tools/corpus_tools.py`、`agents/runtime.py`），
+   并给其中 6 处**原本没加反引号**的写法补上反引号 —— 否则守卫（只采集反引号 token）看不见它们。
+2. **守卫对 `backend/…` 的旧前缀不设防** ⇒ 已加入 `_LEGACY_HINTS`，写旧前缀一律判**致命**并给改法。
+3. **冻结脚本的自动发现依赖真源码存在** ⇒ 删库后「表驱动普通字符串形态」会**静默扫不到**。
+   已改成：真源码在 ⇒ 看文件是否存在；真源码已删 ⇒ **改看快照里有没有**（`--check` 在删库后依然有效）。
+
+### 仍需在「删库当天」处理（**现在做会打断 Node，故留到最后一起做**）
+
+| # | 项 | 说明 / 改法 |
+|---|---|---|
+✅ 1 | **前端代理已切到 Python**（2026-09-15 提前做） | `frontend/nuxt.config.ts` 的 `/api`、`/static` 由 **5789 → 5790**，并留了逃生门：`NUXT_API_TARGET=http://localhost:5789 npm run dev` 可临时对着 Node 调试。⚠️ 只影响 **dev 代理**（生产同源静态产物由部署侧决定） |
+✅ 2 | **共享契约类型已搬到前端**（2026-09-15 提前做） | `git mv backend/src/shared/contracts.ts frontend/app/types/contracts.ts`（git 记为 `R`，79 行纯类型零 import）+ nuxt 别名两处 + 唯一 importer `app/composables/useApi.ts`；Node 侧 `era-background.ts` 同步改成跨项目 import（它随 `backend/` 一起消失）。**已用 `npm run generate` 真构建验证**（`✔ Server built` / `Prerendered 15 routes` / `✔ Generated public .output/public`） |
+✅ 3 | **`Dockerfile` 已重写为 Python 镜像**（2026-09-15 提前做） | 运行时 `python:3.12-slim` + uvicorn（Node 只留前端构建阶段）、端口 **5790**、`COPY backend-py/skills/`、前端产物落 `frontend/dist`（与 `FRONTEND_DIST` 一致）、`.dockerignore` 补排除 `.venv` / `__pycache__` / `tests` / `scripts`。⚠️ **本机无 Docker ⇒ 未做真构建**；布局/端口/产物路径已由新增自检 `dockerfile_contract_test.py`（**23 用例**）钉在代码常量上，改任一侧立刻报错 |
+✅ 4 | **`parity_run.py` / `parity_diff.py` 已写明生命周期**（2026-09-15） | 两者 docstring 顶部都加了「本工具与 `backend/` 绑定 ⇒ 删库后失效；留作历史证据」，并指明日常回归走 `run_all.py` + `route_parity_test.py` 的快照模式（**不需要 Node**） |
+5 | **文档/记忆里的溯源引用** | 全仓还有 ~137 处提到 `backend/src/…`，**绝大多数是「移植自 X」的溯源注释**（应保留，正是它们的价值）。只需清理那些「把它当权威源去查」的指路语（`docs/api-contract.md` 等） |
+
+> 第 1、2 项做完后又干跑了一次（`backend/` 临时改名）：`check_all.py` rc=0（引用 102 处 / 0 断链）、
+> `route_parity_test.py` rc=0（224 / 227 / 未注册 0 / 0 漂移）⇒ **删库当天只剩「删目录 + Dockerfile 重写」**。
 
 ## 工期参考
 

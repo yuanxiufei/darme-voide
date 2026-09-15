@@ -9,7 +9,7 @@ protocol:
 workflows:
   - 图片提示词
   - 画风设置
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts）
+# 默认注入的 Agent（skill 自描述绑定，机制见 `backend-py/app/services/agents/skills.py`）
 # 暂不默认注入：本项目当前**没有「参考图反推画风」的执行入口**（无对应 Agent、无 UI 触发点、
 # 无路由消费其 protocol 字段 suggested_style_key / reusable_anchors）。
 # 此前绑在 grid_prompt_generator 上，而后者是纯出图 Agent ⇒ 每次出图白占约 3,000 字符上下文。

@@ -5,7 +5,7 @@ preconditions:
   - 调用 read_episode_script 能读到非空的原始内容
 protocol:
   - scene_count: 格式化剧本中的场景数（S01/S02 场景头数量）
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts；不写 = 不默认注入）
+# 默认注入的 Agent（skill 自描述绑定，机制见 backend-py/app/services/agents/skills.py；不写 = 不默认注入）
 agents: [script_rewriter]
 # 注入顺序，越小越靠前
 priority: 10
@@ -14,7 +14,7 @@ priority: 10
 # 剧本改写指南
 
 > **分工**：输出格式（场景头 / 动作 / 对白 / 旁白）、输出硬性要求、说话人划分铁律
-> 由系统提示词给出，单一来源是 `backend/src/shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`。
+> 由系统提示词给出，单一来源是 `backend-py/app/services/prompt_blocks.py` 的 `SCREENPLAY_FORMAT_RULES`。
 > **本文件不重复它们**，只补系统提示词不覆盖的**创作层面判断**。
 
 ## 改写原则

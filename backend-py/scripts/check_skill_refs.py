@@ -58,13 +58,17 @@ PATH_TOKEN_RE = re.compile(rf"^(?:\.\./)*[\w.-]+(?:/[\w.*-]+)*\.(?:{FILE_EXT})$"
 UPSTREAM_PREFIXES = (".ci/", "spec/", "hub-skill-market", ".opencode-v2/", ".agents/", ".claude/")
 #: 明确相对 repo 根的路径前缀。
 #: ``docs/`` 于 2026-09-12 补入（skill 正文常引用 ``docs/*.md`` 作为细节落点）。
-#: ``backend-py/`` 于 2026-09-15 补入：Python 后端已是仓库一等公民（``backend/`` 即将下线），
-#: 少了它，指向 ``backend-py/…`` 的引用会落进「基准不明」被静默跳过 —— 与当初漏 ``docs/`` 同病。
-#: ⚠️ **`skills/` 已从本表移除**：技能库当天并入 ``backend-py/skills/`` ⇒ 现在写 ``skills/…``
-#: 就是**失效引用**，由下面的 ``_LEGACY_SKILLS_PREFIX`` 判**致命**（不给它「基准不明」的静默出口）。
-REPO_ROOT_PREFIXES = ("backend/", "frontend/", "docs/", "backend-py/")
-#: 旧位置前缀：挪库后最危险的是「看着像路径、其实已失效」的写法 ⇒ 一律致命并给出改法。
-_LEGACY_SKILLS_PREFIX = "skills/"
+#: ``backend-py/`` 于 2026-09-15 补入：Python 后端已是仓库一等公民，少了它，指向
+#: ``backend-py/…`` 的引用会落进「基准不明」被静默跳过 —— 与当初漏 ``docs/`` 同病。
+#: ⚠️ **`skills/` 与 `backend/` 已从本表移除**（都并入/让位给 ``backend-py/``）⇒ 现在写它们
+#: 就是**失效引用**，由下面的 ``_LEGACY_HINTS`` 判**致命**（不给「基准不明」的静默出口）。
+REPO_ROOT_PREFIXES = ("frontend/", "docs/", "backend-py/")
+#: 旧前缀 → 提示语：迁移/下线后最危险的是「看着像路径、其实已失效」的写法 ⇒ 一律致命并给改法。
+#: （``backend/`` 于 2026-09-15 加入：Python 后端已全量覆盖，TS 旧后端待删 ⇒ 引用它等于指空。）
+_LEGACY_HINTS = {
+    "skills/": "skills/ 已并入 backend-py/skills/",
+    "backend/": "backend/ 是 TS 旧后端（Python 版在 backend-py/）",
+}
 #: 基准为 skill 根的资产目录（文档不在任何 skill 内时基准不明，跳过）
 SKILL_ROOT_ASSET_DIRS = ("references", "scripts", "agents")
 #: 这些目录的缺失只提示、不判失败
@@ -165,11 +169,12 @@ def main() -> int:
                 skipped.append(f"[上游/外来宿主路径] {pos}  →  {clean}")
                 continue
 
-            # 旧位置（技能库已并入 backend-py/skills/）⇒ 致命：这类引用「看着对、其实指空」，
-            # 正是本守卫存在的理由；给提示比让它落进「基准不明」被跳过有用得多。
-            if clean.startswith(_LEGACY_SKILLS_PREFIX):
+            # 旧位置（技能库已并入 backend-py/skills/、TS 旧后端 backend/ 将下线）⇒ 致命：
+            # 这类引用「看着对、其实指空」，正是本守卫存在的理由；给提示比落进「基准不明」有用得多。
+            legacy = next((prefix for prefix in _LEGACY_HINTS if clean.startswith(prefix)), None)
+            if legacy:
                 checked += 1
-                fatal.append((pos, f"{clean}（skills/ 已并入 backend-py/skills/，请改前缀）"))
+                fatal.append((pos, f"{clean}（{_LEGACY_HINTS[legacy]}，请改前缀）"))
                 continue
 
             # 同一行内、token 之前若出现「举例」措辞 → 该路径泛指而非依赖，跳过

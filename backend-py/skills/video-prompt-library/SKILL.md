@@ -8,7 +8,7 @@ protocol:
 workflows:
   - 分镜拆解
   - 视频提示词
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts）
+# 默认注入的 Agent（skill 自描述绑定，机制见 `backend-py/app/services/agents/skills.py`）
 agents: [storyboard_breaker]
 # 注入顺序，越小越靠前（本库是图像词库的姊妹篇，排在其后）
 priority: 30

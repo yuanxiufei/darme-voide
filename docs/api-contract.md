@@ -1,7 +1,8 @@
 # Drama Studio 前后端接口契约
 
-> 生成时间：2026-08-16
-> 范围：后端 `backend/src/routes/*.ts`（22 文件）+ 前端 `frontend/app/composables/useApi.ts` / `useAgent.ts`
+> 生成时间：2026-08-16（**Node 时代**；2026-09-15 起后端已换成 Python，路径见下注）
+> 范围：后端 `backend/src/routes/*.ts`（22 文件，原始范围）+ 前端 `frontend/app/composables/useApi.ts` / `useAgent.ts`
+> ⚠️ **当前实现位置**：Python 后端 `backend-py/app/routers/*.py`（已全量覆盖 Node 的 224 条路径）；本文件里的路径/端口提到 `backend/…`、`5789` 的，都是**历史产物**，现行权威见 `backend-py/README.md`
 > 结论：前后端路径/方法 100% 对齐，无路径不一致；字段契约仅 1 处不一致（已修复，见 §4）
 
 ## 1. 通用约定

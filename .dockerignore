@@ -17,3 +17,13 @@ tmp
 temp
 .superpowers
 .claude
+
+# Python 后端（2026-09-15）：镜像里只需 `app/` 与 `skills/`，其余一律不进构建上下文
+# ⚠️ `.venv` 必须排除（本机 venv 有几百 MB，COPY backend-py/ 会把它全拖进去）
+backend-py/.venv
+backend-py/__pycache__
+**/__pycache__
+backend-py/tests
+backend-py/scripts
+.codebuddy
+reference

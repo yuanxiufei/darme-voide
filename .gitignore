@@ -69,3 +69,10 @@ models.yaml
 
 # Reference projects (downloaded for learning)
 reference/
+
+# Local model services cloned by backend-py/scripts/model_manager.py（机器相关，不入库）
+# ⚠️ 服务根 2026-09-15 从仓库根 local_services/ 迁到 backend-py/local_services/。
+#    `h3/` 是**项目自带**的 8765 薄封装（纳管），其余是 git clone 下来的第三方服务。
+#    注意：git 的规则是「父目录被排除则子文件无法再包含」⇒ 必须先 `/*` 再反向包含 h3/。
+backend-py/local_services/*
+!backend-py/local_services/h3/

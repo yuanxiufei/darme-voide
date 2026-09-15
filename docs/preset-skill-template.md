@@ -199,9 +199,9 @@ function generateVariationCard(excludeFamily?: string):
 4. **撰写 Style Lock** → 逐字精炼的风格描述块
 5. **撰写负向提示词** → 针对你领域的禁止清单
 6. **调整配比约束** → 灵动元素上限 / 线索比例等
-7. **创建后端服务文件**：`backend/src/services/preset-{name}.ts`
-8. **创建路由文件**：`backend/src/routes/preset-{name}.ts`
-9. **注册路由**：`backend/src/index.ts` 中添加 `api.route('/preset/{name}', preset{Name})`
+7. **后端多数情况无需改代码**（2026-09-15 起）：Python 侧预设是**框架 + 数据驱动**（`backend-py/app/services/preset_framework.py`）⇒ 只要上一步的 skill 数据池与 frontmatter 正确就会被框架识别；**仅当该预设要新端点时**才需要写服务文件
+8. **确需新端点时创建路由**：`backend-py/app/routers/preset_framework.py`（同类实现见 `app/routers/presets.py`）
+9. **注册路由**：在 `backend-py/app/main.py` 里 `include_router(...)`（Python 侧不是 `api.route('/preset/{name}', …)` 那种写法）
 10. **创建前端预设页面**：`frontend/app/pages/preset/{name}.vue`
 11. **注册前端 API**：`frontend/app/composables/useApi.ts` 中添加 `{name}API`
 12. **添加入口按钮**：`frontend/app/pages/index.vue` Header 中添加导航按钮

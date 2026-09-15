@@ -33,6 +33,7 @@ backend/    — Hono + Drizzle ORM + Mastra AI Agents + better-sqlite3
 configs/    — config.yaml 配置文件
 data/       — SQLite 数据库 + 生成资源文件
 backend-py/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/skills/README.md）
+backend-py/local_services/ — 本地服务根（模型工具链 `git clone` 的第三方服务 + 项目自带 h3 8765 薄封装）
 ```
 
 ### 🎥 作品展示 / Demo Videos

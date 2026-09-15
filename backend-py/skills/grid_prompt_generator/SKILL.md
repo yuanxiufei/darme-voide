@@ -5,7 +5,7 @@ preconditions:
   - 已通过 read_shots_for_grid 拿到选中镜头的详细信息
 protocol:
   - prompts_count: 生成的提示词数量
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts；不写 = 不默认注入）
+# 默认注入的 Agent（skill 自描述绑定，机制见 `backend-py/app/services/agents/skills.py`；不写 = 不默认注入）
 agents: [grid_prompt_generator]
 # 注入顺序，越小越靠前
 priority: 10

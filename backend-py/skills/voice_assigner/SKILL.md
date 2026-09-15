@@ -6,7 +6,7 @@ preconditions:
   - 调用 get_characters 能拿到待分配角色
 protocol:
   - assigned_count: 已分配音色的角色数量
-# 默认注入的 Agent（skill 自描述绑定，机制见 backend/src/agents/skills.ts；不写 = 不默认注入）
+# 默认注入的 Agent（skill 自描述绑定，机制见 `backend-py/app/services/agents/skills.py`；不写 = 不默认注入）
 agents: [voice_assigner]
 # 注入顺序，越小越靠前
 priority: 10

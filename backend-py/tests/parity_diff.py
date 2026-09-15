@@ -1,5 +1,9 @@
 """Node ↔ Python 差分对拍 —— 「删 ``backend/`` 前的等价性证据」（S7 第 5 步的验收工具）。
 
+⚠️ **本工具的生命周期与 `backend/` 绑定**：真对拍（用法 A）必须两侧都在 ⇒ **删掉 `backend/` 后失效**；
+用完就留作历史证据。**离线自检（用法 B）与删库无关**，随手可跑。
+删库后「Python 是否仍与当初的 TS 一致」由 `route_parity_test.py` 的**快照**继续守（不需 Node）。
+
 用途：两个后端**并排起来**（Node 5789 / Python 5790，同一 ``DATA_ROOT``），逐端点比对响应，
 把差异分成三类：
 
@@ -161,17 +165,41 @@ def classify(method: str, path: str, node: Any, py: Any) -> tuple[str, list[str]
     return "new", differences
 
 
-def classify_missing(node: Any, py: Any) -> tuple[str, list[str]]:
-    """``MISSING`` 类的判定：Node 未匹配(404) + Python 兜底(501) ⇒ ``missing``（预期内）。
+def is_spa_fallback(payload: Any) -> bool:
+    """Node 是否把请求交给了**前端 SPA 兜底**（而不是命中真端点）。
 
-    ⚠️ 只要 **Node 回了别的状态码**（尤其 200）就说明「Node 真有这个端点」⇒ 判 ``new``。
+    ⚠️ 背景（2026-09-15 实测抓到）：Node ``src/index.ts`` 里有一道**无条件**的兜底
+    ``app.get('*', serveStatic({ root: frontend/dist, path: 'index.html' }))`` ⇒
+    **只要 `frontend/dist/index.html` 存在**（谁跑过一次 ``npm run generate`` 就有，
+    而且 ``frontend/dist`` 还常是指向 ``.output/public`` 的联接），任何**未匹配的 GET**
+    都会回 ``200 + HTML``。这会把 ``MISSING_EXPECT = {node: 404}`` 的假设打崩：
+    4 条裸列表路径（``/episodes`` 等）被误报成「Node 有而 Python 没有」的 ``new`` ✗。
+    判据：`_fetch` 对**非 JSON 体**存成 ``__raw__`` ⇒ 取首 200 字符看是否像 HTML。
+    ⚠️ 只认 HTML：``200 + JSON`` 仍按「Node 真有这个端点」判 ``new``（守卫的原意不能丢）。
+    """
+    if not isinstance(payload, dict) or "__raw__" not in payload:
+        return False
+    head = str(payload["__raw__"]).lstrip()[:200].lower()
+    return head.startswith(("<!doctype", "<html", "<!--"))
+
+
+def classify_missing(node: Any, py: Any) -> tuple[str, list[str]]:
+    """``MISSING`` 类的判定：Node 未匹配 + Python 兜底(501) ⇒ ``missing``（预期内）。
+
+    未匹配有两种形态：Node **404**（Hono 默认），或 Node **200 + SPA 兜底 HTML**
+    （前端产物存在时被 ``serveStatic`` 兜住，见 ``is_spa_fallback``）。
+    ⚠️ 只要 Node 回了**别的东西**（尤其 ``200 + JSON``）就说明「Node 真有这个端点」⇒ 判 ``new``。
     """
     node_status = node.get("__status__")
     py_status = py.get("__status__")
-    if node_status == MISSING_EXPECT["node"] and py_status == MISSING_EXPECT["py"]:
-        return "missing", [f"Node {node_status}（未匹配）/ Python {py_status}（兜底）— 见 MISSING_CASES 注释"]
+    node_unmatched = node_status == MISSING_EXPECT["node"] or (
+        node_status == 200 and is_spa_fallback(node))
+    if node_unmatched and py_status == MISSING_EXPECT["py"]:
+        how = ("Node 404（未匹配）" if node_status == MISSING_EXPECT["node"]
+               else "Node 200 但是**前端 SPA 兜底 HTML**（不是真端点）")
+        return "missing", [f"{how} / Python {py_status}（兜底）— 见 MISSING_CASES 注释"]
     return "new", [f"HTTP {node_status} vs {py_status} —— 与 MISSING_EXPECT 不符"
-                   f"（Node 真回 200 就说明这个端点 Python 缺）"]
+                   f"（Node 真回 200+JSON 就说明这个端点 Python 缺）"]
 
 
 def selftest() -> int:
@@ -215,10 +243,23 @@ def selftest() -> int:
     if strip_timestamps("no stamp here") != "no stamp here":
         failures.append("时间戳归一化：无时间戳的文本不该被改动")
 
+    # MISSING 类判定的三种形态（⚠️ 2026-09-15 实测：前端产物存在时 Node 由 SPA 兜底回 200 HTML）
+    for label, node_payload, expected in (
+        ("404 + 501", {"__status__": 404}, "missing"),
+        ("200 + SPA HTML", {"__status__": 200, "__raw__": "<!doctype html><title>t</title>"}, "missing"),
+        ("200 + JSON", {"__status__": 200, "items": []}, "new"),
+    ):
+        got, details = classify_missing(node_payload, {"__status__": 501})
+        if got != expected:
+            failures.append(f"MISSING 判定 {label}: 期望 {expected} 得到 {got} {details}")
+
+    # ⚠️ `EXTRA_CHECKS` 是**手数**的（`cases` 之外还有几处 if）—— 加断言时同步改它，
+    #    否则 SELFTEST 的分母会偏小（只影响这行打印，`failures` 与退出码不受影响）。
+    EXTRA_CHECKS = 9
     for failure in failures:
         print("FAIL  " + failure)
     print()
-    print(f"SELFTEST: {len(cases) + 5 - len(failures)}/{len(cases) + 5} passed")
+    print(f"SELFTEST: {len(cases) + EXTRA_CHECKS - len(failures)}/{len(cases) + EXTRA_CHECKS} passed")
     return 1 if failures else 0
 
 
