@@ -32,7 +32,7 @@ from ..core.db import get_conn
 from ..core.models import agent_configs
 from ..core.response import bad_request, internal_error, js_truthy, success
 from ..services.agent_registry import AGENT_PHASES, get_default_name, get_host_tool_names
-from ..services.skill_parser import parse_skill, render_skill
+from ..services.skill_parser import ParsedSkill, parse_skill, render_skill
 from ..services.skills import (
     SKILL_CHAR_BUDGET,
     SKILLS_DIR,
@@ -177,7 +177,7 @@ def _count_reference_files(skill_dir: Path) -> int:
     return count
 
 
-def _injected_chars(parsed: dict[str, Any]) -> int:
+def _injected_chars(parsed: ParsedSkill) -> int:
     """真实注入体量（字符）= ``render_skill`` 后的长度，与注入时的预算闸**同口径**。
 
     不能直接用文件字节数：前置契约 / 协议字段段的拼接同样计入注入。
@@ -264,36 +264,36 @@ def list_skills(conn: Connection = Depends(get_conn)):
                     parsed = parse_skill(skill_file.read_text(encoding="utf-8"), entry.name)
                     bound_agents = bindings.get(skill_id, [])
                     category, source = _classify(skill_id)
-                    allowed_tools = parsed["metadata"]["allowedTools"]
+                    allowed_tools = parsed.metadata.allowed_tools
                     # 真实依赖 = frontmatter 声明 ∪ 正文引用（二者都可能指向宿主未注册的工具）
                     required_tools = list(
-                        dict.fromkeys([*allowed_tools, *parsed["foreignToolRefs"]])
+                        dict.fromkeys([*allowed_tools, *parsed.foreign_tool_refs])
                     )
                     skills.append(
                         {
                             "id": skill_id,
-                            "name": parsed["metadata"]["name"],
-                            "description": parsed["metadata"]["description"],
-                            "preconditions": parsed["metadata"]["preconditions"],
-                            "protocol": parsed["metadata"]["protocol"],
+                            "name": parsed.metadata.name,
+                            "description": parsed.metadata.description,
+                            "preconditions": parsed.metadata.preconditions,
+                            "protocol": parsed.metadata.protocol,
                             "category": category,
                             "source": source,
                             "sourceLabel": (library_labels.get(source) or source) if source else None,
-                            "workflows": parsed["metadata"]["workflows"],
-                            "agents": parsed["metadata"]["agents"],
-                            "priority": parsed["metadata"]["priority"],
+                            "workflows": parsed.metadata.workflows,
+                            "agents": parsed.metadata.agents,
+                            "priority": parsed.metadata.priority,
                             "allowedTools": allowed_tools,
-                            "foreignToolRefs": parsed["foreignToolRefs"],
+                            "foreignToolRefs": parsed.foreign_tool_refs,
                             "missingTools": [t for t in required_tools if t not in host_tools],
                             "charCount": _injected_chars(parsed),
                             "referenceCount": _count_reference_files(entry),
-                            "protected": _is_protected_skill(skill_id, parsed["metadata"]["agents"]),
+                            "protected": _is_protected_skill(skill_id, parsed.metadata.agents),
                             "boundAgents": bound_agents,
                             "phases": list(
                                 dict.fromkeys(
                                     [
                                         *(AGENT_PHASES[a] for a in bound_agents if a in AGENT_PHASES),
-                                        *parsed["metadata"]["workflows"],
+                                        *parsed.metadata.workflows,
                                     ]
                                 )
                             ),
@@ -410,7 +410,7 @@ def save_skill(skill_id: str, body: dict[str, Any]):
         warning: str | None = None
         if not re.match(r"^\s*---", content):
             warning = "内容缺少 frontmatter（--- 包裹的头部），name / description / agents 声明将无法识别。"
-        elif len(parse_skill(content, sid)["metadata"]["agents"]) == 0:
+        elif len(parse_skill(content, sid).metadata.agents) == 0:
             warning = "frontmatter 的 agents 声明为空，该 Skill 不再默认注入任何 Agent（可在「Agent 配置 → 绑定 Skills」中手动启用）。"
 
         return success({"warning": warning}) if warning else success()
@@ -485,7 +485,7 @@ def delete_skill(skill_id: str):
         try:
             declared_agents = parse_skill(
                 _safe_skill_path(sid).read_text(encoding="utf-8"), sid
-            )["metadata"]["agents"]
+            ).metadata.agents
         except OSError:
             declared_agents = None
 

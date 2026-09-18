@@ -130,9 +130,13 @@ async def clone_voice(input_data: dict[str, Any]) -> dict[str, Any]:
 async def clone_voice_cosyvoice(input_data: dict[str, Any]) -> dict[str, Any]:
     """CosyVoice 2 **零样本克隆**（本地 ``/inference_zero_shot``）。
 
-    无需训练，传入参考音频（``prompt_audio``）+ 参考文本（``prompt_text``）即时模仿音色合成 demo。
+    无需训练，传入参考音频（``prompt_audio``，**base64**）+ 参考文本（``prompt_text``）即时模仿音色。
 
-    ⚠️ 接口约定参考 CosyVoice 官方 FastAPI 封装；本地服务部署后**需按实际接口核对**。
+    ✅ **2026-09-16 已核实**（读上游 ``runtime/python/fastapi/server.py``）：打的是**薄封装**
+    ``app/local_services/cosyvoice/server.py``（端口 9880 ✓ 见 ``ai_configs.PRESET_SERVICES``），
+    **不是**官方服务本身 —— 官方那条要的是 **multipart 文件**（字段 ``prompt_wav`` ✗）且返回
+    **裸 PCM**（不是 JSON 的 ``audio`` ✗），封装负责吸收这些差异 ✓。契约由
+    ``tests/cosyvoice_seam_test.py`` 守卫（含「base64 → multipart 文件」的真 HTTP 转换断言 ✓）。
     """
     import base64
 

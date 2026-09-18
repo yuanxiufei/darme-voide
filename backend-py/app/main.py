@@ -65,6 +65,12 @@ from .routers.presets import router as presets_router
 from .routers.agent import router as agent_router
 from .routers.auto_pipeline import router as auto_pipeline_router
 from .routers.local_models import router as local_models_router
+from .routers.engine import router as engine_router
+from .routers.prompt_tools import router as prompt_tools_router
+from .routers.asset_gate import router as asset_gate_router
+from .routers.continuity import router as continuity_router
+from .routers.preflight import router as preflight_router  # 开跑前体检（四块串成一次调用）  # 连续性表体检（事前）  # 资产验收门（付费生成前）  # 占位符解析 + 五段质感层  # 自研引擎体检（权重就绪/头部）
+from .routers.comfyui import router as comfyui_router
 from .routers.compose import router as compose_router
 from .routers.grid import router as grid_router
 from .routers.images import router as images_router
@@ -75,6 +81,7 @@ from .routers.preset_framework import router as preset_framework_router
 from .routers.evaluation import router as evaluation_router
 from app.agent.auto_pipeline import recover_auto_pipeline_on_startup
 from app.agent.evaluation_scheduler import start_evaluation_scheduler
+from app.services.comfyui import recover_runs_on_startup as recover_comfyui_runs_on_startup
 from .routers.mcp import router as mcp_router
 from .routers.props import router as props_router
 from .routers.videos import router as videos_router
@@ -104,6 +111,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     start_evaluation_scheduler()
     # 全自动管线**崩溃恢复**：扫描中间态 episode 自动续跑（幂等，空库时直接返回）
     recover_auto_pipeline_on_startup()
+    # ComfyUI 工作流运行**崩溃恢复**：把中断的运行收尾（**绝不重提交** ✓ 避免重复占卡）
+    recover_comfyui_runs_on_startup()
     if PROXY_TO_NODE:
         print(f"[py] strangler ON: unmigrated domains -> {NODE_BACKEND_URL}")
     else:
@@ -187,6 +196,12 @@ app.include_router(compose_router)
 app.include_router(agent_router)
 app.include_router(auto_pipeline_router)
 app.include_router(local_models_router)
+app.include_router(engine_router)
+app.include_router(prompt_tools_router)
+app.include_router(asset_gate_router)
+app.include_router(continuity_router)
+app.include_router(preflight_router)
+app.include_router(comfyui_router)
 app.include_router(mcp_router)
 app.include_router(evaluation_router)
 app.include_router(merge_router)

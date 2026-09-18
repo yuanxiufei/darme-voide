@@ -640,6 +640,19 @@ export interface StyleProfile {
   updated_at: string
 }
 
+// 生产体检：**开跑前**的一条链（占位符 → 质感 → 连续性 → 验收门 ✓）。
+// ⚠️ 后端只要 `episodeId` 就**自己取数组装** ✓ ⇒ 前端**不必**知道 plan/manifest 的形状 ✓
+//    （这正是第 88→90 步接出来的接口 ✓：调用方只给 id ✓）。
+export const productionAPI = {
+  /** 按集体检 ✓ 返回 { ready, blockers, warnings, nextActions, sections, source } */
+  preflightForEpisode: (episodeId: number) =>
+    api.post('/production/preflight', { episodeId }),
+  /** 显式 payload（调试/外部用 ✓）；一般用上面那个 ✓ */
+  preflight: (payload: Record<string, any>) => api.post('/production/preflight', payload),
+  /** 体检接受哪些段、按什么顺序跑 ✓ */
+  schema: () => api.get('/production/preflight/schema'),
+}
+
 export const styleProfileAPI = {
   list: (dramaId?: number) => api.get<{ profiles: StyleProfile[] }>(`/style-profiles${dramaId ? `?drama_id=${dramaId}` : ''}`),
   get: (id: number) => api.get<{ profile: StyleProfile }>(`/style-profiles/${id}`),

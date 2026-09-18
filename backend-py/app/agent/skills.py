@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.agent.skill_parser import ParsedSkill, parse_skill, render_skill
+from app.services.skill_parser import ParsedSkill, parse_skill, render_skill
 
 __all__ = [
     "SKILL_CHAR_BUDGET_DEFAULT",
@@ -51,9 +51,9 @@ SKILL_CHAR_BUDGET_DEFAULT = 60_000
 
 
 def skills_dir() -> Path:
-    """``backend-py/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。
+    """``backend-py/app/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。
 
-    ⚠️ **唯一权威在 ``app/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前本文件、
+    ⚠️ **唯一权威在 ``app/core/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前本文件、
     ``services/skills.py`` 的常量、守卫脚本三处各写一遍 ✗）。这里只转发 —— 保留同名函数是因为
     运行链（``load_agent_skills`` 等）与测试都按这个名字调用，且它们需要**每次调用都重读
     ``SKILLS_DIR``**（常量版做不到，测试隔离时就会失灵）。

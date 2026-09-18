@@ -70,7 +70,7 @@ os.environ["DATA_ROOT"] = str(_smoke_root)
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
-from app.core.config import PROJECT_ROOT, get_data_root, get_db_path, server  # noqa: E402
+from app.core.config import PROJECT_ROOT, get_data_root, get_db_path, server, skills_dir  # noqa: E402
 from app.core.models import metadata  # noqa: E402
 
 check("config: PROJECT_ROOT == repo root", PROJECT_ROOT == REPO, str(PROJECT_ROOT))
@@ -104,6 +104,14 @@ model_schema = {t.name: [c.name for c in t.columns] for t in metadata.tables.val
 LEGACY_DB_ONLY_COLUMNS = {"minio_url"}
 # 真实库里比 Node 模型多出的**遗留表**（同上：旧版本残留，当前代码零引用）
 LEGACY_DB_ONLY_TABLES = {"assets", "props"}
+
+# **Python 侧有意新增**的表（TS 时代没有 ⇒ 冻结快照里当然也没有 ✓）。
+# ⚠️ 为什么加白名单而不是改快照：快照的**全部价值**就是「它 immutable」✗ ——
+#    去改 `db/index.ts` / `db/schema.ts` 的快照，等于把这个守卫废掉 ✗。
+#    用白名单则两全：**承认有意的新增** ✓，同时**任何其它意外表依旧报警** ✓。
+# 2026-09-17 起：`comfyui_runs`（把「跑一次工作流」记成项目的一等公民：状态机/崩溃恢复/记账 ✓，
+# 属 `services/comfyui.py` + `routers/comfyui.py` 那条**可选**链路 ✓）。
+PY_ONLY_TABLES = {"comfyui_runs"}
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +180,16 @@ log(f"column ORDER diffs (informational) : {len(order_diff)} tables")
 # 列序不影响正确性：SQLAlchemy 全程按列名生成 SQL（不会用位置 INSERT/SELECT）
 log(f"  {json.dumps(order_diff, ensure_ascii=False)[:600]}")
 
-check("schema: models == Node DDL table set", sorted(model_schema) == ddl_tables, str(only_model))
+check("schema: models == Node DDL table set", sorted(set(model_schema) - PY_ONLY_TABLES) == ddl_tables,
+      str(only_model))
 check("schema: extra DB tables are known legacy only", set(only_db) <= LEGACY_DB_ONLY_TABLES, str(only_db))
 check("schema: no real missing column", not missing_cols, json.dumps(missing_cols))
 check("schema: no extra column in models", not extra_cols, json.dumps(extra_cols))
-check("schema: table count == 29", len(model_schema) == 29, str(len(model_schema)))
-check("schema: matches Node schema.ts count", ts_schema.count("sqliteTable(") == len(model_schema))
+check("schema: table count == 29 + 白名单新增", len(model_schema) == 29 + len(PY_ONLY_TABLES),
+      str(len(model_schema)))
+check("schema: matches Node schema.ts count（扣除白名单 ✓）",
+      ts_schema.count("sqliteTable(") == len(model_schema) - len(PY_ONLY_TABLES),
+      (ts_schema.count("sqliteTable("), len(model_schema), sorted(PY_ONLY_TABLES)))
 
 # ---------------------------------------------------------------------------
 # 2) 接口契约
@@ -1982,9 +1994,16 @@ with TestClient(app) as client:
     check("gen: storyboard_id 过滤生效", len(r.json()["data"]) == 2, str(len(r.json()["data"])))
 
     # ================= skills（纯文件系统域，读写真实 skills/ 目录）=================
-    SMOKE_SKILL = "py-smoke-tmp"
+    # ⚠️ **进程唯一**的技能 id（2026-09-16 修）：此前是固定名 `py-smoke-tmp`，而它写在**真实技能库**
+    #    （`app/skills/`）里 ⇒ **两个冒烟进程并发**时会互相踩（一个建、另一个测「重复→400」时可能撞上
+    #    对方刚删/刚建的中间态）⇒ 实测出现 **474/476**（2 条 skills 断言 ✗，单跑必绿）。
+    #    加 pid 后缀后，并发跑各自隔离 ✓，兜底清理也只清自己那份 ✓。
+    SMOKE_SKILL = f"py-smoke-tmp-{os.getpid()}"
     # 兜底清理：上一轮若崩在「新建」与「删除」之间，仓库里会留下临时 skill
-    shutil.rmtree(Path(__file__).resolve().parents[2] / "skills" / SMOKE_SKILL, ignore_errors=True)
+    # ⚠️ 路径必须走**唯一权威** `skills_dir()`：2026-09-15 技能库搬到 `app/skills/` 后，
+    #    这里原先是分段拼的 `parents[2] / "skills"` ✗ ⇒ 清理**静默失效**（ignore_errors=True），
+    #    残留 skill 会让**下一轮**冒烟在「skills create」处假红（实测过：475/476，重跑即绿）✗。
+    shutil.rmtree(skills_dir() / SMOKE_SKILL, ignore_errors=True)
 
     r = client.get("/api/v1/skills")
     dump("GET /api/v1/skills", r)
@@ -2087,8 +2106,10 @@ with TestClient(app) as client:
     check("skills delete: 目录已移除，重复删除 -> 'Skill not found'",
           client.get(f"/api/v1/skills/{SMOKE_SKILL}").status_code == 400
           and client.delete(f"/api/v1/skills/{SMOKE_SKILL}").json()["message"] == "Skill not found")
+    # ⚠️ 这条断言此前是**恒真**的 ✗：它检查 `parents[2] / "skills"`（搬库后已不存在）⇒ 永远为真，
+    #    等于把「有没有残留」这条守卫**悄悄关掉**。改走 `skills_dir()` 才真的能抓到残留 ✓。
     check("skills: 临时 skill 未在仓库留下残留",
-          not (Path(__file__).resolve().parents[2] / "skills" / SMOKE_SKILL).exists(), "residue!")
+          not (skills_dir() / SMOKE_SKILL).exists(), skills_dir() / SMOKE_SKILL)
 
     # ================= upload（multipart）/ export（工程账本）=================
     r = client.post("/api/v1/upload/image")

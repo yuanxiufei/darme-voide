@@ -2,7 +2,29 @@
 
 **本文件的 ``TESTS`` 就是套件权威清单**（README 里那棵树只是摘录，别去数它）。
 
-规模（2026-09-15 实测）：**66 个套件 / 2481 项断言**（删 `backend/` 后实测；比删库前少 2 项
+规模（2026-09-17 实测）：**82 个套件 / 2911 项断言**（82 套 / 2911 项 / 0 失败 ✓
+（m1 0-40 → 1822 项、m2 40-60 → 582 项、m3 60-85 → 507 项，三批 `_BAD=0` ✓，范围互不重叠 ✓；
+与 `run_all.TESTS` 的权威套件数 **82** 一致 ✓；本地服务全停时测得 ✓）。
+⚠️ 与上一轮（78 套 / 2806 项）**独立互证** ✓：2806 + 11（`safetensors_crosscheck_test` ✓）
++ 8（`engine_pipeline_test` 90 → 98 ✓）+ 26（`engine_dit_test` ✓）+ 39（`engine_io_test` ✓）
++ 21（`engine_text_test` ✓）= **2911** ✓✓（两条路径同一个数 ✓）。
+⚠️ **批次日志标签不可复用** ✗：`runbatch.py` 按标签写 `tmp/<label>.txt` ✓ ⇒ 复用旧标签会读到
+**上一次会话的陈旧结果** ✓（2026-09-17 实测踩到过一次 ✓）⇒ 每次换新标签 ✓。
+⚠️ 其后又**新增** `engine_segments_test`（长视频分段 ✓ 54 项 ✓）⇒ 现为 **83 套**、总数**待实测** ✗
+（按规则**不推算** ✗ —— 跑一次全量即可补齐 ✓）。
+那一轮的完整复测**没跑成** ✗（环境连跳多次 ✗）⇒ 按规则**不推算总数** ✗：
+本轮改为逐个实测**受影响的**套件（管线 98/98 ✓、交叉验证 11/11 ✓、加载计划 28/28 ✓、
+体检 34/34 ✓、算法 26/26 ✓）✓。**下次跑一次全量即可补齐** ✓。
+⚠️ 每轮都与上一轮**独立互证** ✓（两条路径得出同一个数 ✓）：2762 − 46 + 65（引导 ✓）− 65 + 82
+（首帧条件 ✓）− 82 + 90（torch 依赖闸门 ✓）= **2806** ✓✓。
+⚠️ **活体类套件的项数随本地服务在否浮动** ✗：全停时 `local_services_live_test.py` 记 9 项、
+`h3_backend_live_test.py` 记 0 项（都显式 SKIP ✓）；把 H3 薄封装（8765）起来后变 14 项与 8 项 ✓。
+⇒ **别把数字当硬约束，自己跑一遍看汇总** ✓。
+⚠️ **不做算术推算** ✗（09-16 按「2526+8」算错过 13 项 ✓ 教训在案）⇒ 一律以**刚跑出来的汇总**为准 ✓。
+⚠️ **活体类套件的项数随本地服务在否浮动** ✗：全停时 `local_services_live_test.py` 记 9 项、
+`h3_backend_live_test.py` 记 0 项（都显式 SKIP ✓）；把 H3 薄封装（8765）起来后变 14 项与 8 项
+⇒ 合计 **+13**（这个差也已实测过 ✓）⇒ **别把数字当硬约束，自己跑一遍看汇总** ✓。
+跳过条数一律显式打印（`（skip n：服务未启动）`）⇒ **不要把这几个数字当硬约束，自己跑一遍看汇总** ✓）（删 `backend/` 后实测；比删库前少 2 项
 **显式 `[skip]`**，见 README；另**新增 2 个套件**，都是「删库后 Python 成为唯一后端」才存在的不变量：
 ``frontend_api_coverage_test.py``（前端每个调用点都在后端路由表里）与 ``contract_mirror_test.py``
 （``frontend/app/types/contracts.ts`` 的字段在后端源码里都能找到 —— 共享契约只许单向同步：后端改 ⇒ 镜像跟）。各套件**各自独立进程**、都不碰真实库：
@@ -97,6 +119,42 @@ TESTS = [
     ("前端调用点 ↔ 后端路由覆盖", "frontend_api_coverage_test.py"),
     ("共享契约镜像（contracts.ts ↔ 后端）", "contract_mirror_test.py"),
     ("层级守卫（app/ 内单向依赖）", "layering_test.py"),
+    ("资产布局守卫（三类资产在 app/ 内 + 常量权威）", "assets_layout_test.py"),
+    ("本地 H3 链接缝契约（适配器 ↔ 8765 薄封装）", "h3_chain_test.py"),
+    ("本地服务活体接缝（ollama 真推理；其余按设计 SKIP）", "local_services_live_test.py"),
+    ("H3 全栈活体（配置 → 服务层 → 真 8765 → 落库 + task_id 交叉证明）", "h3_backend_live_test.py"),
+    ("CosyVoice 接缝契约（JSON↔form/multipart、裸 PCM→WAV；真 HTTP stub 上游）", "cosyvoice_seam_test.py"),
+    ("ComfyUI 能力（客户端 + UI→API 工作流转换；真 HTTP stub ComfyUI）", "h3_comfyui_test.py"),
+    ("H3 阶段2 闭环（body → 组装/注入 → 提交 → 轮询 → 取片 → /files → /free）", "h3_stage2_test.py"),
+    ("ComfyUI 能力门面（系统/目录/队列/历史/作业/媒体 + 通用工作流）", "comfyui_capability_test.py"),
+    ("自研引擎·算法层（σ 调度 / 帧网格与像素预算 / 采样循环；零依赖）", "engine_core_test.py"),
+    ("自研引擎·权重体检（纯 Python 读 safetensors + 就绪报告；零依赖）", "engine_inventory_test.py"),
+    ("自研引擎·管线编排（阶段/事件/取消/错误归因 + 干跑后端；零依赖）", "engine_pipeline_test.py"),
+    ("自研引擎·加载计划（量化配套/层号连续性/显存排班；零依赖）", "engine_loader_test.py"),
+    ("safetensors 交叉验证（纯 Python 读取器 vs 官方库；缺库则显式 SKIP）", "safetensors_crosscheck_test.py"),
+    ("自研引擎·真模型层（DiT 前向/条件生效/权重往返/差异报告；CPU 可验）", "engine_dit_test.py"),
+    ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片）", "engine_io_test.py"),
+    ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
+    ("自研引擎·长视频分段（网格长度/重叠接缝/保留帧守恒 + 首帧落 PNG 传递）", "engine_segments_test.py"),
+    ("自研引擎·命名映射（预设改名/合并顺序/**干跑报告**缺哪些键 + 往返装载逐位一致）", "engine_mappings_test.py"),
+    ("短剧提示词生产契约（占位符**解析成具体内容** + Mx-Shell 五段质感层；零依赖）",
+     "prompt_contract_test.py"),
+    ("资产清单 + 验收门（依赖拓扑/成环点名/逐镜阻断/**付费生成前的门**；零依赖）",
+     "asset_gate_test.py"),
+    ("连续性表（§6-§11：道具时间线/越轴/线索提前暴露/转场动机/可删动作；零依赖；**事前**）",
+     "continuity_test.py"),
+    ("Agent 上下文预算（估算/机械压缩/**tool 往返成对**/摘要交给调用方；零依赖）",
+     "agent_context_test.py"),
+    ("开跑前体检（四块串成一次调用：占位符→质感→连续性→验收门 + 按成本排序的行动项）",
+     "preflight_test.py"),
+    ("请求体守卫（`read_json` 已保证 dict ⇒ 路由里的 isinstance 判断是**死代码**；AST 检出）",
+     "read_json_guard_test.py"),
+    ("分镜→连续性适配器（只映射真实列、**不补默认值** + 契约字段的 schema 缺口清单）",
+     "storyboard_continuity_test.py"),
+    ("体检取数（按 episodeId 组装；逐镜 asset_status→逐资产验收 + 空集**不给绿灯**）",
+     "preflight_source_test.py"),
+    ("连续性写入（词汇**拒收而非忽略** / 幂等替换 / **全有或全无** / 归属校验；临时库 ✓）",
+     "continuity_store_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

@@ -498,7 +498,9 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
         ("openai", "/v1"),
         ("openrouter", "/v1"),
         ("chatfire", "/v1"),
-        ("ollama", "/v1"),
+        # ⚠️ `ollama` **不在此列**：2026-09-16 活体实测 —— 本机 qwen3 是思考模型，走 OpenAI 兼容的
+        #    `/v1/chat/completions` 时 `message.content` **恒为空串**（正文在 `reasoning` 里）✗
+        #    ⇒ ollama 已改用**原生** `/api/chat` + `think:false`（见 registry 与 text_adapters）。
         ("volcengine", "/api/v3"),
         ("ali", "/compatible-mode/v1"),
         ("minimax", "/v1"),
@@ -508,9 +510,23 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
         )["url"]
         check(f"text: {provider} 前缀 {prefix}", url == f"http://x.com{prefix}/chat/completions", url)
     check(
-        "text: 7 家共享同一个实例（不是复制体）",
-        all(get_text_adapter(p) is openai_text for p in ("openai", "openrouter", "chatfire", "ollama", "volcengine", "ali", "minimax")),
+        "text: 6 家共享同一个实例（不是复制体）",
+        all(get_text_adapter(p) is openai_text
+            for p in ("openai", "openrouter", "chatfire", "volcengine", "ali", "minimax")),
     )
+    # ollama 走**原生**端点：/api/chat + think:false + options.num_predict（不是 OpenAI 形状）
+    ollama_text = get_text_adapter("ollama")
+    ollama_req = ollama_text.build_request(
+        {"provider": "ollama", "baseUrl": "http://x.com"},
+        {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}], "maxTokens": 8, "temperature": 0},
+    )
+    check("text: ollama 用原生 /api/chat（**不**走 OpenAI 兼容端点）",
+          ollama_req["url"] == "http://x.com/api/chat", ollama_req["url"])
+    check("text: ollama 关思考 + 上限字段名是 num_predict + temperature 保留 0",
+          ollama_req["body"].get("think") is False and ollama_req["body"].get("stream") is False
+          and ollama_req["body"]["options"] == {"temperature": 0, "num_predict": 8}, ollama_req["body"])
+    check("text: ollama 解析原生 message.content",
+          ollama_text.parse_response({"message": {"role": "assistant", "content": "收到"}}) == "收到")
     check(
         "text: temperature 是 nullish（传 0 保留 0）",
         openai_text.build_request({"provider": "openai"}, {"model": "m", "messages": [], "temperature": 0})["body"]["temperature"]

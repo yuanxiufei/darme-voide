@@ -171,12 +171,21 @@ def _case_step_section_unregistered() -> None:
     ⚠️ 2026-09-15 真实事故：一条 `re.sub` 把索引里的第 40/41 步与「待办」条目一起改写掉，
     而末节（第 42 步）锚点还在 ⇒ ④ 全绿、**三条跳读入口静默消失** ✗。本用例锁住 ④b。
     """
-    block = max(_blocks(_read("INDEX.md")), key=lambda item: item["log"])
-    log_lines = _lines_of(_read(block["log"]))
-    steps = [index + 1 for index, line in enumerate(log_lines)
-             if re.match(r"^##\s*S7 第\s*\d+\s*步", line)]
-    if len(steps) < 2:
-        raise AssertionError(f"夹具失配：{block['log']} 内步骤小节不足 2 个")
+    # ⚠️ 夹具选择**不能固定取最新那篇**：有的日记只有 1 个步骤小节（当天刚开一篇、只写了 1 步 ✓）
+    #    ⇒ 硬要求 ≥2 会让自检**自己失配**（2026-09-16 实测：「夹具失配：2026-09-16.md 内步骤小节
+    #    不足 2 个」✗）。改为「按日期**从新到旧**取第一篇含 ≥2 个步骤小节的日志」✓ ——
+    #    用例意图不变（抹掉中间某步的锚点），且对「日记粒度」不敏感 ✓。
+    chosen = None  # (INDEX 里的日志块, 该日志的步骤小节行号列表)
+    for candidate in sorted(_blocks(_read("INDEX.md")), key=lambda item: item["log"], reverse=True):
+        log_lines = _lines_of(_read(candidate["log"]))
+        found = [index + 1 for index, line in enumerate(log_lines)
+                 if re.match(r"^##\s*S7 第\s*\d+\s*步", line)]
+        if len(found) >= 2:
+            chosen = (candidate, found)
+            break
+    if chosen is None:
+        raise AssertionError("夹具失配：INDEX.md 里没有任何日志含 ≥2 个步骤小节")
+    block, steps = chosen
     target = steps[-2]
     lines = list(block["lines"])
     pattern = re.compile(rf"@{target}\b")

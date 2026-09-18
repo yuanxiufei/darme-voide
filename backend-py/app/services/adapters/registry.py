@@ -16,7 +16,7 @@ from .image_adapters import (
     OpenAIImageAdapter,
     VolcEngineImageAdapter,
 )
-from .text_adapters import GeminiTextAdapter, OpenAICompatibleTextAdapter
+from .text_adapters import GeminiTextAdapter, OllamaTextAdapter, OpenAICompatibleTextAdapter
 from .tts_adapters import CosyVoiceTTSAdapter, MiniMaxTTSAdapter
 from .video_adapters import (
     AliVideoAdapter,
@@ -78,7 +78,10 @@ text_adapters: dict[str, Any] = {
     "openai": _openai_compatible_text,
     "openrouter": _openai_compatible_text,
     "chatfire": _openai_compatible_text,
-    "ollama": _openai_compatible_text,
+    # ⚠️ ollama **不**走 OpenAI 兼容端点：本机 qwen3 是思考模型，走 /v1/chat/completions 时
+    #    content 恒为空串（正文在 reasoning 里）⇒ 必须用原生 /api/chat + think:false。
+    #    证据与断言见 tests/local_services_live_test.py（2026-09-16 活体实测）。
+    "ollama": OllamaTextAdapter(),
     "volcengine": _openai_compatible_text,
     "ali": _openai_compatible_text,
     "minimax": _openai_compatible_text,

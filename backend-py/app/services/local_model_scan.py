@@ -38,9 +38,10 @@ from ..core.config import PROJECT_ROOT
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
 #: 的独立服务 + 项目自带的 ``h3`` 薄封装」的落脚点，属后端资产，与后端代码同包更归拢。
-#: ⚠️ **唯一权威在 ``app/config.py``**（2026-09-15 收口：本文件原先自己算一遍 ``parents[2]`` ✗）；
+#: ⚠️ **唯一权威在 ``app/core/config.py``**（2026-09-15 收口：本文件原先自己算一遍 ``parents[2]`` ✗）；
 #: ``scripts/model_manager.py`` 那份是同名独立实现（scripts 不 import ``app.*``），靠注释同步。
-BACKEND_PY_ROOT = config.BACKEND_PY_ROOT
+#: ⚠️ 与 ``config.BACKEND_PY_ROOT`` 区分：**资产根是 `app/`**（三类资产住在这里）⇒ 用 `APP_ROOT`。
+LOCAL_SERVICES_ROOT = config.APP_ROOT / "local_services"
 
 __all__ = [
     "MODEL_EXTS",
@@ -309,7 +310,7 @@ def get_default_roots() -> list[str]:
     comfyui_models_dir = os.path.join(comfyui_root, "models") if comfyui_root else ""
     models_dir = os.environ.get("MODELS_DIR") or cfg.get("models_dir") or comfyui_models_dir
     services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
-                    or str(BACKEND_PY_ROOT / "app" / "local_services"))
+                    or str(LOCAL_SERVICES_ROOT))
 
     # 模型存储目录与 ComfyUI 默认模型目录**并存**扫描（设置自定义存储目录后，ComfyUI 目录仍会被扫）
     for candidate in (models_dir, comfyui_models_dir, services_dir, comfyui_root):

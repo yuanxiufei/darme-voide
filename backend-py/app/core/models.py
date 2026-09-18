@@ -660,6 +660,39 @@ api_usage = Table(
     _txt("created_at", nn=True),
 )
 
+#: ComfyUI 工作流运行记录（2026-09-17）—— **这是「实现」而不是「透传」的关键** ✓：
+#: 把「跑一次工作流」变成**我们系统的一等公民**（有 DB 记录、能崩溃恢复、能记账、产物落在我们数据根 ✓），
+#: 而不是把 ComfyUI 的历史/队列原样透给别人 ✗。
+#: 状态机：``queued`` → ``processing`` → ``succeeded`` / ``failed``（与本项目其它生成链路同形 ✓）。
+comfyui_runs = Table(
+    "comfyui_runs", metadata,
+    _pk(),
+    #: ``h3``（H3 视频薄封装）或 ``workflow``（任意工作流）✓
+    _txt("kind", nn=True, default="workflow"),
+    _txt("workflow_name"),
+    _txt("source_prompt"),
+    #: 请求参数与注入清单（JSON 文本 ✓）
+    _txt("params"),
+    _txt("status", nn=True, default="queued"),
+    #: 人类可读的当前步骤（``submit`` / ``poll`` / ``download`` … ✓）
+    _txt("step"),
+    #: **上游**（8765 服务）的任务 id —— 崩溃恢复靠它续询 ✓
+    _txt("remote_task_id"),
+    _txt("outputs"),
+    _txt("primary_url"),
+    #: 落进**我们数据根**的相对路径（``static/comfyui/<uuid>.mp4`` ✓ 前端可直接播 ✓）
+    _txt("local_path"),
+    _txt("error_msg"),
+    _txt("warnings"),
+    _txt("settings"),
+    _int("elapsed_ms"),
+    _real("requested_seconds"),
+    _real("used_seconds"),
+    _bool("is_local", True),
+    _txt("created_at", nn=True),
+    _txt("updated_at", nn=True),
+)
+
 asset_versions = Table(
     "asset_versions", metadata,
     _pk(),

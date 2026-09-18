@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import skills_dir
-from .skill_parser import parse_skill
+from .skill_parser import ParsedSkill, parse_skill
 
-#: 技能库目录 —— **唯一权威是 ``app/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前
+#: 技能库目录 —— **唯一权威是 ``app/core/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前
 #: 本文件、``services/agents/skills.py``、守卫脚本三处各写一遍 ✗）。
 #: 这里在**导入期**绑定为常量，与迁移前行为一致（要让 ``SKILLS_DIR`` 环境变量生效，需在 import 前设好）；
 #: 运行链里需要「每次调用都重读 env」的地方，用 ``services/agents/skills.py`` 的 ``skills_dir()``。
@@ -80,7 +80,7 @@ def load_skill(skill_id: str) -> dict[str, Any] | None:
         return hit[1]
 
     try:
-        parsed: dict[str, Any] | None = parse_skill(file_path.read_text(encoding="utf-8"), skill_id)
+        parsed: ParsedSkill | None = parse_skill(file_path.read_text(encoding="utf-8"), skill_id)
     except OSError:
         parsed = None
     _parsed_cache[skill_id] = (mtime, parsed)
@@ -97,8 +97,8 @@ def resolve_default_skills(agent_type: str) -> list[str]:
     entries = []
     for skill_id in list_core_skill_ids():
         parsed = load_skill(skill_id)
-        if parsed and agent_type in parsed["metadata"]["agents"]:
-            entries.append((parsed["metadata"]["priority"], skill_id))
+        if parsed and agent_type in parsed.metadata.agents:
+            entries.append((parsed.metadata.priority, skill_id))
         elif parsed is None:
             continue
     entries.sort(key=lambda e: (e[0], e[1]))

@@ -52,6 +52,7 @@ from app.services.task_logger import (
 from app.services.vendor_errors import fetch_with_retry, format_vendor_http_error
 from app.services.visual_graph import build_visual_graph_guidance
 from app.mcp.client import discover_mcp_tools
+from app.agent import context_budget
 from app.agent.protocol import build_protocol_contract, parse_agent_protocol
 from app.agent.skills import load_agent_skills, resolve_default_skills
 from app.agent.tool import ToolRegistry
@@ -492,6 +493,16 @@ async def default_generate(
     text = ""
 
     for _ in range(max(1, int(max_steps))):
+        # ⚠️ **上下文预算**（移植自 reference/Mini-Agent 的思路 ✓）：
+        #    这个循环每步把**整份 messages** 重发 ✓ ⇒ 多步工具链会一路撑大 ✗。
+        #    这里做的是**只机械层**（老的 tool 输出换占位正文 ✓）—— 零 LLM 调用 ✓、
+        #    **消息条数不变** ✓ ⇒ tool 往返的成对关系不会被破坏 ✓（破坏它会直接 400 ✗）。
+        #    机械层不够时会带出 ``needsSummarize`` ✓（**要不要花那次摘要调用由上层决定** ✗ —— 
+        #    本循环不擅自调模型 ✓）。
+        budget_plan = context_budget.plan_compression(messages)
+        if budget_plan.elide:
+            messages = context_budget.apply_plan(messages, budget_plan)
+            steps.append({"contextBudget": budget_plan.to_dict()})
         request = adapter.build_request(config, {
             "model": model,
             "messages": messages,

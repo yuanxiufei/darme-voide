@@ -1,0 +1,524 @@
+"""**torch 后端** —— 真张量实现（2026-09-17；本机已装 CPU 版 torch 2.14 ✓）。
+
+## 它现在是**真**的哪一半（务必分清 ✗）
+
+| 维度 | 现状 |
+|---|---|
+**张量本身** | ✅ **真 torch 张量** ✓（`realTensors=True` ✓）—— 不再用 `dryrun` 那个 12 行 `list[float]` 假张量 ✓ |
+**随机与复现** | ✅ 真 `torch.Generator().manual_seed(seed)` + `torch.randn` ✓ ⇒ 同种子**逐位可复现** ✓ |
+**采样/引导/首帧数学** | ✅ 全部跑在真张量上 ✓（与 `dryrun` 共用同一份 `sampler`/`guidance`/`conditioning` ✓） |
+**模型前向（DiT/TE/VAE）** | ❌ **未接** ✗ —— H3 权重（主 DiT **19.53 GiB** ✗）没下载 ✓，架构装载也还没写 ✓ ⇒ 前向是**占位实现** ✗ |
+**产物** | ❌ **不是生成画面** ✗ ⇒ `synthetic` **保持 True** ✓（`write` 落的是张量清单 ✓，不是 mp4 ✗） |
+
+⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（画面不真 ✗）。
+UI/接口据此可以显示「真张量 ✓ / 真模型 ✗」而不至于误导 ✓。
+
+## 为什么本机是 CPU 版
+
+本机核实**没有 NVIDIA 显卡** ✗（Iris Xe 集显 ✓、无 `nvidia-smi` ✓）⇒ 装 **CPU 轮子**（124 MB ✓）才有意义 ✓
+（2.5 GB CUDA 轮子在这里白装 ✗）。代码**一行都不用改** ✓：到 A5000 那台机器换 CUDA 轮子即可 ✓
+（`device` 自动探测 ✓）。
+
+## 依赖闸门（保留 ✓）
+
+模块**不 import torch** ✓（懒加载 ✓）⇒ 没装也能 :meth:`TorchBackend.describe` ✓。
+不可用时 ``reason`` 分两类 ✗：``deps``（去装包 ✓）／``pending``（依赖齐了但**这部分实现待写** ✓）。
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import dit as dit_mod
+from . import inventory as inv
+from . import loader
+from . import media as media_mod
+from . import safetensors as st
+from . import text_encoder as te_mod
+from . import vae as vae_mod
+from . import weights as weights_mod
+
+__all__ = [
+    "DEPENDENCIES",
+    "PENDING_PARTS",
+    "TorchBackend",
+    "TorchBackendUnavailable",
+    "dependency_status",
+    "torch_available",
+]
+
+
+class TorchBackendUnavailable(RuntimeError):
+    """torch 后端暂时不可用 ✓ —— ``reason`` 区分「缺依赖」与「实现待写」✓。"""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Dependency:
+    module: str
+    package: str
+    purpose: str
+    approximate_mb: int
+
+
+#: 真后端所需依赖 ✓（``module`` 用于探测 ✓，``package`` 用于给出安装命令 ✓）
+DEPENDENCIES: tuple[_Dependency, ...] = (
+    _Dependency("torch", "torch", "张量与设备运行时 ✓", 124),
+    _Dependency("numpy", "numpy", "数组互转 / 数值工具", 20),
+    _Dependency("safetensors", "safetensors", "权重读取（本仓另有纯 Python 读取器 ✓ 体检不必装 ✓）", 1),
+    _Dependency("PIL", "pillow", "首帧/参考图解码 ✓", 3),
+)
+
+#: ⚠️ **仍未实现**的部分 ✓（依赖齐了、DiT 也装好了，也还是这些 ✗）—— 分开报，别让人去查环境 ✗
+PENDING_PARTS: tuple[str, ...] = (
+    "H3 权重未下载（主 DiT 19.53 GiB ✗ ⇒ 用 `loader.plan_stage('h3')` 看还差多少 ✓）",
+    "H3 张量命名 → 本仓模块名的**映射表**（真权重到手后才能定 ✓，见 `weights.load_module_weights` 的 key_map ✓）",
+    "H3 的 DiTConfig（hidden/depth/heads/vae_scale —— 真权重元数据里读 ✓ 或人工给 ✓）",
+    "文本编码器前向（Qwen3-VL-32B nvfp4 ✗ ⇒ 目前条件向量是占位 ✓）",
+    "VAE 解码（视频/音频 ✗）与出片落盘（帧→mp4 / 音频→wav ✗）",
+)
+
+
+def _spec(name: str) -> Any:
+    try:
+        return importlib.util.find_spec(name)
+    except (ImportError, ValueError):  # pragma: no cover - 极少数损坏的安装
+        return None
+
+
+def dependency_status() -> dict[str, Any]:
+    """逐项依赖现状 ✓（**不导入**它们 ✓ ⇒ 毫秒级、无副作用 ✓）。"""
+    items: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for dependency in DEPENDENCIES:
+        found = _spec(dependency.module) is not None
+        items.append({
+            "module": dependency.module, "package": dependency.package,
+            "present": found, "purpose": dependency.purpose,
+            "approximateMB": dependency.approximate_mb,
+        })
+        if not found:
+            missing.append(dependency.package)
+    return {
+        "items": items,
+        "missing": missing,
+        "ready": not missing,
+        "install": ([f"pip install {' '.join(missing)}"] if missing else []),
+        "note": "有 NVIDIA 卡就用 CUDA 轮子（索引源按驱动选 ✓）；没有就得用 CPU 轮子 ✓"
+                "（本项目**刻意不写死版本** ✗）",
+    }
+
+
+def torch_available() -> tuple[bool, str]:
+    """``(可用?, 原因)`` ✓ —— 不可用时原因**可行动** ✓。"""
+    status = dependency_status()
+    if status["ready"]:
+        return True, "依赖齐备 ✓"
+    return False, (f"缺少依赖：{', '.join(status['missing'])}（共约 "
+                   f"{sum(item['approximateMB'] for item in status['items'] if not item['present'])} MB ✓）"
+                   f" ⇒ 先跑 {status['install'][0]} ✓")
+
+
+class TorchBackend:
+    """真张量后端 ✓（``realTensors=True`` ✓ / ``synthetic=True`` ✗ —— 见模块头那张表 ✓）。"""
+
+    name = "torch"
+    #: ⚠️ **产物不是真画面** ✗（前向是占位 ✓）—— 刻意保持 True ✓，不许因为"用上 torch 了"就改成 False ✗
+    synthetic = True
+    #: 张量是真的 ✓（与 :class:`app.services.engine.dryrun.DryRunBackend` 的本质区别 ✓）
+    realTensors = True
+    #: 条件/噪声的向量长度（占位前向用 ✓ —— 真模型接入后由架构决定 ✓）
+    width = 512
+
+    def __init__(self, device: str | None = None) -> None:
+        available, reason = torch_available()
+        self._available = available
+        self._reason = reason
+        self._device = device or self._detect_device()
+        #: 装载成功后这里就是**真模型** ✓（None ⇒ 前向走占位 ✓，`describe()` 会如实说 ✓）
+        self._model: Any = None
+        self._config: Any = None
+        self._loadReport: dict[str, Any] | None = None
+        #: 参考 VAE ✓（挂了才解码出真帧 ✓）；未训练 ⇒ 画面是噪声 ✓（如实标 ✓）
+        self._vae: Any = None
+        self._vaeConfig: Any = None
+        #: 参考文本编码器 ✓（挂了才出真条件 ✓）；同样未训练 ⇒ 无数值语义 ✓（如实标 ✓）
+        self._textEncoder: Any = None
+        self._textConfig: Any = None
+        self._tokenizer: Any = None
+        #: 首帧条件**实际走了哪条路** ✓（真 VAE 编码 / 占位 ✓ —— 由管线回给调用方 ✓）
+        self._conditioningNote: dict[str, Any] | None = None
+
+    @property
+    def conditioningNote(self) -> dict[str, Any] | None:  # noqa: N802 —— 与前端 camelCase 对齐 ✓
+        """首帧条件的实况自述 ✓（管线会把它并进 `conditioning` 结果里 ✓）。"""
+        return self._conditioningNote
+
+    def _detect_device(self) -> str:
+        """有 CUDA 就用 CUDA ✓，否则 CPU ✓（**实测探测**，不猜 ✗）。"""
+        if not self._available:
+            return "cpu"
+        torch = self._torch()
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _torch(self) -> Any:
+        """懒导入 ✓（模块级不 import ✓ ⇒ 没装 torch 也能 import 本模块 ✓）。"""
+        import torch  # noqa: PLC0415
+
+        return torch
+
+    def _gate(self) -> None:
+        if not self._available:
+            raise TorchBackendUnavailable(
+                f"torch 后端不可用：{self._reason}"
+                f"　⇒ 在此之前可用干跑后端验编排 ✓（`engine/dryrun.py` ✓）",
+                reason="deps")
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def load_weights(self, *, path: str | None = None,
+                     config: Any = None) -> dict[str, Any]:
+        """**装载真模型** ✓ ⇒ 之后 :meth:`denoise` 走**真前向** ✓（不再占位 ✓）。
+
+        * ``path`` 省略 ⇒ 按 ``configs/models.json`` 里的主 DiT 解析 ✓（同一份清单 ✓）；
+        * ``config`` 省略 ⇒ 先从权重 ``__metadata__`` 读 ✓（读到就用 ✓）；读不到 ⇒ **报错** ✗
+          （**不猜结构** ✓；道理同 :mod:`dit` 的模块注释 ✓）；
+        * 权重没下载 ⇒ ``reason="pending"`` ✓ + 给出还缺多少 ✓（`loader` 的口径 ✓）。
+        """
+        self._gate()
+        target = Path(path) if path else self._default_dit_path()
+        if target is None or not Path(target).exists():
+            plan = self._plan_for_default_dit()
+            raise TorchBackendUnavailable(
+                f"主 DiT 权重未就绪（{target or '清单里没有可解析路径'} ✗）"
+                f"　⇒ 先按加载计划把权重装上 ✓：{plan}",
+                reason="pending")
+
+        info = st.inspect(Path(target))
+        if config is None:
+            config = dit_mod.DiTConfig.from_metadata(info.metadata)   # 读不到会**明确报错** ✓
+        report = weights_mod.load_module_weights(
+            dit_mod.build_dit(config), target, device=self._device)
+        if not report.complete:
+            raise TorchBackendUnavailable(
+                f"权重与模型结构对不上 ✗（complete=False ⇒ **不是**完整模型）"
+                f"　：{report.to_dict()}",
+                reason="pending")
+        self._model = dit_mod.build_dit(config).to(self._device)
+        weights_mod.load_module_weights(self._model, target, device=self._device)
+        self._config = config
+        self._loadReport = report.to_dict()
+        return self._loadReport
+
+    def _default_dit_path(self) -> str | None:
+        """按清单找主 DiT ✓（``category=video`` 且 ``required`` 的第一个 ✓ —— 与体检同一份清单 ✓）。"""
+        for entry in inv.load_catalog()["models"]:
+            if entry.get("category") == "video" and entry.get("required") \
+                    and str(entry.get("kind")) == "diffusion_models":
+                resolved = inv.component_path(entry)
+                return str(resolved) if resolved else None
+        return None
+
+    def _plan_for_default_dit(self) -> str:
+        """把"还差什么"用 :mod:`loader` 的口径说清 ✓（而不是只说一句"缺权重" ✗）。"""
+        try:
+            stage = loader.plan_stage("h3")
+            residency = stage.get("residency") or {}
+            return (f"缺 {len(residency.get('missing') or [])} 项 ✓"
+                    f"（合计约 {stage.get('requiredWeightsGiB', 0)} GiB ✓，"
+                    f"峰值驻留 {residency.get('peakResidentGiB', 0)} GiB ✓）")
+        except Exception:  # noqa: BLE001 - 诊断信息不该反过来把主流程搞崩 ✓
+            return "（加载计划不可用 ✓）"
+
+    def describe(self) -> dict[str, Any]:
+        """自述 ✓（**只探依赖 + 报设备**，不做张量操作 ✓ ⇒ 任何时候都能调 ✓）。"""
+        torch_version = ""
+        if self._available:
+            try:
+                torch_version = str(self._torch().__version__)
+            except Exception:  # noqa: BLE001 - pragma: no cover
+                torch_version = ""
+        return {
+            "name": self.name, "synthetic": self.synthetic, "realTensors": self.realTensors,
+            "available": self._available, "reason": self._reason,
+            "device": self._device, "torchVersion": torch_version,
+            "cudaAvailable": self._device == "cuda",
+            # ⚠️ 四个层次**分开答** ✓（混在一起就会变成"看着像能做、其实不行" ✗）：
+            #    依赖齐了 ✓ → 张量是真的 ✓ → DiT 真前向（装了权重才是 ✓）→ 能不能出片 ✗
+            "modelLoaded": self._model is not None,
+            "vaeLoaded": self._vae is not None,
+            "textEncoderLoaded": self._textEncoder is not None,
+            "tokenizer": (getattr(self._tokenizer, "name", None)
+                          if self._tokenizer is not None else None),
+            # 落盘能力其实来自 ffmpeg ✓ ⇒ 一并报出来（缺 ffmpeg 时前端能提前说清 ✓）
+            "ffmpeg": {"available": media_mod.have_ffmpeg(), "version": media_mod.ffmpeg_version()},
+            # 「装了模型 + 给了 vae_scale」⇒ 拿真形状的潜变量 ✓；否则一维占位 ✓（如实标 ✓）
+            "latentMode": "real-shape" if (self._model is not None and self._config is not None
+                                           and getattr(self._config, "vae_scale", 0))
+            else "placeholder-1d",
+            "loadReport": self._loadReport,
+            "config": self._config.to_dict() if self._config is not None else None,
+            # 就算 DiT 真前向了，也**还缺** TE/VAE/落盘 ⇒ 现在仍然**不能出片** ✗（如实 ✓）
+            "canGenerate": False,
+            "pendingParts": list(PENDING_PARTS),
+            "dependencies": dependency_status(),
+        }
+
+    # ── GenerationBackend 协议 ──────────────────────────────────────────
+    def condition_width(self) -> int:
+        """条件向量宽度 ✓ —— **装了模型就按它的 ``text_dim``** ✓（否则类默认 ✓）。
+
+        ⚠️ 这里踩过一次：初版一律用类默认 512 ✗，而测试配置的 ``text_dim=16`` ✓
+        ⇒ 真前向报 `mat1 and mat2 shapes cannot be multiplied (1x512 and 16x32)` ✗
+        （自检 ㉗ 整链跑到才暴露 ✓ —— 又一条"必须端到端跑"的证据 ✓）。
+        """
+        if self._config is not None:
+            return int(getattr(self._config, "text_dim", self.width) or self.width)
+        return self.width
+
+    def _condition(self, text: str, width: int | None = None) -> Any:
+        """文本 → **真张量**条件 ✓（占位：TE 权重未下载 ✗ ⇒ 用 sha256 造确定性向量 ✓ 可复现 ✓）。"""
+        torch = self._torch()
+        count = int(width or self.condition_width())
+        digest = hashlib.sha256(str(text).encode("utf-8")).digest()
+        values = [((digest[index % len(digest)] / 255.0) * 2.0 - 1.0)
+                  for index in range(count)]
+        return torch.tensor(values, dtype=torch.float32, device=self._device)
+
+    def encode_text(self, request: Any) -> dict[str, Any]:
+        """提示词 → 条件 ✓：挂了文本编码器就走**真编码器** ✓，否则用 sha256 占位 ✓（都如实标 ✓）。"""
+        self._gate()
+        if self._textEncoder is not None:
+            torch = self._torch()
+            config = self._textConfig
+            results: dict[str, Any] = {}
+            meta: dict[str, Any] = {}
+            positive_ids: list[int] = []
+            for name, text in (("positive", request.prompt), ("negative", request.negative)):
+                ids, original, truncated = te_mod.tokenize_prompt(
+                    self._tokenizer, text, max_length=config.max_length)
+                tensor = torch.tensor([ids], dtype=torch.long, device=self._device)
+                with torch.no_grad():
+                    results[name] = self._textEncoder(tensor)
+                if name == "positive":
+                    positive_ids = list(ids)
+                meta[name] = {"tokens": len(ids), "originalTokens": original,
+                              "truncated": truncated}
+            # ⚠️ `ids` 必须是**真的 id 列表** ✓（第一版把 meta 字典塞进了 `ids` ✗ ⇒ 调用方
+            #    `len(...)` 拿到的是"字典键数"而不是 token 数 ✓ —— 自检 ⑯ 当场红 ✓ 已改 ✓）；
+            #    逐分支明细放 `byBranch` ✓。
+            return {**results, "ids": positive_ids, "tokens": len(positive_ids),
+                    "originalTokens": meta["positive"]["originalTokens"],
+                    "truncated": meta["positive"]["truncated"],
+                    "byBranch": meta, "textEncoder": "reference-untrained"}
+        return {"positive": self._condition(request.prompt),
+                "negative": self._condition(request.negative),
+                "textEncoder": "sha256-placeholder"}
+
+    def init_latents(self, plan: Any, request: Any) -> Any:
+        """初始噪声 ✓ —— **真** `torch.randn` + **真**种子 ✓ ⇒ 同种子逐位可复现 ✓。
+
+        * **装了真模型**（且配置给了 ``vae_scale`` ✓）⇒ 造**真形状**的潜变量 ✓
+          ``(1, C, 潜帧, H/vae, W/vae)`` ✓ ⇒ 真前向才吃得下 ✓；
+        * 否则 ⇒ 退回**一维占位** ✓（只为验编排 ✓，`describe()["latentMode"]` 会如实说 ✓）。
+        """
+        self._gate()
+        torch = self._torch()
+        shape = self.latent_shape(plan)
+        generator = torch.Generator(device="cpu").manual_seed(int(request.seed))
+        if shape is None:
+            noise = torch.randn(self.width, generator=generator, dtype=torch.float32)
+            return noise.to(self._device)
+        noise = torch.randn(*shape, generator=generator, dtype=torch.float32)
+        return noise.to(self._device)
+
+    def latent_shape(self, plan: Any) -> tuple[int, ...] | None:
+        """潜变量形状 ✓（``None`` = 信息不够 ⇒ **用占位** ✓ 并如实标注 ✓）。
+
+        ⚠️ 需要 ``vae_scale``（像素↔潜空间边长比 ✓）与潜帧数 ✓；**任一缺就返回 None** ✗
+        —— 猜一个"看起来合理"的 8 只会让真机上错得莫名其妙 ✗。
+        """
+        config = self._config
+        if self._model is None or config is None or not getattr(config, "vae_scale", 0):
+            return None
+        latent_frames = getattr(plan, "latent_frames", None)
+        if not latent_frames:
+            return None
+        scale = int(config.vae_scale)
+        return (1, int(config.in_channels), int(latent_frames),
+                max(1, int(plan.height) // scale), max(1, int(plan.width) // scale))
+
+    def denoise(self, latents: Any, sigma: float, condition: Any, request: Any) -> Any:
+        """**真前向**（装了模型 ✓）或**占位**（没装 ✓）—— 由 :meth:`describe` 如实标注 ✓。
+
+        * 真前向：``x0 = DiT(x, σ, context)``（流匹配 velocity → x0 ✓ 见 :func:`dit.flow_match_x0` ✓）；
+        * 占位：``(1−g)·cond + g·x``（``g→0`` 当 ``σ→0`` ✓ 保证采样按时收敛 ✓）。
+        """
+        self._gate()
+        torch = self._torch()
+        sigma = float(sigma)
+        if self._model is not None:
+            with torch.no_grad():
+                prediction = self._model(latents, sigma, condition)
+            return dit_mod.flow_match_x0(prediction, latents, sigma)
+        with torch.no_grad():
+            g = min(0.5, sigma / (sigma + 1.0)) if sigma > 0 else 0.0
+            return condition * (1.0 - g) + latents * g
+
+    def condition_first_frame(self, latents: Any, image_path: str, mask: list[float],
+                              plan: Any, request: Any) -> Any:
+        """首帧条件 ✓ —— **真张量按掩码混合** ✓（掩码由引擎算出 ✓ 见 `conditioning` ✓）。"""
+        self._gate()
+        torch = self._torch()
+        # ⚠️ 两条路都要支持（初版只按 5 维写 ⇒ 占位一维时 `reshape` 直接崩 ✗，自检 ㊾ 抓到 ✓）：
+        #   * **真形状潜变量** (B,C,T,h,w) ⇒ 按掩码**逐潜帧**混 ✓（引擎算的 mask ✓ 长度 = T ✓）；
+        #   * **占位一维潜变量** ⇒ 按「首帧权重」整体混 ✓（占位下谈逐帧没意义 ✓，如实标 ✓）。
+        # ⚠️ 仍是**占位数值**：真做法是用 VAE `encode` 把首帧图片编码成潜变量 ✓（`vae` 已就绪 ✓，
+        #    缺"读图 + 缩放 + 组 batch"的胶水 ✓）—— 数学是真的 ✓、数值是占位的 ✓。
+        if latents.ndim == 5:
+            frames = int(latents.shape[2])
+            weight0 = float(mask[0]) if mask else 0.0
+            if self._vae is not None and weight0 > 0:
+                # ── **真路径** ✓：图片 → VAE 编码 → 按掩码混进**第 0 个潜帧** ✓ ────────────
+                scale = int(self._vaeConfig.spatial_scale)
+                pixel_w, pixel_h = int(latents.shape[4]) * scale, int(latents.shape[3]) * scale
+                image, info = media_mod.load_image_tensor(image_path, width=pixel_w,
+                                                          height=pixel_h)
+                torch = self._torch()
+                with torch.no_grad():
+                    encoded = self._vae.encode(
+                        image.to(device=latents.device, dtype=latents.dtype))
+                # ⚠️ **只比 C/h/w，不比 T** ✓ —— 图片天然是**单帧** ⇒ 编码出 ``T=1`` ✓
+                #    而潜变量有 T 帧 ✓（初版连 T 一起比 ⇒ 自己把自己拦住了 ✗，自检㉟ 当场红 ✓）。
+                if tuple(encoded.shape[1::2]) != tuple(latents.shape[1::2]):
+                    raise TorchBackendUnavailable(
+                        f"首帧编码后形状 {tuple(encoded.shape)} 与潜变量 {tuple(latents.shape)} "
+                        f"的「通道/高/宽」对不上 ✗（VAE 配置要与 DiT 的 vae_scale、通道数一致 ✓）",
+                        reason="pending")
+                blended = latents.clone()
+                blended[:, :, :1] = latents[:, :, :1] * (1.0 - weight0) + encoded * weight0
+                self._conditioningNote = {
+                    "mode": "vae-encode", "imageInfo": info, "weight": weight0,
+                    "note": "图片经 **VAE 编码**后按掩码混入第 0 个潜帧 ✓"
+                            + ("（⚠️ keep>1 时只有第 0 潜帧能来自图片 ✓ 其余按掩码保持生成 ✓）"
+                               if len([w for w in mask if w > 0]) > 1 else ""),
+                }
+                return blended
+            # ── 占位路径：没有 VAE（或掩码首权重为 0）⇒ 按元素数造确定性向量 ✓ 并如实标 ✓ ──
+            count = int(latents.shape[1] * latents.shape[2] * latents.shape[3] * latents.shape[4])
+            image = self._condition(f"first-frame:{image_path}", width=count).reshape(latents.shape)
+            weights = torch.tensor(list(mask) + [0.0] * max(0, frames - len(mask)),
+                                   dtype=latents.dtype, device=latents.device)[:frames]
+            weights = weights.reshape(1, 1, -1, 1, 1)
+            self._conditioningNote = {
+                "mode": "placeholder", "weight": weight0,
+                "note": "未挂 VAE ⇒ 首帧条件是**占位向量** ✗（挂 `attach_vae()` 后走真编码 ✓）",
+            }
+        else:
+            image = self._condition(f"first-frame:{image_path}", width=int(latents.numel()))
+            first = float(mask[0]) if mask else 0.0
+            weights = torch.full_like(latents, first, dtype=latents.dtype)
+            self._conditioningNote = {
+                "mode": "placeholder-1d", "weight": first,
+                "note": "潜变量是**一维占位**（未装模型）⇒ 首帧条件无从谈起 ✓（如实标 ✓）",
+            }
+        with torch.no_grad():
+            return latents * (1.0 - weights) + image * weights
+
+    def attach_text_encoder(self, config: Any = None, tokenizer: Any = None) -> dict[str, Any]:
+        """挂上 :mod:`app.services.engine.text_encoder` ✓ ⇒ :meth:`encode_text` 出**真条件** ✓。
+
+        ⚠️ 它同样**未经训练** ✗ ⇒ 条件数值没有语义 ✓（验的是管道 ✓）。真权重到位后换实现即可 ✓
+        （调用点不变 ✓）。``tokenizer`` 走**注入** ✓（本仓不内置词表 ✗ 见那里的模块注释 ✓）。
+        """
+        self._gate()
+        config = config or te_mod.TextEncoderConfig(
+            output_dim=int(getattr(self._config, "text_dim", 64) or 64))
+        self._tokenizer = tokenizer or te_mod.StubTokenizer(
+            config.vocab_size, max_length=config.max_length)
+        self._textEncoder = te_mod.build_text_encoder(config).to(self._device).eval()
+        self._textConfig = config
+        return {
+            "config": config.to_dict(),
+            "tokenizer": getattr(self._tokenizer, "name", type(self._tokenizer).__name__),
+            "note": "TE 与本仓库其它模型一样是**参考实现（未训练）** ✗ ⇒ 条件无数值语义 ✓",
+        }
+
+    def attach_vae(self, config: Any = None) -> dict[str, Any]:
+        """挂上 :mod:`app.services.engine.vae` 的参考 VAE ✓ ⇒ :meth:`decode` 能出**真帧** ✓。
+
+        ⚠️ 它是**未经训练**的 ✓ ⇒ 画面是噪声 ✓（验的是**管道** ✓）。真 VAE 权重到位后换 `vae.py`
+        的实现即可 ✓（`decode` 的调用点不变 ✓）。
+        """
+        self._gate()
+        config = config or vae_mod.VideoVAEConfig()
+        self._vae = vae_mod.build_vae(config).to(self._device).eval()
+        self._vaeConfig = config
+        return config.to_dict()
+
+    def decode(self, latents: Any, plan: Any, request: Any) -> dict[str, Any]:
+        """**VAE 解码**（挂了 VAE ✓）或只回真张量事实（没挂 ✓）—— 都如实标注 ✓。"""
+        self._gate()
+        if self._vae is not None:
+            torch = self._torch()
+            with torch.no_grad():
+                frames = self._vae.decode(latents)
+            return {
+                "synthetic": True,          # 真张量 ✓ 真 VAE ✓ 但**未训练** ✗ ⇒ 仍是合成 ✓
+                "note": "真 torch 张量 + 参考 VAE ✓，但 VAE **未经训练** ✗ ⇒ 画面是噪声 ✓"
+                        "（验的是管道 ✓；接真权重后这里换成训练好的 VAE ✓）",
+                "frames": frames, "frameCount": int(frames.shape[2]),
+                "shape": list(frames.shape), "dtype": str(frames.dtype),
+                "device": str(frames.device), "vaeConfig": self._vaeConfig.to_dict()
+                if self._vaeConfig is not None else None,
+            }
+        return {
+            "synthetic": True,
+            "note": "真 torch 张量 ✓ 但**未经 VAE** ✗（未挂 VAE ✓）⇒ 这不是生成画面 ✗",
+            "frames": int(plan.frames), "frameWidth": int(plan.width), "frameHeight": int(plan.height),
+            "shape": list(latents.shape), "dtype": str(latents.dtype), "device": str(latents.device),
+            "norm": round(float(latents.norm()), 6),
+            "preview": [round(float(value), 4) for value in latents[:8].tolist()],
+        }
+
+    def write(self, outputs: dict[str, Any], plan: Any, request: Any) -> dict[str, Any]:
+        """有**真帧张量**就落**真 mp4** ✓（ffmpeg ✓）；否则落张量清单 JSON ✓ —— 两种情况都如实标 ✓。"""
+        self._gate()
+        where = Path(request.outputs_dir) if request.outputs_dir else Path(
+            tempfile.mkdtemp(prefix="engine_torch_"))
+        where.mkdir(parents=True, exist_ok=True)
+        frames = outputs.get("frames")
+        if hasattr(frames, "shape") and len(tuple(frames.shape)) == 5:
+            target = where / f"video_seed{int(request.seed)}.mp4"
+            report = media_mod.write_video(frames, target, fps=int(plan.fps or 24),
+                                           value_range="-1..1")
+            return {
+                # ⚠️ 文件是真的 ✓ 但内容仍是**未训练 VAE** 的产物 ✗ ⇒ `synthetic` 保持 True ✓
+                "synthetic": True, "realTensors": True, "realFile": True,
+                "videoPath": str(target), "primaryPath": str(target),
+                "video": report,
+                "artifacts": [{"kind": "video", "path": str(target), "bytes": report["bytes"]}],
+                "note": "**真 mp4** ✓（ffprobe 可复核 ✓），但画面来自**未训练**的参考 VAE ✗",
+            }
+        target = where / f"torch_stub_seed{int(request.seed)}.json"
+        target.write_text(json.dumps({
+            "synthetic": True,
+            "note": "torch 后端占位产物：真张量统计 ✓，**不是生成的画面** ✗",
+            "request": request.to_dict(), "plan": plan.to_dict(), "decode": outputs,
+        }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        return {
+            "synthetic": True, "realTensors": True, "realFile": True, "videoPath": None,
+            "artifacts": [{"kind": "torch-stub-manifest", "path": str(target),
+                           "bytes": target.stat().st_size}],
+            "primaryPath": str(target),
+        }

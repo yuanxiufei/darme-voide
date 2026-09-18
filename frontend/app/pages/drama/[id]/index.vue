@@ -43,6 +43,21 @@
       </div>
     </div>
 
+    <!-- 开跑前体检（**事前** ✓ 不花钱 ✓）—— 只给 episodeId，后端自己取数组装 ✓ -->
+    <div class="section-label">
+      开跑前体检
+      <select
+        v-model="inspectEpisodeId"
+        style="margin-left: 10px; font-size: 12px; padding: 2px 6px; border-radius: 6px;"
+      >
+        <option :value="null">选一集体检…</option>
+        <option v-for="option in episodeOptions" :key="option.value" :value="option.value">
+          {{ option.label }}
+        </option>
+      </select>
+    </div>
+    <PreflightPanel :episode-id="inspectEpisodeId" />
+
     <!-- Episode List -->
     <div class="section-label">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -261,6 +276,7 @@ const artStyleOptions = ART_STYLE_OPTIONS
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
+import PreflightPanel from '~/components/PreflightPanel.vue'
 
 const { confirm } = useConfirm()
 
@@ -268,6 +284,20 @@ const route = useRoute()
 const router = useRouter()
 const drama = ref(null)
 const dramaId = computed(() => Number(route.params.id))
+
+// 体检：**选一集**才跑 ✓（不自动全跑 ✓ —— 免得一进页面就打一堆查询 ✓）
+const inspectEpisodeId = ref(null)
+const episodeOptions = computed(() =>
+  (drama.value?.episodes || []).map((ep) => ({
+    label: `第 ${ep.episode_number ?? '?'} 集 ${ep.title || ''}`.trim(),
+    value: ep.id,
+  })),
+)
+watch(drama, (value) => {
+  if (value?.episodes?.length && inspectEpisodeId.value == null) {
+    inspectEpisodeId.value = value.episodes[0].id
+  }
+})
 
 // 返回首页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
 function goBack() {

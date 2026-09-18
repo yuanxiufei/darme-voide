@@ -44,7 +44,10 @@ PRESET_SERVICES = (
 
 #: 本地模型预设（无需 API Key）
 LOCAL_PRESET_SERVICES = (
-    {"service_type": "text", "label": "文本(本地)", "provider": "openai", "base_url": "http://localhost:11434", "model": "qwen3:14b", "priority": 85},
+    # ⚠️ provider 必须是 `ollama`（原生 /api/chat + think:false）：若写 `openai`（OpenAI 兼容端点）
+    #    则本机 qwen3 这类思考模型**恒返回空 content** ✗（2026-09-16 活体实测，见 tts/text 适配器注释
+    #    与 tests/local_services_live_test.py）。
+    {"service_type": "text", "label": "文本(本地)", "provider": "ollama", "base_url": "http://localhost:11434", "model": "qwen3:14b", "priority": 85},
     {"service_type": "image", "label": "图片(本地)", "provider": "local-sd", "base_url": "http://localhost:7860", "model": "sdxl-base", "priority": 84},
     {"service_type": "video", "label": "视频(本地H3)", "provider": "minimax", "base_url": "http://localhost:8765", "model": "hailuo-02", "priority": 83},
     {"service_type": "audio", "label": "音频(本地)", "provider": "cosyvoice", "base_url": "http://localhost:9880", "model": "cosyvoice-v2", "priority": 82},

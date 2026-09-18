@@ -113,10 +113,21 @@ class MiniMaxTTSAdapter:
 
 
 class CosyVoiceTTSAdapter:
-    """CosyVoice 2 本地 TTS（假设本机 HTTP 服务暴露 REST 接口）。
+    """CosyVoice 2 本地 TTS —— ⚠️ **面向本地薄封装**（``app/local_services/cosyvoice/server.py``）。
 
-    * 普通合成 → ``POST /tts``
-    * **带参考音频时走零样本克隆** → ``POST /inference_zero_shot``
+    * 普通合成 → ``POST /tts``（JSON）
+    * **带参考音频时走零样本克隆** → ``POST /inference_zero_shot``（JSON；``prompt_audio`` 是 **base64** ✓）
+
+    ✅ **2026-09-16 已核实**（读上游 ``runtime/python/fastapi/server.py`` 源码，不再靠猜）：
+    官方 FastAPI 服务**根本没有 ``/tts``** ✗，零样本那条收的是 **multipart 文件**（字段名
+    ``prompt_wav``，不是 ``prompt_audio`` ✗）、返回的是**裸 int16 PCM 流**（不是 JSON 里的 ``audio`` ✗）、
+    默认端口是 **50000**（不是 9880 ✗）⇒ **直接打官方服务四项都不兼容**，普通合成必然 404 ✗。
+
+    所以本适配器的 baseUrl 应当指向**薄封装**（``PRESET_SERVICES`` 里本地音频就是
+    ``http://localhost:9880`` ✓）：封装负责把这些差异**全部吸收**（JSON → form-data / multipart、
+    裸 PCM → 补 44 字节 WAV 头 → hex、并如实回报 ``format="wav"`` ⇒ 下游据此定文件扩展名 ✓）。
+    这条契约由 ``tests/cosyvoice_seam_test.py`` **机械守卫**（起真 HTTP stub 按官方形态收请求，
+    断言字段名/文件/字节数/WAV 头，并含「包装真的转发了」的反套套逻辑 ✓）。
     """
 
     provider = "cosyvoice"

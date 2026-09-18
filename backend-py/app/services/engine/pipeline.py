@@ -1,0 +1,516 @@
+"""生成管线（**编排层**，2026-09-17）—— 把一个生成请求拆成**可观测、可取消、可归因**的阶段。
+
+## 它解决什么真问题
+
+生成很慢（视频动辄几十秒到几分钟 ✓）而失败很贵 ✗：如果只写「一个大函数」，用户只能看到
+**转圈**（不知道卡在哪 ✗）、失败只看到**一句异常**（不知道是编码、采样还是解码炸的 ✗）。
+
+所以这里把流程钉成六个**有名字的阶段** ✓，每阶段记耗时、抛错时**带上阶段与步号** ✓：
+
+```
+plan → encode → init → sample → decode → write
+```
+
+## 后端可插拔（这是本模块最重要的设计 ✓）
+
+管线本身**不碰张量** ✗ —— 所有张量操作都经 :class:`GenerationBackend` 协议交给后端 ✓：
+
+* **真后端**：``torch`` + 权重（装好依赖后由 ``torch_backend`` 实现 ✓）；
+* **干跑后端**：:mod:`app.services.engine.dryrun`（**零依赖** ✓，用纯 Python 小向量跑完整管线 ✓）
+  —— 用来验**编排本身**（阶段顺序、事件、取消、错误归因 ✓），也是前端「不装权重先试流程」的底座 ✓。
+
+⚠️ 干跑**不产生真图/真视频** ✗（输出会显式标注 ``synthetic: true`` ✓）—— 不许拿它冒充生成结果 ✗。
+
+## 算法层是真用的（不是摆设 ✓）
+
+``sample`` 阶段**真的**调 :func:`app.services.engine.sampler.sample` ✓（Euler/Heun/多阶 ✓），
+σ 序列**真的**来自 :mod:`app.services.engine.schedules` ✓（Karras 等 ✓），
+尺寸/帧数**真的**来自 :mod:`app.services.engine.geometry` ✓ ⇒ 换后端不换算法 ✓。
+
+## 取消（协同式 ✓）
+
+长任务必须能停 ✓：``cancel`` 是个可调用对象（返回 ``True`` 表示要停 ✓），
+在**阶段边界**与**每个采样步**检查 ✓ ⇒ 取消后抛 :class:`GenerationCancelled` ✓
+（已完成阶段的信息仍会带出来 ✓，便于前端显示「停在第几步」✓）。
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Protocol
+
+from . import conditioning as conditioning_mod
+from . import geometry, guidance as guidance_mod, sampler as sampler_mod, schedules
+
+__all__ = [
+    "STAGE_ORDER",
+    "GenerationBackend",
+    "GenerationCancelled",
+    "GenerationPlan",
+    "GenerationRequest",
+    "PipelineResult",
+    "StageError",
+    "build_plan",
+    "run_sync",
+]
+
+#: 阶段顺序（也是前端进度条的依据 ✓）
+STAGE_ORDER: tuple[str, ...] = ("plan", "encode", "init", "sample", "decode", "write")
+
+#: 各阶段的中文名（报错/事件里给人看 ✓）
+STAGE_LABELS: dict[str, str] = {
+    "plan": "规划（尺寸/帧数/σ 序列）",
+    "encode": "文本编码",
+    "init": "初始化潜变量",
+    #: 可选阶段 ✓（只有图生视频会给首帧 ⇒ 不给就不出现在耗时表里 ✓）
+    "condition": "首帧条件（图生视频）",
+    "sample": "去噪采样",
+    "decode": "解码（潜变量 → 帧）",
+    "write": "落盘",
+}
+
+
+class GenerationError(RuntimeError):
+    """引擎的基类错误 ✓。"""
+
+
+class GenerationCancelled(GenerationError):
+    """用户中途取消 ✓（**不是失败** ✗ —— 前端应当按"已取消"显示 ✓）。"""
+
+
+class StageError(GenerationError):
+    """某个阶段失败 ✓ —— 带**阶段名 + 步号 + 原异常**，便于归因 ✓。"""
+
+    def __init__(self, stage: str, message: str, *, step: int | None = None,
+                 cause: BaseException | None = None) -> None:
+        label = STAGE_LABELS.get(stage, stage)
+        where = f"（第 {step} 步）" if step else ""
+        super().__init__(f"{label}{where}失败：{message}")
+        self.stage = stage
+        self.step = step
+        self.__cause__ = cause
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 请求与计划
+# ══════════════════════════════════════════════════════════════════════════
+@dataclass(frozen=True)
+class GenerationRequest:
+    """一次生成请求（不可变 ✓ —— 便于重放与缓存键计算 ✓）。"""
+
+    prompt: str
+    negative: str = ""
+    seed: int = 0
+    seconds: float = 5.0
+    fps: int = geometry.H3_FPS
+    ratio: Any = "16:9"          # "16:9" / 数字 / (w, h) ✓
+    megapixels: float = 0.65
+    steps: int = 30
+    sampler: str = "euler"
+    schedule: str = "karras"
+    temporal_compression: int | None = None   # ⚠️ 必须显式给（见 geometry 的原则 ✓）
+    first_frame: str | None = None            # 图生视频的首帧 ✓
+    reference_frames: tuple[str, ...] = ()
+    outputs_dir: str | None = None
+    dry_run: bool = False
+    #: 引导（CFG ✓）—— 默认 ``scale=1.0`` ⇒ **不引导** ✓（不被要求的干预一律不做 ✓）
+    guidance: guidance_mod.GuidanceConfig = field(default_factory=guidance_mod.GuidanceConfig)
+    #: 首帧条件（图生视频 ✓）—— 只在给了 ``first_frame`` 时生效 ✓
+    conditioning: conditioning_mod.ConditioningConfig = field(
+        default_factory=conditioning_mod.ConditioningConfig)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["ratio"] = list(self.ratio) if isinstance(self.ratio, tuple) else self.ratio
+        return data
+
+
+@dataclass
+class GenerationPlan:
+    """请求 → **具体数字**（给用户看、给后端用 ✓）。"""
+
+    width: int = 0
+    height: int = 0
+    frames: int = 0
+    fps: int = 0
+    latent_frames: int | None = None
+    sigmas: list[float] = field(default_factory=list)
+    timesteps: list[float] = field(default_factory=list)
+    steps: int = 0
+    warnings: list[str] = field(default_factory=list)
+    #: **相对**耗时系数 ✓（1 步 euler 无引导 = 1 ✓）—— 见 :meth:`to_dict` 里为什么不报秒数 ✗
+    cost_factor: float = 0.0
+
+    @property
+    def costFactor(self) -> float:  # noqa: N802 —— 与前端 camelCase 对齐的只读别名 ✓
+        return self.cost_factor
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "width": self.width, "height": self.height, "frames": self.frames, "fps": self.fps,
+            "latentFrames": self.latent_frames, "steps": self.steps,
+            "sigmas": [round(value, 4) for value in self.sigmas],
+            "timesteps": [round(value, 4) for value in self.timesteps],
+            "durationSeconds": round(self.frames / self.fps, 3) if self.fps else 0,
+            # ⚠️ **相对**耗时系数（步数 × 采样器 × 引导 ✓ 三者都可精确算 ✓）——
+            #    刻意不给"秒" ✗：那需要每步的算力模型（我们还没有 ✓），
+            #    硬报一个秒数就是**编** ✗。前端要秒数就等真后端跑一次后按实测标定 ✓。
+            "costFactor": round(self.cost_factor, 4),
+            "warnings": self.warnings,
+        }
+
+
+def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) -> GenerationPlan:
+    """算出这一次要用的**尺寸/帧数/σ 序列** ✓（纯计算、毫秒级、可先给用户看 ✓）。
+
+    ⚠️ 这里**提前**校验采样器名与参数 ✓ —— 让错误在「还没开始跑」时就以明确文案返回 ✓，
+    而不是跑到一半才炸 ✗。
+    """
+    plan = GenerationPlan(fps=int(request.fps or geometry.H3_FPS))
+    if not str(request.prompt or "").strip():
+        raise StageError("plan", "提示词不能为空 ✓")
+    if request.steps < 1:
+        raise StageError("plan", f"steps 必须 ≥1（收到 {request.steps} ✗）")
+    if request.seconds <= 0:
+        raise StageError("plan", f"seconds 必须 >0（收到 {request.seconds} ✗）")
+    if str(request.sampler or "").lower() not in sampler_mod.SAMPLERS:
+        raise StageError("plan", f"未知采样器 {request.sampler!r}；可用：{sorted(sampler_mod.SAMPLERS)}")
+
+    plan.width, plan.height = geometry.size_for_megapixels(
+        max(0.05, float(request.megapixels)), request.ratio)
+    plan.frames = geometry.snap_frames(request.seconds, fps=plan.fps)
+    plan.steps = int(request.steps)
+
+    try:
+        plan.sigmas = schedules.sigmas_for(plan.steps, str(request.schedule or "karras"))
+    except (ValueError, TypeError) as err:
+        raise StageError("plan", f"σ 调度不可用：{err}", cause=err) from err
+    plan.timesteps = schedules.timesteps_for(plan.sigmas)
+
+    if request.temporal_compression:
+        plan.latent_frames = geometry.latent_frames(plan.frames,
+                                                    temporal_compression=int(request.temporal_compression))
+    else:
+        # 诚实标注：不猜压缩比（见 geometry 的模块注释 ✓）—— 后端可以自己算 ✓
+        plan.warnings.append("未给 temporalCompression ⇒ 潜空间帧数未知（不影响采样，解码时后端自行决定 ✓）")
+    plan.warnings.append(f"{plan.frames} 帧 @{plan.fps}fps ≈ {plan.frames / max(1, plan.fps):.2f}s"
+                         f"（已吸附到 {geometry.H3_FRAME_GRID}k+{geometry.H3_MIN_FRAMES} 网格 ✓）")
+    # ── 相对耗时系数（**可精确算** ✓：步数 × 采样器 × 引导 ✓）────────────────
+    # heun 每个区间调模型 2 次 ✓；CFG 让"施加引导的那些步"再翻倍 ✓ ⇒ 引导只需要按**生效比例**算 ✓：
+    # cost = (步数 + 生效步数) × 采样器倍数 ✓（全程引导时正好 = 步数 × 2 × 倍数 ✓）。
+    sampler_multiplier = 2 if str(request.sampler or "").lower() == "heun" else 1
+    config = request.guidance
+    guided_steps = sum(1 for index in range(plan.steps)
+                       if guidance_mod.scale_for_step(index, plan.steps, config) != 1.0)
+    plan.cost_factor = float((plan.steps + guided_steps) * sampler_multiplier)
+    if config.enabled:
+        # ⚠️ 引导的**代价**必须提前说 ✓（CFG 每步两次模型调用 ⇒ 二阶采样器就是每步四次 ✗）
+        plan.warnings.append(
+            f"引导 cfg={config.scale:g}：{plan.steps} 步里有 {guided_steps} 步生效，"
+            f"相对耗时约 ×{plan.cost_factor / max(1.0, float(plan.steps)):.2f}"
+            f"（heun 每步还要 ×2 ✗）" +
+            (f"（重标定 {config.rescale:g} ✓）" if config.rescale else ""))
+    if weights_bytes:
+        from .inventory import estimate_vram
+
+        vram = estimate_vram(int(weights_bytes))
+        plan.warnings.append(
+            f"权重约 {vram['weightsGiB']} GiB ⇒ 估算占用 {vram['estimatedGiB']} GiB"
+            f"（{vram['disclaimer']}）")
+    return plan
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 后端协议
+# ══════════════════════════════════════════════════════════════════════════
+class GenerationBackend(Protocol):
+    """推理后端（**唯一**碰张量的地方 ✓）。"""
+
+    name: str
+    #: 干跑后端标 ``True``（输出必须被标注为合成 ✓）
+    synthetic: bool
+
+    def encode_text(self, request: GenerationRequest) -> Any:
+        """提示词 → 条件 ✓。
+
+        **推荐**回 ``{"positive": ..., "negative": ...}`` ✓ —— 管线据此做 CFG
+        （见 :mod:`app.services.engine.guidance` ✓）；只回单个条件也**兼容** ✓
+        （那时视为 positive-only ⇒ 不引导 ✓，不报错 ✗）。
+        """
+
+    def init_latents(self, plan: GenerationPlan, request: GenerationRequest) -> Any:
+        """按 plan 造初始噪声（种子由 ``request.seed`` 决定 ✓）。"""
+
+    # 可选能力（不给也行 ✓，但给了 ``request.first_frame`` 却不实现 ⇒ 会**明确失败** ✗，
+    # 见 pipeline 的 condition 阶段 ✓）：
+    #
+    # def condition_first_frame(self, latents, image_path, mask, plan, request) -> Any:
+    #     """首帧条件 ✓：后端**自己**把图片编码成潜变量（VAE 是它的事 ✓），再按 ``mask``
+    #     （每潜帧一个权重 ✓ 由 :mod:`app.services.engine.conditioning` 算出 ✓）套到 latents 上 ✓。
+    #
+    #     怎么套（通道维拼接 / 时间维替换 / mask 输入）是**后端自己的事** ✓ —— 引擎不猜布局 ✗。
+    #     必须**返回**新的 latents ✓（返回 None ⇒ 引擎判为错误 ✓，不装作成功 ✗）。"""
+
+    def denoise(self, latents: Any, sigma: float, condition: Any,
+                request: GenerationRequest) -> Any:
+        """给 ``sampler`` 用的**模型调用** ✓：返回去噪估计（x0 ✓）。"""
+
+    def decode(self, latents: Any, plan: GenerationPlan, request: GenerationRequest) -> dict[str, Any]:
+        """潜变量 → 帧（可含音频 ✓）。"""
+
+    def write(self, outputs: dict[str, Any], plan: GenerationPlan,
+              request: GenerationRequest) -> dict[str, Any]:
+        """落盘 ✓（返回产物描述：路径/尺寸/时长 ✓）。"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 结果
+# ══════════════════════════════════════════════════════════════════════════
+@dataclass
+class PipelineResult:
+    """一次运行的全部事实 ✓（成功与否都返回它 —— 便于调用方统一落库/展示 ✓）。"""
+
+    ok: bool = False
+    cancelled: bool = False
+    backend: str = ""
+    synthetic: bool = False
+    plan: GenerationPlan | None = None
+    outputs: dict[str, Any] = field(default_factory=dict)
+    stageMs: dict[str, int] = field(default_factory=dict)
+    sampleSteps: int = 0
+    #: 实际施加了引导的步数 ✓（0 = 全程未引导 ✓ —— 告诉用户"真的做了"还是"跳过了" ✓）
+    guidanceSteps: int = 0
+    #: 首帧条件的实况 ✓（``None`` = 本次没要求图生视频 ✓；有值就说明**真的套上去了** ✓）
+    conditioning: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+    @property
+    def totalMs(self) -> int:
+        return sum(self.stageMs.values())
+
+    def event(self, stage: str, *, step: int | None = None, total: int | None = None,
+              note: str = "") -> dict[str, Any]:
+        """给前端的事件载荷（字段名与前端 camelCase 约定一致 ✓）。"""
+        payload: dict[str, Any] = {
+            "kind": "stage", "stage": stage, "label": STAGE_LABELS.get(stage, stage),
+            "elapsedMs": self.totalMs, "stageMs": self.stageMs.get(stage, 0),
+        }
+        if step is not None:
+            payload["step"] = step
+        if total is not None:
+            payload["total"] = total
+        if note:
+            payload["note"] = note
+        return payload
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok, "cancelled": self.cancelled, "backend": self.backend,
+            "synthetic": self.synthetic, "sampleSteps": self.sampleSteps,
+            "guidanceSteps": self.guidanceSteps, "conditioning": self.conditioning,
+            "totalMs": self.totalMs, "stageMs": dict(self.stageMs),
+            "plan": self.plan.to_dict() if self.plan else None,
+            "outputs": self.outputs, "error": self.error,
+        }
+
+
+CancelFn = Callable[[], bool]
+
+
+def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
+             on_event: Callable[[dict[str, Any]], None] | None = None,
+             cancel: CancelFn | None = None) -> PipelineResult:
+    """**同步**跑完一次生成（FastAPI 的同步端点跑在线程池里 ✓ ⇒ 不会卡事件循环 ✓）。
+
+    返回 :class:`PipelineResult` ✓（**不抛异常** ✗ —— 失败也体现在结果里 ✓，
+    因为「阶段 + 步号 + 文案」比异常栈对用户有用得多 ✓）。
+    """
+    result = PipelineResult(backend=getattr(backend, "name", type(backend).__name__),
+                            synthetic=bool(getattr(backend, "synthetic", False)))
+    condition: Any = None
+    latents: Any = None
+
+    def emit(payload: dict[str, Any]) -> None:
+        if on_event:
+            on_event(payload)
+
+    def ensure_not_cancelled(stage: str, step: int | None = None) -> None:
+        if cancel and cancel():
+            raise GenerationCancelled(f"已取消（停在{STAGE_LABELS.get(stage, stage)}"
+                                      f"{f' 第 {step} 步' if step else ''} ✓）")
+
+    # ── ① plan ────────────────────────────────────────────────────────────
+    started = time.perf_counter()
+    try:
+        result.plan = build_plan(request)
+    except StageError as err:
+        result.stageMs["plan"] = int((time.perf_counter() - started) * 1000)
+        result.error = {"stage": err.stage, "message": str(err)}
+        return result
+    result.stageMs["plan"] = int((time.perf_counter() - started) * 1000)
+    emit(result.event("plan", note=f"{result.plan.width}×{result.plan.height} / "
+                                   f"{result.plan.frames} 帧 / {result.plan.steps} 步"))
+    plan = result.plan
+
+    # ── ② encode ──────────────────────────────────────────────────────────
+    started = time.perf_counter()
+    try:
+        ensure_not_cancelled("encode")
+        condition = backend.encode_text(request)
+    except BaseException as err:  # noqa: BLE001 —— 见下：取消与失败都归到这里 ✓
+        result.stageMs["encode"] = int((time.perf_counter() - started) * 1000)
+        return _fail(result, "encode", err)
+    result.stageMs["encode"] = int((time.perf_counter() - started) * 1000)
+    emit(result.event("encode"))
+
+    # ── ③ init ────────────────────────────────────────────────────────────
+    started = time.perf_counter()
+    try:
+        ensure_not_cancelled("init")
+        latents = backend.init_latents(plan, request)
+    except BaseException as err:  # noqa: BLE001
+        result.stageMs["init"] = int((time.perf_counter() - started) * 1000)
+        return _fail(result, "init", err)
+    result.stageMs["init"] = int((time.perf_counter() - started) * 1000)
+    emit(result.event("init", step=0, total=plan.steps))
+
+    # ── ③b condition（**可选阶段** ✓：只有给了首帧才跑 ✓）────────────────────
+    # ⚠️ 这里的设计取舍值得写明：**后端不支持就报错** ✗，而不是**悄悄按文生视频跑** ✗。
+    #    后者看着"更宽容"，实际是最坏的：用户要的是图生视频 ✓，拿到的却是无关产物 ✗
+    #    而且**看不出来** ✗ ⇒ 宁可当场失败并把原因说清 ✓。
+    if request.first_frame:
+        started = time.perf_counter()
+        try:
+            ensure_not_cancelled("condition")
+            hook = getattr(backend, "condition_first_frame", None)
+            if not callable(hook):
+                raise conditioning_mod.ConditioningError(
+                    f"后端 {getattr(backend, 'name', type(backend).__name__)} 未实现 "
+                    f"condition_first_frame ✗ ⇒ 无法做图生视频（刻意报错，不退回文生视频 ✗）")
+            latent_count = conditioning_mod.latent_frames_for(plan.frames,
+                                                              request.temporal_compression)
+            mask = conditioning_mod.first_frame_mask(latent_count, request.conditioning)
+            conditioned = hook(latents, request.first_frame, mask, plan, request)
+            if conditioned is None:
+                raise conditioning_mod.ConditioningError(
+                    "condition_first_frame 返回 None ✗（必须回新的 latents ✓）")
+            latents = conditioned
+            result.conditioning = {
+                "applied": True, "mode": "first-frame", "imagePath": request.first_frame,
+                "latentFrames": latent_count, "mask": mask,
+                "config": request.conditioning.to_dict(),
+            }
+            # 后端愿意自述"实际走了哪条路"（真 VAE 编码 / 占位 ✓）就透出来 ✓ —— 不猜 ✗：
+            # 不同后端实现不同（`torch` 有、`dryrun` 没有 ✓），没有就不加这个键 ✓。
+            note = getattr(backend, "conditioningNote", None)
+            if isinstance(note, dict):
+                result.conditioning["backendNote"] = note
+        except BaseException as err:  # noqa: BLE001
+            result.stageMs["condition"] = int((time.perf_counter() - started) * 1000)
+            return _fail(result, "condition", err)
+        result.stageMs["condition"] = int((time.perf_counter() - started) * 1000)
+        emit(result.event("condition", note=f"首帧条件 ✓（{latent_count} 潜帧，"
+                                            f"keep={request.conditioning.keep} ✓）"))
+
+    # ── ④ sample（**真调采样器** ✓）────────────────────────────────────────
+    started = time.perf_counter()
+    holder: dict[str, Any] = {"step": 0, "scale": 1.0}
+    positive, negative = _branches(condition)
+    guided_counter = {"steps": 0, "calls": 0}
+
+    def on_step(step: int, sigma: float, _x: Any) -> None:
+        holder["step"] = step
+        note = f"σ={sigma:.4g}"
+        if holder["scale"] != 1.0:
+            note += f" / cfg={holder['scale']:.2f}"
+        emit(result.event("sample", step=step, total=plan.steps, note=note))
+        ensure_not_cancelled("sample", step)  # 每步都能停 ✓
+
+    try:
+        def model_fn(x: Any, sigma: float) -> Any:
+            """**引导就在这儿生效** ✓（引擎的采样语义 ✓，与后端无关 ✓）。
+
+            ⚠️ 二阶采样器（heun）每步会调**两次** ⇒ 引导时每步共 **4** 次后端调用 ✓
+            —— 这是 CFG + 二阶的固有代价 ✓（如实计数 ✓，见 ``guidanceCalls`` ✓）。
+            """
+            index = int(holder["step"])          # 0 基；on_step 在每步结束后 +1 ⇒ 正是当前步 ✓
+            scale = guidance_mod.scale_for_step(index, plan.steps, request.guidance)
+            holder["scale"] = scale
+            guided_counter["calls"] += 1
+            if scale == 1.0 or negative is None:
+                return backend.denoise(x, float(sigma), positive, request)
+            positive_estimate = backend.denoise(x, float(sigma), positive, request)
+            negative_estimate = backend.denoise(x, float(sigma), negative, request)
+            combined, _report = guidance_mod.combine(
+                positive_estimate, negative_estimate, scale, rescale=request.guidance.rescale)
+            return combined
+
+        # 统计「实际施加了引导的步数」✓（区间外/斜坡外不算 ✓）
+        for index in range(plan.steps):
+            if guidance_mod.scale_for_step(index, plan.steps, request.guidance) != 1.0:
+                guided_counter["steps"] += 1
+        result.guidanceSteps = int(guided_counter["steps"])
+
+        latents, result.sampleSteps = sampler_mod.sample(
+            model_fn, latents, plan.sigmas, str(request.sampler or "euler"), callback=on_step)
+    except BaseException as err:  # noqa: BLE001
+        result.stageMs["sample"] = int((time.perf_counter() - started) * 1000)
+        return _fail(result, "sample", err, step=holder["step"] or None)
+    result.stageMs["sample"] = int((time.perf_counter() - started) * 1000)
+    emit(result.event("sample", step=result.sampleSteps, total=plan.steps))
+
+    # ── ⑤ decode ──────────────────────────────────────────────────────────
+    started = time.perf_counter()
+    decoded: dict[str, Any] = {}
+    try:
+        ensure_not_cancelled("decode")
+        decoded = backend.decode(latents, plan, request)
+    except BaseException as err:  # noqa: BLE001
+        result.stageMs["decode"] = int((time.perf_counter() - started) * 1000)
+        return _fail(result, "decode", err)
+    result.stageMs["decode"] = int((time.perf_counter() - started) * 1000)
+    emit(result.event("decode"))
+
+    # ── ⑥ write ───────────────────────────────────────────────────────────
+    started = time.perf_counter()
+    try:
+        ensure_not_cancelled("write")
+        result.outputs = backend.write(decoded, plan, request)
+    except BaseException as err:  # noqa: BLE001
+        result.stageMs["write"] = int((time.perf_counter() - started) * 1000)
+        return _fail(result, "write", err)
+    result.stageMs["write"] = int((time.perf_counter() - started) * 1000)
+    result.ok = True
+    emit(result.event("write", note="完成 ✓"))
+    return result
+
+
+def _branches(condition: Any) -> tuple[Any, Any]:
+    """把 ``encode_text`` 的产出拆成 ``(正, 负)`` ✓。
+
+    兼容两种后端写法 ✓：``{"positive":…, "negative":…}`` ✓（推荐 ✓）；
+    或**直接回一个条件对象** ✓ ⇒ 视为 positive-only、负为空 ⇒ 管线**不引导** ✓（而不是报错 ✗）。
+    """
+    if isinstance(condition, dict):
+        positive = condition.get("positive")
+        if positive is None:            # dict 但没给 positive ⇒ 当成"单个条件" ✓ 不硬拆 ✗
+            return condition, None
+        return positive, condition.get("negative")
+    return condition, None
+
+
+def _fail(result: PipelineResult, stage: str, err: BaseException,
+          *, step: int | None = None) -> PipelineResult:
+    """把异常归一成结果 ✓ —— 取消**不是失败** ✗（前端要分开显示 ✓）。"""
+    if isinstance(err, GenerationCancelled):
+        result.cancelled = True
+        # ⚠️ 步号必须**进结构化字段**（不能只写在文案里 ✓）：自检 ㉗ 抓到初版只把「第 3 步」
+        #    放进了 message ⇒ 前端想画「停在第 3/20 步」还得去**解析中文** ✗。
+        result.error = {"stage": stage, "step": step, "message": str(err), "cancelled": True}
+        return result
+    stage_error = err if isinstance(err, StageError) else StageError(
+        stage, f"{type(err).__name__}: {err}"[:300], step=step, cause=err)
+    result.error = {"stage": stage_error.stage, "step": stage_error.step,
+                    "message": str(stage_error),
+                    "type": type(err).__name__}
+    return result

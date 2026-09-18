@@ -535,6 +535,14 @@ _JSON_DUMPS_ALLOW = {
     "local_model_scan.py",  # configs/model-paths.json：镜像 `JSON.stringify(cfg, null, 2)`（indent=2 有意）
     "style_profiles.py",  # 提炼 prompt 里的测量事实：镜像 `JSON.stringify(measurements, null, 2)`（indent=2 有意）
     "jianying_draft.py",  # 剪映草稿 JSON：镜像 `JSON.stringify(content, null, 2)`（indent=2 有意）
+    # 干跑报告：**本地调试产物**，给人看的（indent=1 有意 ✓）。与上面几条的区别是它
+    # **没有 Node 对应物** ✗ ⇒ 根本不承担「镜像紧凑性」义务（这条守卫防的是
+    # 「写进共用 DB 列 / 发给厂商 / 直接当响应体」的字符串 ✓ 三者它都不属于 ✓）。
+    "dryrun.py",
+    # 上下文摘要**提示词**（发给 LLM 的正文 ✓，indent=1 有意）：与 dryrun 同理 ——
+    # **没有 Node 对应物** ✗、也不属于「写共用 DB 列 / 发给厂商的响应体 / 直接当 API 响应体」
+    # 这三类 ✓。缩进是给模型读执行记录用的（1 字符缩进 ⇒ 可读性 vs token 的折中 ✓）。
+    "context_budget.py",
 }
 
 

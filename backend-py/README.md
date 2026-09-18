@@ -17,7 +17,7 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
-> **自检 2481 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 8**）
+> **自检 2911 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 8** + **自研引擎·算法层 26** + **自研引擎·权重体检 34** + **自研引擎·管线编排 98** + **自研引擎·加载计划 28**）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -182,10 +182,10 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 > | 树 | 是什么 | 谁写 | 谁读 / 调用 | 进镜像 |
 > |---|---|---|---|---|
 > | `app/` | **后端代码**：装配（`main.py`）+ 平台层（`core/`）+ HTTP 层（`routers/`）+ 业务层（`services/`）；层间**单向依赖**由 `tests/layering_test.py` 机械守卫 | 开发者 | uvicorn `import` | ✅ `COPY backend-py/app` |
-> | `skills/` | **内容资产**（SKILL.md + `library.yaml`） | **运行时可写**：`PUT/POST/DELETE /api/v1/skills` | 加载器用 `Path` 读；前端技能页 | ✅ `COPY backend-py/skills` |
-> | `tests/` | **行为契约自检**（`run_all.py` = 权威清单） | 开发者 | 人 / CI；**不参与产品运行时** | ❌ |
-> | `scripts/` | **仓库守卫 + 工具链 + 语料**（四类，见 `scripts/README.md`） | 开发者 | `.githooks/pre-commit`、人；**不 `import app.*`** | ❌ |
-> | `local_services/` | **本地服务根**（clone 来的第三方服务 + 自带 `h3` 薄封装） | `scripts/model_manager.py --runtime git`（**机器相关**） | 后端经 subprocess / HTTP | ❌ |
+> | `app/skills/` | **内容资产**（SKILL.md + `library.yaml`） | **运行时可写**：`PUT/POST/DELETE /api/v1/skills` | 加载器用 `Path` 读；前端技能页 | ✅ 随 `COPY backend-py/app` |
+> | `tests/` | **行为契约自检**（`run_all.py` = 权威清单） | 开发者 | 人 / CI；**不参与产品运行时** | ❌（已在 `app/` 内，`COPY backend-py/app` 覆盖） |
+> | `app/scripts/` | **仓库守卫 + 工具链 + 语料**（四类，见 `scripts/README.md`） | 开发者 | `.githooks/pre-commit`、人；**不 `import app.*`** | ❌ |
+> | `app/local_services/` | **本地服务根**（clone 来的第三方服务 + 自带 `h3` / `cosyvoice` 薄封装） | `scripts/model_manager.py --runtime git`（**机器相关**） | 后端经 subprocess / HTTP | ❌ |
 >
 > **结论：不需要再套一层**（`src/`、`assets/`、`tools/` 之类只会把「哪棵树属于哪种生命周期」重新搅浑）。
 > `Dockerfile` 的 COPY 面已经把「运行时必需」与「开发期工具」分开了 —— 这张表就是那个事实的展开。
@@ -220,7 +220,8 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 backend-py/
 ├─ app/
 │  ├─ core/                      **平台层**（与业务无关的基础设施；**不许 import routers/ services/**）
-│  │  ├─ config.py               配置解析（PROJECT_ROOT / BACKEND_PY_ROOT / skills_dir() 的**唯一权威**）
+│  │  ├─ config.py               配置解析（**路径唯一权威**：PROJECT_ROOT / BACKEND_PY_ROOT /
+│  │  │                            APP_ROOT / skills_dir()）
 │  │  ├─ db.py                   SQLite 连接（WAL + busy_timeout，对齐 connection.ts）
 │  │  ├─ models.py               29 张表的 SQLAlchemy Core 定义（对齐 db/schema.ts）
 │  │  ├─ response.py             统一响应层 + 行→dict / 字段映射工具
@@ -267,7 +268,15 @@ backend-py/
 │  │  └─ model_manager.py 等       AI/GPU 工具链（+ sd_h3_pipeline / compat_probe / h3_install / migrate_models）
 │  │     ↑ 细节见 `app/scripts/README.md`（含「为什么不放仓库根」「pre-commit 怎么触发」）
 │  ├─ local_services/              **本地服务根**（2026-09-15 从仓库根 local_services/ 并入）
-│     └─ h3/{server.py,requirements.txt}  项目自带的 H3 薄封装（端口 8765，复用 minimax adapter）
+│     ├─ h3/                                    项目自带的 H3 薄封装 + **ComfyUI 驱动层**（端口 8765）
+│     │  ├─ server.py                           与 minimax-video 协议对齐的 HTTP 外壳
+│     │  ├─ comfyui_client.py                   ComfyUI HTTP 客户端（/prompt /history /view /free /object_info
+│     │  │                                      /upload/image；零依赖 = 只用标准库 ✓）
+│     │  ├─ workflow.py                         **UI 图 → API 格式**转换 + 参数注入（ComfyUI 只吃 API 格式 ✗）
+│     │  └─ workflows/                          参考 H3 工作流模板（T2V / I2V；来源与署名见该目录 README）
+│     ├─ cosyvoice/{server.py,requirements.txt} 项目自带的 CosyVoice 薄封装（端口 9880）
+│     └─ cosyvoice/{server.py,requirements.txt} 项目自带的 CosyVoice 薄封装（端口 9880；官方服务四项不兼容
+│        ⇒ 由它吸收：JSON→form/multipart、裸 PCM→WAV、如实回 format=wav；`COSYVOICE_UPSTREAM` 指官方 50000）
 │     ↑ ⚠️ 其余子目录是 `app/scripts/model_manager.py --runtime git` **clone 来的第三方服务**
 │       （机器相关，已 gitignore）；默认值三处同步：本目录 / `app/services/local_model_scan.py`
 │       / TS 侧 `local-model-scan.ts`
@@ -376,7 +385,42 @@ backend-py/
    ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，5 用例）
    ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端 + 前端 dev 代理端口，8 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
-   └─ run_all.py                一次跑完以上六十六项（**套件权威清单就在这个文件里**，本树只是摘录）
+   ├─ assets_layout_test.py     资产布局守卫（skills/scripts/local_services 在 app/ 内 + 常量权威，12 用例）
+   ├─ h3_chain_test.py          本地 H3 链**接缝契约**（适配器 ↔ 8765 薄封装；含「阶段2 未接线」缺口断言，13 用例）
+   ├─ local_services_live_test.py 本地服务**活体**接缝（ollama 真推理 9 用例；未启动的服务显式 SKIP）
+   ├─ h3_backend_live_test.py   **H3 全栈活体**（配置 → 服务层 → 真 8765 → 落库；含「落库 task_id 被运行中的
+   │                            8765 认出」的交叉证明 ⇒ 排除「其实是 mock」，8 用例；8765 未跑则 SKIP）
+   ├─ cosyvoice_seam_test.py    **CosyVoice 接缝契约**（JSON↔form/multipart、裸 PCM→WAV、format=wav；
+   │                            起真 HTTP stub 上游按官方形态收请求 ⇒ 转换逻辑不靠猜，18 用例）
+   ├─ h3_comfyui_test.py        **ComfyUI 能力**（客户端 /prompt·/history·/view·/free·/object_info·/upload/image
+   │                            + **UI 图→API 格式**转换与参数注入；真 HTTP stub ComfyUI ⇒ 不需要 GPU，38 用例）
+   ├─ h3_stage2_test.py         **H3 阶段 2 闭环**（body → 组装/注入 → 提交 → 轮询 → 取片 → `/files` → `/free`；
+   │                            stub ComfyUI 真 HTTP ⇒ 不需要 GPU/模型，20 用例）
+   ├─ comfyui_capability_test.py **ComfyUI 能力门面**（系统/目录/队列/历史/作业/媒体 + **任意工作流**跑通；
+   │                            逐条对照 26 条原生路由，含反套套逻辑，25 用例）
+   ├─ engine_core_test.py       **自研引擎·算法层**（σ 调度 / 帧网格与像素预算 / 采样循环；**零依赖**：
+   │                            采样器用 12 行假张量验算法 ⇒ 不需要 torch/GPU/权重，26 用例）
+   ├─ engine_inventory_test.py  **自研引擎·权重体检**（纯 Python 读 safetensors 头部 + 组件就绪报告 +
+   │                            两个体检端点；合成真的/截断的权重文件来验 ⇒ 不下载模型，34 用例）
+   ├─ engine_pipeline_test.py   **自研引擎·管线编排**（阶段顺序 / 进度事件 / 取消（阶段边界 +
+   │                            采样步中）/ 错误归因（阶段+步号）/ **收敛与换采样器结果真不同** /
+   │                            **引导 CFG**（含「每步真调两次模型」的硬证据）/ **首帧条件**（图生视频；
+   │                            后端不支持 ⇒ **明确失败**而不是悄悄退回文生视频 ✗）/ 干跑后端与端点；
+   │                            **零依赖**，98 用例 ✓（装了 torch ⇒ 真张量那批也跑起来了 ✓））
+   ├─ engine_loader_test.py     **自研引擎·加载计划**（量化配套 scale / 层号连续性 / 体积阈值 /
+   │                            **显存排班**：文本编码器用完即退 ⇒ 峰值是 19.53 而非三者之和；
+   │                            合成权重里故意注入「缺 scale / 层号有洞」两种坏法，28 用例）
+   ├─ safetensors_crosscheck_test.py  **纯 Python 读取器 vs 官方库**（名字/形状/精度/元数据逐项一致 ✓、
+   │                            `read_tensor_bytes` **逐字节相同** ✓、**截断两边都拒绝** ✓；缺库则显式 SKIP ✓，11 用例）
+   ├─ engine_dit_test.py         **自研引擎·真模型层**（真 `nn.Module` DiT：前向同形 ✓、条件真的进网络 ✓、**权重往返逐位相同** ✓、缺键/多键/**形状不符⇒中止且不污染** ✓；CPU 可验，26 用例）
+   ├─ engine_io_test.py          **自研引擎·解码与落盘**（真 VAE 编解码 ✓、帧→**真 mp4**（ffmpeg）
+   │                            **用 ffprobe 复核宽高/帧数/时长** ✓、音频→真 wav 用标准库读回 ✓、
+   │                            整链（合成权重→DiT→VAE→mp4）✓ **这条揪出过 4 个单测抓不到的真 bug** ✓；再加**首帧条件走真 VAE 编码**（图片→编码→按掩码混入第 0 潜帧，逐位比对 ✓）39 用例）
+   ├─ engine_text_test.py        **自研引擎·文本编码**（真 TE 结构 ✓ + **注入式 tokenizer**（本仓不内置词表 ✗）+
+   │                            **截断回报** ✓ + 注意力真的混 token ✓ + 整链 TE→DiT→VAE→真 mp4 ✓，21 用例）
+   ├─ engine_segments_test.py    **自研引擎·长视频分段**（网格长度 ✓ / 重叠接缝恰好 N 帧 ✓ / ⭐ **保留帧数守恒** ✓ /
+   │                            边界帧落 PNG ⇒ 走真 VAE 首帧条件 ✓ / 报错带可调量 ✓，54 用例）
+   └─ run_all.py                一次跑完以上八十三项（**套件权威清单就在这个文件里**，本树只是摘录）
 adapter.parse_generate_response(result)         # → {"isAsync", "taskId"/"imageUrl"}（不解析 HTTP）
 ```
 
@@ -579,7 +623,7 @@ cd backend-py
 | ⚠️ **`ai_service_configs.model` 存的是 JSON 数组字符串** | 不是单模型名。读侧两边都是 `JSON.parse(row.model)` 再取 `models[0]`；接口入参则是**数组**（路由会 `json.dumps` 后落库）。写成裸字符串 `"dall-e-3"` 会让 `model` 解析成**空串**（Node 同样如此）—— 排查"模型没生效"时先看这里 |
 | ✅ **镜头 QC 打分已迁**（`qc_scoring.py` + `technical_qc.py`） | 规则打分与技术维度均已接线（`_run_qc_after_video_complete` / webhook / 合并前置）。🔴 但技术维度里**冻帧 / 音频真峰 / 集成响度三项是两侧共同的继承缺陷**（正则与 ffmpeg 真实输出格式不符 ⇒ 永不生效；黑场/帧率/时长正常）—— 详见 `technical_qc.py` 的「继承缺陷」段与 `tests/technical_qc_test.py`，**要修必须两边一起修** |
 | ⚠️ **`probe_video_duration` 需要系统 `ffprobe`** | 异步提供商不返回 `duration` 时用它补时长。**没装 ffprobe 不报错**，返回 0 ⇒ 分镜的 `duration` 键不写（保留旧值）——与原实现的 `resolve(0)` 一致 |
-| ⚠️ **CosyVoice 的接口是「按猜想写的」** | `voice-clone.ts` 原文注释即写明：``/inference_zero_shot`` 约定参考 CosyVoice 官方 FastAPI 封装，**本地服务部署后需按实际接口核对**。因此 Python 侧也只做等价移植，未额外加固 —— 真机联调时以实际响应为准 |
+| ✅ **CosyVoice 接缝已核实并加薄封装**（2026-09-16） | 旧行文是「按猜想写的 / 部署后需按实际接口核对」——现已读上游 `runtime/python/fastapi/server.py` 核实：官方服务**没有 `/tts`** ✗、零样本那条收 **multipart 文件**（字段 `prompt_wav`）✗、返回**裸 int16 PCM**（不是 JSON 的 `audio`）✗、默认端口 **50000**（不是 9880）✗ ⇒ 直接打官方**四项都不兼容**。解法即 `app/local_services/cosyvoice/server.py`（端口 **9880**，与 `PRESET_SERVICES` 的本地音频 baseUrl 一致）把官方端点包成后端期望的形状（JSON → form/multipart、裸 PCM → 补 44 字节 WAV 头 → hex、并如实回 `format="wav"` ⇒ 下游据此定文件扩展名）。启动两步：官方服务 `python runtime/python/fastapi/server.py --port 50000` → 封装 `COSYVOICE_UPSTREAM=http://127.0.0.1:50000 uvicorn server:app --port 9880`。契约由 `tests/cosyvoice_seam_test.py` 机械守卫（真 HTTP stub 上游 ✓） |
 | ⚠️ **参考音频的绝对 URL 默认指向 5789（Node 的端口）** | `to_public_media_url` 沿用原 TS 的默认基址 `http://localhost:5789`。**只跑 Python 后端时必须设 `PUBLIC_BASE_URL=http://localhost:5790`**，否则本地 H3 服务按 5789 拉参考音频会 404（绞杀期两边都在则无感） |
 | ⚠️ **写自检/后台任务时别嵌套事务** | SQLite 只有一个写者：在 `with engine.begin()` 里再开一个 `engine.begin()`（例如调用了「内部自己开事务」的辅助函数）会直接 `database is locked`。生产代码里 `image/video_generation` 一律**每步一个短事务、不嵌套**；这条坑是写 `prompt_storyboard_test.py` 时踩到的 |
 | 真实库比 Node 模型多 2 张表 | `assets`、`props` —— 旧版本残留，Node 侧 `db/index.ts` 不建、代码零引用，Python 同样不建模 |
@@ -649,7 +693,8 @@ cd backend-py
    「现有快照优先于 git」是刻意的：快照是**删库前现场**，git HEAD 可能落后（曾差点静默回退一次改动）。
 
 结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓（**当时**的实测值；此后新增
-`frontend_api_coverage_test.py`、`contract_mirror_test.py` 与 `layering_test.py` ⇒ 现为 **66 套件 / 2481 项**），
+`frontend_api_coverage_test.py`、`contract_mirror_test.py`、`layering_test.py` 与 `assets_layout_test.py`
+⇒ 现为 **82 套件 / 2911 项**），
 快照 **76 条 / 674 KB** ✓。
 
 ⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：

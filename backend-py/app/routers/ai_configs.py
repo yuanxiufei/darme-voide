@@ -146,11 +146,19 @@ def _upsert_preset(
     api_key: str,
     name_prefix: str,
     ts: str,
+    local: bool = False,
 ) -> None:
     """按 (service_type, provider) 覆盖写入预设配置。
 
     ⚠️ 原 TS 是「先按 service_type 查、再在内存里 filter provider」—— 语义上等价于按
     (service_type, provider) 查找，照抄以免漏掉同类型多 provider 的情形。
+
+    ``local=True``（`POST /quick-local` 用）时改为按「**该服务类型下已有的本地行**」覆盖 ——
+    本地服务每类只有一家（11434/7860/8765/9880），而本地行是**派生**判断（`is_local_config`）。
+    为什么必须这样：2026-09-16 把本地文本预设的 provider 从 `openai` 改成 `ollama`（原生
+    /api/chat，见 `services/ai_configs.py`）后，老装机那条 provider=openai 的本地文本行若只按
+    (service_type, provider) 去重就会**留下不动** ⇒ 它会以 priority 85 继续被选用、而它**恒返回空
+    文本** ✗✗。按「本地行」覆盖才能让 `quick-local` **收敛**成每类一条 ✓。
     """
     for preset in presets:
         candidates = conn.execute(
@@ -158,7 +166,11 @@ def _upsert_preset(
                 ai_service_configs.c.service_type == preset["service_type"]
             )
         ).all()
-        existing = next((r for r in candidates if r.provider == preset["provider"]), None)
+        existing = next(
+            (r for r in candidates
+             if (is_local_config(r.base_url, r.provider) if local else r.provider == preset["provider"])),
+            None,
+        )
 
         values = {
             "service_type": preset["service_type"],
@@ -238,7 +250,8 @@ def quick_local(conn: Connection = Depends(get_tx)):
     try:
         ts = now()
         # 本地服务不需要真实 key，但字段不可为空 ⇒ 固定 'local'
-        _upsert_preset(conn, LOCAL_PRESET_SERVICES, api_key="local", name_prefix="本地", ts=ts)
+        # `local=True`：每类只留一条**本地**行（覆盖旧 provider，避免老行的坏配置残留 ✗）
+        _upsert_preset(conn, LOCAL_PRESET_SERVICES, api_key="local", name_prefix="本地", ts=ts, local=True)
         configs = [map_config_row(r) for r in conn.execute(select(ai_service_configs)).all()]
         return success({"configs": configs})
     except Exception as exc:  # noqa: BLE001

@@ -30,6 +30,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 #: 本地服务根…）都从这里派生；⚠️ 与 ``scripts/`` 侧的同名常量靠注释同步（scripts 不 import ``app.*``）。
 BACKEND_PY_ROOT = Path(__file__).resolve().parents[2]
 
+#: **`app/` 根**（``backend-py/app``）—— 三类「住在 `app/` 里、但不是应用分层代码」的资产的共同父目录：
+#: ``app/skills``（内容资产）、``app/scripts``（工具链）、``app/local_services``（机器相关运行时）。
+#: ⚠️ 2026-09-15 三目录并入 `app/` 后新增：此前这三处各自拼 ``BACKEND_PY_ROOT / "app" / ...`` ✗，
+#: 搬家时漏一处就是**静默失效**（冒烟里就有一条兜底清理指错路径 ⇒ 残留 skill 让下一轮假红）。
+APP_ROOT = BACKEND_PY_ROOT / "app"
+
 CONFIG_PATH = Path(os.environ["CONFIG_PATH"]) if os.environ.get("CONFIG_PATH") else (
     PROJECT_ROOT / "configs" / "config.yaml"
 )
@@ -50,7 +56,7 @@ def skills_dir() -> Path:
     override = os.environ.get("SKILLS_DIR")
     if override:
         return Path(override)
-    return BACKEND_PY_ROOT / "app" / "skills"
+    return APP_ROOT / "skills"
 
 
 def _load_raw() -> dict[str, Any]:

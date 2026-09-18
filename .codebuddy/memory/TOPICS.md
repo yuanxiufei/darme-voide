@@ -40,6 +40,22 @@
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。
 
+## 自 MEMORY.md 下移（2026-09-18，第二次腾 8k 预算）
+
+**`backend-py/` 迁移明细**（原文自 MEMORY.md §项目与运行 下移；红线仍在 MEMORY.md）：
+- **全部域已迁完**（未注册 0 条，Node 侧 224 条路径已 100% 覆盖）；**端口 5790**（刻意不读 `config.yaml` 的 `server.port`）；
+- 回归跑 `backend-py/tests/run_all.py`；动手前读 `backend-py/README.md`；
+- **`backend/` 已于 2026-09-15 删除**：TS 原文现只存于 `backend-py/tests/frozen_ts_source.py`（76 条 / 674 KB），**守卫与自检读 TS 一律走「真源码优先 → 快照」**；`PROXY_TO_NODE` 已无对象（接缝保留只为兜底 501）。
+
+**Skill 体系明细**（原文自 MEMORY.md §Skill 体系 下移；**绑定/命名/删除保护等红线仍在 MEMORY.md**）：
+- **注入闸**：`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过 + 末尾「未注入：…」诊断。**口径 = `renderSkill(parseSkill(...)).length`**（≠ 字节数）。外部库单体最大 ~2.7 万字符 ⇒ 只勾两个即逼近上限。
+- **DB 配置优先铁律**：`parseSkillsConfig(raw)` 解析出配置项即「用户已做过选择」→ **全关也不回退默认**（仅 `null`/空串/空数组/解析失败才回退）；`enabled` 缺省 = **启用**（`!== false`），`priority` 缺省 `0`。默认绑定**仅当** DB `agent_configs.skills` 为空时生效。
+- **宿主工具兼容性**：外部库依赖的 `hub_*` 等工具本项目**从未注册**；依赖 = `allowed-tools` ∪ 正文 `hub_*` 引用（**只认 `hub_` 前缀**，宽泛猜会被字段名污染）；**工具集须取 `tool.id`**（取错把 21 个工具全误判为缺失）。
+- **改名/挪库后必核对 DB 绑定**：`agent_configs.skills` 存 skill id ⇒ 旧绑定失效；核对用 `better-sqlite3` **`{ readonly: true }`** 直开（绕开清洗副作用，坑⑦）。**实测 5 行全 `NULL` ⇒ 改名零影响**。
+- **兜底库**：顶层目录无 `library.yaml` → `/meta.sources` 补合成条目（`declared:false`，label = 目录名）→ 保证「core + Σ各库 = 总数」自洽且侧栏可达。
+
+**新引擎与"事前省钱链"（2026-09-18 建，细节见当日日志）**：`backend-py/app/services/engine/`（零依赖算法层：schedules/geometry/sampler/guidance/conditioning/dit/vae/text/media/segments/mappings/safetensors/inventory/loader/pipeline/dryrun ✓）+ `app/agent/context_budget.py` ✓ + 生产链四模块（`shot_placeholders`/`prompt_polish`/`asset_manifest`/`continuity` ✓ + 粘合 `production_preflight` ✓ + 取数 `preflight_source` ✓ + 适配 `storyboard_continuity` ✓）+ 前端 `components/PreflightPanel.vue` ✓。**判据只有一份** ✓：粘合层**只调用**、不重写判据 ✓（自检钉"与直接调用逐字段一致"✓）。
+
 ## Skill 体系坑清单（2026-09-15 自 `MEMORY.md` 下移，腾 8k 预算 —— 本文件逼近上限时**尾部区块最先被截断**）
 
 - ① `renderSkill()` **不含 frontmatter name** → 验证注入要用正文特征串；
