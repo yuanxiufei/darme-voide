@@ -4,7 +4,10 @@
 
 * ``read_storyboard_context`` 读剧本 + 角色 + 场景 + 已有分镜 + **连续性状态** + 物品（拆镜上下文）；
 * ``save_storyboards``        **整集重建**：删光旧分镜与关联 → 逐镜校验/插入/绑定 → 回写集时长 → 三件后置；
-* ``save_continuity_states``  **整体替换**连续性状态（跨镜一致性状态机）；
+* ``save_continuity_states``  **按镜替换**连续性状态（跨镜一致性状态机）；
+  ⚠️ 2026-09-18 **有意偏离 TS 移植原状** ✓：旧行为是「整集覆盖」✗ ⇒ LLM 分批调用时
+  **会把没提到的镜的状态整片删掉** ✗✗（且无提示 ✓）⇒ 已改为**只替换显式给出的镜** ✓，
+  语义与 `services/continuity_store.py` **同一套** ✓（词汇拒收 / 全有或全无 / 归属校验 ✓）；
 * ``update_storyboard``       单镜增量更新（**按字段是否出现**决定是否写，不是"空值覆盖"）。
 
 ⚠️ 六处保真点：
@@ -34,6 +37,7 @@ from typing import Any
 from sqlalchemy import and_, delete as sql_delete, select, update
 
 from app.core.db import engine
+from app.services import continuity_store
 from app.core.models import (
     characters,
     continuity_states,
@@ -251,29 +255,106 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
         return payload
 
     async def save_continuity_states(arguments: dict[str, Any]) -> dict[str, Any]:
-        states = arguments.get("states") or []
-        ts = now()
+        """⭐⭐ **按镜替换** ✓（**不再是「清空整集」** ✗ —— 2026-09-18 改 ✓）。
+
+        旧实现是 `DELETE ... WHERE episode_id = ?` ✓ 再插入本次传来的 ✓ ——
+        那是**整集覆盖** ✓ 且工具描述里也这么写着（*Replaces all previous states* ✓）。
+        问题在于：**分集一长，LLM 几乎必然分批调用** ✓✗ ⇒ 第二批发来时，
+        **第一批那些镜的状态会被整片删掉** ✗✗（而且**没有任何提示** ✓）。
+
+        现在改为：**只替换"本次显式给出的镜"** ✓（未出现的镜**一行不碰** ✓），
+        并把校验交给 :func:`app.services.continuity_store.write_episode_states` ✓
+        ⇒ 与写侧**同一套语义**（词汇拒收 ✓ / 全有或全无 ✓ / 归属校验 ✓）✓。
+        """
+        raw_states = arguments.get("states") or []
+        if not isinstance(raw_states, list):
+            raw_states = []
+        # 按**镜**与**场景**分区 ✓（未出现的镜/场景一行不碰 ✓）——
+        # ⚠️ `continuity_states` 除 `storyboard_id` 还有 `scene_id` ✓（工具描述里的
+        #    *scene space layout* 就是它 ✓）⇒ 初版只认镜头、把场景级状态全拒了 ✗
+        #    属**过度纠正** ✓（原有能力不该被顺手删掉 ✗）。
+        by_shot: dict[int, list[dict[str, Any]]] = {}
+        by_scene: dict[int, list[dict[str, Any]]] = {}
+        unassigned: list[dict[str, Any]] = []
+        for state in raw_states:
+            if not isinstance(state, dict):
+                continue
+            target = None
+            for key, bucket in (("storyboard_id", by_shot), ("scene_id", by_scene)):
+                try:
+                    target = (int(state.get(key)), bucket)
+                    break
+                except (TypeError, ValueError):
+                    continue
+            if target is None:
+                unassigned.append(state)
+                continue
+            target[1].setdefault(target[0], []).append(state)
+
+        # ⚠️⚠️ **显式空数组 = 明确要求清空本集** ✓（保留这个既有能力 ✓）——
+        # 要杜绝的是另一件事 ✗：**传了部分状态、却把没提到的镜/场景一起清掉** ✓✗
+        # （那才是原实现的数据丢失来源 ✓）。两者语义完全不同 ✓。
+        if not raw_states:
+            with engine.begin() as conn:
+                cleared = conn.execute(sql_delete(continuity_states).where(
+                    continuity_states.c.episode_id == episode_id)).rowcount or 0
+            log_task_success("StoryboardTool", "save-continuity", {
+                "episodeId": episode_id, "dramaId": drama_id, "count": 0,
+                "deleted": int(cleared), "explicitClear": True,
+            })
+            return {"message": "Saved 0 continuity states", "count": 0,
+                    "shots": [], "scenes": [], "deleted": int(cleared), "problems": []}
+
         with engine.begin() as conn:
-            conn.execute(
-                sql_delete(continuity_states).where(continuity_states.c.episode_id == episode_id)
-            )
-            for state in states:
-                conn.execute(continuity_states.insert().values(
-                    episode_id=episode_id,
-                    storyboard_id=state.get("storyboard_id"),
-                    scene_id=state.get("scene_id"),
-                    state_type=state.get("state_type"),
-                    entity_key=state.get("entity_key"),
-                    state_value=state.get("state_value"),
-                    constraints=state.get("constraints") or "",
-                    created_at=ts, updated_at=ts,
-                ))
+            outcome = continuity_store.write_episode_states(
+                conn, episode_id=episode_id,
+                shots=[{"storyboardId": shot_id, "states": rows}
+                       for shot_id, rows in by_shot.items()])
+            for scene_id, rows in by_scene.items():
+                scene_outcome = continuity_store.write_scene_states(
+                    conn, episode_id=episode_id, scene_id=scene_id, states=rows)
+                outcome["inserted"] += scene_outcome["inserted"]
+                outcome["deleted"] += scene_outcome["deleted"]
+                outcome["problems"].extend(scene_outcome["problems"])
+            # ⚠️ 集级那一档也**必须在同一个事务里** ✓（初版写到了 `with` 外面 ✗ ⇒
+            #    此时 `conn` 已关 ✓ 会直接报错 ✓ —— 这类"缩进错位"很隐蔽 ✓）
+            if unassigned:
+                # ⚠️ 老实现允许"集级状态"（两个 id 都空 ✓）⇒ **留着这一档** ✓
+                #    （去掉它等于顺手删掉既有能力 ✗）；但删除**只针对这一桶** ✓ —— 不是整集清空 ✗
+                episode_outcome = continuity_store.write_episode_level_states(
+                    conn, episode_id=episode_id, states=unassigned)
+                outcome["inserted"] += episode_outcome["inserted"]
+                outcome["deleted"] += episode_outcome["deleted"]
+                outcome["problems"].extend(episode_outcome["problems"])
+            problems = list(outcome["problems"])
+
+        if problems:
+            problems.append(
+                "⚠️ 填错不会静默生效 ✓ —— `state_type` 必须来自词汇表 ✓；"
+                "每镜要传**它自己完整的一套**状态（同一镜/同一场景是「先删后写」✓）")
+
         log_task_success("StoryboardTool", "save-continuity", {
-            "episodeId": episode_id, "dramaId": drama_id, "count": len(states),
+            "episodeId": episode_id, "dramaId": drama_id, "count": len(raw_states),
+            "shots": len(by_shot), "scenes": len(by_scene),
+            "inserted": outcome["inserted"], "deleted": outcome["deleted"],
+            "problems": len(problems),
             # 去重保序（`[...new Set(...)]`）
-            "types": ",".join(dict.fromkeys(str(s.get("state_type")) for s in states)),
+            "types": ",".join(dict.fromkeys(str(s.get("state_type")) for s in raw_states
+                                            if isinstance(s, dict))),
         })
-        return {"message": f"Saved {len(states)} continuity states", "count": len(states)}
+        return {
+            # ⚠️ 收据**逐字保留原串** ✓（外部/自检都在看它 ✓ —— 没必要为改文案而动别人 ✓）；
+            #    新增的信息（镜/场景/替换行数）放在**结构字段**里 ✓（shots/scenes/deleted ✓）。
+            "message": f"Saved {outcome['inserted']} continuity states",
+            "count": outcome["inserted"],
+            "shots": sorted(by_shot),
+            "scenes": sorted(by_scene),
+            "deleted": outcome["deleted"],
+            "problems": problems,
+            # ⭐ 把词汇表**回灌**给模型 ✓ ⇒ 它下一轮能自己改对 ✓✓（工具返回就是它的反馈通道 ✓）
+            "allowedStateTypes": sorted(continuity_store.STATE_TYPES_ALLOWED),
+            "vocabulary": continuity_store.describe_vocabulary() if problems else [],
+        }
 
     async def save_storyboards(arguments: dict[str, Any]) -> dict[str, Any]:
         payload_storyboards = arguments.get("storyboards") or []
@@ -560,9 +641,16 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
         "save_continuity_states": Tool(
             id="save_continuity_states",
             description=(
-                "Save/replace the persistent continuity states (scene space layout, character pose, "
-                "prop state, clue reveal) for this episode. Call after save_storyboards to lock "
-                "cross-shot consistency. Replaces all previous states (idempotent)."
+                "Save continuity states (scene space layout / character pose / prop state / "
+                "clue reveal) to lock cross-shot consistency. Call after save_storyboards. "
+                "IMPORTANT: replacement is **per shot** — only the shots you list here are "
+                "replaced; every listed shot must carry its **complete** state set. Shots you do "
+                "not mention are left untouched, so you may call this incrementally. Each state "
+                "needs a storyboard_id; state_type must come from the fixed vocabulary "
+                "(prop / direction / transition / start_state / end_state / clue / action) — "
+                "unknown types are rejected and the allowed list is returned so you can fix it. "
+                "Action rows may carry meta={\"prop\": \"<prop id>\"} to say which prop the "
+                "action touched."
             ),
             input_schema=object_schema({"states": array_of(object_schema(
                 {
@@ -572,6 +660,16 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
                     "constraints": json_string(),
                     "storyboard_id": nullable_number,
                     "scene_id": nullable_number,
+                    # ⭐ 动作「碰了哪件道具」要靠它 ✓（否则 §8「状态变化要有交代」永远判不了 ✗）
+                    # ⚠️ 用**纯 dict**（不引 helper ✓）：`json_string` 是**函数** ✗（不是 dict ✗），
+                    #    而本文件底部那几个 `nullable_*` 被当**值**用 ✓✗ —— 那是既存形状 ✓，不跟 ✓。
+                    "meta": {
+                        "type": "object",
+                        "description": (
+                            "Optional JSON object. For action rows use {\"prop\": \"<prop id>\"} "
+                            "or {\"props\": [\"<id>\", ...]} to declare which prop(s) the action "
+                            "touched — otherwise the prop timeline check cannot pass."),
+                    },
                 },
                 required=["state_type", "entity_key", "state_value"],
             ))}),

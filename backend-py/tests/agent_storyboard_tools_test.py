@@ -201,8 +201,15 @@ def main() -> int:  # noqa: C901
         {"state_type": "prop_state", "entity_key": "玉坠", "state_value": "林昭持有",
          "storyboard_id": None, "constraints": "不落地"},
     ]})
-    check("状态: 回执是 `Saved N continuity states` + count",
-          first == {"message": "Saved 2 continuity states", "count": 2}, first)
+    # ⚠️ 2026-09-18 **有意扩展**收据 ✓（原断言是严格 `== {message, count}` ✓）：
+    #    现在另带 `problems` / `allowedStateTypes` / `vocabulary` 等**反馈字段** ✓ ——
+    #    那是为了让模型下一轮能自己改对 ✓（工具返回就是它的反馈通道 ✓）；
+    #    **`message` 与 `count` 逐字保持不变** ✓（外部依赖的就是这两个 ✓）。
+    check("状态: 回执是 `Saved N continuity states` + count（逐字不变 ✓）",
+          first["message"] == "Saved 2 continuity states" and first["count"] == 2, first)
+    check("状态: ⭐ 回执里带**词汇表**与 `problems`（模型据此自纠 ✓）",
+          bool(first["allowedStateTypes"]) and first["problems"] == []
+          and first["vocabulary"] == [], first.get("allowedStateTypes"))
     with engine.begin() as conn:
         state_rows = conn.execute(select(continuity_states)
                                   .where(continuity_states.c.episode_id == episode_id)

@@ -197,6 +197,24 @@ def run_episode_preflight(conn: Connection, episode_id: int) -> dict[str, Any]:
     # ⚠️⚠️ **没有分镜 ⇒ 必须 `ready=False`** ✗ —— 纯函数那边会"跳过没给的内容" ✓，
     #    于是**不存在的集**会看起来「可开跑」✗✗（没有任何证据却给了绿灯 ✓）。
     #    这是最坏的一类误导 ✓ ⇒ 在这里补一条**阻断** ✓（"无从体检" ≠ "通过" ✓）。
+    # ⚠️⚠️ **「判不了」必须进阻断** ✗（2026-09-18 补 ✓ —— 这正是本仓反复立的那条规则 ✓）：
+    #    连续性六项覆盖率**全为 0** ⇒ 那些判定**一项都没跑** ✓ ⇒ 此时 `ready=True`
+    #    等于**拿"没判"冒充"通过"** ✗✗（同一套判据在"取数空空"时却给了绿灯 ✓）。
+    #    ⇒ 有分镜、但连续性状态一条都没有 ⇒ 阻断 ✓（并给出可执行的补数据动作 ✓）。
+    if rows.get("storyboards"):
+        counts = storyboard_continuity.coverage_counts(
+            plan, storyboard_props=rows.get("storyboard_props") or [])
+        if counts and all(item["covered"] == 0 for item in counts.values()):
+            report["blockers"].append({
+                "stage": "continuity-coverage",
+                "message": "连续性状态**一项都没有** ✗ ⇒ 道具时间线/越轴/线索揭示/转场动机/"
+                           "接戏**全都判不了** ✓ —— 这**不等于通过** ✗（先把这些状态填上 ✓）"})
+            report["ready"] = False
+            report["nextActions"] = [
+                "先用 `PUT /api/v1/production/continuity-states`（或让分镜生成顺带产出 ✓）"
+                "按 `STATE_TYPES` 写状态 ✓ —— 之后再体检才有意义 ✓"] + [
+                item for item in report["nextActions"] if "可以开跑" not in item]
+
     if not (rows.get("storyboards") or []):
         report["blockers"].append({
             "stage": "source",

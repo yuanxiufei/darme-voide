@@ -56,6 +56,16 @@ STATE_TYPES: dict[str, str] = {
               "``constraints``=effects 的 JSON 数组（五类作用 ✓）",
 }
 
+#: ⚠️ **既存的 TS 时代名字**（2026-09-18 兼容加 ✓）：老数据与老写入方用的是这三个 ✓，
+#: 若不在表里 ⇒ 会被**拒收** ✗（等于把既有数据判成非法 ✓✗）。
+#: 处理：**照收不拒** ✓，并由适配器能映射的映射 ✓（`prop_state` → §8 道具状态 ✓）、
+#: 映射不了的**如实说明** ✓（不静默吞 ✗）。**新写入请用 :data:`STATE_TYPES` 里的 7 条** ✓。
+LEGACY_STATE_TYPES: dict[str, str] = {
+    "prop_state": "≈ §8 道具状态（老名字 ✓ ⇒ 映射到 prop_states ✓）",
+    "scene_space": "≈ §6 场景空间（老名字 ✓）—— 场景级布局 ✓，当前**不进 plan**（场景本身已从 `scenes` 表取 ✓）",
+    "character_pose": "≈ 角色姿态（老名字 ✓）—— 属**起止状态**一类 ✓，但老数据**没区分 start/end** ✗ ⇒ 当前不映射 ✓",
+}
+
 #: 契约要素 → 承载方式 ✓（``table=None`` 表示**仍然无处安放** ✗ —— 目前为空 ✓）
 CONTRACT_MAP: tuple[dict[str, str], ...] = (
     {"contract": "§6 场景空间表（画面方向）", "carrier": "continuity_states / direction",
@@ -172,7 +182,11 @@ def build_plan_from_rows(storyboards: Iterable[Any], *,
         shot: dict[str, Any] = {"shot_id": shot_id}
         scene_ref = _as_text(_field(row, "scene_id"))
         if scene_ref:
-            shot["location"] = f"L{scene_ref}"
+            # ⚠️⚠️ **必须与 `locations[].id` 用同一个写法** ✗ —— 初版这里加了个 `L` 前缀 ✓
+            # 而场景表那边的 id 是裸数字 ✓ ⇒ 判定器比对 `shot.location in locations` ✗
+            # ⇒ **每一镜都报 `unknown-location`** ✓✗（端到端一跑就现形 ✓：
+            # `L5` != `5` ✓）。**同一份数据的两侧，写法必须同源** ✓（本会话第 2 次栽在这类 ✓）。
+            shot["location"] = scene_ref
         base_text = _as_text(_field(row, "action")) or _as_text(_field(row, "description"))
         if base_text:
             base_actions[len(shots)] = base_text
@@ -184,15 +198,37 @@ def build_plan_from_rows(storyboards: Iterable[Any], *,
     # ── ⭐ 通用状态行 → 契字段（按 state_type 分派 ✓）────────────────────
     unknown_types: set[str] = set()
     prop_shot_count = 0
+    #: 场景级 §6 字段 ✓：``{scene_id: {"left": ..., ...}}``（从 `scene_space` 行读 ✓）
+    scene_fields: dict[str, dict[str, str]] = {}
+    #: 角色 §7 当前状态 ✓：``{character_id: current_state}``（从 `character_pose` 行读 ✓）
+    character_states: dict[str, str] = {}
     for row in continuity_states:
         shot_ref = _as_text(_field(row, "storyboard_id"))
         shot = by_id.get(f"sb{shot_ref}")
         kind = _as_text(_field(row, "state_type")).lower()
         key = _as_text(_field(row, "entity_key"))
         value = _as_text(_field(row, "state_value"))
+
+        # ⭐⭐ **场景级**状态（`scene_id` 有值、`storyboard_id` 为空 ✓）—— 初版**只认绑镜的行** ✗
+        # ⇒ `scene_space` 那类**整片被跳过** ✗，于是 §6 的 `left/right/...` **永远是空的** ✗
+        # ⇒ 体检**只要不填就永远红** ✓✗（真机跑 episode 1 时当场暴露 ✓）。
+        scene_ref = _as_text(_field(row, "scene_id"))
+        if shot is None and scene_ref:
+            if kind in ("scene_space", "direction"):
+                field_name = key.lower()
+                if field_name in ("left", "right", "back", "foreground", "axis"):
+                    scene_fields.setdefault(scene_ref, {})[field_name] = value
+            continue
         if shot is None:
-            continue                       # 没挂到镜头的状态（例如集级）⇒ 已在覆盖率里体现 ✓
-        if kind == "prop":
+            # 集级（两个 id 都空 ✓）：角色姿态可以落回角色表 ✓，其余留待后续 ✓
+            if kind == "character_pose" and key:
+                character_states[key] = value
+            continue
+        if kind == "character_pose" and key:
+            # 老名字 `character_pose` ≈ §7 的 `current_state` ✓（老数据没区分 start/end ✓）
+            character_states[key] = value
+            continue
+        if kind in ("prop", "prop_state"):      # ⚠️ 老名字 `prop_state` 一并收 ✓（兼容 ✓）
             shot.setdefault("prop_states", {})[key] = value
             prop_shot_count += 1
         elif kind == "direction":
@@ -249,6 +285,23 @@ def build_plan_from_rows(storyboards: Iterable[Any], *,
         for key in first_seen
     ]
 
+    # ⭐ 把**场景级**状态回填到 §6 ✓（`plan["locations"]` 的 id 就是 `scenes.id` ✓）
+    for location in plan["locations"]:
+        extra = scene_fields.get(location.get("id") or "")
+        if extra:
+            for field_name, value in extra.items():
+                if value:
+                    location[field_name] = value
+    # ⭐ 把**角色姿态**回填到 §7 的 `current_state` ✓
+    for character in plan["characters"]:
+        pose = character_states.get(character.get("id") or "")
+        if pose:
+            character["current_state"] = pose
+    if scene_fields or character_states:
+        notes.append(f"已从**场景级/角色级**老状态回填 ✓：{len(scene_fields)} 个场景的 §6 字段 ✓、"
+                     f"{len(character_states)} 个角色的 §7 当前状态 ✓"
+                     f"（`scene_space` / `character_pose` ✓ —— 光收不读等于没兼容 ✗）")
+
     if unknown_types:
         notes.append(f"⚠️ 有 {len(unknown_types)} 种 `state_type` 不在词汇表里 "
                      f"{sorted(unknown_types)} ✗ ⇒ 那几行**被忽略**了 ✓（请按 §STATE_TYPES 填 ✓）")
@@ -260,31 +313,54 @@ def build_plan_from_rows(storyboards: Iterable[Any], *,
     return plan, notes
 
 
+def coverage_counts(plan: dict[str, Any], *, storyboard_props: Iterable[Any] = ()
+                    ) -> dict[str, dict[str, int]]:
+    """⭐ **结构化**覆盖率 ✓ ⇒ ``{要素: {"covered": n, "total": m}}``。
+
+    ⚠️ 为什么要结构化 ✓：体检那边需要**据此判断"判不了"** ✓（六个要素**全 0** ⇒
+    连续性判定**一项都没跑** ✓ ⇒ 那**不是通过** ✗）。让 `coverage_report` 与判定**同源**
+    ✓ —— 否则一处在算覆盖率 ✓、另一处自己再算一遍 ✗（正是"判据只有一份"要防的 ✓）。
+    """
+    shots = plan.get("shots") or []
+    total = len(shots)
+    linked = len({_as_text(_field(row, "storyboard_id")) for row in storyboard_props
+                  if _as_text(_field(row, "storyboard_id"))})
+
+    def covered(predicate) -> int:
+        return sum(1 for shot in shots if predicate(shot))
+
+    return {
+        "§6 画面方向": {"covered": covered(lambda s: s.get("screen_direction")), "total": total},
+        "§8 道具状态": {"covered": covered(lambda s: s.get("prop_states")), "total": total,
+                        "propsLinked": linked},
+        "§9 线索可见": {"covered": covered(lambda s: s.get("clues_visible")), "total": total},
+        "§10 动作（带 effects）": {
+            "covered": covered(lambda s: any(a.get("effects") for a in s.get("actions") or [])),
+            "total": total},
+        "§11 转场动机": {"covered": covered(lambda s: s.get("transition")), "total": total},
+        "接戏起止状态": {"covered": covered(lambda s: s.get("start_state") or s.get("end_state")),
+                        "total": total},
+    }
+
+
 def coverage_report(plan: dict[str, Any], *, storyboard_props: Iterable[Any] = ()) -> list[str]:
     """⭐ **每个契约要素的数据覆盖率** ✓ —— 没有它，部分数据会得到"全绿"✓✗。
 
     例：``§8 道具状态 3/12 镜`` ⇒ 那次判定**只覆盖 3 镜** ✓（用户据此知道该信多少 ✓）。
     """
-    shots = plan.get("shots") or []
-    total = len(shots) or 1
-
-    def covered(predicate) -> int:
-        return sum(1 for shot in shots if predicate(shot))
-
-    linked = len({_as_text(_field(row, "storyboard_id")) for row in storyboard_props})
-    rows: list[tuple[str, int, str]] = [
-        ("§6 画面方向", covered(lambda s: s.get("screen_direction")), ""),
-        ("§8 道具状态", covered(lambda s: s.get("prop_states")),
-         (f"（另有 {linked} 镜登记了道具但**没有状态** ✗ ⇒ 那些镜的状态是**未知** ✓ "
-          f"不是「没变」✗）" if linked else "")),
-        ("§9 线索可见", covered(lambda s: s.get("clues_visible")), ""),
-        ("§10 动作（带 effects）",
-         covered(lambda s: any(a.get("effects") for a in s.get("actions") or [])), ""),
-        ("§11 转场动机", covered(lambda s: s.get("transition")), "（第一镜不需要 ✓）"),
-        ("接戏起止状态", covered(lambda s: s.get("start_state") or s.get("end_state")), ""),
+    counts = coverage_counts(plan, storyboard_props=storyboard_props)
+    linked = (counts["§8 道具状态"].get("propsLinked") or 0)
+    rows: list[tuple[str, int, int, str]] = [
+        (name, item["covered"], item["total"],
+         ("（另有 "
+          f"{linked} 镜登记了道具但**没有状态** ✗ ⇒ 那些镜的状态是**未知** ✓ 不是「没变」✗）"
+          if linked and name.startswith("§8") else "")
+         + ("（第一镜不需要 ✓）" if name.startswith("§11") else ""))
+        for name, item in counts.items()
     ]
-    report = [f"覆盖率 {name} {count}/{total} 镜 ✓{suffix}" for name, count, suffix in rows]
-    empty = [name for name, count, _suffix in rows if count == 0]
+    report = [f"覆盖率 {name} {covered_count}/{total or 1} 镜 ✓{suffix}"
+              for name, covered_count, total, suffix in rows]
+    empty = [name for name, covered_count, _total, _suffix in rows if covered_count == 0]
     if empty:
         report.append(f"⚠️ 这些要素**一镜都没有数据** ⇒ 对应判定**完全不成立** ✓：{empty} ✓"
                       f"（不是「通过」✗ —— 是「**没判**」✓）")

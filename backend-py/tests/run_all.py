@@ -155,6 +155,8 @@ TESTS = [
      "preflight_source_test.py"),
     ("连续性写入（词汇**拒收而非忽略** / 幂等替换 / **全有或全无** / 归属校验；临时库 ✓）",
      "continuity_store_test.py"),
+    ("生产链端到端（真工具写状态 → 取数 → 适配 → 判定 → 门；**填齐就当绿** ✓ 临时库 ✓）",
+     "chain_e2e_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
 ]
 

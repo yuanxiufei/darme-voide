@@ -32,14 +32,19 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Connection
 
 from ..core.models import continuity_states as states_tbl
+from ..core.models import scenes as scenes_tbl
 from ..core.models import storyboards as storyboards_tbl
-from .storyboard_continuity import STATE_TYPES
+from .storyboard_continuity import LEGACY_STATE_TYPES, STATE_TYPES
 
 __all__ = ["STATE_TYPES_ALLOWED", "describe_vocabulary", "normalize_states",
-           "write_episode_states", "write_shot_states"]
+           "write_episode_level_states", "write_episode_states", "write_scene_states",
+           "write_shot_states"]
 
 #: 词汇表（**大小写归一后**的形态 ✓ —— 与"归一化产物必须同源"那条规则一致 ✓）
-STATE_TYPES_ALLOWED: frozenset[str] = frozenset(kind.lower() for kind in STATE_TYPES)
+#: ⚠️ **含既存的老名字** ✓：老数据/老写入方用的 `scene_space`/`prop_state`/`character_pose`
+#: 必须**照收不拒** ✗（否则等于把既有数据判成非法 ✓✗）。新写入请用 :data:`STATE_TYPES` 的 7 条 ✓。
+STATE_TYPES_ALLOWED: frozenset[str] = frozenset(
+    kind.lower() for kind in (*STATE_TYPES, *LEGACY_STATE_TYPES))
 
 #: 逐条必填 ✓（`constraints` / `meta` 可选 ✓ —— 它们承载 effects / prop 指认 ✓）
 _REQUIRED: tuple[str, ...] = ("state_type", "entity_key", "state_value")
@@ -115,7 +120,7 @@ def write_shot_states(conn: Connection, *, episode_id: int, storyboard_id: int,
             {"episode_id": episode_id, "storyboard_id": storyboard_id,
              "scene_id": None, "state_type": row["state_type"],
              "entity_key": row["entity_key"], "state_value": row["state_value"],
-             "constraints": row["constraints"] or None, "meta": row["meta"] or None,
+             "constraints": row["constraints"], "meta": row["meta"],
              "created_at": now_value, "updated_at": now_value}
             for row in rows])
 
@@ -123,6 +128,82 @@ def write_shot_states(conn: Connection, *, episode_id: int, storyboard_id: int,
             "inserted": len(rows),
             "stateTypes": sorted({row["state_type"] for row in rows}),
             "vocabulary": describe_vocabulary() if problems else []}
+
+
+def write_scene_states(conn: Connection, *, episode_id: int, scene_id: int,
+                       states: Any) -> dict[str, Any]:
+    """**按场景**幂等替换 ✓ —— 与 :func:`write_shot_states` 同语义 ✓。
+
+    ⚠️ 为什么需要它（**我一开始漏了** ✗）：`continuity_states` 除了 `storyboard_id` 还有
+    `scene_id` ✓，工具描述里也明写 *scene space layout* ✓ ⇒ **场景级状态是有意支持的** ✓；
+    初版"只认镜头"把它一律拒掉 ✗ ⇒ 属**过度纠正** ✓（原有能力不该被顺手删掉 ✗）。
+    仍**不做**的只有一件 ✓：**整集清空** ✗（那才是数据丢失的来源 ✓）。
+    """
+    rows, problems = normalize_states(states)
+    scene_id = int(scene_id)
+    episode_id = int(episode_id)
+
+    owned = conn.execute(
+        select(scenes_tbl.c.id).where(
+            scenes_tbl.c.id == scene_id,
+            # 场景的 `episode_id` 可空（剧级场景 ✓）⇒ 两种都算本集可用 ✓
+            (scenes_tbl.c.episode_id == episode_id) | (scenes_tbl.c.episode_id.is_(None)))
+    ).first()
+    if owned is None:
+        problems.append(f"scene {scene_id} 不属于 episode {episode_id} ✗ ⇒ **一条都不写**")
+        return {"ok": False, "problems": problems, "deleted": 0, "inserted": 0,
+                "stateTypes": [], "vocabulary": describe_vocabulary()}
+    if problems:
+        problems.append("⇒ 本场景**一行都不动** ✓（全有或全无 ✓）")
+        return {"ok": False, "problems": problems, "deleted": 0, "inserted": 0,
+                "stateTypes": [], "vocabulary": describe_vocabulary()}
+
+    deleted = conn.execute(
+        delete(states_tbl).where(states_tbl.c.episode_id == episode_id,
+                                 states_tbl.c.scene_id == scene_id,
+                                 states_tbl.c.storyboard_id.is_(None))
+    ).rowcount or 0
+    now_value = _now()
+    if rows:
+        conn.execute(insert(states_tbl), [
+            {"episode_id": episode_id, "storyboard_id": None, "scene_id": scene_id,
+             "state_type": row["state_type"], "entity_key": row["entity_key"],
+             "state_value": row["state_value"], "constraints": row["constraints"],
+             "meta": row["meta"], "created_at": now_value, "updated_at": now_value}
+            for row in rows])
+    return {"ok": True, "problems": [], "deleted": int(deleted), "inserted": len(rows),
+            "stateTypes": sorted({row["state_type"] for row in rows}), "vocabulary": []}
+
+
+def write_episode_level_states(conn: Connection, *, episode_id: int,
+                               states: Any) -> dict[str, Any]:
+    """**集级**状态（既没绑镜、也没绑场景 ✓）幂等替换 ✓。
+
+    ⚠️ 为什么留这一档：老实现允许"集级状态" ✓（两个 id 都空 ✓），
+    去掉它等于**顺手删掉既有能力** ✗ ⇒ 留着 ✓。
+    但 ⚠️⚠️ 删除**只针对"两个 id 都为空"的那一桶** ✓✓ ——
+    **不是**「按 episode_id 清空整集」✗（那才是原来的数据丢失来源 ✓）。
+    """
+    rows, problems = normalize_states(states)
+    if problems:
+        problems.append("⇒ 集级状态**一行都不动** ✓（全有或全无 ✓）")
+        return {"ok": False, "problems": problems, "deleted": 0, "inserted": 0,
+                "stateTypes": [], "vocabulary": describe_vocabulary()}
+
+    deleted = conn.execute(delete(states_tbl).where(
+        states_tbl.c.episode_id == int(episode_id),
+        states_tbl.c.storyboard_id.is_(None),
+        states_tbl.c.scene_id.is_(None))).rowcount or 0
+    now_value = _now()
+    if rows:
+        conn.execute(insert(states_tbl), [
+            {"episode_id": int(episode_id), "storyboard_id": None, "scene_id": None,
+             "state_type": row["state_type"], "entity_key": row["entity_key"],
+             "state_value": row["state_value"], "constraints": row["constraints"],
+             "meta": row["meta"], "created_at": now_value, "updated_at": now_value}
+            for row in rows])
+    return {"ok": True, "problems": [], "deleted": int(deleted), "inserted": len(rows),
+            "stateTypes": sorted({row["state_type"] for row in rows}), "vocabulary": []}
 
 
 def write_episode_states(conn: Connection, *, episode_id: int, shots: Iterable[Any]) -> dict[str, Any]:

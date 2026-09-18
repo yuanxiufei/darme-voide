@@ -175,11 +175,39 @@ def case_together() -> None:
           and any("不等于「通过」" in item for item in empty_notes), empty_notes)
 
 
+def case_legacy_levels() -> None:
+    """⭐⭐ 老数据的**场景级 / 角色级**状态要能**回填**到 §6/§7 ✓（光**收**不**读** = 没兼容 ✗）。
+
+    这条是**真机跑出来的** ✓：对真库 `episode 1`（20 镜）跑体检时，阻断项**全是**
+    `locations[*]` 缺 `left/right/...` ✓ + `characters[*]` 缺 `current_state` ✗
+    ⇒ 而这两个正是 `scene_space` / `character_pose` 的**家** ✓ ⇒ 若不回填，
+    **§6/§7 永远空 ⇒ 体检永远红** ✓✗（那等于造了一个"永远报错"的检查 ✓）。
+    """
+    plan, notes = build_plan_from_rows(
+        SHOTS, scenes=SCENES, characters=CHARACTERS,
+        continuity_states=[
+            {"scene_id": 5, "state_type": "scene_space", "entity_key": "left", "state_value": "门"},
+            {"scene_id": 5, "state_type": "scene_space", "entity_key": "axis",
+             "state_value": "左入右出"},
+            {"storyboard_id": 11, "state_type": "character_pose", "entity_key": "7",
+             "state_value": "侧身半跪"},
+        ])
+    location = plan["locations"][0]
+    check("㉓ ⭐⭐ 场景级 `scene_space` **回填**到 §6 ✓（`left`/`axis` ✓）"
+          "—— 只收不读的话 §6 永远空 ⇒ 体检永远红 ✗",
+          location.get("left") == "门" and location.get("axis") == "左入右出", location)
+    check("㉔ ⭐ `character_pose` 回填到 §7 的 `current_state` ✓",
+          plan["characters"][0].get("current_state") == "侧身半跪", plan["characters"][0])
+    check("㉕ 回填这件事在 notes 里**写明白** ✓（不做隐性换算 ✓）",
+          any("回填" in item for item in notes), notes)
+
+
 def main() -> int:
     case_vocabulary()
     case_translation()
     case_coverage()
     case_together()
+    case_legacy_levels()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
