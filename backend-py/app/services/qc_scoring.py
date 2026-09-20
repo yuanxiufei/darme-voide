@@ -198,20 +198,15 @@ def score_storyboard(conn: Connection, storyboard_id: Any) -> dict[str, Any]:
     index = next((i for i, s in enumerate(siblings) if s.id == sb.id), -1)
     if index > 0:
         prev = siblings[index - 1]
-        # ⚠️ **原 TS 的死分支（照抄，别"修"）**：这里要求 ``prev.scene_id == sb.scene_id``，
-        #    而 ``prev_scene`` 又是按 ``prev.scene_id`` 查出来的 ⇒ 两者**同一个场景行**，
-        #    其 ``location_id`` 必然相同 ⇒ 下面那个「地点 ID 不一致 -20」**永远不会触发**。
-        #    （想真正校验地点一致性，得比较不同场景行，属原实现的意图偏差；保留原行为以便对拍。）
-        if sb.scene_id and prev.scene_id == sb.scene_id:
-            prev_scene = conn.execute(
-                select(scenes).where(scenes.c.id == prev.scene_id)).first()
-            if (prev_scene is not None and scene is not None
-                    and prev_scene.location_id and scene.location_id
-                    and prev_scene.location_id != scene.location_id):
-                score -= 20
-                issues.append({"dimension": "continuity", "severity": "error",
-                               "message": f"同一场景 #{sb.scene_id} 但地点 ID 不一致"
-                                          f"（{prev_scene.location_id} vs {scene.location_id}）"})
+        # ⚠️ **2026-09-20：这里原来的"死分支"已删** ✗ ——
+        #    原 TS 写的是「同一场景但地点 ID 不一致 ⇒ −20」，可它**结构上不可能触发** ✓：
+        #    判据要求 ``prev.scene_id == sb.scene_id`` ✓，而 ``prev_scene`` 又是按
+        #    ``prev.scene_id`` 查出来的 ⇒ 两次读的是**同一个场景行** ⇒ ``location_id`` 必然相同 ✓✗
+        #    （测试里也一直写着"永远不触发" ✓）。Node 侧已删 ⇒ 不再需要为对拍保留 ✓ ⇒ 删掉 ✓
+        #    （**分数不变** —— 它从来没触发过 ✓）。
+        #    **真正的地点/空间连续性**由两条更靠谱的判据承担 ✓：
+        #    ① 本函数下方「关联场景未锁定地点 ID（location_id 为空）」✓；
+        #    ② ``services/continuity.py`` 的 §6 场景空间体检（含**越轴**判据 ✓）。
         # 状态衔接：上一镜 end_state 与本镜 start_state 的公共实体必须一致
         if prev.end_state and sb.start_state:
             prev_end = parse_entity_states(prev.end_state)

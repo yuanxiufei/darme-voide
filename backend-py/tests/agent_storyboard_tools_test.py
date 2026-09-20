@@ -166,6 +166,12 @@ def main() -> int:  # noqa: C901
     check("保存: 三件后置 —— 剧本指纹盖章 + take 预算重置都被调用",
           _STAMP_CALLS == [episode_id] and _TAKE_CALLS == [episode_id],
           (_STAMP_CALLS, _TAKE_CALLS))
+    # ⭐⭐ 2026-09-20：**第三件后置真的落地了** ✓ —— 此前 `assign_rhythm_phases` 是**空实现** ✗
+    #    （工具对外存在、`storyboards.rhythm_phase` 却一直是空的 ✓✗ —— "宣告了但什么都不做" ✓）。
+    #    这里**直接查库里的列** ✓（不看回执 ✗）：空实现会让这条立刻红 ✓ = 信号灯 ✓
+    phases = [r.rhythm_phase for r in rows]
+    check("保存: 节奏相位**真写进库**（首镜恒 setup ✓，且三镜不是一个值 ⇒ 真按占比分了 ✓）",
+          all(phases) and phases[0] == "setup" and len(set(phases)) >= 2, phases)
 
     # 重建：再存一次 -> 旧分镜（含关联）被清掉
     _call(tools, "save_storyboards", {"storyboards": [

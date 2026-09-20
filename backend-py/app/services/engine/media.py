@@ -25,8 +25,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
-__all__ = ["MediaError", "ffmpeg_version", "have_ffmpeg", "load_image_tensor", "probe",
-           "write_image", "write_video", "write_wav"]
+__all__ = ["MediaError", "extract_wav", "ffmpeg_version", "have_ffmpeg", "load_image_tensor",
+           "load_video_tensor", "probe", "write_image", "write_video", "write_wav"]
 
 
 class MediaError(RuntimeError):
@@ -217,6 +217,116 @@ def write_image(frames: Any, path: str | Path, *, index: int = 0,
     Image.fromarray(array.round().astype(np.uint8), "RGB").save(target)
     return {"path": str(target), "bytes": target.stat().st_size, "index": int(index),
             "width": int(shape[4]), "height": int(shape[3])}
+
+
+def load_video_tensor(path: str | Path, *, value_range: str = "-1..1") -> tuple[Any, dict[str, Any]]:
+    """视频文件 → 帧张量 ✓ 形状 ``(1, 3, T, H, W)`` —— **自己实现** ✓（ffmpeg 解码 ✓ 不引依赖 ✓）。
+
+    ⚠️ 用**原生尺寸与帧数** ✓：**不缩放、不裁剪、不抽帧** ✗（参考视频块用的是**它自己的**网格 ✓
+    —— 悄悄改尺寸/丢帧都会改变素材本身 ✓✗，而参考唯一在意的就是它的内容 ✓）。
+    尺寸整除性（vae_scale ✓）由**调用方**校验 ✓ —— 这里只管忠实解码 ✓。
+    ⚠️ 解出的字节数**不是整数帧** ⇒ 报错 ✗（不静默截断半帧 ✓）。
+    """
+    import numpy as np  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    target = Path(path)
+    if not target.exists():
+        raise MediaError(f"视频文件不存在 ✗：{target}（先确认路径 ✓）")
+    facts = probe(target)
+    width, height = int(facts["width"]), int(facts["height"])
+    if not width or not height:
+        raise MediaError(f"文件里没有视频轨 ✗：{target}（ffprobe 读不到宽高 ✓）")
+    command = [_tool("ffmpeg"), "-hide_banner", "-loglevel", "error",
+               "-i", str(target), "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    try:
+        done = subprocess.run(command, capture_output=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as err:
+        raise MediaError(f"ffmpeg 调用失败：{type(err).__name__}: {err}") from err
+    if done.returncode:
+        tail = (done.stderr or b"")[-600:].decode("utf-8", "replace")
+        raise MediaError(f"ffmpeg 解码返回 {done.returncode} ✗：{tail}")
+    raw = done.stdout or b""
+    per_frame = width * height * 3
+    if not raw:
+        raise MediaError(f"一帧都没解出来 ✗：{target}（ffprobe 说有 {width}×{height} 的视频轨 ✓）")
+    if len(raw) % per_frame:
+        raise MediaError(
+            f"解出的字节数不是整数帧 ✗（{len(raw)} 字节 ÷ 每帧 {per_frame} 有余 ✓）"
+            f"—— 不静默截断半帧 ✓：{target}")
+    frames = len(raw) // per_frame
+    kind = str(value_range or "-1..1").replace(" ", "")
+    if kind not in ("-1..1", "[-1,1]", "0..1", "[0,1]"):
+        raise MediaError(f"未知值域 {value_range!r}；可用：-1..1 / 0..1 ✓")
+    array = np.frombuffer(raw, dtype=np.uint8).reshape(frames, height, width, 3)
+    values = torch.from_numpy(array.astype(np.float32) / 255.0)
+    if kind in ("-1..1", "[-1,1]"):
+        values = values * 2.0 - 1.0
+    # (T, H, W, 3) → (1, 3, T, H, W) ✓ 与 write_video 的输入口径一致 ✓（可往返 ✓）
+    tensor = values.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
+    return tensor, {"path": str(target), "width": width, "height": height, "frames": frames,
+                    "fps": facts["fps"], "hasAudio": bool(facts["hasAudio"]),
+                    "valueRange": value_range}
+
+
+def extract_wav(source: str | Path, target: str | Path) -> dict[str, Any]:
+    """从视频容器里**抽出音轨** → 16-bit PCM wav ✓（**原生**采样率/声道 ✓）。
+
+    ⚠️ 与 :func:`load_wav_tensor` **成对** ✓：这里**不重采样、不混声道** ✗
+    （不带 ``-ar`` / ``-ac`` ✓）—— 采样率/声道与音频 VAE 不符会在读回那一步**明确报错** ✓
+    （那才是该报的地方 ✓，而不是在这里悄悄改掉素材 ✓✗）。
+    """
+    origin, destination = Path(source), Path(target)
+    if not origin.exists():
+        raise MediaError(f"视频文件不存在 ✗：{origin}（先确认路径 ✓）")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [_tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+               "-i", str(origin), "-vn", "-acodec", "pcm_s16le", str(destination)]
+    try:
+        done = subprocess.run(command, capture_output=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as err:
+        raise MediaError(f"ffmpeg 调用失败：{type(err).__name__}: {err}") from err
+    if done.returncode:
+        tail = (done.stderr or b"")[-600:].decode("utf-8", "replace")
+        raise MediaError(f"ffmpeg 抽音轨返回 {done.returncode} ✗：{tail}")
+    if not destination.exists() or destination.stat().st_size == 0:
+        raise MediaError(
+            f"ffmpeg 返回 0 但没抽出音轨（{origin} ✗）—— **静默失败**必须当失败处理 ✓"
+            f"（先用 :func:`probe` 的 ``hasAudio`` 判断有没有音轨 ✓）")
+    return {"path": str(destination), "bytes": destination.stat().st_size}
+
+
+def load_wav_tensor(path: str | Path, *, sample_rate: int,
+                    channels: int = 2) -> tuple[Any, dict[str, Any]]:
+    """wav → 波形张量 ✓ 形状 ``(channels, N)`` ✓（值域 ``[-1, 1]`` ✓）—— **自己实现** ✓（标准库 `wave` ✓ 零依赖 ✓）。
+
+    ⚠️ 与 :func:`write_wav` **成对** ✓（那边写 16-bit PCM ✓ 这边读 16-bit PCM ✓）。
+    ⚠️ 采样率 / 声道数与**给定的**不一致 ⇒ **报错** ✓：**不重采样、不混声道** ✗ ——
+    那些都会**悄悄改掉素材本身** ✓✗，而参考音频唯一在意的就是它的内容 ✓。
+    ⚠️ 位宽不是 2 字节 ⇒ 报错 ✓（本仓只写 2 字节 ✓ ⇒ 别的宽度**没有依据** ✓ 不猜 ✗）。
+    """
+    import numpy as np  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    target = Path(path)
+    if not target.exists():
+        raise MediaError(f"音频文件不存在 ✗：{target}（先确认路径 ✓）")
+    with wave.open(str(target), "rb") as handle:
+        got_channels, width = handle.getnchannels(), handle.getsampwidth()
+        rate, count = handle.getframerate(), handle.getnframes()
+        raw = handle.readframes(count)
+    if int(width) != 2:
+        raise MediaError(f"采样位宽 {int(width) * 8} bit ✗ —— 本仓只认 16-bit PCM ✓（不猜别的格式 ✗）")
+    if int(rate) != int(sample_rate) or int(got_channels) != int(channels):
+        raise MediaError(
+            f"采样率/声道与要求不符 ✗：文件是 {rate} Hz / {got_channels} 声道 ✓，"
+            f"要的是 {sample_rate} Hz / {channels} 声道 ✓（**不重采样、不混声道** ✓✗ —— "
+            f"那会悄悄改掉参考音频的内容 ✓）")
+    values = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32767.0
+    tensor = torch.from_numpy(values.reshape(int(count), int(channels)).T.copy())
+    return tensor, {"path": str(target), "sampleRate": int(rate), "channels": int(got_channels),
+                    "samples": int(count),
+                    "durationSeconds": round(int(count) / max(1, int(rate)), 4)}
 
 
 def write_wav(samples: Any, path: str | Path, sample_rate: int = 32000) -> dict[str, Any]:

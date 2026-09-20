@@ -17,7 +17,10 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
-> **自检 2911 项全绿**（冒烟 476 + 适配器 101 + 错误归因 58 + 文本生成 67 + 图片生成 64 + 视频生成 50 + TTS/音色复刻 34 + 分镜 prompt/图谱 38 + 宫格 prompt/运镜 48 + 逐镜路由/videos 43 + 单镜合成 35 + 整集拼接 29 + 宫格路由 42 + **图谱/图片/回调 37** + **AI 音色 43** + **前端调用覆盖 5** + **契约镜像 8** + **自研引擎·算法层 26** + **自研引擎·权重体检 34** + **自研引擎·管线编排 98** + **自研引擎·加载计划 28**）
+> **自检 3224 项全绿**（2026-09-20 全量实测；**权威清单在 `tests/run_all.py`**，本行不再逐套罗列 ——
+> 逐套数字会随套件增减而腐烂 ✗）
+> ⚠️ 另有 **2 套不打印 `SUMMARY`** 的套件（`route_parity_test` 打 `OK:` 行 ✓、`h3_backend_live_test` 是活体 ✓）
+> ⇒ 它们**本身通过** ✓ 但**项数未计入 3224** ✓（不是"0 项"✗ —— 汇总要打分母、并点名异常项 ✓）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
@@ -420,7 +423,7 @@ backend-py/
    │                            **截断回报** ✓ + 注意力真的混 token ✓ + 整链 TE→DiT→VAE→真 mp4 ✓，21 用例）
    ├─ engine_segments_test.py    **自研引擎·长视频分段**（网格长度 ✓ / 重叠接缝恰好 N 帧 ✓ / ⭐ **保留帧数守恒** ✓ /
    │                            边界帧落 PNG ⇒ 走真 VAE 首帧条件 ✓ / 报错带可调量 ✓，54 用例）
-   └─ run_all.py                一次跑完以上八十三项（**套件权威清单就在这个文件里**，本树只是摘录）
+   └─ run_all.py                一次跑完以上**九十四项**（**套件权威清单就在这个文件里**，本树只是摘录）
 adapter.parse_generate_response(result)         # → {"isAsync", "taskId"/"imageUrl"}（不解析 HTTP）
 ```
 
@@ -451,7 +454,7 @@ TTS | `minimax` / `cosyvoice` |
 cd backend-py
 # 依赖：python-multipart（upload 域的 multipart 解析，Starlette 的 request.form() 必需）
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
-./.venv/Scripts/python.exe tests/run_all.py     # 十六项一次跑完，退出码 0 = 全过
+./.venv/Scripts/python.exe tests/run_all.py     # 九十四项一次跑完，退出码 0 = 全过
 ```
 
 单项也可以单独跑（调试时更快）：
@@ -621,7 +624,7 @@ cd backend-py
 | ✅ **参考图压缩已迁**（`read_image_as_compressed_data_url`，ffmpeg 实现） | 2026-09-15 落地：`scale=min(W\,iw):min(H\,ih):force_original_aspect_ratio=decrease:flags=lanczos`（等比、**不放大**，`<=0` 视为该维不约束）+ 有 alpha 走 `geq` **白底合成**（⚠️ 取 alpha 的函数名是 `alpha(X\,Y)`，写成 `a(X\,Y)` 会报 `Unknown function`）+ 末尾 `trunc(iw/2)*2` 保偶数（mjpeg 4:2:0 要求，与 sharp 最多差 1px）⇒ mjpeg。⚠️ **编码器不同 ⇒ 体积不相等**：实测 1024×768，sharp `q68+mozjpeg`=**17399 B** vs ffmpeg `-q:v 10`=**29039 B**（同视觉质量约大 1.4~1.7×，mozjpeg 本就是压缩率优化版）⇒ `quality→-q:v` 用**线性近似**（q68→10）优先保视觉质量，想要更小体积就调低 `quality` |
 | ✅ **像素级校色已迁**（`apply_color_grade_to_file`，ffmpeg 实现） | 2026-09-15 落地：8 步链中 7 步是逐通道点式 ⇒ 合成 ``RGB乘法LUT → eq=saturation → 对比度/肤色 LUT``，**不装 Pillow**。⭐ 用真实 sharp 实测（`backend/probe-sharp.cjs`）才发现 **`.gamma()` 在无 resize 时是 no-op**（128→127、200,100,50→199,9?,4? 只差 ±1 取整）⇒ Python 侧**有意跳过** ⑥⑦ 两步；`modulate({brightness})` 是 **L 星感知乘法**（128→199，非 192）⇒ 用 RGB 乘法近似、约 3% 差异（已写进模块 docstring 与 `tests/color_grade_test.py`）。校准/对比度/白平衡/肤色与 Node **逐值一致**（192 / 236 / 154 / 136…） |
 | ⚠️ **`ai_service_configs.model` 存的是 JSON 数组字符串** | 不是单模型名。读侧两边都是 `JSON.parse(row.model)` 再取 `models[0]`；接口入参则是**数组**（路由会 `json.dumps` 后落库）。写成裸字符串 `"dall-e-3"` 会让 `model` 解析成**空串**（Node 同样如此）—— 排查"模型没生效"时先看这里 |
-| ✅ **镜头 QC 打分已迁**（`qc_scoring.py` + `technical_qc.py`） | 规则打分与技术维度均已接线（`_run_qc_after_video_complete` / webhook / 合并前置）。🔴 但技术维度里**冻帧 / 音频真峰 / 集成响度三项是两侧共同的继承缺陷**（正则与 ffmpeg 真实输出格式不符 ⇒ 永不生效；黑场/帧率/时长正常）—— 详见 `technical_qc.py` 的「继承缺陷」段与 `tests/technical_qc_test.py`，**要修必须两边一起修** |
+| ✅ **镜头 QC 打分已迁**（`qc_scoring.py` + `technical_qc.py`） | 规则打分与技术维度均已接线（`_run_qc_after_video_complete` / webhook / 合并前置）。✅ **2026-09-18：技术维度三项「死检测」已修** —— 冻帧 / 音频真峰 / 集成响度此前与 ffmpeg 真实输出格式不符 ⇒ **永不生效**（黑场/帧率/时长一直正常）。Node 删除后「必须两边一起修」的约束消失，且本机有 ffmpeg 9.0.1 ⇒ 按**实测输出**修：`freezedetect` 三行事件流配对（视频冻到片尾时只有 `freeze_start` ⇒ 用总时长收尾并标注 open）；`ebur128` summary 是**跨两行**的（`I:` / `Peak:` 在标题下一行），退化时取**最后一条**进度行（首行恒 -70 LUFS ⇒ 取首行会造出「永远 -70」的假读数）。详见 `technical_qc.py` 顶部「✅ 三项检测曾两边都死，现已修」段 |
 | ⚠️ **`probe_video_duration` 需要系统 `ffprobe`** | 异步提供商不返回 `duration` 时用它补时长。**没装 ffprobe 不报错**，返回 0 ⇒ 分镜的 `duration` 键不写（保留旧值）——与原实现的 `resolve(0)` 一致 |
 | ✅ **CosyVoice 接缝已核实并加薄封装**（2026-09-16） | 旧行文是「按猜想写的 / 部署后需按实际接口核对」——现已读上游 `runtime/python/fastapi/server.py` 核实：官方服务**没有 `/tts`** ✗、零样本那条收 **multipart 文件**（字段 `prompt_wav`）✗、返回**裸 int16 PCM**（不是 JSON 的 `audio`）✗、默认端口 **50000**（不是 9880）✗ ⇒ 直接打官方**四项都不兼容**。解法即 `app/local_services/cosyvoice/server.py`（端口 **9880**，与 `PRESET_SERVICES` 的本地音频 baseUrl 一致）把官方端点包成后端期望的形状（JSON → form/multipart、裸 PCM → 补 44 字节 WAV 头 → hex、并如实回 `format="wav"` ⇒ 下游据此定文件扩展名）。启动两步：官方服务 `python runtime/python/fastapi/server.py --port 50000` → 封装 `COSYVOICE_UPSTREAM=http://127.0.0.1:50000 uvicorn server:app --port 9880`。契约由 `tests/cosyvoice_seam_test.py` 机械守卫（真 HTTP stub 上游 ✓） |
 | ⚠️ **参考音频的绝对 URL 默认指向 5789（Node 的端口）** | `to_public_media_url` 沿用原 TS 的默认基址 `http://localhost:5789`。**只跑 Python 后端时必须设 `PUBLIC_BASE_URL=http://localhost:5790`**，否则本地 H3 服务按 5789 拉参考音频会 404（绞杀期两边都在则无感） |
@@ -694,7 +697,7 @@ cd backend-py
 
 结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓（**当时**的实测值；此后新增
 `frontend_api_coverage_test.py`、`contract_mirror_test.py`、`layering_test.py` 与 `assets_layout_test.py`
-⇒ 现为 **82 套件 / 2911 项**），
+⇒ 现为 **94 套件 / 3224 项**（2026-09-20 实测 ✓，权威清单以 `tests/run_all.py` 为准 ✓），
 快照 **76 条 / 674 KB** ✓。
 
 ⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：

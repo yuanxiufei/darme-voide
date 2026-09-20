@@ -22,9 +22,12 @@ from __future__ import annotations
 import math
 
 __all__ = [
+    "AUDIO_LATENT_CHANNELS",
+    "AUDIO_LATENT_HZ",
     "H3_FPS",
     "H3_FRAME_GRID",
     "H3_MIN_FRAMES",
+    "audio_latent_frames",
     "ceil_to_multiple",
     "latent_frames",
     "megapixels_for_size",
@@ -38,6 +41,32 @@ __all__ = [
 H3_FPS = 24
 H3_FRAME_GRID = 17
 H3_MIN_FRAMES = 5
+#: 音频潜空间的事实（来自 H3 模型的**文件头说明** ✓：「stereo audio (32ch, 40 Hz) latents」✓）
+#: ⇒ 40 Hz 时间轴 ✓、**立体声 2 声道** ✓（通道数 32 是**特征维** ✓ 不是声道 ✓ —— 别混 ✗）
+AUDIO_LATENT_HZ = 40
+AUDIO_LATENT_CHANNELS = 2
+
+
+def audio_latent_frames(seconds: float, *, mode: str, hz: int = AUDIO_LATENT_HZ) -> int:
+    """秒数 → **音频潜帧数** ✓；⚠️ ``mode``（取整方式）**必须显式给** ✗。
+
+    为什么**不给默认** ✓：音频潜帧数在参考实现里是**从调用方的张量读出来的**
+    （``audio_t = audio_x.shape[-1]`` ✓）⇒ 「**怎么从秒数算出来**」这一步**我没核过** ✗。
+    按本模块的纪律（见文件头 ✓：「给个看起来合理的数只会**在真机上错得莫名其妙**」✓）⇒
+    **把没核过的地方逼成必填参数** ✓：``mode`` 取 ``"round" | "ceil" | "floor"`` ✓，
+    调用方（或以后核到的事实）来定 ✓ —— 一旦核清，**只改这一处** ✓。
+
+    ``hz`` 是**已核实的** ✓（40 Hz ✓）；``seconds`` 与视频那侧的
+    :func:`snap_frames` **各走各的网格** ✓（不必整除 ✓）。
+    """
+    if mode not in ("round", "ceil", "floor"):
+        raise ValueError(f"mode 必须是 round/ceil/floor 之一（收到 {mode!r} ✗）")
+    value = max(0.0, float(seconds)) * int(hz)
+    if mode == "ceil":
+        return int(math.ceil(value))
+    if mode == "floor":
+        return int(math.floor(value))
+    return int(round(value))
 #: 分辨率步长（schema 的 ``step=32`` ✓）
 RESOLUTION_MULTIPLE = 32
 

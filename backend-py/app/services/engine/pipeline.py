@@ -111,6 +111,14 @@ class GenerationRequest:
     temporal_compression: int | None = None   # ⚠️ 必须显式给（见 geometry 的原则 ✓）
     first_frame: str | None = None            # 图生视频的首帧 ✓
     reference_frames: tuple[str, ...] = ()
+    #: 参考**音频**（wav 路径 ✓）—— H3 的 ``ref_audio`` 块 ✓（本仓库自己实现读写 ✓）。
+    #: ⚠️ 采样率/声道要与音频 VAE 一致 ✓（**不重采样** ✗ —— 见 `media.load_wav_tensor` ✓）。
+    reference_audio: tuple[str, ...] = ()
+    #: 参考**视频**（视频文件路径 ✓）—— H3 的 ``video`` / ``video_audio`` 块 ✓
+    #:（有无音轨决定块类型 ✓ —— 有音轨则两条流都编码 ✓）。
+    #: ⚠️ 用**原生尺寸/帧率** ✓（**不缩放、不抽帧** ✗ —— 见 `media.load_video_tensor` ✓）；
+    #: 宽高要能被 vae_scale 整除 ✗（不整除**报错** ✓ 不悄悄取整 ✗）。
+    reference_videos: tuple[str, ...] = ()
     outputs_dir: str | None = None
     dry_run: bool = False
     #: 引导（CFG ✓）—— 默认 ``scale=1.0`` ⇒ **不引导** ✓（不被要求的干预一律不做 ✓）
@@ -329,6 +337,8 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
                             synthetic=bool(getattr(backend, "synthetic", False)))
     condition: Any = None
     latents: Any = None
+    #: ⭐ 本次是否走**双流**（视频 + 音频 ✓ H3 形态）—— 由**后端自述**决定 ✓（管线不猜 ✗）
+    dual = False
 
     def emit(payload: dict[str, Any]) -> None:
         if on_event:
@@ -367,18 +377,63 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
     started = time.perf_counter()
     try:
         ensure_not_cancelled("init")
-        latents = backend.init_latents(plan, request)
+        init_dual = getattr(backend, "init_dual_latents", None)
+        note = getattr(backend, "dualStream", None)
+        # ⚠️ 只有后端**自述可用**（``enabled=True`` ✓）才走双流 ✓ —— 光"有这个方法"不算 ✗。
+        #    `dualStream` 会**逐条报缺什么** ✓（没挂音频 VAE / 形态不对 / 没给取整口径 ✓）——
+        #    别把"双流不齐"顺手当成"那就照单流跑" ✗（那会做出**与请求不符**的产物 ✓✗）。
+        dual = bool(callable(init_dual) and isinstance(note, dict) and note.get("enabled"))
+        # ⚠️ 参考图同理（见下面首帧那段 ✓）：后端没自述就别让它跑 ✗ ——
+        #    `init_dual_latents` 会**静默忽略** `referenceFrames` ✓✗（产物与参考无关 ✓ 而用户看不出来 ✓）。
+        # ⚠️ 判定必须在**调用 init 之前** ✓：等它跑完再判就已经"悄悄忽略过了"✗。
+        if dual and tuple(request.reference_frames or ()) and not note.get("referencesImage"):
+            raise conditioning_mod.ConditioningError(
+                "双流后端**没有自述支持参考图** ✗ ⇒ 不静默忽略 `referenceFrames` ✗"
+                "（要么后端把 `ref_img` 段接上 ✓，要么这次别给参考图 ✓）")
+        if dual and tuple(request.reference_audio or ()) and not note.get("referencesAudio"):
+            raise conditioning_mod.ConditioningError(
+                "双流后端**没有自述支持参考音频** ✗ ⇒ 不静默忽略 `referenceAudio` ✗"
+                "（要么后端把 `ref_audio` 块接上 ✓，要么这次别给参考音频 ✓）")
+        if dual and tuple(request.reference_videos or ()) and not note.get("referencesVideo"):
+            raise conditioning_mod.ConditioningError(
+                "双流后端**没有自述支持参考视频** ✗ ⇒ 不静默忽略 `referenceVideos` ✗"
+                "（要么后端把 `video` / `video_audio` 块接上 ✓，要么这次别给参考视频 ✓）")
+        latents = init_dual(plan, request) if dual else backend.init_latents(plan, request)
     except BaseException as err:  # noqa: BLE001
         result.stageMs["init"] = int((time.perf_counter() - started) * 1000)
         return _fail(result, "init", err)
     result.stageMs["init"] = int((time.perf_counter() - started) * 1000)
-    emit(result.event("init", step=0, total=plan.steps))
+    emit(result.event("init", step=0, total=plan.steps,
+                      note="双流（视频 + 音频 ✓）" if dual else ""))
 
     # ── ③b condition（**可选阶段** ✓：只有给了首帧才跑 ✓）────────────────────
     # ⚠️ 这里的设计取舍值得写明：**后端不支持就报错** ✗，而不是**悄悄按文生视频跑** ✗。
     #    后者看着"更宽容"，实际是最坏的：用户要的是图生视频 ✓，拿到的却是无关产物 ✗
     #    而且**看不出来** ✗ ⇒ 宁可当场失败并把原因说清 ✓。
-    if request.first_frame:
+    if dual and request.first_frame:
+        # ⚠️ 双流的首帧走**另一条路** ✓：不是这里的 `condition_first_frame`（那是单流的 ✓），
+        #    而是 `init_dual_latents` 里把它编成 H3 的 ``cond`` 段 ✓（**已经做完了** ✓）。
+        #    ⚠️ 但**先看后端自述** ✓：没声明支持却照跑 = 静默忽略首帧 ⇒ 产出与首帧无关的画面 ✓✗
+        #    ⇒ 那种情况**明确拒绝** ✗（本仓判据：宁可当场失败并把原因说清 ✓）。
+        state = getattr(backend, "dualStream", None) or {}
+        if not state.get("firstFrame"):
+            started = time.perf_counter()
+            result.stageMs["condition"] = int((time.perf_counter() - started) * 1000)
+            return _fail(result, "condition", conditioning_mod.ConditioningError(
+                "双流后端**没有自述支持首帧条件** ✗ ⇒ 不静默按文生视频跑 ✗"
+                "（要么后端把 `cond` 段接上 ✓，要么这次别给 firstFrame ✓）"))
+        started = time.perf_counter()
+        result.conditioning = {
+            "applied": True, "mode": "h3-keyframe-cond", "imagePath": request.first_frame,
+            "via": "init_dual_latents（首帧在 init 阶段编成 `cond` 段 ✓）",
+        }
+        note = getattr(backend, "conditioningNote", None)
+        if isinstance(note, dict):
+            result.conditioning["backendNote"] = note
+        result.stageMs["condition"] = int((time.perf_counter() - started) * 1000)
+        emit(result.event("condition", note="首帧 → `cond` 段 ✓（H3 形态 ✓）"))
+
+    if request.first_frame and not dual:
         started = time.perf_counter()
         try:
             ensure_not_cancelled("condition")
@@ -427,32 +482,77 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
         ensure_not_cancelled("sample", step)  # 每步都能停 ✓
 
     try:
-        def model_fn(x: Any, sigma: float) -> Any:
-            """**引导就在这儿生效** ✓（引擎的采样语义 ✓，与后端无关 ✓）。
+        if dual:
+            # ── 双流（H3 形态 ✓）：两条流各走各的 σ ✓，采样循环**只有一份** ✓（`h3_form` ✓）──
+            # ⚠️ H3 参考实现**不做 CFG** ✓（第 111 步核到的事实 ✓）⇒ 要求引导就**明确报错** ✗：
+            #    静默忽略 = 用户以为按 cfg=X 跑了、其实没有 ✓✗（本仓最忌讳那种"看不出来"✗）。
+            guided = [index for index in range(plan.steps)
+                      if guidance_mod.scale_for_step(index, plan.steps, request.guidance) != 1.0]
+            if guided or request.guidance.enabled:
+                raise StageError(
+                    "sample", "双流（H3 形态）**不支持引导** ✗ —— 参考实现无 CFG ✓"
+                              f"（收到 cfg={request.guidance.scale:g} ✓）")
+            # ⚠️ 同理：双流的循环是**一阶欧拉** ✓（`h3_form.sample_dual_stream` ✓）——
+            #    收到 heun 还照跑就是**静默换算法** ✗✗（调度器名字被无视 ✓ 而用户看不出来 ✓）。
+            if str(request.sampler or "euler").lower() != "euler":
+                raise StageError(
+                    "sample", "双流（H3 形态）**只做一阶欧拉** ✗（参考实现如此 ✓）"
+                              f"（收到 sampler={request.sampler!r} ✓ —— 不静默忽略 ✗）")
+            sample_dual = getattr(backend, "sample_dual", None)
+            if not callable(sample_dual):
+                raise StageError("sample", "后端自述双流可用 ✓ 却没实现 `sample_dual` ✗")
 
-            ⚠️ 二阶采样器（heun）每步会调**两次** ⇒ 引导时每步共 **4** 次后端调用 ✓
-            —— 这是 CFG + 二阶的固有代价 ✓（如实计数 ✓，见 ``guidanceCalls`` ✓）。
-            """
-            index = int(holder["step"])          # 0 基；on_step 在每步结束后 +1 ⇒ 正是当前步 ✓
-            scale = guidance_mod.scale_for_step(index, plan.steps, request.guidance)
-            holder["scale"] = scale
-            guided_counter["calls"] += 1
-            if scale == 1.0 or negative is None:
-                return backend.denoise(x, float(sigma), positive, request)
-            positive_estimate = backend.denoise(x, float(sigma), positive, request)
-            negative_estimate = backend.denoise(x, float(sigma), negative, request)
-            combined, _report = guidance_mod.combine(
-                positive_estimate, negative_estimate, scale, rescale=request.guidance.rescale)
-            return combined
+            # ⚠️ 双流要的是**文本状态张量** ✓ —— 不是 `encode_text` 那个 dict ✗。
+            #    2026-09-20 自检抓到：直接把 `condition`（dict ✓）递下去 ⇒ 主干把它当行张量 ⇒
+            #    `AttributeError: 'dict' object has no attribute 'shape'` ✓（好在它**响亮** ✓）。
+            states = condition
+            if isinstance(condition, dict):
+                if condition.get("negative") is not None:
+                    raise StageError(
+                        "sample", "双流（H3 形态）不该有 negative 条件 ✗ —— 参考实现无 CFG ✓"
+                                  "（给了就说明后端按可引导的方式准备了条件 ✓ 不静默忽略 ✓）")
+                states = condition.get("positive")
+                if states is None:
+                    raise StageError(
+                        "sample", "后端回的 dict 里没有 `positive`（文本状态 ✓）✗ ⇒ 双流没法跑 ✓")
 
-        # 统计「实际施加了引导的步数」✓（区间外/斜坡外不算 ✓）
-        for index in range(plan.steps):
-            if guidance_mod.scale_for_step(index, plan.steps, request.guidance) != 1.0:
-                guided_counter["steps"] += 1
-        result.guidanceSteps = int(guided_counter["steps"])
+            def on_dual_step(index: int, sigma_v: float, sigma_a: float) -> None:
+                emit(result.event("sample", step=index, total=plan.steps,
+                                  note=f"σv={sigma_v:.4g} / σa={sigma_a:.4g}"))
+                ensure_not_cancelled("sample", index)   # 每步都能停 ✓
 
-        latents, result.sampleSteps = sampler_mod.sample(
-            model_fn, latents, plan.sigmas, str(request.sampler or "euler"), callback=on_step)
+            sampled = sample_dual(latents, plan.sigmas, states, request, on_dual_step)
+            latents = {"video": sampled["video"], "audio": sampled["audio"]}
+            result.sampleSteps = int(sampled["steps"])
+            result.guidanceSteps = 0      # 双流=无引导 ✓（上面已拒绝非 1.0 的引导 ✓）
+        else:
+            def model_fn(x: Any, sigma: float) -> Any:
+                """**引导就在这儿生效** ✓（引擎的采样语义 ✓，与后端无关 ✓）。
+
+                ⚠️ 二阶采样器（heun）每步会调**两次** ⇒ 引导时每步共 **4** 次后端调用 ✓
+                —— 这是 CFG + 二阶的固有代价 ✓（如实计数 ✓，见 ``guidanceCalls`` ✓）。
+                """
+                index = int(holder["step"])      # 0 基；on_step 在每步结束后 +1 ⇒ 正是当前步 ✓
+                scale = guidance_mod.scale_for_step(index, plan.steps, request.guidance)
+                holder["scale"] = scale
+                guided_counter["calls"] += 1
+                if scale == 1.0 or negative is None:
+                    return backend.denoise(x, float(sigma), positive, request)
+                positive_estimate = backend.denoise(x, float(sigma), positive, request)
+                negative_estimate = backend.denoise(x, float(sigma), negative, request)
+                combined, _report = guidance_mod.combine(
+                    positive_estimate, negative_estimate, scale, rescale=request.guidance.rescale)
+                return combined
+
+            # 统计「实际施加了引导的步数」✓（区间外/斜坡外不算 ✓）
+            for index in range(plan.steps):
+                if guidance_mod.scale_for_step(index, plan.steps, request.guidance) != 1.0:
+                    guided_counter["steps"] += 1
+            result.guidanceSteps = int(guided_counter["steps"])
+
+            latents, result.sampleSteps = sampler_mod.sample(
+                model_fn, latents, plan.sigmas, str(request.sampler or "euler"),
+                callback=on_step)
     except BaseException as err:  # noqa: BLE001
         result.stageMs["sample"] = int((time.perf_counter() - started) * 1000)
         return _fail(result, "sample", err, step=holder["step"] or None)

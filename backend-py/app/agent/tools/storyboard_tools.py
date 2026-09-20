@@ -25,8 +25,11 @@
 6. ``update_storyboard`` 的每次写入都**以字段出现为准**（``'x' in fields``）⇒
    传 ``null`` 会**真的清空**该列，而不传则保持原值。
 
-⚠️ ``assign_rhythm_phases``（`rhythm-phase.ts`）**尚未移植** ⇒ 保留调用点为**空实现**
-（与 compose/merge 的 QC 占位同样处置），``storyboards.rhythm_phase`` 暂时留空。
+✅ 2026-09-20 收口：``assign_rhythm_phases`` 原先在本文件里是**空实现** ✗（注释写「尚未移植」✓），
+而 ``services/rhythm_phase.py`` **早就实现了** ✓（相位阈值 / 累计占比 / 无时长回退都有 ✓）
+⇒ 那等于**对外宣告了一个什么都不做的工具** ✗✗（LLM 以为分了相位，DB 里却是空的 ✓）。
+现在改为**直接委托**那份实现 ✓ —— 判据只有一份 ✓，本文件不复制任何逻辑 ✓，
+并把写入条数带进任务日志 ✓（``storyboards.rhythm_phase`` 现在真有值了 ✓）。
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ from sqlalchemy import and_, delete as sql_delete, select, update
 
 from app.core.db import engine
 from app.services import continuity_store
+from app.services import rhythm_phase
 from app.core.models import (
     characters,
     continuity_states,
@@ -91,9 +95,16 @@ def extract_speaker_name(dialogue: str | None) -> str | None:
     return name
 
 
-def assign_rhythm_phases(episode_id: int) -> None:
-    """多集节奏相位分配（``rhythm-phase.ts``）——**保留调用点，逻辑未移植**。"""
-    return None
+def assign_rhythm_phases(conn: Any, episode_id: int) -> int:
+    """为某集所有分镜分配**节奏相位** ⇒ 返回写入条数。
+
+    ⚠️ 2026-09-20：这里**原来是个空实现** ✗（``return None`` ✓，注释写「逻辑未移植」✓），
+    而 ``services/rhythm_phase.py`` 里的实现**早就在** ✓（按累计时长占比判 setup/…/resolution ✓，
+    无时长则按序号占比 ✓）⇒ **"工具对外存在、实际什么都不做"是最坏的一种不一致** ✗✗
+    （LLM 会以为已经分好相位 ✓，而 ``storyboards.rhythm_phase`` 一直是空 ✓）。
+    现在**直接委托** ✓：判据只留一份（那边 ✓），本文件不复制逻辑 ✗。
+    """
+    return rhythm_phase.assign_rhythm_phases(conn, episode_id)
 
 
 def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
@@ -489,11 +500,15 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
             # 三个后置：剧本指纹盖章 / take 预算重置 / 节奏相位
             stamp_storyboards_script_hash(conn, episode_id)
             reset_take_budget_for_episode(conn, episode_id)
-            assign_rhythm_phases(episode_id)  # 占位（rhythm-phase.ts 未迁）
+            # ⚠️ 2026-09-20：这里原来是**空调用** ✗（"占位" ✓）⇒ 现在真分配节奏相位 ✓
+            #    必须在**同一个事务内**调（刚插入的分镜要能被它读到 ✓）
+            rhythm_assigned = assign_rhythm_phases(conn, episode_id)
 
         log_task_success("StoryboardTool", "save-complete", {
             "episodeId": episode_id, "count": len(payload_storyboards),
             "totalDuration": total_duration, "dialogueIssues": dialogue_issue_count,
+            # 相位写入条数进日志 ✓（不塞进回执 ✗ —— 回执形状有严格断言 ✓）
+            "rhythmPhases": rhythm_assigned,
         })
         suffix = (f" ({dialogue_issue_count} dialogue character mismatches detected)"
                   if dialogue_issue_count else "")

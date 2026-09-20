@@ -80,6 +80,140 @@ def case_config() -> None:
     check("④ `vae_scale` 默认 0 = **未给** ✓（像素↔潜空间比是 VAE 的知识，本模块不猜 ✗）",
           dit_mod.DiTConfig().vae_scale == 0)
 
+    # ⭐ 2026-09-20：H3 结构事实（抄自 `reference/ComfyUI` ✓ 逐条带出处 ✓ 不是猜的 ✗）
+    h3 = dit_mod.H3_SHAPE_FACTS
+    check("④′ ⭐ H3 事实自洽：**heads × headDim ≠ hidden** ✓（56×128=7168 vs 5376 ✓）"
+          "—— 这条正是「本仓 MHA 装不下 H3 权重」的根因 ✓",
+          h3["heads"] * h3["headDim"] == h3["attnInnerDim"] != h3["hidden"],
+          (h3["heads"], h3["headDim"], h3["hidden"]))
+    h3_config = dit_mod.DiTConfig(hidden=h3["hidden"], depth=h3["depth"], heads=h3["heads"],
+                                  patch_size=h3["patchSize"], in_channels=h3["videoLatents"],
+                                  text_dim=h3["textDim"], vae_scale=h3["vaeScale"])
+    check("④″ ⭐ H3 数字**能构造** DiTConfig ✓ —— 但**不等于**能装 H3 权重 ✗"
+          "（本仓推出来的 head_dim 是 96，不是 128 ✓）",
+          h3_config.head_dim == h3["hidden"] // h3["heads"] != h3["headDim"],
+          h3_config.head_dim)
+    check("④‴ ⚠️ 缺口清单**只减不骗** ✓：未关 **7** 条 + 已关 3 条都列着 ✓"
+          "（第 114 步把参考读全后从 5 条补到 7 条 ✓ —— 「没记 ≠ 没有」✗）",
+          len(dit_mod.H3_STRUCTURAL_GAPS) == 7 and len(dit_mod.H3_GAPS_CLOSED) == 3
+          and any("adaLN" in item for item in dit_mod.H3_STRUCTURAL_GAPS),
+          (len(dit_mod.H3_STRUCTURAL_GAPS), len(dit_mod.H3_GAPS_CLOSED)))
+    check("④¹⁶ ⭐ 打包规格**单独立表** ✓（与形状数字分开 ✓：混一起会让两类断言互相牵连 ✗）"
+          "且钉住两条最要紧的事实：**音频在视频之前** ✓ + **无 attention mask** ✓",
+          len(dit_mod.H3_PACK_FACTS) >= 6
+          and any("audio" in fact and "video" in fact for fact in dit_mod.H3_PACK_FACTS)
+          and any("attention mask" in fact for fact in dit_mod.H3_PACK_FACTS),
+          dit_mod.H3_PACK_FACTS[:2])
+
+    # ⭐⭐ 2026-09-20 **① 注意力维度**：让本仓能**表达** H3 的 7168 ≠ 5376 ✓
+    #    （⚠️ H3 的真实尺寸**只构造、不建模型** ✗ —— 一个 block 的 qkv 就是 460 MB ✓，50 层 ≈ 23 GB ✗）
+    h3_attn = dit_mod.DiTConfig(hidden=h3["hidden"], depth=h3["depth"], heads=h3["heads"],
+                                patch_size=h3["patchSize"], in_channels=h3["videoLatents"],
+                                text_dim=h3["textDim"], vae_scale=h3["vaeScale"],
+                                attn_dim=h3["attnInnerDim"])
+    check("④⁗ ⭐⭐ 显式给 `attn_dim` ⇒ **attn_head_dim == 128**（= H3 的 headDim ✓✓）"
+          "—— 这正是「旧形态推不出来」的那一项（旧形态只会给 96 ✗）",
+          h3_attn.attn_head_dim == h3["headDim"] != h3_attn.head_dim,
+          (h3_attn.attn_head_dim, h3["headDim"], h3_attn.head_dim))
+    keep = dit_mod.DiTConfig(hidden=32, depth=1, heads=4, patch_size=(1, 2, 2),
+                             in_channels=4, text_dim=16)
+    check("④⁵ ⭐ `attn_dim` 默认 0 ⇒ **inner == hidden**、`attn_head_dim == head_dim` ✓"
+          "（旧权重 / 旧预设 / 旧断言一字不改 ✓）",
+          keep.inner_dim == keep.hidden and keep.attn_head_dim == keep.head_dim, keep.inner_dim)
+    try:
+        from app.services.engine import dit as _dit  # noqa: PLC0415
+        import torch  # noqa: PLC0415
+
+        wide_cfg = dit_mod.DiTConfig(hidden=32, depth=1, heads=4, patch_size=(1, 2, 2),
+                                     in_channels=4, text_dim=16, attn_dim=64)
+        wide = _dit.build_dit(wide_cfg)
+        block = wide.blocks[0]
+        check("④⁶ ⭐ attn_dim≠hidden ⇒ 走**显式** qkv_proj/out_proj（形状 = 缩放版 H3 ✓："
+              "qkv 32→192 ✓、out 64→32 ✓）且**没有** MHA ✓",
+              block.explicit_attention is True
+              and tuple(block.qkv_proj.weight.shape) == (3 * 64, 32)
+              and tuple(block.out_proj.weight.shape) == (32, 64)
+              and not hasattr(block, "attn"), tuple(block.qkv_proj.weight.shape))
+        narrow = _dit.build_dit(keep)
+        check("④⁷ ⭐ attn_dim=0 ⇒ 仍然只有 MHA（`attn` 在 ✓、`qkv_proj` **不在** ✓）",
+              hasattr(narrow.blocks[0], "attn")
+              and not hasattr(narrow.blocks[0], "qkv_proj")
+              and narrow.blocks[0].explicit_attention is False)
+        latent = torch.zeros(1, 4, 2, 4, 4)
+        out = wide(latent, 0.5)
+        check("④⁸ 显式形态**能跑通**且与潜变量同形 ✓",
+              tuple(out.shape) == tuple(latent.shape), tuple(out.shape))
+        raised = ""
+        try:
+            # ⚠️ 形状要**按 text_dim** 给（这个 config 是 16 ✓）——
+            #    第一版写成 32 ✗ ⇒ 先撞上 `text_proj` 的矩阵乘法 ⇒ RuntimeError 把整套跑挂 ✗✓
+            wide(latent, 0.5, torch.zeros(1, 3, wide_cfg.text_dim))
+        except dit_mod.DiTConfigError as err:
+            raised = str(err)
+        # ⚠️ 实测发现：`DiT.forward` 在 **cross_attention=False** 时**根本不把 context 往下传** ✗
+        #    ⇒ 这条"给了 context 就该报错"在**整模型层面到不了** ✓ ⇒ 改成下面两处更早/更靠内的守卫 ✓
+        excited = bool(raised)
+        check("④⁹⁰ ⭐ 记录一个事实：`cross_attention=False` 时 context **被忽略** ✓"
+              "（不报错也不使用 ✓ —— 所以「被忽略」必须是**配置里说清楚**的 ✓，见下两条 ✓）",
+              excited is False and wide_cfg.cross_attention is False, raised)
+
+        conflicted = ""
+        try:
+            dit_mod.DiTConfig(hidden=32, depth=1, heads=4, attn_dim=64, cross_attention=True)
+        except dit_mod.DiTConfigError as err:
+            conflicted = str(err)
+        check("④⁹ ⭐⭐ `attn_dim≠hidden` + `cross_attention=True` ⇒ **构造时就报错** ✗"
+              "（宁可最早报 ✓，也不做出「能跑但装不上真权重」的假模型 ✗）",
+              "自注意力" in conflicted, conflicted)
+        inner = ""
+        try:
+            wide.blocks[0](torch.zeros(1, 4, 32), torch.zeros(1, 32), torch.zeros(1, 3, 32))
+        except dit_mod.DiTConfigError as err:
+            inner = str(err)
+        check("④¹⁰ 直接调 block 给 context ⇒ **内层守卫也报错** ✓（双保险 ✓）",
+              "自注意力" in inner, inner)
+
+        # ⭐⭐ 2026-09-20 **② 双输出** + **④ condition_proj / token_refiner**：
+        #    键名**逐字对齐 H3** ✓ —— 这是"能装真权重"的判据 ✓（名字对不上就得再改一次 ✓）
+        h3_like = dit_mod.DiTConfig(hidden=32, depth=1, heads=4, patch_size=(1, 2, 2),
+                                    in_channels=4, text_dim=16, attn_dim=64,
+                                    audio_latents=8, text_refiner_layers=2)
+        h3_model = _dit.build_dit(h3_like)
+        names = set(h3_model.state_dict())
+        check("④¹¹ ⭐ 键名对齐 H3：`condition_proj` / `token_refiner.blocks.N` / "
+              "`final_layer.video_out` / `final_layer.audio_out` 全部就位 ✓",
+              any(key.startswith("condition_proj.") for key in names)
+              and "token_refiner.blocks.0.qkv_proj.weight" in names
+              and "token_refiner.blocks.1.qkv_proj.weight" in names
+              and "final_layer.video_out.weight" in names
+              and "final_layer.audio_out.weight" in names, sorted(names)[:8])
+        # ⚠️ 期望值我第一版写错了 ✗✓：把 H3 的 24 通道算进了**缩放版**（`patch 1×2×2 × 4ch = 16` ✓、
+        #    H3 是 `2×2×24 = 96` ✓ —— **同一个公式** ✓）⇒ 自检当场红 ✓
+        check("④¹² ⭐ 形状 = **缩放版 H3**：video_out 32→16（patch 1×2×2 × 4ch ✓；H3 是 2×2×24=96 ✓）、"
+              "audio_out 32→8（= audio_latents ✓；H3 是 →32 ✓）",
+              tuple(h3_model.final_layer.video_out.weight.shape) == (16, 32)
+              and tuple(h3_model.final_layer.audio_out.weight.shape) == (8, 32),
+              (tuple(h3_model.final_layer.video_out.weight.shape),
+               tuple(h3_model.final_layer.audio_out.weight.shape)))
+        video, audio = h3_model(latent, 0.5, torch.zeros(1, 3, wide_cfg.text_dim))
+        check("④¹³ ⭐ 双输出形态返回 **(视频, 音频)** ✓（视频与潜变量同形 ✓、音频每 token 一个向量 ✓）",
+              tuple(video.shape) == tuple(latent.shape)
+              and audio.ndim == 3 and audio.shape[0] == 1 and audio.shape[-1] == 8,
+              (tuple(video.shape), tuple(audio.shape)))
+        check("④¹⁴ ⭐ 两个开关都关 ⇒ **回到旧形态** ✓（`out` 在 ✓、`final_layer`/`token_refiner` 不在 ✓）",
+              "out.weight" in set(narrow.state_dict())
+              and not any(key.startswith(("final_layer.", "token_refiner."))
+                          for key in narrow.state_dict()))
+        half = ""
+        try:
+            dit_mod.DiTConfig(hidden=32, depth=1, heads=4, audio_latents=8)
+        except dit_mod.DiTConfigError as err:
+            half = str(err)
+        check("④¹⁵ ⭐ 只给 `audio_latents` 不给 `attn_dim` ⇒ **构造时报错** ✗（拒绝「半套 H3」✓）",
+              "attn_dim" in half, half)
+    except ImportError:
+        _skip("⏭ ④⁶-④⁹：没装 torch（显式注意力形态的形状/报错自检跳过）")
+
     info = st.inspect(_write_minimal_checkpoint())
     inferred = dit_mod.infer_config_from_info(info)
     check("⑤ 从权重头部**机械确定**层数（``blocks.N`` 的个数 ✓）", inferred.depth == 2,

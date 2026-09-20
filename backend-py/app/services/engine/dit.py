@@ -28,7 +28,84 @@ from typing import Any
 
 from . import safetensors as st
 
-__all__ = ["DiTConfig", "DiTConfigError", "build_dit", "flow_match_x0", "infer_config_from_info"]
+__all__ = ["DiTConfig", "DiTConfigError", "H3_SHAPE_FACTS", "H3_PACK_FACTS", "H3_STRUCTURAL_GAPS",
+           "H3_GAPS_CLOSED", "build_dit", "flow_match_x0", "infer_config_from_info"]
+
+#: ⭐ **H3 的结构事实**（2026-09-20 抄自 `reference/ComfyUI` ✓，逐条带出处 ✓ —— 不是猜的 ✗）。
+#: 用途：① 让"真权重到手"那一刻**不必重新翻参考项目** ✓；② 让下面的缺口清单**可被机械核对** ✓。
+#: 出处：`comfy/ldm/minimax/model.py:474-481`（默认值）、`comfy/model_detection.py:390-418`（从权重反推）、
+#: `comfy/sd.py:1011-1017`（VAE 压缩比）、`comfy/text_encoders/llama.py:289-297`（TE ✓）。
+H3_SHAPE_FACTS: dict[str, object] = {
+    "hidden": 5376,             # 主干隐层 ✓
+    "depth": 50,                # `blocks.N` 个数 ✓
+    "heads": 56,                # 注意力头数 ✓
+    "headDim": 128,             # ⚠️ 注意：56 × 128 = 7168 **≠** hidden 5376 ✓（见下面缺口 ①）
+    "attnInnerDim": 7168,       # heads × headDim ⇒ H3 走 qkv_proj → out_proj 模式 ✓
+    "ffnHidden": 14336,         # MLP fc1 输出 ÷2（SwiGLU ✓）
+    "patchSize": (1, 2, 2),     # ✓
+    "videoLatents": 24,         # 视频潜通道 ✓
+    "audioLatents": 32,         # 音频潜通道 ✓
+    "textDim": 5120,            # Qwen3-VL-32B 输出维 ✓
+    "timeEmbedIn": 256,         # 时间步输入维 ✓
+    "timeEmbedHidden": 5376,
+    "timeEmbedOut": 2688,
+    "eps": 1e-5,                # norm_eps / qk_norm_eps / final_norm_eps ✓
+    "ropeInvFreqLen": 16,       # 3 轴 × 16 = 48 ⇒ 复制成 96 ✓
+    "tokenRefinerLayers": 2,    # ✓
+    "vaeScale": 16,             # 空间压缩比 ✓（时间：帧 17k+5 ↔ 潜 5k+2 ✓）
+    "sigmaShiftVideo": 12.0,    # 采样 shift ✓（audio 3.0 ⇒ audio_scale = 12/3 = 4.0 ✓）
+    "sigmaShiftAudio": 3.0,
+}
+
+#: ⚠️ **H3 打包序列的规格**（2026-09-20 读全参考实现后补 ✓ —— 与 `H3_SHAPE_FACTS` 分开存 ✓：
+#: 那张表是「形状数字」✓，这张是「**行怎么排**」✓；混在一张表里会让两类断言互相牵连 ✗）。
+#: ⚠️ 全部是**结构事实** ✓（本仓要自己实现 ✗ 不抄代码 ✓）；本仓目前**没有**打包层 ✗ ——
+#: ⚠️ 且**故意不先建** ✗：按本仓判据「**没人调用的库不算功能**」✓，等 H3 形态 forward 落地时再建 ✓。
+H3_PACK_FACTS: tuple[str, ...] = (
+    "顺序：text | cond(关键帧) 或 refs | **audio** | **video** ✓（目标音频在目标视频之前 ✓ 且为最后两段 ✓）",
+    "视频行数 = `latent_t × (lat_h//2)×(lat_w//2)` ✓（每个 2×2 patch 一行 ✓）",
+    "音频行数 = `audio_t × 2` ✓（**立体声 channel-major** ⇒ 每行 = 一个声道的一帧 ✓）",
+    "视频时间轴：每 token 跨度表 (1, 4, 4, 4, 4) 循环 ✓ × 5/3 ✓（`FRAME_PER_TOKEN`/`FRAME_RESCALE` ✓）",
+    "三段模态 tag（modalities=3 ✓）：text/cond 同一档 ✓、audio、video 各自一档 ✓",
+    "**无 attention mask**（整条序列互相可见 ✓）；去噪掩码是**另一回事**（per-2×2 行 ∈[0,1] ✓）✓",
+    "采样：只喂**视频 σ** ✓，音频按 `time_shift_sigma(σ, 12.0, 3.0)` **逐帧换算** ✓（`schedules.py` ✓）",
+)
+
+#: ⚠️⚠️ **本仓 DiT 与 H3 的结构缺口**（2026-09-20 交叉核对时发现 ✓ —— **必须显式记着** ✗，
+#: 否则"把 H3 数字填进 DiTConfig"会得到**名字对、形状错**的模型 ✓✗，那比不填更坏 ✓）。
+#: ⚠️ **本清单是"还剩几件"** ✓ —— 关掉的条目**移进** `H3_GAPS_CLOSED` ✓（列表要**只减不骗** ✗）。
+#: ⚠️⚠️ **它在第 114 步被"补全"过一次** ✗✓：第 113 步只记了 5 条 ✓，直到把参考实现
+#: **读全**（源码 + 单元测试 ✓）才发现还漏着 **RoPE / 正弦时间嵌入 / RMSNorm / SwiGLU /
+#: fp32 输出头 / denoise mask** 等 ✗ —— 「**没记 ≠ 没有**」✓：清单**没写全**时，
+#: 下一步会以为"只剩 3 件"而开工 ✗ ⇒ 结果又是「名字对、装不上」✗。
+H3_STRUCTURAL_GAPS: tuple[str, ...] = (
+    "adaLN：H3 `AdalnProj(expand=6, modalities=3)` = 18 路 ✓ **且按 per-token mod-row 分段应用** ✓ "
+    "（`mod_segments` = [(start, stop, row)] ✓，row 可为逐 token 索引 ✓）；本仓只 6 路单模态 ✗",
+    "打包序列：H3 是 **2D**（`[总行, 通道×patch]` ✓ **无 batch 维** ✗）的 "
+    "`text | cond/refs | audio | video` ✓（目标音频在视频**之前** ✓ 且为最后两段 ✓）"
+    "+ per-token 模态 tag + **无 attention mask** ✓；本仓是 (B,N,D) + 「先算文本 → pooled 调制」✗",
+    "`q_norm` / `k_norm`：per-head RMSNorm（eps 1e-5 ✓）—— 本仓显式 qkv 形态**未实现** ✗",
+    "RoPE：3 轴 ✓ partial split-half ✓ 坐标按**面积归一化**（`_axis_from_sqrt_area` ✓ ×32 ✓ endpoint=False ✓）"
+    "—— 本仓是**学习式** `pos_embed` ✗（H3 无位置表 ✓）",
+    "时间条件：H3 用**正弦** `TimeEmbedder(freq_dim→hidden→out)` ✓（cos 在前 ✓）且"
+    "**每 token 独立 timestep**（`t = 1 − σ` ✓ 音频另按 shift 3.0 换算 ✓）；本仓是 `Linear(1,hidden)` ✗ 单标量 ✗",
+    "归一化与 MLP：H3 全 **RMSNorm** ✓ + **SwiGLU** MLP（fc1 `hidden→2×ffn` ✓ 无 bias ✓）"
+    "—— 本仓 LayerNorm + 非 SwiGLU ✗",
+    "输出与掩码：H3 两个头存 **fp32** ✓（bias=True ✓）+ 支持**部分去噪**（per-2×2 行 ∈[0,1] ✓）"
+    "+ 音频按**立体声 channel-major** 打包（`audio_t×2` 行 ✓）；本仓单头 + 无 mask ✗",
+)
+
+#: ✅ **已经关掉的缺口**（2026-09-20 ✓）—— 每条注明**靠什么关的** ✓：
+#: * ① 注意力维度 ⇒ `DiTConfig.attn_dim` + 显式 `qkv_proj`/`out_proj` ✓（5376→3×7168 ✓、7168→5376 ✓）；
+#: * ② 双输出 ⇒ `DiTConfig.audio_latents` + `final_layer.video_out`/`audio_out` ✓；
+#: * ④ `condition_proj` + `token_refiner` ⇒ `DiTConfig.text_refiner_layers` ✓（键名逐字对齐 ✓）。
+#: ⚠️ 关掉 ≠ **核过真权重** ✗：② 里的"音频第二个头"是**可装载的近似** ✓（H3 真形态是拼序列出 ✓，
+#: 见上面第 2 条 ✓），④ 的 refiner **内部细节未经真权重核对** ✗（层数/键名对齐 ✓，归一化位置待核 ✓）。
+H3_GAPS_CLOSED: tuple[str, ...] = (
+    "① 注意力维度：attn_dim + 显式 qkv_proj/out_proj（键名/形状对齐 H3 ✓）",
+    "② 双输出：final_layer.video_out + audio_out（近似：H3 真形态是拼序列 ✓）",
+    "④ condition_proj + token_refiner.blocks.N（层数与键名对齐 ✓，内部细节待核 ✗）",
+)
 
 
 class DiTConfigError(ValueError):
@@ -53,18 +130,69 @@ class DiTConfig:
     #: ⚠️ ``0`` = **未给** ✓ ⇒ 这时**不能**从 plan 推潜变量形状 ✓（本该如此：压缩比是 VAE 的知识 ✗，
     #: 本模块**不猜** ✓ —— 与 `geometry` 不猜时间压缩比是同一条纪律 ✓）。
     vae_scale: int = 0
+    #: **注意力内部维度** ✓（``hidden → attn_dim`` 的 qkv 投影 + ``attn_dim → hidden`` 的输出投影 ✓）。
+    #: ⚠️ **默认 ``0`` = 与 ``hidden`` 相同** ✓（= 旧行为 ✓，走 ``nn.MultiheadAttention`` ✓，
+    #: 键名 ``attn.in_proj_weight`` ✓ 不变 ✓）。非 0 且 ≠ ``hidden`` 时改用**显式**
+    #: ``qkv_proj`` / ``out_proj`` ✓ —— **这正是 H3 的形态** ✓：见 `H3_SHAPE_FACTS`，
+    #: heads **56** × headDim **128** = **7168** ≠ hidden **5376** ✓，而 ``MultiheadAttention``
+    #: 只会推 ``hidden // heads`` = **96** ✗ ⇒ **根本装不上真权重** ✗
+    #: （2026-09-20 交叉核对数字时发现 ✓ 见 `H3_STRUCTURAL_GAPS` 第 ① 条 ✓）。
+    attn_dim: int = 0
+    #: **音频潜通道数** ✓（``0`` = 单输出 = 旧行为 ✓）。
+    #: 非 0 ⇒ 走 **H3 的双输出形态** ✓：``final_layer.video_out``（hidden→pT·pH·pW·in_channels ✓）
+    #: + ``final_layer.audio_out``（hidden→``audio_latents`` ✓）—— **键名与 H3 逐字一致** ✓
+    #: （它的检测器就是按 ``final_layer.audio_out.weight.shape[0]`` 读音频潜通道的 ✓）。
+    #: ⚠️ H3 真形态里音频是**与视频 token 拼在同一条序列**上出的 ✓（见 `H3_STRUCTURAL_GAPS` ⑤ ✓）；
+    #: 这里的"第二个头"是**可装载的近似** ✓，语义差异写在缺口清单里 ✓（不假装等价 ✗）。
+    audio_latents: int = 0
+    #: **文本 refiner 层数** ✓（``0`` = 无 = 旧行为 ✓）。
+    #: 非 0 ⇒ 走 H3 的文本侧形态 ✓：``condition_proj``(text_dim→hidden ✓) + ``token_refiner.blocks.N``
+    #: （每层自注意力 ✓）—— 同样**键名与 H3 逐字一致** ✓（H3 是 2 层 ✓）。
+    #: ⚠️ 内部细节（归一化位置 / 是否 adaLN）**未经真权重核对** ✗ ⇒ 注释里标明是近似 ✓。
+    text_refiner_layers: int = 0
 
     def __post_init__(self) -> None:
         if self.hidden % self.heads:
             raise DiTConfigError(f"hidden={self.hidden} 不能被 heads={self.heads} 整除 ✗")
         if self.hidden <= 0 or self.depth <= 0:
             raise DiTConfigError("hidden/depth 必须为正 ✗")
+        if self.attn_dim < 0:
+            raise DiTConfigError(f"attn_dim 不能为负（收到 {self.attn_dim} ✗）")
+        if self.attn_dim and self.attn_dim % self.heads:
+            raise DiTConfigError(
+                f"attn_dim={self.attn_dim} 不能被 heads={self.heads} 整除 ✗"
+                f"（H3 是 56 头 × 128 维 = 7168 ✓）")
+        if self.audio_latents < 0 or self.text_refiner_layers < 0:
+            raise DiTConfigError(
+                f"audio_latents / text_refiner_layers 不能为负 ✗"
+                f"（收到 {self.audio_latents} / {self.text_refiner_layers} ✓）")
+        if self.audio_latents and not self.attn_dim:
+            # 双输出是 **H3 形态**的一部分 ✓ ⇒ 单独打开它只会得到"半套结构"✗（装不上真权重 ✓）
+            raise DiTConfigError(
+                "`audio_latents>0` 属 H3 双输出形态 ✓ ⇒ 必须同时给 `attn_dim` ✗"
+                "（否则是「半套 H3」，装不上真权重 ✓）")
         if any(size <= 0 for size in self.patch_size):
             raise DiTConfigError(f"patch_size 必须为正（收到 {self.patch_size} ✗）")
+        #: ⚠️ **两个自相矛盾的开关**：显式 qkv 形态 = 自注意力 ✓（H3 形态 ✓）⇒ 不能要 cross-attention ✗
+        if self.attn_dim and self.attn_dim != self.hidden and self.cross_attention:
+            raise DiTConfigError(
+                "「显式 qkv_proj 形态」只做**自注意力** ✓ ⇒ 不能与 `cross_attention=True` 同时给 ✗"
+                "（H3 的文本是**拼进同一条序列**的 ✓，见 `H3_STRUCTURAL_GAPS` ⑤ ✓）"
+                "—— 宁可**构造时就报错** ✓，也不做出「能跑但装不上真权重」的假模型 ✗")
 
     @property
     def head_dim(self) -> int:
         return self.hidden // self.heads
+
+    @property
+    def inner_dim(self) -> int:
+        """注意力内部维度 ✓（``attn_dim`` 未给 ⇒ 等于 ``hidden`` ✓ = 旧行为 ✓）。"""
+        return self.attn_dim or self.hidden
+
+    @property
+    def attn_head_dim(self) -> int:
+        """每头维度 ✓（H3：``inner_dim // heads`` = 7168 // 56 = **128** ✓）。"""
+        return self.inner_dim // self.heads
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +200,9 @@ class DiTConfig:
             "patchSize": list(self.patch_size), "inChannels": self.in_channels,
             "textDim": self.text_dim, "mlpRatio": self.mlp_ratio,
             "crossAttention": self.cross_attention, "vaeScale": self.vae_scale,
+            "attnDim": self.attn_dim, "attnInnerDim": self.inner_dim,
+            "attnHeadDim": self.attn_head_dim, "audioLatents": self.audio_latents,
+            "textRefinerLayers": self.text_refiner_layers,
         }
 
     @classmethod
@@ -124,7 +255,13 @@ class DiTConfig:
                    text_dim=as_int(pick("text_dim", "context_dim")) or 512,
                    # ⚠️ `vae_scale` 也要读（自检 ⑲ 抓到漏读 ✗）—— 读不到就是 0 ✓（= 未给 ✓ 不猜 ✓）
                    vae_scale=(as_int(pick("vae_scale", "vae_scale_factor",
-                                          "spatial_compression")) or 0))
+                                          "spatial_compression")) or 0),
+                   # 注意力内部维度 ✓（H3 是 7168 = 56×128 ✓ ≠ hidden 5376 ✓）；读不到就是 0 ✓ = 未给 ✓
+                   attn_dim=(as_int(pick("attn_dim", "attention_dim", "inner_dim")) or 0),
+                   # H3 双输出与文本 refiner ✓；读不到就是 0 ✓（= 旧形态 ✓ 不猜 ✓）
+                   audio_latents=(as_int(pick("audio_latents", "audio_latent_channels")) or 0),
+                   text_refiner_layers=(as_int(pick("text_refiner_layers",
+                                                    "token_refiner_layers")) or 0))
 
 
 def infer_config_from_info(info: st.SafetensorsInfo, *,
@@ -202,12 +339,28 @@ def _build() -> tuple[type, type, type]:
             return out.flatten(2).transpose(1, 2)
 
     class DiTBlock(nn.Module):
-        """adaLN-Zero 调制的注意力 + MLP ✓（DiT 系的公开做法 ✓）。"""
+        """adaLN-Zero 调制的注意力 + MLP ✓（DiT 系的公开做法 ✓）。
+
+        ⚠️ **两种注意力形态**（2026-09-20 为"能装 H3 权重"而开 ✓，判据见 `DiTConfig.attn_dim` ✓）：
+        * ``attn_dim == hidden``（默认 ✓）⇒ ``nn.MultiheadAttention`` ✓ —— **旧行为一字不改** ✓
+          （键名 ``attn.in_proj_weight`` ✓ 与既有预设/自检/往返装载全都照旧 ✓）；
+        * ``attn_dim ≠ hidden`` ⇒ **显式** ``qkv_proj``(hidden→3·attn_dim ✓) + ``out_proj``(attn_dim→hidden ✓)
+          —— **H3 的形态** ✓（5376 → 3×7168 ✓、7168 → 5376 ✓）。
+        """
 
         def __init__(self, config: DiTConfig) -> None:
             super().__init__()
             self.norm1 = nn.LayerNorm(config.hidden, elementwise_affine=False)
-            self.attn = nn.MultiheadAttention(config.hidden, config.heads, batch_first=True)
+            self.heads = config.heads
+            self.inner = config.inner_dim
+            self.head_dim = config.attn_head_dim
+            #: 是否需要**显式投影** ✓（= 是否走 H3 那种 attention 形态 ✓）
+            self.explicit_attention = config.inner_dim != config.hidden
+            if self.explicit_attention:
+                self.qkv_proj = nn.Linear(config.hidden, 3 * self.inner)
+                self.out_proj = nn.Linear(self.inner, config.hidden)
+            else:
+                self.attn = nn.MultiheadAttention(config.hidden, config.heads, batch_first=True)
             self.norm2 = nn.LayerNorm(config.hidden, elementwise_affine=False)
             inner = int(config.hidden * config.mlp_ratio)
             self.mlp = nn.Sequential(nn.Linear(config.hidden, inner), nn.GELU(),
@@ -216,17 +369,74 @@ def _build() -> tuple[type, type, type]:
             nn.init.zeros_(self.modulation[-1].weight)
             nn.init.zeros_(self.modulation[-1].bias)   # adaLN-**Zero** ✓：起步是恒等 ✓
 
+        def _attend(self, tokens: Any) -> Any:
+            """显式 ``qkv_proj`` → 注意力 → ``out_proj`` ✓（**自注意力** ✓）。
+
+            * ``qkv_proj`` 的输出是 **[q | k | v] 三段**（与 H3 一致 ✓ ——
+              它的检测器就是按 ``qkv_proj.weight.shape[0] // (3·head_dim)`` 反推头数的 ✓）；
+            * ⚠️ **本形态不做 cross-attention** ✗ ⇒ 给了 ``context`` 就**明确报错** ✓
+              （H3 的文本是**拼进同一条序列**的 ✓，见 `H3_STRUCTURAL_GAPS` ⑤ ✓；
+              硬装作支持 = 得到一个"能跑但装不上权重"的假模型 ✗）；
+            * ⚠️ H3 的 ``q_norm``/``k_norm``（eps 1e-5 ✓）**暂未实现** ✗ —— 等真权重到手、
+              确认归一化位置再补 ✓（**先不假装有** ✗）。
+            """
+            batch, length, _ = tokens.shape
+            qkv = self.qkv_proj(tokens)
+            query, key, value = qkv.chunk(3, dim=-1)
+            shape = (batch, length, self.heads, self.head_dim)
+            attended = torch.nn.functional.scaled_dot_product_attention(
+                query.view(shape).transpose(1, 2),
+                key.view(shape).transpose(1, 2),
+                value.view(shape).transpose(1, 2))
+            attended = attended.transpose(1, 2).reshape(batch, length, self.inner)
+            return self.out_proj(attended)
+
         def forward(self, tokens: Any, cond: Any, context: Any = None) -> Any:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
                 self.modulation(cond).chunk(6, dim=-1)
             normed = self.norm1(tokens) * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
-            if context is not None:
+            if self.explicit_attention:
+                if context is not None:
+                    raise DiTConfigError(
+                        "显式 qkv_proj 形态只做**自注意力** ✓（H3 无 cross-attention ✗）——"
+                        "要跨注意力请用 ``attn_dim == hidden`` 的形态 ✓")
+                attended = self._attend(normed)
+            elif context is not None:
                 attended, _ = self.attn(normed, context, context, need_weights=False)
             else:
                 attended, _ = self.attn(normed, normed, normed, need_weights=False)
             tokens = tokens + gate_msa.unsqueeze(1) * attended
             normed = self.norm2(tokens) * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
             return tokens + gate_mlp.unsqueeze(1) * self.mlp(normed)
+
+    class TokenRefiner(nn.Module):
+        """H3 的 `token_refiner` ✓（键名逐字对齐：``token_refiner.blocks.N.*`` ✓）。
+
+        ⚠️ 每层用的是本仓 :class:`DiTBlock`（自注意力 ✓ + adaLN 调制 ✓）—— **层数与键名对齐 H3** ✓，
+        但**内部细节（归一化位置 / 是否带 adaLN）未经真权重核对** ✗ ⇒ 记在 `H3_GAPS_CLOSED` 里 ✓
+        （「关掉 ≠ 核过」✓）。
+        """
+
+        def __init__(self, config: DiTConfig) -> None:
+            super().__init__()
+            self.blocks = nn.ModuleList([DiTBlock(config)
+                                         for _ in range(config.text_refiner_layers)])
+
+    class FinalLayerHeads(nn.Module):
+        """H3 的 `final_layer` 输出头 ✓（``video_out`` + ``audio_out`` ✓ 键名逐字对齐 ✓）。
+
+        * ``video_out``：``hidden → pT·pH·pW·in_channels`` ✓（H3 是 5376→96 = 2×2×24 ✓）
+          —— 与它的检测器口径一致（``video_out.shape[0] // 4`` ⇒ 24 潜通道 ✓）；
+        * ``audio_out``：``hidden → audio_latents`` ✓（H3 按 ``audio_out.shape[0]`` 读 32 ✓）；
+        * ⚠️ H3 真形态里音频 token 与视频 token **在同一条序列**上出 ✓，且这一层还带
+          ``adaln_proj.linear`` ✗ ⇒ 本头是**可装载的近似** ✓（缺口清单第 ③ 条 ✓）。
+        """
+
+        def __init__(self, config: DiTConfig) -> None:
+            super().__init__()
+            self.video_out = nn.Linear(
+                config.hidden, math.prod(config.patch_size) * config.in_channels)
+            self.audio_out = nn.Linear(config.hidden, config.audio_latents)
 
     class DiT(nn.Module):
         """**本项目自己的 DiT** ✓（结构显式来自 :class:`DiTConfig` ✓ 不猜 ✗）。"""
@@ -243,8 +453,15 @@ def _build() -> tuple[type, type, type]:
             self.pos_embed = nn.Parameter(torch.zeros(1, 4096, config.hidden))
             self.sigma_embed = nn.Sequential(
                 nn.Linear(1, config.hidden), nn.SiLU(), nn.Linear(config.hidden, config.hidden))
-            self.text_proj = (nn.Identity() if config.text_dim == config.hidden
-                              else nn.Linear(config.text_dim, config.hidden))
+            # 文本侧：旧形态 = `text_proj` ✓；H3 形态 = `condition_proj` + `token_refiner.blocks.N` ✓
+            # ⚠️ **键名逐字对齐 H3** ✓ ⇒ 装真权重时不用再改名字 ✓（见 DiTConfig.text_refiner_layers ✓）
+            self.uses_refiner = config.text_refiner_layers > 0
+            if self.uses_refiner:
+                self.condition_proj = nn.Linear(config.text_dim, config.hidden)
+                self.token_refiner = TokenRefiner(config)
+            else:
+                self.text_proj = (nn.Identity() if config.text_dim == config.hidden
+                                  else nn.Linear(config.text_dim, config.hidden))
             self.blocks = nn.ModuleList([DiTBlock(config) for _ in range(config.depth)])
             self.final_norm = nn.LayerNorm(config.hidden, elementwise_affine=False)
             self.final_modulation = nn.Sequential(
@@ -252,7 +469,11 @@ def _build() -> tuple[type, type, type]:
             nn.init.zeros_(self.final_modulation[-1].weight)
             nn.init.zeros_(self.final_modulation[-1].bias)
             out_channels = math.prod(config.patch_size) * config.in_channels
-            self.out = nn.Linear(config.hidden, out_channels)
+            if config.audio_latents:
+                # H3 双输出：`final_layer.video_out` + `final_layer.audio_out` ✓（键名对齐 ✓）
+                self.final_layer = FinalLayerHeads(config)
+            else:
+                self.out = nn.Linear(config.hidden, out_channels)   # 旧形态 ✓（键名 `out` 不变 ✓）
 
         def forward(self, latent: Any, sigma: Any, context: Any = None) -> Any:
             """``latent (B,C,T,H,W)`` + ``sigma`` + 文本上下文 → **与 latent 同形状的预测** ✓。
@@ -277,14 +498,23 @@ def _build() -> tuple[type, type, type]:
                     raw = raw.unsqueeze(0)              # (D,) → (1, D) ✓
                 if raw.ndim == 2:
                     raw = raw.unsqueeze(1)              # (B, D) → (B, 1, D) ✓
-                text = self.text_proj(raw)
+                text = self.condition_proj(raw) if self.uses_refiner else self.text_proj(raw)
                 if int(text.shape[0]) != batch:         # 单条条件广播到整个 batch ✓
                     text = text.expand(batch, *text.shape[1:])
+                if self.uses_refiner:
+                    # H3 的 refiner 是**文本侧自注意力** ✓（只处理文本 token ✓ 不碰潜变量 ✓）
+                    for refiner_block in self.token_refiner.blocks:
+                        text = refiner_block(text, cond)
                 cond = cond + text.mean(dim=1)          # pooled 调制 ✓
             for block in self.blocks:
                 tokens = block(tokens, cond, text if self.config.cross_attention else None)
             shift, scale = self.final_modulation(cond).chunk(2, dim=-1)
             tokens = self.final_norm(tokens) * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+            if self.config.audio_latents:
+                # 双输出 ⇒ **(视频, 音频)** ✓（音频是每 token 一个 `audio_latents` 向量 ✓）
+                # ⚠️ 旧形态仍返回**单张量** ✓ ⇒ 调用方按 config 判形态 ✓（不静默换形状 ✗）
+                return (self.unpatchify(self.final_layer.video_out(tokens), latent),
+                        self.final_layer.audio_out(tokens))
             return self.unpatchify(self.out(tokens), latent)
 
         def unpatchify(self, tokens: Any, reference: Any) -> Any:

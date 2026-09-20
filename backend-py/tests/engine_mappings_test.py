@@ -209,10 +209,29 @@ def _error(fn) -> Exception:  # noqa: ANN001
     return Exception("（没有抛错 ✗）")
 
 
+def case_minimax_h3() -> None:
+    """⭐ H3 专用预设（2026-09-20 抄自 `reference/ComfyUI` 的实测键名 ✓）。"""
+    spec = mp.preset("minimax-h3")
+    check("⑱ ⭐ H3 预设存在，且**故意不带合并规则** ✗（H3 权重里 qkv 本就是融合的 ✓）",
+          spec is not None and spec.merges == (), spec.merges)
+    renamed, _hits = mp.apply_renames(
+        ["model.diffusion_model.blocks.0.attn.qkv_proj.weight",
+         "model.diffusion_model.blocks.3.mlp.fc1.weight",
+         "model.diffusion_model.final_layer.video_out.weight"], spec.renames)
+    check("⑲ 前缀 + `qkv_proj`→`in_proj_` + `mlp.fc1`→`mlp.0` 一次改到位 ✓",
+          renamed[0] == "blocks.0.attn.in_proj_weight"
+          and renamed[1] == "blocks.3.mlp.0.weight", renamed)
+    check("⑳ ⭐⭐ 本仓**没有对应物**的键要留原样并在 note 里点名 ✗"
+          "（不硬塞成看似对的名字 ✓ —— 那会变成「名字对、形状错」✗）",
+          renamed[2] == "final_layer.video_out.weight"
+          and "token_refiner" in spec.note and "video_out" in spec.note, renamed[2])
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_map_"))
     case_rules()
     case_merge_order()
+    case_minimax_h3()
     case_report()
     case_roundtrip(root)
 

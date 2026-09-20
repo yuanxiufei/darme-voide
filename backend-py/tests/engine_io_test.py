@@ -96,6 +96,80 @@ def case_vae(root: Path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ①′ 潜变量归一化：**H3 真权重必须开** ✓（第 123 步交付；落盘自检在此补齐 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_latent_stats(root: Path) -> None:
+    """⚠️ 那组 **mean/std 猜不出来** ✗ —— 漏了它，画面「看着还行、数值全错」✗✗ 而且**不报错** ✗。
+
+    ⇒ 这里钉的是「**真的在用那组数**」✓（不是"函数没抛异常"✗）：
+    逐通道**手算对照** ✓、往返恒等 ✓、常量不动点 ✓、**改数必变**（反套套逻辑 ✓）、数不对必报错 ✓。
+    """
+    facts = vae_mod.H3_VIDEO_VAE_FACTS
+    width = len(facts["latentsMean"])
+    check("㊵ 归一化统计数与 `dit.H3_SHAPE_FACTS` 的潜通道**同源** ✓（24 ✓，不是各写各的 ✗）",
+          width == len(facts["latentsStd"]) == 24, (width, len(facts["latentsStd"])))
+
+    off = vae_mod.VideoVAEConfig(base_channels=8, latent_channels=4,
+                                 channel_multipliers=(1, 1, 1, 1))
+    on = vae_mod.VideoVAEConfig(base_channels=8, latent_channels=width,
+                                channel_multipliers=(1, 1, 1, 1), apply_latent_stats=True)
+    if not _have_torch():
+        skip("torch 未安装 ⇒ 潜变量归一化用例跳过 ✓")
+        return
+    import torch  # noqa: PLC0415
+
+    sample = torch.randn(1, 4, 2, 2, 2)
+    model_off = vae_mod.build_vae(off)
+    check("㊶ 未开归一化 ⇒ `normalize_latents` **原样返回**（`is` 同一对象 ✓）",
+          model_off.normalize_latents(sample) is sample)
+    check("㊷ 未开 ⇒ `denormalize_latents` 也原样 ✓（两个方向都透明 ✓）",
+          model_off.denormalize_latents(sample) is sample)
+
+    model = vae_mod.build_vae(on)
+    latents = torch.randn(1, width, 2, 2, 2)
+    view = (1, width, 1, 1, 1)
+    mean = torch.tensor(facts["latentsMean"]).reshape(view)
+    std = torch.tensor(facts["latentsStd"]).reshape(view)
+    normalized = model.normalize_latents(latents)
+    check("㊸ ⭐ 归一化 = 逐通道 `(x−mean)/std` ✓（与 facts 里那组数**手算对照** ✓ —— "
+          "空转或硬编码都过不了 ✓）",
+          bool(torch.allclose(normalized, (latents - mean) / std, atol=1e-5)),
+          float((normalized - (latents - mean) / std).abs().max()))
+    check("㊹ ⭐ 往返恒等：`denormalize(normalize(x)) == x` ✓（最强那类不变量 ✓）",
+          bool(torch.allclose(model.denormalize_latents(normalized), latents, atol=1e-5)))
+
+    at_mean = mean.repeat(1, 1, 2, 2, 2)
+    at_mean_plus = (mean + std).repeat(1, 1, 2, 2, 2)
+    check("㊺ 常量不动点：`x = mean ⇒ 0` ✓、`x = mean + std ⇒ 1` ✓（两个点都能自己算出来 ✓）",
+          bool(torch.allclose(model.normalize_latents(at_mean),
+                              torch.zeros_like(at_mean), atol=1e-5))
+          and bool(torch.allclose(model.normalize_latents(at_mean_plus),
+                                  torch.ones_like(at_mean_plus), atol=1e-5)))
+
+    original = list(facts["latentsStd"])
+    try:
+        facts["latentsStd"] = [value * 2.0 for value in original]
+        changed = model.normalize_latents(latents)
+    finally:
+        facts["latentsStd"] = original
+    check("㊻ ⭐⭐ 反套套逻辑：把 std 翻倍 ⇒ 归一化结果**必须变** ✓"
+          "（不变 ⇒ 那组数根本没被读进去 ✗✗ —— 「条件没接进去」的假绿 ✓）",
+          not bool(torch.allclose(changed, normalized, atol=1e-6)))
+    check("㊼ 恢复后与改前**逐位相同** ✓（自检不留全局副作用 ✓）",
+          bool(torch.allclose(model.normalize_latents(latents), normalized, atol=1e-7)))
+
+    mismatch = vae_mod.VideoVAEConfig(base_channels=8, latent_channels=4,
+                                      channel_multipliers=(1, 1, 1, 1), apply_latent_stats=True)
+    try:
+        vae_mod.build_vae(mismatch).normalize_latents(torch.randn(1, 4, 2, 2, 2))
+        mismatch_ok = False
+    except vae_mod.VAEError as err:
+        mismatch_ok = "24" in str(err) and "4" in str(err)
+    check("㊽ 潜通道与统计数不符 ⇒ **明确报错** ✓（4 vs 24 ✓ —— 不猜、不截断 ✗："
+          "凑一组「差不多」的只会得到看着对的错图 ✗✗）", mismatch_ok)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ② 落盘：**真文件 + 独立复核**（本套的重点 ✓）
 # ══════════════════════════════════════════════════════════════════════════
 def case_media(root: Path) -> None:
@@ -325,6 +399,7 @@ def _media_error(path: Path) -> Exception | None:
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_io_"))
     case_vae(root)
+    case_latent_stats(root)
     case_media(root)
     case_end_to_end(root)
     case_backend_pipeline(root)

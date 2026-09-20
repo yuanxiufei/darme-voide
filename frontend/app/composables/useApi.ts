@@ -653,6 +653,21 @@ export const productionAPI = {
   schema: () => api.get('/production/preflight/schema'),
 }
 
+// 提示词生产工具：**纯函数、毫秒级**（不落库、不调模型）⇒ 可在用户编辑时**实时**调 ✓。
+// ⚠️ 返回形状按后端真键写（勿猜）：resolve → { text, ok, used, unresolved, durationsMs,
+//    residualTags, bareIds, problems }；polish → { sections, text, ok, issues, vagueTerms, inserted }
+export const promptToolsAPI = {
+  /** 占位符 → **具体内容**；`ok=false` ⇒ 还不能直接送模型 ✗（原因看 `problems`） */
+  resolve: (payload: {
+    text: string
+    maps?: Record<string, Record<string, string>>
+    durationTemplate?: string
+    flagBareIds?: boolean
+  }) => api.post('/prompts/resolve', payload),
+  /** Mx-Shell **五段质感层**（字段一律 camelCase）；`issues` = 哪一段约束不够硬 */
+  polish: (payload: Record<string, any>) => api.post('/prompts/polish', payload),
+}
+
 export const styleProfileAPI = {
   list: (dramaId?: number) => api.get<{ profiles: StyleProfile[] }>(`/style-profiles${dramaId ? `?drama_id=${dramaId}` : ''}`),
   get: (id: number) => api.get<{ profile: StyleProfile }>(`/style-profiles/${id}`),

@@ -7,13 +7,13 @@ Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 
 - 后端 **5789**（`config.ts`）、前端 **3013**（proxy `/api`、`/static`）；前缀 `/api/v1`，另有 `/webhooks/*`、`/static/*`；无登录页。页面 `/`、`/settings`、`/drama/[id]`、`/library/*`。
 - 启动：`cd backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790`；`cd frontend && npx nuxt dev --port 3013`（dev 代理已指 5790）。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；不依赖 postgres/redis/qdrant。（Node 5789 已随 `backend/` 删除，仅历史。）
 - **前端 dev 代理现在指向 Python 后端 5790**（2026-09-15 起；旧 Node 5789 可用 `NUXT_API_TARGET` 临时覆盖）；**共享契约类型在前端** `frontend/app/types/contracts.ts`（前端侧镜像，**字段权威在 Python 后端**，改后端字段要同步它）。技能库 / 脚本 / 快照也都在 `backend-py/` 下。
-- **`backend-py/` = Python 后端**：FastAPI + SQLAlchemy **Core**，**全部域已迁完**（未注册 0 / Node 224 条路径 100% 覆盖）；**端口 5790**；回归 `backend-py/tests/run_all.py`；动手前读 `backend-py/README.md`。⚠️ **`backend/` 已删**（2026-09-15）⇒ TS 原文只在 `backend-py/tests/frozen_ts_source.py`，**守卫读 TS 走「真源码优先 → 快照」**；`PROXY_TO_NODE` 已无对象（接缝只为兜底 501）。**明细见 `TOPICS.md`**。
+- **`backend-py/` = Python 后端**（FastAPI + SQLAlchemy **Core**；**端口 5790**；全部域已迁完 / 未注册 0）：回归 `backend-py/tests/run_all.py`；动手前读 `backend-py/README.md`。⚠️ **`backend/` 已删**（2026-09-15）⇒ TS 原文只在 `frozen_ts_source.py`。**明细见 `TOPICS.md`** ✓
 
 ## 本地模型 + H3 视频推理
 **详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/app/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
 
 ## 后端能力（9 项）
-QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking —— **明细见 `TOPICS.md`**（Python 实现全在 `backend-py/app/services/`）。
+QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking —— **明细见 `TOPICS.md`**。
 **约定**：`appendStyleProfile()` 同步；门禁统一支持 `force`；无指纹/无相位视为旧产物不阻断；`storyboards` 无 resolution/fps（在 `video_generations`）；Windows ZIP 内路径转 posix。
 
 ## 前端约定
@@ -22,45 +22,58 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 
 ## 画风体系（10 种）
 - key：realistic / cinematic / noir / anime / ghibli / ink-wash / watercolor / comic / cyberpunk / pixar3d。**词表四段**「画风核心+镜头光线+调色质感+画质」，**负面词负责排除对立风格**。
-- **单一事实来源 2 处必须同步**：后端 `shared/prompt-utils.ts`（`ART_STYLE_CATALOG`+`DRAMA_ART_STYLE_MAP`/`DRAMA_ART_NEGATIVE_MAP`/`EQUIP_ART_STYLE_MAP`）与前端 `app/utils/artStyles.ts`；**加画风只改这 2 个文件**。`prompt-utils.ts` **不拆**；找副本顺序 = 后端常量 → skill 正文 → 工具 instruction → 前端硬编码。
-- 解析链 `characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`，**唯一入口** `resolveEffectiveArtStyle()`（脏值跳过不透传），各路由不得存副本。
-- **正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix`+`buildXxxNegativePrompt`。skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。**细节（反 AI 感白名单、视频与静帧为何必须分开、放开写词要改什么）见 `TOPICS.md` §画风体系细节**。
+- ⚠️ **单一事实来源 2 处必须同步**：后端 `backend-py/app/services/prompt_utils.py`（`ART_STYLE_CATALOG` + 三张映射表）与前端 `frontend/app/utils/artStyles.ts` ⇒ **加画风只改这 2 个文件** ✓。旧指针 `shared/prompt-utils.ts` **已随 `backend/` 删除** ✗（见到它=在读旧文 ✓）。
+- 其余（解析链唯一入口 `resolveEffectiveArtStyle` ✓、正负成对收口 ✓、找副本顺序 ✓、反 AI 感白名单 ✓）⇒ **`TOPICS.md` §画风体系细节** ✓
 
 ## Skill 体系（详见 `backend-py/app/skills/README.md`，改前先读）
 - **库由声明文件识别，与目录名解耦**：`<lib>/library.yaml` 的 `name`/`label`/`description` ⇒ **加库/换库/改展示名零代码**。⚠️ **无执行入口的 skill 勿写进 `agents:`** ✗（每次生成白背一段上下文）；**词库按介质分家**（图像｜视频）⇒ **改词库前先确认改哪个** ✓（清单见 `TOPICS.md`）。
 - **命名**：core 目录名 = Agent 类型（`agent_configs.agent_type`，**勿改名**）；库内 skill id **勿重命名**（`references/` 互引静默断链）。
-- **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（越小越靠前，缺省 100）；解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`。**改绑定 = 改 md**；`AGENT_SKILL_MAP` 已删。
-- **注入闸**：默认只注自有；外部库**按需手动绑**；超预算按 priority 跳过并给诊断（阈值/口径见 `TOPICS.md`）。
-- **DB 配置优先铁律**：`parseSkillsConfig` 解析出配置即「用户已选过」→ **全关也不回退默认** ✗（仅 `null`/空/解析失败才回退）；`enabled` 缺省 = 启用。
-- **agent 出厂默认唯一出口**：`getAgentDefaults()`（`DEFAULT_PROMPTS`+`resolveDefaultSkills`）→ `GET /agent-configs/defaults` → `agents.vue`；**前端不得硬编码默认提示词/默认绑定**。
-- **同一规则只留一处**：`shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`、`IMAGE_PROMPT_TEMPLATE_CHARACTER/SCENE/SHOT`。
-- **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达**（22 个含 references 的全是 vendor，core 零引用）→ **有意取舍非 bug**；前端以 `referenceCount` 标注「N 个参考文件（不注入）」。
-- **删除保护**：`DELETE /skills/<id>` 拒删 = **顶层（id 不含 `/`）** *且* **`agents:` 非空**（core 删掉永久丢失）；`backend-py/app/skills/<agent>/<name>/` 不受保护；**顶层但 agents 空可删**；解析失败传 `undefined` → 保守拒删。
-- **注入可见性**：`agents.vue` 绑定面板 = 外部库 Skill **唯一 UI 挂载入口**；⚠️ 合计**只算 `enabled=true`**；**拖拽真实生效**（列表顺序 = 注入顺序 = 超预算跳过顺序）。字段清单与 UI 细节见 `TOPICS.md`。
-- **兜底库**：顶层目录无 `library.yaml` → `/meta.sources` 补合成条目（`declared:false`，label = 目录名）→ 保证「core + Σ各库 = 总数」自洽且侧栏可达。
-- **宿主工具兼容性**：外部库依赖的 `hub_*` 本项目**从未注册**；**只认 `hub_` 前缀**（宽泛猜会被字段名污染），且**工具集须取 `tool.id`** ✗（取错会把 21 个工具全误判为缺失）。判据见 `TOPICS.md`。
-- **`meta.yaml` 是死数据**（改它不生效 ✓ 全仓零读取）；但 `version`/`author-*`/`source` **只此一处** ⇒ **勿擅自删** ✗（丢溯源）。
-- **改名/挪库后必核对 DB 绑定** ✓（`agent_configs.skills` 存的是 id ⇒ 旧绑定**静默**失效）；核对必须**只读直开** `{ readonly: true }` ✓。实测 5 行全 `NULL` ⇒ 改名零影响 ✓。
-- **坑⑨条已下移**（渲染/前端 import type/路由注册顺序/回读校验/回显规范化/DB 清洗副作用/守卫触发）⇒ `TOPICS.md` §Skill 体系坑清单（2026-09-15 腾 8k 预算：本文件逼近上限时**尾部区块最先被截断**）。
+- **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（缺省 100）⇒ **改绑定 = 改 md**；入口唯一 `resolveDefaultSkills` ✓
+- **DB 配置优先铁律**：`parseSkillsConfig` 解析出配置即「用户已选过」→ **全关也不回退默认** ✗（仅 `null`/空/失败才回退）；`enabled` 缺省 = 启用 ✓
+- **出厂默认唯一出口** `getAgentDefaults()` ⇒ **前端不得硬编码默认提示词/默认绑定** ✗
+- **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达（有意取舍，非 bug）** ✓
+- **删除保护**：拒删 = **顶层 id** *且* **`agents:` 非空** ✗（core 删掉永久丢失）；解析失败 ⇒ 保守拒删 ✓
+- ⚠️ **宿主工具**：只认 `hub_` 前缀 ✓，且**工具集须取 `tool.id`** ✗（取错 ⇒ 21 个工具全误判为缺失）
+- ⚠️ **改名/挪库后必核对 DB 绑定** ✓（存的是 id ⇒ 旧绑定**静默**失效；核对须**只读直开** ✓）
+- 注入闸默认只注自有 ✓、超预算按 priority 跳过给诊断 ✓、合计**只算 `enabled=true`** ✓
+- **完整表述 / 坑⑨条 / 注入口径 全在 `TOPICS.md`** §Skill 体系 ✓（本文件只留会导致 bug 的判据 ✓）
 
 ## 视频提示词语料
 **详见 `TOPICS.md`**（检索管线 8987 条/3 源、已排除源清单、落盘三分都在那儿）。一条红线：他人提示词正文**不得搬运进仓库**（只提炼范式，结论落 `docs/`）。
 
 ## 代码约定（写代码时的硬规则）
 - **中文文案里要引用就用「」，绝不用半角 `"`** —— 文案本身是双引号串，嵌 `"` 直接 `SyntaxError`（2026-09-17 一天犯了 3 次）。同类：改文案后**顺手搜一遍引用它的断言**（`check("…文案…")` 会因改词而失效）。
+- **解析外部工具真实输出前先把真实输出落盘取证**（别照文档猜 —— 技术 QC「三项死检测」就是猜出来的）；**一个布尔字段只许一个含义**（把「观察到的事实」和「推断出的结论」塞进同一个 flag ⇒ 文案会说谎）；**检测类改动要有「能触发」的反向证明**（另造一个必命中素材，否则「判定已生效」根本证明不了）。
 - **测试不许依赖"真机装了什么"**：断言写成**两种世界都成立**（如「真张量 ✓ + 画面仍不真 ✗」✓）；缺依赖/缺服务那类路径用 **monkeypatch 模拟**，不要写成「必然缺」——装上/起来就红。断言也别写**套套逻辑**（`sum(x) == sum(x)` 恒真，只增通过数不增信息）。
 - **判"代码里有没有某种写法"用 AST，别用正则** ✗（正则会把**文档串里的说明**当代码 ✓、又漏掉**换了写法**的同类 ✓）⇒ 守卫三段：合同锚点 + **正/负对照** + 扫描面非空 ✓。
 - **归一化产物与判断常量必须同源** ✗（`-` vs `_` 实测导致"待重做资产被排除出生成顺序"✗）；断言钉**后果**，不只钉计数 ✓。
 - **"schema 里没有"先找专用表再说** ✗（实测 `continuity_states` 早就在 ✓）⇒ **先找现成的家，别急着盖房子** ✓。
 - **"没数据/没读到" ≠ 通过** ✗：纯函数"没给就跳过"⇒ **空集会被读成绿灯** ✓✗ ⇒ 外层补**阻断**（"无从体检 ≠ 通过"）+ 报**覆盖率** ✓。
+- **检测器的模式要比解析器更宽松** ✗（复用同一个严格正则 ⇒ 解析不了的**畸形输入也检测不到** ⇒ 被当成「干净」✓✗）；**追加小节只锚「末节首行」** ✗（锚在正文中间会把新小节插到旧小节**前面**）。
+- ⭐ **判据要"响亮"不要"静默"** ✗：惰性导出必配**名字名单**（`__all__`）且**先校验** ⇒ 漏加立刻 `AttributeError` ✓（别给空壳/None 让错误漂到下游 ✗）；**占位符不许留在模块体里** ✗、**断言优先写"能自己算出来的不变量"** ✗ ⇒ 其余（模块级状态 / `compile()` / 汇总分母 / 规模数字）见 `TOPICS.md` §代码约定坑清单 ✓
+- ⭐ **同一份配置的两种形态（dataclass / dict）⇒ 每个读取点都要两处都认** ✗（取不到的那些会**悄悄回落默认值** ✓✗ ⇒ 与模型对不上）；**能算出 0 宽度的结构不变量要在构造期报** ✗（否则报的是**第三方后端的天书** ✓✗）；**多流各按落盘工具的契约报形状** ✗（对称去维 ⇒ 静默走错分支 ✓✗）
 
 ## 本机环境（2026-09-17 实测）
 - **开发机无 NVIDIA 显卡** ✗（Iris Xe 集显 ✓，无 `nvidia-smi` ✓）⇒ 只装 **CPU 版 torch**（124 MB ✓），别装 2.5 GB CUDA 轮子 ✗。**真推理（H3 19.53 GiB 权重）要在工作站（A5000）跑** ✓ ⇒ 见下面那条工作方式。
-- **PyPI 在本机下不动** ✗（两次卡在同一文件、无报错）⇒ 一律 `-i https://pypi.tuna.tsinghua.edu.cn/simple`（20–58 MB/s ✓）；装 torch：`--index-url https://download.pytorch.org/whl/cpu --extra-index-url <镜像> torch==<ver>+cpu` ✓。
-- 长命令常被判「在后台运行」⇒ **先查产物再决定重跑** ✗（它可能真跑完了 ✓）；批次日志**标签不可复用** ✗（复用会读到上次会话的陈旧结果 ✓）。
+- **PyPI 镜像 / 长命令被判后台 / 跑批编码坑（`*>>` 写 UTF-16 ⇒ grep 0 命中；子进程 GBK ⇒ 打印炸冒充失败）** ⇒ **`TOPICS.md` §自 MEMORY.md 下移（2026-09-20 第三次）** ✓
 
 ## 工作方式（用户 2026-09-17 明确）
 - **以实现功能为先**：先把能力在代码里**实现完**（含测试与守卫 ✓），**等实现完再去工作站跑真流程** ✓ —— 不要为了"当场看到出片"而反复折腾本机环境 ✗（本机也没有 NVIDIA 卡 ✓）。接口/后端可以按"工作站上才真跑"来设计 ✓，但**不许**因此把未验证的部分说成已验证 ✗。
+
+## ⭐ 自研优先（用户 2026-09-20 明确要求记住）
+- **原话**：「**所有功能不要对外依赖，自己实现所有的功能，要参考我给你的几个项目**」⇒ 落成三条硬约束：
+  1. **能力自研**：功能要能在**本仓自己实现**（推理/生成/解析/合成都算 ✓）⇒ 不许把关键能力**只**挂在外部队商 API 上 ✗；
+  2. **不对外依赖**：默认形态是**离线可跑**（本地服务 / 本地权重 / 纯计算 ✓）⇒ 外部队商适配器**可以有**（作为可选通道 ✓），但**不能是唯一出路** ✗；
+  3. **参考 `reference/` 那几个项目**（Mini-Agent / minimax-desgin-plugin / ollama-python / ollama / Open-AI-Micro-Drama-Generator / short-drama-agent ✓）：**有用的功能搬过来自己实现** ✓（判据同「没人调用的库不算功能」✓：搬来要真接线 ✓）。
+- **⚡ 2026-09-20 加严**：「**所有都要自己实现，不要调用外部的**」⇒ 外部队商 API **不是可选通道，是要去掉的** ✗。
+  边界（可纠正 ✓）：**功能/能力**不外包 ✗；`ffmpeg`/SQLite/标准库/框架属**本地基础设施** ✓ 不算 ✗。
+- ⚠️⚠️ **2026-09-20 实测：四类生成当前**全部**解析到外部** ✗✗**（`api.minimax.chat` / `ark.cn-beijing.volces.com` ✓）——
+  `ai_providers.py` 按 **priority 降序**取第一条 ✓，本地预设 82–85 ✓ 输给厂商 97–300 ✓ ⇒ **厂商永远赢** ✗。
+  ⇒ 动作：抬本地 priority / 删外部行 ✓（**审计表与三层依赖阶梯见 `TOPICS.md` §外部调用审计** ✓）。
+- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **19 模块 / 343 用例全绿 ✓ 零依赖可跑** ✓；
+  出片唯一硬缺口 = **真权重 + 真配置** ✗（机制都已实现 ✓）。
+- **⚫ 可照抄项目（用户点名 ✓「不要忘记」）**：ComfyUI / minimax-h3-comfyui / ollama / ollama-python /
+  minimax-desgin-plugin ⇒ **功能直接抄** ✓（落点见 `TOPICS.md` §可照抄项目清单 ✓）。
 
 ## 协作与提交
 - **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。

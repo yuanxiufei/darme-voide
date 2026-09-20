@@ -170,6 +170,9 @@ onMounted(load)
       </div>
     </div>
 
+    <!-- 提示词生产质检（占位符解析 + 五段质感层；本地纯计算、不花钱、不落库） -->
+    <PromptQcPanel />
+
     <!-- 搜索 + 筛选 -->
     <div class="toolbar">
       <div class="search-box">

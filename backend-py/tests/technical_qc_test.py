@@ -73,9 +73,14 @@ def build_fixtures() -> dict[str, str]:
                                  "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
                                  "-af", "volume=-30dB", "-c:v", "libx264", "-pix_fmt", "yuv420p",
                                  "-c:a", "aac", "-shortest"])
+    # 削波素材：默认 sine ≈ -16 dBFS ⇒ +20dB 必然顶到 0dBFS（真峰 > -1dBTP 必命中）
+    _ffmpeg(root / "hot.mp4", ["-f", "lavfi", "-i", "testsrc2=s=64x64:d=2",
+                               "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+                               "-af", "volume=20dB", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                               "-c:a", "aac", "-shortest"])
     (root / "broken.mp4").write_bytes(b"not a video")
     return {name: f"videos/{name}.mp4"
-            for name in ("black", "white", "lowfps", "clean", "loud", "quiet", "broken")}
+            for name in ("black", "white", "lowfps", "clean", "loud", "quiet", "hot", "broken")}
 
 
 def notes_of(spec: dict) -> list[str]:
@@ -117,27 +122,53 @@ def main() -> int:  # noqa: C901
     check("解析: blackdetect 行 -> 起止与时长",
           tq.parse_black_segments("x black_start:1.5 black_end:2.0 black_duration:0.5 y")
           == [{"start": 1.5, "duration": 0.5}])
-    check("解析: freezedetect 行 -> 起点与时长",
+    # ⚠️ 老形态没给 freeze_end，但**时长已知** ⇒ 不算「排到片尾」（open=False）✓
+    #    初版把「没有 freeze_end」也当成 open ✗ ⇒ 文案会对一段"其实结束了"的冻帧说
+    #    「一直持续到片尾」✓✗ —— 这条自检当场抓到 ✓
+    check("解析: freezedetect 老形态（同一行）+ 时长已知 ⇒ open=False（不谎称排到片尾）",
           tq.parse_freeze_segments("freeze_start: 0.8 freeze_duration: 1.7")
-          == [{"start": 0.8, "duration": 1.7}])
+          == [{"start": 0.8, "duration": 1.7, "end": 2.5, "open": False}])
     check("解析: volumedetect 的 mean/max（负号要留住）",
           tq.parse_volume("mean_volume: -23.4 dB\nmax_volume: -0.2 dB")
           == {"mean": -23.4, "max": -0.2})
-    check("解析: ebur128 的正则**能**吃住 summary 形态（解析逻辑本身没问题）",
+    check("解析: ebur128 老形态（值与标题同一行）仍要吃得下",
           tq.parse_ebur128("Integrated loudness: -13.2 LUFS\nTrue peak: -0.5 dBTP")
           == {"integrated": -13.2, "truePeak": -0.5})
-    # 🔴 继承缺陷锁定：ffmpeg 实际打的是**逐帧进度行**，没有 `Integrated loudness:` / `True peak:` summary
-    #    ⇒ 两侧都永远解析不到（详见 technical_qc.py 的「继承缺陷」段）。修好时这条会红 = 预期信号。
-    check("解析[继承缺陷]: ffmpeg **真实**输出格式 ⇒ 解析结果为空（Node 亦然，勿单边修）",
-          tq.parse_ebur128("[Parsed_ebur128_0 @ 0x1] t: 0.0999773  TARGET:-23 LUFS    "
-                           "M:-120.7 S:-120.7     I: -70.0 LUFS       LRA: 0.0 LU  "
-                           "FTPK: -16.5 dBFS  TPK: -16.5 dBFS")
-          == {"integrated": None, "truePeak": None})
-    check("解析[继承缺陷]: freezedetect 真实输出带前缀且 start/duration 分行 ⇒ 解析为空",
+
+    # ✅ 三项检测已修（2026-09-18）：以下**全部按实测 ffmpeg 9.0.1 的真实输出**写断言 ✓
+    #    （旧用例锁的是「真实格式 ⇒ 解析为空」的缺陷 ✗ —— 已按信号改成正确期望 ✓）
+    check("解析[真格式] freezedetect 三行（带前缀、分行）⇒ 配对成一段",
           tq.parse_freeze_segments(
               "[Parsed_freezedetect_0 @ 0x2] lavfi.freezedetect.freeze_start: 0\n"
-              "[Parsed_freezedetect_0 @ 0x2] lavfi.freezedetect.freeze_duration: 2.4")
-          == [])
+              "[Parsed_freezedetect_0 @ 0x2] lavfi.freezedetect.freeze_duration: 2.4\n"
+              "[Parsed_freezedetect_0 @ 0x2] lavfi.freezedetect.freeze_end: 2.4")
+          == [{"start": 0.0, "duration": 2.4, "end": 2.4, "open": False}])
+    check("解析[真格式] 两段冻帧各成一段（事件流不能把两段粘成一段）",
+          tq.parse_freeze_segments(
+              "lavfi.freezedetect.freeze_start: 0\nlavfi.freezedetect.freeze_duration: 2\n"
+              "lavfi.freezedetect.freeze_end: 2\nlavfi.freezedetect.freeze_start: 5\n"
+              "lavfi.freezedetect.freeze_duration: 1.5\nlavfi.freezedetect.freeze_end: 6.5")
+          == [{"start": 0.0, "duration": 2.0, "end": 2.0, "open": False},
+              {"start": 5.0, "duration": 1.5, "end": 6.5, "open": False}])
+    check("解析[真格式] 只有 freeze_start（一直冻到片尾）⇒ 用总时长收尾并标 open",
+          tq.parse_freeze_segments(
+              "[Parsed_freezedetect_0 @ 0x2] lavfi.freezedetect.freeze_start: 0.5", 3.0)
+          == [{"start": 0.5, "duration": 2.5, "end": 3.0, "open": True}])
+    check("解析: 只给 freeze_start 且**拿不到总时长** ⇒ duration=None（不猜，也不谎称片尾）",
+          tq.parse_freeze_segments("lavfi.freezedetect.freeze_start: 0.5")
+          == [{"start": 0.5, "duration": None, "end": None, "open": False}])
+    check("解析[真格式] ebur128 summary 是**跨两行**的（值在标题下一行）",
+          tq.parse_ebur128("  Integrated loudness:\n    I:         -21.8 LUFS\n"
+                           "  True peak:\n    Peak:      -16.1 dBFS\n")
+          == {"integrated": -21.8, "truePeak": -16.1})
+    # ⚠️ 这条钉的是**新陷阱**：只有逐帧进度行时取末条 ✓ —— `I:` 是滚动累计值，
+    #    首行恒为 -70 LUFS（起手静音）⇒ 取首行会造出「永远 -70」的假读数 ✗✗
+    check("解析[真格式] 只有进度行 ⇒ 取**最后**一条 I:（首行恒 -70 LUFS，取首行=假读数）",
+          tq.parse_ebur128(
+              "[Parsed_ebur128_0 @ 0x1] t: 0.09  ...  I: -70.0 LUFS  TPK: -16.5 dBFS\n"
+              "[Parsed_ebur128_0 @ 0x1] t: 1.00  ...  I: -21.8 LUFS  TPK: -16.1 dBFS\n"
+              "[Parsed_ebur128_0 @ 0x1] t: 2.00  ...  I: -19.4 LUFS  TPK: -15.9 dBFS")
+          == {"integrated": -19.4, "truePeak": -15.9})
     check("JS 语义: toFixed 是 half-away-from-zero（1.005 -> 1.01，Python 的 f-string 会给 1.00）",
           tq._js_to_fixed(1.005, 2) == "1.01" and tq._js_to_fixed(2.5, 0) == "3")
     check("JS 语义: 整数不带 .0（阈值 1.0 -> `1`）",
@@ -146,9 +177,12 @@ def main() -> int:  # noqa: C901
     # ── 2. 黑场夹具 ──
     black = tq.probe_video_technical_spec(video["black"])
     black_notes = notes_of(black)
-    check("黑场: 检出一段以上，且**分数 = 100 − 20×段数**（自洽不变量）",
+    # ⚠️ 纯黑夹具**同时是静止画面** ⇒ 冻帧检测修好后扣分会叠加 ✓
+    #    （自洽不变量必须把两类段都算上 ⇒ 只看黑场会变成"假红" ✗）
+    check("黑场: 检出一段以上，且**分数 = 100 − 20×(黑场段 + 冻帧段)**（自洽不变量）",
           len(black["blackSegments"]) >= 1
-          and black["score"] == max(0, 100 - 20 * len(black["blackSegments"])), black)
+          and black["score"] == max(0, 100 - 20 * (len(black["blackSegments"])
+                                                    + len(black["freezeSegments"]))), black)
     check("黑场: 报 error 级 + 文案含时长/起点/阈值（>0.25s）",
           any(i["severity"] == "error" and "画面黑场" in i["message"] and "标准 >0.25s" in i["message"]
               for i in black["issues"]), black_notes)
@@ -156,11 +190,20 @@ def main() -> int:  # noqa: C901
           black["hasAudio"] is False and black["maxVolumeDb"] is None
           and not any("响度" in m or "真峰" in m for m in black_notes), black_notes)
 
-    # ── 3. 静止画面（冻帧）—— 🔴 继承缺陷：**永远检不出**（正则与 ffmpeg 输出不符）──
+    # ── 3. 静止画面（冻帧）—— ✅ 已修（2026-09-18）：纯静止画面**能**检出了 ──
     white = tq.probe_video_technical_spec(video["white"])
-    check("冻帧[继承缺陷]: 纯静止画面**检不出**（freezeSegments 空、满分）——Node 亦然，勿单边修",
-          white["freezeSegments"] == [] and white["issues"] == [] and white["score"] == 100,
-          white)
+    check("冻帧: 纯静止画面被检出（error 级 + 文案含「画面冻帧」+ 分数自洽）",
+          len(white["freezeSegments"]) >= 1
+          and white["score"] == max(0, 100 - 20 * len(white["freezeSegments"]))
+          and any(i["severity"] == "error" and "画面冻帧" in i["message"]
+                  for i in white["issues"]), white)
+    check("冻帧: 该段**排到片尾**（ffmpeg 只给 freeze_start）⇒ 用总时长收尾，时长≈整片",
+          white["freezeSegments"][0]["open"] is True
+          and white["freezeSegments"][0]["duration"] is not None
+          and abs(white["freezeSegments"][0]["duration"] - white["duration"]) < 0.5,
+          (white["freezeSegments"][0], white["duration"]))
+    check("冻帧: 文案点明「一直持续到片尾」（否则人以为只是一小段 ✗）",
+          any("一直持续到片尾" in i["message"] for i in white["issues"]), notes_of(white))
     check("冻帧: 白场不会被误判成黑场（blackdetect 正常工作）",
           white["blackSegments"] == [] and white["duration"] is not None, white["duration"])
 
@@ -184,25 +227,52 @@ def main() -> int:  # noqa: C901
           and clean["blackSegments"] == [] and clean["freezeSegments"] == []
           and clean["fps"] == 25.0, clean)
 
-    # ── 6. 音频响度（volumedetect 可用；ebur128 两项是继承缺陷）──
+    # ── 6. 音频响度 —— ✅ 已修（2026-09-18）：集成响度与真峰都能读到了 ──
     loud = tq.probe_video_technical_spec(video["loud"])
     check("响度: 有音轨 ⇒ hasAudio=True + maxVolumeDb 有值（volumedetect 正常工作）",
           loud["hasAudio"] is True and loud["maxVolumeDb"] is not None, loud["maxVolumeDb"])
-    check("响度[继承缺陷]: 真峰/集成响度恒为 None ⇒ 不产生任何响度类 issue（Node 亦然）",
-          loud["integratedLoudness"] is None
-          and not any("真峰" in m or "集成响度" in m for m in notes_of(loud)), notes_of(loud))
+    check("响度: 集成响度**读到了**（不再是恒 null ⇒ 此前这条标准永远不判 ✗）",
+          loud["integratedLoudness"] is not None and -70 < loud["integratedLoudness"] < 0,
+          loud["integratedLoudness"])
+    # ⭐ 自洽不变量（**不写死 LUFS 数值** ⇒ ffmpeg 版本差异不会造成假红 ✓）：
+    #    「报没报集成响度偏离」必须与「读数离 -14LUFS 是否 > 1」**一致** ✓
+    check("响度: 「报响度偏离」⇔「读数离 -14LUFS 超 1」两侧一致（自洽不变量）",
+          any("集成响度" in m for m in notes_of(loud))
+          == (abs(loud["integratedLoudness"] - (-14)) > 1), notes_of(loud))
+    check("响度: 默认 sine 远低于 -1dBTP ⇒ **不该**误报真峰（不该报的时候不报）",
+          loud["maxVolumeDb"] < -10 and not any("真峰" in m for m in notes_of(loud)),
+          (loud["maxVolumeDb"], notes_of(loud)))
+    # ⭐ 反向：削波素材必须**报**真峰 —— 否则「真峰判定已生效」证明不了 ✗
+    #    （一个永不触发的检查，与"没检测到"长得一模一样 ✗）
+    hot = tq.probe_video_technical_spec(video["hot"])
+    check("响度: 削波素材（+20dB ⇒ 顶到 0dBFS）**必须报真峰**（证明这条判定真能触发）",
+          hot["hasAudio"] is True and any("真峰" in m for m in notes_of(hot)),
+          (hot["maxVolumeDb"], notes_of(hot)))
+    check("响度: 真峰超限扣 15 分（分数自洽）",
+          hot["score"] == max(0, 100 - 15 * (1 if any("真峰" in m for m in notes_of(hot)) else 0)
+                              - 10 * (1 if any("集成响度" in m for m in notes_of(hot)) else 0)
+                              - 20 * (len(hot["freezeSegments"]) + len(hot["blackSegments"]))),
+          hot["score"])
     quiet = tq.probe_video_technical_spec(video["quiet"])
-    check("响度: -30dB 素材同样 hasAudio=True，但**不会**报响度偏离（同一继承缺陷）",
-          quiet["hasAudio"] is True and quiet["integratedLoudness"] is None
-          and not any("集成响度" in m for m in notes_of(quiet)), notes_of(quiet))
+    check("响度: -30dB 素材同样 hasAudio=True，且集成响度**更低**（读数单调）",
+          quiet["hasAudio"] is True and quiet["integratedLoudness"] is not None
+          and quiet["integratedLoudness"] < loud["integratedLoudness"],
+          (quiet["integratedLoudness"], loud["integratedLoudness"]))
+    check("响度: -30dB 素材报响度偏离（离 -14 远超 1LUFS）",
+          any("集成响度" in m for m in notes_of(quiet)), notes_of(quiet))
 
     # ── 7. 降级分支 ──
-    # ⚠️ 原 TS 的判失败条件是「非零退出**且** stderr 为空」⇒ 坏文件（ffprobe 非零但打了 stderr）
-    #    会被当作**成功**：不扣分、后续检测空转、最终 100 分。照抄（勿改成非零即失败）。
+    # ⚠️ `_run` 的判失败条件（「非零退出**且** stderr 为空」）**保持原样** ✓ ——
+    #    ffmpeg 滤镜正常结束也会非零退出 ✓ ⇒ 不能改成"非零即失败" ✗。
+    #    但 2026-09-20 收口了它的**静默绿灯**连带后果 ✗：坏文件读不出任何规格 ⇒ 必须报出来 ✓
+    #    （初版是「满分且零 issue」✓✗ —— 坏文件看起来"干净"，是最坏的一种 ✓）。
     broken = tq.probe_video_technical_spec(video["broken"])
-    check("降级: 坏文件 ⇒ **不扣分、满分且无 issue**（「非零退出但有 stderr」被当作成功，原 TS 语义）",
-          broken["score"] == 100 and broken["issues"] == [] and broken["fps"] is None
-          and broken["blackSegments"] == [], broken)
+    check("降级: 坏文件 ⇒ **不再满分**（读不出规格 ⇒ warning + 扣 15 分），并说清后果",
+          broken["score"] == 85 and broken["fps"] is None
+          and any("无法读取视频规格" in m for m in notes_of(broken)), broken)
+    check("降级: 坏文件**不会**被误判成有段/有音轨（没读到 ≠ 通过 ✓）",
+          broken["blackSegments"] == [] and broken["freezeSegments"] == []
+          and broken["hasAudio"] is False, broken)
     check("降级: 路径穿越被拒 ⇒ 带上 `error` 且字段全空（原 TS 的早退分支）",
           (lambda r: r["score"] == 100 and r.get("error") and r["issues"] == [])(
               tq.probe_video_technical_spec("../outside.mp4")))

@@ -91,6 +91,36 @@ def case_schedules() -> None:
           (len(base), len(doubled)))
     check("⑦ factor<=1 ⇒ 原样返回（不瞎改 ✓）", sch.interpolate_sigmas(base, 1.0) == base)
 
+    # ⭐ 2026-09-20：**多流模型的 σ 跨 shift 换算** ✓（引擎按 H3 取 视频 12.0 / 音频 3.0 ✓）
+    #    ⚠️ 编号用 ⑦⁰ 后缀：①…⑱ 在本文件里是**全局连号** ✓ ⇒ 直接写 ⑧ 会撞号 ✗
+    check("⑦¹ shift 恒等：同一条 shift ⇒ 原样返回 ✓（`time_shift_sigma(s, k, k) == s` ✓）",
+          abs(sch.time_shift_sigma(0.37, 12.0, 12.0) - 0.37) < 1e-12
+          and abs(sch.time_shift_sigma(0.37, 3.0, 3.0) - 0.37) < 1e-12,
+          sch.time_shift_sigma(0.37, 12.0, 12.0))
+    check("⑦² 两个不动点：σ=0 ⇒ 0 ✓、σ=1 ⇒ 1 ✓（**任意 shift** 都成立 ✓）",
+          all(sch.time_shift_sigma(s, 12.0, 3.0) == s for s in (0.0, 1.0))
+          and all(sch.time_shift_sigma(s, 3.0, 12.0) == s for s in (0.0, 1.0)))
+    # ⚠️ 方向我第一版**记反了** ✗✓：以为 12→3 会「抬向 1」✗，实测 **0.5 → 0.2** ✓（**压低** ✓）。
+    #    正确理解：同一份噪声水平，**越小的 shift 对应的 σ 越小** ✓ ⇒ 折算即"换到另一条网格的刻度" ✓，
+    #    不是"变噪/变净" ✗。⇒ 断言只写**能自己算出来的**性质（单调 + 区间 + 反向抬高 ✓），
+    #    不写**方向直觉** ✗（直觉正是这次错的那部分 ✓）。
+    lowered = [sch.time_shift_sigma(s, 12.0, 3.0) for s in (0.2, 0.5, 0.9)]
+    raised = [sch.time_shift_sigma(s, 3.0, 12.0) for s in (0.2, 0.5, 0.9)]
+    check("⑦³ 12→3 把 0<σ<1 **单调压低**（0.5 → 0.2 ✓）；反向 3→12 **单调抬高** ✓ —— 两向都是"
+          "「换刻度」✓（同一噪声水平在不同 shift 上落在不同 σ ✓）",
+          all(0.0 < value < s for s, value in zip((0.2, 0.5, 0.9), lowered))
+          and lowered == sorted(lowered)
+          and all(s < value < 1.0 for s, value in zip((0.2, 0.5, 0.9), raised))
+          and raised == sorted(raised), (lowered, raised))
+    check("⑦³′ **实测锚点**（防我下次又把方向记反 ✗）：0.5 → 0.2 ✓、0.9 → 0.6923… ✓",
+          abs(lowered[1] - 0.2) < 1e-12 and abs(lowered[2] - 0.69230769230769) < 1e-12, lowered)
+    round_trip = [sch.time_shift_sigma(sch.time_shift_sigma(s, 12.0, 3.0), 3.0, 12.0)
+                  for s in (0.05, 0.3, 0.8)]
+    check("⑦⁴ 往返 12→3→12 回到原值 ✓（**最强的一条** ✓：说明两条网格真的互逆 ✓）",
+          all(abs(value - s) < 1e-12 for s, value in zip((0.05, 0.3, 0.8), round_trip)), round_trip)
+    check("⑦⁵ shift≤0 ⇒ 报错（不静默算出一个假值 ✗）",
+          "shift 必须为正" in str(_raises(lambda: sch.time_shift_sigma(0.5, 0.0, 3.0))))
+
 
 def case_geometry() -> None:
     """② 几何：帧网格 / 分辨率 / 潜空间 ✓。"""
@@ -121,6 +151,18 @@ def case_geometry() -> None:
     check("⑮ 像素回显（用于成本/日志 ✓）",
           abs(geo.megapixels_for_size(1088, 608) - 0.6615) < 0.001,
           geo.megapixels_for_size(1088, 608))
+
+    # ⭐ 2026-09-20：音频潜空间（H3 是 **40 Hz 立体声** ✓ 事实来自模型文件头说明 ✓）
+    check("⑮′ 音频事实：**40 Hz** ✓、**立体声 2 声道** ✓（⚠️ 通道数 **32** 是**特征维** ✗ 不是声道 ✓）",
+          geo.AUDIO_LATENT_HZ == 40 and geo.AUDIO_LATENT_CHANNELS == 2)
+    check("⑮″ ⭐ **取整方式必须显式给** ✗（不给就 `TypeError` ✓）：5s ⇒ round/ceil/floor 都是 **200** ✓、"
+          "5.01s ⇒ **floor 200 ✓ / round 200 ✓ / ceil 201** ✓（⚠️ 参考里 `audio_t` 是**从张量读**的 ⇒ "
+          "「秒数怎么算」**没核过** ✗ ⇒ 按本模块纪律**逼成必填** ✓，绝不塞个默认值 ✗）",
+          geo.audio_latent_frames(5.0, mode="round") == 200
+          and geo.audio_latent_frames(5.0, mode="ceil") == 200
+          and geo.audio_latent_frames(5.01, mode="floor") == 200
+          and geo.audio_latent_frames(5.01, mode="ceil") == 201
+          and "mode" in str(_raises(lambda: geo.audio_latent_frames(5.0))))
 
 
 def case_sampler() -> None:

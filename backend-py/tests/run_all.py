@@ -2,9 +2,11 @@
 
 **本文件的 ``TESTS`` 就是套件权威清单**（README 里那棵树只是摘录，别去数它）。
 
-规模（2026-09-17 实测）：**82 个套件 / 2911 项断言**（82 套 / 2911 项 / 0 失败 ✓
-（m1 0-40 → 1822 项、m2 40-60 → 582 项、m3 60-85 → 507 项，三批 `_BAD=0` ✓，范围互不重叠 ✓；
-与 `run_all.TESTS` 的权威套件数 **82** 一致 ✓；本地服务全停时测得 ✓）。
+规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
+增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
+最近一次**全量实测**：**94 套 / 3224 项 / 0 失败**（2026-09-20 ✓）；其后又**新增**
+`engine_h3_form_test` ✓ 与 `engine_dual_stream_test` ✓ ⇒ 套数 **96** ✓、总数**待实测** ✗
+（按规则**不推算** ✗ —— 跑一次全量即可补齐 ✓）。
 ⚠️ 与上一轮（78 套 / 2806 项）**独立互证** ✓：2806 + 11（`safetensors_crosscheck_test` ✓）
 + 8（`engine_pipeline_test` 90 → 98 ✓）+ 26（`engine_dit_test` ✓）+ 39（`engine_io_test` ✓）
 + 21（`engine_text_test` ✓）= **2911** ✓✓（两条路径同一个数 ✓）。
@@ -133,6 +135,12 @@ TESTS = [
     ("自研引擎·加载计划（量化配套/层号连续性/显存排班；零依赖）", "engine_loader_test.py"),
     ("safetensors 交叉验证（纯 Python 读取器 vs 官方库；缺库则显式 SKIP）", "safetensors_crosscheck_test.py"),
     ("自研引擎·真模型层（DiT 前向/条件生效/权重往返/差异报告；CPU 可验）", "engine_dit_test.py"),
+    ("自研引擎·H3 形态积木（RMSNorm / SwiGLU / 18 路 adaLN / 正弦时间嵌入 / RoPE 旋转不变量 / "
+     "双 fp32 输出头 —— ⚠️ **尚无调用方** ✗，见 `h3_form.H3_FORM_TODO`）", "engine_h3_form_test.py"),
+    ("自研引擎·音频 VAE（32 kHz 立体声 ⇄ 潜变量；**真写 wav + 标准库读回核对** ✓）",
+     "engine_audio_vae_test.py"),
+    ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；能力自述逐条报缺 / 取整口径必填 / "
+     "三条当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片）", "engine_io_test.py"),
     ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
     ("自研引擎·长视频分段（网格长度/重叠接缝/保留帧守恒 + 首帧落 PNG 传递）", "engine_segments_test.py"),
@@ -161,9 +169,38 @@ TESTS = [
 ]
 
 
+def syntax_problems(root: Path) -> list[str]:
+    """**AST 预检**整棵源码树 ✓ ⇒ ``["相对路径:行 说明", …]`` ✓（空 = 全过 ✓）。
+
+    ⚠️⚠️ 为什么要它 ✗（2026-09-20 加 ✓）：那一天里「中文文案里嵌了半角双引号 ``"``」把
+    `SyntaxError` 带进来**四次** ✓✗（本仓 MEMORY 早写着这条 ✓ 我还是犯了 ✓）。那种错的**代价很阴** ✗：
+    套件**连一行都不输出** ✓ ⇒ 表现只是"没有 SUMMARY"✓，看起来像"被判后台 / 输出被吞"✓✗
+    —— 每次都得另外跑一次才看出来 ✓。⇒ 开跑前统一 parse ✓，一有问题**当场点名 `文件:行`** ✓
+    （"响亮"而不是静默 ✓ —— 本仓那条判据 ✓）。
+    """
+    import ast  # noqa: PLC0415 —— 只在预检用 ✓
+
+    bad: list[str] = []
+    for path in sorted(Path(root).rglob("*.py")):
+        if {".venv", "__pycache__"} & set(path.parts):
+            continue
+        try:
+            ast.parse(path.read_text(encoding="utf-8"), str(path))
+        except SyntaxError as err:
+            bad.append(f"{path.relative_to(root)}:{err.lineno} {err.msg}")
+    return bad
+
+
 def main() -> int:
     here = Path(__file__).resolve().parent
     failures: list[str] = []
+
+    syntax_bad = syntax_problems(here.parent)
+    if syntax_bad:
+        for item in syntax_bad:
+            print("SYNTAX " + item)
+        print(f"\nSYNTAX 预检失败：{len(syntax_bad)} 个文件有语法错 ✗（先修它们再跑套件 ✓）")
+        return 1
 
     # ⚠️ Windows 上的双坑（都踩过）：
     # 1. 子进程 stdout 是**管道**时，Python 按**本地代码页（GBK）**输出 ⇒ 若按 UTF-8 解码

@@ -156,9 +156,21 @@ def main() -> int:  # noqa: C901
     rep1 = run(e1)
     check("报告: 只有 4 个可比对（1 号无图不参与；2 号 first_frame_image 被选中 ⇒ 共 4 对）",
           rep1["checkedPairs"] == 4 and len(rep1["pairs"]) == 4, rep1["checkedPairs"])
-    check("报告: camelCase 形状 + dramaId 透传（episodeId/dramaId/checkedPairs/warningCount/pairs）",
-          set(rep1) == {"episodeId", "dramaId", "checkedPairs", "warningCount", "pairs"}
+    check("报告: camelCase 形状 + dramaId 透传（+ ⭐ 2026-09-20 新增 consistent / coverage）",
+          set(rep1) == {"episodeId", "dramaId", "checkedPairs", "warningCount", "pairs",
+                        "consistent", "coverage"}
           and rep1["episodeId"] == e1 and rep1["dramaId"] == did, list(rep1))
+    # ⭐⭐ 三态：**"没判 / 比过没问题 / 有问题"必须能区分** ✗（初版只有 checkedPairs+warningCount
+    #    两个数 ⇒ 「一对都没比出来」与「比过且零 warning」**长得一模一样** ✗✗）
+    check("⭐⭐ 三态: 真比过、但**有 warning** ⇒ consistent=False（不是 True 也不是 None）",
+          rep1["consistent"] is False and rep1["warningCount"] == 2, rep1["consistent"])
+    # ⭐ 自洽不变量（不写死夹具形状 ⇒ 夹具改了也不会假红 ✓）：
+    #    pairs = shots − 1 ✓，且**每一对**要么"比过"要么被计数跳过 ✓（不留"消失的对" ✗）
+    check("⭐ 覆盖率自洽: pairs = shots − 1，且 compared + 各类 skipped = pairs",
+          rep1["coverage"]["pairs"] == rep1["coverage"]["shots"] - 1
+          and (rep1["coverage"]["compared"] + rep1["coverage"]["skippedMissingImage"]
+               + rep1["coverage"]["skippedUnreadable"]) == rep1["coverage"]["pairs"]
+          and rep1["coverage"]["compared"] == rep1["checkedPairs"], rep1["coverage"])
     check("报告: warningCount 只数 warning 对（=2：0.422 与 0.0 两对）",
           rep1["warningCount"] == 2 and
           sum(1 for p in rep1["pairs"] if p["severity"] == "warning") == 2, rep1["warningCount"])
@@ -230,13 +242,22 @@ def main() -> int:  # noqa: C901
           and c2["message"].endswith("（仅记录）"), c2)
     check("跨场景: **scene_id 为空**也算跨场景（`!!prev.sceneId` 语义）",
           c2["sameScene"] is False and rep2["warningCount"] == 0, rep2["warningCount"])
+    check("⭐ 三态: 比过且**零 warning** ⇒ consistent=True（三态齐全：False/True/None 各有用例 ✓）",
+          rep2["consistent"] is True and rep2["coverage"]["compared"] == 2, rep2["coverage"])
 
-    # ── S3：跳过规则 ──
+    # ── S3：跳过规则 —— ⭐ 2026-09-20：**「没比出来」必须能看出来** ✗ ──
+    rep3 = run(e3)
     check("跳过: 无图 / 坏图（ffmpeg 解不开）/ 路径不存在 -> 全部不计入 checkedPairs",
-          run(e3)["checkedPairs"] == 0 and run(e3)["pairs"] == [])
-    check("单镜: 少于 2 个分镜 -> 直接返回空报告（without 任何比对）",
-          run(e4) == {"episodeId": e4, "dramaId": did, "checkedPairs": 0,
-                      "warningCount": 0, "pairs": []}, run(e4))
+          rep3["checkedPairs"] == 0 and rep3["pairs"] == [])
+    check("⭐⭐ 一对都没比过 ⇒ consistent=None（**不拿「没判」冒充「通过」** ✗）+ 说清跳过了什么",
+          rep3["consistent"] is None and rep3["coverage"]["compared"] == 0
+          and (rep3["coverage"]["skippedMissingImage"] + rep3["coverage"]["skippedUnreadable"]) > 0
+          and "没判" in rep3["coverage"]["note"], rep3["coverage"])
+    rep4 = run(e4)
+    check("单镜: 少于 2 个分镜 -> 空报告 + consistent=None + 明说「没有可比的一对」",
+          rep4["checkedPairs"] == 0 and rep4["pairs"] == [] and rep4["consistent"] is None
+          and rep4["coverage"]["pairs"] == 0 and "没判" in rep4["coverage"]["note"],
+          rep4["coverage"])
 
     # ── S4：排序 + 软删不过滤 ──
     rep5 = run(e5)

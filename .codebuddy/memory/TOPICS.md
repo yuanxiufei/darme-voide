@@ -40,6 +40,19 @@
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。
 
+## 自 MEMORY.md 下移（2026-09-20 第三次腾 8k 预算）
+
+**本机环境 / 跑批细节**（原文自 MEMORY.md §本机环境 下移 ✓；第三条是 2026-09-20 新踩的 ✓）：
+- **PyPI 在本机下不动** ✗（两次卡在同一文件、无报错 ✓）⇒ 一律 `-i https://pypi.tuna.tsinghua.edu.cn/simple`
+  （20–58 MB/s ✓）；装 torch：`--index-url https://download.pytorch.org/whl/cpu --extra-index-url <镜像> torch==<ver>+cpu` ✓。
+- 长命令常被判「在后台运行」✗ ⇒ **先查产物再决定重跑** ✓（它可能真跑完了 ✓）；批次日志**标签不可复用** ✓
+  （复用会读到上次会话的陈旧结果 ✓）。
+- ⚠️⚠️ **跑批工具坑**（2026-09-20 实测 ✓，与代码无关但会**骗人** ✓✗）：PowerShell `*>>` 写的是 **UTF-16** ✗，
+  再叠一个 `Add-Content -Encoding UTF8` ⇒ **混编码文件** ⇒ `Select-String` / `grep` **0 命中** ✓✗
+  （"看起来一个 FAIL 都没有" ✓ 实际是读不出来 ✓）；子进程 stdout 默认 **GBK** ✗ ⇒ 套件里的 `✓` 直接
+  `UnicodeEncodeError` ✓✗（**看起来"失败"、其实只是打印炸** ✓）⇒ 跑批时给子进程
+  **`PYTHONIOENCODING=utf-8`** ✓，或干脆在**脚本里**做 UTF-8 落盘 ✓（别经 PowerShell 重定向 ✗）。
+
 ## 自 MEMORY.md 下移（2026-09-18，第二次腾 8k 预算）
 
 **`backend-py/` 迁移明细**（原文自 MEMORY.md §项目与运行 下移；红线仍在 MEMORY.md）：
@@ -55,6 +68,90 @@
 - **兜底库**：顶层目录无 `library.yaml` → `/meta.sources` 补合成条目（`declared:false`，label = 目录名）→ 保证「core + Σ各库 = 总数」自洽且侧栏可达。
 
 **新引擎与"事前省钱链"（2026-09-18 建，细节见当日日志）**：`backend-py/app/services/engine/`（零依赖算法层：schedules/geometry/sampler/guidance/conditioning/dit/vae/text/media/segments/mappings/safetensors/inventory/loader/pipeline/dryrun ✓）+ `app/agent/context_budget.py` ✓ + 生产链四模块（`shot_placeholders`/`prompt_polish`/`asset_manifest`/`continuity` ✓ + 粘合 `production_preflight` ✓ + 取数 `preflight_source` ✓ + 适配 `storyboard_continuity` ✓）+ 前端 `components/PreflightPanel.vue` ✓。**判据只有一份** ✓：粘合层**只调用**、不重写判据 ✓（自检钉"与直接调用逐字段一致"✓）。
+
+## ⭐ 可照抄项目清单（用户 2026-09-20 点名；原话「这几个项目**功能可以直接抄**，**不要忘记**」）
+
+> ⚠️ 用户当时补了一句「不要忘记」⇒ 这是**长期挂账的待办源** ✓：能力缺口优先从这五个项目里找现成实现 ✓。
+
+| 参考项目（`reference/` 下） | 它提供什么 | 该抄进本仓哪里 |
+|---|---|---|
+`ComfyUI` | **执行引擎骨架**：节点图 → 拓扑执行、缓存/复用、队列与取消、类型校验、进度事件 | `app/services/engine/`（把"图执行/校验"这套机制搬成自研执行器 ✓）；⚠️ **别整包搬** ✗（十万行级第三方应用 ✓ 只取机制 ✓） |
+`minimax-h3-comfyui` | **H3 的 ComfyUI 侧实现**：节点定义、T2V/I2V 工作流模板、采样参数与条件注入 | 对照 `engine/` 的 `dit`/`conditioning`/`sampler`/`pipeline` 补齐 ✓；工作流模板 → 本仓 `local_services/h3/workflows/` ✓ |
+`ollama`（Go 服务端） | **本地模型服务**：模型清单/加载/keep-alive、流式响应、Modelfile、模板与参数默认值 | LLM 侧自研服务的形态参考 ✓（把"本地起服务 + 流式 + 模型管理"做成自家的 ✓）；⚠️ 当前 LLM 走的是本机 ollama 进程 ⚠️ |
+`ollama-python` | **客户端与结构化输出**：函数→工具 schema、结构化输出约束、（增量）流式解析 | 已在第 85 步判过：本项目 agent 工具集**已有**等价件 ✓、流式工具调用**暂无调用方** ⇒ 等真接流式再抄 ✓ |
+`minimax-desgin-plugin` | **ComfyUI 插件形态**：节点注册、参数校验、设计稿/资产对接 | 与 `ComfyUI` 那条合并看 ✓：**节点注册 + 参数校验**这套机制 |
+（早先已抄 ✓）`short-drama-agent` / `Mini-Agent` / `Open-AI-Micro-Drama-Generator` | 生产契约（占位符/质感层/资产门/连续性 ✓）、上下文预算 ✓ | 已落：`shot_placeholders` / `prompt_polish` / `asset_manifest` / `continuity` / `agent/context_budget` ✓ |
+
+**抄的姿势（延续本仓判据 ✓）**：① 只抄**能接线**的 ✓（搬来没人调用 = 没抄 ✓ 见第 106 步教训 ✓）；
+② 抄**机制**不抄**体量** ✗（尤其 `ComfyUI` ✓）；③ 抄完**写清出处** ✓（`docs/` 或模块 docstring ✓，
+与「他人提示词正文不得搬运」的红线不冲突 ✓ —— 那是**语料**✗，这是**代码/机制** ✓）。
+
+## 外部调用审计（2026-09-20 实测；用户要求「不要调用外部的」）
+
+**真库 `data/drama.db` 的 `ai_service_configs`（只读查 ✓ 8 条 active）**：
+
+| service_type | provider | base_url | 外部? | priority |
+|---|---|---|---|---|
+audio | minimax | https://api.minimax.chat | **外部 ✗** | 200 |
+image | volcengine | https://ark.cn-beijing.volces.com | **外部 ✗** | 200 |
+video | volcengine | https://ark.cn-beijing.volces.com | **外部 ✗** | 200 |
+text | minimax | https://api.minimax.chat | **外部 ✗** | 300 |
+text | openai | http://localhost:11434 | 本地 ✓（其实是 ollama ✓） | 85 |
+image | local-sd | http://localhost:7860 | 本地 ✓ | 84 |
+video | minimax | http://localhost:8765 | 本地 ✓（H3 门面） | 83 |
+audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
+
+**取用口径（决定性）**：`services/ai_providers.py:87` = `rows.sort(key=lambda r: r.priority or 0, reverse=True)`
+⇒ **priority 越大越优先** ✓（`estimate_service.py` 另有一套：`is_default` 先、再 priority 降序 ✓ 别混 ✓）。
+⇒ **四类当前都会选中外部行** ✗（本地 82–85 输给外部 200/300 ✓✗）。
+
+**为什么会长成这样**：`ai_configs.LOCAL_PRESET_SERVICES` 的本地预设 priority 定在 **85/84/83/82** ✓，
+而 `PRESET_SERVICES`（厂商一键配置）是 **100/99/98/97** ✓ ⇒ **本地预设天生排在厂商之后** ✗
+（"先一键配置、再切本地" ⇒ 厂商行仍在且更高 ✓✗）。
+
+**要「不调用外部」的动作（按代价排序）**：
+1. **抬高本地行 priority**（如 200+ ✓）或**把外部行 `is_active` 置 0 / 直接删** ✓；
+2. 把 `LOCAL_PRESET_SERVICES` 的 priority 改到**高于** `PRESET_SERVICES` ✓（否则每次一键配置又颠倒 ✓）；
+3. 长期：图片/视频/TTS 从**本地第三方运行时**（SD-WebUI 7860 ✓ / ComfyUI→8765 ✓ / CosyVoice 9880 ✓）
+   换成**自研引擎** ✓（缺真权重 ✗ ⇒ 见 §自研引擎现状 ✓）。
+
+**三层依赖阶梯（汇报时要说清 ✓）**：① **外部厂商 API** ✗✗（要去的 ← 上表 4 行）→
+② **本地第三方运行时** ⚠️（ollama ✓ SD-WebUI ✓ ComfyUI ✓ CosyVoice ✓ —— 本地但非自研 ✓）→
+③ **完全自研** ✓（`services/engine/` 19 模块 ✓）。
+
+## 自研引擎现状（2026-09-20 实测，自 MEMORY.md §自研优先 下移）
+
+**19 个模块**（`backend-py/app/services/engine/`）：`schedules` / `geometry` / `sampler` / `guidance` /
+`conditioning` / `dit` / `vae` / `text_encoder` / `media` / `segments` / `mappings` / `safetensors` /
+`inventory` / `loader` / `weights` / `pipeline` / `dryrun` / `torch_backend` / `__init__`。
+
+**自检 9 套 343 用例**（2026-09-20 实测全绿 ✓）：core 26 / dit 26 / inventory 34 / io 39 /
+loader 28 / mappings 17 / pipeline 98 / segments 54 / text 21 —— **零依赖可跑** ✓
+（装了 torch 则真张量那批也跑 ✓）。
+
+**已能自主完成的**：σ 调度 ✓ / 采样循环 + CFG 引导 ✓ / 首帧条件（图生视频 ✓ 真 VAE 编码 + 掩码混合 ✓）/
+长视频分段（保留帧数守恒 ✓）/ DiT 真前向 ✓ / 文本编码（**注入式 tokenizer** ✗ 本仓不内置词表 ✓）/
+VAE 解码 ✓ / 帧→真 mp4（ffprobe 复核 ✓）/ 音频→真 wav（标准库 `wave` ✓）/ 权重体检 + 加载计划 ✓ /
+管线编排（进度 / 取消 / 错误归因 ✓）/ 干跑后端 ✓。
+
+**唯一硬缺口 = 真权重 + 真配置** ✗（见 `torch_backend.PENDING_PARTS` ✓：H3 主 DiT 19.53 GiB 未下载 ✓ /
+张量命名映射表 ✓ / DiTConfig ✓ / TE·VAE 权重 ✓ / 端到端 `generate()` 真跑一次 ✓）⇒ `canGenerate=False` ✓。
+
+## 自 MEMORY.md 下移（2026-09-20，第三次腾 8k 预算）
+
+**Skill 体系完整表述**（红线仍留在 `MEMORY.md` §Skill 体系）：绑定解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`；**改绑定 = 改 md**（`AGENT_SKILL_MAP` 已删）。注入闸：`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过并给诊断（口径 = `renderSkill(parseSkill(...)).length`，不等于字节数）；`agents.vue` 绑定面板是外部库 Skill **唯一 UI 挂载入口**，**拖拽真实生效**（列表顺序 = 注入顺序 = 超预算跳过顺序），合计**只算 `enabled=true`**。同一规则只留一处：`shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`、`IMAGE_PROMPT_TEMPLATE_CHARACTER/SCENE/SHOT`。兜底库：顶层目录无 `library.yaml` ⇒ `/meta.sources` 补合成条目（`declared:false`，label = 目录名）⇒ 「core + Σ各库 = 总数」自洽且侧栏可达。`meta.yaml` 是**死数据**（改它不生效 ✓ 全仓零读取）但 `version`/`author-*`/`source` **只此一处** ⇒ 勿擅自删 ✗（丢溯源）。改名/挪库后必核对 DB 绑定：只读直开 `{ readonly: true }`（绕开清洗副作用）；实测 5 行全 `NULL` ⇒ 当时改名零影响。
+
+**画风体系完整表述**（红线仍留在 `MEMORY.md` §画风体系）：`prompt-utils` **不拆**；找副本顺序 = 后端常量 → skill 正文 → 工具 instruction → 前端硬编码。解析链 `characters.style` → `dramas.style` → `app_settings.art_style` → `realistic`，**唯一入口** `resolveEffectiveArtStyle()`（脏值跳过不透传），各路由不得存副本。**正负成对收口**：场景 / 分镜静帧+宫格 / 视频 / 角色·装备·道具·表情各有 `buildXxxArtStyleSuffix` + `buildXxxNegativePrompt`；skill **不得输出画风英文词**（一律后端 suffix 收口，auto-pipeline 现算不落库）。
+
+**代码约定坑清单**（2026-09-20 第四次腾预算时从 `MEMORY.md` 下移 ✓；红线仍在那边 ✓）：
+
+* **模块级状态**：凡「为跨项比较」引入的模块级状态 ⇒ **入口必须清零** ✗（单次调用**测不出来** ✓，连调两次才现形 ✓）。
+* **`compile()` 过了 ≠ 名字在** ✗ —— 改了模块级引用还要**真的 `import` 一次并跑到那条路径** ✓（语法与名字是两道门 ✓）；本仓已应验 **3 次** ✓（最近一次：编辑时顺手把 `_mod_row` 的定义圈走 ✗ ⇒ `compile()` 照样过 ✓，一跑到 forward 才 `NameError` ✓）。
+* **汇总必须打分母 + 点名异常项** ✗（只报总数 ⇒「**没读到**」与「**真的是 0**」在输出里长得一样 ✓）。
+* **文档里的规模数字要么指向唯一权威、要么带实测日期** ✗（逐项罗列会随增删**腐烂** ✓ —— `run_all.py` 的 docstring、`README.md` 都被咬过 ✓）。
+* ⭐ **占位符不许留在模块体里** ✗ —— 同名空壳会把**真实现静默遮住** ✓✗（导入拿到空壳 ✓，到调用才炸 ✓）；要"可选依赖"就用**取名字时才构造**（`__getattr__` ✓），且**先查名单再构造** ✓（否则问一个不存在的名字也会去 `import torch` ✗）。
+* ⭐ **判据要"响亮"不要"静默"** ✗ —— 惰性导出的模块一定配一份**名字名单**（`__all__` ✓）并**先校验**：漏加名单时立刻 `AttributeError` ✓（本仓实测：新加的 `packed_rows` 忘了进名单 ⇒ 一跑就**点名**报出来 ✓✓），而不是给一个空壳/None 让错误漂到下游 ✓。
+* ⭐ **写断言时，凡"顺序 / 布局 / 形状 / dtype"都要当场算一遍** ✗（实测：一天里 7 处红全是**我的期望**错，代码都是对的 ✓ —— 典型如「笛卡尔积两列逐位相等」✗（应为**值集合相同** ✓）、「token 逐个递增 t」✗（实为**一帧内共用同一个 t** ✓）、`nn.Linear(in,out).weight` = **(out,in)** ✓、`float64 × float32` 直接 `RuntimeError` ✓）。
 
 ## Skill 体系坑清单（2026-09-15 自 `MEMORY.md` 下移，腾 8k 预算 —— 本文件逼近上限时**尾部区块最先被截断**）
 

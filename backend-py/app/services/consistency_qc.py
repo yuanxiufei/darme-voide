@@ -150,8 +150,21 @@ async def run_episode_consistency_qc(conn: Connection, episode_id: Any,
         "checkedPairs": 0,
         "warningCount": 0,
         "pairs": [],
+        # ⭐ 2026-09-20：**「没比出来」必须能看出来** ✗ —— 初版这里只有
+        #    ``checkedPairs=0`` / ``warningCount=0`` ⇒ 与「比过且都没问题」**长得一模一样** ✗✗
+        #    （消费方看一眼 ``warningCount == 0`` 就会当成"连续性没问题" ✓）。
+        #    ⇒ 补**三态**结论 + **覆盖率**（"没判 ≠ 通过" ✓，与本仓其它模块同口径 ✓）。
+        "consistent": None,       # None=没判 ✓ / True=比过且无警告 ✓ / False=有警告 ✓
+        "coverage": {
+            "shots": len(ordered),
+            "pairs": max(0, len(ordered) - 1),
+            "compared": 0,
+            "skippedMissingImage": 0,
+            "skippedUnreadable": 0,
+        },
     }
     if len(ordered) < 2:
+        report["coverage"]["note"] = "分镜不足 2 个 ⇒ 没有可比的一对 ⇒ **没判**（不是通过）"
         return report
 
     # 每张图只算一次 hash（避免相邻对重复计算）；键是**相对路径**
@@ -198,10 +211,12 @@ async def run_episode_consistency_qc(conn: Connection, episode_id: Any,
         prev_image = _pick_image(prev)
         cur_image = _pick_image(cur)
         if not prev_image or not cur_image:
+            report["coverage"]["skippedMissingImage"] += 1
             continue
 
         prev_hash, cur_hash = await asyncio.gather(get_hash(prev_image), get_hash(cur_image))
         if prev_hash is None or cur_hash is None:
+            report["coverage"]["skippedUnreadable"] += 1
             continue
 
         sim = js_round(_similarity(prev_hash, cur_hash) * 1000) / 1000
@@ -240,6 +255,7 @@ async def run_episode_consistency_qc(conn: Connection, episode_id: Any,
             "message": message,
         })
         report["checkedPairs"] += 1
+        report["coverage"]["compared"] += 1
         if severity == "warning":
             report["warningCount"] += 1
 
@@ -281,4 +297,13 @@ async def run_episode_consistency_qc(conn: Connection, episode_id: Any,
             log_task_warn("ConsistencyQc", "writeback-failed",
                           {"qcId": state["id"], "error": str(exc)})
 
+    # ⭐ 结论**三态**（本步的核心）：一对都没比过 ⇒ ``None`` = **没判** ✓
+    #    ——**不要**拿「没判」冒充「通过」✗（这正是本仓反复立的那条：没数据 ≠ 通过 ✓）。
+    #    ⚠️ 故意与冻结的 TS 接口（只有 checkedPairs/warningCount）**不一致** ✓：
+    #    Node 侧已删（2026-09-15）✓ ⇒ 该接口不再是行为契约 ✓；而"空报告 = 全绿"会误导调用方 ✗。
+    if report["coverage"]["compared"] == 0:
+        report["coverage"]["note"] = ("没有任何可比对的一对（图缺失 / 图读不出来）"
+                                      "⇒ **没判**（不是通过）")
+    report["consistent"] = (None if report["coverage"]["compared"] == 0
+                            else report["warningCount"] == 0)
     return report

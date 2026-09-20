@@ -18,23 +18,33 @@
 代价是这一步会占用调用方的执行时间（ffmpeg 4~5 趟，短视频通常 1~3s）；失败仍只 warn，不向上抛。
 
 ⚠️ ``execFileP`` 的判失败条件很特别：**只有「非零退出且 stderr 为空」才算失败** ——
-ffmpeg 的滤镜输出全在 stderr，正常结束也可能非零退出。这里逐字镜像（``_run``）。
-⇒ 连带后果：**坏文件/不存在的视频也会「成功」**（ffprobe 非零退出但打了 stderr）⇒ 不扣分、
-后续检测全部空转，最终 100 分。与原 TS 一致，**不要顺手改成非零即失败**。
+ffmpeg 的滤镜输出全在 stderr，正常结束也可能非零退出。这里逐字镜像（``_run``）✓，**不要改成非零即失败** ✗。
 
-## 🔴 三项检测是**继承缺陷（两边都死）**，照抄未修
+⚠️⚠️ 但这条语义有个**静默绿灯**的连带后果 ✗：坏文件/空文件走到这里 ⇒ ffprobe 非零退出但打了 stderr
+⇒ **不报错** ✓、各滤镜读不出任何特征 ⇒ 段数全空 ⇒ **最终 100 分、零 issue** ✗✗
+（比报错更坏：它看起来**干净** ✓）。2026-09-20 收口：**规格侧**补一条判据 ——
+``duration`` 与 ``fps`` **同时**读不出来 ⇒ 报 warning 并扣 15 分（"后面那些检测都是空转" ✓）。
+``_run`` 的语义**一个字没动** ✓（改的是"读不出规格"这件事的**报出** ✓，不是退出码判定 ✓）。
 
-2026-09-15 实测 ffmpeg 真实输出后确认：**冻帧 / 音频真峰 / 集成响度**三项在 Node 与 Python
-**都永远判不出来**（正则与 ffmpeg 实际输出格式不符；黑场、帧率、时长三项正常）：
+## ✅ 三项检测曾**两边都死**，现已修（2026-09-18，Python 侧单边修）
 
-* ``freezedetect`` 输出是**带前缀的多行**：``[Parsed_freezedetect_0 @ 0x…] lavfi.freezedetect.freeze_start: 0``
-  ⇒ 而正则是 ``freeze_start: N <空白> freeze_duration: N``（要求两者相邻）⇒ 永不匹配；
-* ``ebur128`` 现代版本打的是**逐帧进度行**（``t: 0.09 … I: -70.0 LUFS … TPK: -16.5 dBFS``），
-  **根本没有** ``Integrated loudness:`` / ``True peak:`` 这种 summary 行 ⇒ 两个正则都永不匹配。
+历史：2026-09-15 实测发现 **冻帧 / 音频真峰 / 集成响度**三项在 Node 与 Python **都永远判不出来**
+（正则与 ffmpeg 实际输出格式不符；黑场、帧率、时长三项正常）。当时约定「要修必须两侧一起改」
+⇒ 于是**没修** ✗，只用「真实格式 ⇒ 解析为空」的用例把缺陷钉住当信号 ✓。
 
-⇒ 于是 ``drain`` 里「真峰防削波」「响度偏离 ±1 LUFS」两条**永不触发**（``integratedLoudness`` 恒 null）。
-**要修必须两侧一起改**（并同步 ``TECH_QC_THRESHOLDS`` 的语义），只改一边会造成真正的行为分叉 ——
-``tests/technical_qc_test.py`` 已用「真实输出格式 ⇒ 解析为空」的用例把当前行为钉住，修好时会红 = 预期信号。
+现状：Node 侧**已删**（2026-09-15 ✓）⇒「两边一起改」这个约束随之消失 ✓；本机装了
+**ffmpeg 9.0.1** ✓ ⇒ 按**实测输出**修掉 ✓（不靠文档猜 ✗ —— 当初正是因为猜不准才没修 ✓）：
+
+* ⚠️ ``freezedetect`` 打的是**带前缀的三行**（``lavfi.freezedetect.freeze_start`` /
+  ``freeze_duration`` / ``freeze_end``，**各占一行、顺序为 start→duration→end**）✗
+  ⇒ 改成**事件流配对** ✓（不再要求相邻 ✓）。**且**：视频一直冻到片尾时**只打 ``freeze_start``**
+  ✗✗ ⇒ 用 ffprobe 的总时长收尾并标 ``open``（初版对这种片**整段漏报** ✗）；
+* ⚠️ ``ebur128`` **是有 summary 的** ✓，但值是**标题的下一行**（``Integrated loudness:`` →
+  ``I: … LUFS``；``True peak:`` → ``Peak: … dBFS``）✗ ⇒ 改成跨行取 ✓；
+  无 summary 的构建退化为**取最后一条**逐帧进度行 ✓ —— ``I:`` 是**滚动累计值**，
+  **首行恒为 ``-70.0 LUFS``**（起手静音）✗✗ ⇒ 取首行会造出「永远 -70」的假读数 ✓✗（比不解析更坏 ✓）；
+* ``Peak: … dBFS`` 是 ebur128 的**真峰**（与 ``dBTP`` 同一标度 ✓）⇒ ``TECH_QC_THRESHOLDS``
+  的语义**不变** ✓（值也与 ``technical-qc.ts`` 逐字一致 ✓，不触发镜像常量守卫 ✓）。
 """
 
 from __future__ import annotations
@@ -70,11 +80,24 @@ TECH_QC_THRESHOLDS: dict[str, float] = {
 
 _BLACK_RE = re.compile(
     r"black_start:\s*([0-9.]+)\s*black_end:\s*([0-9.]+)\s*black_duration:\s*([0-9.]+)")
-_FREEZE_RE = re.compile(r"freeze_start:\s*([0-9.]+)\s*freeze_duration:\s*([0-9.]+)")
+#: freezedetect：实测 ffmpeg 9 是**三行、各带前缀** ⇒ 按**事件**取（顺序 start→duration→end）
+_FREEZE_EVENT_RE = re.compile(
+    r"freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*(-?[0-9.]+)")
+#: 兼容**同一行**的老形态（``freeze_start: 0.8 freeze_duration: 1.7``）
+_FREEZE_INLINE_RE = re.compile(r"freeze_start:\s*([0-9.]+)\s*freeze_duration:\s*([0-9.]+)")
 _MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?[0-9.]+) dB")
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?[0-9.]+) dB")
-_INTEGRATED_RE = re.compile(r"Integrated loudness:\s*(-?[0-9.]+) LUFS")
-_TRUE_PEAK_RE = re.compile(r"True peak:\s*(-?[0-9.]+) dBTP")
+#: ebur128 summary：实测 ffmpeg 9 的**值是标题的下一行**
+_INTEGRATED_SUMMARY_RE = re.compile(
+    r"Integrated loudness:\s*\r?\n\s*I:\s*(-?[0-9.]+)\s*LUFS")
+_TRUE_PEAK_SUMMARY_RE = re.compile(
+    r"True peak:\s*\r?\n\s*Peak:\s*(-?[0-9.]+)\s*dBFS")
+#: 老形态：值与标题**同一行**
+_INTEGRATED_INLINE_RE = re.compile(r"Integrated loudness:\s*(-?[0-9.]+)\s*LUFS")
+_TRUE_PEAK_INLINE_RE = re.compile(r"True peak:\s*(-?[0-9.]+)\s*dBTP")
+#: 退化路径：逐帧进度行 ⇒ 必须取**最后**一条（``I:`` 是滚动累计值，首行恒 -70 LUFS）
+_INTEGRATED_PROGRESS_RE = re.compile(r"\bI:\s*(-?[0-9.]+)\s*LUFS")
+_TRUE_PEAK_PROGRESS_RE = re.compile(r"\bTPK:\s*(-?[0-9.]+)\s*dBFS")
 
 
 def _js_to_fixed(value: float, digits: int) -> str:
@@ -115,9 +138,63 @@ def parse_black_segments(stderr: str) -> list[dict[str, float]]:
     return [{"start": float(m[0]), "duration": float(m[2])} for m in _BLACK_RE.findall(stderr)]
 
 
-def parse_freeze_segments(stderr: str) -> list[dict[str, float]]:
-    """解析 ``freeze_start/freeze_duration`` 行。"""
-    return [{"start": float(m[0]), "duration": float(m[1])} for m in _FREEZE_RE.findall(stderr)]
+def _freeze_segment(start: float, duration: float | None, end: float | None,
+                    total_duration: float | None) -> dict[str, Any]:
+    """补齐一段冻帧的已知量。
+
+    ``open`` 的含义**只有一个**：该段**只能靠总时长收尾** ⇒ 也就是「**一直冻到片尾**」✓
+    （初版把「ffmpeg 没打 ``freeze_end``」也归成 ``open`` ✗ ⇒ 文案会对一段"其实结束了"的
+    冻帧说「持续到片尾」✓✗ —— 自检当场红 ✓）。三项来源的优先级：
+    ``freeze_end`` ✓ → ``freeze_duration`` 推 ✓ → 总时长收尾 ✓；
+    **都没有就如实留 ``None``**（不猜 ✓）。
+    """
+    if end is None and duration is not None:
+        end = start + duration
+    if duration is None and end is not None:
+        duration = end - start
+    open_ended = False
+    if end is None and total_duration is not None and total_duration > start:
+        end = total_duration
+        duration = total_duration - start
+        open_ended = True
+    return {"start": start, "duration": duration, "end": end, "open": open_ended}
+
+
+def parse_freeze_segments(stderr: str,
+                          total_duration: float | None = None) -> list[dict[str, Any]]:
+    """解析 ``freezedetect`` 段 ⇒ ``[{"start", "duration", "end", "open"}]``。
+
+    ⚠️ 实测 ffmpeg 9 打的是**三行**（带 ``[Parsed_freezedetect_0 @ …]`` 前缀）::
+
+        lavfi.freezedetect.freeze_start: 0
+        lavfi.freezedetect.freeze_duration: 3
+        lavfi.freezedetect.freeze_end: 3
+
+    ⇒ 必须按**事件流配对**（初版要求 ``start``/``duration`` 相邻 ⇒ **永不匹配** ✗）。
+    ⚠️ 视频**一直冻到片尾**时只打 ``freeze_start`` ✗ ⇒ 用 ``total_duration`` 收尾并标 ``open``
+    （初版对这种片**整段漏报** ✗✗）。
+    """
+    events = [(kind, float(value)) for kind, value in _FREEZE_EVENT_RE.findall(stderr)]
+    if not events:
+        return [_freeze_segment(float(start), float(duration), None, total_duration)
+                for start, duration in _FREEZE_INLINE_RE.findall(stderr)]
+
+    segments: list[dict[str, Any]] = []
+    start: float | None = None
+    duration: float | None = None
+    for kind, value in events:
+        if kind == "freeze_start":
+            if start is not None:  # 上一段还没闭合就又开始了 ⇒ 先收掉 ✓
+                segments.append(_freeze_segment(start, duration, None, total_duration))
+            start, duration = value, None
+        elif kind == "freeze_duration" and start is not None:
+            duration = value
+        elif kind == "freeze_end" and start is not None:
+            segments.append(_freeze_segment(start, duration, value, total_duration))
+            start, duration = None, None
+    if start is not None:
+        segments.append(_freeze_segment(start, duration, None, total_duration))
+    return segments
 
 
 def parse_volume(stderr: str) -> dict[str, float | None]:
@@ -128,12 +205,46 @@ def parse_volume(stderr: str) -> dict[str, float | None]:
             "max": float(max_volume.group(1)) if max_volume else None}
 
 
+def _first_group(pattern: re.Pattern[str], text: str) -> float | None:
+    """取**第一条**匹配（summary 只会出现一次）。"""
+    found = pattern.search(text)
+    return float(found.group(1)) if found else None
+
+
+def _last_group(pattern: re.Pattern[str], text: str) -> float | None:
+    """取**最后一条**匹配（逐帧进度行必须取末条 ⇒ 见 ``parse_ebur128`` 的警告）。"""
+    found = None
+    for found in pattern.finditer(text):  # noqa: B007 —— 故意留最后一个
+        pass
+    return float(found.group(1)) if found else None
+
+
 def parse_ebur128(stderr: str) -> dict[str, float | None]:
-    """解析 ``ebur128`` summary 的 ``Integrated loudness`` / ``True peak``。"""
-    integrated = _INTEGRATED_RE.search(stderr)
-    peak = _TRUE_PEAK_RE.search(stderr)
-    return {"integrated": float(integrated.group(1)) if integrated else None,
-            "truePeak": float(peak.group(1)) if peak else None}
+    """解析 ``ebur128`` 的**集成响度**与**真峰**。
+
+    ⚠️ 实测 ffmpeg 9 的 summary 是**跨两行**的（值在标题下一行）::
+
+          Integrated loudness:
+            I:         -21.8 LUFS
+          True peak:
+            Peak:      -16.1 dBFS
+
+    ⇒ 先取跨行 summary ✓、再取同行老形态 ✓、最后退化为**最后一条**逐帧进度行 ✓。
+    ⚠️ **绝不能取首条进度行** ✗：``I:`` 是**滚动累计值**，首行恒为 ``-70.0 LUFS``（起手静音）
+    ⇒ 取首行会得到一个「永远 -70」的假读数 ✗✗（比解析不出更坏）。
+    """
+    integrated = _first_group(_INTEGRATED_SUMMARY_RE, stderr)
+    if integrated is None:
+        integrated = _first_group(_INTEGRATED_INLINE_RE, stderr)
+    if integrated is None:
+        integrated = _last_group(_INTEGRATED_PROGRESS_RE, stderr)
+
+    peak = _first_group(_TRUE_PEAK_SUMMARY_RE, stderr)
+    if peak is None:
+        peak = _first_group(_TRUE_PEAK_INLINE_RE, stderr)
+    if peak is None:
+        peak = _last_group(_TRUE_PEAK_PROGRESS_RE, stderr)
+    return {"integrated": integrated, "truePeak": peak}
 
 
 def _empty_result(error: str | None = None) -> dict[str, Any]:
@@ -180,6 +291,19 @@ def probe_video_technical_spec(local_path: str,
             den = _js_number_or_none(parts[1]) if len(parts) > 1 else None
             if num and den:
                 result["fps"] = float(_js_to_fixed(num / den, 3))
+
+        # ⚠️ **两条都读不出来** ⇒ 必须报出来 ✗（初版一声不吭地给 100 分 ✗✗ —— 坏文件看起来"干净" ✓）。
+        #    ``_run`` 的判定**不动** ✓：ffmpeg 滤镜正常结束也会非零退出 ✓，
+        #    所以这里判的是"**规格读不出来**"这件事本身 ✓，不是退出码 ✓。
+        #    注意不能只看 stdout 是否为空 ✗（有些容器/裸流本来就没有那些字段 ✓）；
+        #    也不能只缺一个就报警 ✗（例如无音轨、或某些容器没有 avg_frame_rate ✓）。
+        if result["duration"] is None and result["fps"] is None:
+            result["score"] -= 15
+            result["issues"].append({
+                "severity": "warning",
+                "message": "无法读取视频规格（ffprobe 未给出时长与帧率）"
+                           "⇒ 黑场/冻帧/响度这些检测会全部空转 ✗",
+            })
     except Exception:  # noqa: BLE001
         result["score"] -= 15
         result["issues"].append({"severity": "warning",
@@ -207,6 +331,8 @@ def probe_video_technical_spec(local_path: str,
         pass
 
     # ===== 3. 冻帧检测 =====
+    # ⚠️ 传 total_duration：视频**一直冻到片尾**时 ffmpeg 只打 `freeze_start` ✗
+    #    ⇒ 用 ffprobe 的总时长收尾；拿不到就不猜 ✓（文案如实说「时长未知」✓）。
     try:
         _stdout, stderr = _run("ffmpeg", [
             "-i", absolute,
@@ -214,13 +340,16 @@ def probe_video_technical_spec(local_path: str,
                    f":d={_js_num_str(thresholds['freezeMinDuration'])}",
             "-map", "0:v", "-f", "null", "-",
         ])
-        result["freezeSegments"] = parse_freeze_segments(stderr)
+        result["freezeSegments"] = parse_freeze_segments(stderr, result["duration"])
         for segment in result["freezeSegments"]:
             result["score"] -= 20
+            duration = segment["duration"]
+            head = (f"画面冻帧 {_js_to_fixed(duration, 2)}s" if duration is not None
+                    else "画面冻帧（时长未知 ⇒ ffmpeg 未给结束时刻）")
+            tail = "，该段一直持续到片尾" if segment["open"] else ""
             result["issues"].append({
                 "severity": "error",
-                "message": f"画面冻帧 {_js_to_fixed(segment['duration'], 2)}s"
-                           f"（第 {_js_to_fixed(segment['start'], 1)}s 起，"
+                "message": f"{head}（第 {_js_to_fixed(segment['start'], 1)}s 起{tail}，"
                            f"标准 >{_js_num_str(thresholds['freezeMinDuration'])}s 即判缺陷）",
             })
     except Exception:  # noqa: BLE001

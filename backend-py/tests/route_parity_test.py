@@ -240,15 +240,60 @@ def _extract_ts_string_constants(src: str) -> dict[str, str]:
     return out
 
 
+def _extract_ts_object_string_values(src: str, const_name: str) -> dict[str, str]:
+    """抽 ``NAME: Record<string, string> = { ... }`` 里**每个键的值**（含跨行拼接）。
+
+    ⚠️ 2026-09-20：原先只用 ``re.findall(r"'key':\\s*'([^']*)'")`` ✗ —— 那只吃得到**多行值的
+    **第一行**（实测 10 条里抽到 1 条，而且抽到的是**残缺值** ✓✗：TS 少了后半句却"看着像对的" ✓）。
+    ⇒ 改成与 :func:`_extract_ts_string_constants` 同款的逐行累积：值以 ``+`` 续行或引号未闭合
+    时继续收 ✓，最后把引号片段**按序拼接**（不做任何空白归一 ✓）。
+    """
+    block = re.search(
+        rf"{const_name}:\s*Record<string, string>\s*=\s*\{{(.*?)\n\}}", src, re.S)
+    if block is None:
+        return {}
+    lines = block.group(1).splitlines()
+    out: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        match = re.match(r"\s*'?([a-z0-9-]+)'?:\s*(.*)$", lines[index])
+        if not match:
+            index += 1
+            continue
+        key, chunk = match.group(1), match.group(2)
+        # ⚠️ 三种形态都要吃住（**初版漏了第一种** ✗ ⇒ 正表 0 条、负面表 10 条 ✓）：
+        #   a) **值在下一行**（实测 TS 正表就是 `realistic:` ↓ `'...' +` ✓）
+        #   b) 值以 `+` 续行；c) 引号未闭合
+        while (not re.search(r"'[^']*'", chunk)
+               or chunk.rstrip().endswith("+")
+               or chunk.count("'") % 2 == 1):
+            index += 1
+            if index >= len(lines):
+                break
+            chunk += "\n" + lines[index]
+        index += 1
+        quoted = re.findall(r"'([^']*)'", chunk)
+        if quoted:
+            out[key] = "".join(quoted)
+    return out
+
+
 def _prompt_utils_drift() -> list[str]:
     """校验 ``services/prompt_utils.py`` 的字符串常量与 ``prompt-utils.ts`` 逐字一致。
 
     这是**最需要漂移守卫**的一处：那些词表就是生成结果本身，改一个词就改变出图/出片，
     而两边不一致时**不会报任何错**，只会「同一个剧在两套后端下风格不同」。
 
-    覆盖范围：单行字符串/单行模板常量 + 画风目录 key 集合 + ``DRAMA_ART_STYLE_MAP`` 的 key 集合。
-    ⚠️ **不覆盖**跨行拼接的常量（``VISUAL_STYLE_VIDEO``）与映射表里的**值**（值太长、跨行），
-    那两块靠人工核对 —— 已在此处显式说明，避免误以为"全都被守住了"。
+    覆盖范围（2026-09-20 扩过一轮 ✓）：**跨行拼接**的字符串常量 ✓ + 画风目录 key 集合 ✓
+    + 两张映射表的 **key 与 value** ✓。
+
+    ⚠️ 原文这里写着「**不覆盖**跨行拼接的常量（``VISUAL_STYLE_VIDEO``）」—— **实测是错的** ✗：
+    探针跑下来 ``VISUAL_STYLE_VIDEO`` / ``VIDEO_MOTION_BASE`` / ``IMPERFECTION_ANCHORS`` /
+    ``QUALITY_TAIL`` 四个都**抽得准、且与 Python 逐字相同** ✓ ⇒ 它们只是**没被列进 ``expected``** ✗
+    （**"没被断言" ≠ "断不了"** ✓）。已补上 ✓ —— 等于白捡的覆盖 ✓。
+
+    ⚠️ 映射表**值**当时确实是真盲区 ✗：`re.findall` 只吃到多行值的**第一行** ⇒ 10 条只抽到 1 条 ✓✗
+    ⇒ 现在用与常量同款的「引号拼接 + 续行」逻辑逐条抽、**逐字比对全部值** ✓。
     """
     from app.services import prompt_utils as pu
 
@@ -267,7 +312,10 @@ def _prompt_utils_drift() -> list[str]:
         "STORYBOARD_IMAGE_NEGATIVE": pu.STORYBOARD_IMAGE_NEGATIVE,
         "VIDEO_NEGATIVE": pu.VIDEO_NEGATIVE,
         "PRESET_IMAGE_NEGATIVE": pu.PRESET_IMAGE_NEGATIVE,
+        "VISUAL_STYLE_VIDEO": pu.VISUAL_STYLE_VIDEO,
         "VIDEO_MOTION_BASE": pu.VIDEO_MOTION_BASE,
+        "IMPERFECTION_ANCHORS": pu.IMPERFECTION_ANCHORS,
+        "QUALITY_TAIL": pu.QUALITY_TAIL,
         "IMPERFECTION_ANCHORS": pu.IMPERFECTION_ANCHORS,
         "QUALITY_TAIL": pu.QUALITY_TAIL,
         "THREE_VIEW_COMBINED_LAYOUT": pu.THREE_VIEW_COMBINED_LAYOUT,
@@ -298,6 +346,32 @@ def _prompt_utils_drift() -> list[str]:
         problems.append(
             f"画风映射表 key 漂移：TS={sorted(set(ts_styles))} ／ Python={sorted(pu.DRAMA_ART_STYLE_MAP)}"
         )
+
+    # ⭐ 2026-09-20 补：**映射表的值**也逐字比 ✓（这些英文词**就是生成结果** ✓，
+    #    此前只比了 key ✗ ⇒ 值整句被改/被截断，守卫一声不吭 ✓✗）
+    # ⚠️ 负面表在 Python 侧是**私有名** `_DRAMA_ART_NEGATIVE_MAP` ✓（TS 侧叫 DRAMA_ART_NEGATIVE_MAP）；
+    #    此前**只**比了正表的 key ✗ ⇒ 负面表连 key 都没守 ✓✗（这一轮的值比对顺带把它的 key 也守上了 ✓）
+    for const_name, py_map in (("DRAMA_ART_STYLE_MAP", pu.DRAMA_ART_STYLE_MAP),
+                               ("DRAMA_ART_NEGATIVE_MAP", pu._DRAMA_ART_NEGATIVE_MAP)):
+        ts_values = _extract_ts_object_string_values(src, const_name)
+        if not ts_values:
+            problems.append(f"{const_name} 未能从 TS 抽取值（抽取器要跟着改）")
+            continue
+        # ⭐ **检查器自检** ✓：抽到的条数必须与 Python 表**一样多** ——
+        #    否则"只抽到一半"会被读成"另一半没漂移" ✗✗（本仓的老教训：**没读到 ≠ 通过** ✓）
+        if len(ts_values) != len(py_map):
+            problems.append(
+                f"{const_name} 抽取条数 {len(ts_values)} ≠ Python 表 {len(py_map)}"
+                f" ⇒ 抽取器漏了 ✗（**别把「没抽到」当成「没漂移」** ✓）")
+            continue
+        missing = sorted(k for k in ts_values if k not in py_map)
+        if missing:
+            problems.append(f"{const_name} 缺 key：{missing}")
+        for key, ts_value in ts_values.items():
+            py_value = py_map.get(key)
+            if py_value is not None and py_value != ts_value:
+                problems.append(
+                    f"{const_name}[{key!r}] 值漂移：TS={ts_value!r} ／ Python={py_value!r}")
 
     # 表情预设：key 与前端共用，必须逐项一致（含英文表情词本身）
     presets = re.search(r"EXPRESSION_PRESETS: Array<[^>]*> = \[(.*?)\n\]", src, re.S)

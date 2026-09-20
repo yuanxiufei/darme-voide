@@ -67,6 +67,10 @@ def main() -> int:  # noqa: C901
         ep = int(conn.execute(episodes.insert().values(
             drama_id=drama_id, episode_number=1, title="第一集", content="x",
             created_at=stamp, updated_at=stamp)).lastrowid)
+        # ⭐ 2026-09-20：正对照（场景未锁地点）要**零波及** ⇒ 单独一集（无兄弟可比 ✓）
+        ep2 = int(conn.execute(episodes.insert().values(
+            drama_id=drama_id, episode_number=2, title="第二集", content="x",
+            created_at=stamp, updated_at=stamp)).lastrowid)
         scene = int(conn.execute(scenes.insert().values(
             drama_id=drama_id, episode_id=ep, location="咖啡厅", time="白天",
             prompt="咖啡厅内景", location_id="LOC-1",
@@ -74,6 +78,12 @@ def main() -> int:  # noqa: C901
         other_scene = int(conn.execute(scenes.insert().values(
             drama_id=drama_id, episode_id=ep, location="街道", time="夜晚",
             prompt="夜晚街道", location_id="LOC-2",
+            created_at=stamp, updated_at=stamp)).lastrowid)
+        # ⭐ 正对照（2026-09-20 加）：场景**没锁地点 ID** —— 用来证明「删掉那条死分支后，
+        #    地点相关的**真判据**还在」✓（否则容易误会成"地点完全不查了" ✗）
+        noloc_scene = int(conn.execute(scenes.insert().values(
+            drama_id=drama_id, episode_id=ep, location="天台", time="黄昏",
+            prompt="黄昏天台", location_id=None,
             created_at=stamp, updated_at=stamp)).lastrowid)
         # 干净镜：无对白、无角色、时长 5s、有状态、有 continuity_states
         clean = int(conn.execute(storyboards.insert().values(
@@ -91,6 +101,16 @@ def main() -> int:  # noqa: C901
         conn.execute(storyboards.insert().values(
             episode_id=ep, storyboard_number=3, title="镜三", duration=6,
             scene_id=other_scene, created_at=stamp, updated_at=stamp))
+        # ⭐ 正对照镜：场景无 location_id；状态齐全、时长合规、本集已有跨镜状态
+        #    ⇒ 只该命中「关联场景未锁定地点 ID」这一条（-5）
+        # ⚠️ 2026-09-20：刻意放在**另一个集**（`ep2`）✓ —— 第一版放在同集（编号 4）✗，
+        #    结果它挤进了兄弟序列 ⇒ 改掉了 9 号镜的"上一镜"✓ ⇒ **把另外两条用例弄红** ✗
+        #    （实测期望 93 实际 95 ✓）。**测试夹具也是共享状态** ✗：加一个分镜要问
+        #    "谁把它当上一镜" ✓。放独立集 ⇒ 无兄弟可比 ⇒ 零波及 ✓✓
+        noloc_sb = int(conn.execute(storyboards.insert().values(
+            episode_id=ep2, storyboard_number=1, title="孤立镜", duration=5,
+            scene_id=noloc_scene, start_state="茶杯=在桌上", end_state="茶杯=在桌上",
+            created_at=stamp, updated_at=stamp)).lastrowid)
         # 角色：缺参考图 / 缺声音 / 缺服装
         char_id = int(conn.execute(characters.insert().values(
             drama_id=drama_id, name="小明", created_at=stamp, updated_at=stamp)).lastrowid)
@@ -98,6 +118,10 @@ def main() -> int:  # noqa: C901
             storyboard_id=noisy, character_id=char_id))
         conn.execute(continuity_states.insert().values(
             episode_id=ep, state_type="prop", entity_key="茶杯", state_value="在桌上",
+            created_at=stamp, updated_at=stamp))
+        # 同上：ep2 也要有一条 ⇒ 否则正对照镜会额外命中「本集未保存跨镜状态 −5」✗
+        conn.execute(continuity_states.insert().values(
+            episode_id=ep2, state_type="prop", entity_key="茶杯", state_value="在桌上",
             created_at=stamp, updated_at=stamp))
 
     with engine.begin() as conn:
@@ -141,8 +165,10 @@ def main() -> int:  # noqa: C901
           [s for d, s in issues if d == "lip_sync"] == ["error", "warning", "warning"], issues)
     check("噪声镜: character = 100-25(无参考图)-10(无声音)-5(无服装) = 60",
           noisy_result["characterConsistencyScore"] == 60, noisy_result["characterConsistencyScore"])
-    check("噪声镜: continuity = 100-10(时长1.5越界)-20(状态跳变) = 70"
-          "（**同场景地点不一致那条是原 TS 死分支，永远不触发**）",
+    # ⚠️ 2026-09-20：这里原来写着「同场景地点不一致那条是原 TS 死分支，永远不触发」✓
+    #    —— 该分支已**按证据删掉** ✓（两镜同场景行 ⇒ `location_id` 必然相同 ✓，结构上不可能触发 ✓），
+    #    分数**不变**（它本来就没触发过 ✓）；真正的地点/空间判据在 `continuity.py` §6 ✓。
+    check("噪声镜: continuity = 100-10(时长1.5越界)-20(状态跳变) = 70（删死分支后**不变** ✓）",
           noisy_result["continuityScore"] == 70, noisy_result["continuityScore"])
     check("噪声镜: 状态跳变文案含「上一镜尾「在桌上」→ 本镜首「地上」」的原文对照",
           any("相邻镜头状态跳变" in i["message"] and "茶杯" in i["message"]
@@ -151,6 +177,15 @@ def main() -> int:  # noqa: C901
           noisy_result["overallScore"] == 47, noisy_result["overallScore"])
     check("噪声镜: **无完成视频 ⇒ 即使有 error 也是 pending**（三态第一档优先）",
           noisy_result["status"] == "pending", noisy_result["status"])
+
+    # ⭐ 正对照（删死分支后补的 ✓）：**地点相关判据还在**，而且真能扣分 ✓
+    with engine.begin() as conn:
+        noloc_result = qs.score_storyboard(conn, noloc_sb)
+    check("正对照: 场景未锁地点 ⇒ continuity = 100 − 5（**这条才是真判据** ✓ 死分支已删）",
+          noloc_result["continuityScore"] == 95, noloc_result["continuityScore"])
+    check("正对照: 文案点名「关联场景未锁定地点 ID（location_id 为空）」+ info 级",
+          any("未锁定地点 ID" in i["message"] and i["severity"] == "info"
+              for i in noloc_result["issues"]), noloc_result["issues"])
 
     # 有完成视频：error -> failed；干净镜 + 参考模式 -> passed
     with engine.begin() as conn:

@@ -43,14 +43,20 @@ PRESET_SERVICES = (
 )
 
 #: 本地模型预设（无需 API Key）
+#: ⚠️ 2026-09-20：priority 从 **85/84/83/82** 抬到 **503/502/501/500** ✓ —— 起因见下：
+#: `ai_providers.py:87` 取用时是 **priority 降序取第一条** ✓，而厂商预设 `PRESET_SERVICES` 是
+#: **100/99/98/97** ✓ ⇒ 本地预设**天生排在厂商之后** ✗✗ ⇒ "先一键配置、再切本地"之后
+#: **四类生成仍然全部打到外部 API** ✓✗（实测真库：外部行 priority 200/300 ✓）。
+#: 用户 2026-09-20 明确「**尽量本地 / 不要调用外部的**」✓ ⇒ 本地必须**压过**任何厂商行 ✓
+#: （500+ 也留出余量：历史遗留的高 priority 外部行最高见过 300 ✓）。
 LOCAL_PRESET_SERVICES = (
     # ⚠️ provider 必须是 `ollama`（原生 /api/chat + think:false）：若写 `openai`（OpenAI 兼容端点）
     #    则本机 qwen3 这类思考模型**恒返回空 content** ✗（2026-09-16 活体实测，见 tts/text 适配器注释
     #    与 tests/local_services_live_test.py）。
-    {"service_type": "text", "label": "文本(本地)", "provider": "ollama", "base_url": "http://localhost:11434", "model": "qwen3:14b", "priority": 85},
-    {"service_type": "image", "label": "图片(本地)", "provider": "local-sd", "base_url": "http://localhost:7860", "model": "sdxl-base", "priority": 84},
-    {"service_type": "video", "label": "视频(本地H3)", "provider": "minimax", "base_url": "http://localhost:8765", "model": "hailuo-02", "priority": 83},
-    {"service_type": "audio", "label": "音频(本地)", "provider": "cosyvoice", "base_url": "http://localhost:9880", "model": "cosyvoice-v2", "priority": 82},
+    {"service_type": "text", "label": "文本(本地)", "provider": "ollama", "base_url": "http://localhost:11434", "model": "qwen3:14b", "priority": 503},
+    {"service_type": "image", "label": "图片(本地)", "provider": "local-sd", "base_url": "http://localhost:7860", "model": "sdxl-base", "priority": 502},
+    {"service_type": "video", "label": "视频(本地H3)", "provider": "minimax", "base_url": "http://localhost:8765", "model": "hailuo-02", "priority": 501},
+    {"service_type": "audio", "label": "音频(本地)", "provider": "cosyvoice", "base_url": "http://localhost:9880", "model": "cosyvoice-v2", "priority": 500},
 )
 
 #: 一键配置时同步写入的 Agent 默认

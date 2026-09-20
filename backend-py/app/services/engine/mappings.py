@@ -104,6 +104,36 @@ PRESETS: dict[str, MappingPreset] = {
                       "attn.in_proj_weight", "已是融合名 ⇒ 只改名 ✓"),
         ),
     ),
+    # ⚠️ H3 专用预设（2026-09-20 抄自 `reference/ComfyUI` 的实测键名 ✓，出处逐条写在 note 里 ✓）：
+    #    与通用 `dit` 预设的**关键差别有两条**：
+    #    ① **不做 q/k/v 合并** ✗ —— H3 本身就是融合权重 `attn.qkv_proj`（`model.py:133-515` ✓）；
+    #    ② H3 的很多键**在本仓 DiT 里没有对应物** ✗（见 note ✓）⇒ 本预设只做"能安全改的"，
+    #       剩下的**如实列出来** ✓（不硬塞成看似对的名字 ✗ —— 那会变成"名字对、形状错"✓✗）。
+    "minimax-h3": MappingPreset(
+        name="minimax-h3",
+        note=("MiniMax H3 DiT：**只去外层前缀 + MLP 落位** ✓；⚠️ 以下键本仓 DiT **暂无对应物** ✗："
+              "`token_refiner.*`（2 层 refiner ✓）、`condition_proj.*`（5120→5376 ✓）、"
+              "`rope.inv_freq`（3 轴 16→96 ✓）、`final_layer.video_out/audio_out`（**双输出** ✓✗）、"
+              "`blocks.N.adaln_proj.linear`（expand=6×模态3=18 ✓ ✗）。"
+              "键名与结构出处：`reference/ComfyUI/comfy/model_detection.py:390-418`、"
+              "`comfy/ldm/minimax/model.py:474-481` ✓"),
+        renames=(
+            RenameRule(r"^model\.diffusion_model\.", "", "去 ComfyUI 外层前缀 ✓（`lora.py:384-388` ✓）"),
+            RenameRule(r"^model\.model\.", "", "另一候选前缀 ✓"),
+            RenameRule(r"^model\.", "", "回退前缀 ✓"),
+            RenameRule(r"^net\.", "", "候选前缀 ✓"),
+            RenameRule(r"^diffusion_model\.", "", "LoRA 侧前缀 ✓"),
+            RenameRule(r"^blocks\.(\d+)\.mlp\.fc1\.", r"blocks.\1.mlp.0.", "MLP fc1 → 本仓 `mlp.0` ✓"),
+            RenameRule(r"^blocks\.(\d+)\.mlp\.fc2\.", r"blocks.\1.mlp.2.", "MLP fc2 → 本仓 `mlp.2` ✓"),
+            RenameRule(r"^blocks\.(\d+)\.attn\.qkv_proj\.", r"blocks.\1.attn.in_proj_",
+                       "融合 qkv → 本仓 `in_proj_*` ✓；⚠️ **形状仍会对不上** ✗（H3 是 56 头×128 维=7168 ✓，"
+                       "本仓 MHA 是 hidden/heads=96 ✓ ⇒ 要先把 DiT 的注意力维度改成可显式给 ✓）"),
+            RenameRule(r"^blocks\.(\d+)\.attn\.out_proj\.", r"blocks.\1.attn.out_proj.",
+                       "输出投影：名字一致 ✓"),
+        ),
+        #: ⚠️ **故意不给合并规则** ✗：H3 权重里 q/k/v 已经是融合的 ✓（与通用 `dit` 预设相反 ✓）
+        merges=(),
+    ),
     "text-encoder": MappingPreset(
         name="text-encoder",
         note="文本编码器：去前缀 + 词表/位置表命名归一 ✓",

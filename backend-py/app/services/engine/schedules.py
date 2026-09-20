@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-__all__ = ["SCHEDULES", "interpolate_sigmas", "sigmas_for", "timesteps_for"]
+__all__ = ["SCHEDULES", "interpolate_sigmas", "sigmas_for", "time_shift_sigma", "timesteps_for"]
 
 #: 常用锚点（SD 系模型的经验值；**可覆盖** ✓）
 DEFAULT_SIGMA_MIN = 0.0292
@@ -37,6 +37,35 @@ def _linspace(start: float, stop: float, count: int) -> list[float]:
         return [float(stop)]
     step = (stop - start) / (count - 1)
     return [start + step * index for index in range(count)]
+
+
+def time_shift_sigma(sigma: float, from_shift: float, to_shift: float) -> float:
+    """把 σ 从一条 flow-shift 网格**换算到**另一条 ✓（闭式 ✓ 纯数学 ✓ 零依赖 ✓）。
+
+    推导（自己做的 ✓，不是抄来的 ✗）：shift 网格与 base 网格的关系是
+    ``σ = s·b / (1 + (s−1)·b)`` ✓ ⇒ 代进去解 ``b``：
+
+    ``σ + σ(s−1)b = s·b`` ⇒ ``b = σ / (s + σ(1−s))`` ✓
+
+    再把它套到目标 shift 上 ✓，即得下面的两行 ✓。
+
+    ⚠️ **不换算就会犯的错**（多流模型都踩 ✓）：视频与音频跑在**各自的 shift** 上
+    （本项目自研引擎按 H3 的取值 = 视频 **12.0** / 音频 **3.0** ✓ 见 `dit.H3_SHAPE_FACTS` ✓），
+    但采样器只喂**视频的 σ** ✓ ⇒ 音频若直接吃同一个数 ✓，等于把「**同一个 σ**」当成
+    「**两种不同的噪声水平**」✗ ⇒ 音频会**系统性偏噪或偏净** ✗（而且不会报错 ✓✗）。
+
+    不变量（自检钉住 ✓）：
+    ``time_shift_sigma(s, k, k) == s`` ✓（同一 shift ⇒ 恒等 ✓）；
+    ``σ=0 ⇒ 0`` ✓、``σ=1 ⇒ 1`` ✓（**任意 shift 的不动点** ✓）；
+    ``to_shift < from_shift`` 时把 ``0<σ<1`` **单调抬向 1** ✓；往返（12→3→12）回到原值 ✓。
+    """
+    if from_shift <= 0 or to_shift <= 0:
+        raise ValueError(f"shift 必须为正（收到 {from_shift} / {to_shift} ✗）")
+    denominator = from_shift + sigma * (1.0 - from_shift)
+    if denominator == 0:
+        raise ValueError(f"σ={sigma} 落在 shift={from_shift} 的极点上 ✗（分母为 0）")
+    base = sigma / denominator
+    return to_shift * base / (1.0 + (to_shift - 1.0) * base)
 
 
 def karras_sigmas(steps: int, *, sigma_min: float = DEFAULT_SIGMA_MIN,
