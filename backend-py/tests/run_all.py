@@ -4,12 +4,13 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**103 套 / 3540 项 / 0 失败**（2026-09-20 ✓ 引擎六项扩充后重跑 ✓ ——
-`engine_gguf_test` ✓ / `engine_h3_keys_test` ✓ / `engine_tokenizer_test` ✓ /
-`engine_tokenizer_hub_test` ✓ / `engine_tokenizer_own_test` ✓ / `engine_tokenizers_tuning_test` ✓；
-102 套按 `SUMMARY:` 收敛出 3540 项 ✓，另 1 套是常量守卫型
-（打印 `OK: 镜像常量漂移 0 条` ✓ 无项数 ✓））。
-⚠️ 上一轮：101 套 / 3516 项 ✓ —— 按规则**不推算** ✗，数字一律取自刚跑出来的汇总 ✓。
+最近一次**全量实测**：**104 套 / 3571 项 / 0 失败**（2026-09-21 ✓：自研预分词器补齐
+`Split`（**五种 behavior** ✓）/`FixedLength` 后重跑 ✓ —— 103 套按 `SUMMARY:` 收敛出 3571 项 ✓，
+另 1 套是常量守卫型（打印 `OK: 镜像常量漂移 0 条` ✓ 无项数 ✓））。
+⚠️ 上一轮：104 套 / 3563 项 ✓（`engine_readiness_script_test` 上机前自检入口 ✓）——
+按规则**不推算** ✗，数字取自刚跑出来的汇总 ✓。
+⚠️⚠️ **别同时开多个全量回归** ✗：并发会互相抢 CPU（表现为"卡在某套很久" ✓✗）；
+判据是日志里有没有 `结论：` 行 ✓ —— **半截日志不算跑过** ✗（2026-09-21 实测踩到 ✓）。
 ⚠️ 自检**汇总行格式有硬要求** ✗：必须是 `SUMMARY: n/m passed` ✓（`run_all.py` 按这个前缀收敛项数 ✓）
 —— 写成「n/m 项通过」会在总表里显示**空摘要** ✓✗（2026-09-20 实测踩过 ✓ 已修 4 个套件 ✓）。
 ⚠️ 与上一轮（78 套 / 2806 项）**独立互证** ✓：2806 + 11（`safetensors_crosscheck_test` ✓）
@@ -146,6 +147,8 @@ TESTS = [
      "engine_tokenizer_own_test.py"),
     ("自研引擎·transformers 运行时改造（离线兜底含 Auto 工厂/缓存目录/降噪/计数/可撤；幂等）",
      "engine_tokenizers_tuning_test.py"),
+    ("自研引擎·上机前自检入口（依赖/权重就绪/加载计划/真权重预检 + 词表；JSON 与退出码）",
+     "engine_readiness_script_test.py"),
     ("safetensors 交叉验证（纯 Python 读取器 vs 官方库；缺库则显式 SKIP）", "safetensors_crosscheck_test.py"),
     ("自研引擎·真模型层（DiT 前向/条件生效/权重往返/差异报告；CPU 可验）", "engine_dit_test.py"),
     ("自研引擎·H3 形态积木（RMSNorm / SwiGLU / 18 路 adaLN / 正弦时间嵌入 / RoPE 旋转不变量 / "

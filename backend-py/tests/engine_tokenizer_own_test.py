@@ -355,7 +355,118 @@ def case_pretokenizers(root: Path) -> None:
           _raises(lambda: legacy.split("a, b"), "is_whitespace_prefix") is not None, None)
 
 
+def case_performance(root: Path) -> None:
+    """⭐ **性能优化的不变量**（2026-09-21 ✓）：优化必须**不改语义** ✓ 且**可自证** ✓。"""
+    if reference_module() is None:
+        check("⑲ 参考实现没装 ⇒ 性能用例跳过 ✓", True, "skipped")
+        return
+    tokenizer = own.load_own_tokenizer(write_unigram_metaspace(root))
+    from tokenizers import Tokenizer  # noqa: PLC0415
+    reference = Tokenizer.from_file(str(write_unigram_metaspace(root) / "tokenizer.json"))
+    text = "hello world hello world he llo 中文 hello" * 3
+
+    cold = tokenizer.encode(text)
+    tokenizer.clear_cache()
+    warm = tokenizer.encode(text)
+    check("⑲ 片段缓存**不改结果** ✓（清了缓存再编，id **逐位相同** ✓ —— 缓存只是个加速层 ✓）",
+          cold == warm == list(reference.encode(text).ids), (cold[:6], warm[:6]))
+
+    before = tokenizer.cache_stats()
+    tokenizer.encode(text)
+    after = tokenizer.cache_stats()
+    check("⑳ 缓存**可观测** ✓（重复文本 ⇒ `hits` 增 ✓ 而不是「我觉得加了缓存」 ✓）",
+          after["hits"] > before["hits"] and after["entries"] > 0, (before, after))
+
+    # ⚠️ 结构性判据（**不脆** ✓）：每个起点只该扫一次前缀树 ⇒ 扫描数应 ≈ 字符数 ✓。
+    #    第一版是「每个 (end,start) 都重扫」✗ ⇒ 扫描数 ≈ 字符数 × 最长词长 ✓（约 5–8 倍 ✓）。
+    probe = "he llo world 中文 test" * 20
+    tokenizer.clear_cache()
+    tokenizer.trieScans = 0
+    tokenizer.encode(probe)
+    scans = tokenizer.trieScans
+    check("㉑ ⭐ **前缀树扫描 ≈ 字符数** ✓（优化后每个起点只扫一次 ✓）"
+          "—— 若退回「按 (end,start) 重扫」✗，这里会到 5–8 倍 ⇒ **当场红** ✓",
+          scans <= len(probe) * 1.5, (scans, len(probe)))
+
+    # ⚠️ 缓存上限后**整体清空** ✓：不炸 ✓ 且结果不变 ✓（上限是模块级常量 ⇒ monkeypatch ✓ 不依赖真机 ✓）
+    original_limit = own.PIECE_CACHE_LIMIT
+    own.PIECE_CACHE_LIMIT = 2
+    try:
+        tokenizer.clear_cache()
+        small = own.load_own_tokenizer(write_unigram_metaspace(root))
+        ids = small.encode(text)
+    finally:
+        own.PIECE_CACHE_LIMIT = original_limit
+    check("㉒ 缓存**到上限就整体清空** ✓：不炸 ✗ 且结果不变 ✓（不做 LRU ✓ —— 换工作集够用 ✓）",
+          ids == cold, ids[:6])
+
+
+def case_split_and_fixed(root: Path) -> None:
+    """⭐ `Split`（五种 behavior ✓）与 `FixedLength`（2026-09-21 补 ✓）—— 规则全部实测 ✓。"""
+    if reference_module() is None:
+        check("㉓ 参考实现没装 ⇒ `Split`/`FixedLength` 对照跳过 ✓", True, "skipped")
+        return
+    from tokenizers import Regex as RefRegex  # noqa: PLC0415
+    from tokenizers import pre_tokenizers as ref_pre  # noqa: PLC0415
+
+    texts = ["abcdefg", "ab12cd345ef", "ab12cd", "ab 12 cd", "  ab", "12", "", "中文12x"]
+    suites: list[tuple[str, Any, Any]] = [
+        ("FixedLength(3)", own.FixedLengthPretokenizer(3), ref_pre.FixedLength(3)),
+    ]
+    for behavior in own.BEHAVIORS:
+        suites.append((f"Split(\\d+,{behavior})",
+                       own.SplitPretokenizer({"Regex": r"\d+"}, behavior),
+                       ref_pre.Split(RefRegex(r"\d+"), behavior)))
+        suites.append((f"Split(\\d,{behavior})",
+                       own.SplitPretokenizer({"Regex": r"\d"}, behavior),
+                       ref_pre.Split(RefRegex(r"\d"), behavior)))
+    suites.append(("Split(字面 String ✓)", own.SplitPretokenizer({"String": "cd"}, "isolated"),
+                   ref_pre.Split("cd", "isolated")))
+    suites.append(("Split(invert ✓)", own.SplitPretokenizer({"Regex": r"[a-z]+"}, "removed",
+                                                           invert=True),
+                   ref_pre.Split(RefRegex(r"[a-z]+"), "removed", True)))
+
+    wrong: dict[str, Any] = {}
+    for label, mine, theirs in suites:
+        for text in texts:
+            got = [piece for piece in mine.split(text) if piece]
+            want = [piece for piece, _ in theirs.pre_tokenize_str(text)]
+            if got != want:
+                wrong[f"{label} | {text!r}"] = (got, want)
+    check("㉓ ⭐⭐ **13 种 `Split` 配置 + `FixedLength` × 8 例**与参考逐例一致 ✓"
+          "（含**相邻匹配**：`merged_with_previous` 出 `['ab1','2','cd']` ✓、"
+          "`merged_with_next` 出 `['ab','1','2cd']` ✓、`contiguous` 出 `['ab','12','cd']` ✓；"
+          "空白**不特殊处理** ✓；`invert` 匹配补集 ✓）",
+          not wrong, wrong)
+
+    unsupported = [
+        ("能匹配空串的正则 ✓", own.SplitPretokenizer, ({"Regex": r"x*"}, "isolated")),
+        ("`\\p{...}` 语法（标准库没有 ✗）", own.SplitPretokenizer, ({"Regex": r"\p{N}+"}, "isolated")),
+        ("length ≤ 0 ✗", own.FixedLengthPretokenizer, (0,)),
+        ("认不出的 behavior ✗", own.SplitPretokenizer, ({"Regex": r"\d"}, "nope")),
+    ]
+    missed = [label for label, factory, args in unsupported
+              if _raises(lambda: factory(*args)) is None]
+    check("㉔ 四类**明确拒绝**都真能触发 ✓（空匹配正则 / `\\p{…}` / `length≤0` / 未知 behavior ✓）"
+          "—— 宁可回退参考实现 ✓ 也不静默按错的语义切 ✓✗",
+          not missed, missed)
+
+    # ⚠️ 两种形状别混 ✗：`tokenizer.json` 里 `pattern` 是**嵌在规格里**的 ✓
+    #    （`{"type":"Split","pattern":{"Regex":…}}` ✓）⇒ 判定吃的是**规格** ✓、构造吃的是**模式** ✓。
+    split_reason = own.split_spec_problem(
+        {"type": "Split", "pattern": {"Regex": r"x*"}, "behavior": "isolated"})
+    split_raised = _raises(lambda: own.SplitPretokenizer({"Regex": r"x*"}, "isolated"))
+    length_reason = own.fixed_length_problem({"type": "FixedLength", "length": 0})
+    length_raised = _raises(lambda: own.FixedLengthPretokenizer(0))
+    check("㉕ 判定与构造**同一句话** ✓（`split_spec_problem` / `fixed_length_problem` 与构造"
+          "抛的错**逐字相同** ✓ —— 否则 `own_support` 给出的拒绝理由会说成别的 ✓✗）",
+          bool(split_reason) and split_reason == split_raised
+          and bool(length_reason) and length_reason == length_raised,
+          (split_reason, split_raised, length_reason, length_raised))
+
+
 def case_reject(root: Path) -> None:
+    """「自研明确拒绝」的几条路 ✓（⚠️ 夹具的语义要**跟着能力走** ✗ —— 见下面注释 ✓）。"""
     # ⚠️ 覆盖面变了 ✗：带 `normalizer` 的词表**现在能走自研** ✓ ⇒ 拒绝用例换成**没实现**的
     #    `Precompiled` ✓（要 SentencePiece charsmap 表 ✓ 手写 JSON 即可 ✓ 不需要参考实现 ✓）。
     path = write_with_normalizer(root)
@@ -388,6 +499,8 @@ def main() -> int:
         case_unigram(root)
         case_normalizer(root)
         case_pretokenizers(root)
+        case_split_and_fixed(root)
+        case_performance(root)
         case_reject(root)
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

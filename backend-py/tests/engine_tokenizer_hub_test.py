@@ -273,6 +273,33 @@ def case_own_three_families(root: Path) -> None:
           wp_hub.backend == "own-wordpiece" and len(wp_hub.encode("hello world")) > 0,
           (wp_hub.backend, wp_hub.encode("hello world")))
 
+    # ⚠️ 预分词器的**参数**也会决定能不能接 ✗（2026-09-21 起 ✓）：`Split` 的正则 ✓
+    #    / `FixedLength` 的 length ✓ —— 只看类型名会误判 ✓✗（所以 `detect_form` 要带原始规格 ✓）。
+    split_dir = root / "split_form"
+    split_dir.mkdir(parents=True, exist_ok=True)
+    (split_dir / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "WordPiece", "vocab": {"[UNK]": 0, "ab": 1, "cd": 2, "12": 3},
+                  "unk_token": "[UNK]"},
+        "pre_tokenizer": {"type": "Split", "pattern": {"Regex": r"\d+"}, "behavior": "isolated"},
+    }), encoding="utf-8")
+    split_hub = hub_mod.load(hub_mod.HubConfig(path=str(split_dir)))
+    check("㉘ ⭐ `Split` 预分词器**也走自研** ✓（`WordPiece` + `Split(\\d+)` ⇒ `own-wordpiece` ✓）"
+          "且真能编 ✓",
+          split_hub.backend == "own-wordpiece"
+          and split_hub.encode("ab12cd", add_special_tokens=False) != [],
+          (split_hub.backend, split_hub.encode("ab12cd", add_special_tokens=False)))
+
+    hostile = root / "hostile_split"
+    hostile.mkdir(parents=True, exist_ok=True)
+    (hostile / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "WordPiece", "vocab": {"[UNK]": 0}, "unk_token": "[UNK]"},
+        "pre_tokenizer": {"type": "Split", "pattern": {"Regex": r"\p{N}+"}, "behavior": "isolated"},
+    }), encoding="utf-8")
+    support = own_mod.own_support(hub_mod.detect_form(hostile))
+    check("㉙ `\\p{…}` 正则（标准库**没有** ✗）⇒ **带理由拒绝** ✓（回退参考实现 ✓）"
+          "—— 不静默按错的语义切 ✓✗",
+          support.ok is False and "\\p{" in support.reason, support.reason)
+
 
 def case_optimizations(root: Path) -> None:
     hub = hub_mod.load(hub_mod.HubConfig(path=str(write_byte_bpe(root))))

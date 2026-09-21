@@ -94,7 +94,10 @@ DEPENDENCIES: tuple[_Dependency, ...] = (
 #: 「TE → DiT → VAE → **真 mp4**」✓）。⇒ **真正缺的只有「真权重 + 真配置」** ✓：
 #: 机制齐了、权重没到 ✓ ⇒ `canGenerate=False` **依然正确** ✓（只是别把原因归到机制上 ✗）。
 PENDING_PARTS: tuple[str, ...] = (
-    "H3 真权重未下载（主 DiT 19.53 GiB ✗ ⇒ 用 `loader.plan_stage('h3')` 看还差多少 ✓）",
+    "H3 真权重未下载（主 DiT 19.53 GiB ✗ ⇒ **上机前先跑一次** "
+    "`python app/scripts/h3_readiness.py` ✓ —— 它把依赖 / 权重就绪 / 加载计划 / "
+    "**真权重预检（键名核对 + 结构推导）+ 词表** 串成一次调用 ✓ "
+    "（拿到权重后加 `--weights <路径> [--tokenizer <词表目录>]` ✓ 判据见 `engine_readiness_script_test` ✓））",
     "⚠️ **H3 形态已建到「行级主干」并已接进管线** ✓（`engine/h3_form.py` ✓）："
     "积木（RMSNorm / SwiGLU / 显式注意力 / 18 路 adaLN / 正弦时间嵌入 / RoPE ✓）+ 打包层"
     "（段表 / 坐标 / 跨度 ✓）+ **主干 `H3FormTrunk`** ✓（模块名与参考 `__init__` 逐字对齐 ✓、"

@@ -139,9 +139,13 @@ def detect_form(path: str | Path) -> dict[str, Any]:
             raise TokenizerHubError(f"{json_path} 不是合法 JSON ✗（{err} ✓）") from err
         model = payload.get("model") or {}
         model_type = str(model.get("type") or "")
-        pre = _pre_tokenizer_type(payload.get("pre_tokenizer"))
+        pre_spec = payload.get("pre_tokenizer")
+        pre = _pre_tokenizer_type(pre_spec)
         normalizer_spec = payload.get("normalizer")
         return {"modelType": model_type, "preTokenizer": pre, "source": str(json_path),
+                # ⚠️ 预分词器的**原始规格**也要带上 ✗：`Split` 的**正则** / `FixedLength` 的
+                #    **length** 都会决定「自研能不能接」✓（只看类型名会误判 ✓✗）。
+                "preTokenizerSpec": pre_spec,
                 "normalizerType": _normalizer_type(normalizer_spec),
                 # ⚠️ **展平后的每一项**都要报 ✗：`Sequence` 里只要有一项没实现 ⇒ 自研就得让位 ✓
                 #    （只看顶层类型会把 `Sequence` 读成"能接" ✓✗）。
@@ -152,7 +156,7 @@ def detect_form(path: str | Path) -> dict[str, Any]:
     if vocab_json.exists() and merges_txt.exists():
         # 经典 GPT-2 格式 ✓ —— 它**就是** ByteLevel-BPE ✓（没有 pretokenizer 字段可读 ✓）
         return {"modelType": "BPE", "preTokenizer": "ByteLevel", "normalizerType": "",
-                "normalizerTypes": [], "byteFallback": False,
+                "normalizerTypes": [], "byteFallback": False, "preTokenizerSpec": None,
                 "source": f"{vocab_json.name}+{merges_txt.name}", "ownBpeOk": True}
     raise TokenizerHubError(
         f"{target} 里没有可识别的词表 ✗（找过 `tokenizer.json` ✓ 与 `vocab.json`+`merges.txt` ✓）")

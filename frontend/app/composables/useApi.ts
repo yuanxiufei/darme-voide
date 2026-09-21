@@ -651,6 +651,16 @@ export const productionAPI = {
   preflight: (payload: Record<string, any>) => api.post('/production/preflight', payload),
   /** 体检接受哪些段、按什么顺序跑 ✓ */
   schema: () => api.get('/production/preflight/schema'),
+  /**
+   * **机器侧**就绪（依赖 / 权重 / 显存 ✓ 2026-09-21 新增 ✓）
+   *
+   * ⚠️ 与 `preflightForEpisode` 不是一回事 ✗：那个查**内容/结构** ✓，这个查
+   * 「**这台机器能不能跑**」✓ ⇒ 两个 `ready` 各自独立 ✓，别在界面上混成一个 ✗。
+   * ⚠️ 真权重预检（键名/形状核对）**不在这个端点** ✗（那要传文件路径 ✓ ⇒ 等于开放任意路径读取 ✗）
+   * ⇒ 后端响应里的 `hint` 会指明用 CLI ✓。
+   */
+  engineReadiness: (stage: string = 'h3') =>
+    api.get('/production/engine-readiness', { params: { stage } }),
 }
 
 // 提示词生产工具：**纯函数、毫秒级**（不落库、不调模型）⇒ 可在用户编辑时**实时**调 ✓。

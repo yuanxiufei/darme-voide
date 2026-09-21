@@ -74,8 +74,11 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
   （2026-09-20 新增：**GGUF 读取器** `engine/gguf.py` ✓；**H3 键名核对器** `engine/h3_keys.py` ✓；
   **自研字节级 BPE** `engine/tokenizer_bpe.py` ✓；
   ⭐ **自研 Unigram/WordPiece/Metaspace** `engine/tokenizer_own.py` ✓（Viterbi ✓ / 整词 UNK ✓ /
-  **normalizer 11 种** ✓ / **预分词器 8 种** ✓ 含 `Punctuation` 五种 behavior ✓ ——
-  规则全部**逐例实测**对齐参考 ✓）；
+  **normalizer 11 种** ✓ / **预分词器 10 种** ✓ 含 `Punctuation` 与 `Split` 各五种 behavior ✓、
+  `FixedLength` ✓ —— 规则全部**逐例实测**对齐参考 ✓）；
+  ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✗）：`byte_fallback` ✓（实测参考实现该配置下没走字节回退 ✓
+  语义未核清 ✓）、`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、`UnicodeScripts` ✓（标准库无 script 表 ✓）、
+  **能匹配空串的正则** ✓ 与 `\p{…}` 语法 ✓（`re` 没有 ✓）；
   ⭐ **对 `transformers` 的运行时改造** `engine/tokenizers_tuning.py` ✓（离线兜底含 **Auto 工厂** ✓
   / 缓存目录 / 降噪 / 计数 / 可撤 ✓ 幂等 ✓）；
   **分词器总入口** `engine/tokenizer_hub.py` ✓ = 形态嗅探 + **3 模型 × 8 预分词器全自研** ✓ +
@@ -90,6 +93,20 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
   离线兜底 ✓ 缓存目录 ✓ 降噪 ✓ 计数 ✓ 可撤 ✓；⚠️ **Auto 工厂必须单独包** ✗
   （它在解析出具体类**之前**就外呼 ✓✗）；分词本身已由**自研三血统**接管 ✓ ⇒ 它只剩核对价值 ✓。
 - ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗（`run_all.py` 按此前缀收敛项数；写成「n/m 项通过」⇒ 总表**空摘要**、项数缺一套 ✓✗）。
+- ⚠️ **别同时开多个全量回归** ✗（并发抢 CPU ⇒ 像"卡死" ✓✗）；**判据 = 日志里有没有 `结论：` 行** ✗
+  （半截日志不算跑过 ✓）。基准/性能数字**必须把口径一起报** ✗（只报"热"数字会得出"比 Rust 快 5.5 倍"这种假象 ✓✗）。
+- ⭐ **自研分词器性能**（2026-09-21 ✓）：`UnigramTokenizer` 的 Viterbi 由「每 (end,start) 重扫前缀树」✗
+  改成「**每起点只扫一次** + 前向 DP」✓ ⇒ 冷 60k → **218k tokens/s**（相对 Rust 0.12 → 0.44 ✓）；
+  再加**片段级缓存** ✓（热 3.5M tokens/s ✓ 两个模型共用模块级 `PIECE_CACHE_LIMIT` ✓ 到了整体清空 ✓）。
+  基准脚本 `app/scripts/tokenizer_bench.py` ✓（冷/热/参考三方 + 扫描数 + 命中率 ✓）。
+- ⭐ **上机前自检**（2026-09-21 ✓）：业务在**服务层** `app/services/engine_readiness.py` ✓
+  （⚠️ **不能放 `app/scripts/`** ✗ —— 那个目录**不是包** ✓ ⇒ 路由**引用不到** ✓✗）；
+  CLI 薄壳 `app/scripts/h3_readiness.py` ✓（`--json` ✓ + **退出码 = ready** ✓）；
+  路由 `GET /api/v1/production/engine-readiness` ✓（回**精简摘要** ✓ 别塞整坨排班 ✗，
+  真权重预检要文件路径 ⇒ **不走 HTTP** ✗ 留在 CLI ✓）；前端 `PreflightPanel.vue` 有**独立**
+  「引擎就绪」块 ✓（没选集也能看 ✓「没查的项」用**灰点**与通过区分 ✓）。
+  ⚠️ 口径：没给权重 ⇒ 明说「**没查**」✗ 不算通过 ✓；「还要下多少」按清单 `expectedGiB` 求和 ✗
+  （用 `bytes` 会恒为 0 ✓✗）。⚠️ 与 `POST /production/preflight`（查**内容**）是两个独立 `ready` ✗。
 - **⚫ 可照抄项目（用户点名 ✓「不要忘记」）**：ComfyUI / minimax-h3-comfyui / ollama / ollama-python /
   minimax-desgin-plugin ⇒ **功能直接抄** ✓（落点见 `TOPICS.md` §可照抄项目清单 ✓）。
 

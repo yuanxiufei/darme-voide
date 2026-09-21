@@ -23,9 +23,41 @@ type Report = {
   source?: { episodeId?: number; counts?: Record<string, number>; notes?: string[] }
 }
 
+/** **机器侧**就绪摘要 ✓（与按集体检**分开** ✓ —— 一个查内容 ✓ 一个查这台机器 ✓）。 */
+type EngineReport = {
+  ready?: boolean
+  blockers?: string[]
+  /** ⚠️ 「没查」的那几项 ✓ —— 界面上必须与「通过」区分开 ✗（本仓那条纪律 ✓） */
+  unchecked?: string[]
+  nextSteps?: string[]
+  environment?: {
+    torchAvailable?: boolean
+    torchReason?: string
+    missingRequired?: string[]
+    optionalMissing?: string[]
+    ffmpeg?: boolean
+  }
+  weights?: {
+    modelsDir?: string
+    ready?: boolean
+    missingRequired?: string[]
+    plannedGiB?: number
+    downloadedGiB?: number
+    /** ⚠️ 后端按**清单**求和 ✓ —— 别在前端自己拿 bytes 算 ✗（缺失组件 bytes 恒为 0 ✓✗） */
+    remainingGiB?: number
+  }
+  vram?: { capacityGiB?: number; peakResidentGiB?: number; fits?: boolean; strategy?: string }
+  hint?: string
+}
+
 const loading = ref(false)
 const report = ref<Report | null>(null)
 const error = ref('')
+
+// 机器侧：**与 episodeId 无关** ✓（没选集也该能看这台机器能不能跑 ✓）⇒ 独立的加载与错误态 ✓
+const engineLoading = ref(false)
+const engine = ref<EngineReport | null>(null)
+const engineError = ref('')
 
 async function load() {
   if (!props.episodeId) {
@@ -46,8 +78,25 @@ async function load() {
   }
 }
 
+async function loadEngine() {
+  engineLoading.value = true
+  engineError.value = ''
+  try {
+    engine.value = await productionAPI.engineReadiness()
+  } catch (err: any) {
+    // ⚠️ 同上：读不到就说读不到 ✗（**不能**因为"没读出问题"就显示成可以跑 ✓✗）
+    engine.value = null
+    engineError.value = err?.message || '引擎体检请求失败'
+  } finally {
+    engineLoading.value = false
+  }
+}
+
 watch(() => props.episodeId, load)
-onMounted(load)
+onMounted(() => {
+  load()
+  loadEngine()
+})
 
 const STAGE_LABEL: Record<string, string> = {
   source: '数据',
@@ -127,6 +176,83 @@ function stageLabel(stage?: string) {
       <div v-if="!report.blockers?.length && !report.warnings?.length"
            class="pf-empty">没有发现阻断或建议 ✓</div>
     </template>
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         **机器侧**就绪 ✓（与上面按集体检分开 ✓ —— 这个不看集 ✓ 只看这台机器 ✓）
+         ⚠️ 「没查」必须与「通过」在界面上分得清 ✗（本仓那条纪律 ✓）
+         ══════════════════════════════════════════════════════════════════ -->
+    <div class="pf-engine">
+      <div class="pf-head">
+        <div class="pf-title">
+          <span class="pf-dot" :class="engine?.ready ? 'ok' : (engine ? 'blocked' : 'unknown')"></span>
+          引擎就绪（依赖 / 权重 / 显存）
+          <span v-if="engine" class="pf-verdict" :class="engine.ready ? 'ok' : 'blocked'">
+            {{ engine.ready ? '这台机器可以跑' : '还不能跑' }}
+          </span>
+          <span v-else-if="engineLoading" class="pf-verdict">检查中…</span>
+          <span v-else class="pf-verdict">未取到</span>
+        </div>
+        <button class="pf-btn" :disabled="engineLoading" @click="loadEngine">
+          {{ engineLoading ? '…' : '重新检查' }}
+        </button>
+      </div>
+
+      <p v-if="engineError" class="pf-error">引擎体检没跑成：{{ engineError }}（这不等于可以跑 ✗）</p>
+
+      <template v-if="engine">
+        <ul class="pf-list engine-facts">
+          <li>
+            <span class="pf-chip">环境</span>
+            torch {{ engine.environment?.torchAvailable ? '✓' : '✗' }}
+            ／ ffmpeg {{ engine.environment?.ffmpeg ? '✓' : '✗' }}
+            <span v-if="engine.environment?.missingRequired?.length" class="blocked">
+              缺必需依赖 {{ engine.environment.missingRequired.join('、') }}
+            </span>
+          </li>
+          <li>
+            <span class="pf-chip">权重</span>
+            清单 {{ engine.weights?.plannedGiB ?? '—' }} GiB
+            ／ 已在盘 {{ engine.weights?.downloadedGiB ?? '—' }} GiB
+            ／ <span :class="engine.weights?.remainingGiB ? 'blocked' : ''">
+              还要下 {{ engine.weights?.remainingGiB ?? '—' }} GiB
+            </span>
+            <span v-if="engine.weights?.missingRequired?.length" class="pf-shot">
+              缺 {{ engine.weights.missingRequired.join('、') }}
+            </span>
+          </li>
+          <li>
+            <span class="pf-chip">显存</span>
+            峰值 {{ engine.vram?.peakResidentGiB ?? '—' }} / {{ engine.vram?.capacityGiB ?? '—' }} GiB
+            ／ fits {{ engine.vram?.fits ? '✓' : '✗' }}
+            <span class="pf-shot">{{ engine.vram?.strategy || '' }}</span>
+          </li>
+        </ul>
+
+        <div v-if="engine.blockers?.length" class="pf-block">
+          <div class="pf-block-title blocked">阻断（{{ engine.blockers.length }}）</div>
+          <ul class="pf-list">
+            <li v-for="(item, index) in engine.blockers" :key="index">{{ item }}</li>
+          </ul>
+        </div>
+
+        <!-- ⚠️ 这一块是**关键** ✓：让「没查」与「通过」在界面上分得清 ✗ -->
+        <div v-if="engine.unchecked?.length" class="pf-block">
+          <div class="pf-block-title">没查的项（**不等于通过** ✗）</div>
+          <ul class="pf-list notes">
+            <li v-for="(item, index) in engine.unchecked" :key="index">{{ item }}</li>
+          </ul>
+        </div>
+
+        <div v-if="engine.nextSteps?.length" class="pf-block">
+          <div class="pf-block-title">引擎侧下一步（按成本从低到高 ✓）</div>
+          <ol class="pf-actions">
+            <li v-for="(step, index) in engine.nextSteps" :key="index">{{ step }}</li>
+          </ol>
+        </div>
+
+        <p v-if="engine.hint" class="pf-hint">{{ engine.hint }}</p>
+      </template>
+    </div>
   </section>
 </template>
 
@@ -143,6 +269,8 @@ function stageLabel(stage?: string) {
 .pf-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .pf-dot.ok { background: #22c55e; }
 .pf-dot.blocked { background: #ef4444; }
+/* ⚠️ 「没取到/没查」是**第三种**状态 ✓ —— 用灰的 ✓ 别画成绿或红 ✗（否则"没判"会被读成结论 ✓✗） */
+.pf-dot.unknown { background: #94a3b8; }
 .pf-verdict { font-size: 12px; font-weight: 500; opacity: 0.75; }
 .pf-verdict.ok { color: #22c55e; opacity: 1; }
 .pf-verdict.blocked { color: #ef4444; opacity: 1; }

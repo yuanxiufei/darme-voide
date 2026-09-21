@@ -55,10 +55,12 @@ from typing import Any, Iterable, Sequence
 
 from . import tokenizer_bpe
 
-__all__ = ["BertNormalizer", "BertPreTokenizer", "MetaspacePretokenizer", "NormalizedTokenizer",
-           "OwningSupport", "SequenceNormalizer", "UnicodeNormalizer", "UnigramTokenizer",
-           "WordPieceTokenizer", "build_normalizer", "normalizer_spec_types", "own_support",
-           "load_own_tokenizer", "SUPPORTED_NORMALIZERS"]
+__all__ = ["BEHAVIORS", "BertNormalizer", "BertPreTokenizer", "FixedLengthPretokenizer",
+           "MetaspacePretokenizer", "NormalizedTokenizer", "OwningSupport", "SequenceNormalizer",
+           "SimplePreTokenizer", "SplitPretokenizer", "UnicodeNormalizer", "UnigramTokenizer",
+           "WordPieceTokenizer", "build_normalizer", "fixed_length_problem",
+           "normalizer_spec_types", "own_support", "load_own_tokenizer", "split_spec_problem",
+           "SUPPORTED_NORMALIZERS"]
 
 #: ⚠️ 自研**实现了**的 normalizer ✓；不在表里的 ⇒ **拒绝** ✓（由 hub 决定回退还是报错 ✓）。
 #: 明确不做 ✗：`Precompiled`（要 SentencePiece 的 **charsmap 表** ✓ —— 实测
@@ -68,6 +70,11 @@ SUPPORTED_NORMALIZERS: tuple[str, ...] = (
     "BertNormalizer", "NFC", "NFD", "NFKC", "NFKD",
     "Lowercase", "StripAccents", "Strip", "Prepend", "Replace", "Sequence",
 )
+
+#: **片段级缓存上限** ✓（超了**整体清空** ✓ 不做 LRU ✗ —— 换一篇就换工作集 ✓ 简单规则够用且不抖动 ✓）。
+#: ⚠️ 放在**模块级** ✗：两个模型（Unigram / WordPiece）都用它 ✓ —— 写在某个类里会让另一个类
+#: `AttributeError` ✓✗（2026-09-21 实测踩到 ✓）。
+PIECE_CACHE_LIMIT = 32768
 
 
 class OwningSupport:
@@ -581,6 +588,196 @@ class MetaspacePretokenizer:
         return [self.replacement + chunk for chunk in body.split(self.replacement)[1:]]
 
 
+class FixedLengthPretokenizer:
+    """``FixedLength`` ✓：按**固定字符数**切 ✓（最后一片可短 ✓ 空串 ⇒ 无片 ✓）。
+
+    实测（2026-09-21 ✓）：``'abcdefg'`` + length 3 ⇒ ``['abc','def','g']`` ✓；
+    ``'中文测试x'`` ⇒ ``['中文测','试x']`` ✓ —— 按**码元/字符**数切 ✓（不是字节 ✗）。
+    """
+
+    def __init__(self, length: int) -> None:
+        size = int(length)
+        if size < 1:
+            raise ValueError(f"`FixedLength` 的 `length` 必须 ≥ 1 ✗（收到 {length!r} ✓）")
+        self.name = "FixedLength"
+        self.length = size
+
+    def split(self, text: str) -> list[str]:
+        return [text[index:index + self.length]
+                for index in range(0, len(text), self.length)]
+
+    def describe(self) -> dict[str, Any]:
+        return {"name": self.name, "length": self.length}
+
+
+class SplitPretokenizer:
+    """``Split`` ✓：按**正则/字面串**匹配切 ✓ —— **五种 behavior 逐例实测**得来 ✓（2026-09-21 ✓）。
+
+    语料 ``pattern = r'\\d'``（单数字 ✓）与 ``r'\\d+'`` ✓；观测（参考实现 ✓）：
+
+    * ``isolated`` ✓：``'ab12cd'`` ⇒ ``['ab','1','2','cd']`` ✓（**非匹配段原样保留** ✓ ——
+      ⚠️ **空白不特殊处理** ✗：``'ab 12 cd'`` ⇒ ``['ab ','12',' cd']`` ✓，与 `Punctuation` 那套不同 ✓）；
+    * ``contiguous`` ✓：``'ab12cd'`` ⇒ ``['ab','12','cd']`` ✓（**相邻匹配合成一片** ✓）；
+    * ``removed`` ✓：``'ab12cd'`` ⇒ ``['ab','cd']`` ✓（匹配段丢掉 ✓ 只留非空段 ✓）；
+    * ``merged_with_previous`` ✓：``'ab12cd'`` ⇒ ``['ab1','2','cd']`` ✓
+      （匹配并进**前一片** ✓；⚠️ 前一片**已经以匹配结尾**时 ⇒ **另起一片** ✓ —— 第二个 ``'2'`` 独立 ✓）；
+    * ``merged_with_next`` ✓：``'ab12cd'`` ⇒ ``['ab','1','2cd']`` ✓（匹配并**后一段** ✓；
+      ⚠️ 匹配后面**紧跟另一个匹配**（或到串尾）⇒ 它**自成一片** ✓ —— ``'1'`` 独立 ✓）。
+
+    ``invert`` ✓：把**补集**当匹配 ✓（实测 ``[a-z]+`` + invert ⇒ 匹配的是数字段 ✓）；
+    ``pattern`` ✓：``{"Regex": …}`` / ``{"String": …}`` ✓（后者按**字面**切 ✓）。
+
+    ⚠️ 两类**明确拒绝**（构造即报错 ✓ 由 :func:`own_support` 提前说清 ✓）：
+    ① **能匹配空串**的正则（如 ``x*`` ✓）—— 参考实现会退化成逐字符切 ✓✗，语义**没核清** ✗ 不模仿；
+    ② Python `re` **不支持的语法**（如 ``\\p{N}`` ✓ —— 标准库**没有** ``\\p{...}`` ✗，
+       装 `regex` 才能用 ✓ 但本仓不引它 ✗）⇒ 宁可回退参考实现 ✓ 也不静默按错的语义切 ✓✗。
+    """
+
+    def __init__(self, pattern: Any, behavior: str = "isolated", *, invert: bool = False) -> None:
+        self.name = "Split"
+        self.behavior = str(behavior or "isolated")
+        if self.behavior not in BEHAVIORS:
+            raise ValueError(f"`Split` 不认识的 behavior：{self.behavior!r} ✗"
+                             f"（认得：{list(BEHAVIORS)} ✓）")
+        self.invert = bool(invert)
+        self.literal = self.pattern_text(pattern)
+        self._compiled = self._compile(pattern)
+
+    @staticmethod
+    def pattern_text(pattern: Any) -> str | None:
+        """字面串模式 ✓ ⇒ 返回那个串；正则会返回其源串或 ``None`` ✓（由调用方区分 ✓）。"""
+        if isinstance(pattern, dict):
+            if "String" in pattern:
+                return str(pattern["String"])
+            if "Regex" in pattern:
+                return str(pattern["Regex"])
+            return None
+        return str(pattern) if isinstance(pattern, str) else None
+
+    @staticmethod
+    def _compile(pattern: Any) -> Any:
+        literal = None
+        source: str | None = None
+        if isinstance(pattern, dict):
+            if "String" in pattern:
+                literal = str(pattern["String"])
+            elif "Regex" in pattern:
+                source = str(pattern["Regex"])
+        elif isinstance(pattern, str):
+            literal = pattern
+        if literal is not None:
+            if not literal:
+                raise ValueError("`Split` 的 `String` 模式为空 ✗")
+            return re.compile(re.escape(literal))
+        if not source:
+            raise ValueError(f"`Split` 的 `pattern` 认不出来 ✗（{pattern!r} ✓）")
+        try:
+            compiled = re.compile(source)
+        except re.error as err:
+            raise ValueError(f"`Split` 的正则 Python `re` 编译不了 ✗（{source!r}：{err} ✓）"
+                             f"（⚠️ 标准库**没有** `\\p{{...}}` 这类语法 ✓ ⇒ 不静默按错的语义切 ✓）") from err
+        if compiled.match("") is not None:
+            raise ValueError(f"`Split` 的正则能匹配**空串** ✗（{source!r} ✓）⇒ 语义没核清 ✓"
+                             f"（参考实现在这种模式上会退化成逐字符切 ✓✗）不模仿 ✓")
+        return compiled
+
+    def _spans(self, text: str) -> list[tuple[int, int]]:
+        spans = [match.span() for match in self._compiled.finditer(text)]
+        if not self.invert:
+            return spans
+        # 补集 ✓：把「没被匹配到」的区间当成匹配 ✓
+        complement: list[tuple[int, int]] = []
+        cursor = 0
+        for start, end in spans:
+            if start > cursor:
+                complement.append((cursor, start))
+            cursor = max(cursor, end)
+        if cursor < len(text):
+            complement.append((cursor, len(text)))
+        return complement
+
+    def _atoms(self, text: str) -> list[tuple[bool, str]]:
+        atoms: list[tuple[bool, str]] = []
+        cursor = 0
+        for start, end in self._spans(text):
+            if start > cursor:
+                atoms.append((False, text[cursor:start]))
+            atoms.append((True, text[start:end]))
+            cursor = end
+        if cursor < len(text):
+            atoms.append((False, text[cursor:]))
+        return atoms
+
+    def split(self, text: str) -> list[str]:
+        behavior = self.behavior
+        atoms = self._atoms(text)
+        if behavior == "removed":
+            return [item for is_match, item in atoms if not is_match and item]
+        pieces: list[str] = []
+        for index, (is_match, item) in enumerate(atoms):
+            if not item:
+                continue
+            if not is_match:
+                pieces.append(item)
+                continue
+            if behavior == "merged_with_previous":
+                # ⚠️ 判据是「**前一片是不是以匹配结尾**」✗ 不是「前一片存不存在」✓（实测 ✓）
+                if pieces and atoms[index - 1][0] is False:
+                    pieces[-1] = pieces[-1] + item
+                else:
+                    pieces.append(item)
+                continue
+            if behavior == "merged_with_next":
+                following = atoms[index + 1] if index + 1 < len(atoms) else (True, "")
+                if following[0] is False and following[1]:
+                    pieces.append(item + following[1])
+                    atoms[index + 1] = (True, "")      # 已被吸收 ✓ 免得再出一片 ✓
+                else:
+                    pieces.append(item)
+                continue
+            if behavior == "contiguous" and pieces and atoms[index - 1][0] is True:
+                pieces[-1] = pieces[-1] + item
+                continue
+            pieces.append(item)                        # isolated ✓
+        return [piece for piece in pieces if piece]
+
+    def describe(self) -> dict[str, Any]:
+        return {"name": self.name, "behavior": self.behavior, "invert": self.invert,
+                "pattern": self.literal}
+
+
+#: ``Split`` 认得的 behavior ✓（与参考实现同一组 ✓）
+BEHAVIORS: tuple[str, ...] = ("isolated", "removed", "merged_with_previous", "merged_with_next",
+                              "contiguous")
+
+
+def split_spec_problem(spec: Any) -> str:
+    """``Split`` 规格能不能用 ✓（``""`` = 没问题 ✓；否则是**拒绝理由** ✓）。
+
+    ⚠️ 单独抽出来 ✗ 是因为**判定**（`own_support` ✓）与**构造**（`_build_pre_tokenizer` ✓）
+    必须同一句话 ✓ —— 否则拒绝理由会说成别的 ✓✗（本仓在 `Precompiled` 上踩过同类坑 ✓）。
+    """
+    if not isinstance(spec, dict):
+        return f"`Split` 规格不是对象 ✗（{type(spec).__name__} ✓）"
+    try:
+        SplitPretokenizer(spec.get("pattern"), str(spec.get("behavior") or "isolated"),
+                          invert=bool(spec.get("invert")))
+    except ValueError as err:
+        return str(err)
+    return ""
+
+
+def fixed_length_problem(spec: Any) -> str:
+    """``FixedLength`` 规格能不能用 ✓（同上 ✓）。"""
+    if not isinstance(spec, dict):
+        return f"`FixedLength` 规格不是对象 ✗（{type(spec).__name__} ✓）"
+    try:
+        FixedLengthPretokenizer(spec.get("length") or 0)
+    except (ValueError, TypeError) as err:
+        return str(err)
+    return ""
+
+
 class UnigramTokenizer:
     """**Unigram + Viterbi** ✓（词表 = ``[(token, score), …]`` ✓，id = 下标 ✓）。"""
 
@@ -600,6 +797,17 @@ class UnigramTokenizer:
         self._trie = self._build_trie(entries)
         self.pre_tokenizer = pre_tokenizer
         self.max_token_len = max(len(token) for token, _ in entries)
+        #: ⚠️ **前缀树扫描次数** ✓（可观测 ✗）—— 「优化有没有效」不能靠感觉 ✓：
+        #: 每段文本的扫描次数应当 ≈ 字符数（每个起点扫一次 ✓）✓；若随长度**平方增长** ✓✗
+        #: 就是第一版那种退化 ✓（基准里会把它打出来 ✓ 自检里也会断言它的量级 ✓）。
+        self.trieScans = 0
+        #: ⭐ **片段级缓存** ✓（2026-09-21 ✓）：跨文本复用的**预分词片段**很多 ✓
+        #: （提示词里反复出现的词 / 标点 / 空格组合 ✓）⇒ 命中就省掉整段 Viterbi ✓。
+        #: ⚠️ 上限后**整体清空** ✓（不做 LRU ✗ —— 换一篇就换工作集 ✓ 简单规则够用 ✓ 且不抖动 ✓）
+        #: ⚠️ 返回值**必须是拷贝** ✗（否则调用方 `extend` 会把缓存里的列表改掉 ✓✗）
+        self._pieceCache: dict[str, tuple[int, ...]] = {}
+        self.pieceCacheHits = 0
+        self.pieceCacheMisses = 0
 
     @staticmethod
     def _build_trie(entries: Iterable[tuple[str, float]]) -> dict[str, Any]:
@@ -622,6 +830,7 @@ class UnigramTokenizer:
 
     def _matches(self, piece: str, start: int) -> list[tuple[str, float]]:
         """从前缀树里取出**以 start 开头**的全部词表项 ✓（长到短都留 ✓ Viterbi 才会对 ✓）。"""
+        self.trieScans += 1
         node = self._trie
         found: list[tuple[str, float]] = []
         index = start
@@ -637,26 +846,33 @@ class UnigramTokenizer:
 
     def _encode_piece(self, piece: str) -> list[int]:
         size = len(piece)
+        # ⚠️⚠️ **每个起点只扫一次前缀树** ✓（2026-09-21 优化 ✓）：
+        #    第一版是「对每个 `end`，把 `end-maxTokenLen…end` 的起点**重新扫一遍**」✗
+        #    ⇒ 同一个起点被扫约 `maxTokenLen` 遍 ✓✗（基准：约千字符扫 5456 次 ⇒ 就是它 ✓）。
+        #    改成「先按起点算好匹配表 ✓ 再做**前向** DP」✓ ⇒ 扫描次数降到 ≈ 字符数 ✓。
+        #    ⚠️ 语义**必须一模一样** ✗：DP 的更新顺序变了 ✓，但取的是**严格大于**才替换 ✓
+        #    ⇒ 平局时的选择与第一版一致 ✓（对拍靠自检里那批「与参考逐例同 id」✓）。
+        matches = [self._matches(piece, start) for start in range(size)]
         #: `best[i]` = 前 i 个字符的**最优总分** ✓；`back[i]` = (起点, token 或 None=未知 ✓)
         best = [float("-inf")] * (size + 1)
         back: list[tuple[int, str | None]] = [(0, None)] * (size + 1)
         best[0] = 0.0
-        for end in range(1, size + 1):
-            for start in range(max(0, end - self.max_token_len), end):
-                if best[start] == float("-inf"):
-                    continue
-                for token, score in self._matches(piece, start):
-                    if start + len(token) != end:
-                        continue
-                    candidate = best[start] + score
-                    if candidate > best[end]:
-                        best[end] = candidate
-                        back[end] = (start, token)
+        unk_score = self.unk_score
+        for start in range(size):
+            base = best[start]
+            if base == float("-inf"):                    # pragma: no cover - 未知兜底保证不会发生 ✓
+                continue
+            for token, score in matches[start]:
+                end = start + len(token)
+                candidate = base + score
+                if candidate > best[end]:
+                    best[end] = candidate
+                    back[end] = (start, token)
             # 未知单字符兜底 ✓（**只有一个字符** ✓ —— 连续未知由 `fuse_unk` 在下游合并 ✓）
-            single = best[end - 1]
-            if single != float("-inf") and single + self.unk_score > best[end]:
-                best[end] = single + self.unk_score
-                back[end] = (end - 1, None)
+            candidate = base + unk_score
+            if candidate > best[start + 1]:
+                best[start + 1] = candidate
+                back[start + 1] = (start, None)
         tokens: list[str | None] = []
         cursor = size
         while cursor > 0:
@@ -684,9 +900,21 @@ class UnigramTokenizer:
         pieces = (self.pre_tokenizer.split(str(text or "")) if self.pre_tokenizer is not None
                   else [str(text or "")])
         ids: list[int] = []
+        cache = self._pieceCache
         for piece in pieces:
-            if piece:
-                ids.extend(self._encode_piece(piece))
+            if not piece:
+                continue
+            hit = cache.get(piece)
+            if hit is not None:
+                self.pieceCacheHits += 1
+                ids.extend(hit)
+                continue
+            self.pieceCacheMisses += 1
+            encoded = self._encode_piece(piece)
+            if len(cache) >= PIECE_CACHE_LIMIT:
+                cache.clear()                       # 换工作集 ⇒ 整体清空 ✓（见上面的理由 ✓）
+            cache[piece] = tuple(encoded)
+            ids.extend(encoded)
         return ids
 
     def decode(self, ids: Sequence[int], *, skip_special_tokens: bool = True) -> str:
@@ -696,6 +924,16 @@ class UnigramTokenizer:
         if isinstance(self.pre_tokenizer, MetaspacePretokenizer):
             text = text.replace(self.pre_tokenizer.replacement, " ").strip()
         return text
+
+    def cache_stats(self) -> dict[str, int]:
+        """片段缓存现状 ✓（命中率要能读出来 ✗ —— 否则"加了缓存"无法自证 ✓）。"""
+        total = self.pieceCacheHits + self.pieceCacheMisses
+        return {"entries": len(self._pieceCache), "hits": self.pieceCacheHits,
+                "misses": self.pieceCacheMisses, "limit": PIECE_CACHE_LIMIT,
+                "hitRate": round(self.pieceCacheHits / total, 4) if total else 0.0}
+
+    def clear_cache(self) -> None:
+        self._pieceCache.clear()
 
     def describe(self) -> dict[str, Any]:
         return {"name": self.name, "vocabSize": self.vocab_size, "unkId": self.unk_id,
@@ -723,6 +961,10 @@ class WordPieceTokenizer:
         self.prefix = str(prefix)
         self.max_chars = int(max_chars)
         self.pre_tokenizer = pre_tokenizer
+        #: ⭐ 片段级缓存 ✓（与 `UnigramTokenizer` 同一套规则与理由 ✓ 见那里的注释 ✓）
+        self._pieceCache: dict[str, tuple[int, ...]] = {}
+        self.pieceCacheHits = 0
+        self.pieceCacheMisses = 0
 
     @property
     def vocab_size(self) -> int:
@@ -758,10 +1000,32 @@ class WordPieceTokenizer:
         pieces = (self.pre_tokenizer.split(str(text or "")) if self.pre_tokenizer is not None
                   else [str(text or "")])
         ids: list[int] = []
+        cache = self._pieceCache
         for piece in pieces:
-            if piece:
-                ids.extend(self._encode_word(piece))
+            if not piece:
+                continue
+            hit = cache.get(piece)
+            if hit is not None:
+                self.pieceCacheHits += 1
+                ids.extend(hit)
+                continue
+            self.pieceCacheMisses += 1
+            encoded = self._encode_word(piece)
+            if len(cache) >= PIECE_CACHE_LIMIT:
+                cache.clear()
+            cache[piece] = tuple(encoded)
+            ids.extend(encoded)
         return ids
+
+    def cache_stats(self) -> dict[str, int]:
+        """片段缓存现状 ✓（与 `UnigramTokenizer` 同一口径 ✓）。"""
+        total = self.pieceCacheHits + self.pieceCacheMisses
+        return {"entries": len(self._pieceCache), "hits": self.pieceCacheHits,
+                "misses": self.pieceCacheMisses, "limit": PIECE_CACHE_LIMIT,
+                "hitRate": round(self.pieceCacheHits / total, 4) if total else 0.0}
+
+    def clear_cache(self) -> None:
+        self._pieceCache.clear()
 
     def decode(self, ids: Sequence[int], *, skip_special_tokens: bool = True) -> str:
         index = {value: key for key, value in self.vocab.items()}
@@ -784,11 +1048,13 @@ class WordPieceTokenizer:
 _OWN_MODELS: tuple[str, ...] = ("BPE", "Unigram", "WordPiece")
 
 #: 自研覆盖的**预分词器** ✓（⚠️ 每一条的规则都**逐例实测**过 ✓ —— 见各实现的注释 ✓）。
-#: 明确**不做** ✗：`Split`（behavior 组合多 ✗ 未逐条核过 ✓）、`FixedLength`、`UnicodeScripts`、
-#: `WhitespaceSplit` 之外的组合等 ✓ ⇒ 由 :func:`own_support` 拒绝 ✓ 交给回退 ✓。
+#: 明确**不做** ✗：`UnicodeScripts`（要 Unicode script 表 ✓ 标准库**没有** ✗）、
+#: `Split` 里**能匹配空串**的正则 ✓ 与 `\p{...}` 语法 ✓（见 `SplitPretokenizer` 注释 ✓）
+#: —— 都由 :func:`own_support` **带理由**拒绝 ✓ 交给回退 ✓。
 _OWN_PRE_TOKENIZERS: tuple[str, ...] = (
     "ByteLevel", "Metaspace", "BertPreTokenizer",
     "Whitespace", "WhitespaceSplit", "Punctuation", "Digits", "CharDelimiterSplit",
+    "Split", "FixedLength",
 )
 
 
@@ -819,6 +1085,17 @@ def own_support(form: dict[str, Any]) -> OwningSupport:
     if pre_type not in _OWN_PRE_TOKENIZERS:
         return OwningSupport(False, f"预分词器 `{pre_type}` ✗ 未实现 ✓"
                                     f"（覆盖：{list(_OWN_PRE_TOKENIZERS)} ✓）", form)
+    # ⚠️ `Split` / `FixedLength` 的**参数**也可能不合格 ✗（空匹配正则 ✓ `\p{...}` ✓ length≤0 ✓）
+    #    ⇒ 判定与构造**用同一句话** ✓（否则拒绝理由会说成别的 ✓✗）。
+    pre_spec = form.get("preTokenizerSpec")
+    if pre_type == "Split":
+        problem = split_spec_problem(pre_spec)
+        if problem:
+            return OwningSupport(False, problem, form)
+    if pre_type == "FixedLength":
+        problem = fixed_length_problem(pre_spec)
+        if problem:
+            return OwningSupport(False, problem, form)
     suffix = f" + normalizer `{normalizer_types}` ✓" if normalizer_types else ""
     return OwningSupport(True, f"自研实现覆盖 `{model_type}` + `{pre_type}`{suffix} ✓", form)
 
@@ -839,6 +1116,12 @@ def load_own_tokenizer(path: str | Path) -> Any | None:
     normalizer_spec = payload.get("normalizer")
     form = {"modelType": str(model.get("type") or ""),
             "preTokenizer": _pre_tokenizer_type(payload.get("pre_tokenizer")),
+            # ⚠️⚠️ **原始规格必须带上** ✗ —— 少了它，`Split` 的**正则** / `FixedLength` 的
+            #    **length** 就无从校验 ⇒ `own_support` 会把这类型一律判成"参数不合格" ✓✗
+            #    （2026-09-21 实测：`Split` 词表被**误判回退** ✓✗，自检 ㉘ 当场红 ✓）。
+            #    ⚠️ 这份 `form` 与 :func:`.tokenizer_hub.detect_form` 是**同口径的两处** ✓
+            #    ⇒ 字段要一起加 ✗（改一处记得改另一处 ✓）。
+            "preTokenizerSpec": payload.get("pre_tokenizer"),
             "normalizerType": _normalizer_type(normalizer_spec),
             "normalizerTypes": normalizer_spec_types(normalizer_spec),
             "byteFallback": bool(model.get("byte_fallback"))}
@@ -896,6 +1179,11 @@ def _build_pre_tokenizer(spec: Any) -> Any:
         return MetaspacePretokenizer.from_spec(node)
     if node_type == "BertPreTokenizer":
         return BertPreTokenizer()
+    if node_type == "Split":
+        return SplitPretokenizer(node.get("pattern"), str(node.get("behavior") or "isolated"),
+                                 invert=bool(node.get("invert")))
+    if node_type == "FixedLength":
+        return FixedLengthPretokenizer(node.get("length") or 0)
     if node_type in ("Whitespace", "WhitespaceSplit", "Punctuation", "Digits", "CharDelimiterSplit"):
         return SimplePreTokenizer(node_type, **{key: value for key, value in node.items()
                                                 if key != "type"})

@@ -8,6 +8,13 @@
 * ``nextActions`` ✓ —— **可执行的修复顺序** ✓（先零成本的文字/结构 ✓ 最后才谈钱 ✓）；
 * ``sections`` ✓ —— 四个环节各自的**完整原报告** ✓（想深挖时不必再调一次 ✓）。
 
+## 另有一个**机器侧**体检（2026-09-21 新增 ✓）
+
+``GET /api/v1/production/engine-readiness`` ✓ —— 查的是「**这台机器能不能跑**」✗
+（依赖 ✓ 权重就绪 ✓ 显存排班 ✓），与上面那个查**内容/结构**的完全两回事 ✓ ⇒ 两个 ``ready``
+各自独立 ✓（别混成一个 ✗）。摘要来自 :mod:`app.services.engine_readiness` ✓（与 CLI 同源 ✓；
+⚠️ 真权重预检要**文件路径** ✗ ⇒ 不走 HTTP ✓，见端点里的 ``hint`` ✓）。
+
 ⚠️ 本端点**不产生新判据** ✗ —— 它就是 :mod:`app.services.production_preflight` 这段黏合 ✓，
 而那段只**调用** :mod:`.shot_placeholders` / :mod:`.prompt_polish` / :mod:`.continuity` /
 :mod:`.asset_manifest` ✓。**判据只有一份** ✓，改一处就够 ✓。
@@ -22,7 +29,7 @@ from sqlalchemy.engine import Connection
 from ..core.db import get_conn, get_tx
 from ..core.request_utils import read_json
 from ..core.response import bad_request, success
-from ..services import continuity_store, preflight_source, production_preflight
+from ..services import continuity_store, engine_readiness, preflight_source, production_preflight
 
 router = APIRouter(prefix="/api/v1/production", tags=["production"])
 
@@ -100,6 +107,19 @@ def continuity_vocabulary() -> Any:
     """回显 `state_type` **词汇表** ✓ —— 写入方（前端/Agent）照它填 ✓，别自己造词 ✗。"""
     return success({"stateTypes": continuity_store.describe_vocabulary(),
                     "note": "state_type 不在表里 ⇒ **拒收**（不会静默忽略 ✓）"})
+
+
+@router.get("/engine-readiness")
+def engine_readiness_route(stage: str = "h3") -> Any:
+    """**自研引擎就绪体检** ✓（依赖 → 权重就绪 → 显存排班 ✓ ⇒ 回一份**精简摘要** ✓）。
+
+    ⚠️ 与 :func:`preflight` 不是一回事 ✗：那个查的是**内容/结构**（占位符 ✓ 连续性 ✓ 验收门 ✓）；
+    这个查的是**这台机器能不能跑**（依赖 ✓ 权重 ✓ 显存 ✓）—— 两边的 ``ready`` 各自独立 ✓。
+
+    ⚠️ **真权重预检（键名/形状核对）不走 HTTP** ✗：那要传**文件路径** ✓ ⇒ 等于开放任意路径读取 ✓✗
+    ⇒ 用 CLI：``python app/scripts/h3_readiness.py --weights <路径>`` ✓（响应里 ``hint`` 也这么说 ✓）。
+    """
+    return success(engine_readiness.summary(engine_readiness.collect(stage=stage)))
 
 
 @router.get("/preflight/schema")
