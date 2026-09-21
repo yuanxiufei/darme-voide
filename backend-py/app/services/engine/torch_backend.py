@@ -69,6 +69,8 @@ class _Dependency:
     package: str
     purpose: str
     approximate_mb: int
+    #: ⭐ ``True`` ⇒ **可选**（缺了也**不阻断** ✓）。判据：本仓有等价的自研实现 ✓（如自研 BPE ✓）
+    optional: bool = False
 
 
 #: 真后端所需依赖 ✓（``module`` 用于探测 ✓，``package`` 用于给出安装命令 ✓）
@@ -77,6 +79,12 @@ DEPENDENCIES: tuple[_Dependency, ...] = (
     _Dependency("numpy", "numpy", "数组互转 / 数值工具", 20),
     _Dependency("safetensors", "safetensors", "权重读取（本仓另有纯 Python 读取器 ✓ 体检不必装 ✓）", 1),
     _Dependency("PIL", "pillow", "首帧/参考图解码 ✓", 3),
+    # ⚠️ **可选** ✓：``transformers`` 只是「HF tokenizer 适配」这一条通道 ✓ ——
+    #    本仓**自己实现了字节级 BPE** ✓（`engine/tokenizer_bpe.py` ✓ 零依赖 ✓ 离线 ✓）
+    #    ⇒ 缺它**不该**把后端判成不可用 ✗（`torch_available()` 走的是 `ready` ✓ = **必需**项齐不齐 ✓）。
+    _Dependency("transformers", "transformers",
+                "HF tokenizer 适配（本仓另有**自研 BPE** ✓ ⇒ 不装也能离线分词 ✓）", 120,
+                optional=True),
 )
 
 #: ⚠️ **仍未实现**的部分 ✓（依赖齐了、DiT 也装好了，也还是这些 ✗）—— 分开报，别让人去查环境 ✗
@@ -101,12 +109,41 @@ PENDING_PARTS: tuple[str, ...] = (
     "⇒ ⚠️ **这不是「小改」**✗：要**单开一个 H3 形态 forward** ✓（规格已固化：`H3_SHAPE_FACTS` ✓ + "
     "`H3_PACK_FACTS` ✓ + `schedules.time_shift_sigma` ✓）；✅ 已关 3 条见 `dit.H3_GAPS_CLOSED` ✓"
     "（⚠️「关掉 ≠ 核过真权重」✗：音频头与 refiner 内部仍是近似 ✓）",
-    "H3 的 DiTConfig（**事实表已抄好** ✓ `dit.H3_SHAPE_FACTS`：hidden 5376 / depth 50 / heads 56 / "
-    "headDim 128 / ffn 14336 / patch (1,2,2) / vae_scale 16 ✓ —— 拿到真权重后仍要按元数据复核 ✓）",
-    "文本编码器 / VAE 的**权重**（机制已实现 ✓；tokenizer 是**注入式** ✓ —— "
-    "本仓不内置词表 ✗，得自己给 ✓）",
+    "✅ **H3 结构推导已实现** ✓（2026-09-20 ✓ `h3_keys.infer_h3_trunk_config` ✓）：尺寸 / 层数 / "
+    "head_dim / ffn / text_dim / modalities / `inv_freq_len` / **PDD 头库** 全部**从权重读** ✓"
+    "（出厂常量只作回落 ✗ ⇒ 社区重导出 / 蒸馏 / 自检缩小版走**同一条**路 ✓）；"
+    "每个字段的来源随装载报告给出 ✓（`configSources` ✓ —— 免得「回落」被读成「权重事实」 ✗）。"
+    "⚠️ 仍留给真权重的一步：按元数据复核 `patch_size` ✗（**权重里没有 patch 事实** ⇒ 只能显式给 ✓）"
+    "与 eps 类（**形状验不出 eps** ✗ ⇒ 用参考默认 1e-5 ✓）",
+    "✅ **tokenizer 已自研** ✓（2026-09-20 ✓ `engine/tokenizer_bpe.py` ✓ 零依赖 ✓ 离线 ✓）："
+    "字节级 BPE ✓（GPT-2 映射算法生成 ✓ + 自写预分词扫描器 ✓ + 按 merges 排名合并 ✓ + 往返恒等 ✓），"
+    "读**随权重来的**词表文件 ✓（`tokenizer.json` ✓ 或 `vocab.json`+`merges.txt` ✓，"
+    "`load_tokenizer` 嗅探 ✓）⇒ **不需要外部 `transformers`** ✓"
+    "（`transformers` 已登记为**可选**依赖 ✓ ⇒ 它只是另一条通道 ✓，且能当**核对用**的第二实现 ✓"
+    "—— 自检里已逐例同 id 比过 ✓）。⚠️ 仍缺的只是**词表文件本身** ✗（那是权重的一部分 ✗ "
+    "本仓不内置任何词表 ✓）",
+    "✅ **分词器总入口也升级了** ✓（2026-09-20 ✓ `engine/tokenizer_hub.py` ✓）：形态嗅探 ✓ → "
+    "自研 BPE 优先 ✓ → `Unigram`/`WordPiece`/`Metaspace`（Llama/Qwen 系 ✓）**回退参考实现** ✓ "
+    "+ 批量 ✓ LRU 缓存 ✓ 离线/关遥测/缓存目录 ✓ 运行期互校 ✓ "
+    "⇒ 词表形态**不再限制能力** ✓（`attach_text_encoder(tokenizer_path=…)` 直接给路径 ✓）",
+    "文本编码器 / VAE 的**权重**（机制已实现 ✓；tokenizer 走**注入** ✓ 本仓已有自研 BPE ✓）",
     "端到端 `generate()` 拿真权重跑一次（现在 `canGenerate=False` ✓ = 「机制齐、权重没到」✓）",
 )
+
+
+def _same_setting(left: Any, right: Any) -> bool:
+    """两个「配置值」是不是**同一个** ✓（``tuple`` ↔ ``list`` 算相同 ✓、数是数 ✓）。
+
+    ⚠️ 为什么要专门写它 ✗：`patch_size` / 形状的写法在配置里可能是 ``[1,2,2]`` ✓、
+    推断出来的是 ``(1,2,2)`` ✓ —— 直接用 `!=` 比会**假报"不一致"** ✓✗（把对的配置拒掉 ✓）。
+    """
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return tuple(left) == tuple(right)
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) == float(right)
+    return left == right
 
 
 def _spec(name: str) -> Any:
@@ -117,23 +154,32 @@ def _spec(name: str) -> Any:
 
 
 def dependency_status() -> dict[str, Any]:
-    """逐项依赖现状 ✓（**不导入**它们 ✓ ⇒ 毫秒级、无副作用 ✓）。"""
+    """逐项依赖现状 ✓（**不导入**它们 ✓ ⇒ 毫秒级、无副作用 ✓）。
+
+    ⚠️⚠️ 两个清单**分开答** ✓（2026-09-20 起 ✓）：``missing`` = **必需**项（缺 ⇒ 后端不可用 ✓）；
+    ``optionalMissing`` = **可选**项（缺 ⇒ 只少一条通道 ✓ —— 例如缺 ``transformers`` 时
+    仍有**自研 BPE** 能分词 ✓）。⇒ 混在一起会让「可选没装」把整个后端判死 ✓✗。
+    """
     items: list[dict[str, Any]] = []
     missing: list[str] = []
+    optional_missing: list[str] = []
     for dependency in DEPENDENCIES:
         found = _spec(dependency.module) is not None
         items.append({
             "module": dependency.module, "package": dependency.package,
             "present": found, "purpose": dependency.purpose,
-            "approximateMB": dependency.approximate_mb,
+            "approximateMB": dependency.approximate_mb, "optional": dependency.optional,
         })
         if not found:
-            missing.append(dependency.package)
+            (optional_missing if dependency.optional else missing).append(dependency.package)
     return {
         "items": items,
         "missing": missing,
+        "optionalMissing": optional_missing,
         "ready": not missing,
         "install": ([f"pip install {' '.join(missing)}"] if missing else []),
+        "installOptional": ([f"pip install {' '.join(optional_missing)}"]
+                            if optional_missing else []),
         "note": "有 NVIDIA 卡就用 CUDA 轮子（索引源按驱动选 ✓）；没有就得用 CPU 轮子 ✓"
                 "（本项目**刻意不写死版本** ✗）",
     }
@@ -277,28 +323,39 @@ class TorchBackend:
         #    少了这一步，H3 权重会被**静默**按 DiT 建 ✓✗（表面只表现为"装载报告里缺一堆键" ✓，
         #    人很容易读成"权重没下全" ✗）。判形态是纯函数、只看**头部键名** ✓ ⇒ 毫秒级 ✓ 不读大文件 ✓。
         from app.services.engine import h3_form  # noqa: PLC0415 —— 局部 import ✓：它模块级不碰 torch ✓ 无循环 ✓
+        from app.services.engine import h3_keys  # noqa: PLC0415 —— 同上 ✓（结构推导/键名核对都**不需要 torch** ✓）
         if h3_form.looks_like_h3_form(info.tensors.keys()):
-            form_defaults = dict(h3_form.H3_TRUNK_DEFAULTS)
-            if isinstance(config, dict):
-                form_defaults.update(config)   # 自检用**缩小版**配置走**同一条**路 ✓
-            # ⭐ **头库大小从权重形状推断** ✓（PDD ✓）—— 真权重**不会**给这个数 ✓ ⇒ 既不猜也不硬编 ✓：
-            #    * 拿默认 1 去装 banks>1 的权重 ⇒ **形状不符** ✗；
-            #    * 写死一个数 ⇒ 换检查点就错 ✓✗。
-            entry = info.tensors.get(h3_form.H3_VIDEO_OUT_KEY)
-            if entry is None:
+            explicit = dict(config) if isinstance(config, dict) else {}
+            # ⭐⭐ **结构从权重推** ✓（2026-09-20 起）—— 出厂常量 `H3_TRUNK_DEFAULTS` 只作**回落** ✗：
+            #    尺寸 / 层数 / 头数 / head_dim / ffn / text_dim / modalities / `inv_freq_len` /
+            #    **PDD 头库** 全部读权重 ✓ ⇒ 自检的**缩小版**与工作站上的**真权重**走**同一条**路 ✓。
+            #    ⚠️ 老写法（`form_defaults = H3_TRUNK_DEFAULTS` + 只推 banks ✗）对**非出厂**检查点
+            #    （社区重导出 / 蒸馏 / 缩小版 ✓）会「名字对、形状错」✓✗ —— 那正是 `PENDING_PARTS`
+            #    第 4 条「H3 的 DiTConfig」剩下的机制缺口 ✓（现在补上了 ✓）。
+            shapes = {name: tensor.shape for name, tensor in info.tensors.items()}
+            inferred = h3_keys.infer_h3_trunk_config(shapes, patch_size=explicit.get("patch_size"))
+            if not inferred.ok:
+                reasons = list(inferred.problems)
+                if inferred.audit.missing:
+                    reasons.append(f"权重缺 {len(inferred.audit.missing)} 个键 ✗"
+                                   f"（如 {inferred.audit.missing[:4]} ✓）")
+                if inferred.audit.shape_mismatch:
+                    reasons.append(f"{len(inferred.audit.shape_mismatch)} 处形状不符 ✗"
+                                   f"（如 {inferred.audit.shape_mismatch[:2]} ✓）")
                 raise TorchBackendUnavailable(
-                    f"H3 权重里没有 {h3_form.H3_VIDEO_OUT_KEY} ✗ ⇒ 推断不出头库大小 ✓"
-                    f"（不静默按 1 装 ✗ —— 那会让 PDD 头库白装而**不报错** ✓✗）", reason="pending")
-            inferred = h3_form.head_banks_from_shape(
-                entry.shape,
-                h3_form.video_patch_dim(int(form_defaults["latents_dim"]),
-                                        tuple(form_defaults["patch_size"])))
-            explicit = form_defaults.get("head_banks")
-            if explicit is not None and int(explicit) != inferred:
+                    "H3 权重推不出可装的结构 ✗（**不拿出厂常量硬装** ✗ —— 那会「名字对、形状错」✓✗）："
+                    + "；".join(reasons), reason="pending")
+            form_defaults = {**h3_form.H3_TRUNK_DEFAULTS, **inferred.config}
+            # ⚠️ 显式配置**只做交叉校验** ✓：与权重推断不一致 ⇒ **报错** ✗（不静默取其中一个 ✓
+            #    —— 老版只在 `head_banks` 上守这条 ✓，现在推广到**每个**可推字段 ✓）。
+            conflicts = {key: [value, inferred.config[key]] for key, value in explicit.items()
+                         if key in inferred.config and not _same_setting(value, inferred.config[key])}
+            if conflicts:
                 raise TorchBackendUnavailable(
-                    f"配置里显式 `head_banks={explicit}` 与权重推断出的 {inferred} **不一致** ✗"
+                    f"配置与权重推断出的结构**不一致** ✗：{conflicts}"
                     f"（两者必须一致 ✓ —— 不静默取其中一个 ✗）", reason="pending")
-            form_defaults["head_banks"] = inferred
+            form_defaults.update({key: value for key, value in explicit.items()
+                                  if key not in inferred.config})   # 推不出的字段（如 eps ✓）由显式配置补 ✓
             form_report = weights_mod.load_module_weights(
                 h3_form.H3FormTrunk(**form_defaults), target, device=self._device)
             if not form_report.complete:
@@ -310,7 +367,14 @@ class TorchBackend:
             weights_mod.load_module_weights(self._model, target, device=self._device)
             self._config = form_defaults
             self._form = self.H3_FORM_NAME
-            self._loadReport = form_report.to_dict()
+            self._loadReport = {
+                **form_report.to_dict(),
+                # ⭐ 「哪些字段是**权重里读出来的** ✓、哪些是**不可推的回落** ✗」随报告一起给 ✓
+                #    —— 装真权重时，光看 `complete=True` 分不清这两种 ✓✗（本仓那条纪律 ✓）。
+                "configSources": dict(inferred.sources),
+                "derivedFields": inferred.derived_count,
+                "fieldCount": len(inferred.config),
+            }
             return self._loadReport
         if config is None:
             config = dit_mod.DiTConfig.from_metadata(info.metadata)   # 读不到会**明确报错** ✓
@@ -838,24 +902,61 @@ class TorchBackend:
         with torch.no_grad():
             return latents * (1.0 - weights) + image * weights
 
-    def attach_text_encoder(self, config: Any = None, tokenizer: Any = None) -> dict[str, Any]:
+    def attach_text_encoder(self, config: Any = None, tokenizer: Any = None,
+                            tokenizer_path: str | None = None) -> dict[str, Any]:
         """挂上 :mod:`app.services.engine.text_encoder` ✓ ⇒ :meth:`encode_text` 出**真条件** ✓。
 
         ⚠️ 它同样**未经训练** ✗ ⇒ 条件数值没有语义 ✓（验的是管道 ✓）。真权重到位后换实现即可 ✓
-        （调用点不变 ✓）。``tokenizer`` 走**注入** ✓（本仓不内置词表 ✗ 见那里的模块注释 ✓）。
+        （调用点不变 ✓）。tokenizer 三种给法（**都是注入** ✓ 本仓不内置词表 ✗）：
+
+        * ``tokenizer=<Tokenizer>`` —— 任意实现 ✓（协议只要 `vocab_size` + `encode` ✓）；
+        * ⭐ ``tokenizer_path=<目录或文件>`` —— **本仓自研 BPE** ✓（2026-09-20 ✓
+          `engine/tokenizer_bpe.py` ✓ 零依赖 ✓ 离线 ✓）：自动嗅探 ``tokenizer.json`` ✓
+          或 ``vocab.json`` + ``merges.txt`` ✓ ⇒ 词表随权重到手就能直接分词 ✓；
+        * 都不给 ⇒ :class:`~app.services.engine.text_encoder.StubTokenizer`（**假桩** ✓
+          只验管道 ✗ —— `describe().tokenizer` 会报 `stub` ✓ 一眼看得出 ✓）。
         """
         self._gate()
+        if tokenizer is None and tokenizer_path:
+            # ⭐ 走**总入口** ✓（2026-09-20 ✓）：形态嗅探 → 自研 BPE 优先 ✓ → 参考实现回退 ✓
+            #    ⇒ 词表是 `Unigram`/`Metaspace`（Llama/Qwen 系 ✓）这类本仓自研**未覆盖**的形态时
+            #    也能直接挂上 ✓（此前会**直接报错** ✗ ⇒ 能力到此为止 ✓✗）。
+            from app.services.engine import tokenizer_hub  # noqa: PLC0415 —— 局部引 ✓ 顶层不碰 torch ✓
+            tokenizer = tokenizer_hub.load(tokenizer_hub.HubConfig(path=str(tokenizer_path)))
+            if config is None:
+                # ⚠️⚠️ 嵌入表要**装得下**这个分词器 ✓ —— 必须用 `required_vocab_size`（含特殊符 ✓）
+                #    而**不是** `vocab_size` ✗（后者不含 added tokens ⇒ 特殊符 id 会**越界** ✓✗；
+                #    实测：合成词表里 `<|endoftext|>`=999 ⇒ 用 262 建表，下一行的守卫**当场拦下** ✓）。
+                required = int(getattr(tokenizer, "required_vocab_size",
+                                       getattr(tokenizer, "vocab_size", 0)) or 0)
+                config = te_mod.TextEncoderConfig(
+                    vocab_size=max(required, int(getattr(tokenizer, "vocab_size", 0)), 2),
+                    output_dim=self._configured_text_dim(64))
         config = config or te_mod.TextEncoderConfig(
             output_dim=self._configured_text_dim(64))
+        if tokenizer is not None:
+            required = int(getattr(tokenizer, "required_vocab_size",
+                                   getattr(tokenizer, "vocab_size", 0)) or 0)
+            if required > int(config.vocab_size):
+                raise TorchBackendUnavailable(
+                    f"分词器需要嵌入表 ≥ {required} 个 id ✗，但 TE 的 vocab_size={config.vocab_size} ✓"
+                    f" ⇒ 特殊符 id 会**越界** ✓✗（不静默截断 ✗ —— 请显式给足够大的 vocab_size ✓）",
+                    reason="pending")
         self._tokenizer = tokenizer or te_mod.StubTokenizer(
             config.vocab_size, max_length=config.max_length)
         self._textEncoder = te_mod.build_text_encoder(config).to(self._device).eval()
         self._textConfig = config
-        return {
+        report = {
             "config": config.to_dict(),
             "tokenizer": getattr(self._tokenizer, "name", type(self._tokenizer).__name__),
             "note": "TE 与本仓库其它模型一样是**参考实现（未训练）** ✗ ⇒ 条件无数值语义 ✓",
         }
+        if tokenizer_path:
+            report["tokenizerPath"] = str(tokenizer_path)
+        describe = getattr(self._tokenizer, "describe", None)
+        if callable(describe):
+            report["tokenizerDetail"] = describe()
+        return report
 
     def attach_vae(self, config: Any = None) -> dict[str, Any]:
         """挂上 :mod:`app.services.engine.vae` 的参考 VAE ✓ ⇒ :meth:`decode` 能出**真帧** ✓。

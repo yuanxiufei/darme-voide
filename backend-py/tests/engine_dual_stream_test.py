@@ -371,6 +371,102 @@ def case_reference_audio(root: Path) -> None:
           != Path(plain.outputs["audioPath"]).read_bytes(), result.error)
 
 
+def case_reference_video(root: Path) -> None:
+    """⭐ 参考**视频**（H3 的 ``video`` / ``video_audio`` 块 ✓）—— 参考块四类的**最后一条入口** ✓。"""
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    # ── 自己造素材 ✓：write_video 出真 mp4（无音轨 ⇒ ``video`` 块 ✓）──
+    # ⚠️ 用**平滑渐变**而不用随机噪声 ✗：噪声是有损编码的**最坏情况** ✓（实测 crf=12 下
+    #    平均误差 0.35 ✓✗ —— 那是编码器的结构使然 ✗ 不是"读错了"✓ ⇒ 拿它断言"往返忠实"会假红 ✓）。
+    source = (torch.linspace(-1.0, 0.5, 64).view(1, 1, 1, 64)
+              .expand(1, 3, 3, 64, 64) + torch.tensor([0.0, 0.15, 0.3]).view(1, 1, 3, 1, 1))
+    mp4 = media_mod.write_video(source, root / "ref_clip.mp4", fps=12, crf=12)["path"]
+    clip, info = media_mod.load_video_tensor(mp4)
+    check("51 ⭐ **自己写的视频读** ✓（与 `write_video` **成对** ✓）：形状 ``(1,3,T,H,W)`` ✓、"
+          "帧数如实 ✓、``hasAudio=False`` ✓、值域 ⊆ [-1, 1] ✓",
+          tuple(clip.shape) == (1, 3, 3, 64, 64) and info["frames"] == 3
+          and info["hasAudio"] is False and float(clip.abs().max()) <= 1.0,
+          (tuple(clip.shape), {k: info[k] for k in ("frames", "hasAudio")}))
+    check("51′ ⭐ **往返忠实** ✓（读回 ≈ 写入 ✓ —— 差只来自有损编码 ✓ 且在上界内 ✓）",
+          float((clip - source).abs().mean()) < 0.05, float((clip - source).abs().mean()))
+
+    backend = _h3_backend(root, name="h3_refvideo")
+    result = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "refvideo"),
+                                  "reference_videos": (mp4,)}), backend)
+    check("51″ ⭐⭐ 双流 + 参考视频（无音轨 ⇒ ``video`` 块 ✓）⇒ **跑通** ✓"
+          "（帧 → 视频 VAE → ``ref_img`` 行 ✓ 用**它自己的**网格 ✓）",
+          result.ok is True, result.error)
+    plain = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "novideo")}),
+        _h3_backend(root, name="h3_novideo"))
+    check("51‴ ⭐ **反套套**：给参考视频 vs 不给 ⇒ **wav 字节必不同** ✓（相同 ⇒ 参考压根没进模型 ✗✗）",
+          result.ok is True and plain.ok is True
+          and Path(result.outputs["audioPath"]).read_bytes()
+          != Path(plain.outputs["audioPath"]).read_bytes(), result.error)
+
+    # ── 带音轨 ⇒ ``video_audio`` 块 ✓：wav + ffmpeg 混流进 mkv（pcm_s16le 可**无损**进 mkv ✓）──
+    rate = 32000
+    torch.manual_seed(32)
+    samples = (torch.rand(2, int(rate * 0.1)) * 2.0 - 1.0) * 0.5
+    wav_path = media_mod.write_wav(samples, root / "ref_va_audio.wav", sample_rate=rate)["path"]
+    mkv = root / "ref_clip_audio.mkv"
+    ffmpeg = shutil.which("ffmpeg")
+    muxed = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                            "-i", mp4, "-i", wav_path, "-c", "copy", str(mkv)],
+                           capture_output=True, timeout=120)
+    if mkv.exists() and mkv.stat().st_size > 0 and muxed.returncode == 0:
+        with_audio = pipe.run_sync(
+            pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "refva"),
+                                      "reference_videos": (str(mkv),)}),
+            _h3_backend(root, name="h3_refva"))
+        check("52 ⭐⭐ 双流 + **带音轨**参考视频 ⇒ ``video_audio`` 块 ✓ **跑通** ✓"
+              "（抽轨 → 音频 VAE → 音频行 ✓ —— 音频行排在视频行**之前** ✓ 事实 ✓）",
+              with_audio.ok is True, with_audio.error)
+        check("52′ ⭐ **反套套**：带音轨 vs 无音轨参考 ⇒ **wav 字节必不同** ✓"
+              "（相同 ⇒ 音轨压根没进模型 ✗✗）",
+              with_audio.ok is True
+              and Path(with_audio.outputs["audioPath"]).read_bytes()
+              != Path(result.outputs["audioPath"]).read_bytes(), with_audio.error)
+    else:
+        skip("ffmpeg 混流 mkv 失败 ⇒ ``video_audio`` 块用例跳过 ✓")
+
+    # ── 两条"必须当场拒绝"的路 ✓ ──
+    class NoVideoRefs:
+        """包一层：把能力自述里的 ``referencesVideo`` 摘掉 ✓（模拟"没接参考视频"的后端 ✓）。"""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        @property
+        def dualStream(self) -> dict[str, Any]:
+            return {**self._inner.dualStream, "referencesVideo": False}
+
+    refused = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "norefvideo"),
+                                  "reference_videos": (mp4,)}),
+        NoVideoRefs(_h3_backend(root, name="h3_guardvideo")))
+    check("53 ⭐ 后端没自述支持参考视频 ⇒ **当场报错** ✓（不静默忽略 `referenceVideos` ✗）",
+          refused.ok is False
+          and "参考视频" in str((refused.error or {}).get("message")), refused.error)
+
+    odd = media_mod.write_video(torch.rand(1, 3, 2, 100, 100) * 2.0 - 1.0,
+                                root / "ref_odd.mp4", fps=12)["path"]
+    refused_odd = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "oddref"),
+                                  "reference_videos": (odd,)}),
+        _h3_backend(root, name="h3_oddref"))
+    check("54 ⭐ 参考视频尺寸不能整除 vae_scale ⇒ **明确报错** ✓（不悄悄取整 ✗ —— "
+          "那会改变参考素材的网格却没人知道 ✓✗）",
+          refused_odd.ok is False
+          and "整除" in str((refused_odd.error or {}).get("message")), refused_odd.error)
+
+
 def case_condition_guard(root: Path) -> None:
     """⚠️ 2026-09-20 自检抓到过真错 ✓：管线把 `encode_text` 的 **dict** 直接当成文本状态递下去 ✗
     ⇒ 主干把它当行张量 ⇒ `AttributeError: ... 'dict' object has no attribute 'shape'` ✓（它**响亮** ✓
@@ -430,6 +526,7 @@ def main() -> int:
         case_condition_guard(root)
         case_head_banks_inference(root)
         case_reference_audio(root)
+        case_reference_video(root)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

@@ -7,3 +7,12 @@ PyYAML>=6.0.2
 httpx>=0.27.2
 # multipart/form-data 解析（Starlette 的 request.form() / UploadFile 依赖它，upload 域必需）
 python-multipart>=0.0.9
+
+# ── 推理引擎依赖（**不当硬依赖**写死在这里 ✗ —— 本机 PyPI 慢/无 GPU 时会让普通后端装不上 ✓）──
+# 权威清单在代码里：`app/services/engine/torch_backend.py::DEPENDENCIES` ✓（`dependency_status()`
+# 会报「缺哪些 + 装什么 ✓」）。要装就按需装：
+#   必需（真张量后端）：torch（有卡装 CUDA 轮子 ✓ 无卡装 CPU 轮子 ✓）、numpy、safetensors、pillow
+#   可选（**缺了不阻断** ✓ 本仓有等价自研实现）：transformers —— 词表适配的**第二条通道** ✓；
+#        分词本身由 `app/services/engine/tokenizer_bpe.py`（**自研字节级 BPE** ✓ 零依赖 ✓ 离线 ✓）负责 ✓
+#   ⚠️ 本机装法（PyPI 直连不通 ✓）：-i https://pypi.tuna.tsinghua.edu.cn/simple
+#      例：.venv/Scripts/python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple transformers

@@ -10,6 +10,20 @@
 
 * :class:`StubTokenizer` —— 确定性哈希 ✓（**自检用** ✓ 不需要下载 ✓；⚠️ 它**不代表真词表** ✗）；
 * :class:`HFTokenizer` —— `transformers` 的适配器 ✓（懒导入 ✓；没装就给出可行动报错 ✓）。
+  ⚠️ 2026-09-20 起 `transformers` **已登记为本仓的可选依赖** ✓
+  （`torch_backend.DEPENDENCIES` 里 `optional=True` ✓ —— 缺它**不阻断**后端 ✓；用镜像装：
+  `pip install -i https://pypi.tuna.tsinghua.edu.cn/simple transformers` ✓）；
+* ⭐ :class:`~app.services.engine.tokenizer_bpe.BpeTokenizer` —— **本仓自研的字节级 BPE** ✓
+  （2026-09-20 补 ✓ 零依赖 ✓ 离线 ✓）：直接读**随权重一起来的**词表文件 ✓
+  （``tokenizer.json`` ✓ 或 ``vocab.json`` + ``merges.txt`` ✓，用
+  :func:`~app.services.engine.tokenizer_bpe.load_tokenizer` 嗅探 ✓）⇒ **不需要外部 `transformers`** ✗。
+  ⚠️ 它需要的是**词表文件**（那是**权重的一部分** ✗ 本模块依然不内置任何词表 ✓ ——
+  内置一个"看起来能用"的词表只会在真机上错得莫名其妙 ✓✗）。
+* ⭐⭐ :class:`~app.services.engine.tokenizer_hub.TokenizerHub` —— **总入口（优化改造层）** ✓
+  （2026-09-20 ✓）：**形态嗅探** → 自研 BPE 优先 ✓ → ``Unigram``/``WordPiece``/``Metaspace``
+  等自研**未覆盖**的形态**回退参考实现** ✓（`transformers` ✓ 已登记为可选依赖 ✓）+
+  批量 ✓ LRU 缓存 ✓ 离线/关遥测/缓存目录 ✓ 运行期互校 ✓。**给路径即用** ✓
+  （``TorchBackend.attach_text_encoder(tokenizer_path=…)`` 走的就是它 ✓）。
 
 ## 与 :mod:`app.services.engine.dit` 的接口
 
@@ -111,10 +125,21 @@ class HFTokenizer:
             raise TextEncoderError(
                 f"未安装 transformers（{err} ✓）⇒ `pip install transformers` ✓"
                 f"（注意本机 PyPI 下不动 ✓：加 `-i https://pypi.tuna.tsinghua.edu.cn/simple` ✓）；"
-                f"在此之前可用 `StubTokenizer` 验管道 ✓。") from err
+                f"在此之前可用 `StubTokenizer` 验管道 ✓，或直接用**本仓自研 BPE** ✓"
+                f"（`tokenizer_bpe.load_tokenizer(词表目录)` ✓ 零依赖 ✓ 离线 ✓）。") from err
         self.repo = str(repo_or_path)
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.repo, local_files_only=local_files_only)
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.repo, local_files_only=local_files_only)
+        except Exception as err:  # noqa: BLE001 —— ⚠️ **不许把外部库的裸异常漏出去** ✗
+            # ⚠️⚠️ 2026-09-20 实测：装了 `transformers` 之后，坏仓库名会抛 `OSError`
+            #    （`Repo id must use alphanumeric chars…` ✓）—— 那是**外部库的天书** ✓✗，
+            #    调用方（与自检）拿不到「该怎么办」✓ ⇒ 统一包成**可行动**的 `TextEncoderError` ✓。
+            raise TextEncoderError(
+                f"装载 HF 分词器失败（仓库/路径 `{self.repo}` ✓）：{err} ✓"
+                f" ⇒ 先核对仓库名或本机是否已有该词表 ✓（离线时传**本地目录** ✓）；"
+                f"也可改用**本仓自研 BPE** ✓（`tokenizer_bpe.load_tokenizer(词表目录)` ✓ "
+                f"零依赖 ✓ 离线 ✓）。") from err
         self.vocab_size = int(getattr(self._tokenizer, "vocab_size", 0) or 0)
 
     def encode(self, text: str) -> list[int]:

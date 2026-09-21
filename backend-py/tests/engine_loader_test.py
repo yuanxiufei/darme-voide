@@ -135,15 +135,15 @@ def case_component(root: Path) -> None:
           naive_plan.quantScheme == "none" and naive_plan.problems == [],
           (naive_plan.quantScheme, naive_plan.problems))
 
-    # GGUF：不假装读过 ✓
+    # GGUF：2026-09-20 起有**真读取器** ✓（详见 engine_gguf_test.py ✓）
+    # —— 垃圾 GGUF（GGUF + 全零 ✗）现在**真的去读** ⇒ 结构坏 ⇒ 阻断 ✓（不再是 `gguf-unknown` ✗）
     gguf = root / "gguf"
     (gguf).mkdir(parents=True, exist_ok=True)
     (gguf / "w.gguf").write_bytes(b"GGUF" + b"\x00" * 128)
     gguf_plan = ld.plan_component({**entry, "filename": "w.gguf", "file_path": "w.gguf"}, root=gguf)
-    check("⑩ GGUF ⇒ `gguf-unknown` + 明确警告（不假装知道里面是什么 ✓）",
-          gguf_plan.quantScheme == "gguf-unknown"
-          and any("GGUF" in item for item in gguf_plan.warnings),
-          (gguf_plan.quantScheme, gguf_plan.warnings))
+    check("⑩ 垃圾 GGUF ⇒ 真读取后结构坏 ⇒ problems 非空 + verified=False（不假装读过 ✓）",
+          bool(gguf_plan.problems) and gguf_plan.verified is False,
+          (gguf_plan.quantScheme, gguf_plan.problems, gguf_plan.verified))
 
     # 缺文件：是**结论**不是异常 ✓
     missing = ld.plan_component(entry, root=root / "nope")

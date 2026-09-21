@@ -27,11 +27,11 @@ def skip(name: str) -> None:
 
 def main() -> int:
     # ① 事实表本身**不需要 torch** 就能读 ✓（所以先测它 ✓）
-    # ⚠️ 这里只判「**非空**」✓，不写 `>= 5` 这种**魔法阈值** ✗ ——
-    #    本轮 TODO 因"只减不骗"从 5 条降到 4 条 ✓ ⇒ 阈值当场红 ✗✓。
-    #    真正的不变量在 ⑱（**双向**：做完的移出 TODO ✓ 同时出现在 PARTS ✓）。
-    check("① 积木清单非空 ✓、**待办清单也非空** ✓（钉住「还没接线」✗ —— 免得下轮以为已经能跑 ✓）",
-          len(h3.H3_FORM_PARTS) >= 8 and len(h3.H3_FORM_TODO) >= 1,
+    # ⚠️ 2026-09-20 起待办**清零** ✓（参考视频入口已通 ✓ / PDD 已实现并从权重自动推断 ✓）
+    #    ⇒ 判据翻转：**必须恰好为 0** ✓ —— 再往 `h3_form` 加没接线的东西必须先进 TODO ✗
+    #    （否则"待办清单"又会变成没人看的套话 ✓✗）。
+    check("① 积木清单非空 ✓、**待办清单已清零** ✓（全部接线完毕 ✓ —— 有新待办就必须出现 ✗）",
+          len(h3.H3_FORM_PARTS) >= 8 and len(h3.H3_FORM_TODO) == 0,
           (len(h3.H3_FORM_PARTS), len(h3.H3_FORM_TODO)))
     check("①′ 不存在的名字 ⇒ `AttributeError` ✓（**不静默给 None** ✗；且**不需要 torch** ✓）",
           "没有" in str(_raises(lambda: h3.NoSuchPart)))

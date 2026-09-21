@@ -70,8 +70,26 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - ⚠️⚠️ **2026-09-20 实测：四类生成当前**全部**解析到外部** ✗✗**（`api.minimax.chat` / `ark.cn-beijing.volces.com` ✓）——
   `ai_providers.py` 按 **priority 降序**取第一条 ✓，本地预设 82–85 ✓ 输给厂商 97–300 ✓ ⇒ **厂商永远赢** ✗。
   ⇒ 动作：抬本地 priority / 删外部行 ✓（**审计表与三层依赖阶梯见 `TOPICS.md` §外部调用审计** ✓）。
-- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **19 模块 / 343 用例全绿 ✓ 零依赖可跑** ✓；
-  出片唯一硬缺口 = **真权重 + 真配置** ✗（机制都已实现 ✓）。
+- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **25 模块 / 3500+ 用例全绿 ✓ 零依赖可跑** ✓
+  （2026-09-20 新增：**GGUF 读取器** `engine/gguf.py` ✓；**H3 键名核对器** `engine/h3_keys.py` ✓；
+  **自研字节级 BPE** `engine/tokenizer_bpe.py` ✓；
+  ⭐ **自研 Unigram/WordPiece/Metaspace** `engine/tokenizer_own.py` ✓（Viterbi ✓ / 整词 UNK ✓ /
+  **normalizer 11 种** ✓ / **预分词器 8 种** ✓ 含 `Punctuation` 五种 behavior ✓ ——
+  规则全部**逐例实测**对齐参考 ✓）；
+  ⭐ **对 `transformers` 的运行时改造** `engine/tokenizers_tuning.py` ✓（离线兜底含 **Auto 工厂** ✓
+  / 缓存目录 / 降噪 / 计数 / 可撤 ✓ 幂等 ✓）；
+  **分词器总入口** `engine/tokenizer_hub.py` ✓ = 形态嗅探 + **3 模型 × 8 预分词器全自研** ✓ +
+  极少数形态回退 ✓ + 批量 + LRU + 运行期互校 ✓）；
+  **H3 结构从权重推** ✓（`h3_keys.infer_h3_trunk_config` ✓ ⇒ 出厂常量只作回落 ✓）；
+  出片唯一硬缺口 = **真权重** ✗（机制都已实现 ✓）。**全量回归 103 套 / 3540 项 / 0 失败** ✓
+  （2026-09-21 又扩 normalizer + 预分词器 ✓ 数字待重跑 ✓）。
+- ⚠️ **`transformers` 已装（5.17.0 = PyPI 最新 ✓ 镜像 ✓）且登记为「可选依赖」** ✓：`_Dependency.optional` ✓
+  ⇒ `dependency_status()` 分 `missing`（必需 ✓ 缺则后端不可用）/ `optionalMissing`（可选 ✓）
+  ⇒ **别把可选塞进必需位** ✗（`ready`/`torch_available()` 会被判死 ✗✗）。
+  ⚠️ **不 fork / 不 vendored** ✗（许可允许但不必要 ✓）：只做**运行时改造** ✓ ——
+  离线兜底 ✓ 缓存目录 ✓ 降噪 ✓ 计数 ✓ 可撤 ✓；⚠️ **Auto 工厂必须单独包** ✗
+  （它在解析出具体类**之前**就外呼 ✓✗）；分词本身已由**自研三血统**接管 ✓ ⇒ 它只剩核对价值 ✓。
+- ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗（`run_all.py` 按此前缀收敛项数；写成「n/m 项通过」⇒ 总表**空摘要**、项数缺一套 ✓✗）。
 - **⚫ 可照抄项目（用户点名 ✓「不要忘记」）**：ComfyUI / minimax-h3-comfyui / ollama / ollama-python /
   minimax-desgin-plugin ⇒ **功能直接抄** ✓（落点见 `TOPICS.md` §可照抄项目清单 ✓）。
 

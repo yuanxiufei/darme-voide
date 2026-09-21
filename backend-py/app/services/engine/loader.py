@@ -19,8 +19,9 @@
      到推理时才炸 ✗（而且往往炸在显存里 ✗）；
    * 声明的字节数与文件大小一致（由 ``safetensors`` 层保证 ✓）。
 
-⚠️ **GGUF 只报「在/不在 + 大小」** ✗（读取器未实现 ✓），``quantScheme`` 标 ``gguf-unknown`` ✓
-—— 不假装知道里面是什么 ✓。
+⚠️ GGUF 此前只报「在/不在 + 大小」✗（读取器未实现 ✗）—— **已补齐** ✓（2026-09-20 ✓）：
+现在 ``.gguf`` 走 :mod:`.gguf` 真读取（张量表 / 截断 / ``general.file_type`` 方案名 ✓），
+与 safetensors 同一套「结构坏 ⇒ 阻断」口径 ✓。
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import inventory as inv
+from . import gguf as gguf_mod
 from . import safetensors as st
 
 __all__ = [
@@ -150,9 +152,25 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
         return plan
 
     if path.suffix.lower() == ".gguf":
-        plan.quantScheme = "gguf-unknown"
+        # ⚠️ 2026-09-20 起有**真读取器** ✓（此前只报 ``gguf-unknown`` ✗）：
+        #    量化方案名来自 ``general.file_type`` ✓（Q4_K_M 这类打包名只在元数据里 ✓），
+        #    截断 / 块不整除 / 重叠都进 ``problems`` ⇒ 与 safetensors 同一「阻断」口径 ✓。
+        ginfo = gguf_mod.inspect(path)
+        plan.verified = ginfo.ok
+        plan.tensorCount = ginfo.tensor_count
+        plan.dtypeClasses = dict(ginfo.dtype_counts)
+        plan.quantScheme = ginfo.quant_scheme
+        plan.computeDtype = (f"{ginfo.quant_scheme}（反量化由 ComfyUI-GGUF/llama.cpp 运行时完成 ✓）"
+                             if ginfo.quant_scheme not in ("none", "unknown") else ginfo.quant_scheme)
+        plan.problems.extend(ginfo.problems)
+        head, count, gaps = _block_gap_of(list(ginfo.tensors))
+        plan.blockHead, plan.blockCount = head, count
+        if gaps:
+            plan.problems.append(gaps)
         plan.loadMode = _mode_for(plan.bytes, capacity_gib)
-        plan.warnings.append("GGUF：本仓读取器未实现 ⇒ 只知道它多大、不知道里面是什么 ✗")
+        plan.readSecondsEstimate = round(plan.gib / ASSUMED_READ_GIBPS, 1)
+        if plan.quantScheme not in ("none", "unknown") and plan.loadMode != "full":
+            plan.warnings.append("量化权重 + 显存吃紧 ⇒ 请**逐层反量化**（别整份反量化后再放 ✗）")
         return plan
 
     info = st.inspect(path)
@@ -196,12 +214,17 @@ def _quant_of(info: st.SafetensorsInfo) -> tuple[str, str]:
 
 
 def _blocks_of(info: st.SafetensorsInfo) -> tuple[str | None, int, str]:
-    """找**层块**（``blocks.N.`` ✓）：返回 ``(头名, 层数, 问题描述)`` ✓。
+    """找**层块**（``blocks.N.`` ✓）：返回 ``(头名, 层数, 问题描述)`` ✓。"""
+    return _block_gap_of(list(info.tensors))
+
+
+def _block_gap_of(names: list[str]) -> tuple[str | None, int, str]:
+    """按张量名找**层块** ✓（safetensors 与 GGUF 两条路共用同一判据 ✓）。
 
     ⚠️ 这是**不依赖架构知识**的自洽性检查 ✓：数字段必须**从 0 开始且连续** ✓ ——
     有洞/重复几乎只有两种原因：**文件被截断** ✗ 或**权重被拼错** ✗，两者都该在加载前发现 ✓。
     """
-    groups = prefix_groups(list(info.tensors), depth=2)
+    groups = prefix_groups(names, depth=2)
     # 取「``<头>.<数字>``」这一族里的**最大一支**（例如 ``blocks.N`` 有 30 个 ⇒ 就是它 ✓）
     # ⚠️ 不写死 `blocks` ✗ —— 不同实现叫 `blocks` / `layers` / `transformer_blocks` ✓ 都得认 ✓
     tally: dict[str, list[int]] = {}

@@ -13,10 +13,12 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
@@ -34,6 +36,15 @@ def check(name: str, condition: object, detail: object = "") -> None:
 
 def skip(reason: str) -> None:
     _SKIPS.append(reason)
+
+
+def _raises(call: Any, needle: str | None = None) -> str | None:
+    """**能触发**的反向证明 ✓：调它、看报错里有没有那个词 ✓（没报错 ⇒ None ⇒ 断言红 ✓）。"""
+    try:
+        call()
+    except Exception as err:  # noqa: BLE001 —— 就是来看它报什么的 ✓
+        return str(err) if needle is None or needle in str(err) else None
+    return None
 
 
 TE_CONFIG = te_mod.TextEncoderConfig(vocab_size=512, hidden=32, depth=2, heads=4,
@@ -75,13 +86,17 @@ def case_config() -> None:
     check("⑥ 空文本 ⇒ 给一个 pad id ✓（不返回空列表 ⇒ 避免后续除零/空张量 ✗）",
           empty_ids == [0] and empty_original == 0 and empty_truncated is False, empty_ids)
 
-    try:
-        te_mod.HFTokenizer("不存在的仓库").encode("x")
-        hf_ok = False
-    except te_mod.TextEncoderError as err:
-        hf_ok = "transformers" in str(err) or "仓库" in str(err)
-    check("⑦ `transformers` 未装 ⇒ **可行动报错**（给出镜像安装提示 ✓ 并指向桩 tokenizer ✓）",
-          hf_ok)
+    # ⚠️ **两种世界都成立** ✓（本仓纪律：断言不许依赖「真机装没装」✗）：
+    #    未装 ⇒ 报「未安装 transformers ✓ + 镜像提示 ✓ + 指向 stub / 自研 BPE ✓」；
+    #    已装但仓库名坏 ⇒ 报「装载失败 ✓ + 核对仓库名 ✓ + 指向自研 BPE ✓」（**外部库的裸异常
+    #    不许漏出去** ✗ —— 2026-09-20 装上之后实测：HF 抛的是 `OSError: Repo id must use …` ✓✗）。
+    hf_message = _raises(lambda: te_mod.HFTokenizer("不存在的仓库").encode("x"))
+    check("⑦ 好坏两种世界都给**可行动**的 `TextEncoderError` ✓（安装提示 / 仓库核对 ✓，"
+          "且都指向 `stub` 或**自研 BPE** ✓ —— 不把外部库的裸异常漏出来 ✗）",
+          hf_message is not None
+          and ("transformers" in hf_message or "装载 HF 分词器失败" in hf_message)
+          and ("StubTokenizer" in hf_message or "自研 BPE" in hf_message),
+          hf_message)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -169,6 +184,50 @@ def case_integration(root: Path) -> None:
     check("⑱ 回报里带**截断信息** ✓（前端可据此提示「提示词被截了」✓）",
           "truncated" in positive and "tokens" in positive, {k: positive[k] for k in
                                                             ("tokens", "truncated")})
+
+    # ── ⭐ 真词表（**本仓自研 BPE** ✓ 2026-09-20）────────────────────────────
+    #    ⚠️ 这里用**合成词表**验接线 ✓（真词表随权重来 ✓ —— 自检不依赖它 ✓）。
+    from app.services.engine import tokenizer_bpe as tbp  # noqa: PLC0415
+    space = tbp.bytes_to_unicode()[32]           # ⚠️ 空格在 byte 映射里不是 `" "` ✓
+    vocab = {char: index for index, char in enumerate(sorted(tbp.bytes_to_unicode().values()))}
+    extra = 400
+    for token in ("he", "ll", "hell", "hello",
+                  f"{space}w", f"{space}wo", f"{space}wor", f"{space}worl", f"{space}world"):
+        vocab[token] = extra
+        extra += 1
+    merges = ["h e", "l l", "he ll", "hell o",
+              f"{space} w", f"{space}w o", f"{space}wo r", f"{space}wor l", f"{space}worl d"]
+    vocab["<|endoftext|>"] = 999                 # 特殊符 id 故意**很大** ✓（守嵌入表尺寸 ✓）
+    vocab_dir = root / "tokenizer"
+    vocab_dir.mkdir(parents=True, exist_ok=True)
+    (vocab_dir / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "BPE", "vocab": vocab, "merges": merges},
+        "added_tokens": [{"id": 999, "content": "<|endoftext|>", "special": True}],
+        "pre_tokenizer": {"type": "ByteLevel"},
+    }), encoding="utf-8")
+
+    real = backend.attach_text_encoder(tokenizer_path=str(vocab_dir))
+    check("⑲⁰ ⭐ **真词表**（HF 格式 ✓）直接挂上 ✓：`tokenizer=\"bpe\"` ✓ "
+          "（不再是 `stub` 假桩 ✗ —— `describe()` 一眼可辨 ✓）且词表口径随报告给出 ✓",
+          real["tokenizer"] == "bpe"
+          and real["tokenizerDetail"]["vocabSize"] == len(vocab)
+          and real["tokenizerDetail"]["backend"] == "own-bpe"       # ⭐ 走的是**自研**那条 ✓
+          and real["tokenizerDetail"]["detail"]["merges"] == len(merges)
+          and backend.describe()["tokenizer"] == "bpe", real)
+    check("⑲⁰′ ⭐ 不给 config 时 TE 的 `vocab_size` **自动取 `required_vocab_size`** ✓"
+          "（含特殊符 id 999 ⇒ ≥ 1000 ✓ —— 拿 `vocab_size`=262 建表会**越界** ✓✗）",
+          real["config"]["vocabSize"] >= 1000, real["config"])
+
+    encoded = backend.encode_text(pipe.GenerationRequest(prompt="hello world", steps=2))
+    check("⑲¹ ⭐ 走**真 BPE**：`hello world` ⇒ 2 个 token ✓（合并真的发生 ✓ 不是按字符 11 个 ✗）",
+          encoded["tokens"] == 2 and tuple(encoded["positive"].shape) == (1, 2, TE_CONFIG.output_dim),
+          (encoded["tokens"], tuple(encoded["positive"].shape)))
+
+    check("⑲² 嵌入表**装不下**分词器（含特殊符 id 999 ✓）⇒ **明确报错** ✓"
+          "（不静默截断 ✗ —— 越界往往到真跑才炸 ✓）",
+          _raises(lambda: backend.attach_text_encoder(
+              te_mod.TextEncoderConfig(vocab_size=100, output_dim=TE_CONFIG.output_dim),
+              tokenizer_path=str(vocab_dir)), "越界") is not None, None)
 
     check("⑲ VAE 也挂上 ✓", bool(backend.attach_vae(
         vae_mod.VideoVAEConfig(base_channels=8, latent_channels=4,

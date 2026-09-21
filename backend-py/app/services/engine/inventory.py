@@ -16,18 +16,26 @@
   ``size_gib`` / ``required`` ✓）；
 * 目录：``configs/model-paths.json`` 的 ``models_dir`` ✓（解析优先级由
   :func:`app.services.local_model_scan.get_model_paths` 统一提供 ✓ 与本仓其它地方同一份来源 ✓）；
-* 校验：:mod:`app.services.engine.safetensors`（纯 Python ✓）。
+* 校验：:mod:`app.services.engine.safetensors`（纯 Python ✓）与
+  :mod:`app.services.engine.gguf`（纯 Python ✓，2026-09-20 起支持 ✓）。
+* H3 键名核对：:mod:`app.services.engine.h3_keys`（纯 Python ✓ torch-free ✓
+  2026-09-20 起支持 ✓）—— 文件形态是 H3 时（`h3_form.looks_like_h3_form` ✓），
+  直接对照参考结构核「键全集 + 形状关系」✓（真权重到手**插上就验** ✓，
+  不用先建 50 层模型 ✗）。
 
-⚠️ **GGUF 只报「在/不在 + 大小」**✗（读取器未实现 ✓），并明确标注 ``verified: false`` ✓ ——
-不假装验过 ✓。
+⚠️ GGUF 此前只报「在/不在 + 大小」✗（读取器未实现 ✗）—— **已补齐** ✓（2026-09-20 ✓）：
+现在 ``.gguf`` 走 :mod:`.gguf` 真体检（张量表 / 截断 / 量化方案 ✓）。
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from ..local_model_scan import get_model_paths
+from . import gguf as gguf_mod
+from . import h3_form
+from . import h3_keys
 from . import safetensors as st
 
 __all__ = [
@@ -95,6 +103,31 @@ def component_path(entry: dict[str, Any], root: Path | None = None) -> Path | No
     return root / relative
 
 
+def _audit_h3_form(status: dict[str, Any], tensors: Mapping[str, Sequence[int] | None]) -> None:
+    """文件形态是 H3 时（`h3_form.looks_like_h3_form` ✓）做**键名核对** ✓（2026-09-20 起）。
+
+    好处：真权重到手那一刻就能答「这份 checkpoint 能不能装进 ``H3FormTrunk``」✓ ——
+    不用先建 50 层模型再让 ``load_module_weights`` 报 missing ✗。
+    核不通过（缺键 / 形状不符 / 结构矛盾）⇒ 进 ``problems`` ⇒ **阻断**就绪 ✓。
+    """
+    if not tensors or not h3_form.looks_like_h3_form(set(tensors)):
+        return
+    try:
+        audit = h3_keys.audit_h3_checkpoint(tensors)
+    except Exception as err:  # noqa: BLE001 —— 核对器自身炸了也是「结论」的一种 ✓
+        status["problems"].append(f"H3 键名核对器异常：{err}")
+        return
+    status["h3Audit"] = audit.to_dict()
+    status["problems"].extend(audit.problems)
+    for item in audit.missing[:6]:
+        status["problems"].append(f"H3 键名核对：缺 `{item}` ✗")
+    for item in audit.shape_mismatch[:4]:
+        status["problems"].append(
+            f"H3 键名核对：`{item['key']}` 形状 {item['got']} ≠ 期望 {item['expected']} ✗")
+    if not audit.ok:
+        status["verified"] = False
+
+
 def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
     """单个组件的体检结论（不抛错 ✓ —— 缺文件也是**结论**的一种 ✓）。"""
     path = component_path(entry, root)
@@ -126,8 +159,17 @@ def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[st
     status["present"] = True
 
     if path.suffix.lower() == ".gguf":
-        status["problems"].append("GGUF：本读取器只认 safetensors ⇒ 仅校了「在/不在 + 大小」✗")
-        status["verified"] = False
+        # ⚠️ 2026-09-20 起有**真读取器** ✓（此前只报「在/不在 + 大小」✗）⇒ 与 safetensors
+        #    同一口径：结构坏 ⇒ 阻断 ✗；量化方案名来自 ``general.file_type`` ✓。
+        info = gguf_mod.inspect(path)
+        status["problems"].extend(info.problems)
+        status["verified"] = info.ok
+        status["tensorCount"] = info.tensor_count
+        status["dtypeCounts"] = info.dtype_counts
+        status["quantScheme"] = info.quant_scheme
+        status["biggest"] = [{"name": t.name, "shape": t.shape, "dtype": t.type_name}
+                             for t in info.biggest(5)]
+        _audit_h3_form(status, {name: tensor.shape for name, tensor in info.tensors.items()})
     else:
         info = st.inspect(path)
         status["problems"].extend(info.problems)
@@ -136,6 +178,7 @@ def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[st
         status["dtypeCounts"] = info.dtype_counts
         status["biggest"] = [{"name": t.name, "shape": t.shape, "dtype": t.dtype}
                              for t in info.biggest(5)]
+        _audit_h3_form(status, {name: tensor.shape for name, tensor in info.tensors.items()})
 
     actual_gib = round(status["bytes"] / 1024 ** 3, 2)
     status["actualGiB"] = actual_gib

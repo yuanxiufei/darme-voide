@@ -143,10 +143,10 @@ def case_safetensors(root: Path) -> None:
           not st.inspect(weird).ok and any("dtype" in p for p in st.inspect(weird).problems),
           st.inspect(weird).problems)
 
-    # GGUF 与不存在 ✓
+    # GGUF 与不存在 ✓（safetensors 读取器拒收 .gguf ✓ —— GGUF 体检走 engine/gguf.py ✓）
     gguf = root / "x.gguf"
     gguf.write_bytes(b"GGUF" + b"\x00" * 32)
-    check("⑫ GGUF 明确说「读取器不实现」（不假装读过 ✓）",
+    check("⑫ safetensors 读取器对 .gguf 明确拒收（不假装读过 ✓）",
           any("GGUF" in p for p in st.inspect(gguf).problems), st.inspect(gguf).problems)
     check("⑬ 不存在的文件 ⇒ 有结论而不是抛异常 ✓",
           not st.inspect(root / "nope.safetensors").ok)

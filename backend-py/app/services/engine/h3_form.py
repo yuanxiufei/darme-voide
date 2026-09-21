@@ -5,10 +5,10 @@
 而 `dit.py` 是 ``(B, N, D)`` + 学习式 `pos_embed` + 单标量 σ ✓ —— 两者**不共用结构** ✗，
 硬塞进一个类只会两边都读不懂 ✓。
 
-⚠️⚠️ **本文件现在还没有调用方** ✗ —— 这一步**只交付"能独立自检的积木"** ✓：
-归一化 ✓ / MLP ✓ / 注意力 ✓ / 时间嵌入 ✓ / adaLN ✓ / refiner ✓ / 输出头 ✓。
-**forward 的接线还没做** ✗（打包网格 ✓ / RoPE 频率分配 ✓ / denoise mask ✓ / 输出头 bank ✓）
-⇒ 逐条列在 `H3_FORM_TODO` ✓ —— **不假装它已经是功能** ✗（本仓判据：**没人调用的库不算功能** ✓）。
+⚠️⚠️ 本文件的**调用方是 `TorchBackend`（H3 双流路径）** ✓（2026-09-20 起接线完毕 ✓）：
+主干前向 ✓ / 打包布局 ✓ / 采样循环 `sample_dual_stream` ✓ / PDD 头库 ✓ / 参考块四类 ✓
+（图 ✓ 音 ✓ 视频 ✓ 带音轨视频 ✓ ⇒ `H3_FORM_TODO` 已清零 ✓）。
+**还没核过真权重** ✗（机制已实现 ✓ ⇒ 缺口的权威清单在 `torch_backend.PENDING_PARTS` ✓）。
 
 事实来源：`dit.H3_SHAPE_FACTS` / `dit.H3_PACK_FACTS`（2026-09-20 从参考实现读全后核出 ✓）。
 ⚠️ 本文件的**代码是自己写的** ✓（不抄 ✗），只在**结构事实**（键名 / 形状 / 18 路 / 打包顺序 ✓）上对齐 ✓。
@@ -860,10 +860,11 @@ def _build_torch_parts() -> dict[str, Any]:
         """**H3 形态主干** ✓ —— 模块名与参考的 ``__init__`` **逐字对齐** ✓（可直接装它的权重 ✓）。
 
         ⚠️ 它**不是** `dit.py` 那个 DiT 的变体 ✗ —— 输入是 **2D 行**（``[S, 通道×patch]`` ✓ **无 batch 维** ✗）、
-        时间条件是**每 token 的 t** ✓、注意力是 RoPE ✓。**还没接线进管线** ✗（见 `H3_FORM_TODO` ✓）。
+        时间条件是**每 token 的 t** ✓、注意力是 RoPE ✓。已接线进管线 ✓（`TorchBackend` 双流路径 ✓）。
 
-        ⚠️ 仍未做（**明着留**✗）：``cond``/``refs`` 段 ✗、denoise mask ✗、输出头 bank（PDD ✓）、
-        ``unpatchify``/``unpack_audio`` 的**外层封装** ✗（本类只到「行级」为止 ✓）。
+        ⚠️ ``cond``/``refs`` 段 ✓、denoise mask ✓、输出头 bank（PDD ✓）都已实现 ✓；
+        ``unpatchify``/``unpack_audio`` 的**外层封装**也已有 ✓（`pipeline` → `write` ✓）。
+        ⚠️ 仍未核过**真权重** ✗（机制已实现 ✓ ⇒ 见 `torch_backend.PENDING_PARTS` ✓）。
         """
 
         def __init__(self, hidden: int = H3_DEFAULTS["hidden"], layers: int = H3_DEFAULTS["layers"],

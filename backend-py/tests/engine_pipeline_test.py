@@ -581,6 +581,20 @@ def case_torch_backend() -> None:
           status["ready"] or (bool(status["missing"])
                               and str(status["install"][0]).startswith("pip install ")),
           status["install"])
+    # ⭐ 必需 / 可选**分开答** ✓（2026-09-20 ✓）：可选项缺了**不能**把后端判死 ✗ ——
+    #    判据：本仓有等价的自研实现 ✓（如 `transformers` ↔ 自研 BPE `tokenizer_bpe.py` ✓）。
+    optional = [item["package"] for item in status["items"] if item.get("optional")]
+    check("②′''' ⭐ 依赖分**必需 / 可选**两栏 ✓：`transformers` 属可选 ✓ ⇒ 缺它只少一条通道 ✓"
+          "（混在一起会让「可选没装」把后端判死 ✗✗）",
+          "transformers" in optional
+          and set(status["missing"]).isdisjoint(optional)      # 可选缺 ⇒ **不进**必需缺失 ✓
+          and status["ready"] == (not status["missing"])       # `ready` 只看必需项 ✓
+          and isinstance(status.get("optionalMissing"), list)
+          and bool(status.get("installOptional")) == bool(status["optionalMissing"]),
+          (optional, status.get("optionalMissing"), status["missing"]))
+    transformers_entry = next(item for item in status["items"] if item["module"] == "transformers")
+    check("②″''' 可选项的 `purpose` 要写清**自研替代**在哪 ✓（免得后人以为少了它就不能分词 ✗）",
+          "自研 BPE" in transformers_entry["purpose"], transformers_entry["purpose"])
 
     # ── 闸门一：缺依赖（**模拟** ⇒ 与真机装没装无关 ✓ 永远可验 ✓）──────────
     original = tb.torch_available

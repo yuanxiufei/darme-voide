@@ -4,9 +4,14 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**94 套 / 3224 项 / 0 失败**（2026-09-20 ✓）；其后又**新增**
-`engine_h3_form_test` ✓ 与 `engine_dual_stream_test` ✓ ⇒ 套数 **96** ✓、总数**待实测** ✗
-（按规则**不推算** ✗ —— 跑一次全量即可补齐 ✓）。
+最近一次**全量实测**：**103 套 / 3540 项 / 0 失败**（2026-09-20 ✓ 引擎六项扩充后重跑 ✓ ——
+`engine_gguf_test` ✓ / `engine_h3_keys_test` ✓ / `engine_tokenizer_test` ✓ /
+`engine_tokenizer_hub_test` ✓ / `engine_tokenizer_own_test` ✓ / `engine_tokenizers_tuning_test` ✓；
+102 套按 `SUMMARY:` 收敛出 3540 项 ✓，另 1 套是常量守卫型
+（打印 `OK: 镜像常量漂移 0 条` ✓ 无项数 ✓））。
+⚠️ 上一轮：101 套 / 3516 项 ✓ —— 按规则**不推算** ✗，数字一律取自刚跑出来的汇总 ✓。
+⚠️ 自检**汇总行格式有硬要求** ✗：必须是 `SUMMARY: n/m passed` ✓（`run_all.py` 按这个前缀收敛项数 ✓）
+—— 写成「n/m 项通过」会在总表里显示**空摘要** ✓✗（2026-09-20 实测踩过 ✓ 已修 4 个套件 ✓）。
 ⚠️ 与上一轮（78 套 / 2806 项）**独立互证** ✓：2806 + 11（`safetensors_crosscheck_test` ✓）
 + 8（`engine_pipeline_test` 90 → 98 ✓）+ 26（`engine_dit_test` ✓）+ 39（`engine_io_test` ✓）
 + 21（`engine_text_test` ✓）= **2911** ✓✓（两条路径同一个数 ✓）。
@@ -133,14 +138,23 @@ TESTS = [
     ("自研引擎·权重体检（纯 Python 读 safetensors + 就绪报告；零依赖）", "engine_inventory_test.py"),
     ("自研引擎·管线编排（阶段/事件/取消/错误归因 + 干跑后端；零依赖）", "engine_pipeline_test.py"),
     ("自研引擎·加载计划（量化配套/层号连续性/显存排班；零依赖）", "engine_loader_test.py"),
+    ("自研引擎·GGUF 读取器（头格式/张量表/截断检测/量化方案名；零依赖）", "engine_gguf_test.py"),
+    ("自研引擎·H3 键名核对器（键全集/形状关系/PDD 头库/curve 变体；零依赖 torch-free）", "engine_h3_keys_test.py"),
+    ("自研引擎·BPE 分词器（真词表 tokenizer.json/vocab+merges；往返恒等；零依赖离线）", "engine_tokenizer_test.py"),
+    ("自研引擎·分词器总入口（形态嗅探/自研优先/参考回退/批量+LRU/离线开关；互校）", "engine_tokenizer_hub_test.py"),
+    ("自研引擎·自研 Unigram/WordPiece/Metaspace（Viterbi/fuse_unk/整词 UNK；与参考逐例同 id）",
+     "engine_tokenizer_own_test.py"),
+    ("自研引擎·transformers 运行时改造（离线兜底含 Auto 工厂/缓存目录/降噪/计数/可撤；幂等）",
+     "engine_tokenizers_tuning_test.py"),
     ("safetensors 交叉验证（纯 Python 读取器 vs 官方库；缺库则显式 SKIP）", "safetensors_crosscheck_test.py"),
     ("自研引擎·真模型层（DiT 前向/条件生效/权重往返/差异报告；CPU 可验）", "engine_dit_test.py"),
     ("自研引擎·H3 形态积木（RMSNorm / SwiGLU / 18 路 adaLN / 正弦时间嵌入 / RoPE 旋转不变量 / "
-     "双 fp32 输出头 —— ⚠️ **尚无调用方** ✗，见 `h3_form.H3_FORM_TODO`）", "engine_h3_form_test.py"),
+     "双 fp32 输出头 / PDD 头库 —— 已接进 `TorchBackend` 双流路径 ✓ `H3_FORM_TODO` 已清零 ✓）",
+     "engine_h3_form_test.py"),
     ("自研引擎·音频 VAE（32 kHz 立体声 ⇄ 潜变量；**真写 wav + 标准库读回核对** ✓）",
      "engine_audio_vae_test.py"),
-    ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；能力自述逐条报缺 / 取整口径必填 / "
-     "三条当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
+    ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；参考块四类入口 ✓ / 能力自述逐条报缺 / "
+     "取整口径必填 / 当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片）", "engine_io_test.py"),
     ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
     ("自研引擎·长视频分段（网格长度/重叠接缝/保留帧守恒 + 首帧落 PNG 传递）", "engine_segments_test.py"),
