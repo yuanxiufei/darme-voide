@@ -26,6 +26,6 @@ from __future__ import annotations
 
 __all__ = ["audio_vae", "conditioning", "dit", "dryrun", "geometry", "gguf", "guidance",
            "h3_form", "h3_keys", "inventory", "loader", "mappings", "media", "pipeline",
-           "safetensors", "sampler", "schedules", "segments", "text_encoder",
+           "quant", "safetensors", "sampler", "schedules", "segments", "text_encoder",
            "tokenizer_bpe", "tokenizer_hub", "tokenizer_own", "tokenizers_tuning",
            "torch_backend", "vae", "weights"]

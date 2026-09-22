@@ -23,13 +23,14 @@ ByteLevel-BPE** ✗）与 `HFTokenizer`（依赖 `transformers` ✓ 只覆盖「
   （三种模型共用一个包装 ✓）。⚠️ 自研实测出**两处容易搞反的语义** ✓：`BertNormalizer` 的
   `cf. clean_text` **不 trim / 不合并空格** ✓、`StripAccents` **不分解** ✓✗（而 BertNormalizer 的去重音
   **会**分解 ✓ —— 两处语义确实不同 ✓）；`Precompiled` **拒绝** ✓（要 SentencePiece charsmap 表 ✗）；
-* ⭐ **预分词器也扩到八种** ✓（2026-09-21 补 ✓）：`ByteLevel` / `Metaspace` / `BertPreTokenizer` ✓
+* ⭐ **预分词器已扩到十种** ✓（2026-09-21 补 ✓）：`ByteLevel` / `Metaspace` / `BertPreTokenizer` ✓
   + `Whitespace`（按**字母数字↔非字母数字边界**切 ✓ 连续非字母数字**留一起** ✓）/
   `WhitespaceSplit` / `Punctuation`（**5 种 behavior** ✓ 含 `removed`/`contiguous` ✓）/
-  `Digits`（两种口径 ✓）/ `CharDelimiterSplit` ✓ ⇒ 覆盖 **3 种模型 × 8 种预分词器** ✓；
-* ⭐ **参考实现回退** ✓：只剩自研**明确拒绝**的形态（`byte_fallback` ✗ —— 实测参考实现该配置下
-  **没走**字节回退 ✓ 语义未核清 ✓、`Precompiled` 等未实现 normalizer ✗、`Split` / `FixedLength` /
-  `UnicodeScripts` 等预分词器 ✗ —— 理由由 `tokenizer_own.own_support` 给出 ✓）才走 `transformers` ✓
+  `Digits`（两种口径 ✓）/ `CharDelimiterSplit` / `Split`（**5 种 behavior** ✓）/ `FixedLength` ✓
+  ⇒ 覆盖 **3 种模型 × 10 种预分词器** ✓；⭐ **`byte_fallback` 的 Unigram 也自研了** ✓（**段级判据** ✓）；
+* ⭐ **参考实现回退** ✓：只剩自研**明确拒绝**的形态（`Precompiled` 等未实现 normalizer ✗、
+  `UnicodeScripts` ✗（要 script 表 ✓ 标准库没有 ✓）、别的模型的 `byte_fallback` ✗、
+  `Split` 的空匹配正则 / `\p{…}` ✗ —— 理由由 `tokenizer_own.own_support` 给出 ✓）才走 `transformers` ✓
   （`tokenizers` Rust 后端 ✓）；两者都没有 ⇒ **明确报错**并给出安装命令 ✓
   （不静默换一个词表把文本编成一串"看着正常"的错 id ✗✗）；
 * ⭐ **性能优化** ✓：同文本 ``encode`` 走 **LRU 缓存** ✓（管线里同一提示词会被反复编码 ✓）、

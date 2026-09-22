@@ -134,6 +134,34 @@ def case_component(root: Path) -> None:
     check("⑨ 整份 bf16 的权重**不会**被要求有 scale（不误报 ✓）",
           naive_plan.quantScheme == "none" and naive_plan.problems == [],
           (naive_plan.quantScheme, naive_plan.problems))
+    check("⑨′ ⭐ 纯 bf16 ⇒ `dequantPlan.weights == 0` ✓（反量化计划**不虚报** ✓）",
+          naive_plan.dequantPlan["weights"] == 0 and naive_plan.dequantPlan["supported"] is False,
+          naive_plan.dequantPlan)
+
+    # ⭐⭐ 2026-09-22：**反量化能不能自动做**要在**体检阶段**就有结论 ✓（只靠形状 ✓ 不需要 torch ✓）
+    check("⑨″ ⭐⭐ fp8 + 配套 scale ⇒ 体检报告直接给出**自动反量化可行** ✓ 且标出布局 ✓"
+          "（`loader` 与 `quant` 用**同一套判据** ✗ —— 不然会出现「体检说能装、装载时被拒」✓✗）",
+          plan.dequantPlan["weights"] == 3 and plan.dequantPlan["paired"] == 3
+          and plan.dequantPlan["layouts"] == {"elementwise": 3}
+          and plan.dequantPlan["supported"] is True
+          and any("自动反量化" in item for item in plan.warnings),
+          (plan.dequantPlan, plan.warnings))
+
+    # ⚠️ 块量化的 scale 形状（[2,2] 对不上权重 [8,8] ✓）⇒ **体检就要拦下** ✓（装的时候会中止 ✓）
+    blocked = root / "blocked"
+    # ⚠️ 落点必须拼成 `<root>/diffusion_models/dit.safetensors` ✗（与 entry 的 `file_path` 一致 ✓）
+    #    —— 第一版直接写 `<root>/blocked/dit.safetensors` ⇒ 被当成「文件缺失」⇒ 早退 ⇒
+    #    `dequantPlan` 还是空的 `{}` ⇒ `KeyError` ✓✗（**同一个坑这仓已经注释过一次了** ✓ 我又踩 ✓）。
+    write_safetensors(blocked / "diffusion_models" / "dit.safetensors",
+                      {"blocks.0.attn.wq.weight": ("F8_E4M3", [8, 8]),
+                       "blocks.0.attn.wq.scale": ("F32", [2, 2])})
+    blocked_plan = ld.plan_component(entry, root=blocked)
+    check("⑨‴ ⚠️ 块量化（scale 形状对不上 ✓）⇒ 体检就报 problem 并点名「块量化」✓、"
+          "`supported=False` ✓（不等到装载才炸 ✓ —— group size 在随附 json 里 ✓ 本仓不猜 ✗）",
+          blocked_plan.dequantPlan["unresolvedCount"] == 1
+          and blocked_plan.dequantPlan["supported"] is False
+          and any("块量化" in item for item in blocked_plan.problems),
+          (blocked_plan.dequantPlan, blocked_plan.problems))
 
     # GGUF：2026-09-20 起有**真读取器** ✓（详见 engine_gguf_test.py ✓）
     # —— 垃圾 GGUF（GGUF + 全零 ✗）现在**真的去读** ⇒ 结构坏 ⇒ 阻断 ✓（不再是 `gguf-unknown` ✗）

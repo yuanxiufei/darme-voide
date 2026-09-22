@@ -33,7 +33,7 @@ from .engine import inventory as inv
 from .engine import loader as loader_mod
 from .engine import media as media_mod
 
-__all__ = ["collect", "precheck_weights", "summary", "next_steps", "planned_gib"]
+__all__ = ["collect", "precheck_weights", "quant_plan", "summary", "next_steps", "planned_gib"]
 
 
 def environment_report() -> dict[str, Any]:
@@ -67,6 +67,39 @@ def planned_gib(ready: dict[str, Any], *, only_missing: bool = False) -> float:
             continue
         total += float(item.get("expectedGiB") or 0.0)
     return total
+
+
+def quant_plan(load_plan: dict[str, Any]) -> dict[str, Any]:
+    """**低精度权重能不能自动还原** ✓（按组件 ✓ 结论取自 `loader.plan_stage` 的 `dequantPlan` ✓）。
+
+    ⚠️ 三种状态**分开说** ✗（本仓那条口径：**没查 ≠ 通过** ✓）：
+
+    * ``supported`` ✓：该组件里有低精度权重、且布局判得出来 ⇒ 附**布局计数** ✓；
+    * ``unsupported`` ✗：有低精度权重但**判不出来**（块量化 / 分组量化 / 缺 scale ✓）⇒ 装载时会被**中止** ✓
+      ⇒ 逐条点名 ✓（⚠️ GGUF **豁免** ✗：它的反量化由运行时做 ✓ 见 `dequantPlan["note"]` ✓）；
+    * ``notChecked`` ✓：组件**没下载** ⇒ `dequantPlan` 是空的 `{}` ✓ ⇒ 记这里 ✓（不是「通过」✗）。
+    """
+    supported: list[dict[str, Any]] = []
+    unsupported: list[dict[str, Any]] = []
+    not_checked: list[str] = []
+    for component in load_plan.get("components") or []:
+        key = str(component.get("key") or "")
+        detail = component.get("dequantPlan") or {}
+        if not detail:
+            if not component.get("present"):
+                not_checked.append(key)
+            continue
+        if detail.get("note"):
+            continue                                    # GGUF：反量化归运行时 ✓ 不算「装不上」✗
+        if detail.get("supported"):
+            supported.append({"key": key, "weights": detail.get("weights"),
+                              "layouts": detail.get("layouts")})
+        elif detail.get("weights"):
+            unsupported.append({"key": key, "weights": detail.get("weights"),
+                                "unresolved": detail.get("unresolved"),
+                                "unpaired": detail.get("unpaired"),
+                                "grouped": detail.get("grouped")})
+    return {"supported": supported, "unsupported": unsupported, "notChecked": not_checked}
 
 
 def precheck_weights(weights: str | None, tokenizer: str | None) -> dict[str, Any] | None:
@@ -128,6 +161,10 @@ def next_steps(report: dict[str, Any]) -> list[str]:
     if check is None and not missing:
         steps.append("权重已在盘上 ⇒ 加 `--weights <DiT 路径> [--tokenizer <词表目录>]` "
                      "跑**真权重预检** ✓")
+    for item in (report.get("quantPlan") or {}).get("unsupported") or []:
+        steps.append(f"`{item['key']}` 的低精度权重**要随附 json 的 group size** 才能反量化 ✓"
+                     f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓ "
+                     f"⇒ 本仓不猜 ✗；先换成**非分组**量化的重导出 ✓ 或把 group size 给出来 ✓）")
     if isinstance(check, dict) and (check.get("audit") or {}).get("ok"):
         steps.append("⭐ 权重核对通过 ✓ ⇒ 下一步在工作站：`TorchBackend.load_weights(path=…)` "
                      "→ `pipeline.run_sync(...)` ✓（本机无 NVIDIA 卡 ✗）")
@@ -164,6 +201,14 @@ def collect(*, weights: str | None = None, tokenizer: str | None = None,
             blockers.append("权重键名/形状核对**没通过** ✓ ⇒ 装不进去 ✓（细节见 `weightsCheck.audit` ✓）")
         if check.get("tokenizerError"):
             blockers.append(f"词表装不上：{check['tokenizerError']} ✓")
+    # ⭐ 低精度权重**能不能自动还原** ✓：在盘上、但布局判不出来 ⇒ 装载会被**中止** ✗ ⇒ 也是阻塞 ✓
+    #    ⚠️ 组件**没下载** ⇒ 记 `notChecked` ✓（**没查 ≠ 通过** ✗ —— 不阻塞、但也不假装绿 ✓）
+    report["quantPlan"] = quant_plan(plan)
+    for item in report["quantPlan"]["unsupported"]:
+        blockers.append(
+            f"`{item['key']}` 的低精度权重**判不出反量化布局** ✗ ⇒ 装载会中止 ✓"
+            f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓）"
+            f"⇒ 需要随附 json 里的 group size ✓ 本仓不猜 ✗")
     report["ready"] = bool(not blockers)
     report["blockers"] = blockers
     report["unchecked"] = ([] if check is not None else
@@ -206,6 +251,12 @@ def summary(report: dict[str, Any]) -> dict[str, Any]:
             "fits": residency.get("fits"),
             "strategy": residency.get("strategy"),
             "note": residency.get("note"),
+        },
+        #: ⭐ 低精度（fp8/int8）权重**能不能自动还原** ✓ —— 三档分开报 ✗（支持 / 不支持 / **没查** ✓）
+        "quant": {
+            "supported": report["quantPlan"]["supported"],
+            "unsupported": report["quantPlan"]["unsupported"],
+            "notChecked": report["quantPlan"]["notChecked"],
         },
         #: ⚠️ 真权重预检**要文件路径** ✗ ⇒ 不走 HTTP ✗（那等于开放任意路径读取 ✓✗）
         #: ⇒ 说明清楚「要更深的检查请用 CLI」✓（可行动 ✓ 而不是留个空白 ✓）。

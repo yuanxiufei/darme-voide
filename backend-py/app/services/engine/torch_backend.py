@@ -94,6 +94,10 @@ DEPENDENCIES: tuple[_Dependency, ...] = (
 #: 「TE → DiT → VAE → **真 mp4**」✓）。⇒ **真正缺的只有「真权重 + 真配置」** ✓：
 #: 机制齐了、权重没到 ✓ ⇒ `canGenerate=False` **依然正确** ✓（只是别把原因归到机制上 ✗）。
 PENDING_PARTS: tuple[str, ...] = (
+    "✅ **低精度权重能真装了** ✓（2026-09-22 ✓ `engine/quant.py` ✓）：fp8/int8 先按配套 scale **反量化** ✓"
+    "（布局**按形状**判 ✓ per-tensor / per-row / per-col / 逐元素 ✓；`*_scale_inv` 走除 ✓）"
+    "⇒ 再归一 dtype ✓ —— ⚠️ 此前是**直接 `to(bf16)`** ✗ ⇒ 尺度丢掉但**不报错** ✓✗（19.53 GiB 的主权重"
+    "就是 fp8 ✓）。⚠️ 判不出来（块量化 / 分组量化 / 缺 scale / scale 含 0 ✓）⇒ **中止装载** ✓ 不按猜的算 ✗。",
     "H3 真权重未下载（主 DiT 19.53 GiB ✗ ⇒ **上机前先跑一次** "
     "`python app/scripts/h3_readiness.py` ✓ —— 它把依赖 / 权重就绪 / 加载计划 / "
     "**真权重预检（键名核对 + 结构推导）+ 词表** 串成一次调用 ✓ "

@@ -24,6 +24,7 @@ BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
+from app.services.engine import tokenizer_hub as hub_mod  # noqa: E402
 from app.services.engine import tokenizer_own as own  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -139,10 +140,16 @@ def case_support(root: Path) -> None:
           supported.ok and "BertNormalizer" in supported.reason
           and not rejected.ok and "Nmt" in rejected.reason,
           (supported.reason, rejected.reason))
-    fallback = own.own_support({"modelType": "Unigram", "preTokenizer": "Metaspace",
-                                "byteFallback": True}).reason
-    check("③ `byte_fallback` ⇒ 拒绝并说明 ✓（按字节兜底表尚未实现 ✓ 不假装能跑 ✗）",
-          "byte_fallback" in fallback, fallback)
+    # ⚠️ **口径改过** ✗（2026-09-21 第二轮 ✓）：`Unigram` 的字节回退**已实现** ✓ ⇒ 现在**能接** ✓；
+    #    只有**别的模型**的 `byte_fallback` 仍拒绝 ✓（触发条件与 Unigram 不同 ✓ 未核清 ✓）。
+    unigram_fallback = own.own_support({"modelType": "Unigram", "preTokenizer": "Metaspace",
+                                        "byteFallback": True})
+    bpe_fallback = own.own_support({"modelType": "BPE", "preTokenizer": "ByteLevel",
+                                    "byteFallback": True}).reason
+    check("③ `byte_fallback` 分两档 ✓：`Unigram` **能接** ✓（判据逐条实测过 ✓）；"
+          "别的模型**拒绝并说明理由** ✓（触发条件未核清 ✓ 不假装能跑 ✗）",
+          unigram_fallback.ok and "byte_fallback" in bpe_fallback,
+          (unigram_fallback.reason, bpe_fallback))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -465,6 +472,85 @@ def case_split_and_fixed(root: Path) -> None:
           (split_reason, split_raised, length_reason, length_raised))
 
 
+def case_byte_fallback(root: Path) -> None:
+    """⭐⭐ **字节回退**（2026-09-21 第二轮 ✓）：判据全部实测 ✓ —— 与参考**逐例同 id** ✓。
+
+    ⚠️ 第一轮曾把它判成「语义未核清 ⇒ 拒绝」✗：那时的实测**少了前置条件** ✗（词表里**没有**
+    `<0xNN>` 字节 token ✓✗ —— 没有字节 token 当然回退不出去 ✓）。补齐字节 token 再测 ⇒ 真走回退 ✓。
+    """
+    tokenizers = reference_module()
+    if tokenizers is None:
+        check("㉖ 参考实现没装 ⇒ 字节回退对照跳过 ✓（不是失败 ✗）", True, "skipped")
+        return
+    from tokenizers import Tokenizer  # noqa: PLC0415
+    from tokenizers import models as ref_models  # noqa: PLC0415
+    from tokenizers import pre_tokenizers as ref_pre  # noqa: PLC0415
+
+    zhong_bytes = [f"<0x{byte:02X}>" for byte in "中".encode("utf-8")]
+
+    def build(label: str, extra: dict[str, float], *, fallback: bool = True) -> tuple[Any, Any]:
+        """同一份词表 ⇒ **自研**（内存里直接建 ✓）与**参考**（存盘再读 ✓）两边 ✓。"""
+        entries: dict[str, float] = {"<unk>": -10.0, "a": -1.0, "▁": -2.0, **extra}
+        vocab = [(token, score) for token, score in entries.items()]   # ⚠️ 参考实现要**元组** ✗
+        theirs = Tokenizer(ref_models.Unigram(vocab, unk_id=0, byte_fallback=fallback))
+        theirs.pre_tokenizer = ref_pre.Metaspace(replacement="▁")
+        target = root / f"bf_{label}"
+        target.mkdir(parents=True, exist_ok=True)
+        theirs.save(str(target / "tokenizer.json"))
+        hub = hub_mod.load(hub_mod.HubConfig(path=str(target)))
+        return hub, theirs
+
+    # ⚠️ 冲**段级判据**去的用例 ✗（2026-09-21 实测 ✓）：`'中x'`/`'a中x'`/`'中中x'` 都是「段里有一个
+    #    字符回退不了 ⇒ **整段**一个 `unk`」✓（`'a'` 这种词表能匹配的字符**照常保留** ✓）。
+    texts = ["中", "a中", "中中", "中 a", "中 ", "中\t中", "a", "▁",
+             "中x", "x中", "a中x", "中xa", "aa中xaa", "中中x"]
+
+    full, full_ref = build("full", {token: -5.0 - index
+                                    for index, token in enumerate(zhong_bytes)})
+    mismatched = {text: (full.encode(text, add_special_tokens=False),
+                         list(full_ref.encode(text).ids))
+                  for text in texts
+                  if full.encode(text, add_special_tokens=False) != list(full_ref.encode(text).ids)}
+    check("㉖ ⭐⭐ **字节回退走自研** ✓（`backend=own-unigram` ✓）且与参考**逐例同 id** ✓"
+          "（`'中'` ⇒ ``▁`` + 三个 ``<0xE4><0xB8><0xAD>`` ✓；`'中中'` ⇒ **6 个字节** ✓ 逐字符展开 ✓；"
+          "⚠️ **段级**判据 ✓：`'中x'` ⇒ 整段一个 `unk` ✓（`'中'` **也不**展开 ✓✗）、`'a中x'` ⇒ "
+          "`[▁, a, unk]` ✓（词表能匹配的 `a` 照常保留 ✓）—— 14 例 ✓）",
+          full.backend == "own-unigram" and not mismatched, (full.backend, mismatched))
+
+    detail = full._impl.describe()                                          # noqa: SLF001
+    check("㉗ 自证：`describe()` 能读出**开没开** + 词表里有**几个**字节 token ✓"
+          "（把参考出的字节 id 与自研逐位比 ✓ —— 这条让第 ㉖ 条不是碰巧 ✓）",
+          detail["byteFallback"] is True and detail["byteTokens"] == 3
+          and full.encode("中", add_special_tokens=False)
+          == [full._impl.vocab["▁"]] + [full._impl.vocab[token]               # noqa: SLF001
+                                        for token in zhong_bytes],
+          detail)
+
+    partial, partial_ref = build("partial", {zhong_bytes[0]: -5.0})
+    partial_got = partial.encode("中", add_special_tokens=False)
+    check("㉘ ⚠️ **缺任意一个字节 ⇒ 回退不了** ✓（只给 `<0xE4>` 时 `'中'` 与参考一致**出 `unk`** ✓"
+          "而不是只出 `<0xE4>` ✓✗—— 判据是「**每个**字节都得有 token」✓）",
+          partial_got == list(partial_ref.encode("中").ids)
+          and partial_got == [partial._impl.vocab["▁"], partial._impl.unk_id],        # noqa: SLF001
+          (partial_got, list(partial_ref.encode("中").ids)))
+
+    bogus, bogus_ref = build("bogus", {"<0xZZ>": -5.0})
+    bogus_got = bogus.encode("中", add_special_tokens=False)
+    check("㉙ 「怪名字」不算字节 token ✓（`<0xZZ>` ⇒ 与参考一致出 `unk` ✓ —— 只认 `<0x` + "
+          "**两位十六进制** ✓，且 `describe()` 里字节 token 数为 0 ✓）",
+          bogus_got == list(bogus_ref.encode("中").ids)
+          and bogus._impl.describe()["byteTokens"] == 0,                             # noqa: SLF001
+          (bogus_got, list(bogus_ref.encode("中").ids)))
+
+    off, off_ref = build("off", {token: -5.0 - index for index, token in enumerate(zhong_bytes)},
+                         fallback=False)
+    off_got = off.encode("中", add_special_tokens=False)
+    check("㉚ 关掉 `byte_fallback` ⇒ 与参考一致**出 `unk`** ✓（⇒ 第 ㉖ 条比的是真行为 ✓ 不是恒真 ✓）",
+          off_got == list(off_ref.encode("中").ids)
+          and off_got == [off._impl.vocab["▁"], off._impl.unk_id],                    # noqa: SLF001
+          (off_got, list(off_ref.encode("中").ids)))
+
+
 def case_reject(root: Path) -> None:
     """「自研明确拒绝」的几条路 ✓（⚠️ 夹具的语义要**跟着能力走** ✗ —— 见下面注释 ✓）。"""
     # ⚠️ 覆盖面变了 ✗：带 `normalizer` 的词表**现在能走自研** ✓ ⇒ 拒绝用例换成**没实现**的
@@ -500,6 +586,7 @@ def main() -> int:
         case_normalizer(root)
         case_pretokenizers(root)
         case_split_and_fixed(root)
+        case_byte_fallback(root)
         case_performance(root)
         case_reject(root)
     failed = [item for item in _RESULTS if not item[1]]

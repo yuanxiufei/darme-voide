@@ -98,12 +98,13 @@ def write_wordpiece(root: Path) -> Path | None:
 
 
 def write_refused_form(root: Path) -> Path | None:
-    """**自研明确拒绝**的形态 ✓ —— 现在是 `byte_fallback` 的 Unigram ✓（2026-09-21 ✓：
+    """**自研明确拒绝**的形态 ✓ —— 现在是 `UnicodeScripts` 预分词器 ✓（2026-09-21 ✓）：
 
-    ⚠️ 此前这里用的是「带 `normalizer` 的 WordPiece」✗ —— 但 normalizer **已经自研**了 ✗
-    ⇒ 那个夹具现在走自研 ✓，不能再当回退用例 ✓（**判据跟着能力走** ✓）。
-    ``byte_fallback`` 仍是拒绝项 ✓：实测参考实现该配置下**没走**字节回退 ✓（未知字符仍出 `unk` ✓）
-    ⇒ 语义未核清 ⇒ 不硬套 ✓。
+    ⚠️ **判据跟着能力走** ✗（这个夹具换过三次 ✓）：最早是「带 `normalizer` 的 WordPiece」✗
+    ⇒ normalizer 自研后失效 ✓；后来用 `byte_fallback` 的 Unigram ✗ ⇒ **字节回退自研后也失效** ✓
+    （而且当初的拒绝理由本身是错的 ✗ —— 那次实测**少了前置条件**：词表里没有 `<0xNN>` 字节 token ✓）。
+    现在用 `UnicodeScripts` ✓：它要 **Unicode script 表** ✓ 而**标准库没有** ✗（装 `regex` 才有 ✓
+    但本仓不引 ✓）⇒ 自研**明确拒绝** ✓、参考实现支持 ✓ ⇒ 是干净的「回退」用例 ✓。
     """
     try:
         from tokenizers import Tokenizer  # noqa: PLC0415
@@ -114,8 +115,8 @@ def write_refused_form(root: Path) -> Path | None:
     target = root / "refused"
     target.mkdir(parents=True, exist_ok=True)
     vocab = [("<unk>", 0.0), ("▁hello", -1.0), ("▁h", -2.0), ("e", -2.5), ("llo", -2.6)]
-    tokenizer = Tokenizer(ref_models.Unigram(vocab, unk_id=0, byte_fallback=True))
-    tokenizer.pre_tokenizer = ref_pre.Metaspace(replacement="▁")
+    tokenizer = Tokenizer(ref_models.Unigram(vocab, unk_id=0))
+    tokenizer.pre_tokenizer = ref_pre.UnicodeScripts()
     tokenizer.save(str(target / "tokenizer.json"))
     return target
 
@@ -218,8 +219,8 @@ def case_fallback(root: Path) -> None:
         check("⑩ 参考实现没装 ⇒ 回退用例跳过 ✓", True, "skipped")
         return
     hub = hub_mod.load(hub_mod.HubConfig(path=str(refused)))
-    check("⑩ ⭐ **回退只在「自研拒绝」时发生** ✓：`byte_fallback` 的 Unigram"
-          "（语义未核清 ✓）⇒ 走参考实现 ✓ 且**真能编出 id** ✓",
+    check("⑩ ⭐ **回退只在「自研拒绝」时发生** ✓：`UnicodeScripts` 预分词器"
+          "（要 script 表 ✓ 标准库没有 ✗）⇒ 走参考实现 ✓ 且**真能编出 id** ✓",
           hub.backend == "transformers" and len(hub.encode("hello world")) > 0
           and any("回退" in note for note in hub.notes),
           (hub.backend, hub.encode("hello world"), hub.notes))
@@ -228,8 +229,8 @@ def case_fallback(root: Path) -> None:
     check("⑫ 回退也**如实报形态** ✓（模型 + 预分词 + **展平后的 normalizer 列表** ✓ + "
           "`byteFallback` ✓ —— 判据跟着能力走 ✓）",
           hub.detail["form"]["modelType"] == "Unigram"
-          and hub.detail["form"]["preTokenizer"] == "Metaspace"
-          and hub.detail["form"]["byteFallback"] is True
+          and hub.detail["form"]["preTokenizer"] == "UnicodeScripts"
+          and hub.detail["form"]["byteFallback"] is False
           and hub.detail["form"]["normalizerTypes"] == [], hub.detail)
 
     # ⚠️ 反向证明：**同一份**词表，参考实现「没装」⇒ 必须**报错并给命令** ✓（不静默换实现 ✗）
@@ -241,7 +242,7 @@ def case_fallback(root: Path) -> None:
         hub_mod.reference_available = original  # type: ignore[assignment]
     check("⑬ 自研拒绝该形态 + 参考实现没装 ⇒ **报错 + 可执行安装命令 + 拒绝理由** ✓"
           "（绝不静默换一个词表 ✓✗）",
-          message is not None and "pip install" in message and "byte_fallback" in message,
+          message is not None and "pip install" in message and "UnicodeScripts" in message,
           message)
 
 
@@ -299,6 +300,27 @@ def case_own_three_families(root: Path) -> None:
     check("㉙ `\\p{…}` 正则（标准库**没有** ✗）⇒ **带理由拒绝** ✓（回退参考实现 ✓）"
           "—— 不静默按错的语义切 ✓✗",
           support.ok is False and "\\p{" in support.reason, support.reason)
+
+    # ⭐ 字节回退**也能自研**了 ✓（2026-09-21 第二轮 ✓ —— 此前它被当成「回退用例」✗ 见上面的注释 ✓）
+    bf_dir = root / "byte_fallback"
+    bf_dir.mkdir(parents=True, exist_ok=True)
+    from tokenizers import Tokenizer as RefTokenizer  # noqa: PLC0415
+    from tokenizers import models as ref_models  # noqa: PLC0415
+    from tokenizers import pre_tokenizers as ref_pre  # noqa: PLC0415
+    bf_vocab = [("<unk>", -10.0), ("a", -1.0), ("▁", -2.0)]
+    bf_vocab += [(f"<0x{byte:02X}>", -5.0 - index)
+                 for index, byte in enumerate("中".encode("utf-8"))]
+    ref_tok = RefTokenizer(ref_models.Unigram(bf_vocab, unk_id=0, byte_fallback=True))
+    ref_tok.pre_tokenizer = ref_pre.Metaspace(replacement="▁")
+    ref_tok.save(str(bf_dir / "tokenizer.json"))
+    bf_hub = hub_mod.load(hub_mod.HubConfig(path=str(bf_dir)))
+    check("㉚ ⭐ **`byte_fallback` 也走自研** ✓（`own-unigram` ✓ —— **不再**是回退用例 ✓）"
+          "且与参考**逐例同 id** ✓（含 `'中'`/`'中中'`/`'中x'` ✓ —— 段级判据 ✓）",
+          bf_hub.backend == "own-unigram"
+          and all(bf_hub.encode(text, add_special_tokens=False) == list(ref_tok.encode(text).ids)
+                  for text in ("中", "中中", "a中", "中x", "a中x")),
+          (bf_hub.backend, bf_hub.encode("中x", add_special_tokens=False),
+           list(ref_tok.encode("中x").ids)))
 
 
 def case_optimizations(root: Path) -> None:

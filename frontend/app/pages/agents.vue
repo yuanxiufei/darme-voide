@@ -92,7 +92,7 @@
                       </span>
                       <span class="dim skill-picker-id">{{ s.id }}</span>
                     </span>
-                    <span class="skill-bind-chars">{{ fmtChars(s.charCount) }}</span>
+                    <span class="skill-bind-chars">{{ fmtChars(s.charCount ?? 0) }}</span>
                     <Plus :size="12" />
                   </button>
                 </div>
@@ -173,20 +173,25 @@ import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { agentConfigAPI, aiConfigAPI, skillsAPI } from '~/composables/useApi'
 
+// ⚠️⚠️ 2026-09-21：这里所有 `ref([])` 都改成**显式泛型** ✗ ——
+//      `ref([])` 推出来是 **`never[]`** ✗（元素 `never` ⇒ 下面每个属性访问都报 TS2339 ✓✗），
+//      一趟类型检查能冒出来近百条 ✓。形状取自 `~contracts`（**后端是权威** ✓，本文件是镜像 ✓）。
+import type { AgentConfigVO, AiServiceConfigVO, SkillBinding, SkillVO } from '~contracts'
+
 // ===== Agent Configs =====
-const agentCfgs = ref([])
-const editingAgent = ref(null)
+const agentCfgs = ref<AgentConfigVO[]>([])
+const editingAgent = ref<string | null>(null)
 const agentSaving = ref(false)
-const agentSaved = ref(null)
+const agentSaved = ref<string | null>(null)
 const agentForm = reactive({ model: '', temperature: 0.7, max_tokens: 4096, system_prompt: '' })
-const agentSkillBindings = ref([])   // 当前编辑中的 Agent 的 Skill 绑定 [{ id, enabled, priority }]
-const availableSkills = ref([])      // 全局可用 Skill 列表 { id, name, description, charCount, category }[]
+const agentSkillBindings = ref<SkillBinding[]>([])   // 当前编辑中的 Agent 的 Skill 绑定
+const availableSkills = ref<SkillVO[]>([])           // 全局可用 Skill 列表
 const skillCharBudget = ref(0)       // 注入体量硬闸（来自 /skills/meta，超出的 Skill 会被静默跳过）
-const skillDragFrom = ref(null)      // 拖拽起始索引
-const skillDragOverIdx = ref(null)   // 当前悬停索引
+const skillDragFrom = ref<number | null>(null)   // 拖拽起始索引
+const skillDragOverIdx = ref<number | null>(null)   // 当前悬停索引
 const showSkillPicker = ref(false)   // 「添加 Skill」候选面板是否展开
 const skillPickerQuery = ref('')     // 候选面板搜索词（外部库近 30 个，必须可搜）
-const cfgs = ref([])
+const cfgs = ref<AiServiceConfigVO[]>([])
 
 // 出厂默认配置由后端下发（GET /agent-configs/defaults），单一事实来源：
 //   提示词 = backend/src/agents/index.ts 的 DEFAULT_PROMPTS
@@ -219,7 +224,7 @@ const agentDefs = [
 ]
 
 
-function getAgentCfg(type) {
+function getAgentCfg(type: string): AgentConfigVO | undefined {
   return agentCfgs.value.find(a => a.agent_type === type)
 }
 
@@ -242,7 +247,7 @@ const textModelSelectOptions = computed(() =>
 
 async function loadAgents() {
   try { agentCfgs.value = await agentConfigAPI.list() }
-  catch (e) { toast.error(e.message) }
+  catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 
 async function loadCfgs() {
@@ -254,7 +259,7 @@ async function loadCfgs() {
 async function loadAgentDefaults() {
   try {
     const list = await agentConfigAPI.defaults()
-    agentDefaults.value = Object.fromEntries((list || []).map((d) => [d.agent_type, d]))
+    agentDefaults.value = Object.fromEntries((list || []).map((d: AgentConfigVO) => [d.agent_type, d]))
   } catch (e) { /* 非关键：取不到时回显为空，「恢复默认」保持原值 */ }
 }
 
@@ -317,7 +322,7 @@ function fmtChars(n: number): string {
   return v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v)
 }
 
-function toggleAgentEdit(type) {
+function toggleAgentEdit(type: string) {
   closeSkillPicker()
   if (editingAgent.value === type) { editingAgent.value = null; agentSkillBindings.value = []; return }
   const cfg = getAgentCfg(type)
@@ -347,17 +352,17 @@ function toggleAgentEdit(type) {
   editingAgent.value = type
 }
 
-function resetAgentPrompt(type) {
+function resetAgentPrompt(type: string) {
   agentForm.system_prompt = defaultInstructions(type) || agentForm.system_prompt
   toast.info('已恢复默认提示词，点击保存生效')
 }
 
-function resetAgentSkills(type) {
+function resetAgentSkills(type: string) {
   agentSkillBindings.value = toBindings(defaultSkillIds(type))
   toast.info('已恢复默认 Skill 绑定，点击保存生效')
 }
 
-function getSkillName(skillId) {
+function getSkillName(skillId: string) {
   return availableSkills.value.find(s => s.id === skillId)?.name
 }
 
@@ -400,17 +405,17 @@ function removeSkillBinding(idx: number) {
   toast.info(`已移除「${getSkillName(removed.id) || removed.id}」，保存后生效`)
 }
 
-function onSkillDragStart(idx, e) {
+function onSkillDragStart(idx: number, e: DragEvent) {
   skillDragFrom.value = idx
   if (e?.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', String(idx))
   }
 }
-function onSkillDragOver(idx) {
+function onSkillDragOver(idx: number) {
   skillDragOverIdx.value = idx
 }
-function onSkillDrop(idx) {
+function onSkillDrop(idx: number) {
   const from = skillDragFrom.value
   if (from == null || from === idx) { skillDragOverIdx.value = null; return }
   const list = [...agentSkillBindings.value]
@@ -424,7 +429,7 @@ function onSkillDragEnd() {
   skillDragOverIdx.value = null
 }
 
-async function saveAgentCfg(type) {
+async function saveAgentCfg(type: string) {
   agentSaving.value = true
   agentSaved.value = null
   try {
@@ -450,7 +455,7 @@ async function saveAgentCfg(type) {
     toast.success(`${agentDefs.find(a => a.type === type)?.label} 配置已保存`)
     setTimeout(() => { if (agentSaved.value === type) agentSaved.value = null }, 3000)
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   } finally {
     agentSaving.value = false
   }

@@ -734,7 +734,7 @@
                     <label class="field">
                       <span class="field-label">标题</span>
                       <input :value="selectedSb.title || ''" class="input"
-                        @blur="updateField(selectedSb, 'title', $event.target.value)" placeholder="如：雪地逼近" />
+                        @blur="updateField(selectedSb, 'title', formValue($event))" placeholder="如：雪地逼近" />
                     </label>
                     <label class="field">
                       <span class="field-label">景别</span>
@@ -743,7 +743,7 @@
                         :value="selectedSb.shot_type || selectedSb.shotType || ''"
                         class="input"
                         placeholder="选择或输入景别"
-                        @change="updateField(selectedSb, 'shot_type', $event.target.value)"
+                        @change="updateField(selectedSb, 'shot_type', formValue($event))"
                       />
                       <datalist id="shot-type-list">
                         <option v-for="t in shotTypes" :key="t" :value="t" />
@@ -756,7 +756,7 @@
                         :value="selectedSb.angle || ''"
                         class="input"
                         placeholder="选择或输入角度"
-                        @change="updateField(selectedSb, 'angle', $event.target.value)"
+                        @change="updateField(selectedSb, 'angle', formValue($event))"
                       />
                       <datalist id="shot-angle-list">
                         <option v-for="t in shotAngles" :key="t" :value="t" />
@@ -769,7 +769,7 @@
                         :value="selectedSb.movement || ''"
                         class="input"
                         placeholder="选择或输入运镜"
-                        @change="updateField(selectedSb, 'movement', $event.target.value)"
+                        @change="updateField(selectedSb, 'movement', formValue($event))"
                       />
                       <datalist id="shot-movement-list">
                         <option v-for="t in shotMovements" :key="t" :value="t" />
@@ -798,7 +798,7 @@
                           <select
                             class="input costume-picker-select"
                             :value="getStoryboardCharacterCostume(selectedSb, char.id)"
-                            @change="setStoryboardCharacterCostume(selectedSb, char.id, $event.target.value)"
+                            @change="setStoryboardCharacterCostume(selectedSb, char.id, formValue($event))"
                           >
                             <option value="">默认形象</option>
                             <option v-for="c in charCostumeOptions(char)" :key="c" :value="c">{{ c }}</option>
@@ -809,7 +809,7 @@
                     <label class="field">
                       <span class="field-label">绑定场景</span>
                       <select class="input" :value="selectedSb.scene_id || selectedSb.sceneId || ''"
-                        @change="updateField(selectedSb, 'scene_id', $event.target.value ? Number($event.target.value) : null)">
+                        @change="updateField(selectedSb, 'scene_id', formValue($event) ? Number(formValue($event)) : null)">
                         <option value="">未绑定场景</option>
                         <option v-for="scene in scenes" :key="scene.id" :value="scene.id">
                           {{ scene.location }} · {{ scene.time || '未设时间' }}
@@ -819,17 +819,17 @@
                     <label class="field">
                       <span class="field-label">地点</span>
                       <input :value="selectedSb.location || ''" class="input"
-                        @blur="updateField(selectedSb, 'location', $event.target.value)" placeholder="场景地点" />
+                        @blur="updateField(selectedSb, 'location', formValue($event))" placeholder="场景地点" />
                     </label>
                     <label class="field">
                       <span class="field-label">时间</span>
                       <input :value="selectedSb.time || ''" class="input"
-                        @blur="updateField(selectedSb, 'time', $event.target.value)" placeholder="如：深夜 / 清晨" />
+                        @blur="updateField(selectedSb, 'time', formValue($event))" placeholder="如：深夜 / 清晨" />
                     </label>
                     <label class="field">
                       <span class="field-label">时长</span>
                       <input :value="selectedSb.duration || 10" class="input" type="number" min="1" max="60"
-                        @blur="updateField(selectedSb, 'duration', Number($event.target.value))" />
+                        @blur="updateField(selectedSb, 'duration', Number(formValue($event)))" />
                     </label>
                   </div>
                 </div>
@@ -848,30 +848,30 @@
                         </button>
                       </span>
                       <textarea :value="selectedSb.action || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'action', $event.target.value)" placeholder="谁在做什么，表情和动作细节是什么" />
+                        @blur="updateField(selectedSb, 'action', formValue($event))" placeholder="谁在做什么，表情和动作细节是什么" />
                     </label>
                     <label class="field">
                       <span class="field-label">结果</span>
                       <textarea :value="selectedSb.result || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'result', $event.target.value)" placeholder="镜头结束时的状态变化或画面结果" />
+                        @blur="updateField(selectedSb, 'result', formValue($event))" placeholder="镜头结束时的状态变化或画面结果" />
                     </label>
                   </div>
                   <div class="field-grid field-grid-2">
                     <label class="field">
                       <span class="field-label">画面描述</span>
                       <textarea :value="selectedSb.description || ''" class="textarea" rows="4"
-                        @blur="updateField(selectedSb, 'description', $event.target.value)" placeholder="描述画面内容..." />
+                        @blur="updateField(selectedSb, 'description', formValue($event))" placeholder="描述画面内容..." />
                     </label>
                     <label class="field">
                       <span class="field-label">氛围</span>
                       <textarea :value="selectedSb.atmosphere || ''" class="textarea" rows="4"
-                        @blur="updateField(selectedSb, 'atmosphere', $event.target.value)" placeholder="光线、色调、空气感、环境氛围" />
+                        @blur="updateField(selectedSb, 'atmosphere', formValue($event))" placeholder="光线、色调、空气感、环境氛围" />
                     </label>
                   </div>
                   <label class="field">
                     <span class="field-label">对白 / 旁白</span>
                     <textarea :value="selectedSb.dialogue || ''" class="textarea" rows="3"
-                      @blur="updateField(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容 或 旁白：内容" />
+                      @blur="updateField(selectedSb, 'dialogue', formValue($event))" placeholder="角色名：台词内容 或 旁白：内容" />
                   </label>
                 </div>
                 <div class="detail-section">
@@ -883,37 +883,37 @@
                     <label class="field">
                       <span class="field-label">开始状态</span>
                       <textarea :value="selectedSb.start_state || selectedSb.startState || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'start_state', $event.target.value)" placeholder="如：角色_林晚=站在门口左侧，面朝屋内" />
+                        @blur="updateField(selectedSb, 'start_state', formValue($event))" placeholder="如：角色_林晚=站在门口左侧，面朝屋内" />
                     </label>
                     <label class="field">
                       <span class="field-label">结束状态</span>
                       <textarea :value="selectedSb.end_state || selectedSb.endState || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'end_state', $event.target.value)" placeholder="如：角色_林晚=走到桌旁坐下" />
+                        @blur="updateField(selectedSb, 'end_state', formValue($event))" placeholder="如：角色_林晚=走到桌旁坐下" />
                     </label>
                   </div>
                   <label class="field">
                     <span class="field-label">逐镜禁止变化</span>
                     <textarea :value="selectedSb.constraints || ''" class="textarea" rows="2"
-                      @blur="updateField(selectedSb, 'constraints', $event.target.value)" placeholder="如：服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变" />
+                      @blur="updateField(selectedSb, 'constraints', formValue($event))" placeholder="如：服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变" />
                   </label>
                   <div class="field-grid field-grid-2">
                     <label class="field">
                       <span class="field-label">转场动机</span>
                       <input :value="selectedSb.transition_motive || selectedSb.transitionMotive || ''" type="text" class="input"
-                        @change="updateField(selectedSb, 'transition_motive', $event.target.value)"
+                        @change="updateField(selectedSb, 'transition_motive', formValue($event))"
                         placeholder="视线引导 / 动作匹配 / 声音引导 / 道具承接 / 情绪延续 / 信息揭示 / 空间切换 / 危险预警" />
                     </label>
                     <label class="field">
                       <span class="field-label">转场方式</span>
                       <input :value="selectedSb.transition_type || selectedSb.transitionType || 'cut'" type="text" class="input"
-                        @change="updateField(selectedSb, 'transition_type', $event.target.value)"
+                        @change="updateField(selectedSb, 'transition_type', formValue($event))"
                         placeholder="cut / 匹配剪辑 / 叠化 / 闪切" />
                     </label>
                   </div>
                   <label class="field">
                     <span class="field-label">关键帧（中段）</span>
                     <textarea :value="selectedSb.keyframe_prompt || selectedSb.keyframePrompt || ''" class="textarea" rows="2"
-                      @blur="updateField(selectedSb, 'keyframe_prompt', $event.target.value)"
+                      @blur="updateField(selectedSb, 'keyframe_prompt', formValue($event))"
                       placeholder="动作进行到一半/道具状态变化/机位移动中间态的画面描述，用于生成中段关键帧锁定中间状态" />
                   </label>
                   <label class="field">
@@ -934,23 +934,23 @@
                   <label class="field">
                     <span class="field-label">静态画面提示词</span>
                     <textarea :value="selectedSb.image_prompt || selectedSb.imagePrompt || ''" class="textarea" rows="4"
-                      @blur="updateField(selectedSb, 'image_prompt', $event.target.value)" placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词" />
+                      @blur="updateField(selectedSb, 'image_prompt', formValue($event))" placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词" />
                   </label>
                   <label class="field">
                     <span class="field-label">视频提示词</span>
                     <textarea :value="selectedSb.video_prompt || selectedSb.videoPrompt || ''" class="textarea" rows="5"
-                      @blur="updateField(selectedSb, 'video_prompt', $event.target.value)" placeholder="按 3 秒分段的视频提示词..." />
+                      @blur="updateField(selectedSb, 'video_prompt', formValue($event))" placeholder="按 3 秒分段的视频提示词..." />
                   </label>
                   <div class="field-grid field-grid-2">
                     <label class="field">
                       <span class="field-label">配乐提示词</span>
                       <textarea :value="selectedSb.bgm_prompt || selectedSb.bgmPrompt || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'bgm_prompt', $event.target.value)" placeholder="如：压抑低频弦乐，缓慢推进" />
+                        @blur="updateField(selectedSb, 'bgm_prompt', formValue($event))" placeholder="如：压抑低频弦乐，缓慢推进" />
                     </label>
                     <label class="field">
                       <span class="field-label">音效提示词</span>
                       <textarea :value="selectedSb.sound_effect || selectedSb.soundEffect || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'sound_effect', $event.target.value)" placeholder="如：风雪声、脚踩积雪、衣料摩擦声" />
+                        @blur="updateField(selectedSb, 'sound_effect', formValue($event))" placeholder="如：风雪声、脚踩积雪、衣料摩擦声" />
                     </label>
                   </div>
                 </div>
@@ -965,7 +965,7 @@
                     <textarea
                       :value="selectedSb.custom_image_prompt || selectedSb.customImagePrompt || ''"
                       class="textarea" rows="2"
-                      @blur="updateField(selectedSb, 'custom_image_prompt', $event.target.value)"
+                      @blur="updateField(selectedSb, 'custom_image_prompt', formValue($event))"
                       placeholder="手动覆盖图片 prompt" />
                   </label>
                   <label class="field">
@@ -973,7 +973,7 @@
                     <textarea
                       :value="selectedSb.negative_prompt || selectedSb.negativePrompt || ''"
                       class="textarea" rows="2"
-                      @blur="updateField(selectedSb, 'negative_prompt', $event.target.value)"
+                      @blur="updateField(selectedSb, 'negative_prompt', formValue($event))"
                       placeholder="排除不希望出现的内容，如：文字、水印、低清晰度、畸形手指" />
                   </label>
                   <div class="flex gap-2 items-center mt-2">
@@ -1364,7 +1364,7 @@
                   <div class="grid-history-copy">
                     <div class="grid-history-tags">
                       <span class="tag mono">#{{ item.id }}</span>
-                      <span class="tag mono">{{ item.layout.rows }}x{{ item.layout.cols }}</span>
+                      <span class="tag mono">{{ item.layout?.rows }}x{{ item.layout?.cols }}</span>
                       <span class="tag">{{ item.modeLabel }}</span>
                     </div>
                     <div class="grid-history-meta">{{ item.createdAtLabel }}</div>
@@ -1527,7 +1527,7 @@
 
                   <div class="grid-blank-preview" :style="gridBlankStyle">
                     <div v-for="(cell, i) in gridCellPrompts" :key="i" class="grid-blank-cell">
-                      <div class="grid-blank-cell-index">#{{ cell.shot_number }} {{ {first_frame:'首帧',last_frame:'尾帧',reference:'参考'}[cell.frame_type] || '' }}</div>
+                      <div class="grid-blank-cell-index">#{{ cell.shot_number }} {{ ({first_frame:'首帧',last_frame:'尾帧',reference:'参考'} as Record<string, string>)[cell.frame_type ?? ''] || '' }}</div>
                       <div class="grid-blank-cell-desc">{{ cell.prompt }}</div>
                     </div>
                     <div v-for="i in Math.max(0, (gridAutoLayout.rows * gridAutoLayout.cols) - gridCellPrompts.length)" :key="'empty-'+i" class="grid-blank-cell empty">
@@ -1607,7 +1607,7 @@
                         <div v-for="item in pagedGridAssignments" :key="item.index" :class="['grid-assign-row', activeGridCell === item.index && 'active']">
                           <span class="grid-assign-index">格{{ item.index + 1 }}</span>
                           <BaseSelect
-                            :model-value="item.assignment.storyboard_id"
+                            :model-value="item.assignment.storyboard_id ?? undefined"
                             :options="gridAssignmentShotOptions"
                             placeholder="选择镜头"
                             @update:model-value="updateGridAssignment(item.index, 'storyboard_id', $event)"
@@ -2104,6 +2104,19 @@ function goBack() {
 }
 
 const drama = ref<any>(null), episode = ref<any>(null), chars = ref<any[]>([]), scenes = ref<any[]>([]), sbs = ref<any[]>([]), mergeData = ref<any>(null), dubMatchCache = ref<any>({})
+/**
+ * 模板里读表单值 ✓（`input` / `select` / `textarea` 都有 `value: string` ✓）
+ *
+ * ⚠️ 2026-09-21：模板里直接写 `formValue($event)` 会被类型检查拦下 ✗ ——
+ * `EventTarget` **没有** `value` 属性 ✓✗ 且 `$event.target` 可能为 `null` ✓
+ * ⇒ 本页曾因此冒出一批 TS18047 + TS2339 ✓（同一个根因 ✓）。
+ * ⇒ 统一走这里：**既不写 `as any`** ✗（那等于关掉检查 ✓），也不漏 null ✓。
+ */
+type ValueElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+function formValue(event: Event): string {
+  return (event.target as ValueElement | null)?.value ?? ''
+}
+
 const panel = ref('script')
 const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, run: runAgent } = useAgent()
 
@@ -2158,12 +2171,12 @@ const ROLE_TAGS = [
   { label: '反派', cls: 'role-tag-villain' },
   { label: '配角', cls: 'role-tag-supporting' },
 ]
-function roleTagCls(label) {
+function roleTagCls(label: string) {
   if (label === '龙套') return 'role-tag-extra'
   return ROLE_TAGS.find(t => t.label === label)?.cls || ''
 }
 // 依据音色名 + 描述关键词推断该音色适合的角色类型（一个音色可打多个标签）
-function inferRoleTags(name, desc = []) {
+function inferRoleTags(name: string, desc: string[] = []) {
   const text = `${name || ''} ${Array.isArray(desc) ? desc.join(' ') : (desc || '')}`.toLowerCase()
   const tags = []
   if (/旁白|讲述|解说|叙述|播音|磁性|沉稳|醇厚|浑厚|大气|成熟男/.test(text)) tags.push('旁白')
@@ -2173,7 +2186,7 @@ function inferRoleTags(name, desc = []) {
   return tags.slice(0, 3)
 }
 // 依据角色姓名 + 角色定位推断角色类型，用于角色卡片展示对照标签
-function inferCharRoleTag(c) {
+function inferCharRoleTag(c: any) {
   const text = `${c.name || ''} ${c.role || ''}`.toLowerCase()
   if (text.includes('龙套') || text.includes('路人') || text.includes('群演') || text.includes('extra')) return '龙套'
   const rt = c?.role_type || c?.roleType || ''
@@ -2356,18 +2369,18 @@ const failedVideoMessages = ref<Record<number, string>>({})
 const failedComposeMessages = ref<Record<number, string>>({})
 const imageViewer = ref({ open: false, src: '', title: '' })
 
-function configLabel(config) {
+function configLabel(config: any) {
   if (!config) return '未配置'
   let modelName = ''
   try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
   return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
 }
 
-function isPendingCharImage(id) {
+function isPendingCharImage(id: number) {
   return pendingCharImageIds.value.includes(id)
 }
 
-function openImageViewer(src, title = '') {
+function openImageViewer(src: string, title: string = '') {
   if (!src) return
   imageViewer.value = { open: true, src, title }
 }
@@ -2414,7 +2427,7 @@ function closePlaylist() {
   playlistPaused.value = false
 }
 
-function playAt(i) {
+function playAt(i: number) {
   if (i < 0 || i >= playlist.value.length) return
   playIndex.value = i
 }
@@ -2441,7 +2454,7 @@ function onPlayEnded() {
   nextPlay()
 }
 
-function handleImageViewerKeydown(event) {
+function handleImageViewerKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
 }
 
@@ -2466,35 +2479,35 @@ onBeforeUnmount(() => {
   if (mergeIntervalId) clearInterval(mergeIntervalId)
 })
 
-function isPendingSceneImage(id) {
+function isPendingSceneImage(id: number) {
   return pendingSceneImageIds.value.includes(id)
 }
 
-function framePendingKey(id, frameType) {
+function framePendingKey(id: number, frameType: string) {
   return `${id}:${frameType}`
 }
 
-function isPendingShotFrame(id, frameType) {
+function isPendingShotFrame(id: number, frameType: string) {
   return pendingShotFrameKeys.value.includes(framePendingKey(id, frameType))
 }
 
-function isPendingVideo(id) {
+function isPendingVideo(id: number) {
   return pendingVideoIds.value.includes(id)
 }
 
-function videoFailMessage(id) {
+function videoFailMessage(id: number) {
   return failedVideoMessages.value[id] || ''
 }
 
-function isPendingCompose(id) {
+function isPendingCompose(id: number) {
   return pendingComposeIds.value.includes(id)
 }
 
-function composeFailMessage(id) {
+function composeFailMessage(id: number) {
   return failedComposeMessages.value[id] || ''
 }
 
-function isNarratorCharacter(char) {
+function isNarratorCharacter(char: any) {
   const rt = char?.role_type || char?.roleType || ''
   if (rt === '旁白') return true
   const text = `${char?.name || ''} ${char?.role || ''}`.toLowerCase()
@@ -2513,10 +2526,15 @@ const lockedAudioConfigLabel = computed(() => configLabel(audioConfigs.value.fin
 
 // Episode 级模型配置切换
 async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: number) {
-  if (!epId) return
+  // ⚠️⚠️ 2026-09-21 修**真 bug** ✗：这里原本是 `if (!epId) return` + `episodeAPI.update(epId, …)` ✓✗
+  //      而 `epId` 是 **ComputedRef** ✗（`epId = computed(() => episode.value?.id || 0)` ✓）⇒
+  //      ① `!epId` 恒为 `false`（对象恒真 ✓✗）⇒ 空 id 也放行 ✓；
+  //      ② 传进去的是**对象本身** ✗ ⇒ URL 拼成 `/episodes/[object Object]` ✓✗ ⇒ **这个功能从来没生效过** ✓✗
+  //      （被 catch 吞成一个 toast ✓，看起来只是"偶发失败" ✓✗）。类型检查一开就现形 ✓。
+  if (!epId.value) return
   const field = `${type}_config_id`
   try {
-    await episodeAPI.update(epId, { [field]: configId })
+    await episodeAPI.update(epId.value, { [field]: configId })
     // 本地更新 episode 对象，避免全量 refresh
     if (episode.value) {
       if (type === 'image') episode.value.image_config_id = configId
@@ -2557,22 +2575,52 @@ const gridDialog = ref(false)
 const gridStep = ref(0)
 const gridLayout = ref('3x3')
 const gridMode = ref('first_frame')
-const gridSelected = ref([])
-const gridSingleTarget = ref(null)
-const gridGenId = ref(null)
+// ⚠️⚠️ 2026-09-21：这一批原来都是**裸 `ref([])` / `ref(null)`** ✗ ⇒ 推出 `never[]` / `Ref<null>` ✓✗
+//      ⇒ 元素属性访问全报 TS2339 ✓（`selectedSb?.id` 那种全变 `never` ✓✗，一趟类型检查近百条 ✓）。
+//      ⚠️ 本页其余数据是 `ref<any[]>` ✓ ⇒ 这里只把「声明处丢类型」的补上 ✓，不顺手改成大接口 ✗。
+//      字段按**界面实际消费**声明 ✓（后端是权威 ✓）。
+const gridSelected = ref<number[]>([])
+const gridSingleTarget = ref<number | null>(null)
+const gridGenId = ref<string | number | null>(null)
 const gridImagePath = ref('')
 const gridStatusText = ref('')
 const gridActualLayout = ref({ rows: 3, cols: 3 })
 const gridRecoveredAt = ref('')
 const gridRecoveredMode = ref('')
 const gridPromptText = ref('')
-const gridCellPrompts = ref([])
+/** 宫格单格提示词（`grid/prompt` 返回的元素；按界面消费的字段声明 ✓ 允许动态字段 ✓） */
+interface GridCellPrompt {
+  shot_number?: number
+  frame_type?: string
+  shot_id?: number
+  prompt?: string
+  [key: string]: unknown
+}
+const gridCellPrompts = ref<GridCellPrompt[]>([])
 const gridPromptSource = ref('')
 const gridPromptLoading = ref(false)
 const gridPromptStatus = ref('')
-const gridAssignmentsState = ref([])
-const gridActiveShotIds = ref([])
-const gridHistory = ref([])
+/** 宫格分配项（可编辑 ✓ 故允许动态字段 ✓） */
+interface GridAssignment {
+  cell_index?: number
+  /** 未分配时为 `null` ✓（`createGridAssignments()` 会产出 `storyboard_id: null` ✓） */
+  storyboard_id?: number | null
+  frame_type?: string
+  prompt?: string
+  [key: string]: unknown
+}
+/** 宫格历史项（本地缓存的一条记录 ✓） */
+interface GridHistoryItem {
+  id: string | number
+  localPath?: string
+  generationId?: string | number | null
+  /** 宫格行列（历史条目里回显 `rows x cols` ✓） */
+  layout?: { rows?: number; cols?: number }
+  [key: string]: unknown
+}
+const gridAssignmentsState = ref<GridAssignment[]>([])
+const gridActiveShotIds = ref<number[]>([])
+const gridHistory = ref<GridHistoryItem[]>([])
 const showAllGridHistory = ref(false)
 const activeGridCell = ref(0)
 const gridAssignmentPage = ref(0)
@@ -2680,21 +2728,21 @@ function resetGridAssignments() {
   gridAssignmentPage.value = 0
 }
 
-function gridCellLabel(a) {
+function gridCellLabel(a: GridAssignment) {
   if (!a?.storyboard_id) return '未分配'
   const idx = sbs.value.findIndex(s => s.id === a.storyboard_id) + 1
-  const suffix = { first_frame: '首', last_frame: '尾', reference: '参' }[a.frame_type] || ''
+  const suffix = ({ first_frame: '首', last_frame: '尾', reference: '参' } as Record<string, string>)[a.frame_type ?? ''] || ''
   return `#${idx}${suffix ? ` ${suffix}` : ''}`
 }
 
-function gridCellTitle(id) {
+function gridCellTitle(id: number | null | undefined) {
   if (!id) return '未分配'
   const idx = sbs.value.findIndex(s => s.id === id) + 1
   const sb = sbs.value.find(s => s.id === id)
   return `#${String(idx).padStart(2, '0')} ${sb?.title || sb?.description || '镜头'}`
 }
 
-function updateGridAssignment(index, field, value) {
+function updateGridAssignment(index: number, field: string, value: any) {
   const next = [...gridAssignmentsState.value]
   next[index] = { ...next[index], [field]: value }
   gridAssignmentsState.value = next
@@ -2702,7 +2750,7 @@ function updateGridAssignment(index, field, value) {
   if (gridImagePath.value) persistGridImagePath(gridImagePath.value)
 }
 
-function focusGridCell(index) {
+function focusGridCell(index: number) {
   activeGridCell.value = index
   gridAssignmentPage.value = Math.floor(index / gridAssignmentPageSize.value)
 }
@@ -2722,7 +2770,7 @@ const gridBlankStyle = computed(() => {
 })
 
 // Production step helpers
-function prodStepDone(id) {
+function prodStepDone(id: string) {
   if (id === 'chars') return !visualCharTotal.value || charImgCount.value === visualCharTotal.value
   if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
   if (id === 'dubbing') return !!sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
@@ -2781,7 +2829,7 @@ function openGridTool() {
   gridDialog.value = true
 }
 
-function persistGridImagePath(value) {
+function persistGridImagePath(value: string | null | undefined) {
   if (typeof window === 'undefined') return
   if (!value) {
     window.localStorage.removeItem(gridStorageKey.value)
@@ -2819,7 +2867,8 @@ function restoreGridState() {
   }
 }
 
-function applyGridState(imagePath, meta = {}) {
+function applyGridState(imagePath: string | null | undefined,
+                        meta: Record<string, any> = {}) {
   gridImagePath.value = imagePath || ''
   gridGenId.value = meta.generationId || meta.id || null
   if (meta.layout?.rows && meta.layout?.cols) gridActualLayout.value = meta.layout
@@ -2831,9 +2880,9 @@ function applyGridState(imagePath, meta = {}) {
   gridRecoveredMode.value = meta.recoveredMode || meta.modeLabel || ''
 }
 
-function selectGridHistory(item) {
+function selectGridHistory(item: GridHistoryItem) {
   const cached = restoreGridState()
-  const cachedEntry = cached?.entries?.[item.localPath] || {}
+  const cachedEntry: Record<string, any> = cached?.entries?.[item.localPath ?? ''] || {}
   applyGridState(item.localPath, {
     ...item,
     ...cachedEntry,
@@ -2855,7 +2904,7 @@ function reopenGridPreview() {
   gridStep.value = 3
 }
 
-function parseGridLayoutFromFrameType(value) {
+function parseGridLayoutFromFrameType(value: string | undefined) {
   const match = String(value || '').match(/grid_[^_]+_(\d+)x(\d+)$/)
   if (!match) return null
   return { rows: Number(match[1]) || 3, cols: Number(match[2]) || 3 }
@@ -2914,7 +2963,7 @@ async function generateGridPrompt() {
     }
   } catch (e) {
     gridPromptStatus.value = ''
-    toast.error(e?.message || '生成提示词失败')
+    toast.error(e instanceof Error && e.message ? e.message : '生成提示词失败')
   } finally {
     gridPromptLoading.value = false
   }
@@ -2928,7 +2977,7 @@ async function startGridGen() {
     rows = gridAutoLayout.value.rows; cols = gridAutoLayout.value.cols; ids = gridSelected.value.slice(0, gridTotalCells.value)
     if (gridMode.value === 'first_last') ids = [...gridSelected.value]
   }
-  gridActiveShotIds.value = ids.filter(Boolean)
+  gridActiveShotIds.value = ids.filter((item): item is number => typeof item === 'number')
   gridActualLayout.value = { rows, cols }
   if (!gridAssignmentsState.value.length) resetGridAssignments()
   gridStep.value = 2
@@ -2947,7 +2996,7 @@ async function startGridGen() {
     gridStatusText.value = '等待图片生成...'
     pollGridStatus()
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
     gridStep.value = 0
   }
 }
@@ -2956,8 +3005,12 @@ async function pollGridStatus() {
   for (let i = 0; i < 120; i++) {
     await new Promise(r => setTimeout(r, 3000))
     if (!isMounted.value) return
+    // ⚠️ 2026-09-21：`gridGenId` 可能是 `string | number | null` ✗ 而 `gridAPI.status` 只收 `number` ✓
+    //    ⇒ 先取数字 ✓（拿不到就**结束轮询** ✓ 不发一个 id=NaN 的请求 ✓✗）。
+    const genId = Number(gridGenId.value)
+    if (!genId) return
     try {
-      const res = await gridAPI.status(gridGenId.value)
+      const res = await gridAPI.status(genId)
       gridStatusText.value = `状态: ${res.status}`
       if (res.status === 'completed' && res.local_path) {
         gridImagePath.value = res.local_path
@@ -3003,7 +3056,7 @@ async function loadLatestGridImage() {
       : grids[0]?.localPath
     const current = grids.find(item => item.localPath === preferredPath)
     if (current) {
-      const cachedEntry = cached?.entries?.[current.localPath] || {}
+      const cachedEntry: Record<string, any> = cached?.entries?.[current.localPath] || {}
       applyGridState(current.localPath, {
         ...current,
         ...cachedEntry,
@@ -3019,7 +3072,7 @@ async function loadLatestGridImage() {
 
   const cached = restoreGridState()
   if (cached?.activeImagePath) {
-    const cachedEntry = cached?.entries?.[cached.activeImagePath] || {}
+    const cachedEntry: Record<string, any> = cached?.entries?.[cached.activeImagePath] || {}
     applyGridState(cached.activeImagePath, {
       ...cachedEntry,
       recoveredAt: cachedEntry.recoveredAt || '',
@@ -3043,7 +3096,7 @@ async function doGridSplit() {
     gridStep.value = 4
     toast.success('切分分配完成')
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
@@ -3120,7 +3173,7 @@ const activeMainStage = computed(() => {
   return 'storyboard'
 })
 
-function mainStageDone(stageId) {
+function mainStageDone(stageId: string) {
   if (stageId === 'script') return !!scriptContent.value
   if (stageId === 'assets') {
     const charsReady = !!chars.value.length && charsVoiced.value === chars.value.length
@@ -3140,7 +3193,7 @@ function mainStageDone(stageId) {
   return false
 }
 
-function goMainStage(stageId) {
+function goMainStage(stageId: string) {
   if (stageId === 'script') {
     panel.value = 'script'
     scriptStep.value = Math.min(scriptStep.value, 1)
@@ -3245,10 +3298,10 @@ const activeBubbleKey = computed(() => {
 
 const showBottomBubble = computed(() => panel.value === 'script' || panel.value === 'production')
 
-function goSubStep(key) {
+function goSubStep(key: string) {
   if (key.startsWith('script:')) {
     panel.value = 'script'
-    const stepMap = {
+    const stepMap: Record<string, number> = {
       'script:raw': 0,
       'script:rewrite': 1,
       'script:extract': 2,
@@ -3297,7 +3350,7 @@ const currentSubStageLabel = computed(() => {
   return current?.label || currentStageLabel.value
 })
 
-function updateCharVoice(charId, voiceId) {
+function updateCharVoice(charId: number, voiceId: string) {
   characterAPI.update(charId, { voice_style: voiceId, voice_provider: lockedAudioProvider.value || undefined })
   const c = chars.value.find(ch => ch.id === charId)
   if (c) {
@@ -3309,7 +3362,7 @@ function updateCharVoice(charId, voiceId) {
     c.voiceSampleUrl = ''
   }
 }
-function getVoiceProfile(voiceId) {
+function getVoiceProfile(voiceId: string) {
   return voiceProfiles.value.find(v => v.id === voiceId) || null
 }
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
@@ -3318,7 +3371,7 @@ const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duratio
 const mergeSourceChar = ref<any>(null)
 const mergeBusy = ref(false)
 /** 规范化名称：去空白/大小写，用于判定「同一人物」的重复记录 */
-function normName(n) {
+function normName(n: string) {
   return String(n || '').replace(/\s+/g, '').toLowerCase()
 }
 // 称谓词缀：与后端 shared/character-match.ts 保持一致（前后端无共享包，此处同步维护）。
@@ -3326,7 +3379,7 @@ function normName(n) {
 // 这类别名重复就永远没有修复入口——所以候选列表复用同一套判定。
 const ALIAS_TITLE_SUFFIX = /(?:小姐|夫人|太太|先生|公子|老爷|少爷|姑娘|师傅|师父|前辈|老师|阿姨|哥哥|姐姐|妹妹|弟弟|妈妈|爸爸|母亲|父亲|奶奶|爷爷|祖母|祖父)$/
 const ALIAS_TITLE_PREFIX = /^(?:阿|小|老)/
-function stripAliasAffixes(name) {
+function stripAliasAffixes(name: string) {
   let out = String(name || '').trim()
   let prev = ''
   while (prev !== out && out.length > 0) {
@@ -3336,17 +3389,17 @@ function stripAliasAffixes(name) {
   return out
 }
 /** 精确同名（高置信重复记录） */
-function sameNameCandidates(c) {
+function sameNameCandidates(c: any) {
   const cNorm = normName(c?.name)
   if (!cNorm) return []
-  return (drama.value?.characters || []).filter(t => t.id !== c?.id && normName(t.name) === cNorm)
+  return (drama.value?.characters || []).filter((t: any) => t.id !== c?.id && normName(t.name) === cNorm)
 }
 /** 别名疑似同人：去称谓词缀后同名，或双向包含（单字不比较，避免误配） */
-function aliasCandidates(c) {
+function aliasCandidates(c: any) {
   const cNorm = normName(c?.name)
   if (!cNorm) return []
   const cBase = stripAliasAffixes(cNorm) || cNorm
-  return (drama.value?.characters || []).filter((t) => {
+  return (drama.value?.characters || []).filter((t: any) => {
     if (t.id === c?.id) return false
     const tNorm = normName(t.name)
     if (!tNorm || tNorm === cNorm) return false
@@ -3356,18 +3409,18 @@ function aliasCandidates(c) {
   })
 }
 /** 候选 = 精确同名 + 别名疑似，同名的排前面 */
-function mergeCandidates(c) {
+function mergeCandidates(c: any) {
   return [...sameNameCandidates(c), ...aliasCandidates(c)]
 }
-function hasMergeCandidates(c) {
+function hasMergeCandidates(c: any) {
   return mergeCandidates(c).length > 0
 }
 /** 是否为精确同名；否则视为「疑似同人」，列表里给出提示标签后再人工确认 */
-function isExactNameMatch(a, b) {
+function isExactNameMatch(a: any, b: any) {
   const na = normName(a?.name)
   return !!na && na === normName(b?.name)
 }
-function openMergePicker(c) {
+function openMergePicker(c: any) {
   mergeSourceChar.value = c
 }
 function closeMergePicker() {
@@ -3379,7 +3432,7 @@ function pickerCandidates() {
   const s = mergeSourceChar.value
   return s ? mergeCandidates(s) : []
 }
-async function mergeInto(target) {
+async function mergeInto(target: any) {
   const s = mergeSourceChar.value
   if (!s || mergeBusy.value) return
   const ok = await confirm({
@@ -3402,7 +3455,10 @@ async function mergeInto(target) {
   }
 }
 
-const selectedSb = ref(null)
+// ⚠️ 2026-09-21：原来是 `ref(null)` ✗ ⇒ `selectedSb?.id` 系列全报 TS2339（`never` ✓✗）
+//      —— 这一个 ref 解释本页绝大多数 `never` 报错 ✓（模板里 500-700 行大量读它的字段 ✓）。
+//      ⚠️ 与 `sbs`（`ref<any[]>` ✓）同口径：此处不发明接口 ✗，只补回被丢掉的类型 ✓。
+const selectedSb = ref<any | null>(null)
 
 function jumpToTimelineShot(sb: any) {
   panel.value = 'production'
@@ -3491,7 +3547,7 @@ async function activateVersion(v: any) {
 const shotAngles = ['平视', '仰视', '俯视', '侧拍', '背拍', '斜侧', '主观视角', '过肩']
 const shotMovements = ['固定', '推镜', '拉镜', '摇镜', '移镜', '跟拍', '升降', '手持', '环绕']
 
-function updateField(sb, field, value) {
+function updateField(sb: any, field: string, value: any) {
   const current = sb[field] ?? sb[toCamel(field)]
   if (current === value) return
   sb[field] = value
@@ -3500,35 +3556,35 @@ function updateField(sb, field, value) {
   storyboardAPI.update(sb.id, { [field]: value })
 }
 
-function toCamel(field) {
-  return field.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+function toCamel(field: string) {
+  return field.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase())
 }
 
-function getStoryboardCharacterIds(sb) {
+function getStoryboardCharacterIds(sb: any) {
   return sb?.character_ids || sb?.characterIds || []
 }
 
-function getStoryboardCharacterNames(sb) {
+function getStoryboardCharacterNames(sb: any) {
   const ids = getStoryboardCharacterIds(sb)
   return chars.value.filter(char => ids.includes(char.id)).map(char => char.name)
 }
 
-function isStoryboardCharacterSelected(sb, charId) {
+function isStoryboardCharacterSelected(sb: any, charId: number) {
   return getStoryboardCharacterIds(sb).includes(charId)
 }
 
-function toggleStoryboardCharacter(sb, charId) {
+function toggleStoryboardCharacter(sb: any, charId: number) {
   const currentIds = getStoryboardCharacterIds(sb)
   const nextIds = currentIds.includes(charId)
-    ? currentIds.filter(id => id !== charId)
+    ? currentIds.filter((id: number) => id !== charId)
     : [...currentIds, charId]
   updateField(sb, 'character_ids', nextIds)
 }
 
-function toggleStoryboardProp(sb, propId) {
+function toggleStoryboardProp(sb: any, propId: number) {
   const current = sb.prop_ids || sb.propIds || []
   const next = current.includes(propId)
-    ? current.filter(id => id !== propId)
+    ? current.filter((id: number) => id !== propId)
     : [...current, propId]
   updateField(sb, 'prop_ids', next)
 }
@@ -3576,14 +3632,14 @@ const boundChars = computed(() => {
   return chars.value.filter((char: any) => ids.includes(char.id) && charCostumeOptions(char).length > 0)
 })
 
-function getSceneName(sb) {
+function getSceneName(sb: any) {
   const sceneId = sb?.scene_id || sb?.sceneId
   if (!sceneId) return '未绑定场景'
   const scene = scenes.value.find(s => s.id === sceneId)
   return scene ? `${scene.location} · ${scene.time || '未设时间'}` : `场景 #${sceneId}`
 }
 
-async function genActionSuggestion(sb) {
+async function genActionSuggestion(sb: any) {
   if (!sb?.id || aiSuggesting.value) return
   aiSuggesting.value = true
   try {
@@ -3596,13 +3652,13 @@ async function genActionSuggestion(sb) {
     updateField(sb, 'action', merged)
     toast.success('动作建议已生成')
   } catch (e) {
-    toast.error(e.message || '生成失败')
+    toast.error(e instanceof Error && e.message ? e.message : '生成失败')
   } finally {
     aiSuggesting.value = false
   }
 }
 
-async function splitShot(sb) {
+async function splitShot(sb: any) {
   if (!sb?.id || splittingShot.value) return
   if (!(await confirm({ message: 'AI 将把此镜头拆分为多个子镜头，保留原镜头并追加在其后。确定继续？' }))) return
   splittingShot.value = true
@@ -3615,13 +3671,13 @@ async function splitShot(sb) {
     await refresh()
     toast.success(`已拆分为 ${count} 个子镜头`)
   } catch (e) {
-    toast.error(e.message || '拆分失败')
+    toast.error(e instanceof Error && e.message ? e.message : '拆分失败')
   } finally {
     splittingShot.value = false
   }
 }
 
-async function deleteShot(sb) {
+async function deleteShot(sb: any) {
   if (!(await confirm({ message: '确定删除此镜头？', danger: true }))) return
   const idx = sbs.value.indexOf(sb)
   await storyboardAPI.del(sb.id)
@@ -3663,7 +3719,7 @@ function initScriptStep() {
 async function refresh() {
   try {
     drama.value = await dramaAPI.get(dramaId)
-    const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
+    const ep = drama.value.episodes?.find((e: any) => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
@@ -3687,7 +3743,7 @@ async function refresh() {
       loadAllDubMatchCache().catch(() => {})
     }
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
   try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
 }
@@ -3833,14 +3889,14 @@ function doBreakdown() {
   const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
   runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
 }
-async function genSample(id) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e.message) } }
+async function genSample(id: number) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) } }
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
 
-function sleep(ms) {
+function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function watchAsyncResult(check, attempts = 24, delay = 2500) {
+function watchAsyncResult(check: () => any, attempts: number = 24, delay: number = 2500) {
   void (async () => {
     for (let i = 0; i < attempts; i++) {
       await sleep(delay)
@@ -3855,7 +3911,7 @@ function normEpUrl(p?: string | null): string {
   return p.startsWith('/') ? p : '/' + p
 }
 
-async function genCharImg(id) {
+async function genCharImg(id: number) {
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
@@ -3871,7 +3927,7 @@ async function genCharImg(id) {
     })
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
@@ -3895,7 +3951,7 @@ async function genCharImgWithModel(id: number) {
     })
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 function batchCharImages() {
@@ -3913,10 +3969,10 @@ function batchCharImages() {
     }), 36)
   }).catch(e => {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   })
 }
-async function genSceneImg(id) {
+async function genSceneImg(id: number) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
@@ -3932,7 +3988,7 @@ async function genSceneImg(id) {
     })
   } catch (e) {
     pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
@@ -3956,14 +4012,14 @@ async function genSceneImgWithModel(id: number) {
     })
   } catch (e) {
     pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 function batchSceneImages() {
   const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
   if (!ids.length) { toast.info('所有场景图片已生成'); return }
   pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
-  ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e.message)) })
+  ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e instanceof Error ? e.message : String(e))) })
   toast.success('场景图片批量生成中')
   watchAsyncResult(() => ids.every(id => {
     const scene = scenes.value.find(s => s.id === id)
@@ -3981,7 +4037,7 @@ const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需
  * 只匹配真正的"角色名：较长台词"模式，避免把句子中的标点/短句误拆
  * 关键规则：冒号后面必须 >= 8 个字符且不含冒号，才认为是有效对话行
  */
-function getDialogueLines(sb) {
+function getDialogueLines(sb: any) {
   const raw = sb?.dialogue?.trim() || ''
   if (!raw) return []
   const lines = []
@@ -4000,18 +4056,18 @@ function getDialogueLines(sb) {
   return lines
 }
 
-function getDialogueSpeakerRaw(sb) {
+function getDialogueSpeakerRaw(sb: any) {
   const dialogue = sb?.dialogue?.trim() || ''
   const match = dialogue.match(/^(.+?)[:：]/)
   return match ? match[1].replace(/[（(].+?[)）]/g, '').trim() : ''
 }
 
-function getDialogueText(sb) {
+function getDialogueText(sb: any) {
   const dialogue = sb?.dialogue?.trim() || ''
   return dialogue ? dialogue.replace(/^.+?[:：]\s*/, '').trim() : ''
 }
 
-function isTTSIgnorable(sb) {
+function isTTSIgnorable(sb: any) {
   const lines = getDialogueLines(sb)
   const raw = sb?.dialogue?.trim() || ''
   if (!raw) return true
@@ -4026,11 +4082,11 @@ function isTTSIgnorable(sb) {
   return false
 }
 
-function hasDialogue(sb) { return !isTTSIgnorable(sb) }
-function hasTTS(sb) { return !!(sb?.tts_audio_url || sb?.ttsAudioUrl) }
-function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
+function hasDialogue(sb: any) { return !isTTSIgnorable(sb) }
+function hasTTS(sb: any) { return !!(sb?.tts_audio_url || sb?.ttsAudioUrl) }
+function getTTSUrl(sb: any) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 
-function getDialogueSpeaker(sb) {
+function getDialogueSpeaker(sb: any) {
   const lines = getDialogueLines(sb)
   if (lines.length === 0) return '旁白'
   if (lines.length === 1) return lines[0].speaker
@@ -4041,7 +4097,7 @@ function getDialogueSpeaker(sb) {
 /**
  * 获取多人对话的 TTS 音频列表（从 JSON 解析）
  */
-function getTTSLines(sb) {
+function getTTSLines(sb: any) {
   const url = sb?.tts_audio_url || sb?.ttsAudioUrl || ''
   if (!url) return []
   // 尝试解析为 JSON 数组（多人模式返回格式）
@@ -4068,7 +4124,7 @@ async function loadAllDubMatchCache() {
   const results = await Promise.allSettled(
     sbsWithDialogue.map(sb => storyboardAPI.validateDialogue(sb.id).catch(() => null))
   )
-  const cache = {}
+  const cache: Record<string, any> = {}
   sbsWithDialogue.forEach((sb, i) => {
     const r = results[i]
     if (r.status === 'fulfilled' && r.value) {
@@ -4090,17 +4146,17 @@ async function loadAllDubMatchCache() {
 /**
  * 获取单条 TTS 台词行的匹配状态
  */
-function getTTSLineMatchStatus(sbId, ttsLine) {
+function getTTSLineMatchStatus(sbId: number, ttsLine: any) {
   if (ttsLine?.match_status) return ttsLine.match_status
   const cache = dubMatchCache.value[sbId]
   if (!cache || !cache.lines) return null
-  const found = cache.lines.find(l => l.speaker === ttsLine.speaker && l.text === ttsLine.text)
+  const found = cache.lines.find((l: any) => l.speaker === ttsLine.speaker && l.text === ttsLine.text)
   return found?.match_status || null
 }
 
-function getMatchStatusDot(status) {
+function getMatchStatusDot(status: string) {
   if (!status) return ''
-  const map = {
+  const map: Record<string, string> = {
     matched: 'match-dot match-dot-ok',
     narrator: 'match-dot match-dot-ok',
     no_voice: 'match-dot match-dot-warn',
@@ -4109,9 +4165,9 @@ function getMatchStatusDot(status) {
   return map[status] || ''
 }
 
-function getMatchStatusLabel(status) {
+function getMatchStatusLabel(status: string) {
   if (!status) return ''
-  const map = {
+  const map: Record<string, string> = {
     matched: '',
     narrator: '旁白',
     no_voice: '未配置音色',
@@ -4128,7 +4184,7 @@ const dubIssueCount = computed(() => {
   for (const sbId in dubMatchCache.value) {
     const cache = dubMatchCache.value[sbId]
     if (!cache || !cache.lines) continue
-    count += cache.lines.filter(l => l.match_status === 'not_found' || l.match_status === 'no_voice').length
+    count += cache.lines.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice').length
   }
   return count
 })
@@ -4149,7 +4205,7 @@ const dubStaleCount = computed(() => {
 /**
  * 获取 TTS 台词行的匹配状态颜色（用于左侧边框）
  */
-function getTTSLineMatchStatusColor(sbId, ttsLine) {
+function getTTSLineMatchStatusColor(sbId: number, ttsLine: any) {
   const status = getTTSLineMatchStatus(sbId, ttsLine)
   if (status === 'not_found') return 'var(--danger, #e74c3c)'
   if (status === 'no_voice') return 'var(--warning, #f59e0b)'
@@ -4159,7 +4215,7 @@ function getTTSLineMatchStatusColor(sbId, ttsLine) {
 /**
  * 单人角色的匹配状态标签文本
  */
-function getDubMatchStatusLabel(sb) {
+function getDubMatchStatusLabel(sb: any) {
   const cache = dubMatchCache.value[sb.id]
   if (!cache || !cache.lines || cache.lines.length === 0) return ''
   const line = cache.lines[0]
@@ -4169,7 +4225,7 @@ function getDubMatchStatusLabel(sb) {
 /**
  * 单人角色的匹配状态 CSS 类
  */
-function getDubMatchDotClass(sb) {
+function getDubMatchDotClass(sb: any) {
   const cache = dubMatchCache.value[sb.id]
   if (!cache || !cache.lines || cache.lines.length === 0) return ''
   return getMatchStatusDot(cache.lines[0].match_status)
@@ -4178,17 +4234,17 @@ function getDubMatchDotClass(sb) {
 /**
  * 多人对话：获取某对话行的匹配状态（来自验证缓存）
  */
-function getDLMatchStatus(sbId, dialogueLine) {
+function getDLMatchStatus(sbId: number, dialogueLine: any) {
   const cache = dubMatchCache.value[sbId]
   if (!cache || !cache.lines) return null
-  const found = cache.lines.find(l => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
+  const found = cache.lines.find((l: any) => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
   return found?.match_status || null
 }
 
 /**
  * 多人对话：获取某对话行的边框颜色
  */
-function getDLMatchStatusColor(sbId, dialogueLine) {
+function getDLMatchStatusColor(sbId: number, dialogueLine: any) {
   const status = getDLMatchStatus(sbId, dialogueLine)
   if (status === 'not_found') return 'var(--danger, #e74c3c)'
   if (status === 'no_voice') return 'var(--warning, #f59e0b)'
@@ -4198,7 +4254,7 @@ function getDLMatchStatusColor(sbId, dialogueLine) {
 /**
  * 多人对话：检查某台词行是否已生成 TTS
  */
-function getDLHasTTS(sbId, dialogueLine) {
+function getDLHasTTS(sbId: number, dialogueLine: any) {
   const ttsLines = getTTSLinesFromCache(sbId)
   const found = ttsLines.find(l => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
   return found?.tts_audio_url || false
@@ -4207,7 +4263,7 @@ function getDLHasTTS(sbId, dialogueLine) {
 /**
  * 多人对话：获取某台词行的音频 URL
  */
-function getDLAudioUrl(sbId, dialogueLine) {
+function getDLAudioUrl(sbId: number, dialogueLine: any) {
   const ttsLines = getTTSLinesFromCache(sbId)
   const found = ttsLines.find(l => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
   return found?.tts_audio_url || null
@@ -4216,18 +4272,18 @@ function getDLAudioUrl(sbId, dialogueLine) {
 /**
  * 从 storyboard 的 ttsAudioUrl 解析台词行（不依赖当前 SBs 数组）
  */
-function getTTSLinesFromCache(sbId) {
+function getTTSLinesFromCache(sbId: number) {
   const sb = sbs.value.find(s => s.id === sbId)
   if (!sb) return []
   return getTTSLines(sb)
 }
 
-async function genShotTTS(sb) {
+async function genShotTTS(sb: any) {
   // 生成前验证
   const cache = dubMatchCache.value[sb.id]
-  const issues = cache?.lines?.filter(l => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
+  const issues = cache?.lines?.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
   if (issues.length > 0) {
-    const warns = issues.map(v => v.warning).filter(Boolean).join('；')
+    const warns = issues.map((v: any) => v.warning).filter(Boolean).join('；')
     if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${warns}\n\n继续生成可能使用默认音色，是否继续？` }))) return
   }
 
@@ -4235,7 +4291,7 @@ async function genShotTTS(sb) {
     await storyboardAPI.generateTTS(sb.id)
     toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
     await refresh()
-  } catch (e) { toast.error(e.message) }
+  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 async function batchShotTTS() {
   const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
@@ -4248,7 +4304,7 @@ async function batchShotTTS() {
   const allIssues = []
   for (const sb of pending) {
     const cache = dubMatchCache.value[sb.id]
-    const issues = cache?.lines?.filter(l => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
+    const issues = cache?.lines?.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
     if (issues.length > 0) {
       allIssues.push({ sb, issues })
     }
@@ -4256,7 +4312,7 @@ async function batchShotTTS() {
   if (allIssues.length > 0) {
     const detail = allIssues.map(({ sb, issues }) => {
       const num = sb.storyboard_number || sb.storyboardNumber || sb.id
-      const warns = issues.map(i => i.warning).filter(Boolean).join('；')
+      const warns = issues.map((i: any) => i.warning).filter(Boolean).join('；')
       return `#${num}：${warns}`
     }).join('\n')
     if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${detail}\n\n继续生成可能使用默认音色，是否继续？` }))) return
@@ -4270,29 +4326,29 @@ async function batchShotTTS() {
   await refresh()
 }
 
-function getFirstFrame(s) { return s?.first_frame_image || s?.firstFrameImage || null }
-function getLastFrame(s) { return s?.last_frame_image || s?.lastFrameImage || null }
-function getKeyframe(s) { return s?.keyframe_image || s?.keyframeImage || null }
-function getStoryboardCover(s) { return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null }
-function getVideoUrl(s) { return s?.video_url || s?.videoUrl || null }
-function getComposedVideoUrl(s) { return s?.composed_video_url || s?.composedVideoUrl || null }
-function hasImg(s) { return !!getStoryboardCover(s) }
-function hasVid(s) { return !!getVideoUrl(s) }
-function hasComposed(s) { return !!getComposedVideoUrl(s) }
+function getFirstFrame(s: any) { return s?.first_frame_image || s?.firstFrameImage || null }
+function getLastFrame(s: any) { return s?.last_frame_image || s?.lastFrameImage || null }
+function getKeyframe(s: any) { return s?.keyframe_image || s?.keyframeImage || null }
+function getStoryboardCover(s: any) { return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null }
+function getVideoUrl(s: any) { return s?.video_url || s?.videoUrl || null }
+function getComposedVideoUrl(s: any) { return s?.composed_video_url || s?.composedVideoUrl || null }
+function hasImg(s: any) { return !!getStoryboardCover(s) }
+function hasVid(s: any) { return !!getVideoUrl(s) }
+function hasComposed(s: any) { return !!getComposedVideoUrl(s) }
 
-function getPreviousStoryboard(sb) {
+function getPreviousStoryboard(sb: any) {
   const idx = sbs.value.findIndex(item => item.id === sb.id)
   return idx > 0 ? sbs.value[idx - 1] : null
 }
 
-function getNextStoryboard(sb) {
+function getNextStoryboard(sb: any) {
   const idx = sbs.value.findIndex(item => item.id === sb.id)
   return idx >= 0 && idx < sbs.value.length - 1 ? sbs.value[idx + 1] : null
 }
 
-function getShotReferenceImages(sb) {
-  const refs = []
-  const pushRef = (value) => {
+function getShotReferenceImages(sb: any) {
+  const refs: string[] = []
+  const pushRef = (value: any) => {
     if (!value || refs.includes(value) || refs.length >= 6) return
     refs.push(value)
   }
@@ -4320,7 +4376,7 @@ function getShotReferenceImages(sb) {
   return refs.filter(Boolean).slice(0, 6)
 }
 
-function buildShotImagePrompt(sb, frameType) {
+function buildShotImagePrompt(sb: any, frameType: string) {
   const title = sb.title || ''
   const keyframeDesc = sb.keyframe_prompt || sb.keyframePrompt || ''
   // 关键帧生成优先用用户填写的中段关键帧描述，其次回退画面描述
@@ -4356,7 +4412,7 @@ function buildShotImagePrompt(sb, frameType) {
   ].filter(Boolean).join('；')
 }
 
-async function genShotFrame(sb, frameType) {
+async function genShotFrame(sb: any, frameType: string) {
   const prompt = buildShotImagePrompt(sb, frameType)
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
@@ -4382,11 +4438,11 @@ async function genShotFrame(sb, frameType) {
     })
   } catch (e) {
     pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
-async function genVid(sb) {
+async function genVid(sb: any) {
   const params = {
     storyboard_id: sb.id,
     drama_id: dramaId,
@@ -4415,10 +4471,10 @@ async function genVid(sb) {
     pollVideoGeneration(generation?.id, sb.id)
   } catch (e) {
     pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
-async function pollVideoGeneration(generationId, storyboardId) {
+async function pollVideoGeneration(generationId: number, storyboardId: number) {
   if (!generationId) {
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === storyboardId)
@@ -4457,7 +4513,7 @@ async function pollVideoGeneration(generationId, storyboardId) {
   }
   toast.error('视频生成超时')
 }
-async function doCompose(sb) {
+async function doCompose(sb: any) {
   try {
     delete failedComposeMessages.value[sb.id]
     if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
@@ -4469,9 +4525,9 @@ async function doCompose(sb) {
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
     failedComposeMessages.value = {
       ...failedComposeMessages.value,
-      [sb.id]: e.message,
+      [sb.id]: e instanceof Error ? e.message : String(e),
     }
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 function batchVideos() {
@@ -4732,13 +4788,13 @@ async function pollComposeStatus() {
       const res = await composeAPI.status(epId.value)
       await refresh()
       const items = Array.isArray(res?.items) ? res.items : []
-      const processingIds = items.filter(item => item.status === 'compose_processing').map(item => item.id)
+      const processingIds = items.filter((item: any) => item.status === 'compose_processing').map((item: any) => item.id)
       pendingComposeIds.value = processingIds
 
-      const failedItems = items.filter(item => item.status === 'compose_failed')
+      const failedItems = items.filter((item: any) => item.status === 'compose_failed')
       if (failedItems.length) {
         const next = { ...failedComposeMessages.value }
-        failedItems.forEach((item) => {
+        failedItems.forEach((item: any) => {
           next[item.id] = item.error_msg || item.errorMsg || '视频合成失败'
         })
         failedComposeMessages.value = next
@@ -4752,7 +4808,7 @@ async function pollComposeStatus() {
     } catch {}
   }
 }
-function getRefs(sb) {
+function getRefs(sb: any) {
   const raw = sb.reference_images || sb.referenceImages
   if (!raw) return []
   try { return JSON.parse(raw) } catch { return [] }
@@ -4771,14 +4827,14 @@ async function loadConfigs() {
   } catch (e) { console.error('Failed to load AI configs', e) }
 }
 
-function inferVoiceGender(name, desc = []) {
+function inferVoiceGender(name: string, desc: string[] = []) {
   const text = `${name} ${Array.isArray(desc) ? desc.join(' ') : ''}`
   if (/[男|青年|大爷|学长|boy|man|male]/i.test(text)) return '男声'
   if (/[女|少女|御姐|奶奶|girl|woman|female]/i.test(text)) return '女声'
   return '中性'
 }
 
-function mapVoiceProfile(v) {
+function mapVoiceProfile(v: any) {
   const desc = Array.isArray(v.description) ? v.description : []
   const backendTags = Array.isArray(v.role_tags) && v.role_tags.length ? v.role_tags : null
   return {

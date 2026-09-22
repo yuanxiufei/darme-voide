@@ -70,14 +70,40 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
 - ⚠️⚠️ **2026-09-20 实测：四类生成当前**全部**解析到外部** ✗✗**（`api.minimax.chat` / `ark.cn-beijing.volces.com` ✓）——
   `ai_providers.py` 按 **priority 降序**取第一条 ✓，本地预设 82–85 ✓ 输给厂商 97–300 ✓ ⇒ **厂商永远赢** ✗。
   ⇒ 动作：抬本地 priority / 删外部行 ✓（**审计表与三层依赖阶梯见 `TOPICS.md` §外部调用审计** ✓）。
-- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **25 模块 / 3500+ 用例全绿 ✓ 零依赖可跑** ✓
+- ⚠️ **前端有类型检查了** ✗（2026-09-21 ✓）：`npm run typecheck`（`vue-tsc` ✓ 与 `@types/node` ✓ 都装在
+  devDependencies ✓ 走 `registry.npmmirror.com` ✓）。⚠️ `npm run build` **不做类型检查** ✗
+  （`nuxt.config.ts` 没开 `typeCheck` ✓）⇒ 两件事都要跑 ✓。
+  ⚠️⚠️ **`ref([])` 推出 `never[]`** ✗ ⇒ 元素属性访问全报 TS2339 ✓✗（一趟能冒几百条 ✓）⇒
+  `ref` 一律带泛型 ✓；字面量配置表用运行时键要 `Record<string, T>` ✓；`catch (e)` 的 `e` 是 `unknown` ✓
+  不许直接 `e.message` ✓；模板读表单值一律走 helper（`formValue($event)` ✓ —— `$event.target.value` 会报
+  `EventTarget` 无 `value` ✓）；⚠️ **`ComputedRef` 必须 `.value`** ✗（`if (!ref)` 恒真 ✓、
+  当参数传会拼出 `[object Object]` ✓✗ —— **只有类型检查能抓住** ✓，已因此逮到
+  `switchEpisodeConfig` 一个"从来没生效"的 bug ✓）。
+  ⭐ **2026-09-22：typecheck 已清零** ✓（537 → 314 → 134 → **0** ✓）—— 三轮修掉两个真 bug ✓；
+  ⚠️ `desc = []` / `refs = []` 这类**默认空数组**会把参数推成 `never[]` ✗ ⇒ 必须显式类型 ✓；
+  ⚠️ 改完前端**要跑三件事** ✗：`npm run typecheck`（0 错误 ✓）、`npm run build`（exit 0 ✓，
+  **构建期已开 `typescript.typeCheck`** ✓ ⇒ 类型错误在构建阶段就红 ✓）、⭐ `npm run **generate**`
+  ✓ —— **前端产物是 generate 出的** ✗（Dockerfile 就是 `RUN npm run generate` ✓ +
+  `COPY --from=…/.output/public` ✓，而 `frontend/dist` 是指向它的**目录联接** ✓）：
+  只跑 `build` 会把 `.output/public/index.html` **覆盖没** ✓✗（`dockerfile_contract_test` 当场红 ✓）。
+  ⚠️ **注释里别写调用形状** ✗：`frontend_api_coverage_test` 纯文本扫 `api.get('…')` ✓ ⇒
+  注释里的一句"曾经写错成 …"会被**当成真调用点** ✓✗（2026-09-22 实测踩到 ✓）。
+- ⭐ **低精度权重能真装了** ✓（2026-09-22 ✓ `engine/quant.py` ✓）：fp8/int8 先按配套 scale **反量化**
+  （布局**按形状**判 ✓ 四种 ✓；`*_scale_inv` 走除 ✓；**判不出来就拒绝** ✗：块/分组量化、缺 scale、scale=0 ✓）
+  ⇒ 再归一 dtype ✓。⚠️ 此前是**直接 `to(bf16)`** ✗ ⇒ 尺度丢掉却**不报错** ✓✗（目标主权重就是 fp8 ✓）。
+  ⚠️ 顺序要紧 ✗：**先反量化、再 cast**；失败 ⇒ 中止装载 + **不污染模块** ✓。
+  ⭐ 结论已推到**三个消费者** ✓（CLI ② 段 / 就绪 API `summary().quant` / 前端面板 ✓）且**三档分开说** ✗：
+  可自动还原 ✓ / 判不出（**同时进 blockers** ✓）/ **没查** ✓（组件没下载 ⇒ 不阻塞也不假装绿 ✓）。
+  ⚠️ **GGUF 豁免** ✗（它的反量化归运行时 ✓ 否则每份 GGUF 都会把 `ready` 判死 ✓✗）。
+- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **26 模块 / 3500+ 用例全绿 ✓ 零依赖可跑** ✓
   （2026-09-20 新增：**GGUF 读取器** `engine/gguf.py` ✓；**H3 键名核对器** `engine/h3_keys.py` ✓；
   **自研字节级 BPE** `engine/tokenizer_bpe.py` ✓；
   ⭐ **自研 Unigram/WordPiece/Metaspace** `engine/tokenizer_own.py` ✓（Viterbi ✓ / 整词 UNK ✓ /
   **normalizer 11 种** ✓ / **预分词器 10 种** ✓ 含 `Punctuation` 与 `Split` 各五种 behavior ✓、
   `FixedLength` ✓ —— 规则全部**逐例实测**对齐参考 ✓）；
-  ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✗）：`byte_fallback` ✓（实测参考实现该配置下没走字节回退 ✓
-  语义未核清 ✓）、`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、`UnicodeScripts` ✓（标准库无 script 表 ✓）、
+  **`byte_fallback` 已实现** ✓（Unigram ✓ **段级判据** ✓：段内每个字符都能展开才逐字符展开 ✓ 否则整段一个 `unk` ✓）；
+  ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✗）：`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、
+  `UnicodeScripts` ✓（标准库无 script 表 ✓）、**别的模型**的 `byte_fallback` ✓（触发条件未核 ✓）、
   **能匹配空串的正则** ✓ 与 `\p{…}` 语法 ✓（`re` 没有 ✓）；
   ⭐ **对 `transformers` 的运行时改造** `engine/tokenizers_tuning.py` ✓（离线兜底含 **Auto 工厂** ✓
   / 缓存目录 / 降噪 / 计数 / 可撤 ✓ 幂等 ✓）；

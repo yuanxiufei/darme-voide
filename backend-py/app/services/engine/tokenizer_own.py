@@ -39,9 +39,13 @@ r"""**自研分词算法扩充**：`Unigram`（Viterbi ✓）/ `WordPiece`（贪
 * ``normalizer`` 里含**未实现**项 ⇒ **不走自研** ✓（``Precompiled`` ✗ 要 SentencePiece 的
   **charsmap 表** ✓ 不是 NFKC 换个写法 ✗；``Nmt`` ✗）；⚠️ 判定要按 ``Sequence`` **展平后的每一项** ✓
   （只看顶层类型会把 ``Sequence`` 读成"能接" ✓✗）；
-* ``byte_fallback: true`` 的 Unigram ⇒ **不走自研** ✓ —— 实测（2026-09-21）参考实现**该配置下并没有**
-  走字节回退 ✗（未知字符仍出 ``unk`` ✓）⇒ **语义没核清** ✓ 不按猜的实现 ✓；
-* 预分词器不认识（``CharDelimiterSplit`` / ``Digits`` / ``Split`` …）⇒ **不走自研** ✓。
+* ⭐ ``byte_fallback: true`` 的 **Unigram 已实现** ✓（2026-09-21 第二轮 ✓）：判据是 **段级**的 ✓
+  （见 :meth:`UnigramTokenizer.emit_unknown` ✓）；⚠️ **别的模型**的 ``byte_fallback`` **不走自研** ✓
+  （BPE 的触发条件与它不同 ✓ 未核清 ✓ 不按猜的实现 ✓）。
+  ⚠️ 教训 ✗：第一轮曾判成「参考实现没走字节回退 ⇒ 拒绝」✓✗ —— 那次实测**少了前置条件** ✗
+  （词表里**没有** ``<0xNN>`` 字节 token ✓）。**「实测过」必须写明前置条件** ✗；
+* 预分词器不认识（``UnicodeScripts`` —— 要 Unicode script 表 ✓ 标准库没有 ✗；
+  ``Split`` 的空匹配正则 / ``\p{…}`` ✓）⇒ **不走自研** ✓。
 
 ⇒ 走不了自研时由 :mod:`.tokenizer_hub` 决定**回退参考实现**还是报错 ✓（本模块只回答「我行不行」✓）。
 """
@@ -575,15 +579,19 @@ class MetaspacePretokenizer:
 
         1. 只对**半角空格**动手 ✓（``\\t``/``\\n`` **不切** ✓：实测 ``"hello\\tworld"`` 是**一片** ✓）；
         2. 首字符不是空格 ⇒ 先在**整串**前面补一个 ``replacement`` ✓（``prepend_scheme="always"`` ✓）；
-        3. 空格 → ``replacement`` ✓，按 ``replacement`` 切 ✓，**丢掉第一个空块** ✓（它是上一步补出来的 ✓），
+        3. ⚠️ **首字符判断要连 `replacement` 一起看** ✗（2026-09-21 实测补 ✓）：既不是空格、
+           **也不是 `replacement`** 才补一个 ✓ —— 输入本来就带 `▁`（如 ``"▁a"`` ✓）⇒ **不再补** ✓
+           （第一版只看空格 ✗ ⇒ ``"▁"`` 被补成 `▁▁` ⇒ 出两个 token ✓✗，与参考不一致 ✓）。
+        4. 空格 → ``replacement`` ✓，按 ``replacement`` 切 ✓，**丢掉第一个空块** ✓（它是上一步补出来的 ✓），
            每块再补回一个 ``replacement`` ✓。
 
         实测对照（``replacement="▁"`` ✓）：``"hello  world"`` ⇒ ``['▁hello','▁','▁world']`` ✓、
-        ``" hello"`` ⇒ ``['▁hello']`` ✓（前导空格被"补的那一个"顶掉 ✓）、``"  "`` ⇒ ``['▁','▁']`` ✓。
+        ``" hello"`` ⇒ ``['▁hello']`` ✓（前导空格被"补的那一个"顶掉 ✓）、``"  "`` ⇒ ``['▁','▁']`` ✓、
+        ``"▁"`` ⇒ ``['▁']`` ✓、``"▁▁a"`` ⇒ ``['▁','▁a']`` ✓。
         """
         if not text:
             return []
-        body = text if text.startswith(" ") else self.replacement + text
+        body = text if text[:1] in (" ", self.replacement) else self.replacement + text
         body = body.replace(" ", self.replacement)
         return [self.replacement + chunk for chunk in body.split(self.replacement)[1:]]
 
@@ -778,13 +786,18 @@ def fixed_length_problem(spec: Any) -> str:
     return ""
 
 
+#: 字节回退的 token 名 ✓（实测：只认 ``<0x`` + **两位十六进制** ✓ —— ``<0xZZ>`` 之类不算 ✗）
+BYTE_TOKEN_PATTERN = re.compile(r"<0x([0-9A-Fa-f]{2})>")
+
+
 class UnigramTokenizer:
     """**Unigram + Viterbi** ✓（词表 = ``[(token, score), …]`` ✓，id = 下标 ✓）。"""
 
     name = "own-unigram"
 
     def __init__(self, vocab: Sequence[Sequence[Any]], *, unk_id: int | None = None,
-                 pre_tokenizer: Any = None, fuse_unk: bool = True) -> None:
+                 pre_tokenizer: Any = None, fuse_unk: bool = True,
+                 byte_fallback: bool = False) -> None:
         entries = [(str(item[0]), float(item[1])) for item in vocab]
         if not entries:
             raise ValueError("Unigram 词表是空的 ✗")
@@ -792,6 +805,12 @@ class UnigramTokenizer:
         self.scores = {token: score for token, score in entries}
         self.unk_id = 0 if unk_id is None else int(unk_id)
         self.fuse_unk = bool(fuse_unk)
+        # ⭐ **字节回退** ✓（2026-09-21 核清参考语义后实现 ✓）：见 :meth:`_byte_ids` ✓
+        self.byte_fallback = bool(byte_fallback)
+        #: ``字节值 → token id`` ✓（只认 ``<0xNN>`` ✓ —— 实测「怪名字」（如 ``<0xZZ>`` ✓）**不算** ✗）
+        self.byte_tokens = {int(match.group(1), 16): self.vocab[token]
+                            for token in self.vocab
+                            for match in [BYTE_TOKEN_PATTERN.fullmatch(token)] if match}
         #: 未知字符的得分 ✓（SentencePiece 血统的常见口径：最低分 − 10 ✓）
         self.unk_score = min(self.scores.values()) - 10.0 if self.scores else -10.0
         self._trie = self._build_trie(entries)
@@ -872,8 +891,9 @@ class UnigramTokenizer:
             candidate = base + unk_score
             if candidate > best[start + 1]:
                 best[start + 1] = candidate
-                back[start + 1] = (start, None)
-        tokens: list[str | None] = []
+                # ⭐ 开了字节回退 ⇒ 这个未知字符**先记成它的字节序列** ✓（真的展开在 :meth:`_byte_ids` ✓）
+                back[start + 1] = (start, (piece[start],))
+        tokens: list[str | tuple[str, ...] | None] = []
         cursor = size
         while cursor > 0:
             start, token = back[cursor]
@@ -881,20 +901,59 @@ class UnigramTokenizer:
             cursor = start
         tokens.reverse()
         ids: list[int] = []
-        pending_unknown = False
+
+        def emit_unknown(chars: list[str]) -> None:
+            """把一段**连续未知字符**落成 id ✓（⭐ 2026-09-21 实测出来的**段级**判据 ✓）。
+
+            ⚠️⚠️ **判据是「段」不是「字符」** ✗（第一版按字符判 ⇒ 与参考不一致 ✓✗）：
+            实测（词表只有 ``▁``/``a`` + 「中」的三个字节 token ✓）：
+
+            * ``'中中'`` ⇒ 段内**每个**字符都能展开 ⇒ 逐字符展开 ✓（6 个字节 token ✓）；
+            * ``'中x'`` ⇒ 段内 ``x`` 展开不了 ⇒ **整段合成一个 `unk`** ✓（``'中'`` **也不**展开 ✓✗）；
+            * ``'a中x'`` ⇒ 词表能匹配的 ``a`` **照常保留** ✓（``[▁, a, unk('中x')]`` ✓）⇒ 段 ≠ 整片 ✓；
+            * ``'中中x'`` ⇒ 整段一个 unk ✓（前两个本可展开也不展开 ✓）。
+            """
+            expanded = [self._byte_ids(char) for char in chars]
+            if all(item is not None for item in expanded):
+                for item in expanded:
+                    ids.extend(item or [])
+                return
+            if self.fuse_unk:
+                ids.append(self.unk_id)                  # 整段一个 ✓
+            else:
+                ids.extend([self.unk_id] * len(chars))   # 逐字符各一个 ✓（与不回流时的口径一致 ✓）
+
+        pending: list[str] = []
         for token in tokens:
-            if token is None:
-                pending_unknown = True
+            if token is None:                            # pragma: no cover - 新逻辑不再产出 ✓
                 continue
-            if pending_unknown and self.fuse_unk:
-                ids.append(self.unk_id)     # 连续未知**合并成一个** ✓（参考实现默认如此 ✓）
-            elif pending_unknown:
-                ids.append(self.unk_id)
-            pending_unknown = False
+            if isinstance(token, tuple):                 # ⭐ 未知字符位 ✓ ⇒ 先攒着 ✓（段级判据 ✓）
+                pending.append(token[0])
+                continue
+            if pending:
+                emit_unknown(pending)
+                pending = []
             ids.append(self.vocab[token])
-        if pending_unknown:
-            ids.append(self.unk_id)
+        if pending:
+            emit_unknown(pending)
         return ids
+
+    def _byte_ids(self, char: str) -> list[int] | None:
+        """把**一个字符**展开成它的 UTF-8 字节 token id ✓（回退不了 ⇒ ``None`` ✓）。
+
+        ⚠️ 参考语义**逐条实测**（2026-09-21 ✓ 第一轮探错了 ✗ —— 见 `own_support` 的注释 ✓）：
+
+        * 判据是**该字符的每一个字节**都得有 ``<0xNN>`` token ✓ —— 缺**任何一个**就**回退不了** ✓
+          （实测：词表只有 ``<0xE4>`` 时，``'中'``（``E4 B8 AD``）⇒ 回退不了 ✓ 而不是只出 ``<0xE4>`` ✓✗）；
+        * 字符本身在词表里 ⇒ 走**正常词表 token** ✓（字节只是兜底 ✓）；展开**不与 `unk` 合并** ✓；
+        * ⚠️ 但「一个字符能否回退」**只是零件** ✗ —— 最终要不要展开由 :func:`emit_unknown` 按**段**定 ✓。
+        """
+        if not self.byte_fallback:
+            return None
+        ids = [self.byte_tokens.get(byte) for byte in char.encode("utf-8")]
+        if any(item is None for item in ids):
+            return None
+        return [int(item) for item in ids]
 
     def encode(self, text: str, *, add_special_tokens: bool = True) -> list[int]:
         pieces = (self.pre_tokenizer.split(str(text or "")) if self.pre_tokenizer is not None
@@ -937,7 +996,9 @@ class UnigramTokenizer:
 
     def describe(self) -> dict[str, Any]:
         return {"name": self.name, "vocabSize": self.vocab_size, "unkId": self.unk_id,
-                "fuseUnk": self.fuse_unk, "maxTokenLen": self.max_token_len}
+                "fuseUnk": self.fuse_unk, "maxTokenLen": self.max_token_len,
+                # ⭐ 字节回退**要能读出来** ✗（否则「开没开」无法自证 ✓）—— 连**词表里有几个字节 token** 一起报 ✓
+                "byteFallback": self.byte_fallback, "byteTokens": len(self.byte_tokens)}
 
     def fingerprint(self) -> dict[str, Any]:
         return {"vocabSize": self.vocab_size, "unkId": self.unk_id}
@@ -1073,12 +1134,16 @@ def own_support(form: dict[str, Any]) -> OwningSupport:
         return OwningSupport(False, f"`normalizer` 含未实现项 `{unsupported}` ✗{hints}"
                                     f"（已实现：{list(SUPPORTED_NORMALIZERS)} ✓）"
                                     f"⇒ 自研不硬套 ✓（跳过规范化 = 用错的文本查词表 ✓✗）", form)
-    if form.get("byteFallback"):
-        # ⚠️ 实测（2026-09-21）：参考实现在**该配置下并没有**走字节回退 ✓✗
-        #    （`Unigram(byte_fallback=True)` 对未知字符仍出 `unk` ✓）⇒ 语义**没核清** ✗
-        #    ⇒ 继续拒绝 ✓（不按猜的语义实现 ✓）。
-        return OwningSupport(False, "`byte_fallback: true` ✗ ⇒ 实测参考实现该配置下**没走**字节回退 ✓"
-                                    "（未知字符仍出 `unk` ✓）⇒ 语义未核清 ✓ 不硬套 ✓", form)
+    if form.get("byteFallback") and model_type != "Unigram":
+        # ⚠️⚠️ 这里**改过口径** ✗（2026-09-21 第二轮 ✓）：第一轮实测「`Unigram(byte_fallback=True)` 对未知字符
+        #      仍出 `unk`」⇒ 判成「语义未核清 ✓ 拒绝 ✓」✗ —— ⚠️ 那个实测**少了前置条件** ✗：
+        #      词表里**没有** `<0xNN>` 字节 token ✓✗（没有字节 token 当然回退不出去 ✓）。
+        #      补上字节 token 再测 ⇒ 真走回退 ✓（`'中'` ⇒ `<0xE4><0xB8><0xAD>` ✓）⇒ 现在 **Unigram 已实现** ✓。
+        #    ⚠️ 但 **BPE 的 `byte_fallback` 仍未核** ✗（触发条件与 Unigram 不同 ✓ —— BPE 是字节级词表 ✓
+        #      回退只在「该字节不在 byte↔unicode 映射里」时才可能发生 ✓）⇒ 继续**带理由拒绝** ✓ 不硬套 ✓。
+        return OwningSupport(False, f"`byte_fallback: true` + 模型 `{model_type}` ✗ ⇒ 实测与实现的"
+                                    f"判据只在 **Unigram** 上核清过 ✓（逐字符字节展开 ✓ 缺一字节则整体 `unk` ✓）"
+                                    f"；该模型的触发条件未核 ✓ 不硬套 ✓", form)
     if model_type not in _OWN_MODELS:
         return OwningSupport(False, f"模型 `{model_type}` ✗ 不在自研覆盖表里 ✓"
                                     f"（覆盖：{list(_OWN_MODELS)} ✓）", form)
@@ -1134,7 +1199,8 @@ def load_own_tokenizer(path: str | Path) -> Any | None:
     elif form["modelType"] == "Unigram":
         impl = UnigramTokenizer(model.get("vocab") or [], unk_id=model.get("unk_id"),
                                 pre_tokenizer=pre,
-                                fuse_unk=bool(model.get("fuse_unk", True)))
+                                fuse_unk=bool(model.get("fuse_unk", True)),
+                                byte_fallback=bool(model.get("byte_fallback")))
     else:
         impl = WordPieceTokenizer(model.get("vocab") or {},
                                   unk_token=str(model.get("unk_token") or "[UNK]"),

@@ -823,13 +823,26 @@ const sideItems = [
   { key: 'estimate', label: '费用预估', icon: Calculator },
 ]
 
+// ⚠️ 2026-09-21：`ref([])` ⇒ `never[]` ✗（元素 `never` ⇒ 属性访问全报 TS2339 ✓✗）
+//      ⇒ 显式泛型 ✓。形状取自 `~contracts`（**后端是权威** ✓ 此处是镜像 ✓）。
+import type { AiServiceConfigVO } from '~contracts'
+
 // ===== AI Service Configs =====
-const cfgs = ref([])
+const cfgs = ref<AiServiceConfigVO[]>([])
 const cfgDialog = ref(false)
-const cfgEditId = ref(null)
+const cfgEditId = ref<number | null>(null)
 const presetDialog = ref(false)
 const cfgTesting = ref(false)
-const cfgTestResult = ref(null)
+/** POST /ai-configs/test 的响应（连通性自检；字段取自后端真键 ✓） */
+interface ConnectionTestResult {
+  reachable: boolean
+  status?: number | string
+  message?: string
+  method?: string
+  url?: string
+  response_preview?: string
+}
+const cfgTestResult = ref<ConnectionTestResult | null>(null)
 const cfgModelsLoading = ref(false)
 const cfgModelsResult = ref<any>(null)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, negative_prompt: '', checkpoint_fl2va: '', checkpoint_ref2va: '' })
@@ -837,7 +850,10 @@ const presetForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
 const providers = ref<string[]>(['ali', 'chatfire', 'gemini', 'minimax', 'ollama', 'openai', 'openrouter', 'vidu', 'volcengine'])
 const providerSelectOptions = computed(() => providers.value.map(p => ({ label: p, value: p })))
-const serviceMeta = {
+// ⚠️ 2026-09-21：这里必须标 `Record<string, …>` ✗ ——
+//      写成字面量对象（四个键 ✓）后，用 `service_type`（运行时字符串 ✓）下标会报 TS7053 ✓
+//      （模板里 `serviceMeta[lc.service_type]` 那种 ✓）。
+const serviceMeta: Record<string, { label: string; desc: string }> = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
   image: { label: '图片', desc: '角色图、场景图、镜头图与首尾帧等静态图像生成' },
   video: { label: '视频', desc: '镜头视频生成，支持单图、多图和首尾帧模式' },
@@ -888,16 +904,16 @@ const endpointHint = computed(() => {
   return `${base}${prefix}`
 })
 
-function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
-function onlineByType(t) { return cfgs.value.filter(c => c.service_type === t && !c.is_local) }
-function localByType(t) { return cfgs.value.filter(c => c.service_type === t && c.is_local) }
-function countActive(t) { return byType(t).filter(c => c.is_active).length }
-function fmtModel(m) { return Array.isArray(m) ? m.join(', ') : m || '—' }
-function presetsByType(type) {
+function byType(t: string) { return cfgs.value.filter(c => c.service_type === t) }
+function onlineByType(t: string) { return cfgs.value.filter(c => c.service_type === t && !c.is_local) }
+function localByType(t: string) { return cfgs.value.filter(c => c.service_type === t && c.is_local) }
+function countActive(t: string) { return byType(t).filter(c => c.is_active).length }
+function fmtModel(m: unknown) { return Array.isArray(m) ? m.join(', ') : m || '—' }
+function presetsByType(type: string) {
   const group = providerPresets.value[type] || {}
   return Object.entries(group).map(([provider, preset]) => ({ provider, ...preset }))
 }
-function applyProviderPreset(type, provider) {
+function applyProviderPreset(type: string, provider: string) {
   const preset = providerPresets.value[type]?.[provider]
   if (!preset) return
   cfgForm.provider = provider
@@ -956,10 +972,10 @@ async function loadProviders() {
   }
 }
 
-async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
-async function toggleCfg(c) { try { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() } catch (e: any) { toast.error(e?.message || '切换失败') } }
-async function delCfg(id) { try { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() } catch (e: any) { toast.error(e?.message || '删除失败') } }
-function startAddCfg(t) {
+async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) } }
+async function toggleCfg(c: AiServiceConfigVO) { try { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() } catch (e: any) { toast.error(e?.message || '切换失败') } }
+async function delCfg(id: number) { try { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() } catch (e: any) { toast.error(e?.message || '删除失败') } }
+function startAddCfg(t: string) {
   cfgEditId.value = null
   cfgTestResult.value = null
   cfgModelsResult.value = null
@@ -968,7 +984,7 @@ function startAddCfg(t) {
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
 }
-function startEditCfg(c) {
+function startEditCfg(c: AiServiceConfigVO) {
   cfgEditId.value = c.id
   cfgTestResult.value = null
   cfgModelsResult.value = null
@@ -986,14 +1002,14 @@ function startEditCfg(c) {
   })
   cfgDialog.value = true
 }
-async function testCfgPayload(payload) {
+async function testCfgPayload(payload: Record<string, unknown>) {
   cfgTesting.value = true
   try {
     cfgTestResult.value = await aiConfigAPI.test(payload)
-    if (cfgTestResult.value.reachable) toast.success('端点已响应')
+    if (cfgTestResult.value?.reachable) toast.success('端点已响应')
     else toast.warning('端点未通过测试')
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   } finally {
     cfgTesting.value = false
   }
@@ -1032,7 +1048,7 @@ async function listDraftModels() {
     cfgModelsLoading.value = false
   }
 }
-async function testExistingCfg(c) {
+async function testExistingCfg(c: AiServiceConfigVO) {
   startEditCfg(c)
   await testCfgPayload({
     service_type: c.service_type,
@@ -1104,7 +1120,7 @@ async function saveCfg() {
     if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt, checkpoint_map })
     else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, negative_prompt: cfgForm.negative_prompt, checkpoint_map })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
-  } catch (e) { toast.error(e.message) }
+  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 async function applyQuickPreset() {
   if (!presetForm.apiKey) {
@@ -1117,7 +1133,7 @@ async function applyQuickPreset() {
     presetDialog.value = false
     toast.success('推荐配置已写入')
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 

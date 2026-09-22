@@ -47,6 +47,16 @@ type EngineReport = {
     remainingGiB?: number
   }
   vram?: { capacityGiB?: number; peakResidentGiB?: number; fits?: boolean; strategy?: string }
+  /**
+   * 低精度（fp8/int8）权重**能不能自动还原**（后端 `engine_readiness.quant_plan` 给 ✓）。
+   * ⚠️ 三档必须分开显示 ✗：`supported` 能自动反量化 ✓ / `unsupported` 判不出布局（装的时候会中止 ✗，
+   * 它同时也在 `blockers` 里 ✓）/ `notChecked` **还没下载** ✓ ⇒ **没查 ≠ 通过** ✗（与本仓那条口径一致 ✓）。
+   */
+  quant?: {
+    supported?: { key?: string; weights?: number; layouts?: Record<string, number> }[]
+    unsupported?: { key?: string; weights?: number }[]
+    notChecked?: string[]
+  }
   hint?: string
 }
 
@@ -232,6 +242,26 @@ function stageLabel(stage?: string) {
           <div class="pf-block-title blocked">阻断（{{ engine.blockers.length }}）</div>
           <ul class="pf-list">
             <li v-for="(item, index) in engine.blockers" :key="index">{{ item }}</li>
+          </ul>
+        </div>
+
+        <!-- ⭐ 低精度权重（fp8/int8 ✓）：**能不能自动还原** —— 三档分开显示 ✗
+             （`unsupported` 同时也在阻断里 ✓；这里补的是**能自动做**与**没查**两种，免得读错 ✓） -->
+        <div v-if="engine.quant?.supported?.length" class="pf-block">
+          <div class="pf-block-title">低精度权重可**自动反量化** ✓</div>
+          <ul class="pf-list notes">
+            <li v-for="(item, index) in engine.quant.supported" :key="index">
+              {{ item.key }}：{{ item.weights }} 个权重（布局
+              {{ Object.entries(item.layouts || {}).map(([k, v]) => `${k}×${v}`).join('、') || '—' }}）
+            </li>
+          </ul>
+        </div>
+        <div v-if="engine.quant?.notChecked?.length" class="pf-block">
+          <div class="pf-block-title">低精度权重：没查（**不等于通过** ✗）</div>
+          <ul class="pf-list notes">
+            <li>{{ engine.quant.notChecked.slice(0, 3).join('、') }}
+              <span v-if="engine.quant.notChecked.length > 3">等 {{ engine.quant.notChecked.length }} 个</span>
+              还没下载 ⇒ 到手才知道布局判不判得出来 ✓</li>
           </ul>
         </div>
 

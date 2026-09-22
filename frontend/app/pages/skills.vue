@@ -34,7 +34,7 @@
         >
           <span class="agent-type-badge">🧩</span>
           <span class="skills-agent-label">{{ lib.label }}</span>
-          <span v-if="lib.skillCount > 0" class="skill-count-badge">{{ lib.skillCount }}</span>
+          <span v-if="(lib.skillCount ?? 0) > 0" class="skill-count-badge">{{ lib.skillCount }}</span>
         </button>
       </template>
     </aside>
@@ -80,7 +80,7 @@
               </div>
               <div class="dim" style="font-size:11px">{{ s.description }}</div>
               <div class="skill-stat-row">
-                <span class="skill-stat-tag" title="实际注入体量（含前置契约与协议字段段，与注入预算同口径）">{{ fmtChars(s.charCount) }} 字符</span>
+                <span class="skill-stat-tag" title="实际注入体量（含前置契约与协议字段段，与注入预算同口径）">{{ fmtChars(s.charCount ?? 0) }} 字符</span>
                 <span
                   v-if="s.referenceCount"
                   class="skill-stat-tag warn"
@@ -166,14 +166,35 @@ import { useConfirm } from '~/composables/useConfirm'
 
 const { confirm } = useConfirm()
 
+// ⚠️⚠️ 2026-09-21：这两处 `ref([])` / `ref({...})` 原来是**没有泛型**的 ✗
+//      ⇒ `never[]` / 字面量类型 ⇒ 模板里每个属性访问都报 TS2339 ✓✗（一趟类型检查冒出几十条 ✓）。
+//      形状取自 `~contracts`（**后端是权威** ✓ 此处是镜像 ✓）。
+import type { SkillVO } from '~contracts'
+
+/** GET /skills/meta：可用 Agent 与外部技能库目录（界面用它渲染分组与来源标签 ✓） */
+interface SkillMeta {
+  agents: { type: string; label: string; charCount?: number }[]
+  sources: {
+    id: string
+    label: string
+    description?: string
+    /** `false` ⇒ 该库**没提供** `library.yaml` 声明，展示名取目录名（界面要提示 ✓） */
+    declared?: boolean
+    /** 该库里的 Skill 数（徽标） */
+    skillCount?: number
+  }[]
+  coreCount: number
+  charBudget: number
+}
+
 // ===== Skills =====
 const selectedAgent = ref('script_rewriter')   // 'all' | Agent 类型 | 'lib:<技能库名>'
-const allSkills = ref([])   // SkillVO[]: { id, name, description, category, source, agents, priority, boundAgents, phases }
-const skillMeta = ref({ agents: [], sources: [], coreCount: 0, charBudget: 0 })
-const editingSkill = ref(null)
+const allSkills = ref<SkillVO[]>([])
+const skillMeta = ref<SkillMeta>({ agents: [], sources: [], coreCount: 0, charBudget: 0 })
+const editingSkill = ref<string | null>(null)
 const skillContent = ref('')
 const skillSaving = ref(false)
-const skillSaved = ref(null)
+const skillSaved = ref<string | null>(null)
 const addSkillDialog = ref(false)
 const newSkillForm = reactive({ id: '', name: '', description: '' })
 /** 目录名预校验：比后端更严（不允许斜杠，避免误建嵌套目录）→ 即时提示而非等 400 英文报错 */
@@ -185,14 +206,15 @@ const agentDefs = computed(() => skillMeta.value.agents || [])
 const vendorLibs = computed(() => skillMeta.value.sources || [])
 
 /** Agent 图标（纯 UI 装饰；未知 Agent 回退默认值，新增 Agent 不会让前端报错） */
-const AGENT_ICONS = {
+// ⚠️ 2026-09-21：标 `Record<string, string>` ✗ —— 字面量对象用运行时字符串下标会报 TS7053 ✓
+const AGENT_ICONS: Record<string, string> = {
   script_rewriter: '📝',
   extractor: '🔍',
   storyboard_breaker: '🎬',
   voice_assigner: '🎙',
   grid_prompt_generator: '🖼',
 }
-function agentIcon(type) {
+function agentIcon(type: string) {
   return AGENT_ICONS[type] || '🤖'
 }
 
@@ -214,7 +236,7 @@ const selectedAgentIcon = computed(() => {
   return agentIcon(selectedAgent.value)
 })
 /** 体量格式化：小于 1 万原样显示，超出用 k 记（避免卡片上一长串数字） */
-function fmtChars(n) {
+function fmtChars(n: number) {
   const v = Number(n) || 0
   return v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v)
 }
@@ -245,21 +267,21 @@ const selectedAgentSubtitle = computed(() => {
 })
 
 /** 徽标文案：core = 项目自有；vendor = 归属的外部技能库名（不写死任何库的品牌） */
-function skillCategoryLabel(s) {
+function skillCategoryLabel(s: SkillVO) {
   if (s.category === 'vendor') return s.sourceLabel || s.source || '外部技能库'
   return '核心'
 }
-function agentLabel(type) {
+function agentLabel(type: string) {
   return agentDefs.value.find(a => a.type === type)?.label || type
 }
 
 /** 侧栏分组归属：Agent 组看默认绑定（boundAgents）+ 目录归属；技能库组看来源库 */
-function inGroup(s, type) {
+function inGroup(s: SkillVO, type: string) {
   if (type === 'all') return true
   if (type.startsWith('lib:')) return s.category === 'vendor' && `lib:${s.source}` === type
   return (s.boundAgents || []).includes(type) || s.id === type || s.id.startsWith(type + '/')
 }
-function agentSkillCount(type) {
+function agentSkillCount(type: string) {
   return allSkills.value.filter(s => inGroup(s, type)).length
 }
 
@@ -270,7 +292,7 @@ async function loadAllSkills() {
     const [list, meta] = await Promise.all([skillsAPI.list(), skillsAPI.meta()])
     allSkills.value = list
     skillMeta.value = meta
-  } catch (e) { toast.error(e.message) }
+  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 
 /** meta 加载后校正选中项：Agent / 技能库被移除时不至于停在空分组 */
@@ -279,7 +301,7 @@ function ensureSelectionValid() {
   if (!valid.includes(selectedAgent.value)) selectedAgent.value = agentDefs.value[0]?.type || 'all'
 }
 
-async function selectAgent(type) {
+async function selectAgent(type: string) {
   selectedAgent.value = type
   editingSkill.value = null
 }
@@ -300,11 +322,11 @@ async function confirmAddSkill() {
     await loadAllSkills()
     toast.success('Skill 创建成功')
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
-async function deleteSkill(s) {
+async function deleteSkill(s: SkillVO) {
   if (!(await confirm({
     message: s.category === 'vendor'
       ? `确定删除外部技能库 Skill「${s.id}」？\n该操作将直接从磁盘删除技能文件且不可恢复，如属导入资源需重新导入技能库。`
@@ -317,21 +339,21 @@ async function deleteSkill(s) {
     await loadAllSkills()
     toast.success('已删除')
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 
-async function toggleSkillEdit(id) {
+async function toggleSkillEdit(id: string) {
   if (editingSkill.value === id) { editingSkill.value = null; return }
   try {
     const res = await skillsAPI.get(id)
     skillContent.value = res.content
     skillSaved.value = null
     editingSkill.value = id
-  } catch (e) { toast.error(e.message) }
+  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 
-async function saveSkill(id) {
+async function saveSkill(id: string) {
   skillSaving.value = true
   skillSaved.value = null
   try {
@@ -343,7 +365,7 @@ async function saveSkill(id) {
     else toast.success(`已保存`)
     setTimeout(() => { if (skillSaved.value === id) skillSaved.value = null }, 3000)
   } catch (e) {
-    toast.error(e.message)
+    toast.error(e instanceof Error ? e.message : String(e))
   } finally {
     skillSaving.value = false
   }

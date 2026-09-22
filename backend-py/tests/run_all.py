@@ -4,11 +4,16 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**104 套 / 3571 项 / 0 失败**（2026-09-21 ✓：自研预分词器补齐
-`Split`（**五种 behavior** ✓）/`FixedLength` 后重跑 ✓ —— 103 套按 `SUMMARY:` 收敛出 3571 项 ✓，
+最近一次**全量实测**：**105 套 / 3604 项 / 0 失败**（2026-09-22 ✓：反量化结论推到**三个消费者** ✓
+（CLI ② 段 ✓ / 就绪 API 的 `summary().quant` ✓ / 前端面板 ✓ —— **能力接不出去不算功能** ✓）+
+`quant_plan` 三档（可自动还原 ✓ / 判不出（=阻塞 ✓）/ **没查** ✓）+ **GGUF 豁免** ✓ 后重跑 ✓
+—— 104 套按 `SUMMARY:` 收敛出 3604 项 ✓，
 另 1 套是常量守卫型（打印 `OK: 镜像常量漂移 0 条` ✓ 无项数 ✓））。
-⚠️ 上一轮：104 套 / 3563 项 ✓（`engine_readiness_script_test` 上机前自检入口 ✓）——
+⚠️ 上一轮：105 套 / 3600 项 ✓（`dequantPlan` 进体检 ✓）——
 按规则**不推算** ✗，数字取自刚跑出来的汇总 ✓。
+⚠️ 前端两条自检与**构建命令**耦合 ✗（2026-09-22 踩过 ✓）：`frontend/.output/public/index.html` 是
+`npm run **generate**` 的产物 ✓（Dockerfile 用的也是它 ✓）⇒ 只跑 `npm run **build**` 会把它**覆盖掉** ✓✗
+（`dockerfile_contract_test` 当场红 ✓）⇒ 改完前端**该跑的清单**：`typecheck` ✓ + `generate` ✓。
 ⚠️⚠️ **别同时开多个全量回归** ✗：并发会互相抢 CPU（表现为"卡在某套很久" ✓✗）；
 判据是日志里有没有 `结论：` 行 ✓ —— **半截日志不算跑过** ✗（2026-09-21 实测踩到 ✓）。
 ⚠️ 自检**汇总行格式有硬要求** ✗：必须是 `SUMMARY: n/m passed` ✓（`run_all.py` 按这个前缀收敛项数 ✓）
@@ -142,6 +147,7 @@ TESTS = [
     ("自研引擎·GGUF 读取器（头格式/张量表/截断检测/量化方案名；零依赖）", "engine_gguf_test.py"),
     ("自研引擎·H3 键名核对器（键全集/形状关系/PDD 头库/curve 变体；零依赖 torch-free）", "engine_h3_keys_test.py"),
     ("自研引擎·BPE 分词器（真词表 tokenizer.json/vocab+merges；往返恒等；零依赖离线）", "engine_tokenizer_test.py"),
+    ("自研引擎·反量化（fp8/int8 × 四种布局 × 两种 scale 方向；判不出来就拒绝；接进装载）", "engine_quant_test.py"),
     ("自研引擎·分词器总入口（形态嗅探/自研优先/参考回退/批量+LRU/离线开关；互校）", "engine_tokenizer_hub_test.py"),
     ("自研引擎·自研 Unigram/WordPiece/Metaspace（Viterbi/fuse_unk/整词 UNK；与参考逐例同 id）",
      "engine_tokenizer_own_test.py"),

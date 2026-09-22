@@ -16,7 +16,14 @@
 
 * :mod:`app.services.engine.safetensors` —— 纯 Python **读头部**（体检用 ✓ 不需要 torch ✓）；
 * :mod:`app.services.engine.loader` —— 该不该装 / 装得下吗（加载计划 ✓）；
+* :mod:`app.services.engine.quant` —— 低精度权重怎么**还原**（fp8/int8 → 可算精度 ✓ 布局按形状判 ✓
+  判不出来**拒绝** ✗）；
 * 本模块 —— **真的把张量交给模块** ✓。
+
+⚠️ **装载顺序**（2026-09-22 ✓）：**先反量化，再归一 dtype** ✗ —— 目标主权重就是 **fp8**（19.53 GiB ✓），
+而 fp8 张量直接 `to(bf16)` 是**把尺度丢掉** ✗ ⇒ `load_state_dict` 照单全收、**不报错** ✗✗，
+症状要到出片才发现「画面是噪声」✓✗。⇒ 现在低精度权重走 `quant.dequantize_state` ✓
+（布局 / 来源 scale 都随报告给出来 ✓），**判不出来就中止装载** ✓（不按猜的布局算 ✗）。
 """
 from __future__ import annotations
 
@@ -24,6 +31,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import quant as quant_mod
 
 __all__ = ["WeightLoadReport", "diff_state_dict", "load_module_weights", "save_module_weights"]
 
@@ -41,6 +50,9 @@ class WeightLoadReport:
     shapeMismatch: list[dict[str, Any]] = field(default_factory=list)
     renamed: int = 0
     dtypeCasts: dict[str, int] = field(default_factory=dict)
+    #: 反量化明细 ✓（动过才有内容 ✓）：每个低精度权重的**布局 / 来源 scale / 原 dtype** ✓
+    #: ⚠️ 它必须**随报告给出来** ✗ —— 「装上了」与「按对的布局还原了」是两件事 ✓（同 `configSources` 的纪律 ✓）。
+    dequant: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
     @property
@@ -55,7 +67,8 @@ class WeightLoadReport:
             "missing": self.missing[:12], "missingCount": len(self.missing),
             "unexpected": self.unexpected[:12], "unexpectedCount": len(self.unexpected),
             "shapeMismatch": self.shapeMismatch[:6], "shapeMismatchCount": len(self.shapeMismatch),
-            "renamed": self.renamed, "dtypeCasts": self.dtypeCasts, "error": self.error,
+            "renamed": self.renamed, "dtypeCasts": self.dtypeCasts,
+            "dequant": dict(self.dequant), "error": self.error,
         }
 
 
@@ -129,6 +142,18 @@ def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
     if key_map:
         state, report.renamed = _apply_key_map(state, key_map)
 
+    # ⚠️⚠️ **反量化必须在 cast 之前** ✗（2026-09-22 ✓）—— 目标主权重就是 **fp8** ✓（19.53 GiB ✓），
+    #   而 fp8 张量**直接 `to(bf16)` 是把尺度丢掉** ✗ ⇒ 得到一个「看着正常、数值全错」的模型 ✓✗
+    #   （`load_state_dict` 照单全收 ⇒ **不报错** ✗✗，症状要到出片才发现是噪声 ✓）。
+    #   ⇒ 先按配套 scale 还原成可算精度 ✓，再走下面的 dtype 归一 ✓；
+    #   ⚠️ 反量化**判不出来就中止** ✗（块量化 / 分组量化 / 缺 scale ✓ —— 绝不按猜的布局算 ✓）。
+    quant = quant_mod.dequantize_state(state)
+    if not quant.ok:
+        report.error = ("低精度权重**无法反量化** ✗ ⇒ 已**中止装载**（不按猜的布局算 ✗，"
+                        "也不静默 cast ✗）：" + "；".join(quant.problems[:3]))
+        return report
+    state = dict(quant.tensors)
+    report.dequant = quant.to_dict()
     casts: dict[str, int] = {}
     if dtype is not None:
         converted = {}

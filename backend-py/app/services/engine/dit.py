@@ -104,13 +104,20 @@ H3_STRUCTURAL_GAPS: tuple[str, ...] = (
 #: ✅ **已经关掉的缺口**（2026-09-20 ✓）—— 每条注明**靠什么关的** ✓：
 #: * ① 注意力维度 ⇒ `DiTConfig.attn_dim` + 显式 `qkv_proj`/`out_proj` ✓（5376→3×7168 ✓、7168→5376 ✓）；
 #: * ② 双输出 ⇒ `DiTConfig.audio_latents` + `final_layer.video_out`/`audio_out` ✓；
-#: * ④ `condition_proj` + `token_refiner` ⇒ `DiTConfig.text_refiner_layers` ✓（键名逐字对齐 ✓）。
+#: * ④ `condition_proj` + `token_refiner` ⇒ `DiTConfig.text_refiner_layers` ✓（键名逐字对齐 ✓）；
+#: * ④′ **refiner 内部结构**（2026-09-22 ✓）⇒ **直接复用 `h3_form.TokenRefiner`** ✓（见下 ✓）：
+#:   旧实现拿本仓 `DiTBlock`（带 adaLN ✗）充当 refiner ✗ ⇒ 键是 `token_refiner.blocks.N.adaln_proj.*` ✗
+#:   （**多出参考没有的键** ✓✗）且缺 `attn.` 前缀 ✗ ⇒ 真权重装不上 ✓✗。
 #: ⚠️ 关掉 ≠ **核过真权重** ✗：② 里的"音频第二个头"是**可装载的近似** ✓（H3 真形态是拼序列出 ✓，
-#: 见上面第 2 条 ✓），④ 的 refiner **内部细节未经真权重核对** ✗（层数/键名对齐 ✓，归一化位置待核 ✓）。
+#: 见上面第 2 条 ✓）；④′ 现在是**与参考源码逐字对齐** ✓（不是"待核"了 ✓）—— 但**仍未核过真权重** ✗
+#: （「源码对齐」与「权重核过」是两件事 ✓，别混 ✓）。
 H3_GAPS_CLOSED: tuple[str, ...] = (
     "① 注意力维度：attn_dim + 显式 qkv_proj/out_proj（键名/形状对齐 H3 ✓）",
     "② 双输出：final_layer.video_out + audio_out（近似：H3 真形态是拼序列 ✓）",
-    "④ condition_proj + token_refiner.blocks.N（层数与键名对齐 ✓，内部细节待核 ✗）",
+    "④ condition_proj + token_refiner：层数/键名对齐 ✓ + **内部结构已按参考对齐** ✓"
+    "（2026-09-22 复用 `h3_form.TokenRefiner` ✓：RMSNorm ✓ **无 adaLN** ✓ "
+    "`attn.{qkv_proj,q_norm,k_norm,out_proj}` ✓ SwiGLU `mlp.{fc1,fc2}` ✓ `final_norm` ✓；"
+    "⚠️ 真权重仍未核 ✗）",
 )
 
 
@@ -154,7 +161,9 @@ class DiTConfig:
     #: **文本 refiner 层数** ✓（``0`` = 无 = 旧行为 ✓）。
     #: 非 0 ⇒ 走 H3 的文本侧形态 ✓：``condition_proj``(text_dim→hidden ✓) + ``token_refiner.blocks.N``
     #: （每层自注意力 ✓）—— 同样**键名与 H3 逐字一致** ✓（H3 是 2 层 ✓）。
-    #: ⚠️ 内部细节（归一化位置 / 是否 adaLN）**未经真权重核对** ✗ ⇒ 注释里标明是近似 ✓。
+    #: ⭐ 2026-09-22：refiner **整个复用 `h3_form.TokenRefiner`** ✓（那边已与参考逐字对齐 ✓：
+    #: RMSNorm ✓ **无 adaLN** ✓ `attn.{qkv_proj,q_norm,k_norm,out_proj}` ✓ SwiGLU ✓ `final_norm` ✓）
+    #: ⇒ 内部结构**不再是"近似"** ✓；⚠️ 与全仓同一条纪律：**源码对齐 ≠ 权重核过** ✗。
     text_refiner_layers: int = 0
 
     def __post_init__(self) -> None:
@@ -415,18 +424,18 @@ def _build() -> tuple[type, type, type]:
             normed = self.norm2(tokens) * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
             return tokens + gate_mlp.unsqueeze(1) * self.mlp(normed)
 
-    class TokenRefiner(nn.Module):
-        """H3 的 `token_refiner` ✓（键名逐字对齐：``token_refiner.blocks.N.*`` ✓）。
-
-        ⚠️ 每层用的是本仓 :class:`DiTBlock`（自注意力 ✓ + adaLN 调制 ✓）—— **层数与键名对齐 H3** ✓，
-        但**内部细节（归一化位置 / 是否带 adaLN）未经真权重核对** ✗ ⇒ 记在 `H3_GAPS_CLOSED` 里 ✓
-        （「关掉 ≠ 核过」✓）。
-        """
-
-        def __init__(self, config: DiTConfig) -> None:
-            super().__init__()
-            self.blocks = nn.ModuleList([DiTBlock(config)
-                                         for _ in range(config.text_refiner_layers)])
+    # ⭐⭐ 2026-09-22：**不再自带一份 refiner** ✗ ⇒ 直接复用 `h3_form.TokenRefiner` ✓
+    #      （**不抄第二份** ✗ —— 那份已与参考实现逐字对齐 ✓：RMSNorm ✓ **无 adaLN** ✓
+    #      `attn.{qkv_proj,q_norm,k_norm,out_proj}` ✓ SwiGLU `mlp.{fc1,fc2}` ✓ + 收尾 `final_norm` ✓）。
+    #
+    #      ⚠️⚠️ 旧实现用的是本仓 :class:`DiTBlock`（**带 adaLN** ✗ ⇒ 键变成
+    #      `token_refiner.blocks.N.adaln_proj.*` ✗）⇒ 既**多出参考没有的键** ✓✗、又**缺**
+    #      `attn.` 这层前缀 ✓✗ ⇒ 真权重不但装不上，报错还是"缺一堆键 + 多一堆键"那种最难查的 ✓。
+    #      ⚠️ `h3_keys` 早把「refiner 多出 adaLN」当 unexpected 报出来了 ✓（自检 `engine_h3_keys_test` ⑫ ✓）
+    #      —— dit 这份**一直没跟上** ✗；这次对齐 ✓（自检 `engine_dit_test` ④¹¹ 原来钉的是**错的键名** ✗，
+    #      也一并改正 ✓：「测试钉着的名字」不等于「参考的名字」✗）。
+    from . import h3_form  # noqa: PLC0415 —— 懒导入 ✓（h3_form 模块级不 import torch ✓ 无环 ✓）
+    TokenRefiner = h3_form.TokenRefiner
 
     class FinalLayerHeads(nn.Module):
         """H3 的 `final_layer` 输出头 ✓（``video_out`` + ``audio_out`` ✓ 键名逐字对齐 ✓）。
@@ -464,7 +473,11 @@ def _build() -> tuple[type, type, type]:
             self.uses_refiner = config.text_refiner_layers > 0
             if self.uses_refiner:
                 self.condition_proj = nn.Linear(config.text_dim, config.hidden)
-                self.token_refiner = TokenRefiner(config)
+                # ⚠️ eps 用参考默认 1e-5 ✓（`DiTConfig` 里**没有** eps 字段 ✗ —— 那是 H3 事实表
+                #    里的 `norm_eps` / `qk_norm_eps` / `final_norm_eps` ✓；要改就在 `h3_form` 侧改 ✓）。
+                self.token_refiner = TokenRefiner(
+                    config.text_refiner_layers, config.hidden, config.heads,
+                    config.attn_head_dim, int(config.hidden * config.mlp_ratio))
             else:
                 self.text_proj = (nn.Identity() if config.text_dim == config.hidden
                                   else nn.Linear(config.text_dim, config.hidden))
@@ -508,9 +521,14 @@ def _build() -> tuple[type, type, type]:
                 if int(text.shape[0]) != batch:         # 单条条件广播到整个 batch ✓
                     text = text.expand(batch, *text.shape[1:])
                 if self.uses_refiner:
-                    # H3 的 refiner 是**文本侧自注意力** ✓（只处理文本 token ✓ 不碰潜变量 ✓）
-                    for refiner_block in self.token_refiner.blocks:
-                        text = refiner_block(text, cond)
+                    # H3 的 refiner 是**文本侧自注意力** ✓（只处理文本 token ✓ 不碰潜变量 ✓，
+                    # 也**不看 cond** ✗ —— 参考的 RefinerBlock 只收 x ✓ 无 adaLN 调制 ✓）。
+                    # ⚠️⚠️ **形状口径不同** ✗：`h3_form` 的积木按 H3 的 **2D 打包行**（`(rows, hidden)` ✓
+                    #    **无 batch 维** ✗）写 ✓；本模块走 `(B, L, D)` ✓ ⇒ **逐条**按 2D 喂进去 ✓。
+                    #    ⚠️ 不能图省事整批 `reshape(-1, hidden)` ✗ —— 那会把 batch 之间也拉进同一条
+                    #    序列里互相注意 ✓✗（`B=1` 的自检**发现不了** ✓✗，典型的"测试通过但语义错"✓）。
+                    text = (torch.stack([self.token_refiner(row) for row in text], dim=0)
+                            if text.ndim == 3 else self.token_refiner(text))
                 cond = cond + text.mean(dim=1)          # pooled 调制 ✓
             for block in self.blocks:
                 tokens = block(tokens, cond, text if self.config.cross_attention else None)

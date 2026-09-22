@@ -32,6 +32,7 @@ from typing import Any
 
 from . import inventory as inv
 from . import gguf as gguf_mod
+from . import quant as quant_mod
 from . import safetensors as st
 
 __all__ = [
@@ -103,6 +104,10 @@ class LoadPlan:
     dtypeClasses: dict[str, int] = field(default_factory=dict)
     computeDtype: str = ""
     quantScheme: str = "none"
+    #: ⭐ 低精度权重的**自动还原计划** ✓（2026-09-22 ✓ `quant.plan_dequant` ✓）：
+    #: 布局计数 / 判不出来的 / 缺 scale 的 / 分组量化的 ✓ + `supported` 一句话结论 ✓。
+    #: ⚠️ **只靠形状就能算** ✗ ⇒ 体检阶段（没有 torch ✓）也能给出「这份 fp8 到手后能不能自动还原」✓。
+    dequantPlan: dict[str, Any] = field(default_factory=dict)
     blockHead: str | None = None
     blockCount: int = 0
     loadMode: str = "full"
@@ -120,6 +125,7 @@ class LoadPlan:
             "present": self.present, "verified": self.verified, "gib": self.gib,
             "tensorCount": self.tensorCount, "dtypeClasses": self.dtypeClasses,
             "computeDtype": self.computeDtype, "quantScheme": self.quantScheme,
+            "dequantPlan": dict(self.dequantPlan),
             "blockHead": self.blockHead, "blockCount": self.blockCount,
             "loadMode": self.loadMode, "readSecondsEstimate": self.readSecondsEstimate,
             "warnings": self.warnings, "problems": self.problems,
@@ -162,6 +168,13 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
         plan.quantScheme = ginfo.quant_scheme
         plan.computeDtype = (f"{ginfo.quant_scheme}（反量化由 ComfyUI-GGUF/llama.cpp 运行时完成 ✓）"
                              if ginfo.quant_scheme not in ("none", "unknown") else ginfo.quant_scheme)
+        # ⚠️ GGUF 的量化是**块量化** ✓（Q4_K 一类 ✓ group size 在文件里 ✓）—— 本仓**不自研它的反量化** ✗
+        #    （那要 llama.cpp/ComfyUI-GGUF ✓ 见 `gguf` 模块的边界 ✓）；这里只如实报「不归我管」✓，
+        #    ⇒ `supported=False` 表示「**别指望 `quant.dequantize_state` 处理它**」✓（不是"坏了" ✗）。
+        plan.dequantPlan = {"weights": plan.tensorCount if plan.quantScheme not in ("none", "unknown")
+                            else 0, "paired": 0, "layouts": {}, "unresolved": [], "unresolvedCount": 0,
+                            "unpaired": [], "unpairedCount": 0, "grouped": [], "groupedCount": 0,
+                            "supported": False, "note": "GGUF：反量化由运行时（llama.cpp/ComfyUI-GGUF ✓）做 ✓"}
         plan.problems.extend(ginfo.problems)
         head, count, gaps = _block_gap_of(list(ginfo.tensors))
         plan.blockHead, plan.blockCount = head, count
@@ -186,6 +199,23 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
     if missing_scales:
         plan.problems.append(f"{len(missing_scales)} 个低精度权重缺少配套 scale（例如 "
                              f"{missing_scales[:2]}）⇒ 反量化时会炸 ✗")
+    # ⭐ 反量化**能不能自动做**：由 `quant.plan_dequant` 按**形状**判 ✓（与装载时**同一套判据** ✗）
+    plan.dequantPlan = quant_mod.plan_dequant(
+        {name: (tensor.dtype, tensor.shape) for name, tensor in info.tensors.items()})
+    if plan.dequantPlan["unresolvedCount"]:
+        # ⚠️ 缺 scale 由上面那条报 ✓；这里报的是**布局判不出来**（块量化一类 ✓ 组大小在 json 里 ✗）
+        plan.problems.append(
+            f"{plan.dequantPlan['unresolvedCount']} 个低精度权重的 scale 形状**对不上任何布局** ✗"
+            f"（例如 {plan.dequantPlan['unresolved']} ✓）⇒ 大概是**块量化** ✓，自动反量化会**中止装载** ✓"
+            f"（不按猜的布局算 ✗）⇒ 需要随附 json 里的 group size ✓ 本仓不猜 ✗")
+    if plan.dequantPlan["groupedCount"]:
+        plan.problems.append(
+            f"{plan.dequantPlan['groupedCount']} 个低精度权重带 `zeros`/`g_idx` ✗ ⇒ 分组量化 ✓"
+            f"（例如 {plan.dequantPlan['grouped']} ✓）⇒ 组大小同样在 json 里 ✓ 本仓不猜 ✗")
+    if plan.dequantPlan["supported"]:
+        plan.warnings.append(
+            f"低精度权重可**自动反量化** ✓（布局：{plan.dequantPlan['layouts']} ✓"
+            f" —— 装的时候先还原再归一 dtype ✓）")
     plan.loadMode = _mode_for(plan.bytes, capacity_gib)
     plan.readSecondsEstimate = round(plan.gib / ASSUMED_READ_GIBPS, 1)
     if plan.quantScheme != "none" and plan.loadMode != "full":

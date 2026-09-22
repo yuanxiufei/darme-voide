@@ -19,6 +19,12 @@ export default defineNuxtConfig({
     '~contracts': fileURLToPath(new URL('./app/types/contracts.ts', import.meta.url)),
   },
   typescript: {
+    // ⭐ 2026-09-22：打开**构建期类型检查** ✓ —— 此前只有 `npm run typecheck`（要手动跑 ✓）
+    //    ⇒ 类型错误可以一路"构建通过"地溜进产物 ✓✗（本仓真实吃过：537 条错误里藏了两个
+    //    **功能从来没生效**的 bug ✓ —— `engineReadiness` 参数被静默忽略 ✓、
+    //    `switchEpisodeConfig` 传的是 ComputedRef ✓）。现在错误会在 `npm run build` 阶段就红 ✓。
+    //    ⚠️ 前提是 typecheck 已经清零（2026-09-22 ✓ 0 错误 ✓）—— 否则构建会被拖红 ✗。
+    typeCheck: true,
     tsConfig: {
       compilerOptions: {
         paths: {

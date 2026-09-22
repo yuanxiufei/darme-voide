@@ -180,13 +180,32 @@ def case_config() -> None:
                                     audio_latents=8, text_refiner_layers=2)
         h3_model = _dit.build_dit(h3_like)
         names = set(h3_model.state_dict())
-        check("④¹¹ ⭐ 键名对齐 H3：`condition_proj` / `token_refiner.blocks.N` / "
+        # ⚠️⚠️ 2026-09-22 修正**测试里的错** ✗：这里原本钉的是 `token_refiner.blocks.0.qkv_proj.weight` ✓✗
+        #      —— 那是**旧近似实现**的键（`qkv_proj` 直接挂在 block 上 ✗）；参考（与 `h3_keys` 的
+        #      期望键表 ✓）是 **`token_refiner.blocks.N.attn.qkv_proj.weight`** ✓（多一层 `attn.` ✓），
+        #      且 refiner **没有 adaLN** ✓。⇒ 「测试钉着的名字」**不等于**「参考的名字」✗
+        #      （这条正是本仓反复吃过的亏：清单/断言没写全 ⇒ 下一个人以为"只剩 X 件" ✓✗）。
+        check("④¹¹ ⭐ 键名对齐 H3：`condition_proj` / `token_refiner.blocks.N.attn.qkv_proj` / "
               "`final_layer.video_out` / `final_layer.audio_out` 全部就位 ✓",
               any(key.startswith("condition_proj.") for key in names)
-              and "token_refiner.blocks.0.qkv_proj.weight" in names
-              and "token_refiner.blocks.1.qkv_proj.weight" in names
+              and "token_refiner.blocks.0.attn.qkv_proj.weight" in names
+              and "token_refiner.blocks.1.attn.qkv_proj.weight" in names
               and "final_layer.video_out.weight" in names
               and "final_layer.audio_out.weight" in names, sorted(names)[:8])
+        check("④¹¹′ ⭐ refiner 的内部结构**也按参考** ✓（2026-09-22 复用 `h3_form.TokenRefiner` ✓）："
+              "`blocks.N.{norm1,norm2}`（**RMSNorm** ✓）+ `attn.{q_norm,k_norm}` ✓ + SwiGLU "
+              "`mlp.{fc1,fc2}` ✓ + 收尾 `final_norm` ✓；⚠️ **无 adaLN** ✗（旧近似实现多出来的 "
+              "`token_refiner.blocks.N.adaln_proj.*` 现在**必须不存在** ✓ —— `h3_keys` 就把它当 unexpected ✓）",
+              {"token_refiner.final_norm.weight",
+               "token_refiner.blocks.0.norm1.weight",
+               "token_refiner.blocks.0.norm2.weight",
+               "token_refiner.blocks.0.attn.q_norm.weight",
+               "token_refiner.blocks.0.attn.k_norm.weight",
+               "token_refiner.blocks.0.attn.out_proj.weight",
+               "token_refiner.blocks.0.mlp.fc1.weight",
+               "token_refiner.blocks.0.mlp.fc2.weight"} <= names
+              and not any("adaln" in key for key in names if key.startswith("token_refiner.")),
+              sorted(key for key in names if key.startswith("token_refiner.")))
         # ⚠️ 期望值我第一版写错了 ✗✓：把 H3 的 24 通道算进了**缩放版**（`patch 1×2×2 × 4ch = 16` ✓、
         #    H3 是 `2×2×24 = 96` ✓ —— **同一个公式** ✓）⇒ 自检当场红 ✓
         check("④¹² ⭐ 形状 = **缩放版 H3**：video_out 32→16（patch 1×2×2 × 4ch ✓；H3 是 2×2×24=96 ✓）、"
@@ -200,6 +219,34 @@ def case_config() -> None:
               tuple(video.shape) == tuple(latent.shape)
               and audio.ndim == 3 and audio.shape[0] == 1 and audio.shape[-1] == 8,
               (tuple(video.shape), tuple(audio.shape)))
+
+        # ⭐⭐ 2026-09-22 新增：**batch 之间不许串味** ✓
+        #     起因：`h3_form` 的 refiner 按 H3 的 **2D 打包行**写 ✓（无 batch 维 ✗），dit 这边走 (B,L,D) ✓
+        #     ⇒ 复用时若图省事**整批 `reshape(-1, hidden)`** ✗，batch 之间会被拉进同一条序列互相注意 ✓✗。
+        #     ⚠️ 这种错 **`B=1` 的自检发现不了** ✗✗（本套绝大多数用例就是 B=1 ✓）⇒ 必须专门钉一条 ✓：
+        #     判据 = **只改第 1 条的文本，第 0 条的输出必须**一字不动 ✓、第 1 条必须真变 ✓。
+        #     （后半句是**反向证明** ✓ —— 否则"两条都不变"也会让前半句通过 ✓✗。）
+        #     ⚠️⚠️ 前置：**必须先把调制层置非零** ✗ —— adaLN-Zero 初始化下**条件本来就不影响输出** ✓✗
+        #     （第一版没置 ⇒ 两条 diff 都是 0.0 ⇒ 用例当场红 ✓✓ 这正是"反向证明"该有的作用 ✓）。
+        with torch.no_grad():
+            for block in h3_model.blocks:
+                torch.nn.init.normal_(block.modulation[-1].weight, std=0.05)
+                torch.nn.init.normal_(block.modulation[-1].bias, std=0.05)
+            torch.nn.init.normal_(h3_model.final_modulation[-1].weight, std=0.05)
+            torch.nn.init.normal_(h3_model.final_modulation[-1].bias, std=0.05)
+            pair_latent = torch.cat([latent, latent * 0.5 + 0.1], dim=0)
+            ctx_a = torch.zeros(2, 3, h3_like.text_dim)
+            ctx_a[0] = 0.7
+            ctx_a[1] = -0.3
+            ctx_b = ctx_a.clone()
+            ctx_b[1] = 0.9
+            out_a, _ = h3_model(pair_latent, 0.5, ctx_a)
+            out_b, _ = h3_model(pair_latent, 0.5, ctx_b)
+        check("④¹⁶ ⭐⭐ **batch 独立性** ✓：只改第 1 条的文本 ⇒ 第 0 条输出**一字不动** ✓ 且第 1 条"
+              "**确实变了** ✓（⇒ refiner 是**逐条**按 2D 走的 ✓ 没被整批 flatten 成一条序列 ✓✗）",
+              torch.allclose(out_a[0], out_b[0]) and not torch.allclose(out_a[1], out_b[1]),
+              (float((out_a[0] - out_b[0]).abs().max()),
+               float((out_a[1] - out_b[1]).abs().max())))
         check("④¹⁴ ⭐ 两个开关都关 ⇒ **回到旧形态** ✓（`out` 在 ✓、`final_layer`/`token_refiner` 不在 ✓）",
               "out.weight" in set(narrow.state_dict())
               and not any(key.startswith(("final_layer.", "token_refiner."))

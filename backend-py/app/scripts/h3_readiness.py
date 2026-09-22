@@ -50,6 +50,20 @@ def render(report: dict[str, Any]) -> None:
     print(f"加载计划：fits={residency['fits']}　策略={residency['strategy']}　"
           f"峰值≈{residency['peakResidentGiB']:.2f} GiB / {residency['capacityGiB']:.0f} GiB　"
           f"缺 {residency['missing'] or '无 ✓'}")
+    # ⭐ 低精度权重**能不能自动还原** ✓（fp8/int8 ⇒ 按 scale 反量化 ✓）：三档分开说 ✗
+    #    —— 尤其「**没下载 ⇒ 没查**」✗ 不许读成「通过」✓（本仓那条口径 ✓）。
+    quant = report["quantPlan"]
+    if quant["supported"]:
+        print("低精度权重：可**自动反量化** ✓　" + "　".join(
+            f"{item['key']}×{item['weights']}（{item['layouts']} ✓）" for item in quant["supported"]))
+    for item in quant["unsupported"]:
+        print(f"低精度权重：`{item['key']}` **判不出布局** ✗ ⇒ 装载会中止 ✓"
+              f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓）")
+    if quant["notChecked"]:
+        # ⚠️ 别把十几个组件全打出来 ✗（噪声会把真信号淹掉 ✓）⇒ 前三 + 总数 ✓
+        head = "、".join(quant["notChecked"][:3])
+        more = f" 等 {len(quant['notChecked'])} 个" if len(quant["notChecked"]) > 3 else ""
+        print(f"低精度权重：**没查** ✓（{head}{more} 还没下载 ✓ ⇒ 这一项不是「通过」✗）")
 
     check = report["weightsCheck"]
     print("\n── ③ 真权重预检 ───────────────────────────────────")

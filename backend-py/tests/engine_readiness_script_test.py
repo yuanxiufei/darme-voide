@@ -205,6 +205,51 @@ def case_route() -> None:
           and not any("下权重" in step for step in stub["nextSteps"]), stub["weights"])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑤ 反量化结论：**三档分开说** ✗（支持 / 不支持 / **没查** ✓）+ GGUF 豁免 ✓
+# ══════════════════════════════════════════════════════════════════════════
+def case_quant() -> None:
+    """`quant_plan` 是**纯函数** ✓ ⇒ 直接喂合成的 `load_plan` ✓（不用造真文件 ✓）。"""
+    plan = {"components": [
+        {"key": "dit_int8", "present": True,
+         "dequantPlan": {"weights": 3, "supported": True, "layouts": {"per-row": 3},
+                         "unresolved": [], "unpaired": [], "grouped": []}},
+        {"key": "te_nvfp4", "present": True,
+         "dequantPlan": {"weights": 2, "supported": False, "layouts": {},
+                         "unresolved": [], "unpaired": [], "grouped": ["te.blk"],
+                         "groupedCount": 1}},
+        {"key": "vae_fp16", "present": False, "dequantPlan": {}},
+        {"key": "dit_gguf", "present": True,
+         "dequantPlan": {"weights": 1, "supported": False, "note": "GGUF：反量化由运行时做 ✓",
+                         "unresolved": [], "unpaired": [], "grouped": []}},
+    ]}
+    quant = svc.quant_plan(plan)
+    check("① 三档**分开报** ✓：能自动还原的进 `supported` ✓（附布局 ✓）、判不出来的进 `unsupported` ✓"
+          "（附判不出的名字 ✓）、**没下载**的进 `notChecked` ✓",
+          [item["key"] for item in quant["supported"]] == ["dit_int8"]
+          and quant["supported"][0]["layouts"] == {"per-row": 3}
+          and [item["key"] for item in quant["unsupported"]] == ["te_nvfp4"]
+          and quant["notChecked"] == ["vae_fp16"], quant)
+
+    check("② ⚠️ **GGUF 豁免** ✗：它的反量化由运行时（llama.cpp/ComfyUI-GGUF ✓）做 ⇒ "
+          "`supported=False` **也不许**算「装不上」✗（否则每份 GGUF 都会把 `ready` 判死 ✓✗）",
+          "dit_gguf" not in [item["key"] for item in quant["unsupported"]]
+          and "dit_gguf" not in quant["notChecked"], quant)
+
+    report = svc.collect()
+    check("③ 本机现状（一个都没下）⇒ `notChecked` 非空 ✓ 且**不许**因此变阻塞 ✗"
+          "（**没查 ≠ 通过** ✓：不阻塞 ✓、但也不假装绿 ✓ —— `ready` 的阻塞项里只有「权重没齐」✓）",
+          report["quantPlan"]["notChecked"] and not report["quantPlan"]["supported"]
+          and not any("反量化" in item for item in report["blockers"]),
+          (report["quantPlan"]["notChecked"][:3], report["blockers"]))
+
+    check("④ 结论进了**两份**消费者 ✓：`summary()`（路由 ✓）与 CLI 的 `--json` ✓"
+          "（能力接不出去 = 只有人手敲命令才能用 ✗）",
+          "quant" in svc.summary(report)
+          and svc.summary(report)["quant"]["notChecked"] == report["quantPlan"]["notChecked"],
+          svc.summary(report).get("quant"))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -212,6 +257,7 @@ def main() -> int:
         case_with_weights(root)
         case_cli(root)
         case_route()
+        case_quant()
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n      ↳ {detail}"))

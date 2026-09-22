@@ -165,7 +165,7 @@
                         @click="selectVariation(c)"
                       >
                         <div class="variation-thumb">
-                          <img v-if="getVariationImage(c)" :src="getVariationImage(c)" :alt="c" />
+                          <img v-if="getVariationImage(c)" :src="getVariationImage(c) || undefined" :alt="c" />
                           <span v-else class="variation-empty">未生成</span>
                         </div>
                         <span class="variation-name">{{ c }}</span>

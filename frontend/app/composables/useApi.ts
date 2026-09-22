@@ -659,8 +659,14 @@ export const productionAPI = {
    * ⚠️ 真权重预检（键名/形状核对）**不在这个端点** ✗（那要传文件路径 ✓ ⇒ 等于开放任意路径读取 ✗）
    * ⇒ 后端响应里的 `hint` 会指明用 CLI ✓。
    */
+  // ⚠️⚠️ `api.get` **只收一个路径参数** ✗（签名见上面的 `get: <T>(p: string)` ✓）——
+  //     2026-09-21 打开类型检查时才发现这里曾经**多传了一个查询对象** ✓✗ ⇒ 第二个参数被
+  //     **静默忽略** ✗ ⇒ `stage` 从来没发出去过 ✓✗（后端只会用默认档 ✓，界面看着"正常" ✓）。
+  //     ⇒ 查询串按本文件既有写法**拼进路径** ✓（与 `imageAPI.list` 同口径 ✓）。
+  //     ⚠️ 注释里**不要写调用形状** ✗（`tests/frontend_api_coverage_test.py` 会把**注释里的**
+  //     `api.<method>('…')` 当**真调用点**抽出来反查后端路由 ✓✗ ⇒ 一条不存在的"路径"会让它红 ✓）。
   engineReadiness: (stage: string = 'h3') =>
-    api.get('/production/engine-readiness', { params: { stage } }),
+    api.get(`/production/engine-readiness?stage=${encodeURIComponent(stage)}`),
 }
 
 // 提示词生产工具：**纯函数、毫秒级**（不落库、不调模型）⇒ 可在用户编辑时**实时**调 ✓。
