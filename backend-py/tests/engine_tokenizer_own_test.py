@@ -141,13 +141,14 @@ def case_support(root: Path) -> None:
           and not rejected.ok and "Nmt" in rejected.reason,
           (supported.reason, rejected.reason))
     # ⚠️ **口径改过** ✗（2026-09-21 第二轮 ✓）：`Unigram` 的字节回退**已实现** ✓ ⇒ 现在**能接** ✓；
-    #    只有**别的模型**的 `byte_fallback` 仍拒绝 ✓（触发条件与 Unigram 不同 ✓ 未核清 ✓）。
+    #    只有**别的模型**的 `byte_fallback` 仍拒绝 ✓ —— ⚠️ 理由**不是"未核"**✗（2026-09-22 起 ✓）：
+    #    BPE 的触发条件已核清 ✓，但**输出顺序不是位置语义** ✗（见本文件第 ㉛ 条的实证 ✓）。
     unigram_fallback = own.own_support({"modelType": "Unigram", "preTokenizer": "Metaspace",
                                         "byteFallback": True})
     bpe_fallback = own.own_support({"modelType": "BPE", "preTokenizer": "ByteLevel",
                                     "byteFallback": True}).reason
     check("③ `byte_fallback` 分两档 ✓：`Unigram` **能接** ✓（判据逐条实测过 ✓）；"
-          "别的模型**拒绝并说明理由** ✓（触发条件未核清 ✓ 不假装能跑 ✗）",
+          "别的模型**拒绝并带证据说明理由** ✓（顺序不是位置语义 ✓ 不假装能跑 ✗）",
           unigram_fallback.ok and "byte_fallback" in bpe_fallback,
           (unigram_fallback.reason, bpe_fallback))
 
@@ -549,6 +550,47 @@ def case_byte_fallback(root: Path) -> None:
           off_got == list(off_ref.encode("中").ids)
           and off_got == [off._impl.vocab["▁"], off._impl.unk_id],                    # noqa: SLF001
           (off_got, list(off_ref.encode("中").ids)))
+
+    # ⚠️⚠️ **BPE 的 `byte_fallback` 为什么仍拒绝** ✗（2026-09-22 实测 ✓）：拒绝理由**不是**"没核" ✗，
+    #     而是**顺序不是位置语义** ✗ —— 参考实现里 `'be'` 与 `'eb'` 的输出**完全相同** ✓✗
+    #     ⇒ 任何「按字符位置展开」的实现都**必然错其中一个** ✓✗（两者不可能都对 ✓）。
+    #     ⚠️ 这条判据是**反向证明**式的：将来谁想实现它，必须先让这里红并看懂证据 ✓。
+    bpe_vocab: dict[str, int] = {"<unk>": 0, "a": 1}
+    for char in "bcd":                                                              # 只给 b/c/d 的字节 token ✓
+        bpe_vocab[f"<0x{ord(char):02X}>"] = len(bpe_vocab)                          # ⇒ `e` 回退不了 ✓
+    bpe_dir = root / "bpe_fallback"
+    bpe_dir.mkdir(parents=True, exist_ok=True)
+    (bpe_dir / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "BPE", "unk_token": "<unk>", "byte_fallback": True,
+                  "vocab": bpe_vocab, "merges": []},
+        "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False,
+                          "trim_offsets": True, "use_regex": False},
+    }), encoding="utf-8")
+    ref_bpe = Tokenizer.from_file(str(bpe_dir / "tokenizer.json"))
+    byte_b = bpe_vocab["<0x62>"]
+    byte_c = bpe_vocab["<0x63>"]
+    unk = bpe_vocab["<unk>"]
+    letter_a = bpe_vocab["a"]
+    forward_ids = list(ref_bpe.encode("be").ids)
+    backward_ids = list(ref_bpe.encode("eb").ids)
+    reorder_ids = list(ref_bpe.encode("ecb").ids)
+    intact_ids = list(ref_bpe.encode("eab").ids)
+    support_bpe = own.own_support(hub_mod.detect_form(bpe_dir))
+    check("㉛ ⭐⭐ 拒绝的**实证依据** ✓：参考实现的 BPE `byte_fallback` **丢掉了字符顺序** ✗ —— "
+          "`'be'` 与 `'eb'` 输出**完全相同** ✓✗（⇒ **位置实现必错其一** ✓）；`'ecb'`⇒`[c,b,unk]` ✓✗ "
+          "（输入顺序是 e→c→b ✓）；⚠️ 但 `'eab'`⇒`[unk,a,b]` ✓ **没动** ⇒ 它**不是**「完全乱序」✗ "
+          "⇒ 规则未核清 ✓ 不硬套 ✓",
+          forward_ids == backward_ids == [byte_b, unk]
+          and reorder_ids == [byte_c, byte_b, unk]
+          and intact_ids == [unk, letter_a, byte_b],
+          (forward_ids, backward_ids, reorder_ids, intact_ids))
+
+    check("㉜ 自研对 BPE 的 `byte_fallback` **明确拒绝** ✓ 且理由**带证据** ✓（必须点名顺序问题 ✓"
+          "**并引用那对反例** `'be'`/`'eb'` ✓ —— 只写「未实现」✗ 会让下一个人直接去补实现、然后切错 ✓✗）",
+          support_bpe.ok is False and "顺序" in support_bpe.reason
+          and "位置语义" in support_bpe.reason
+          and "'be'" in support_bpe.reason and "'eb'" in support_bpe.reason,
+          support_bpe.reason)
 
 
 def case_reject(root: Path) -> None:

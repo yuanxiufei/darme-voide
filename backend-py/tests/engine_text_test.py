@@ -229,9 +229,36 @@ def case_integration(root: Path) -> None:
               te_mod.TextEncoderConfig(vocab_size=100, output_dim=TE_CONFIG.output_dim),
               tokenizer_path=str(vocab_dir)), "越界") is not None, None)
 
+    # ⭐⭐ 2026-09-22 补：**显式给不一致的 TE 配置 ⇒ 当场报** ✓（DiT 那侧同样守 ✓ —— 期望值来自
+    #    `DiTConfig.text_dim` ✓）。此前只在**编码之后**由形状错兜住 ✗：报的是「输出应为 (1,L,n) ✓
+    #    收到 (1,L,m) ✗」⇒ **指不到**"是把 TE 配错了" ✓✗。
+    #    ⚠️ 顺带钉住**先核后改** ✓：核不过时**先前挂好的** TE 必须原封不动 ✓（不是被清掉 ✗✗）。
+    mismatch_reason = _raises(lambda: backend.attach_text_encoder(
+        te_mod.TextEncoderConfig(vocab_size=100, output_dim=TE_CONFIG.output_dim * 2)), "对不上")
+    check("⑲³ ⭐⭐ 显式给错的 `output_dim` ⇒ 挂载**当场报** ✓ 且点名 `condition_proj` ✓；"
+          "⚠️ **先核后改** ✓ —— 先前挂好的 TE **原封不动**（`textEncoderLoaded` 仍 True ✓ 且仍是对的那个 ✓）",
+          mismatch_reason is not None and "condition_proj" in mismatch_reason
+          and backend.describe()["textEncoderLoaded"] is True
+          and backend.describe()["textEncoderCheck"]["agrees"] is True,
+          (mismatch_reason, backend.describe()["textEncoderCheck"]))
+
     check("⑲ VAE 也挂上 ✓", bool(backend.attach_vae(
         vae_mod.VideoVAEConfig(base_channels=8, latent_channels=4,
                                channel_multipliers=(1, 1, 1, 1)))))
+
+    # ⚠️⚠️ 2026-09-22 补这道门 ✗：这一族套件（`engine_io_test` / `engine_dual_stream_test` ✓）原本就都有
+    #    「ffmpeg 可用」的显式门 ✓，**只有本套没有** ✗ ⇒ 在缺 ffmpeg 的环境里 **⑳/㉑ 会直接报两条红** ✗✗
+    #    （报的是 `找不到 ffmpeg ✗` ⇒ 看着像代码坏了 ✓✗，实际只是本机没装 / 没进当前进程的 PATH ✓）。
+    #    ⇒ 按同族口径补 ✓：**可用性本身红一条**（ffmpeg 是硬依赖 ✓ 该被看见 ✓），
+    #      依赖它的两条**跳过**（SKIP ✓ 不是「通过」✗ —— 本仓规矩：没跑 ≠ 绿 ✓）。
+    #    ⚠️ 门必须在 `run_sync` **之前** ✗（跑完再判，链已经拿 MediaError 炸过一遍了 ✓✗）。
+    check("⑳前置 本机 ffmpeg/ffprobe 可用 ✓（下面两条的硬依赖 ✓ —— 缺了它们只能跳过 ✗）",
+          media_mod.have_ffmpeg(), media_mod.ffmpeg_version())
+    if not media_mod.have_ffmpeg():
+        skip("本机没有可用的 ffmpeg/ffprobe ⇒ ⑳/㉑ **没跑** ✓（不是通过 ✗）—— "
+             "⚠️ 确认装过就 `where.exe ffmpeg` 复核当前进程能否解析 ✓"
+             "（WinGet 的 alias 是重解析点 ✓ 可能 `lexists=True` 但 `exists=False` ✓✗）")
+        return
 
     request = pipe.GenerationRequest(prompt="雨夜霓虹街头", negative="模糊", seed=6, steps=2,
                                      seconds=0.2, temporal_compression=1,

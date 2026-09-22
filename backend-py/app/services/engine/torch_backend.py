@@ -121,7 +121,12 @@ PENDING_PARTS: tuple[str, ...] = (
     "（出厂常量只作回落 ✗ ⇒ 社区重导出 / 蒸馏 / 自检缩小版走**同一条**路 ✓）；"
     "每个字段的来源随装载报告给出 ✓（`configSources` ✓ —— 免得「回落」被读成「权重事实」 ✗）。"
     "⚠️ 仍留给真权重的一步：按元数据复核 `patch_size` ✗（**权重里没有 patch 事实** ⇒ 只能显式给 ✓）"
-    "与 eps 类（**形状验不出 eps** ✗ ⇒ 用参考默认 1e-5 ✓）",
+    "与 eps 类（**形状验不出 eps** ✗ ⇒ 用参考默认 1e-5 ✓）。"
+    "⭐ 2026-09-22 收紧一半 ✓：`patch_size` 现在有**一条独立约束** ✓ —— 主干推的 `latents_dim` 与"
+    "**VAE 自述的潜通道数**必须一致 ✓（`vae.py` 自己写着这两者是同一个事实 ✓）⇒ 给错的 `patch_size`"
+    "（**能整除**那种 ✓✗：形状全自洽、装得进去 ✓✗）会在**挂载期**被拒 ✓，不再拖到解码时报形状错 ✗"
+    "（见 :meth:`TorchBackend._check_attached_vaes` ✓ / 自检 55~56′ ✓）。"
+    "⚠️ 但这仍是**两条自述相互印证** ✗（两边一起错会漏 ✗）**不是权重事实** ✗ ⇒ 真权重到手后照样要核 ✓",
     "✅ **tokenizer 已自研** ✓（2026-09-20 ✓ `engine/tokenizer_bpe.py` ✓ 零依赖 ✓ 离线 ✓）："
     "字节级 BPE ✓（GPT-2 映射算法生成 ✓ + 自写预分词扫描器 ✓ + 按 merges 排名合并 ✓ + 往返恒等 ✓），"
     "读**随权重来的**词表文件 ✓（`tokenizer.json` ✓ 或 `vocab.json`+`merges.txt` ✓，"
@@ -374,6 +379,16 @@ class TorchBackend:
             weights_mod.load_module_weights(self._model, target, device=self._device)
             self._config = form_defaults
             self._form = self.H3_FORM_NAME
+            try:
+                vae_check = self._check_attached_vaes()
+                text_check = self._check_text_encoder()   # ⭐ 已挂的 TE 也在这一刻再核一次 ✓
+            except TorchBackendUnavailable:
+                # ⚠️ 校验失败 ⇒ **中止装载 + 不污染模块** ✓（本仓在反量化那条上定过这条规矩 ✓）：
+                #    留着半装状态会让 `dualStream` / `latentMode` 按"装好了"自述 ✓✗。
+                self._model = None
+                self._config = None
+                self._form = None
+                raise
             self._loadReport = {
                 **form_report.to_dict(),
                 # ⭐ 「哪些字段是**权重里读出来的** ✓、哪些是**不可推的回落** ✗」随报告一起给 ✓
@@ -381,6 +396,10 @@ class TorchBackend:
                 "configSources": dict(inferred.sources),
                 "derivedFields": inferred.derived_count,
                 "fieldCount": len(inferred.config),
+                # ⭐ 已挂的 VAE 在这里**再查一次** ✓（挂载顺序反过来也要守 ✓ ——
+                #    先挂 VAE 的那次调用时形态还没定 ⇒ 只能等这一刻 ✓）；空 = 还没有 VAE 可比 ✓
+                "vaeCheck": vae_check,
+                "textEncoderCheck": text_check,
             }
             return self._loadReport
         if config is None:
@@ -463,6 +482,11 @@ class TorchBackend:
             "audioVaeLoaded": self._audioVae is not None,
             "dualStream": self.dualStream,
             "loadReport": self._loadReport,
+            # ⭐ **已挂 VAE 的跨来源校验结果** ✓（核过要能自证 ✗；⚠️ 这里**不抛** ✗ ——
+            #    `describe()` 任何时候都得能调 ✓，所以对不上只记为 `agrees=False` ✓）
+            "vaeCheck": self._check_attached_vaes(raise_on_mismatch=False),
+            # ⭐ 文本编码器的 `output_dim` ↔ 主干 `text_dim` ✓（同上：这里**不抛** ✗）
+            "textEncoderCheck": self._check_text_encoder(raise_on_mismatch=False),
             # ⚠️ config **两种形态**：DiT 是 dataclass（有 `to_dict` ✓）、H3 形态是 **dict** ✓
             #    —— 2026-09-20 自检当场抓到：H3 装载后调 `describe()` 直接 `AttributeError` ✗
             #    （而 `/engine/backends` 端点正是调它 ✓ ⇒ 装了 H3 权重后端就 500 ✓✗）。
@@ -941,6 +965,10 @@ class TorchBackend:
                     output_dim=self._configured_text_dim(64))
         config = config or te_mod.TextEncoderConfig(
             output_dim=self._configured_text_dim(64))
+        # ⚠️ **先核后改** ✗（2026-09-22 ✓）：核不过是**这份候选配置**的问题 ✓ ⇒ 此刻模块一个字没动 ✓
+        #    —— 若改成"先挂上再核" ✗，失败时要么留着坏的 ✓✗、要么把**先前挂好的** TE 也清掉 ✓✗
+        #    （⚠️ 后一种更坏 ✗：调用方只是想换一个，结果连原来那个也没了 ✗✗）。
+        self._check_text_encoder(candidate=config)
         if tokenizer is not None:
             required = int(getattr(tokenizer, "required_vocab_size",
                                    getattr(tokenizer, "vocab_size", 0)) or 0)
@@ -973,6 +1001,9 @@ class TorchBackend:
         """
         self._gate()
         config = config or vae_mod.VideoVAEConfig()
+        # ⚠️ **先核后改** ✗（2026-09-22 ✓）：核不过是**候选配置**的问题 ✓ ⇒ 此刻模块一个字没动 ✓
+        #    —— 若改成"先挂上再核" ✗，失败时要么留着坏的 ✓✗、要么把**先前挂好的**那个也清掉 ✓✗。
+        self._check_attached_vaes(video=config)
         self._vae = vae_mod.build_vae(config).to(self._device).eval()
         self._vaeConfig = config
         return config.to_dict()
@@ -988,9 +1019,137 @@ class TorchBackend:
         """
         self._gate()
         config = config or audio_vae_mod.AudioVAEConfig()
+        self._check_attached_vaes(audio=config)   # ⭐ 同上：**先核后改** ✓（音频那一档 ✓）
         self._audioVae = audio_vae_mod.build_audio_vae(config).to(self._device).eval()
         self._audioVaeConfig = config
         return config.to_dict()
+
+    def _check_text_encoder(self, *, candidate: Any = None,
+                            raise_on_mismatch: bool = True) -> dict[str, Any] | None:
+        """⭐⭐ **跨来源校验**：文本编码器的 `output_dim` ↔ 主干要的 `text_dim` ✓（**必须一致** ✗）。
+
+        为什么要专门守 ✗（2026-09-22 补 ✓）：`text_encoder.TextEncoderConfig` 的注释**本来就写着**
+        「应与 `DiTConfig.text_dim` 一致 ✓」✓ —— 但此前**只在编码之后**由形状错兜住 ✗（报的是
+        「文本编码器输出应为 (1,L,5376) ✓，收到 (1,L,64) ✗」，**指不到**"是把 TE 配错了" ✓✗）。
+        两个来源：主干那侧是**权重里的事实** ✓（`condition_proj` / `token_refiner` 的形状推出来 ✓）；
+        TE 那侧是**配置** ✓。
+        ⚠️ **不给** TE 配置时本仓会**自动对齐** ✓（`_configured_text_dim` ✓ —— 连"两种 config 形态都认"
+        这条都被踩出来过 ✓）；但**显式给**的时候没人核 ✗✗，而真权重到手时那正是常见用法 ✓。
+        ⚠️ 挂载**顺序**两向都守 ✓：先挂 TE 后装权重（`load_weights` 里再查一次 ✓）/ 先装权重后挂 ✓。
+        """
+        expected = self._configured_text_dim(0)
+        config = candidate if candidate is not None else self._textConfig   # 候选优先 ✓（先核后改用 ✓）
+        actual = int(getattr(config, "output_dim", 0) or 0) if config is not None else 0
+        if not expected or not actual:
+            return None                     # 主干还没装 / 没挂 TE ⇒ 没有可比的事实 ✓（不是漏 ✓）
+        record = {"field": "output_dim", "expected": expected, "textEncoder": actual,
+                  "agrees": actual == expected}
+        if record["agrees"] or not raise_on_mismatch:
+            return record
+        raise TorchBackendUnavailable(
+            f"文本编码器的 `output_dim` 与主干要的 `text_dim` 对不上 ✗：主干要 {expected} ✓"
+            f"（来自**权重**：`condition_proj` / `token_refiner` 的形状 ✓），"
+            f"而 TE 配置自述 {actual} ✗　⇒ ⚠️ 大概率是**显式给的 TE 配置**没跟上权重 ✓"
+            f"（本仓**不显式给**时会自动按主干对齐 ✓ —— `_configured_text_dim` ✓）。"
+            f"⚠️ **不静默取其中一个** ✗ —— 取错的一方会让 `condition_proj` 收到错的宽度 ✓✗"
+            f"（那要到**编码之后**才报形状错 ✗，而且看不出是把 TE 配错了 ✓✗）。", reason="pending")
+
+    def _trunk_latent_dims(self) -> tuple[int, int] | None:
+        """主干自述的潜通道数 ✓ ``(视频, 音频)`` —— 不是 H3 形态 / 还没推出来 ⇒ ``None`` ✓。"""
+        if getattr(self, "_form", None) != self.H3_FORM_NAME:
+            return None
+        config = self._config if isinstance(self._config, dict) else {}
+        video = int(config.get("latents_dim") or 0)
+        audio = int(config.get("audio_latents_dim") or 0)
+        return (video, audio) if video and audio else None
+
+    def _check_attached_vaes(self, *, video: Any = None, audio: Any = None,
+                             raise_on_mismatch: bool = True) -> list[dict[str, Any]]:
+        """⭐⭐ **跨来源校验**：**挂上来的 VAE 必须与后端算潜尺寸时用的那一套事实一致** ✓。
+
+        为什么要专门守 ✗（2026-09-22 补 ✓）：下面每一条**本来是同一个事实** ✓，但各自有**两个来源** ✗✗，
+        而且**只在解码时才由形状错兜住** ✗（报出来是「潜变量形状应为 (B,24,…)」✓✗ —— 指不到真因 ✓）：
+
+        * ``视频 latent_channels`` ↔ 主干推的 ``latents_dim`` ✓ —— 真因往往是**显式 `patch_size` 与权重
+          不符** ✗✗：`latents_dim` 是从「`video_patch_proj.weight` 列数 ÷ **patch 乘积**」反推的 ✓
+          ⇒ patch 给错但**能整除**时得出的 `latents_dim` 也是错的 ✓✗，而两边形状**都还自洽**
+          ⇒ 装得进去 ✓✗（**画面不对且不报错** ✗✗）。
+          （依据就在本仓：`vae.py` 的事实表写着「24 个均值/标准差 ⇒ 潜通道 24 ✓（与
+          `dit.H3_SHAPE_FACTS` 的 `latents_dim` 一致 ✓）」✓）
+        * ``视频 spatial_scale`` ↔ **H3 事实** `vaeScale` ✓（双流造潜变量 / 首帧编码都按它算 ✓）
+          —— 挂错族的 VAE ⇒ **解码出来的画面尺寸与请求的不是一回事** ✓✗（不报错 ✗）。
+        * ``音频 latent_channels / stereo_channels / latents_per_second`` ↔ 主干推的 `audio_latents_dim`
+          ✓ / `geometry.AUDIO_LATENT_CHANNELS` ✓ / `geometry.AUDIO_LATENT_HZ` ✓ —— ⚠️ 帧率那条最阴 ✗✗：
+          潜帧数按 **40 Hz** 算 ✓、解码却按 **VAE 自己的 hop** 展开 ✓ ⇒ 出来的 wav **时长就是错的** ✓✗。
+        * DiT 形态（非 H3）只核 ``视频 spatial_scale`` ↔ `config.vae_scale` ✓（H3 那几条不适用 ✗）。
+
+        ⚠️ 仍是**两个来源相互印证** ✗，**不是权重事实** ✗：两边一起错仍会漏 ✓ ⇒ 真权重到手后要按元数据
+        再核一次 ✓（见 `PENDING_PARTS` ✓）。
+        ⚠️ 挂载**顺序**两向都守 ✓：先挂 VAE 后装权重（`load_weights` 里再查一次 ✓）/ 先装权重后挂 ✓。
+        """
+        h3_dims = self._trunk_latent_dims()
+        video_channels, audio_channels = h3_dims if h3_dims else (0, 0)
+        video_scale = int(vae_mod.H3_VIDEO_VAE_FACTS["vaeScale"])
+        #: `(流, 自述字段, 期望值, 期望值的来源, 对不上时的「大概率是」✗)`
+        pairs: list[tuple[str, str, int, str, str]] = []
+        # ⚠️ 判据要连**候选**一起看 ✗（2026-09-22 自检当场抓到 ✓✗：改成"先核后改"后只按 `self._vaeConfig`
+        #    判 ⇒ 从没挂过 VAE 的后端**根本不核候选** ✓✗ ⇒ 错的候选照样挂上去 ✗✗）。
+        if video is not None or self._vaeConfig is not None:
+            if h3_dims:
+                pairs.append((
+                    "视频", "latent_channels", video_channels,
+                    "主干推断：`video_patch_proj.weight` 列数 ÷ patch 乘积 ✓（patch 由供方自述 ✗）",
+                    f"**显式 `patch_size` 与权重不符** ✗（当前 patch_size="
+                    f"{(self._config or {}).get('patch_size')} ✓ —— 给错但**能整除**时会推出错的 "
+                    f"`latents_dim` ✓✗）；也可能是视频 VAE 自己的配置给错 ✓"))
+                pairs.append((
+                    "视频", "spatial_scale", video_scale,
+                    f"**H3 事实** `vae.H3_VIDEO_VAE_FACTS.vaeScale={video_scale}` ✓"
+                    f"（`init_dual_latents` 与首帧编码都按它换算 ✓）",
+                    "**挂上来的不是 H3 那一族 VAE** ✗✗（倍率不同 ⇒ 潜尺寸与像素尺寸两边各算各的 ✓✗"
+                    "⇒ 解码出的画面尺寸与请求的**不是一回事** ✓✗，而且不报错 ✓✗）"))
+            else:
+                dit_scale = int(getattr(self._config, "vae_scale", 0) or 0)
+                if dit_scale:
+                    pairs.append((
+                        "视频", "spatial_scale", dit_scale,
+                        "DiT 配置里的 `vae_scale` ✓（装权重时读出来的 ✓ —— 0 = 未给 ⇒ 不核 ✓）",
+                        "**VAE 与 DiT 配置的倍率对不上** ✗（潜变量 ↔ 像素的换算两边不同 ✓✗）"))
+        if (audio is not None or self._audioVaeConfig is not None) and h3_dims:
+            pairs.append((
+                "音频", "latent_channels", audio_channels,
+                "主干推断：`audio_patch_proj.weight` 列数 ✓（音频那侧**不乘 patch** ✓）",
+                "**音频 VAE 的配置给错** ✓（音频那侧不乘 patch ✗ ⇒ 与 `patch_size` 无关 ✓）"))
+            pairs.append((
+                "音频", "stereo_channels", int(geometry_mod.AUDIO_LATENT_CHANNELS),
+                f"`geometry.AUDIO_LATENT_CHANNELS={geometry_mod.AUDIO_LATENT_CHANNELS}` ✓"
+                f"（`init_dual_latents` 按它造立体声那一维 ✓）",
+                "**音频 VAE 的声道数与几何事实不符** ✗（造出的潜变量与解码端要的对不上 ✓✗）"))
+            pairs.append((
+                "音频", "latents_per_second", int(geometry_mod.AUDIO_LATENT_HZ),
+                f"`geometry.AUDIO_LATENT_HZ={geometry_mod.AUDIO_LATENT_HZ}` ✓（潜帧数按它算 ✓）",
+                "**音频 VAE 的帧率与几何事实不符** ✗✗（潜帧数按 40 Hz 算 ✓ 而解码按它自己的 hop 展开 ✓"
+                "⇒ 出来的 wav **时长就是错的** ✓✗，而且不报错 ✓✗）"))
+        # ⚠️ 允许传**候选** ✓（`attach_vae(video=…)` 先核后改用 ✓）：候选优先 ✓，没传就用**已挂的** ✓
+        configs: dict[str, Any] = {"视频": video if video is not None else self._vaeConfig,
+                                   "音频": audio if audio is not None else self._audioVaeConfig}
+        records: list[dict[str, Any]] = []
+        for label, field, want, source, likely in pairs:
+            raw = getattr(configs[label], field, None)
+            got = int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else raw
+            record = {"stream": label, "field": field, "expected": want, "vae": got}
+            if got == want:
+                records.append({**record, "agrees": True})
+                continue
+            if not raise_on_mismatch:      # `describe()` 用 ✓ —— 它**任何时候都得能调** ✗（不许抛 ✗）
+                records.append({**record, "agrees": False, "likely": likely})
+                continue
+            raise TorchBackendUnavailable(
+                f"{label} VAE 的 `{field}` 与**后端用的那一套事实对不上** ✗：期望 {want} ✓"
+                f"（来自 {source}），它自述 {got} ✗　⇒ ⚠️ 大概率是{likely}。"
+                f"⚠️ **不静默取其中一个** ✗ —— 取错的一方会让潜尺寸 / 行打包 / 解码各按各的走 ✓✗"
+                f"（形状自洽、装得进去、**出来不对且不报错** ✗✗）。", reason="pending")
+        return records
 
     def _decode_dual(self, latents: dict[str, Any]) -> dict[str, Any]:
         """**双流解码** ✓：视频走视频 VAE ✓、音频走**另一族**音频 VAE ✓ —— 缺哪个报哪个 ✓。

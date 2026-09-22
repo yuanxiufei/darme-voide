@@ -4,13 +4,24 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**105 套 / 3604 项 / 0 失败**（2026-09-22 ✓：反量化结论推到**三个消费者** ✓
-（CLI ② 段 ✓ / 就绪 API 的 `summary().quant` ✓ / 前端面板 ✓ —— **能力接不出去不算功能** ✓）+
-`quant_plan` 三档（可自动还原 ✓ / 判不出（=阻塞 ✓）/ **没查** ✓）+ **GGUF 豁免** ✓ 后重跑 ✓
-—— 104 套按 `SUMMARY:` 收敛出 3604 项 ✓，
+最近一次**全量实测**：**105 套 / 3615 项 / 0 失败**（2026-09-22 ✓：**已挂 VAE 的跨来源校验扩到四个字段** ✓
+（潜通道数 ✓ + **空间倍率 ↔ `vaeScale=16` 事实** ✓ + 音频**声道 ↔ `AUDIO_LATENT_CHANNELS`** ✓ +
+音频**帧率 ↔ `AUDIO_LATENT_HZ=40`** ✓ —— 后两条各自也是「一个事实两个来源」✗：倍率不同 ⇒ 画面尺寸与请求的
+不是一回事 ✓✗；帧率不同 ⇒ wav **时长错** ✓✗ —— **都不报错** ✗✗）后重跑 ✓
+—— 104 套按 `SUMMARY:` 收敛出 3615 项 ✓，
 另 1 套是常量守卫型（打印 `OK: 镜像常量漂移 0 条` ✓ 无项数 ✓））。
-⚠️ 上一轮：105 套 / 3600 项 ✓（`dequantPlan` 进体检 ✓）——
-按规则**不推算** ✗，数字取自刚跑出来的汇总 ✓。
+⚠️ 上一轮：105 套 / 3612 项 ✓（潜通道数跨来源校验 ✓ 让错 `patch_size` 在**挂载期**就露 ✓）
+—— 按规则**不推算** ✗，数字取自刚跑出来的汇总 ✓。
+⚠️⚠️ **跑之前先把 ffmpeg 的真实 bin 目录「前置」到 PATH** ✗（2026-09-22 实测踩到 ✓✗）：
+Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应用别名（重解析点）** ✗ ——
+在本进程里可能 `lexists=True` 但 `exists=False` ✓✗，于是两条路一起坏：
+① `shutil.which("ffmpeg")` 返回 `None` ✓（引擎侧会说「找不到 ffmpeg ✗」✗ —— 其实装了 ✓）；
+② **裸名** spawn（`subprocess.run(["ffmpeg", …])` ✓ 产品代码那种写法 ✓）直接
+`OSError: [WinError 448] 无法遍历该路径，因为它包含不受信任的装入点` ✗✗
+⇒ `image_generation` / `consistency_qc` / `technical_qc` / `color_grade` / `compressed_data_url`
+**5 套会红** ✓，看着像代码坏了 ✗✗。⇒ 对策：把
+``…\\WinGet\\Packages\\Gyan.FFmpeg_…\\ffmpeg-*-full_build\\bin`` **前置**到 `PATH` ✓
+（**前置**才行 ✗ —— 追加只修好 ① ✗，② 仍会命中坏别名 ✓；判据是 `where.exe ffmpeg` 指到真实 bin ✓）。
 ⚠️ 前端两条自检与**构建命令**耦合 ✗（2026-09-22 踩过 ✓）：`frontend/.output/public/index.html` 是
 `npm run **generate**` 的产物 ✓（Dockerfile 用的也是它 ✓）⇒ 只跑 `npm run **build**` 会把它**覆盖掉** ✓✗
 （`dockerfile_contract_test` 当场红 ✓）⇒ 改完前端**该跑的清单**：`typecheck` ✓ + `generate` ✓。

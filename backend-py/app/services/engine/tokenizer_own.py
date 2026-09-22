@@ -41,7 +41,8 @@ r"""**自研分词算法扩充**：`Unigram`（Viterbi ✓）/ `WordPiece`（贪
   （只看顶层类型会把 ``Sequence`` 读成"能接" ✓✗）；
 * ⭐ ``byte_fallback: true`` 的 **Unigram 已实现** ✓（2026-09-21 第二轮 ✓）：判据是 **段级**的 ✓
   （见 :meth:`UnigramTokenizer.emit_unknown` ✓）；⚠️ **别的模型**的 ``byte_fallback`` **不走自研** ✓
-  （BPE 的触发条件与它不同 ✓ 未核清 ✓ 不按猜的实现 ✓）。
+  —— ⚠️ 理由**不是**"没核"✗：BPE 的触发条件已核清 ✓，但它的**输出顺序不是位置语义** ✗✗
+  （2026-09-22 实测 ✓：参考实现里 ``'be'`` 与 ``'eb'`` 输出**完全相同** ✓ ⇒ 位置实现必错其一 ✓✗）；
   ⚠️ 教训 ✗：第一轮曾判成「参考实现没走字节回退 ⇒ 拒绝」✓✗ —— 那次实测**少了前置条件** ✗
   （词表里**没有** ``<0xNN>`` 字节 token ✓）。**「实测过」必须写明前置条件** ✗；
 * 预分词器不认识（``UnicodeScripts`` —— 要 Unicode script 表 ✓ 标准库没有 ✗；
@@ -1135,15 +1136,22 @@ def own_support(form: dict[str, Any]) -> OwningSupport:
                                     f"（已实现：{list(SUPPORTED_NORMALIZERS)} ✓）"
                                     f"⇒ 自研不硬套 ✓（跳过规范化 = 用错的文本查词表 ✓✗）", form)
     if form.get("byteFallback") and model_type != "Unigram":
-        # ⚠️⚠️ 这里**改过口径** ✗（2026-09-21 第二轮 ✓）：第一轮实测「`Unigram(byte_fallback=True)` 对未知字符
-        #      仍出 `unk`」⇒ 判成「语义未核清 ✓ 拒绝 ✓」✗ —— ⚠️ 那个实测**少了前置条件** ✗：
-        #      词表里**没有** `<0xNN>` 字节 token ✓✗（没有字节 token 当然回退不出去 ✓）。
-        #      补上字节 token 再测 ⇒ 真走回退 ✓（`'中'` ⇒ `<0xE4><0xB8><0xAD>` ✓）⇒ 现在 **Unigram 已实现** ✓。
-        #    ⚠️ 但 **BPE 的 `byte_fallback` 仍未核** ✗（触发条件与 Unigram 不同 ✓ —— BPE 是字节级词表 ✓
-        #      回退只在「该字节不在 byte↔unicode 映射里」时才可能发生 ✓）⇒ 继续**带理由拒绝** ✓ 不硬套 ✓。
-        return OwningSupport(False, f"`byte_fallback: true` + 模型 `{model_type}` ✗ ⇒ 实测与实现的"
-                                    f"判据只在 **Unigram** 上核清过 ✓（逐字符字节展开 ✓ 缺一字节则整体 `unk` ✓）"
-                                    f"；该模型的触发条件未核 ✓ 不硬套 ✓", form)
+        # ⚠️⚠️ 这个口径**改过两次** ✗（第一轮：一律拒绝 ✗ → 第二轮：Unigram 实现 ✓ → 2026-09-22：BPE 仍拒绝 ✓）。
+        #    BPE 这边**触发条件已核清** ✓（不在词表的映射字符 ⇒ 按它**映射字符**的 UTF-8 字节展开 ✓，
+        #    需每字节都有 `<0xNN>` ✓ —— 与 Unigram 不同 ✗：不是按原字符的字节 ✓），
+        #    但 **输出顺序不是位置语义** ✗✗：
+        #    * 最硬的证据：参考实现里 **`'be'` 与 `'eb'` 输出完全相同** ✓✗（`[<0x62>, <unk>]` ✓）
+        #      ⇒ 任何「按字符位置展开」的实现**必然错其中一个** ✓✗（两者不可能都对 ✓）；
+        #    * 实测矩阵（词表只给 `a` + `b`/`c`/`d` 的字节 token ✓）：
+        #      `'ecb'`⇒`[c,b,unk]` ✓、`'ceb'`⇒`[c,b,unk]` ✓（**输出只看得到多重集** ✓✗）、
+        #      `'aeb'`⇒`[a,b,unk]` ✓、`'eab'`⇒`[unk,a,b]` ✓（⚠️ 这条**没动** ✓✗）⇒
+        #      像「unk 段与被展开 token 之间的某种重排」✓，规则**未核清** ✗。
+        #    ⚠️ 本仓纪律：**宁可回退参考实现，也不按猜的语义切** ✓✗（切错 = 拿错的 id 去查自己的词表 ✓）。
+        #    ⚠️ 影响面：要撞上它得有「**部分**字节覆盖」的词表 ✓（只有一部分 `<0xNN>` ✓）——
+        #      完整覆盖 / 完全没覆盖的词表都不受影响 ✓。
+        return OwningSupport(False, f"`byte_fallback: true` + 模型 `{model_type}` ✗ ⇒ 它的**输出顺序**"
+                                    f"不是位置语义 ✓✗（实测参考实现里 `'be'`/`'eb'` 输出**完全相同** ✓）"
+                                    f"⇒ 位置实现必错其一 ✓ 不硬套 ✓（→ 交给参考实现 ✓）", form)
     if model_type not in _OWN_MODELS:
         return OwningSupport(False, f"模型 `{model_type}` ✗ 不在自研覆盖表里 ✓"
                                     f"（覆盖：{list(_OWN_MODELS)} ✓）", form)

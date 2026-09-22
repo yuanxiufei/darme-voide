@@ -29,6 +29,7 @@ from app.services.engine import guidance as guidance_mod  # noqa: E402
 from app.services.engine import h3_form  # noqa: E402
 from app.services.engine import media as media_mod  # noqa: E402
 from app.services.engine import pipeline as pipe  # noqa: E402
+from app.services.engine import text_encoder as te_mod  # noqa: E402
 from app.services.engine import vae as vae_mod  # noqa: E402
 from app.services.engine import weights as weights_mod  # noqa: E402
 from app.services.engine.dryrun import DryRunBackend  # noqa: E402
@@ -513,6 +514,136 @@ def case_single_stream_untouched(root: Path) -> None:
           issubclass(TorchBackendUnavailable, RuntimeError))
 
 
+def case_attached_vae_facts(root: Path) -> None:
+    """⭐⭐ **挂上来的 VAE 与后端那套事实的跨来源校验** ✓（2026-09-22 补 ✓）—— 守的是「装得进去、
+    出来不对、**不报错**」那条路 ✗✗。
+
+    每条**本来是同一个事实** ✓，但各有**两个来源** ✗✗（潜通道数 ✓ / 空间倍率 ✓ / 音频声道 ✓ / 音频帧率 ✓）：
+    * 主干推的 `latents_dim` = `video_patch_proj.weight` 列数 ÷ **patch 乘积** ✓，而 `patch_size` 只能
+      **供方自述** ✗（权重里没 patch 痕迹 ✗）⇒ **给错但能整除**时会推出错的 `latents_dim` ✓✗，
+      两边形状**都还自洽** ⇒ `load_weights` 装得进去 ✓✗ ⇒ 只有画面不对 ✗✗；
+    * 潜尺寸换算用的是**事实表**的 `vaeScale=16` ✓，而挂错族的 VAE 会按自己的倍率解码 ✓✗
+      ⇒ 画面尺寸与请求的**不是一回事** ✓✗（不报错 ✗）；
+    * 音频潜帧数按 `geometry.AUDIO_LATENT_HZ=40` 算 ✓，解码却按 VAE 自己的 hop 展开 ✓✗
+      ⇒ wav **时长就是错的** ✓✗（不报错 ✗）。
+    """
+    backend = _h3_backend(root, name="h3_crosscheck")
+    records = {(item["stream"], item["field"]): item
+               for item in backend.describe()["vaeCheck"]}
+    check("55 ⭐ 挂载期**真核过** ✓ 而且核过要能自证 ✓（`describe().vaeCheck` ⇒ **四个字段**"
+          "（视频 通道/倍率 ✓、音频 通道/声道/帧率 ✓）都 `agrees=True` ✓ + 期望值与自述值都报出来 ✓）",
+          len(records) == 5
+          and all(item["agrees"] is True for item in records.values())
+          and records[("视频", "latent_channels")]["expected"] == TRUNK["latents_dim"]
+          and records[("视频", "spatial_scale")]["expected"] == VIDEO_VAE.spatial_scale
+          and records[("音频", "latents_per_second")]["expected"] == 40, records)
+
+    wrong_video = vae_mod.VideoVAEConfig(base_channels=4, latent_channels=6,
+                                         channel_multipliers=(1, 1, 1, 1, 1))
+    check("55′ ⭐ 视频 VAE 潜通道**对不上** ⇒ 挂载**当场报错** ✓ 且理由**可行动** ✓"
+          "（点名 `patch_size` ✓ —— 不静默取其中一个 ✗）",
+          _raises(lambda: _h3_backend(root, name="h3_crossbad").attach_vae(wrong_video),
+                  "patch_size") is not None)
+
+    wrong_audio = audio_vae_mod.AudioVAEConfig(latent_channels=6, encoder_dim=8,
+                                               latent_dim=32, decoder_dim=128)
+    audio_reason = _raises(lambda: _h3_backend(root, name="h3_crossbad2").attach_audio_vae(
+        wrong_audio), "对不上")
+    check("55″ ⭐ 音频那一档同理 ✓（主干 `audio_latents_dim` ↔ 音频 VAE 的 `latent_channels` ✓）"
+          "—— ⚠️ 且**不许把它当成 `patch_size` 的锅** ✗（音频那侧不乘 patch ✓）："
+          "报错要点名**音频 VAE 的配置** ✓ 且不说「与权重不符」✗",
+          audio_reason is not None and "音频 VAE 的配置给错" in audio_reason
+          and "与权重不符" not in audio_reason, audio_reason)
+
+    # ── ⭐⭐ 这条是守卫的**真正价值** ✓：**错 `patch_size` 在挂载期就露** ✓，不拖到解码 ✗ ──
+    # `patch_size=(1,1,2)` ⇒ 乘积 2 ⇒ 推 `latents_dim = 16 ÷ 2 = 8` ✓✗ —— 而它**装得进去** ✓✗：
+    # `video_patch_proj` 列数 = 8 × 2 = 16 ✓、输出头行数 = banks × 16 ✓ 两边形状都自洽 ✓
+    # ⇒ 这正是「形状自洽、装得进去、画面不对且不报错」那条路 ✓✗。
+    bad_patch = {key: value for key, value in TRUNK.items() if key != "latents_dim"}
+    bad_patch["patch_size"] = (1, 1, 2)
+    backend_bad = TorchBackend(audio_latent_mode="round")
+    backend_bad.load_weights(path=root / "h3_crosscheck.safetensors", config=bad_patch)
+    check("56 ⭐⭐ 错 `patch_size`（(1,1,2) ⇒ 推 `latents_dim=8` ✗）⇒ 装权重**照旧成功** ✓✗"
+          "（形状自洽 ⇒ 谁也没看出问题 ✗）—— 但一挂 VAE 就**当场露** ✓ 且报错点名 `patch_size` ✓",
+          backend_bad.describe()["config"]["latents_dim"] == TRUNK["latents_dim"] * 2
+          and _raises(lambda: backend_bad.attach_vae(VIDEO_VAE), "patch_size") is not None,
+          backend_bad.describe()["config"])
+
+    late = TorchBackend(audio_latent_mode="round")
+    late.attach_vae(wrong_video)      # 此刻还没形态 ⇒ 没有可比的事实 ⇒ **不报** ✓（不是漏 ✓）
+    check("56′ ⭐ 挂载**顺序反过来**（先挂 VAE 后装权重）⇒ 在**装权重那一刻**报 ✓（两向都守 ✓）"
+          "—— 且失败**不污染模块** ✓（`latentMode` 不许按「装好了」自述 ✗）",
+          _raises(lambda: late.load_weights(path=root / "h3_crosscheck.safetensors",
+                                            config=dict(TRUNK)), "对不上") is not None
+          and late.describe()["latentMode"] == "placeholder-1d",
+          late.describe()["latentMode"])
+
+    # ── 另两档：**空间倍率** ✓ 与**音频那两个事实** ✓（同样是「一个事实两个来源」✗）──
+    # 倍率：`vaeScale=16` 是 H3 事实 ✓；4 层 ⇒ `spatial_scale=8` ✗ ⇒ 解码出的画面尺寸与请求的
+    # **不是一回事** ✓✗（潜尺寸按 16 算 ✓、解码按 8 放 ✓）—— 而且**不报错** ✗✗。
+    weak_video = vae_mod.VideoVAEConfig(base_channels=4, latent_channels=TRUNK["latents_dim"],
+                                        channel_multipliers=(1, 1, 1, 1))
+    scale_reason = _raises(lambda: _h3_backend(root, name="h3_scalbad").attach_vae(weak_video),
+                           "spatial_scale")
+    check("56″ ⭐ 空间倍率对不上（4 层 ⇒ 8 ✗ 而 H3 事实是 16 ✓）⇒ 挂载当场报 ✓ 且说清后果 ✓"
+          "（画面尺寸会与请求的**不是一回事** ✗，而不是静默出片 ✗）",
+          scale_reason is not None and "H3 那一族" in scale_reason, scale_reason)
+
+    # 帧率：潜帧数按 **40 Hz** 算 ✓ 而解码按 **VAE 自己的 hop** 展开 ✓✗ ⇒ wav **时长错的** ✓✗。
+    slow_audio = audio_vae_mod.AudioVAEConfig(sample_rate=16000, encoder_dim=8, latent_dim=32,
+                                              decoder_dim=128,
+                                              latent_channels=TRUNK["audio_latents_dim"])
+    rate_reason = _raises(lambda: _h3_backend(root, name="h3_ratebad").attach_audio_vae(slow_audio),
+                          "latents_per_second")
+    check("56‴ ⭐⭐ 音频帧率对不上（16000/800 = **20** ✗ 而事实是 **40** ✓）⇒ 挂载当场报 ✓"
+          "（⚠️ 这条最阴 ✗✗：40 Hz 算帧数 ✓、20 Hz 展开 ⇒ wav **时长错** ✓✗ 且不报错 ✓）",
+          rate_reason is not None and "时长" in rate_reason, rate_reason)
+
+    mono_audio = audio_vae_mod.AudioVAEConfig(stereo_channels=1, encoder_dim=8, latent_dim=32,
+                                              decoder_dim=128,
+                                              latent_channels=TRUNK["audio_latents_dim"])
+    check("56⁗ ⭐ 音频声道对不上（1 ✗ 而 `geometry.AUDIO_LATENT_CHANNELS=2` ✓）⇒ 挂载当场报 ✓",
+          _raises(lambda: _h3_backend(root, name="h3_monobad").attach_audio_vae(mono_audio),
+                  "stereo_channels") is not None)
+
+
+def case_text_encoder_crosscheck(root: Path) -> None:
+    """⭐ **文本编码器的输出维 ↔ 主干要的 `text_dim`** ✓（2026-09-22 补 ✓）—— 同一类「一个事实两个来源」✗。
+
+    `text_encoder.TextEncoderConfig` 的注释**本来就写着**「应与 `DiTConfig.text_dim` 一致 ✓」✓，
+    但此前**只在编码之后**由形状错兜住 ✗（报「输出应为 (1,L,8376) ✓ 收到 (1,L,64) ✗」—— 指不到真因 ✓）。
+    两边来源：主干那侧是**权重**推的 ✓（`condition_proj` / `token_refiner` 的形状 ✓）、TE 那侧是**配置** ✓。
+    ⚠️ 本仓**不显式给** TE 配置时会自动按主干对齐 ✓（`_configured_text_dim` ✓）⇒ 要守的是**显式给**的那条 ✗
+    （真权重到手时正是常见用法 ✓）与**先挂 TE 后装权重**的顺序 ✗。
+    """
+    backend = _h3_backend(root, name="h3_techeck")
+    te_check = backend.describe()["textEncoderCheck"]
+    check("57 ⭐ 不显式给 TE 配置 ⇒ **自动按主干对齐** ✓ 且核过要能自证 ✓"
+          "（`describe().textEncoderCheck` ⇒ `expected = 主干 text_dim` ✓、`agrees=True` ✓）",
+          backend.describe()["textEncoderLoaded"] is True
+          and te_check["expected"] == TRUNK["text_dim"] and te_check["agrees"] is True, te_check)
+
+    bad = TorchBackend(audio_latent_mode="round")
+    bad.load_weights(path=root / "h3_crosscheck.safetensors", config=dict(TRUNK))
+    wrong_te = te_mod.TextEncoderConfig(vocab_size=32, output_dim=TRUNK["text_dim"] * 2)
+    te_reason = _raises(lambda: bad.attach_text_encoder(wrong_te), "对不上")
+    check("57′ ⭐ **显式给错** `output_dim` ⇒ 挂载**当场报** ✓ 且理由**可行动** ✓"
+          "（点名 `condition_proj` ✓ 并说明「不显式给会自动对齐」✓）—— 失败**不污染模块** ✓"
+          "（`textEncoderLoaded` 不许自述「挂好了」✗）",
+          te_reason is not None and "condition_proj" in te_reason
+          and bad.describe()["textEncoderLoaded"] is False,
+          (te_reason, bad.describe()["textEncoderLoaded"]))
+
+    late = TorchBackend(audio_latent_mode="round")
+    late.attach_text_encoder(te_mod.TextEncoderConfig(vocab_size=32, output_dim=64))
+    check("57″ ⭐ 挂载**顺序反过来**（先挂 TE 后装权重）⇒ 在**装权重那一刻**报 ✓（两向都守 ✓）"
+          "—— 且报完 `latentMode` 仍是占位 ✓（不按「装好了」自述 ✗）",
+          _raises(lambda: late.load_weights(path=root / "h3_crosscheck.safetensors",
+                                            config=dict(TRUNK)), "output_dim") is not None
+          and late.describe()["latentMode"] == "placeholder-1d",
+          late.describe()["latentMode"])
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_dual_"))
     case_gating()
@@ -525,6 +656,8 @@ def main() -> int:
         case_pipeline(root)
         case_condition_guard(root)
         case_head_banks_inference(root)
+        case_attached_vae_facts(root)
+        case_text_encoder_crosscheck(root)
         case_reference_audio(root)
         case_reference_video(root)
 

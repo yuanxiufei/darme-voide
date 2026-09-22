@@ -38,12 +38,23 @@ def _tool(name: str) -> str:
     if not found:
         raise MediaError(
             f"找不到 {name} ✗ ⇒ 先装 ffmpeg（Windows: `winget install Gyan.FFmpeg` ✓；"
-            f"Linux: `apt install ffmpeg` ✓）。本仓的色校正/合成等功能也依赖它 ✓。")
+            f"Linux: `apt install ffmpeg` ✓）。本仓的色校正/合成等功能也依赖它 ✓。\n"
+            f"⚠️ 若确认**装过**却仍报这个 ⇒ 十有八九是**当前进程的 PATH 里没有它** ✗"
+            f"（用 `where.exe {name}` 复核 ✓）；Windows 上 WinGet 装出来的 "
+            f"`…\\Microsoft\\WinGet\\Links\\{name}.exe` 是**应用别名（重解析点）** ✗ —— "
+            f"它在某些进程里会 `lexists=True` 但 `exists=False` ✓✗（于是 `shutil.which` 找不到 ✓）"
+            f"⇒ 把**真实**的 `…\\WinGet\\Packages\\…\\bin` 目录**前置**到 PATH ✓"
+            f"（⚠️ **前置**才治本 ✗：追加只让 `which` 找得到 ✓，而**裸名** spawn 仍会先命中坏别名 ✓✗"
+            f"⇒ 那一侧报的是 `WinError 448 不受信任的装入点` ✓）。")
     return found
 
 
 def have_ffmpeg() -> bool:
-    """ffmpeg 是否可用 ✓（`describe()` 会报这个 ✓）。"""
+    """ffmpeg 是否可用 ✓（`describe()` 会报这个 ✓）。
+
+    ⚠️ 判据就是 **PATH 里能不能解析出这两个可执行文件** ✓（本仓**不猜安装路径** ✗ ——
+    猜路径在不同机器上会给出「看着能跑」的假绿 ✓✗）。装过却报 `False` 的排查见 :func:`_tool` ✓。
+    """
     return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 

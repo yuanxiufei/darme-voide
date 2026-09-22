@@ -95,7 +95,9 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
   ⭐ 结论已推到**三个消费者** ✓（CLI ② 段 / 就绪 API `summary().quant` / 前端面板 ✓）且**三档分开说** ✗：
   可自动还原 ✓ / 判不出（**同时进 blockers** ✓）/ **没查** ✓（组件没下载 ⇒ 不阻塞也不假装绿 ✓）。
   ⚠️ **GGUF 豁免** ✗（它的反量化归运行时 ✓ 否则每份 GGUF 都会把 `ready` 判死 ✓✗）。
-- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎 **26 模块 / 3500+ 用例全绿 ✓ 零依赖可跑** ✓
+- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎全绿 ✓ **零依赖可跑** ✓ ——
+  ⚠️ **规模数字别写在这里** ✗（会腐烂 ✓）：模块清单看 `engine/__init__.py.__all__` ✓、
+  自检规模与最近实测看 `tests/run_all.py` 表头 ✓
   （2026-09-20 新增：**GGUF 读取器** `engine/gguf.py` ✓；**H3 键名核对器** `engine/h3_keys.py` ✓；
   **自研字节级 BPE** `engine/tokenizer_bpe.py` ✓；
   ⭐ **自研 Unigram/WordPiece/Metaspace** `engine/tokenizer_own.py` ✓（Viterbi ✓ / 整词 UNK ✓ /
@@ -103,15 +105,32 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
   `FixedLength` ✓ —— 规则全部**逐例实测**对齐参考 ✓）；
   **`byte_fallback` 已实现** ✓（Unigram ✓ **段级判据** ✓：段内每个字符都能展开才逐字符展开 ✓ 否则整段一个 `unk` ✓）；
   ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✗）：`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、
-  `UnicodeScripts` ✓（标准库无 script 表 ✓）、**别的模型**的 `byte_fallback` ✓（触发条件未核 ✓）、
+  `UnicodeScripts` ✓（标准库无 script 表 ✓）、
+  ⭐ **别的模型**的 `byte_fallback` ✓（2026-09-22 ✓ **不是「没核」**✗：BPE 触发条件已核 ✓，
+  但**输出顺序不是位置语义** ✗✗ —— 实测 `'be'`/`'eb'` 输出**完全相同** ✓ ⇒ 位置实现必错其一 ✓✗；
+  拒绝理由**必须带这对证据** ✓，只写「未实现」✗ 会让人去补实现然后切错 ✓✗）、
   **能匹配空串的正则** ✓ 与 `\p{…}` 语法 ✓（`re` 没有 ✓）；
   ⭐ **对 `transformers` 的运行时改造** `engine/tokenizers_tuning.py` ✓（离线兜底含 **Auto 工厂** ✓
   / 缓存目录 / 降噪 / 计数 / 可撤 ✓ 幂等 ✓）；
-  **分词器总入口** `engine/tokenizer_hub.py` ✓ = 形态嗅探 + **3 模型 × 8 预分词器全自研** ✓ +
+  **分词器总入口** `engine/tokenizer_hub.py` ✓ = 形态嗅探 + **3 模型 × 全部已实现预分词器**
+  （清单看 `tokenizer_own._OWN_PRE_TOKENIZERS` ✓ + `SUPPORTED_NORMALIZERS` ✓）全自研 ✓ +
   极少数形态回退 ✓ + 批量 + LRU + 运行期互校 ✓）；
   **H3 结构从权重推** ✓（`h3_keys.infer_h3_trunk_config` ✓ ⇒ 出厂常量只作回落 ✓）；
-  出片唯一硬缺口 = **真权重** ✗（机制都已实现 ✓）。**全量回归 103 套 / 3540 项 / 0 失败** ✓
-  （2026-09-21 又扩 normalizer + 预分词器 ✓ 数字待重跑 ✓）。
+  ⭐ **已挂 VAE 的跨来源校验（四个字段）** ✓（2026-09-22 ✓ `TorchBackend._check_attached_vaes` ✓，
+  `describe().vaeCheck` ✓）：① 主干推的 `latents_dim` ↔ VAE `latent_channels` ✓ ⇒ 给错的 `patch_size`
+  （**能整除**那种 ✓✗ 形状全自洽、装得进去 ✓✗、只有画面不对 ✗✗）在**挂载期**就被拒 ✓；
+  ② VAE `spatial_scale` ↔ **H3 事实 `vaeScale=16`** ✓（不等 ⇒ 画面尺寸与请求的不是一回事 ✓✗ 且不报错 ✗✗）；
+  ③ 音频声道 ↔ `geometry.AUDIO_LATENT_CHANNELS=2` ✓；④ 音频帧率 ↔ `geometry.AUDIO_LATENT_HZ=40` ✓
+  （不等 ⇒ **wav 时长错** ✓✗ 且不报错 ✗✗）。⚠️ DiT 形态只核 `spatial_scale ↔ config.vae_scale` ✓
+  （别做过头 ✗）；挂载**两向**都守 ✓；`load_weights` 校验失败 ⇒ **回滚 `_model/_config/_form`** ✓；
+  ⚠️ 但都是**两个来源互证** ✗ 不是权重事实 ✗ ⇒ 真权重到手仍要按元数据核 ✓；
+  出片唯一硬缺口 = **真权重** ✗（机制都已实现 ✓）。
+- ⚠️⚠️ **跑全量前：把 ffmpeg 真实 bin 目录「前置」到 `PATH`** ✗（2026-09-22 实测 ✓✗）：
+  Windows 上 WinGet 的 `…\WinGet\Links\ffmpeg.exe` 是**应用别名（重解析点）** ⇒ 本进程里
+  `lexists=True` 但 `exists=False` ✓✗ ⇒ ① `shutil.which` → `None` ✓（引擎会说「找不到 ffmpeg」✗ —— 其实装了 ✓）；
+  ② **裸名** spawn ⇒ `WinError 448 不受信任的装入点` ✗✗ ⇒ **5 套假红** ✓（`image_generation`/`consistency_qc`/
+  `technical_qc`/`color_grade`/`compressed_data_url` ✓，看着像代码坏了 ✗✗）。⚠️ **追加无效** ✗（只修好 ① ✗）。
+  判据 `where.exe ffmpeg` ✓。已写进 `tests/run_all.py` 表头 ✓。
 - ⚠️ **`transformers` 已装（5.17.0 = PyPI 最新 ✓ 镜像 ✓）且登记为「可选依赖」** ✓：`_Dependency.optional` ✓
   ⇒ `dependency_status()` 分 `missing`（必需 ✓ 缺则后端不可用）/ `optionalMissing`（可选 ✓）
   ⇒ **别把可选塞进必需位** ✗（`ready`/`torch_available()` 会被判死 ✗✗）。

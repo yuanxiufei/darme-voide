@@ -117,25 +117,31 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 
 **三层依赖阶梯（汇报时要说清 ✓）**：① **外部厂商 API** ✗✗（要去的 ← 上表 4 行）→
 ② **本地第三方运行时** ⚠️（ollama ✓ SD-WebUI ✓ ComfyUI ✓ CosyVoice ✓ —— 本地但非自研 ✓）→
-③ **完全自研** ✓（`services/engine/` 19 模块 ✓）。
+③ **完全自研** ✓（`services/engine/` ✓ —— ⚠️ **别再往这里写模块数** ✗：唯一权威是
+`app/services/engine/__init__.py` 的 `__all__` ✓）。
 
-## 自研引擎现状（2026-09-20 实测，自 MEMORY.md §自研优先 下移）
+## 自研引擎现状（2026-09-22 改写 —— ⚠️ 只留「去哪儿看」✗，不留会腐烂的数字 ✓）
 
-**19 个模块**（`backend-py/app/services/engine/`）：`schedules` / `geometry` / `sampler` / `guidance` /
-`conditioning` / `dit` / `vae` / `text_encoder` / `media` / `segments` / `mappings` / `safetensors` /
-`inventory` / `loader` / `weights` / `pipeline` / `dryrun` / `torch_backend` / `__init__`。
+⚠️⚠️ 这一节原来罗列 **19 个模块 + 9 套 343 用例** ✗ —— 那是 2026-09-20 的快照 ✓，
+之后模块与用例一直在长（`quant` ✓ / `h3_form` ✓ / `h3_keys` ✓ / 词表三件套 ✓ / `gguf` ✓ …）⇒
+**罗列必腐烂** ✗（本仓规矩：规模数字**要么指向唯一权威、要么带实测日期** ✓）。现在改成指针 ✓：
 
-**自检 9 套 343 用例**（2026-09-20 实测全绿 ✓）：core 26 / dit 26 / inventory 34 / io 39 /
-loader 28 / mappings 17 / pipeline 98 / segments 54 / text 21 —— **零依赖可跑** ✓
-（装了 torch 则真张量那批也跑 ✓）。
+* **模块清单** ⇒ `app/services/engine/__init__.py` 的 `__all__` ✓（**唯一权威** ✓）；
+* **自检规模与最近一次实测** ⇒ `tests/run_all.py` 的表头 ✓（**唯一权威** ✓，每次实测后同步 ✓）；
+* **还缺什么** ⇒ `torch_backend.PENDING_PARTS` ✓（**只减不骗** ✓ —— 关掉一条移进
+  `dit.H3_GAPS_CLOSED` / `h3_form.H3_FORM_TODO` ✓）；**H3 形态的权威实现**是 `h3_form.H3FormTrunk` ✓
+  （⚠️ `dit.py` 那 7 条结构差异**不要**去补 ✗ —— 那是「通用 DiT」的设计 ✓，补成半套 H3 反而装不上真权重 ✓✗）。
 
-**已能自主完成的**：σ 调度 ✓ / 采样循环 + CFG 引导 ✓ / 首帧条件（图生视频 ✓ 真 VAE 编码 + 掩码混合 ✓）/
-长视频分段（保留帧数守恒 ✓）/ DiT 真前向 ✓ / 文本编码（**注入式 tokenizer** ✗ 本仓不内置词表 ✓）/
-VAE 解码 ✓ / 帧→真 mp4（ffprobe 复核 ✓）/ 音频→真 wav（标准库 `wave` ✓）/ 权重体检 + 加载计划 ✓ /
-管线编排（进度 / 取消 / 错误归因 ✓）/ 干跑后端 ✓。
+**已能自主完成的**（能力面 ✓ 与上条独立 —— 能力有没有比"有几个模块"稳 ✓）：
+σ 调度 ✓ / 采样循环 + CFG 引导 ✓ / 首帧条件（图生视频 ✓ 真 VAE 编码 + 掩码混合 ✓）/
+长视频分段（保留帧数守恒 ✓）/ DiT 真前向 ✓ / **自研词表三件套** ✓（BPE ✓ / Unigram ✓ / WordPiece ✓ +
+11 种 normalizer + 10 种预分词器 ✓ —— 规则逐例对齐参考 ✓）/ H3 行级主干 + 双流 ✓（真 mp4 + 真 wav ✓）/
+**低精度权重反量化** ✓（fp8/int8 ✓ 四种布局 ✓ 判不出来就拒绝 ✓）/ VAE 解码 ✓ / 帧→真 mp4（ffprobe 复核 ✓）/
+音频→真 wav（标准库 `wave` ✓）/ 权重体检 + 加载计划 ✓（含**反量化计划** ✓）/ 管线编排（进度 / 取消 /
+错误归因 ✓）/ 干跑后端 ✓。
 
-**唯一硬缺口 = 真权重 + 真配置** ✗（见 `torch_backend.PENDING_PARTS` ✓：H3 主 DiT 19.53 GiB 未下载 ✓ /
-张量命名映射表 ✓ / DiTConfig ✓ / TE·VAE 权重 ✓ / 端到端 `generate()` 真跑一次 ✓）⇒ `canGenerate=False` ✓。
+**唯一硬缺口 = 真权重 + 真配置** ✗（见 `torch_backend.PENDING_PARTS` ✓：H3 主 DiT 19.53 GiB 未下载 ✓
+⇒ 上机前先跑 `python app/scripts/h3_readiness.py` ✓）⇒ `canGenerate=False` ✓。
 
 ## 自 MEMORY.md 下移（2026-09-20，第三次腾 8k 预算）
 
