@@ -299,6 +299,8 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
 def _run_h3(task: Dict[str, Any]) -> None:
     """提交到 ComfyUI 并把产物取回本地（**失败也要 `/free`** ✓）。"""
     client = cc.ComfyUIClient(COMFYUI_URL, timeout=TIMEOUT)
+    failure: str | None = None
+    success: Dict[str, Any] = {}
     try:
         _update(task, status="processing")
         api_prompt, _dropped = _build_api_prompt(client, task)
@@ -318,18 +320,23 @@ def _run_h3(task: Dict[str, Any]) -> None:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         saved = client.save_output(videos[0], OUTPUT_DIR,
                                    filename=f"{task['task_id']}{Path(str(videos[0]['filename'])).suffix or '.mp4'}")
-        _update(task, status="succeeded",
-                video_url=f"{PUBLIC_BASE_URL}/files/{saved.name}",
-                outputs=items, saved_path=str(saved), error_msg=None)
+        success = {"video_url": f"{PUBLIC_BASE_URL}/files/{saved.name}",
+                   "outputs": items, "saved_path": str(saved)}
     except cc.NodeMissingError as err:
-        _update(task, status="failed",
-                error_msg=f"{err}｜装节点：{INSTALL_HINT}")
+        failure = f"{err}｜装节点：{INSTALL_HINT}"
     except Exception as err:  # noqa: BLE001 —— 任何失败都要变成任务失败，不能挂在后台 ✗
-        _update(task, status="failed", error_msg=f"{type(err).__name__}: {err}"[:600])
-    finally:
-        # ⚠️ 24G 卡上跑完必须卸载 ✓（失败路径也要卸，否则下一镜 OOM ✗）
-        freed = client.free(unload_models=True, free_memory=True)
-        _update(task, freed_vram=freed)
+        failure = f"{type(err).__name__}: {err}"[:600]
+    # ⚠️⚠️ **先卸载、再落终态** ✗（2026-09-24 修 ✓）。此前是「先写 `succeeded` ✓，再在 `finally` 里
+    #    `/free` + 写 `freed_vram`」✗ ⇒ 中间那一瞬调用方读到的是**自相矛盾**的
+    #    「成功了但 `freed_vram=null`」✓✗（真机上是 API 撒谎 ✓；自检侧表现为**偶发** 19/20 ✗✗
+    #    —— 2026-09-22 / 09-24 两次全量假红都是它 ✓）。现在终态与 `freed_vram` 在**同一个 `_update`**
+    #    里落地 ✓（在锁内 ✓）⇒ 读到的要么是 `processing` ✓、要么是终态 + 已卸载 ✓，没有中间态 ✓。
+    #    ⚠️ 失败路径照样卸 ✓（24G 卡否则下一镜 OOM ✗）。
+    freed = client.free(unload_models=True, free_memory=True)
+    if failure is not None:
+        _update(task, status="failed", error_msg=failure, freed_vram=freed)
+    else:
+        _update(task, status="succeeded", error_msg=None, freed_vram=freed, **success)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -503,6 +510,8 @@ def run_workflow(body: Dict[str, Any]) -> JSONResponse:
 def _run_generic(task: Dict[str, Any]) -> None:
     """通用工作流的执行体（与 H3 同形：提交 → 轮询 → 取产物 → 落盘 → 释放显存 ✓）。"""
     client = _client()
+    failure: str | None = None
+    success: Dict[str, Any] = {}
     try:
         _update(task, status="processing")
         api, _problems = _prepare_generic(client, task)
@@ -523,15 +532,19 @@ def _run_generic(task: Dict[str, Any]) -> None:
                                            filename=f"{task['task_id']}_{index}{suffix}")
                 files.append({"kind": item.get("kind"), "source": item.get("filename"),
                               "url": f"{PUBLIC_BASE_URL}/files/{saved.name}"})
-        _update(task, status="succeeded", outputs=files,
-                video_url=next((f["url"] for f in files if f["kind"] == "videos"), None),
-                error_msg=None)
+        success = {"outputs": files,
+                   "video_url": next((f["url"] for f in files if f["kind"] == "videos"), None)}
     except cc.NodeMissingError as err:
-        _update(task, status="failed", error_msg=f"{err}｜装节点：{INSTALL_HINT}")
+        failure = f"{err}｜装节点：{INSTALL_HINT}"
     except Exception as err:  # noqa: BLE001
-        _update(task, status="failed", error_msg=f"{type(err).__name__}: {err}"[:600])
-    finally:
-        _update(task, freed_vram=client.free(unload_models=True, free_memory=True))
+        failure = f"{type(err).__name__}: {err}"[:600]
+    # ⚠️⚠️ **先卸载、再落终态** ✗（与 `_run_generation` 同一处修法 ✓，2026-09-24 ✓）：
+    #    此前「先写 `succeeded` ✓ 再 `finally` 里 `/free`」✗ ⇒ 中间态是「成功了但 `freed_vram=null`」✓✗。
+    freed = client.free(unload_models=True, free_memory=True)
+    if failure is not None:
+        _update(task, status="failed", error_msg=failure, freed_vram=freed)
+    else:
+        _update(task, status="succeeded", error_msg=None, freed_vram=freed, **success)
 
 
 @app.get("/v1/workflows/task/{task_id}")

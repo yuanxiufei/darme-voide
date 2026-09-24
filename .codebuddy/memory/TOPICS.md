@@ -314,3 +314,332 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 - **「删目录/删服务」的前置验证：真删一次（可回滚干跑）** —— `重命名 → 跑全部守门脚本与自检 → finally 还原`。本项目实测：一轮干跑抓出三类**静态扫描根本看不到**的问题（① 文档里指向被删目录的引用 ② 守卫对旧前缀不设防 ③ 脚本里「真源码在才走某分支」的早期 return 在删后静默失效）。**只跑「代码常量排查 + 全量自检」是查不出来的**，因为它们只在「目录真的不在」时才走到那条分支。
 - ⚠️ **引用守卫只采集反引号 token 与 markdown 链接**（`` `path/x.md` ``）：写在注释/正文里的裸路径**不受保护**，挪库后不会报错 ⇒ 想让某条引用受守卫保护，**先给它加反引号**。
 - **删 `backend/` 的三条前置（2026-09-15 起）**：① **差分对拍 0 新差异** —— `tests/parity_run.py`（两侧并排 + 逐字段 diff）；**只比只读 GET**，`parity_diff.py` 的 `CASES` 表要随迁移补齐（2026-09-15 实测 **一致 12 / 已知 0 / 不存在 4 / 新差异 0**；文本响应靠 `strip_timestamps()` 抹掉 ISO 时间戳才能参与比对，HTML/Markdown 导出物**故意不入表**）；② **守卫快照完整** —— `tests/freeze_ts_snapshot.py`（清单 = 手写 ∪ **从守卫源码自动发现**两种形态：`_SRC_ROOT / "…" / "x.ts"` 拼接 **与** 表驱动普通字符串路径，防「新增守卫读文件 ⇒ 快照静默缺件」；快照 2026-09-15 起存为 **Python 模块** `tests/frozen_ts_source.py`（74 条 / 625 KB，仓库内**已无 .ts**），守卫侧 `frozen_ts.snapshot_root()` **物化到临时目录**后再照常按 `Path` 读 ⇒ 调用点零改动；真源码/冻结两路结论必须一致）；③ **`app/` 对 `backend/` 的路径依赖 = 0**（只剩守卫读 TS 源码，已由 ② 兜住）。
+
+## 自 MEMORY.md 下移（2026-09-24 第四次腾预算）
+
+起因：`MEMORY.md` **13906 字符** ✗（预算 8000 ✓，`app/scripts/check_memory.py` 判**致命** ✓）——
+它的头写明「超限注入会被截断，**尾部 `## 协作与提交` 最先丢**」✗✗ ⇒ 实际已在丢规则 ✓。做法同前三次 ✓：
+细节留本节 ✓，`MEMORY.md` 只留**会导致 bug 的判据** + 指针 ✓。⚠️ 判据：`(Get-Content .codebuddy\memory\MEMORY.md -Raw).Length` ≤ 8000 ✓。
+
+### A. 自研引擎 · 分词器细节
+`engine/tokenizer_bpe.py`（自研字节级 BPE ✓）/ `engine/tokenizer_own.py`（Unigram/WordPiece/Metaspace ✓
+—— Viterbi ✓ / 整词 UNK ✓ / **normalizer 11 种** ✓ / **预分词器 10 种** ✓ 含 `Punctuation` 与 `Split`
+各五种 behavior ✓、`FixedLength` ✓；规则**逐例实测**对齐参考 ✓）/ `engine/tokenizer_hub.py`（形态嗅探 ✓ →
+自研优先 ✓ → 极少数形态回退参考 ✓ + 批量 + LRU + 运行期互校 ✓；`tokenizers_tuning.py` = 对 TF 的**运行时
+改造** ✓：离线兜底含 **Auto 工厂**（它会在解析出具体类**之前**就外呼 ⇒ 必须单独包 ✗）/ 缓存目录 / 降噪 /
+计数 / 可撤 ✓）。
+* `byte_fallback` 的 Unigram **已实现** ✓（**段级判据** ✓：段内**每个**字符都能展开才逐字符展开 ✓，
+  否则**整段**一个 `unk` ✓；缺任一字节 ⇒ 整字符回退不了 ✓；字节名只认 `<0x` + 两位十六进制 ✓）；
+* ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✓）：`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、
+  `UnicodeScripts` ✓（标准库无 script 表 ✓）、**别的模型**的 `byte_fallback` ✓（BPE 的**输出顺序不是
+  位置语义** ✗✗ —— 实测 `'be'`/`'eb'` 输出**完全相同** ✓ ⇒ 位置实现必错其一 ✓；拒绝理由**必须带这对证据** ✓）、
+  **能匹配空串**的正则 ✓ 与 `\p{…}` 语法 ✓（`re` 没有 ✓）；
+* ⭐ **性能**（2026-09-21 ✓）：`UnigramTokenizer` Viterbi 由「每 (end,start) 重扫前缀树」✗ 改成
+  「**每起点只扫一次** + 前向 DP」✓ ⇒ 冷 60k → **218k tokens/s** ✓；再加**片段级缓存** ✓
+  （热 3.5M ✓ 模块级 `PIECE_CACHE_LIMIT` ✓ 满了整体清空 ✓）；基准 `app/scripts/tokenizer_bench.py` ✓。
+* ⚠️ 性能数字**必须把口径一起报** ✗（只报"热"数字 ⇒ 会得出"比 Rust 快 5.5 倍"的假象 ✓✗）。
+
+### B. 自研引擎 · 权重装载与跨来源校验
+* 低精度（`engine/quant.py` ✓）：fp8/int8 先按配套 scale **反量化** ✓（布局**按形状**判 ✓ 四种 ✓、
+  `*_scale_inv` 走除 ✓）⇒ 再归一 dtype ✓；**判不出来就拒绝** ✗（块/分组量化、缺 scale、scale=0 ✓）；
+  ⚠️ 顺序：**先反量化、再 cast** ✗；失败 ⇒ 中止装载 + **不污染模块** ✓。结论已推到**三个消费者** ✓
+  （CLI ② 段 / 就绪 API `summary().quant` / 前端面板 ✓）且**三档分开说** ✗：可自动还原 ✓ / 判不出
+  （**同时进 blockers** ✓）/ **没查** ✓（组件没下载 ⇒ 不阻塞也不假装绿 ✓）；⚠️ **GGUF 豁免** ✗。
+* ⭐⭐ **已挂 VAE 的跨来源校验**（`TorchBackend._check_attached_vaes` ✓ `describe().vaeCheck` ✓）——
+  四/五个字段 ✓：① 主干推的 `latents_dim` ↔ VAE `latent_channels` ✓（给错的 `patch_size`
+  **能整除**时形状全自洽 ⇒ 装得进去 ✓✗、只有画面不对 ⇒ 现在**挂载期**就拒 ✓）；
+  ② VAE `spatial_scale` ↔ **H3 事实 `vaeScale=16`** ✓；③ 音频声道 ↔ `geometry.AUDIO_LATENT_CHANNELS` ✓；
+  ④ 音频帧率 ↔ `geometry.AUDIO_LATENT_HZ=40` ✓（不等 ⇒ **wav 时长错** ✓✗ 且不报错 ✗✗）；
+  ⚠️ DiT 形态只核 `spatial_scale ↔ config.vae_scale` ✓（别做过头 ✗）；挂载**两向**都守 ✓；
+  `load_weights` 校验失败 ⇒ **回滚 `_model/_config/_form`** ✓。
+* ⭐ 同样守 **TE `output_dim` ↔ 主干 `text_dim`** ✓（`_check_text_encoder` ✓ / `describe().textEncoderCheck` ✓，
+  DiT / H3 两侧都守 ✓）；⚠️ 挂载守卫一律**先核后改** ✗（核不过是**候选**的问题 ⇒ 失败时模块一个字没动 ✓
+  —— 反例：先挂上再回滚会把**先前挂好的**那个也清掉 ✗✗）。
+* ⚠️ 以上都是**两个来源互证** ✗ 不是权重事实 ✗ ⇒ 真权重到手仍要按元数据核 ✓。
+* H3 结构**从权重推** ✓（`h3_keys.infer_h3_trunk_config` ✓ ⇒ 出厂常量只作回落 ✓）。
+
+### C. 前端类型检查（2026-09-21 起）
+* 三件事都要跑 ✗：`npm run typecheck`（`vue-tsc` ✓ + `@types/node` ✓ 装在 devDependencies ✓ 走
+  `registry.npmmirror.com` ✓）、`npm run build`（**原先不做**类型检查 ✗ ⇒ 现已开 `typescript.typeCheck` ✓）、
+  ⭐ `npm run **generate**` ✓ —— **前端产物是 generate 出的** ✗（Dockerfile 就是它 ✓；`frontend/dist`
+  是指向 `.output/public` 的**目录联接** ✓）⇒ 只跑 `build` 会把 `.output/public/index.html`
+  **覆盖没** ✓✗（`dockerfile_contract_test` 当场红 ✓）。
+* ⚠️⚠️ `ref([])` 推出 **`never[]`** ✗ ⇒ 元素属性访问全报 TS2339 ✓✗（一趟几百条 ✓）⇒ `ref` 一律带泛型 ✓；
+  字面量配置表用运行时键要 `Record<string, T>` ✓；`catch (e)` 的 `e` 是 `unknown` ✓ 不许直接 `e.message` ✓；
+  模板读表单值走 `formValue($event)` ✓（`$event.target.value` 报 `EventTarget` 无 `value` ✓）；
+  ⚠️ **`ComputedRef` 必须 `.value`** ✗（`if (!ref)` 恒真 ✓、当参数传会拼出 `[object Object]` ✓✗
+  —— **只有类型检查能抓住** ✓，已因此逮到 `switchEpisodeConfig` 一个「从来没生效」的 bug ✓）；
+  ⚠️ `desc = []` / `refs = []` 这类**默认空数组**会把参数推成 `never[]` ✗ ⇒ 必须显式类型 ✓。
+* ⚠️ **注释里别写调用形状** ✗：`frontend_api_coverage_test` 纯文本扫 `api.get('…')` ✓ ⇒
+  注释里的一句"曾经写错成 …"会被**当成真调用点** ✓✗（2026-09-22 实测 ✓）。
+* ⭐ **2026-09-22：typecheck 清零** ✓（537 → 314 → 134 → **0** ✓；三轮修掉两个真 bug ✓）。
+
+### D. 上机前自检（引擎就绪）
+业务在**服务层** `app/services/engine_readiness.py` ✓（⚠️ **不能放 `app/scripts/`** ✗ —— 那个目录
+**不是包** ✓ ⇒ 路由引用不到 ✓✗）；CLI 薄壳 `app/scripts/h3_readiness.py` ✓（`--json` ✓ + **退出码 = ready** ✓）；
+路由 `GET /api/v1/production/engine-readiness` ✓（回**精简摘要** ✓ —— 别塞整坨排班 ✗；真权重预检要文件路径
+⇒ **不走 HTTP** ✗ 留 CLI ✓）；前端 `PreflightPanel.vue` 有**独立**「引擎就绪」块 ✓（没选集也能看 ✓，
+「没查的项」用**灰点**与通过区分 ✓）。
+⚠️ 口径：没给权重 ⇒ 明说「**没查**」✗ 不算通过 ✓；「还要下多少」按清单 `expectedGiB` 求和 ✗
+（用 `bytes` 会恒为 0 ✓✗）；⚠️ 与 `POST /production/preflight`（查**内容**）是两个独立 `ready` ✗。
+
+### E. 记忆层自身的守卫（⚠️ 一直在烂 ✗）
+`app/scripts/check_memory.py` ✓ 把这几条判**致命** ✓：`MEMORY.md` 超 8k ✓、`@N` 越界或**未落在小节首行** ✓、
+**某篇日志的末节没有登记锚点** ✓、磁盘上的日志未登记进 INDEX ✓、落点表里 `文件 §小节` 的小节名查不到 ✓。
+⚠️ **它不在 `run_all.py` 里** ✗ ⇒ 会静默腐烂 ✓✗（2026-09-24 实测：**7 处致命** ✗，其中 5 篇日志的**末节锚点**
+早漂了 ✓ —— ⚠️ **末节/步骤小节锚点会随日志增长而漂移** ✗，写 `@末节` 这种字面量**不算登记** ✓✗）。
+⇒ 每次追加日志后跑一次 ✓：`.venv/Scripts/python.exe app/scripts/check_memory.py` ✓（exit 0 才算过 ✓）。
+
+### F. 环境与自检纪律（2026-09-24 下移）
+* ⚠️⚠️ **跑全量前：把 ffmpeg 真实 bin 目录「前置」到 `PATH`** ✗（2026-09-22 实测 ✓✗）：Windows 上 WinGet 的
+  `…\WinGet\Links\ffmpeg.exe` 是**应用别名（重解析点）** ⇒ 本进程里 `lexists=True` 但 `exists=False` ✓✗
+  ⇒ ① `shutil.which("ffmpeg")` → `None` ✓（引擎会说「找不到 ffmpeg」✗ —— 其实装了 ✓）；② **裸名** spawn
+  （`subprocess.run(["ffmpeg", …])` ✓ 产品代码那种写法 ✓）⇒ `OSError: [WinError 448] 无法遍历该路径，
+  因为它包含不受信任的装入点` ✗✗ ⇒ `image_generation` / `consistency_qc` / `technical_qc` / `color_grade` /
+  `compressed_data_url` **5 套假红** ✓（看着像代码坏了 ✗✗）。⚠️ **追加 PATH 无效** ✗（只修好 ① ✗）；
+  判据 `where.exe ffmpeg` 指到真实 bin ✓。已写进 `tests/run_all.py` 表头 ✓。
+* ⚠️ **`transformers` 是可选的** ✓（已装 5.17.0 ✓ 镜像 ✓，登记为 `_Dependency.optional` ✓）：
+  `dependency_status()` 分 `missing`（必需 ✓ 缺则后端不可用）/ `optionalMissing`（可选 ✓）
+  ⇒ **别把可选塞进必需位** ✗（`ready` / `torch_available()` 会被判死 ✗✗）。⚠️ **不 fork / 不 vendored** ✗：
+  只做**运行时改造** ✓；⚠️ **Auto 工厂必须单独包** ✗（它在解析出具体类**之前**就外呼 ✓✗）；
+  分词本身已由**自研三血统**接管 ✓ ⇒ 它只剩**核对价值** ✓。
+* ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗（`run_all.py` 按此前缀收敛项数 ✓；写成「n/m 项通过」
+  ⇒ 总表**空摘要**、项数缺一套 ✓✗）。
+* ⚠️ **别同时开多个全量回归** ✗（并发抢 CPU ⇒ 像"卡死" ✓✗）；**判据 = 日志里有没有 `结论：` 行** ✗
+  （半截日志不算跑过 ✓）。⚠️ 有红时的顺序 ✗：先数进程 ✓（>1 就清 ✓）→ **单独连跑 3 次** ✓
+  （一次绿说明不了什么 ✗）→ 还绿再去查「什么时候写终态」这类**时序** ✗ —— ⭐ **「单独复跑就好了」≠
+  「不是代码问题」** ✗✗（`h3_stage2_test` 那条偶发红就是这么被误判过一轮 ✓）。
+* ⚠️ **性能数字必须把口径一起报** ✗（只报"热"数字 ⇒ 会得出"比 Rust 快 5.5 倍"的假象 ✓✗）。
+* ⚠️⚠️ **外部调用审计**（四类生成曾**全部**解析到厂商 API ✗：`ai_providers.py` 按 priority 降序取第一条 ✓，
+  本地预设 82–85 ✓ 输给厂商 97–300 ✓ ⇒ 厂商永远赢 ✗）⇒ 抬本地 priority / 删外部行 ✓；
+  **审计表与三层依赖阶梯见 §外部调用审计** ✓。
+* **⚫ 可照抄项目**（用户点名 ✓「不要忘记」✓）：ComfyUI / minimax-h3-comfyui / ollama / ollama-python /
+  minimax-desgin-plugin ⇒ **功能直接抄** ✓（落点见 §可照抄项目清单 ✓）。
+
+## SLM 无限漫剧创造台 · 逆向笔记（2026-09-24 ✓ 用户提供安装包 ✓）
+
+**它是什么** ✓：`Inno Setup` 装的**桌面壳** ✓（`D:\app\SLM` ✓）= `app.py`（pywebview + **bottle 8123** ✓）
++ `launcher.html`（GSAP ✓ 启动器 UI ✓）+ `runtime/`（Python 3.13 嵌入式 ✓ 只带 bottle / pywebview /
+pythonnet ✓）。**产品本体不在这里** ✗：升级清单（`https://slm-update.oss-cn-hangzhou.aliyuncs.com/manifest.json` ✓）
+显示真正的**工作台是 `SLM漫剧台_v3.5.40.zip`（74.7 MB ✓ sha256 有 ✓）** ⇒ 壳只负责**检测 / 引导 / 拉起 /
+插件管理 / 升级** ✓，真正的工作台是 `H3EasyDirector/h3e_backend.py`（独立进程 ✓ `--port 8081 --comfy
+http://127.0.0.1:8188` ✓）。
+⭐ **同一个模型家族** ✓：它整套是 **MiniMax H3** ✓ —— H3 核心插件保护名单 `H3_CORE_PLUGINS`（`H3EasyDirector` /
+`ComfyUI-H3-Director` / `TE-Speed-MiniMaxH3` / `ComfyUI-KJNodes` / `ComfyUI-NB-H3-HyperStep` / `H3E_IndexTTS2.5` /
+`TE-Speed-FlashVSR` / `ComfyUI-VideoHelperSuite` ✓）。
+
+### ⭐⭐ 最值得参考：**三档引擎表** `ENGINE_LOCAL_META`（`app.py:149-183` ✓）
+| 档 | steps | 分辨率 | 加速 | 实测倍率 | 显存建议 |
+|---|---|---|---|---|---|
+| `official` 官方稳妥流（入门 L1 ✓） | 25 | 832×480 | 无（**零第三方依赖** ✓） | 1×（5 秒 10–15 分钟 ✓） | 8G 可跑 |
+| `std8` 标准加速流（中级 L2 ✓） | 8 | 1024×576 | 8 步蒸馏 LoRA（LightX2V 系 ✓） | ≈2.1× | 16G+ |
+| `fast4` 极速流（旗舰 L3 ✓） | 4 | 1024×576 | 4 步蒸馏（**官方 Comfy-Org R2V 模板同款** ✓） | ≈3.44× | 8G 甜点；5090 可 +Sol-Attn +NVFP4 → 1344×768 |
+
+⚠️ 它给每档都配了**模型清单**（`unet_ref2v` / `unet_fl2v` / `te_qwen` / `vae_video` / `vae_audio` /
+`clip_l` / `nodes_speed` / `lora_4step_*` / `unet_hybrid` / `up_2k` / `unet_dasiwa` / `unet_nvfp4` /
+`nodes_solattn` ✓，逐项标 **必需 / 推荐 / 可选** ✓）+ **`gpu_tip`** ✓（哪档配哪张卡 ✓）⇒ 这就是一张**产品化
+的就绪矩阵** ✓ —— 与本仓 `inventory` / `weights` / `engine_readiness` 是**同一个问题**，值得对照 ✓。
+⚠️ 档位口径也带**经验断言** ✓：「官方原生步数 = 画质上限」✓、「4 步蒸馏会削弱轻语/口音/硬切细节 ⇒ 重要
+片段切回入门档」✓、「原生步数 + 官方 sigma shift（12/3）」✓（与本仓 H3 事实一致 ✓）。
+
+### 其它可借的点（都有落点 ✓）
+* ⭐ **已知冲突台账** `COMPAT_WARN`（`app.py:136-144` ✓）：DaSila（磁盘监控 ⇒ WinError 433 ✓ 建议进程隔离 ✓）、
+  EasyCache ⨯ Turbo LoRA ✓、CacheDiT/T8 ⨯ FirstBlockCache ✓、Spectrum（高端卡掉驱动 ✓）、SolAttn（需 triton ✓
+  8G 收益仅 3.5% ✓）⇒ **真实踩坑清单** ✓ 比任何文档都值钱 ✓。
+* **契约同步 + 离线兜底** ✓：壳里那份 `ENGINE_LOCAL_META` 明确写着「**权威在工作台 `/api/workflow_tiers`** ✓，
+  本表只用于①工作台没启动时也能展示/校验 ✓②离线切换 ✓」⇒ 与本仓「后端是权威、前端是镜像 + 离线兜底」同构 ✓。
+* **多镜像链** ✓：插件清单走 `cdn.jsdelivr.net`（ComfyUI-Manager 的 `custom-node-list.json` ✓）；
+  zip 下载 `codeload.github.com` → **`ghfast.top` 代理** 两级回退 ✓（国内可达性 ✓）。
+* **自托管升级** ✓：Aliyun OSS 的 `manifest.json`（`channel` / `notice` / `launcher` / `workbench` ✓ +
+  **sha256 + size** ✓）。
+* **启动器 UX 细节** ✓：EULA 必须**滚到底**才能勾 ✓；步骤状态机 `stepState(n, curr|done|todo)` ✓；
+  日志**自动跟随 + 用户滚动即接管** ✓；退出时询问「是否同时关闭 ComfyUI」✓；原生目录对话框要传
+  **父窗口句柄**保证置前 ✓（pythonnet ✓）；首次运行建桌面快捷方式（PowerShell + **`utf-8-sig` BOM** ✓
+  —— PS5.1 读中文要 BOM ✓，与本仓记忆里那条坑一致 ✓）。
+* **进程边界** ✓：壳 8123 ↔ 工作台 8081 ↔ ComfyUI 8188 三段分明 ✓，各用 `/api/status` 探活 ✓ + 就绪轮询 ✓
+  + 子进程显式 CLI 契约 ✓。
+* ⚠️ **与「自研优先」的分歧** ✗：它的商业模型是「**买家自带 ComfyUI**」✓（能力外包给 ComfyUI + 第三方插件 ✓）
+  —— 与本仓「所有能力自研、外部队商 API 要去掉」相反 ✓ ⇒ **借它的工程与体验，不借它的依赖结构** ✓。
+* ⚠️ **未做**：真正的漫剧生产逻辑（提示词 / 工作流 / H3 管线 ✓）在那个 74.7 MB 的 `v3.5.40` 包里 ✗
+  ⇒ 想要那部分得单独拉包再逆向 ✓（用户未确认 ✓）。
+
+
+### SLM 工作台包逆向 → **可用性判定**（2026-09-24 ✓ 包在 `%TEMP%\slm_reveal\` ✓ sha256 已核 ✓）
+⚠️ **商业闭源** ✓（激活码 + 防破解 + EULA ✓）⇒ **只借事实与架构，不照抄代码** ✗；
+EasyDirector 后端是 PyInstaller（加速链执行 / 预设值 / 探测逻辑**读不到** ✗），
+但 `ComfyUI-H3-Director` 两个插件的 Python 源码与前端**可读** ✓（它更新说明里那 26 条修复也照此只取会影响我们的 ✓）。
+
+**① 要补的（按优先级 ✓）**
+
+| # | 缺什么 | 包里依据 | 落点 |
+|---|---|---|---|
+| 1 | **H3 官方 prompt 契约**（✗ 本仓零命中） | `studio_node.py`：`subject_definitions` / `retention_analysis` / `detailed_description` 三行 + 三档关系 `fully_copy` / `partially_copy` / `reference` 的**英文声明句**；⚠️ 坑：**只写 `<Audio 1>` 绑定句不算声明** ⇒ 自动声明被吞、模型不复用配音（实测相关性≈0） | `engine/conditioning.py`（现只 2 函数） |
+| 2 | **Ref2VA / FL2VA 决策 + 硬约束** | `_select_h3_task()`：**有参考素材 ⇒ 只能 Ref2VA**（FL2VA 用参考会丢素材/失败 ⇒ 直接拒绝）；需硬首帧 ⇒ 无 FL2VA 则报 | `torch_backend` / `h3_form` |
+| 3 | **联合 AV latent 容器互操作** | `h3_latent_io.py`：视频流 **`B×24×T×H×W`**（24 通道第 3 次独立印证 ✓）；多流/缺流**分别报错**；替换视频流要**保容器类型** | `vae.py` / `comfyui_client` |
+| 4 | **加速链（配置驱动 + 提交前校验）** | `accel_chain.json` schema + 四项校验（注册 / 参数名 / 必填 / **kind 接线**：`lora` 需 model+clip、`model_only` 需 model）+ ✅/⚠️/❌ + 自动置灰 | 已有 `/object_info` 与严格 UI→API 校验 ✓ ⇒ 补配置层 |
+| 5 | **`convrot` 布局不支持** ✗（我们只认 fp8/int8 四种） | 模型名实锤：`minimax_h3_ref2va_pruned_int8_convrot` / `..._video_vae_int8_convrot` | `engine/quant.py` |
+| 6 | **权重内嵌元数据契约** | `read_checkpoint_info`：safetensors `metadata` 带 JSON（`format` / `strict_latent_only=true` / `base_config` / `config` / `step`）**逐项严格校验、缺了就拒绝** | `engine/loader.py` |
+| 7 | **超清双采（第二遍）** | `h3_upscaler.py`（可读 ✓）：latent 放大器 V2/V3 + `spatial_pixel_shuffle_2x`（**不在时间维插值**）+ `_h3_build_denoise_mask` 掩码重去噪 + cond refs ×2；≈**6×** 耗时、权重缺失**自动回退** | `engine/pipeline` |
+
+**② 只记认知的（会改判据 / 口径的）**
+- **混合加载**：`H3HybridLoader` = **fl2va 基底 + ref2va 的 adaLN 覆盖层**流式合并成一个 MODEL ⇒ 两权重主要差 adaLN ✓（一台机可一个模型两用 ✓）；带缓存指纹 / 磁盘余量 / 原子落盘 ✓。
+- **分镜解析口径** ✓：5 种标记 + 官方 `[Shot N] At mm:ss`；**≤15 s 合并成一次生成**、>15 s 才贪心装桶；**4.5 字/秒**估时长；断点优先级 = 段落换行 > 句末标点 > 从句标点（**绝不句中硬断**）；时长吸附 VAE 档位（±0.3 s）。
+- **音频条件**：参考音频**压制自生成环境音** ✓✗ ⇒ 对话段挂音色槽、空镜段不挂 ✓；「替换音轨 ≠ 对口型」✓（要口型必须 reference-driven ✓）。
+- **实测口径**：16 GB @0.4MP ⇒ 每 10 秒段 **8~12 分钟** ✓；0.4MP / 32 的倍数 = 官方基线 ✓；8GB 档 5.2 s = **124 帧**（= `17×7+5` ✓ 与本仓 `H3_FRAME_GRID`/`H3_MIN_FRAMES` 一致 ✓）。
+- **值得照做的手法** ✓：任务记录**原子写** ✓；**全局镜号唯一且从 1 开始** ✓；缩略图**按磁盘尾帧恢复** ✓；段配置哈希跳过 ✓；尾帧接力 ✓；每段**深度卸载** ✓；1.5x 超分**先做合法 2x 再缩放** ✓；4x 超分 NaN/Inf **小分块** ✓；缓存文件截断/偏移/非法编码一律拒 ✓。
+- **本仓 H3 事实获外部印证** ✓（24 fps / `17n+5` / 单次 ≤15 s / 0.4MP·32 / shift 12/3）。
+- 参考数据（用得上再取 ✓）：官方 9 套分镜骨架（`h3_templates.js` ✓）；方案预设名单（漫剧快跑 / 漫剧正式 / 玄幻仙侠 / 悬疑诡异 / 都市写实 / 战斗燃向 ✓，**内部参数在编译层** ✗）；IndexTTS 情绪向量 **9 维**（开心/愤怒/悲伤/恐惧/厌恶/忧郁/惊讶/平静 + preset ✓）。
+
+
+### MEMORY.md 下移（2026-09-24 第四次）：Skill 体系细则 + 协作与提交细则 ✓
+
+下移原因：`MEMORY.md` 逼近 8k 硬预算 ✓（守卫的规矩是「本文件只留会导致 bug 的判据 ✓，细节下移 ✓」）。
+原话照录 ✓，未改一处判据 ✓：
+
+#### §Skill 体系细则（原 `## Skill 体系` 全段 ✓）
+- 库由 `<lib>/library.yaml` 识别 ✓（加库/换库/改展示名**零代码**）；⚠️ **无执行入口的 skill 勿写进 `agents:`** ✗；
+  **词库按介质分家** ✓；**core 目录名 = agent_type 勿改名** ✗、**skill id 勿重命名** ✗（`references/` 互引**静默**断链 ✓）。
+- **改绑定 = 改 md** ✓（frontmatter `agents:` + `priority`；入口唯一 ✓）；⭐ **DB 配置优先铁律**：解析出配置
+  即「用户已选过」⇒ **全关也不回退默认** ✗（仅 `null`/空/失败才回退 ✓；`enabled` 缺省 = 启用 ✓）；
+  **出厂默认唯一出口** ⇒ 前端**不得硬编码** ✗。
+- **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达（有意取舍）** ✓；**删除保护** = 顶层 id **且**
+  `agents:` 非空 ✗（core 删掉永久丢失 ✓）；解析失败 ⇒ 保守拒删 ✓；⚠️ **宿主工具只认 `hub_` 前缀** ✓ 且
+  **工具集须取 `tool.id`** ✗（取错 ⇒ 21 个工具全误判缺失 ✓）；⚠️ **改名/挪库后必核对 DB 绑定** ✓（存 id ⇒ 静默失效 ✓）。
+- 注入闸：默认只注自有 ✓、超预算按 priority 跳过给诊断 ✓、合计**只算 `enabled=true`** ✓。
+
+#### §协作与提交细则（原 `## 协作与提交` 里被收起的行 ✓）
+- git 远端 `git@github.com:yuanxiufei/darme-voide.git` ✓；commit message 长的写 `tmp/*.txt` + `git commit -F` ✓。
+- **换行**：`.gitattributes` **只**声明 `.githooks/* text eol=lf` ✗（**不加 `* text=auto`** ✓ —— 避免全仓
+  renormalize 噪声 ✓）；CRLF 会让 shebang 变 `#!/bin/sh\r` ⇒ Windows 上 command not found ✓✗；
+  改钩子后查 `git ls-files --eol <file>` ✓（须 `w/lf` ✓）。
+- **`.codebuddy/memory/` 无 gitignore 规则，且现已全部纳管**（`MEMORY.md`/`TOPICS.md`/`INDEX.md` + 各日日志，
+  自 2026-09-12 的 `abc6cac` 起同批提交）⇒ **新增日志 / 改索引后要随同批提交**，否则 `MEMORY.md` 的读法指针
+  在新克隆上**断链**；状态用 `git ls-files` / `git check-ignore -v` 复查。
+- **`execute_command` 拉大文件/跑大正则易被转后台丢 stdout** → 用
+  `[System.IO.File]::WriteAllText(path, content, UTF8)` 落盘再读；`Get-Content` 必须显式 `-Encoding UTF8`。
+
+
+### 超清放大器（clean-latent 2×）的**架构规格** ✓（2026-09-24 读上游核出 ✓ 可直接照做 ✓）
+
+⭐ **许可已明** ✓：上游 `h3_upscaler.py` 文件头写着「**Mamad8 权重，MIT 代码**来自
+github.com/mamad8c/ComfyUI-H3-Latent-Upscaler-Mamad8」✓ ⇒ 本仓**可以实现** ✓（带署名 ✓）。
+⭐ **检查点格式串**（2026-09-24 核到真值 ✓，此前只知道「有个 format 键」✗）：
+``minimax_h3_clean_latent_upscaler_v3_factorized_attention`` ✓ ⇒ 结构 = **V2 主干 + V3 因子化注意力** ✓
+（本仓 `engine/upscale.py` 已把它钉住 ✓：``CHECKPOINT_FORMAT`` ✓ + 两段配置的**严格字段集** ✓
+（多一个少一个都拒 ✗、值必须正整数 ✓、``in_channels`` 必须 24 ✓、``temporal_kernel`` 必须奇数 ✓、
+``width % heads == 0`` ✓））。
+
+**流程**（口径 ✓）：低清一采 → latent **2× 放大** → **低噪声二采精修**（⚠️ **音频流锁定不重采** ✗ ——
+只重采视频流 ✓ ⇒ 正好用 `engine/latent_container.py`（认出视频流 + 保容器换流 ✓）✓）。
+
+**V2 主干（要实现的全部 ✓，张量 ``B×24×T×H×W`` ✓）**
+1. `spatial_bilinear_2x`：`(B,C,T,H,W)` → 折成 `(B*T,C,H,W)` → **bilinear ×2** → 还原 ✓；
+   ⚠️ 关键：**绝不在时间维插值** ✗（把 T 折进 batch ✓ 就是为了这个 ✓）；
+2. `spatial_pixel_shuffle_2x(x, out_channels)`：输入通道必须是 `out_channels*4` ✓ ⇒
+   `view(B, out, 2, 2, T, H, W)` → `permute(0,1,4,5,2,6,3)` → `reshape(B, out, T, H*2, W*2)` ✓（通道→空间 ✓）；
+3. `_groups_for(C)`：`min(16, C)` 起**往下**找能整除 C 的组数 ✓；
+4. `ResidualBlock3d(C, k=3, spatial_dilation=d)`：`GroupNorm(eps=1e-6)` → `SiLU` → `Conv3d((k,3,3),
+   padding=(k//2, d, d), dilation=(1,d,d))` → 再做一遍 → **加残差** ✓（⚠️ 时间 padding = k//2 ✓
+   保住时间对齐 ✗ —— 这就是「不在时间维插值」的另一半 ✓）；
+5. `H3LatentUpscalerV2`：`low_stem`（24→hidden ✓ 卷积 (k,3,3) ✓）
+   → **num_blocks 个 `ResidualBlock3d`**，空间膨胀按 **`(1, 2, 1, 3)` 循环** ✓（`i % 4` ✓）
+   → `low_norm` → `to_high`（hidden → **refine_channels×4** ✓）
+   → **`spatial_pixel_shuffle_2x` 到 refine_channels 并放大 2×** ✓
+   → `refine_stem`（⚠️ 输入是 `refine_channels + 24` ✓：**把双线性基底拼进通道** ✓）
+   → `refine_blocks` 个 `ResidualBlock3d(refine_channels)` ✓（**不加膨胀** ✓）
+   → `out_norm` → `out`（refine_channels → **24** ✓）；
+6. ⭐ `forward = spatial_bilinear_2x(low) + correction(low)` ✓ —— **残差式超分** ✓
+   （双线性上采样当基底、网络学**修正量** ✓；⚠️ 所以输出天然含基底 ✓，`correction` 只学"补差" ✓）。
+
+**还没读的部分** ✗：`FactorizedBlock` / `H3LatentUpscalerV3`（因子化注意力那块 ✓ 约 120 行 ✓）+
+`build_upscaler`（怎么按契约装配 ✓）⇒ 下次接着读 ✓。
+
+
+#### 超清放大器 · V3（因子化注意力）+ 装配 ✓（2026-09-24 读上游补全 ✓）
+
+⭐ **层次关系**：``H3LatentUpscalerV3`` **内含** ``H3LatentUpscalerV2`` ✓ ⇒ V2 是必经之路 ✓；
+两层**都是残差** ✓：V2 内是 ``bilinear2x(low) + correction(low)`` ✓，V3 外再套 ``base + delta`` ✓。
+
+**`FactorizedBlock(width, heads, window, shifted, mlp_ratio)`** —— 三件套**每件都带残差** ✓：
+1. **空间窗口注意力**：`shift = window//2 if shifted else 0` ✓
+   （⚠️ shifted 版先 `F.pad(x, (shift, 0, shift, 0))` ✓ ⇒ 切窗 → 注意力 → 还原 → **裁回**
+   `[..., shift:shift+H, shift:shift+W]` ✓ —— 这样窗口边界不会永远落在同一处 ✓✗）；
+   先把 H/W padding 到 `window` 的整数倍 ✓（`(-h) % window` ✓），
+   再 `permute(0,2,3,4,1)` → `reshape(B*T, H//w, w, W//w, w, C)` → `permute(0,1,3,2,4,5)`
+   → `reshape(-1, w*w, C)` ✓（**窗口内做注意力** ✓）；`MultiheadAttention(batch_first=True,
+   need_weights=False)` ✓；
+2. **时间注意力**：把 H,W 折进 batch（`permute(0,3,4,2,1)` ✓）⇒ 沿 **T** 做注意力 ✓；
+3. **深度可分离局部卷积**：`GroupNorm(1, width)` → SiLU → `Conv3d(w, w, 3, padding=1, groups=w)` ✓；
+4. **MLP**：`LayerNorm` → `Linear(w, w*mlp_ratio)` → **GELU** → `Linear(...)` ✓；
+   ⚠️ 所有 LayerNorm/GroupNorm 的 `eps=1e-6` ✓。
+
+**`H3LatentUpscalerV3(base_config, config)`**
+* ``self.base = H3LatentUpscalerV2(base_config)`` ✓；
+* ``stem = Conv3d(24 → config.width, 3, padding=1)`` ✓ —— ⚠️ **作用在 `low` 上** ✗（不是 base 输出 ✓）；
+* ``blocks``：`config.blocks` 个 `FactorizedBlock` ✓，**shifted 按 `bool(index % 2)` 交替** ✓；
+* ``norm = GroupNorm(1, width, eps=1e-6)`` → ``to_delta = Conv3d(width → 24*4, 3, padding=1)`` ✓
+  → **`spatial_pixel_shuffle_2x(delta, 24)`** ✓（通道→空间 2× ✓ 回到 24 通道 ✓）；
+* ``forward = base(low) + delta(low)`` ✓。
+
+**装配**：`build_upscaler(state_dict, info)` ✓ ⇒ 按契约**先建结构**再
+`load_state_dict(strict=True)` ✓（⚠️ 缺键/多键 ⇒ 报错并写明「**张量与声明的架构不符**」✓✗ ——
+别指望它静默跳过 ✓）→ `.eval().requires_grad_(False)` ✓。
+⇒ 本仓实现时要守住：**严格装载** ✓ + **失败即拒** ✓（与 `loader` / `quant` 的纪律一致 ✓）。
+
+⚠️ 实现落点（下一步 ✓）：`engine/upscale_net.py`（torch **懒加载** ✓，与 `dit`/`h3_form` 同套做法 ✓），
+自检用**未训练权重**验不变量 ✓：2× 后 `H/W` 翻倍 ✓、**`T` 不变** ✓、通道回 24 ✓、
+`forward == bilinear + correction`（V2 ✓）与 `forward == base + delta`（V3 ✓）✓；
+⚠️ **明说**：验的是管道/形状 ✗，**不宣称画质** ✗。
+
+
+#### ⚠️ 修正：B-3（HTTP 面「可借项」）**大半本仓已有** ✗ ⇒ 别重做 ✗（2026-09-24 ✓ 实查 ✓）
+
+原先列的「借 `routes.py` 的 HTTP 面」里，**两条核心已经在我们仓里、而且更细** ✓✗：
+
+* **上游 key 脱敏** ✓ —— `app/services/provider_probe.py:redact_url` ✓ 覆盖
+  ``key`` / ``api_key`` / ``apikey`` / ``token`` / ``access_token`` ✓；⚠️ 它**不只在日志里** ✗✗
+  （``/test`` **响应体**里就带脱敏后的 ``url`` ✓ ⇒ 照抄时**别用 `urlencode`** ✗ —— JS 的
+  ``searchParams.set('key','***')`` 不编码 ``*`` ✓）；`app/services/task_logger.py` 落盘前统一脱敏 ✓
+  （密钥 ⇒ ``***`` ✓）并**截断 base64 / data-url** ✓（否则一条 trace 几十 MB ✓✗）；
+  三条链路都接了 ✓：`image_generation` / `video_generation` / `tts_generation` ✓ + `ai_configs` 探针 ✓。
+* **未实现布局族具名拒绝** ✓ 同族已在权重守卫里 ✓。
+
+⇒ **B-3 缩小为两条待核**（不是「新建一层」✗）：① **上传上限**（口径 >10 MB 直接拒 ✓）——
+`app/routers/local_models.py` / `app/http_logger.py` 里有 `Content-Length`/上限相关命中 ✓ 待逐行核 ✓；
+② **上传文件名脱敏**（时间戳前缀 ✓ 防目录穿越 ✓）待核 ✓。**先核再改** ✓ —— 别凭「要借」就动手 ✗。
+
+
+**B-3 两条待核 → 实查结论（2026-09-24 ✓ 逐行核过 ✓）**：
+① **文件名脱敏 / 路径穿越** ⇒ **本仓已有且更硬** ✓✗ ⇒ 别加 ✗：`routers/local_models.py` 的
+``resolve_model_path`` ✓（目标必须落在 ``models_dir`` 内 ✓）、``normalize_repo`` ✓（``owner/name`` ✓）、
+删除**限制在模型目录内且不许删根** ✓、列表只展示 ``basename`` ✓（**不遍历磁盘** ✓）。
+② **上传上限**（口径 >10 MB 拒 ✓）⇒ ⚠️ **别照搬** ✗：`app/http_logger.py` 里那个
+``_BODY_READ_LIMIT = 256 * 1024`` ✓ 是**日志读取上限** ✗（注释写明「只影响超大请求体的日志」✓），
+**不是**上传上限 ✓✗；面向 multipart 上传的大小上限**未见** ✗ —— 但**先确认我们的上传面存不存在**
+✗（若上传不经 HTTP 到达本服务 ⇒ 这个上限就是**照搬别人的问题** ✗✗）。**结论：不加** ✓ 除非
+先证明我们这条面有同样的暴露 ✓。
+
+
+**B-1「音色克隆」核查结论：已通 ✓ ⇒ 别加 ✗（2026-09-24 逐处核过 ✓）**：克隆**不在** `adapters/` ✗
+（那里 0 命中 ✓），而是走**音色库** ✓ —— `ai_voices` 有 ``reference_audio`` + ``prompt_text`` ✓，
+`app/services/tts_generation.py:_load_cosyvoice_zero_shot` ✓ **真拿它走 `/inference_zero_shot`** ✓
+（零样本克隆 ✓；行不存在或参考音频不存在 ⇒ 返回空 ⇒ **回落** ✓✗ 不报错 ✓）。
+⚠️ 区分两个字段 ✗：`ai_voices.reference_audio` = **克隆输入** ✓；`characters.voice_sample_url`
+= **试听产物** ✓（`generate_voice_sample` 出的 ✓）⇒ 别把后者当克隆输入用 ✗✗。
+⇒ B-1 真正剩的只有两处：① **`voice_contract` 还没接调用链** ✗（契约层已立 ✓）；
+② 待核：**克隆参考音频 + 情绪向量能否同时给** ✓✗（引擎侧约束 ✓ —— **先核引擎再写判据** ✗，
+别凭猜加互斥 ✗）。
+
+
+### ⏭ 交接：下一步只有一件事（2026-09-24 收工 ✓）
+
+**接线 `voice_contract` → 配音链路** ✓：契约层已立（`app/services/voice_contract.py` ✓ 自检 15/15 ✓）
+但**还没被任何调用方使用** ✗。落点：`app/services/tts_generation.py` ✓（`generate_tts` 的入参构造 ✓）
++ `app/services/adapters/tts_*` ✓（厂商契约为准 ✓）。要做的最小闭环：
+① 角色的 ``voice_emotion``（**单值** ✓）经 `parse_emotion` ✓ 转成「预设名 或 8 维向量」✓；
+② 语速经 `validate_speed` ✓（⚠️ 区间**由调用方按引擎给** ✗ —— 本层不内置好取值 ✓）；
+③ ⚠️ **先核引擎是否允许「克隆参考音频 + 情绪向量」同时给** ✗（别凭猜加互斥 ✗）。
+**范围自律**：本轮已三次得出「**本仓已有，别加**」✓✗（B-3 脱敏/穿越 ✓、音色克隆 ✓）⇒
+**先核现状再动手** ✓，尤其别重复造脱敏、上传上限、克隆那三层 ✗。
+**未提交** ✓：工作区 16 改 + 28 新增（全量 **120 套 / 3912 项 / 0 失败** ✓ 已验证 ✓）。
+⚠️ 提交需**用户明确要求** ✗；message 用**英文** ✓；`.codebuddy/memory/` 改动**随同批** ✓。

@@ -26,8 +26,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-__all__ = ["DequantResult", "LOW_PRECISION_DTYPES", "SCALE_SUFFIXES", "dequantize_state",
-           "is_low_precision", "layout_of", "plan_dequant", "quant_report"]
+__all__ = ["DequantResult", "LOW_PRECISION_DTYPES", "SCALE_SUFFIXES", "UNSUPPORTED_FAMILIES",
+           "dequantize_state", "is_low_precision", "layout_of", "plan_dequant", "quant_report",
+           "unsupported_family"]
 
 #: 需要反量化才能计算的 dtype ✓（**只有这些** ✗ —— bf16/fp16/fp32 本来就是可算精度 ✓）
 #: ⚠️ 含**两套写法** ✓：torch 的 `float8_e4m3fn` ✓ 与 safetensors 头部的 `F8_E4M3` ✓（见 `is_low_precision` ✓）。
@@ -266,3 +267,32 @@ def _torch() -> Any:
     import torch  # noqa: PLC0415 —— 只有真要算时才 import ✓
 
     return torch
+
+
+# ── 未实现的布局族：**认得出来就点名拒绝** ✗（别只说「判不出布局」✗）────────────────────────
+# ⚠️ 2026-09-24 补 ✓（口径来自逆向 ✓）：H3 生态里确实存在 ``*_int8_convrot.safetensors`` 这一族
+#    （卷积旋转量化 ✓ —— 模型文件名实锤 ✓）。本仓 :func:`layout_of` 只认「**形状能自证**」的几种布局 ✓
+#    ⇒ 撞上它只会得到一句「判不出布局」✗ —— 那句话**指不到真因** ✗，还会让人以为「文件坏了 / 多试几次」✗。
+#    ⇒ 补一层**具名识别** ✓：认得出来就说清「是什么 + 为什么不做」✓。
+#: 已知但**未实现**的布局族 ✓（token → 为什么不做 ✓）。
+#: ⚠️ 判据**只有名字** ✗：这些族在形状上自证不了自己 ✓（与 :func:`layout_of` 能自证的那几种不同 ✓）
+#: ⇒ 调用方要**先**问本函数 ✓，再把 :func:`layout_of` 的失败当兜底 ✓。
+UNSUPPORTED_FAMILIES: dict[str, str] = {
+    "convrot": "卷积旋转量化（convrot ✗）—— 反量化必须**先按旋转参数把权重转回来** ✓，"
+               "而权重文件里**没有**这个参数 ⇒ 本仓**不猜** ✗（猜错等于把权重解成噪声 ✓✗）",
+}
+
+
+def unsupported_family(*, source: str = "", tensor_names: Any = ()) -> str | None:
+    """名字里带**已知但未实现**的布局族 ⇒ 返回可行动的拒绝理由 ✓；否则 ``None`` ✓。
+
+    ``source`` 一般是权重**文件名** ✓；``tensor_names`` 是张量名（可迭代 ✓）。只做**子串匹配** ✓
+    （大小写不敏感 ✓）—— ⚠️ 这不是「布局判定」✗，是「**这一族我们不支持**」的具名提示 ✓。
+    """
+    haystack = " ".join([str(source or "")] + [str(name) for name in tensor_names]).lower()
+    for token, why in UNSUPPORTED_FAMILIES.items():
+        if token in haystack:
+            return (f"这个权重属于**未实现的布局族**「{token}」✗：{why}。"
+                    f"⚠️ 这**不是**「判不出布局」✗ —— 不是文件坏了 ✓，是本仓**没实现**这一族 ✓；"
+                    f"要么换成非 {token} 的量化产物 ✓，要么先把该族需要的参数（如旋转参数 ✓）拿到再实现 ✓。")
+    return None

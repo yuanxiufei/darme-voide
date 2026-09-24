@@ -309,6 +309,175 @@ def main() -> int:
           (float(ref_layout["position_ids"][ref_layout["segments"][-2][0], 0]),
            ref_layout["seq_len"]))
 
+    # ── ⭐⭐ 两类**一起给**（2026-09-23 补 ✓）：此前只有「只给关键帧」✓ 与「只给参考块」✓ 两条各自的路 ✗
+    #    现实里「首帧 + 参考图 + 参考视频（带音轨）」是常用组合 ✓ ⇒ 段序 / 时间轴 / 行数对账都要在**混合**
+    #    形态下核一遍 ✓（⚠️ 两种块混在一起**不会报错** ✓✗ —— 正是静默错最爱藏的地方 ✓）。
+    #    ⚠️ 关键帧的潜尺寸要按**目标网格**给 ✓（事实：cond 用**目标**空间网格 ✓）——
+    #    它自己的 H/W 不参与行数 ✓（(2,2,4,4)：T=2 ⇒ 2 帧 × 每帧 4 行 = **8** ✓ 与布局要的一致 ✓）。
+    mixed_kf = [{"resolved_frame_index": 0, "latent": torch.zeros(2, 2, 4, 4),
+                 "audio_latent": torch.zeros(3, 2, 2)},
+                {"resolved_frame_index": 2, "latent": torch.full((2, 2, 4, 4), -0.25),
+                 "audio_latent": torch.full((3, 2, 2), -0.5)}]
+    mixed_refs = [{"kind": "image", "latent_h": 2, "latent_w": 2},
+                  {"kind": "video", "latent_h": 4, "latent_w": 4, "latent_t": 2,
+                   "ref_audio_t": 3}]
+    mixed = h3.packed_layout(5, 3, 4, 4, 4, keyframes=mixed_kf, refs=mixed_refs)
+    mixed_kinds = [kind for _a, _b, kind in mixed["segments"]]
+    check("㉒⁶ ⭐⭐ **关键帧 + 参考块一起给**（现实常用组合 ✓）⇒ 段序 = "
+          "``text → cond → cond_audio → cond → cond_audio → ref_img → ref_audio → ref_img → "
+          "audio → video`` ✓（**cond 在 ref 之前** ✓、目标两条流仍在最后 ✓ 且 audio 在 video 前 ✓）",
+          mixed_kinds == ["text", "cond", "cond_audio", "cond", "cond_audio",
+                          "ref_img", "ref_audio", "ref_img", "audio", "video"], mixed_kinds)
+    refs_span = sum(h3.ref_time_span(block) for block in mixed_refs)
+    first_cond_t = float(mixed["position_ids"][mixed["segments"][1][0], 0])
+    second_cond_t = float(mixed["position_ids"][mixed["segments"][3][0], 0])
+    target_start = float(mixed["position_ids"][mixed["segments"][-2][0], 0])
+    check("㉒⁷ ⭐⭐ 混合形态下**时间轴照样对账** ✓：``cursor = text_len + Σ参考跨度`` ✓（**参考块推后 ✓、"
+          "条件块不推后** ✓✗ —— 两种块混在一起时最容易写错 ✓）；cond 的 t = ``cursor + FRAME_RESCALE×"
+          "frame_index`` ✓（第 0 帧 ⇒ = cursor ✓、第 2 帧 ⇒ +5/3×2 ✓）；目标两条流起点 = cursor ✓",
+          abs(first_cond_t - (5.0 + refs_span)) < 1e-6
+          and abs(second_cond_t - (5.0 + refs_span + 5.0 / 3.0 * 2)) < 1e-6
+          and abs(target_start - (5.0 + refs_span)) < 1e-6,
+          (first_cond_t, second_cond_t, target_start, refs_span))
+    check("㉒⁸ ⭐ 混合形态下**块清单与段表对账** ✓（非目标行数 = cond/cond_audio/ref_img/ref_audio 各段之和 ✓）"
+          "且**更新掩码的长度与归属都对** ✓ —— ⚠️ 掩码与 `segments` 是**两个坐标空间** ✗✗：掩码只按"
+          "视频行 / 音频行打包 ✓（不含 text 行 ✗）⇒ 长度 = 目标行数 + 非目标视频行 ✓，"
+          "且**尾部**目标那截全 True ✓、前面全 False ✓（拿 `segments` 下标去切必错位 ✓✗ —— 我写第一条时"
+          "就是这么错的 ✓）",
+          sum(count for block, count in mixed["video_blocks"] if block[0] != "target")
+          == sum(b - a for a, b, kind in mixed["segments"] if kind in ("cond", "ref_img"))
+          and sum(count for block, count in mixed["audio_blocks"] if block[0] != "target")
+          == sum(b - a for a, b, kind in mixed["segments"] if kind in ("cond_audio", "ref_audio"))
+          and int(mixed["img_update"].numel()) == mixed["video_rows"] + sum(
+              count for block, count in mixed["video_blocks"] if block[0] != "target")
+          and int(mixed["audio_update"].numel()) == mixed["audio_rows"] + sum(
+              count for block, count in mixed["audio_blocks"] if block[0] != "target")
+          and not bool(mixed["img_update"][:-mixed["video_rows"]].any())
+          and bool(mixed["img_update"][-mixed["video_rows"]:].all())
+          and not bool(mixed["audio_update"][:-mixed["audio_rows"]].any())
+          and bool(mixed["audio_update"][-mixed["audio_rows"]:].all()),
+          (mixed["video_blocks"], mixed["segments"],
+           int(mixed["img_update"].numel()), int(mixed["audio_update"].numel())))
+    # ⚠️ 混合形态的**行序**也要"能失败"✓：两类块的**源**分开给 ⇒ 对调两个参考块 ⇒ 拼出的行必变 ✓
+    #    （不变 ⇒ 它按插入序拼 ✗✗ ⇒ 顺序没受布局约束 ✓）；且**缺一个参考块的源** ⇒ 报错 ✓ 不静默跳过 ✗。
+    mixed_seen_v = {("keyframe", 0): mixed_kf[0]["latent"], ("keyframe", 1): mixed_kf[1]["latent"],
+                    # ⚠️ 通道数要等于 `latents_dim` ✓（宽度 = 通道 × patch 面积 ✓ —— 通道给 1 会让
+                    #    `torch.cat` 在这儿报"尺寸不一致" ✗，那报的是拼装层的形状错 ✗ 不是"顺序"✓）。
+                    ("ref", 0): torch.full((2, 1, 2, 2), 0.25),      # 图像参考 ⇒ 1 行 ✓（它自己的网格 ✓）
+                    ("ref", 1): torch.full((2, 2, 4, 4), -0.5)}      # 视频参考 ⇒ 2×2×2 = 8 行 ✓
+    mixed_seen_a = {("keyframe", 0): mixed_kf[0]["audio_latent"],
+                    ("keyframe", 1): mixed_kf[1]["audio_latent"],
+                    ("ref", 1): torch.full((3, 2, 3), -0.25)}        # 视频参考的音轨 ⇒ 3×2 = 6 行 ✓
+    mixed_rows, mixed_audio = h3.assemble_blocks(mixed, mixed_seen_v, mixed_seen_a)
+    # ⚠️ 对调的是**两个关键帧**的源 ✓（同形 ⇒ 行数不变 ⇒ 只有**顺序**变了 ✓ —— 这正是要判的东西 ✓✗；
+    #    参考块之间形状不同（1 行 vs 8 行）⇒ 对调会先撞**行数校验** ✗，验不到"顺序"这件事 ✗）。
+    swapped_seen_v = {("keyframe", 0): mixed_seen_v[("keyframe", 1)],
+                      ("keyframe", 1): mixed_seen_v[("keyframe", 0)],
+                      ("ref", 0): mixed_seen_v[("ref", 0)], ("ref", 1): mixed_seen_v[("ref", 1)]}
+    swapped_seen_a = {("keyframe", 0): mixed_seen_a[("keyframe", 1)],
+                      ("keyframe", 1): mixed_seen_a[("keyframe", 0)],
+                      ("ref", 1): mixed_seen_a[("ref", 1)]}
+    swapped_rows, swapped_audio = h3.assemble_blocks(mixed, swapped_seen_v, swapped_seen_a)
+    missing_err = _raises(lambda: h3.assemble_blocks(
+        mixed, {key: value for key, value in mixed_seen_v.items() if key != ("ref", 1)},
+        mixed_seen_a))
+    check("㉒⁹ ⭐⭐ 混合形态的**行序判据「能失败」** ✓：把两个**关键帧**的源对调 ⇒ 视频行与音频行"
+          "**都要变** ✓（⚠️ 视频源与音频源**各自都要换** ✓✗ —— 只换一边，另一边当然不变 ✓，"
+          "我第一版就是这么写错的 ✓）；缺一个参考块的源 ⇒ **报错** ✓"
+          "（不静默跳过、不补零 ✗ —— 跳过之后要么行数不对、要么**错位而不报错** ✗✗）",
+          not torch.equal(mixed_rows, swapped_rows) and not torch.equal(mixed_audio, swapped_audio)
+          and missing_err is not None and "没有它" in str(missing_err),
+          (mixed["video_blocks"], mixed["audio_blocks"], missing_err))
+
+    # ── ⚠️ 「混了不报错」的**网格规则**逐条钉住（2026-09-24 补 ✓）──
+    # 文档里写着三条：`cond` 用**目标**网格 ✓、参考图用**它自己的** ✓、`ref_audio` 的 w 取**目标**两端 ✓
+    # 而 video 类参考块里的音频行取**它自己**的两端 ✓。⚠️ 摘要式断言（只数行数 / 只看 t）**验不到**它们 ✗✗：
+    # 把两种网格"统一"成一种**不会报错** ✓，只会让**坐标**错 ✓ —— 所以要比**逐值**的 h/w 集合 ✓。
+    def hw_of(layout: Any, index: int) -> set[tuple[float, float]]:
+        start, stop, _kind = layout["segments"][index]
+        return {(round(float(a), 6), round(float(b), 6))
+                for a, b in layout["position_ids"][start:stop, 1:]}
+
+    target_frame, target_w_axis = h3.frame_grid_coords(4, 4)
+    ref_frame, ref_w_axis = h3.frame_grid_coords(2, 4)
+    target_hw = {(round(float(a), 6), round(float(b), 6)) for a, b in target_frame}
+    ref_hw = {(round(float(a), 6), round(float(b), 6)) for a, b in ref_frame}
+    shape_layout = h3.packed_layout(3, 3, 4, 4, 2,
+                                    keyframes=[{"resolved_frame_index": 0,
+                                                "latent": torch.zeros(2, 1, 4, 4),
+                                                "audio_latent": torch.zeros(3, 2, 2)}],
+                                    refs=[{"kind": "image", "latent_h": 2, "latent_w": 4}])
+    check("㉓′ ⭐⭐ `cond` 用**目标**网格 ✓ 而 `ref_img` 用**它自己的** ✓ —— 两者**不相等** ✓"
+          "（⚠️ 相等就说明被「统一」了 ✓✗：不报错，只是坐标错 ✓）",
+          [kind for _a, _b, kind in shape_layout["segments"]]
+          == ["text", "cond", "cond_audio", "ref_img", "audio", "video"]
+          and hw_of(shape_layout, 1) == target_hw and hw_of(shape_layout, 3) == ref_hw
+          and target_hw != ref_hw,
+          (sorted(hw_of(shape_layout, 1))[:3], sorted(hw_of(shape_layout, 3))[:3]))
+
+    audio_layout = h3.packed_layout(3, 3, 4, 4, 2,
+                                    refs=[{"kind": "audio", "ref_audio_t": 2},
+                                          {"kind": "video", "latent_h": 2, "latent_w": 4,
+                                           "latent_t": 1, "ref_audio_t": 2}])
+    target_ends = {round(float(target_w_axis[0]), 6), round(float(target_w_axis[-1]), 6)}
+    ref_ends = {round(float(ref_w_axis[0]), 6), round(float(ref_w_axis[-1]), 6)}
+    audio_w = [set(round(float(value), 6) for value in audio_layout["position_ids"][a:b, 2])
+               for a, b, kind in audio_layout["segments"] if kind == "ref_audio"]
+    check("㉓″ ⭐⭐ `ref_audio` 的 w 取**目标**网格两端 ✓ 而 video 类参考块里的音频行取**它自己**的两端 ✓"
+          "（两段**同名不同源** ✓✗：统一了不报错 ✓，坐标错 ✓）—— ⚠️ 也顺带钉住顺序："
+          "audio 类参考块出 1 段 ✓、video 类参考块出**音频行在前、视频行在后** ✓",
+          [kind for _a, _b, kind in audio_layout["segments"]]
+          == ["text", "ref_audio", "ref_audio", "ref_img", "audio", "video"]
+          and audio_w[0] == target_ends and audio_w[1] == ref_ends and target_ends != ref_ends,
+          (sorted(audio_w[0]), sorted(audio_w[1])))
+
+    # ── ⭐⭐ 混合形态下的**模态标签**（2026-09-24 补 ✓）──
+    # 事实：`video`/`cond`/`ref_img` = 0 ✓、`text` = 1 ✓、`audio`/`cond_audio`/`ref_audio` = 2 ✓。
+    # ⚠️ `cond` / `cond_audio` / `ref_img` / `ref_audio` 这**四档只在混合形态里出现** ✓✗ ——
+    #    此前 `mod_segments_for` 只有**文档**写着它们 ✓，没有一条断言 ✗（而标签只是 adaLN 的**行内偏移** ✓
+    #    ⇒ 错了**完全不报错** ✓，只是把模态接到别的模态那组参数 ✓✗）。
+    mixed_values, mixed_index = h3.t_vals_for(0.5)
+    mixed_mods = h3.mod_segments_for(mixed["segments"], mixed_index)
+    expected_tags = {"text": 1, "cond": 0, "cond_audio": 2, "ref_img": 0,
+                     "ref_audio": 2, "audio": 2, "video": 0}
+    mixed_mod_rows = [(kind, row) for (_a, _b, row), (_c, _d, kind)
+                      in zip(mixed_mods, mixed["segments"])]
+    check("㉔ ⭐⭐ 混合形态下**模态标签逐段钉住** ✓（`row = 序号×3 + 标签` ✓；四档新标签 "
+          "`cond`/`ref_img` = 0 ✓、`cond_audio`/`ref_audio` = 2 ✓）；且 `cond` 与 `ref_img` **同档** ✓、"
+          "`cond_audio` 与 `ref_audio` **同档** ✓（都算 ``max(t_v|t_a, 条件 t)`` ✓）；行号全 < 18 ✓",
+          len(mixed_mods) == len(mixed["segments"])
+          and all(row == mixed_index[kind] * 3 + expected_tags[kind]
+                  for kind, row in mixed_mod_rows)
+          and mixed_index["cond"] == mixed_index["ref_img"]
+          and mixed_index["cond_audio"] == mixed_index["ref_audio"]
+          and all(row < 18 for _a, _b, row in mixed_mods),
+          mixed_mod_rows)
+
+    # ── ⭐⭐ 两条「给错也不报错」的时间轴/声道事实（2026-09-24 补 ✓）──
+    # `dit.H3_PACK_FACTS` 第 4 条：跨度表 **(1,4,4,4,4) 循环** × 5/3 ✓ —— 此前只验了第 0/1 个 token ✗✗，
+    # 而**跨度表给错照样单调递增** ✓✗（只有**回绕**那一格会露 ✓）。
+    spans = h3.video_t_spans(7)
+    check("㉕ ⭐⭐ 视频时间轴的**跨度表循环** ✓：7 个 token ⇒ **(1,4,4,4,4,1,4)** × 5/3 ✓"
+          "（⚠️ 只验第 0/1 格**验不到**循环 ✗：给错也照样单调 ✓）",
+          [round(float(span), 6) for span in spans]
+          == [round(5.0 / 3.0 * factor, 6) for factor in (1, 4, 4, 4, 4, 1, 4)]
+          and h3.FRAME_PER_TOKEN == (1, 4, 4, 4, 4)
+          and abs(h3.FRAME_RESCALE - 5.0 / 3.0) < 1e-12,
+          [round(float(span), 6) for span in spans])
+    # `dit.H3_PACK_FACTS` 第 3 条：**立体声 channel-major** ✓ —— 它的**落点是 `w` 的两端** ✓
+    # （前一半 `count` 行取低端 ✓、后一半取高端 ✓）。⚠️ 只验「t 重复两遍」**验不到**它 ✗✗：
+    # 两种声道顺序的**行数与 t 完全一样** ✓✗（只有 w 分得开 ✓）。
+    plain_layout = h3.packed_layout(3, 3, 4, 4, 5)      # 只目标两条流 ⇒ 段表 = text / audio / video ✓
+    audio_start, audio_stop, _audio_kind = plain_layout["segments"][-2]
+    audio_w = plain_layout["position_ids"][audio_start:audio_stop, 2]
+    half = (audio_stop - audio_start) // 2
+    check("㉖ ⭐⭐ 立体声 **channel-major** 的落点 ✓：目标音频段**前一半**行取 `w` **低端** ✓、"
+          "**后一半**取**高端** ✓（低端 ≠ 高端 ✓ 才说明真按声道分开 ✓ —— 否则两声道会落成同一列 ✓✗）",
+          half > 0 and bool((audio_w[:half] == audio_w[0]).all())
+          and bool((audio_w[half:] == audio_w[-1]).all())
+          and float(audio_w[0]) < float(audio_w[-1]),
+          (float(audio_w[0]), float(audio_w[-1]), half))
+
     tiny = dict(hidden=8, layers=1, heads=2, head_dim=12, ffn=12, text_dim=5, latents_dim=2,
                 audio_latents_dim=3, patch_size=(1, 2, 2), time_input_dim=4, time_hidden=8,
                 time_dim=6, inv_freq_len=2, refiner_layers=1)

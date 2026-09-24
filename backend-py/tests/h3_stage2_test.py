@@ -282,7 +282,10 @@ def main() -> int:  # noqa: C901
         check("⑦ 产物前缀带 task_id（便于追溯 ✓）",
               created["task_id"] in str(find_node(prompt, "SaveVideo").get("inputs", {}).get("filename_prefix")),
               find_node(prompt, "SaveVideo").get("inputs"))
-        check("⑧ 跑完调了 /free 卸载显存（24G 卡必须 ✓）",
+        check("⑧ 跑完调了 /free 卸载显存（24G 卡必须 ✓）—— ⚠️ 这条同时是**终态原子性**的判据 ✓："
+              "2026-09-24 前是「先写 `succeeded` ✓、再在 `finally` 里 `/free`」✗ ⇒ 这一瞬读到的会是"
+              "「成功了但 `freed_vram=null`」✓✗（全量回归里两次**偶发** 19/20 都是它 ✗✗）"
+              "⇒ 现在终态与 `freed_vram` 在**同一次 `_update`** 里落地 ✓ ⇒ 读到终态就等于已卸载 ✓",
               SEEN["free"] > 0 and SEEN.get("free_body") == {"unload_models": True, "free_memory": True}
               and task.get("freed_vram") is True, (SEEN.get("free_body"), task.get("freed_vram")))
 
@@ -333,6 +336,11 @@ def main() -> int:  # noqa: C901
               and "install-nodes" in str(task3.get("error_msg")), str(task3.get("error_msg"))[:150])
         check("⑮ 缺节点时**根本没有提交**（在 /prompt 之前就拦住了 ✓）",
               len(SEEN["prompts"]) == prompts_before, len(SEEN["prompts"]))
+        # ⭐ 失败路径**也要卸** ✓（24G 卡否则下一镜 OOM ✗）—— 此前只有「跑完卸」被断言 ✗，
+        #    失败路径这条**没人核** ✓✗（它是 `finally` 的语义 ✓，重构时最容易被顺手改掉 ✓）。
+        check("⑭′ ⭐ **失败路径也调了 `/free`** ✓ 且 `freed_vram` 随终态一起落地 ✓（不是事后补 ✗）",
+              task3.get("status") == "failed" and task3.get("freed_vram") is True,
+              task3.get("freed_vram"))
         MISSING_CLASS["name"] = None
 
         # ── ⑤ ComfyUI 不可达：报错要明确，且**不再是**「阶段 2 未接线」那句 ✗ ──

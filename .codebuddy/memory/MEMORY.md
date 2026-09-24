@@ -1,64 +1,87 @@
 # MEMORY — 长期记忆
 
-> 只留**会导致 bug 的不变量**与约定；细节看 `docs/`、代码。**读法：本文件（必读）→ `TOPICS.md`（低频长专题）→ `INDEX.md`（日志定位；默认只读索引、按 `@行号` 跳读日志，勿整读）**。**本文件须 ≤8k 字符**，超限会被注入截断（实测 9.4k 即截断，且断在半句——**尾部 `## 协作与提交` 最先丢**）。**逼近上限时把细节下移 `TOPICS.md`，勿硬塞**。
+> 只留**会导致 bug 的判据** ✓；细节看 `docs/`、代码 ✓。**读法：本文件 → `TOPICS.md`（长专题）→ `INDEX.md`（按 `@行号` 跳读 ✓）**。⚠️ **本文件须 ≤8k 字符** ✗（超限会被**截断在半句**、尾部先丢 ✓）⇒ 逼近上限就下移 `TOPICS.md` ✓；判据 `python app/scripts/check_memory.py` ✓。
 
 ## 项目与运行
-Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ **FastAPI + SQLAlchemy Core**（`backend-py/`，唯一后端）。⚠️ **Node 后端（Hono + Drizzle + better-sqlite3，`backend/`）已于 2026-09-15 删除**，能力 100% 迁到 `backend-py/`。
-- 后端 **5789**（`config.ts`）、前端 **3013**（proxy `/api`、`/static`）；前缀 `/api/v1`，另有 `/webhooks/*`、`/static/*`；无登录页。页面 `/`、`/settings`、`/drama/[id]`、`/library/*`。
-- 启动：`cd backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790`；`cd frontend && npx nuxt dev --port 3013`（dev 代理已指 5790）。数据根 `.data-root` > `DATA_ROOT` > `config.yaml database.path` > `./data`；不依赖 postgres/redis/qdrant。（Node 5789 已随 `backend/` 删除，仅历史。）
-- **前端 dev 代理现在指向 Python 后端 5790**（2026-09-15 起；旧 Node 5789 可用 `NUXT_API_TARGET` 临时覆盖）；**共享契约类型在前端** `frontend/app/types/contracts.ts`（前端侧镜像，**字段权威在 Python 后端**，改后端字段要同步它）。技能库 / 脚本 / 快照也都在 `backend-py/` 下。
-- **`backend-py/` = Python 后端**（FastAPI + SQLAlchemy **Core**；**端口 5790**；全部域已迁完 / 未注册 0）：回归 `backend-py/tests/run_all.py`；动手前读 `backend-py/README.md`。⚠️ **`backend/` 已删**（2026-09-15）⇒ TS 原文只在 `frozen_ts_source.py`。**明细见 `TOPICS.md`** ✓
+Drama Studio（`d:/code/voides/voide-darme`）：AI 剧本/分镜/视频。Nuxt 3（`frontend/app`）+ **FastAPI +
+SQLAlchemy Core**（`backend-py/`，**唯一后端**；⚠️ Node 后端 `backend/` 已于 2026-09-15 删除 ✓，
+TS 原文只在 `frozen_ts_source.py` ✓）。
+- ⚠️ **共享契约类型 `frontend/app/types/contracts.ts` 只是前端侧镜像** ✗ —— **字段权威在 Python 后端** ✓，
+  改后端字段要同步它 ✓。
+- 端口：后端 **5790** ✓（前端 dev 代理已指它 ✓，可用 `NUXT_API_TARGET` 覆盖 ✓）、前端 **3013** ✓；
+  前缀 `/api/v1` ✓，另有 `/webhooks/*`、`/static/*` ✓；无登录页 ✓。
+- 启动：`cd backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790`；
+  `cd frontend && npx nuxt dev --port 3013` ✓。数据根 `.data-root` > `DATA_ROOT` >
+  `config.yaml database.path` > `./data` ✓；不依赖 postgres/redis/qdrant ✓。
+  回归 `backend-py/tests/run_all.py` ✓；动手前读 `backend-py/README.md` ✓。
 
 ## 本地模型 + H3 视频推理
-**详见 `TOPICS.md`**。仅三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`**；H3 走 ComfyUI(8188) + 8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'`）、六键 Bible 跨集锁定；⚠️ 该链路 provider 名 `minimax` 是**服务商标识**，与 `backend-py/app/skills/` 外部技能库**无关**。GPU RTX A5000 22 GiB，**无 nvcc**。
+**详见 `TOPICS.md`**。三条必须记牢：**直连 HF 全超时 → 必须 `hf-mirror.com`** ✓；H3 走 ComfyUI(8188) +
+8765 薄封装（`runtime='h3'`、`baseUrl='http://localhost:8765'` ✓）、六键 Bible 跨集锁定 ✓；
+⚠️ 该链路 provider 名 `minimax` 是**服务商标识** ✓，与 `backend-py/app/skills/` 外部技能库**无关** ✓。
+GPU RTX A5000 22 GiB、**无 nvcc** ✓。
+⭐ **8765 任务：先 `/free`、再写终态** ✗（2026-09-24 ✓ 详见 `2026-09-24.md` §⑥）—— 状态与 `freed_vram`
+必须**同一次 `_update`** ✓，否则中间态「成功了但 `freed_vram=null`」✓✗（**「单独复跑就绿」≠「不是代码问题」** ✗）。
 
-## 后端能力（9 项）
-QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerprint｜take-budget｜rhythm-phase｜jianying-draft｜estimate-service｜usage-tracking —— **明细见 `TOPICS.md`**。
-**约定**：`appendStyleProfile()` 同步；门禁统一支持 `force`；无指纹/无相位视为旧产物不阻断；`storyboards` 无 resolution/fps（在 `video_generations`）；Windows ZIP 内路径转 posix。
+## 后端能力（9 项 · 清单见 `TOPICS.md`）
+**约定**：`appendStyleProfile()` 同步 ✓；门禁统一支持 `force` ✓；无指纹/无相位视为旧产物**不阻断** ✓；
+`storyboards` 无 resolution/fps（在 `video_generations` ✓）；Windows ZIP 内路径转 posix ✓。
 
 ## 前端约定
-- 复用型 `refresh()` **禁止写 UI 定位副作用**（切 panel/tab、重置选中、重置编辑中表单）——被刷新按钮与所有生成/编辑回调反复调用（含合成 poll 每 4s）→「画面跳转」；UI 定位只在 `onMounted` 一次。refresh 重赋列表后选中项须**按 id 重绑**，未存表单值需 **dirty 标记**保护。
-- playwright-cli 常被转后台丢 stdout → `... *> .log` 落盘再读；eval 输出**只用 ASCII**；用 `nav button[i]` 定位。**切勿一边改文件一边跑点击测试**（HMR 会造成「修复无效」假象）。**元素计数与 SFC 编译验证见 `TOPICS.md`**。
+- 复用型 `refresh()` **禁止写 UI 定位副作用** ✗（切 panel/tab、重置选中/编辑中表单 ✓ —— 它被刷新按钮与
+  所有生成/编辑回调反复调用 ✓，含合成 poll 每 4s ✓ ⇒「画面跳转」✓）；UI 定位只在 `onMounted` 一次 ✓；
+  重赋列表后选中项须**按 id 重绑** ✓、未存表单值需 **dirty 标记** ✓。
+- playwright-cli 常被转后台丢 stdout ⇒ `... *> .log` 落盘再读 ✓；eval 输出**只用 ASCII** ✓；
+  用 `nav button[i]` 定位 ✓。**切勿一边改文件一边跑点击测试** ✗（HMR 会造成「修复无效」假象 ✓）。
+  ⇒ 元素计数与 SFC 编译验证见 `TOPICS.md` ✓。
 
-## 画风体系（10 种）
-- key：realistic / cinematic / noir / anime / ghibli / ink-wash / watercolor / comic / cyberpunk / pixar3d。**词表四段**「画风核心+镜头光线+调色质感+画质」，**负面词负责排除对立风格**。
-- ⚠️ **单一事实来源 2 处必须同步**：后端 `backend-py/app/services/prompt_utils.py`（`ART_STYLE_CATALOG` + 三张映射表）与前端 `frontend/app/utils/artStyles.ts` ⇒ **加画风只改这 2 个文件** ✓。旧指针 `shared/prompt-utils.ts` **已随 `backend/` 删除** ✗（见到它=在读旧文 ✓）。
-- 其余（解析链唯一入口 `resolveEffectiveArtStyle` ✓、正负成对收口 ✓、找副本顺序 ✓、反 AI 感白名单 ✓）⇒ **`TOPICS.md` §画风体系细节** ✓
+## 画风体系（10 种 · key 清单见 `TOPICS.md`）
+- **词表四段**（画风核心 + 镜头光线 + 调色质感 + 画质 ✓）、**负面词排除对立风格** ✓。
+- ⚠️ **单一事实来源 2 处必须同步** ✗：后端 `app/services/prompt_utils.py`（`ART_STYLE_CATALOG` + 三张映射表 ✓）
+  与前端 `app/utils/artStyles.ts` ⇒ **加画风只改这 2 个文件** ✓。⚠️ 旧指针 `shared/prompt-utils.ts` **已删** ✗
+  （见到它 = 在读旧文 ✓）。
+- 其余（解析链唯一入口 ✓、正负成对收口 ✓、反 AI 感白名单 ✓）⇒ `TOPICS.md` §画风体系细节 ✓
 
-## Skill 体系（详见 `backend-py/app/skills/README.md`，改前先读）
-- **库由声明文件识别，与目录名解耦**：`<lib>/library.yaml` 的 `name`/`label`/`description` ⇒ **加库/换库/改展示名零代码**。⚠️ **无执行入口的 skill 勿写进 `agents:`** ✗（每次生成白背一段上下文）；**词库按介质分家**（图像｜视频）⇒ **改词库前先确认改哪个** ✓（清单见 `TOPICS.md`）。
-- **命名**：core 目录名 = Agent 类型（`agent_configs.agent_type`，**勿改名**）；库内 skill id **勿重命名**（`references/` 互引静默断链）。
-- **绑定 = skill 自描述**：frontmatter `agents: [...]` + `priority`（缺省 100）⇒ **改绑定 = 改 md**；入口唯一 `resolveDefaultSkills` ✓
-- **DB 配置优先铁律**：`parseSkillsConfig` 解析出配置即「用户已选过」→ **全关也不回退默认** ✗（仅 `null`/空/失败才回退）；`enabled` 缺省 = 启用 ✓
-- **出厂默认唯一出口** `getAgentDefaults()` ⇒ **前端不得硬编码默认提示词/默认绑定** ✗
-- **加载器只读 `SKILL.md`** ⇒ `references/` 对 agent **不可达（有意取舍，非 bug）** ✓
-- **删除保护**：拒删 = **顶层 id** *且* **`agents:` 非空** ✗（core 删掉永久丢失）；解析失败 ⇒ 保守拒删 ✓
-- ⚠️ **宿主工具**：只认 `hub_` 前缀 ✓，且**工具集须取 `tool.id`** ✗（取错 ⇒ 21 个工具全误判为缺失）
-- ⚠️ **改名/挪库后必核对 DB 绑定** ✓（存的是 id ⇒ 旧绑定**静默**失效；核对须**只读直开** ✓）
-- 注入闸默认只注自有 ✓、超预算按 priority 跳过给诊断 ✓、合计**只算 `enabled=true`** ✓
-- **完整表述 / 坑⑨条 / 注入口径 全在 `TOPICS.md`** §Skill 体系 ✓（本文件只留会导致 bug 的判据 ✓）
+## Skill 体系（改前先读 `backend-py/app/skills/README.md` ✓）
+- ⭐ 三条最容易踩的：**无执行入口的 skill 勿写进 `agents:`** ✗；**改绑定 = 改 md** ✓（`agents:` + `priority`）；
+  ⭐ **DB 配置优先** ⇒ 已解析出配置就**全关也不回退默认** ✗；**宿主工具只认 `hub_` 前缀** ✓ 且工具集须取
+  `tool.id` ✗（取错 ⇒ 全部误判缺失 ✓）；⚠️ **改名 / 挪库后必核对 DB 绑定** ✗（存 id ⇒ 静默失效 ✓）。
+- 其余细则（库识别 / 勿改名 / 删除保护 / 注入闸口径）⇒ `TOPICS.md` §Skill 体系细则 ✓。
 
 ## 视频提示词语料
 **详见 `TOPICS.md`**（检索管线 8987 条/3 源、已排除源清单、落盘三分都在那儿）。一条红线：他人提示词正文**不得搬运进仓库**（只提炼范式，结论落 `docs/`）。
 
 ## 代码约定（写代码时的硬规则）
-- **中文文案里要引用就用「」，绝不用半角 `"`** —— 文案本身是双引号串，嵌 `"` 直接 `SyntaxError`（2026-09-17 一天犯了 3 次）。同类：改文案后**顺手搜一遍引用它的断言**（`check("…文案…")` 会因改词而失效）。
-- **解析外部工具真实输出前先把真实输出落盘取证**（别照文档猜 —— 技术 QC「三项死检测」就是猜出来的）；**一个布尔字段只许一个含义**（把「观察到的事实」和「推断出的结论」塞进同一个 flag ⇒ 文案会说谎）；**检测类改动要有「能触发」的反向证明**（另造一个必命中素材，否则「判定已生效」根本证明不了）。
-- **测试不许依赖"真机装了什么"**：断言写成**两种世界都成立**（如「真张量 ✓ + 画面仍不真 ✗」✓）；缺依赖/缺服务那类路径用 **monkeypatch 模拟**，不要写成「必然缺」——装上/起来就红。断言也别写**套套逻辑**（`sum(x) == sum(x)` 恒真，只增通过数不增信息）。
-- **判"代码里有没有某种写法"用 AST，别用正则** ✗（正则会把**文档串里的说明**当代码 ✓、又漏掉**换了写法**的同类 ✓）⇒ 守卫三段：合同锚点 + **正/负对照** + 扫描面非空 ✓。
-- **归一化产物与判断常量必须同源** ✗（`-` vs `_` 实测导致"待重做资产被排除出生成顺序"✗）；断言钉**后果**，不只钉计数 ✓。
-- **"schema 里没有"先找专用表再说** ✗（实测 `continuity_states` 早就在 ✓）⇒ **先找现成的家，别急着盖房子** ✓。
-- **"没数据/没读到" ≠ 通过** ✗：纯函数"没给就跳过"⇒ **空集会被读成绿灯** ✓✗ ⇒ 外层补**阻断**（"无从体检 ≠ 通过"）+ 报**覆盖率** ✓。
-- **检测器的模式要比解析器更宽松** ✗（复用同一个严格正则 ⇒ 解析不了的**畸形输入也检测不到** ⇒ 被当成「干净」✓✗）；**追加小节只锚「末节首行」** ✗（锚在正文中间会把新小节插到旧小节**前面**）。
-- ⭐ **判据要"响亮"不要"静默"** ✗：惰性导出必配**名字名单**（`__all__`）且**先校验** ⇒ 漏加立刻 `AttributeError` ✓（别给空壳/None 让错误漂到下游 ✗）；**占位符不许留在模块体里** ✗、**断言优先写"能自己算出来的不变量"** ✗ ⇒ 其余（模块级状态 / `compile()` / 汇总分母 / 规模数字）见 `TOPICS.md` §代码约定坑清单 ✓
-- ⭐ **同一份配置的两种形态（dataclass / dict）⇒ 每个读取点都要两处都认** ✗（取不到的那些会**悄悄回落默认值** ✓✗ ⇒ 与模型对不上）；**能算出 0 宽度的结构不变量要在构造期报** ✗（否则报的是**第三方后端的天书** ✓✗）；**多流各按落盘工具的契约报形状** ✗（对称去维 ⇒ 静默走错分支 ✓✗）
+- **中文文案里要引用就用「」，绝不用半角 `"`** ✗（文案本身是双引号串 ⇒ 嵌 `"` 直接 `SyntaxError` ✓；
+  同类：改文案后**顺手搜一遍引用它的断言** ✓✗）。
+- **解析外部工具输出前先把真实输出落盘取证** ✓（别照文档猜 ✓）；**一个布尔字段只许一个含义** ✗
+  （「事实」与「结论」塞进同一个 flag ⇒ 文案会说谎 ✓）；**检测类改动要有「能触发」的反向证明** ✗。
+- **测试不许依赖"真机装了什么"** ✗：断言写成**两种世界都成立** ✓；缺依赖/服务那类路径用 **monkeypatch** ✓
+  （不要写成「必然缺」✓✗）；断言别写**套套逻辑** ✓✗。
+- **判"代码里有没有某种写法"用 AST，别用正则** ✗（正则会读到**文档串里的说明** ✓、又漏掉换了写法的同类 ✓）
+  ⇒ 守卫三段：合同锚点 + **正/负对照** + 扫描面非空 ✓。
+- **归一化产物与判断常量必须同源** ✗（`-` vs `_` 实测把「待重做资产排除出生成顺序」✗）；断言钉**后果** ✓。
+- **"schema 里没有"先找专用表再说** ✗（实测 `continuity_states` 早就在 ✓）；**"没数据/没读到" ≠ 通过** ✗
+  （空集会被读成绿灯 ✓✗ ⇒ 外层补**阻断** + 报**覆盖率** ✓）。
+- **检测器的模式要比解析器更宽松** ✗（复用同一个严格正则 ⇒ 畸形输入被当成「干净」✓✗）；
+  **追加小节只锚「末节首行」** ✗（锚在正文中间会插到旧小节**前面** ✓）。
+- ⭐ **判据要"响亮"不要"静默"** ✗：惰性导出必配 `__all__` 且**先校验** ✓（别给空壳让错误漂到下游 ✗）；
+  **占位符不许留在模块体里** ✗；**断言优先写"能自己算出来的不变量"** ✗ ⇒ 其余见 `TOPICS.md` §代码约定坑清单 ✓。
+- ⭐ **同一份配置的两种形态（dataclass / dict）⇒ 每个读取点都要两处都认** ✗（取不到会**悄悄回落默认值** ✓✗）；
+  **能算出 0 宽度的结构不变量要在构造期报** ✗（否则报的是第三方后端的**天书** ✓✗）；
+  **多流各按落盘工具的契约报形状** ✗（对称去维 ⇒ 静默走错分支 ✓✗）。
 
 ## 本机环境（2026-09-17 实测）
-- **开发机无 NVIDIA 显卡** ✗（Iris Xe 集显 ✓，无 `nvidia-smi` ✓）⇒ 只装 **CPU 版 torch**（124 MB ✓），别装 2.5 GB CUDA 轮子 ✗。**真推理（H3 19.53 GiB 权重）要在工作站（A5000）跑** ✓ ⇒ 见下面那条工作方式。
-- **PyPI 镜像 / 长命令被判后台 / 跑批编码坑（`*>>` 写 UTF-16 ⇒ grep 0 命中；子进程 GBK ⇒ 打印炸冒充失败）** ⇒ **`TOPICS.md` §自 MEMORY.md 下移（2026-09-20 第三次）** ✓
+- **开发机无 NVIDIA 显卡** ✗（Iris Xe 集显 ✓）⇒ 只装 **CPU 版 torch** ✓（别装 2.5 GB CUDA 轮子 ✗）；
+  **真推理要在工作站（A5000）跑** ✓ ⇒ 见 §工作方式 ✓。
+- ⚠️ PyPI 镜像 / 长命令被判后台 / 跑批编码坑（`*>>` 写 UTF-16 ✓、子进程 GBK ✓）⇒ 见 `TOPICS.md`
+  §自 MEMORY.md 下移（2026-09-20 第三次）✓
 
 ## 工作方式（用户 2026-09-17 明确）
-- **以实现功能为先**：先把能力在代码里**实现完**（含测试与守卫 ✓），**等实现完再去工作站跑真流程** ✓ —— 不要为了"当场看到出片"而反复折腾本机环境 ✗（本机也没有 NVIDIA 卡 ✓）。接口/后端可以按"工作站上才真跑"来设计 ✓，但**不许**因此把未验证的部分说成已验证 ✗。
+- **以实现功能为先**：先把能力**在代码里实现完**（含测试与守卫 ✓），**再去工作站跑真流程** ✓ —— 别为
+  "当场看到出片"折腾本机 ✗；可按"工作站上才真跑"设计接口 ✓，但**不许**把未验证的说成已验证 ✗。
+- ⭐ **记忆/文档只留「会改变下次动作」的** ✓（用户 2026-09-24 明确 ✓）⇒ 读不回的不收 ✗、
+  代码与守卫里已有的只留指针 ✓；**加新内容前先清等量的旧** ✗（本文件 8k 是硬预算 ✓）。
 
 ## ⭐ 自研优先（用户 2026-09-20 明确要求记住）
 - **原话**：「**所有功能不要对外依赖，自己实现所有的功能，要参考我给你的几个项目**」⇒ 落成三条硬约束：
@@ -67,97 +90,29 @@ QC（technical/consistency）｜asset-versions｜style-profiles｜script-fingerp
   3. **参考 `reference/` 那几个项目**（Mini-Agent / minimax-desgin-plugin / ollama-python / ollama / Open-AI-Micro-Drama-Generator / short-drama-agent ✓）：**有用的功能搬过来自己实现** ✓（判据同「没人调用的库不算功能」✓：搬来要真接线 ✓）。
 - **⚡ 2026-09-20 加严**：「**所有都要自己实现，不要调用外部的**」⇒ 外部队商 API **不是可选通道，是要去掉的** ✗。
   边界（可纠正 ✓）：**功能/能力**不外包 ✗；`ffmpeg`/SQLite/标准库/框架属**本地基础设施** ✓ 不算 ✗。
-- ⚠️⚠️ **2026-09-20 实测：四类生成当前**全部**解析到外部** ✗✗**（`api.minimax.chat` / `ark.cn-beijing.volces.com` ✓）——
-  `ai_providers.py` 按 **priority 降序**取第一条 ✓，本地预设 82–85 ✓ 输给厂商 97–300 ✓ ⇒ **厂商永远赢** ✗。
-  ⇒ 动作：抬本地 priority / 删外部行 ✓（**审计表与三层依赖阶梯见 `TOPICS.md` §外部调用审计** ✓）。
-- ⚠️ **前端有类型检查了** ✗（2026-09-21 ✓）：`npm run typecheck`（`vue-tsc` ✓ 与 `@types/node` ✓ 都装在
-  devDependencies ✓ 走 `registry.npmmirror.com` ✓）。⚠️ `npm run build` **不做类型检查** ✗
-  （`nuxt.config.ts` 没开 `typeCheck` ✓）⇒ 两件事都要跑 ✓。
-  ⚠️⚠️ **`ref([])` 推出 `never[]`** ✗ ⇒ 元素属性访问全报 TS2339 ✓✗（一趟能冒几百条 ✓）⇒
-  `ref` 一律带泛型 ✓；字面量配置表用运行时键要 `Record<string, T>` ✓；`catch (e)` 的 `e` 是 `unknown` ✓
-  不许直接 `e.message` ✓；模板读表单值一律走 helper（`formValue($event)` ✓ —— `$event.target.value` 会报
-  `EventTarget` 无 `value` ✓）；⚠️ **`ComputedRef` 必须 `.value`** ✗（`if (!ref)` 恒真 ✓、
-  当参数传会拼出 `[object Object]` ✓✗ —— **只有类型检查能抓住** ✓，已因此逮到
-  `switchEpisodeConfig` 一个"从来没生效"的 bug ✓）。
-  ⭐ **2026-09-22：typecheck 已清零** ✓（537 → 314 → 134 → **0** ✓）—— 三轮修掉两个真 bug ✓；
-  ⚠️ `desc = []` / `refs = []` 这类**默认空数组**会把参数推成 `never[]` ✗ ⇒ 必须显式类型 ✓；
-  ⚠️ 改完前端**要跑三件事** ✗：`npm run typecheck`（0 错误 ✓）、`npm run build`（exit 0 ✓，
-  **构建期已开 `typescript.typeCheck`** ✓ ⇒ 类型错误在构建阶段就红 ✓）、⭐ `npm run **generate**`
-  ✓ —— **前端产物是 generate 出的** ✗（Dockerfile 就是 `RUN npm run generate` ✓ +
-  `COPY --from=…/.output/public` ✓，而 `frontend/dist` 是指向它的**目录联接** ✓）：
-  只跑 `build` 会把 `.output/public/index.html` **覆盖没** ✓✗（`dockerfile_contract_test` 当场红 ✓）。
-  ⚠️ **注释里别写调用形状** ✗：`frontend_api_coverage_test` 纯文本扫 `api.get('…')` ✓ ⇒
-  注释里的一句"曾经写错成 …"会被**当成真调用点** ✓✗（2026-09-22 实测踩到 ✓）。
-- ⭐ **低精度权重能真装了** ✓（2026-09-22 ✓ `engine/quant.py` ✓）：fp8/int8 先按配套 scale **反量化**
-  （布局**按形状**判 ✓ 四种 ✓；`*_scale_inv` 走除 ✓；**判不出来就拒绝** ✗：块/分组量化、缺 scale、scale=0 ✓）
-  ⇒ 再归一 dtype ✓。⚠️ 此前是**直接 `to(bf16)`** ✗ ⇒ 尺度丢掉却**不报错** ✓✗（目标主权重就是 fp8 ✓）。
-  ⚠️ 顺序要紧 ✗：**先反量化、再 cast**；失败 ⇒ 中止装载 + **不污染模块** ✓。
-  ⭐ 结论已推到**三个消费者** ✓（CLI ② 段 / 就绪 API `summary().quant` / 前端面板 ✓）且**三档分开说** ✗：
-  可自动还原 ✓ / 判不出（**同时进 blockers** ✓）/ **没查** ✓（组件没下载 ⇒ 不阻塞也不假装绿 ✓）。
-  ⚠️ **GGUF 豁免** ✗（它的反量化归运行时 ✓ 否则每份 GGUF 都会把 `ready` 判死 ✓✗）。
-- **现状**（见 `TOPICS.md` §自研引擎现状）：引擎全绿 ✓ **零依赖可跑** ✓ ——
-  ⚠️ **规模数字别写在这里** ✗（会腐烂 ✓）：模块清单看 `engine/__init__.py.__all__` ✓、
-  自检规模与最近实测看 `tests/run_all.py` 表头 ✓
-  （2026-09-20 新增：**GGUF 读取器** `engine/gguf.py` ✓；**H3 键名核对器** `engine/h3_keys.py` ✓；
-  **自研字节级 BPE** `engine/tokenizer_bpe.py` ✓；
-  ⭐ **自研 Unigram/WordPiece/Metaspace** `engine/tokenizer_own.py` ✓（Viterbi ✓ / 整词 UNK ✓ /
-  **normalizer 11 种** ✓ / **预分词器 10 种** ✓ 含 `Punctuation` 与 `Split` 各五种 behavior ✓、
-  `FixedLength` ✓ —— 规则全部**逐例实测**对齐参考 ✓）；
-  **`byte_fallback` 已实现** ✓（Unigram ✓ **段级判据** ✓：段内每个字符都能展开才逐字符展开 ✓ 否则整段一个 `unk` ✓）；
-  ⚠️ 明确**拒绝**且**带理由**（宁可回退参考实现 ✗）：`Precompiled` ✓（要 SentencePiece charsmap 表 ✓）、
-  `UnicodeScripts` ✓（标准库无 script 表 ✓）、
-  ⭐ **别的模型**的 `byte_fallback` ✓（2026-09-22 ✓ **不是「没核」**✗：BPE 触发条件已核 ✓，
-  但**输出顺序不是位置语义** ✗✗ —— 实测 `'be'`/`'eb'` 输出**完全相同** ✓ ⇒ 位置实现必错其一 ✓✗；
-  拒绝理由**必须带这对证据** ✓，只写「未实现」✗ 会让人去补实现然后切错 ✓✗）、
-  **能匹配空串的正则** ✓ 与 `\p{…}` 语法 ✓（`re` 没有 ✓）；
-  ⭐ **对 `transformers` 的运行时改造** `engine/tokenizers_tuning.py` ✓（离线兜底含 **Auto 工厂** ✓
-  / 缓存目录 / 降噪 / 计数 / 可撤 ✓ 幂等 ✓）；
-  **分词器总入口** `engine/tokenizer_hub.py` ✓ = 形态嗅探 + **3 模型 × 全部已实现预分词器**
-  （清单看 `tokenizer_own._OWN_PRE_TOKENIZERS` ✓ + `SUPPORTED_NORMALIZERS` ✓）全自研 ✓ +
-  极少数形态回退 ✓ + 批量 + LRU + 运行期互校 ✓）；
-  **H3 结构从权重推** ✓（`h3_keys.infer_h3_trunk_config` ✓ ⇒ 出厂常量只作回落 ✓）；
-  ⭐ **已挂 VAE 的跨来源校验（四个字段）** ✓（2026-09-22 ✓ `TorchBackend._check_attached_vaes` ✓，
-  `describe().vaeCheck` ✓）：① 主干推的 `latents_dim` ↔ VAE `latent_channels` ✓ ⇒ 给错的 `patch_size`
-  （**能整除**那种 ✓✗ 形状全自洽、装得进去 ✓✗、只有画面不对 ✗✗）在**挂载期**就被拒 ✓；
-  ② VAE `spatial_scale` ↔ **H3 事实 `vaeScale=16`** ✓（不等 ⇒ 画面尺寸与请求的不是一回事 ✓✗ 且不报错 ✗✗）；
-  ③ 音频声道 ↔ `geometry.AUDIO_LATENT_CHANNELS=2` ✓；④ 音频帧率 ↔ `geometry.AUDIO_LATENT_HZ=40` ✓
-  （不等 ⇒ **wav 时长错** ✓✗ 且不报错 ✗✗）。⚠️ DiT 形态只核 `spatial_scale ↔ config.vae_scale` ✓
-  （别做过头 ✗）；挂载**两向**都守 ✓；`load_weights` 校验失败 ⇒ **回滚 `_model/_config/_form`** ✓；
-  ⚠️ 但都是**两个来源互证** ✗ 不是权重事实 ✗ ⇒ 真权重到手仍要按元数据核 ✓；
-  出片唯一硬缺口 = **真权重** ✗（机制都已实现 ✓）。
-- ⚠️⚠️ **跑全量前：把 ffmpeg 真实 bin 目录「前置」到 `PATH`** ✗（2026-09-22 实测 ✓✗）：
-  Windows 上 WinGet 的 `…\WinGet\Links\ffmpeg.exe` 是**应用别名（重解析点）** ⇒ 本进程里
-  `lexists=True` 但 `exists=False` ✓✗ ⇒ ① `shutil.which` → `None` ✓（引擎会说「找不到 ffmpeg」✗ —— 其实装了 ✓）；
-  ② **裸名** spawn ⇒ `WinError 448 不受信任的装入点` ✗✗ ⇒ **5 套假红** ✓（`image_generation`/`consistency_qc`/
-  `technical_qc`/`color_grade`/`compressed_data_url` ✓，看着像代码坏了 ✗✗）。⚠️ **追加无效** ✗（只修好 ① ✗）。
-  判据 `where.exe ffmpeg` ✓。已写进 `tests/run_all.py` 表头 ✓。
-- ⚠️ **`transformers` 已装（5.17.0 = PyPI 最新 ✓ 镜像 ✓）且登记为「可选依赖」** ✓：`_Dependency.optional` ✓
-  ⇒ `dependency_status()` 分 `missing`（必需 ✓ 缺则后端不可用）/ `optionalMissing`（可选 ✓）
-  ⇒ **别把可选塞进必需位** ✗（`ready`/`torch_available()` 会被判死 ✗✗）。
-  ⚠️ **不 fork / 不 vendored** ✗（许可允许但不必要 ✓）：只做**运行时改造** ✓ ——
-  离线兜底 ✓ 缓存目录 ✓ 降噪 ✓ 计数 ✓ 可撤 ✓；⚠️ **Auto 工厂必须单独包** ✗
-  （它在解析出具体类**之前**就外呼 ✓✗）；分词本身已由**自研三血统**接管 ✓ ⇒ 它只剩核对价值 ✓。
-- ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗（`run_all.py` 按此前缀收敛项数；写成「n/m 项通过」⇒ 总表**空摘要**、项数缺一套 ✓✗）。
-- ⚠️ **别同时开多个全量回归** ✗（并发抢 CPU ⇒ 像"卡死" ✓✗）；**判据 = 日志里有没有 `结论：` 行** ✗
-  （半截日志不算跑过 ✓）。基准/性能数字**必须把口径一起报** ✗（只报"热"数字会得出"比 Rust 快 5.5 倍"这种假象 ✓✗）。
-- ⭐ **自研分词器性能**（2026-09-21 ✓）：`UnigramTokenizer` 的 Viterbi 由「每 (end,start) 重扫前缀树」✗
-  改成「**每起点只扫一次** + 前向 DP」✓ ⇒ 冷 60k → **218k tokens/s**（相对 Rust 0.12 → 0.44 ✓）；
-  再加**片段级缓存** ✓（热 3.5M tokens/s ✓ 两个模型共用模块级 `PIECE_CACHE_LIMIT` ✓ 到了整体清空 ✓）。
-  基准脚本 `app/scripts/tokenizer_bench.py` ✓（冷/热/参考三方 + 扫描数 + 命中率 ✓）。
-- ⭐ **上机前自检**（2026-09-21 ✓）：业务在**服务层** `app/services/engine_readiness.py` ✓
-  （⚠️ **不能放 `app/scripts/`** ✗ —— 那个目录**不是包** ✓ ⇒ 路由**引用不到** ✓✗）；
-  CLI 薄壳 `app/scripts/h3_readiness.py` ✓（`--json` ✓ + **退出码 = ready** ✓）；
-  路由 `GET /api/v1/production/engine-readiness` ✓（回**精简摘要** ✓ 别塞整坨排班 ✗，
-  真权重预检要文件路径 ⇒ **不走 HTTP** ✗ 留在 CLI ✓）；前端 `PreflightPanel.vue` 有**独立**
-  「引擎就绪」块 ✓（没选集也能看 ✓「没查的项」用**灰点**与通过区分 ✓）。
-  ⚠️ 口径：没给权重 ⇒ 明说「**没查**」✗ 不算通过 ✓；「还要下多少」按清单 `expectedGiB` 求和 ✗
-  （用 `bytes` 会恒为 0 ✓✗）。⚠️ 与 `POST /production/preflight`（查**内容**）是两个独立 `ready` ✗。
+- ⚠️⚠️ **四类生成当前**全部**解析到外部** ✗✗**（`ai_providers.py` 按 priority 降序 ✓ ⇒ 厂商永远赢 ✗）
+  ⇒ 抬本地 priority / 删外部行 ✓（审计表与三层阶梯见 `TOPICS.md` §外部调用审计 ✓）。
+- ⚠️ **前端类型检查**（2026-09-21 起 ✓）：改完**三件事都要跑** ✗（`typecheck` ✓ / `build` ✓ /
+  ⭐ `generate` ✓ —— **产物是 generate 出的** ✗，只跑 `build` 会把它覆盖没 ✓✗）；`ref([])` 推 `never[]` ✗、
+  **`ComputedRef` 必须 `.value`** ✗、**注释里别写调用形状** ✗ ⇒ 细节见 §C ✓。
+- ⭐ **低精度权重能真装了** ✓（2026-09-22 ✓）：先**反量化**再 cast ✓；**判不出来就拒绝** ✗；
+  失败 ⇒ 中止装载 + **不污染模块** ✓；三档**分开说** ✗（没有「没查」冒充通过 ✓）⇒ 细节见 §B ✓。
+- **引擎现状**：全绿 ✓ 零依赖可跑 ✓；⚠️ **规模数字别写在这里** ✗（模块清单看 `engine/__init__.py.__all__` ✓、
+  自检规模看 `tests/run_all.py` 表头 ✓）；⚠️ **拒绝要带理由** ✓（`byte_fallback` 那档**理由必须带反例** ✗）；
+  ⭐ **跨来源校验**（潜通道 / 空间倍率 / 声道帧率 / TE `output_dim` ✓）都是**来源互证** ✗ ⇒ 真权重仍按元数据核 ✓。⇒ §A/§B ✓。
+- ⚠️ **跑全量前把 ffmpeg 真实 bin 目录「前置」到 `PATH`** ✗（WinGet 的 `Links\ffmpeg.exe` 是坏别名 ⇒
+  `which` 找不到 + **裸名** spawn 报 `WinError 448` ⇒ 5 套假红；**追加无效** ✗）⇒ §F ✓。
+- ⚠️ **`transformers` 是可选依赖** ⇒ 别塞必需位 ✗（`ready` 判死 ✓）；**不 fork** ✗，只运行时改造 ✓（Auto 工厂单独包 ✗）。⇒ §F ✓。
+- ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗；**别同时开多个全量回归** ✗（判据 = 有没有 `结论：` 行 ✓）；
+  有红先单独**连跑 3 次** ✓ —— ⭐「单独复跑就好了」≠「不是代码问题」✗✗；性能数字**必须报口径** ✗。⇒ §F ✓。
+- ⭐ **上机前自检**：业务在**服务层** ✓（**不能放 `app/scripts/`** ✗）；CLI `h3_readiness.py` ✓（**退出码 = ready** ✓）；
+  没给权重 ⇒ 明说「**没查**」✗ 不算通过 ✓。⇒ §D ✓。
 - **⚫ 可照抄项目（用户点名 ✓「不要忘记」）**：ComfyUI / minimax-h3-comfyui / ollama / ollama-python /
   minimax-desgin-plugin ⇒ **功能直接抄** ✓（落点见 `TOPICS.md` §可照抄项目清单 ✓）。
 
 ## 协作与提交
-- **未经用户明确要求，绝不 `git commit`**；改完展示 diff。上下文过大时按阶段拆：每阶段只读 1 文件、只改 1 处、逐步验证。
-- git 身份 `yuanxf`/`yuanxf@wedoctor.com`；远端 `git@github.com:yuanxiufei/darme-voide.git`。PowerShell 传中文 commit message 会乱码 → 统一英文（长 message 写 `tmp/*.txt` + `git commit -F`）。
-- **换行**：`.gitattributes` **只**声明 `.githooks/* text eol=lf`（**不加 `* text=auto`**，避免全仓 renormalize 噪声）—— 钩子由 sh 执行，CRLF 会让 shebang 变 `#!/bin/sh\r` ⇒ Windows 上直接报 command not found。改钩子后查 `git ls-files --eol <file>`（须 `w/lf`）。
-- **`.codebuddy/memory/` 无 gitignore 规则，且现已全部纳管**（`MEMORY.md`/`TOPICS.md`/`INDEX.md` + 各日日志，自 2026-09-12 的 `abc6cac` 起同批提交）⇒ **新增日志 / 改索引后要随同批提交**，否则 `MEMORY.md` 的读法指针在新克隆上**断链**；状态用 `git ls-files` / `git check-ignore -v` 复查。
-- **`execute_command` 拉大文件/跑大正则易被转后台丢 stdout** → 用 `[System.IO.File]::WriteAllText(path, content, UTF8)` 落盘再读；`Get-Content` 必须显式 `-Encoding UTF8`（否则中文在控制台显示为乱码）。
+- **未经用户明确要求，绝不 `git commit`** ✗；改完展示 diff ✓；上下文过大按阶段拆 ✓（每阶段只读 1 文件、只改 1 处 ✓）。
+- ⭐ **commit message 统一英文** ✓（PowerShell 传中文会乱码 ✓）；git 身份 `yuanxf` / `yuanxf@wedoctor.com` ✓。
+- ⚠️ **`.codebuddy/memory/` 已全部纳管** ⇒ **新增日志 / 改索引要随同批提交** ✗（否则新克隆上指针**断链** ✓）。
+- 其余（`.gitattributes` 只声明 `.githooks/* text eol=lf` ✗ / CRLF shebang 坑 / `execute_command` 丢 stdout 的绕法）
+  ⇒ `TOPICS.md` §协作与提交细则 ✓。

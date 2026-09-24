@@ -172,6 +172,24 @@ def validate_storyboard_bindings(
 # 台词解析
 # ---------------------------------------------------------------------------
 
+def segments_from_script(text: str, *, units_per_second: float | None = None) -> dict[str, Any]:
+    """**导演稿 → 生成段** ✓（口径与判据都在 :mod:`app.services.engine.script_parse` ✓，此处只做**接缝** ✓）。
+
+    2026-09-24 接的 ✓：5 种标记写法（段标记带时长 / ``[0s-6.6s]`` / ``0:00-0:06`` / ``0至6秒：`` /
+    ``6.6秒 |`` ✓）+ 官方 ``[Shot N] At mm:ss`` ✓ + 无标记按 **4.5 字/秒** 切 **8~15 s** ✓
+    （断点优先级「段落换行 > 句末标点 > 从句标点 ✓ **绝不句中硬断** ✗」✓）；
+    ⚠️ 时长**往下**吸附 ``17k+5`` 帧网格 ✓；⚠️ 显式 >15 s 的段会**按断点切开**（**不截断** ✗ —— 截会静默丢内容 ✓✗）。
+
+    ⚠️ 这里**不碰 LLM、不碰库、不落盘** ✗（纯转换 ✓）—— 落库/绑角色/排镜号是上层的事 ✓。
+    """
+    from app.services.engine import script_parse  # noqa: PLC0415 —— 只为这一条接缝 ✓（避免顶层重依赖 ✓）
+
+    kwargs: dict[str, Any] = {}
+    if units_per_second is not None:
+        kwargs["units_per_second"] = float(units_per_second)
+    return script_parse.parse_script(text, **kwargs).to_dict()
+
+
 def parse_dialogue_lines(dialogue: str | None) -> list[dict[str, str]]:
     """把「角色名：较长台词」的多角色对话文本拆成独立对话行。
 

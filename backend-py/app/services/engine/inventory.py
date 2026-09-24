@@ -37,6 +37,7 @@ from . import gguf as gguf_mod
 from . import h3_form
 from . import h3_keys
 from . import safetensors as st
+from . import tiers as tiers_mod
 
 __all__ = [
     "DEFAULT_CAPACITY_GIB",
@@ -238,6 +239,9 @@ def readiness(stage: str = "h3", *, root: Path | None = None,
         "requiredWeightsGiB": weights_gib,
         "vram": estimate_vram(weights_bytes, capacity_gib=capacity_gib),
         "catalogNodes": len(catalog.get("nodes") or []),
+        # ⭐ 档位表随就绪报告一起给 ✓（2026-09-24 接的 ✓）：步数 / 分辨率 / 加速件 /
+        #    显存建议 / **必备模型** ✓ —— ⚠️ 没给容量时各档的 advised 是「**没比**」✗ 不是通过 ✓。
+        "tiers": tiers_mod.summary(gpu_gib=capacity_gib if capacity_gib else None),
     }
 
 

@@ -582,6 +582,15 @@ def _build_torch_parts() -> dict[str, Any]:
         更新掩码的**归属**（事实 ✓）：只有 ``img_update`` / ``audio_update`` 两条 ✓，分别只覆盖
         **视频行** 与 **音频行** ✓；``text`` 行**两条都不进** ✓（文本有自己的标签机制 ✓，
         塞进去会让"哪些行不更新"多出一批假阳性 ✓）。
+
+        ⚠️⚠️ **两条掩码与 ``segments`` 不在同一个坐标空间** ✗✗（2026-09-23 补注 ✓ —— 写自检时
+        自己就把两者混着用了 ✓✗，值得写清 ✗）：
+        ``segments`` 的区间是**序列坐标** ✓（含 text ✓、长度 = ``seq_len`` ✓）；
+        而 ``img_update`` 只按**视频行**打包 ✓（长度 = 目标 ``video_rows`` ✓ **加** 非目标里的视频行 ✓）、
+        ``audio_update`` 只按**音频行**打包 ✓ —— **都不含 text 行** ✗ ⇒ 拿 ``segments`` 的下标去切掩码
+        **必错位** ✓✗（而且不会报错：只会"某些行该更新却没更新" ✓✗）。
+        ⇒ 用法：掩码的**尾部** ``video_rows`` / ``audio_rows`` 项对应**目标**两条流 ✓（全 True ✓），
+        其余按块序排列 ✓；完整掩码由 :meth:`H3FormTrunk.forward` 里**再拼一次目标**得到 ✓。
         """
         frame, w_axis = frame_grid_coords(latent_h, latent_w)
         frame_rows = int(frame.shape[0])
