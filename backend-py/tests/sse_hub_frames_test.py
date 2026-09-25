@@ -101,13 +101,20 @@ def main() -> int:  # noqa: C901
     check("路径: `storage_root` 就是 `<data_root>/static`（两套写法等价的前提）",
           Path(get_storage_root()) == Path(get_data_root()) / "static",
           (get_data_root(), get_storage_root()))
-    check("路径: 绝对路径原样；`static/x` 走 data_root；其余走 storage_root",
-          fr.to_abs_media_path("/abs/x.mp4") == "/abs/x.mp4"
+    # ⚠️ **绝对路径用本平台原生写法** ✓（2026-09-25 实测）：`/abs/x.mp4` 这种**无盘符根路径**在
+    #   Windows 上 `os.path.isabs` 是 **False** ✓（Python ≥3.13 的严格 `ntpath` ✓ —— 3.12 是 True ✓
+    #   ⇒ 这条**只在 3.13+/Windows 上翻** ✓✗）⇒ 会被当相对路径拼 ✓（`C:\abs\x.mp4` ✓）。
+    #   ⚠️ 产品**不动** ✗：真输入是 `static/…` / `frames/…` / `C:\…`（真绝对 ✓）✓，无盘符的 `/x` 到不了 ✓。
+    #   ⇒ 判据改成"原生绝对路径**仍是绝对**且**没被拼到 storage/data 下**" ✓（平台无关 ✓，照样抓得住错 ✗）。
+    _abs_in = str(Path(get_storage_root()).parent / "abs_probe" / "x.mp4")
+    _abs_out = fr.to_abs_media_path(_abs_in)
+    check("路径: 绝对路径原样（没被拼到 storage_root 下）；`static/x` 走 data_root；其余走 storage_root",
+          Path(_abs_out) == Path(_abs_in) and Path(_abs_out).is_absolute()
           and fr.to_abs_media_path("static/videos/a.mp4")
           == str(Path(get_data_root()) / "static/videos/a.mp4")
           and fr.to_abs_media_path("frames/b.jpg")
           == str(Path(get_storage_root()) / "frames/b.jpg"),
-          [fr.to_abs_media_path(x) for x in ("/abs/x.mp4", "static/videos/a.mp4", "frames/b.jpg")])
+          [fr.to_abs_media_path(x) for x in (_abs_in, "static/videos/a.mp4", "frames/b.jpg")])
 
     # ================= 尾帧提取（打桩 ffmpeg/ffprobe）=================
     video_dir = Path(get_storage_root()) / "videos"

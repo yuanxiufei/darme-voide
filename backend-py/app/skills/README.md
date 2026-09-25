@@ -19,7 +19,7 @@
 ```
 backend-py/app/skills/
 ├── README.md
-├── <8 个自有 skill>/SKILL.md
+├── <9 个自有 skill>/SKILL.md
 ├── genre-templates/          # 片型模板库（9 个）—— 按「成片类型」组织的端到端入口
 │   ├── library.yaml
 │   └── <skill>/SKILL.md
@@ -81,7 +81,10 @@ priority: 20                                          # 注入顺序，越小越
 3. 所有注入受**字符预算**约束：默认 60000 字符，超出部分按优先级跳过并在注入文本末尾注明；
    用环境变量 `AGENT_SKILL_BUDGET` 覆盖（设为 `0` 关闭限制）
 
-实测：5 个 Agent 默认注入合计 **28,128 字符、零跳过**。
+实测（2026-09-25）：5 个 Agent 默认注入合计 **30,793 字符、零跳过**
+（`storyboard_breaker` 19,446 / `grid_prompt_generator` 8,319 / `script_rewriter` 1,059 /
+`extractor` 1,078 / `voice_assigner` 891；`orchestrator` 无默认绑定）。
+口径：各 Agent `load_agent_skills` 的返回长度，逐次稳定可复现（绑定按 `(priority, id)` 排序）。
 
 > **2026-09-12 两轮体量治理**（结论只对**默认绑定**成立；DB `agent_configs.skills` 一旦有值就按 DB 走，见 §三.1）：
 >
@@ -102,6 +105,14 @@ priority: 20                                          # 注入顺序，越小越
 > 把 `search_reference_prompts`（本地语料检索工具，见 `backend-py/app/agent/tools/corpus_tools.py`）
 > 的**使用时机与红线**写进了这两个 skill —— **工具注册了不等于模型会调用**，
 > 不写进 skill 就等于白注册。多花 810 字符换「9000 条语料真被用上」，这笔是值的。
+
+> **2026-09-25 补缺**：新增 `audio-prompt-library`（`agents: [storyboard_breaker]`、`priority: 40`）
+> —— 分镜的 `sound_effect` / `bgm_prompt` 此前**只有字段定义、没有写法与词表**，是提示词层的一处空档。
+> 渲染后 **+3,135 字符** ⇒ `storyboard_breaker` 16,311 → 19,446、五 Agent 合计 27,658 → 30,793
+> （上面 2026-09-12 那组是治理当天的口径，当前值以 §三 开头的实测行为准）。
+> 该库的核心判据是两个字段**消费面完全不同**：`sound_effect` **会进视频提示词**
+> （入队时被追加为 `[background_audio] …`，成片同步合成音轨）⇒ 绝不能写配乐；
+> `bgm_prompt` **不进任何生成链路**，只入库给后期选曲 ⇒ 不能写曲名 / 歌手 / 在世作曲家。
 
 > ⚠️ **加 skill 前先问一句：它有没有执行入口？** 没有（无 Agent / 无 UI 触发点 / 无代码消费其
 > protocol 字段）就不要写进 `agents:` —— 那只会让每次生成都背上一段用不上的上下文。
@@ -167,6 +178,7 @@ backend-py/app/skills/<lib>/<任意层级>/<skill>/SKILL.md
 - 画风词表（单一事实来源）：`backend-py/app/services/prompt_utils.py`
 - 图像提示词范式（七段结构 / 镜头 / 光线 / 调色 / Danbooru tag）：`backend-py/app/skills/prompt-style-library/SKILL.md`
 - 视频提示词范式（写法判定 / 时间码分段 / 散文式多段 / 中文标签 / 合规红线）：`backend-py/app/skills/video-prompt-library/SKILL.md`
+- 分镜音频字段写法（`sound_effect` 同期声 / `bgm_prompt` 配乐方向的分工与词表）：`backend-py/app/skills/audio-prompt-library/SKILL.md`
 - 提示词**取词来源**（人工维护用，**不注入 Agent**）：`docs/prompt-style-sources.md`
 - 参考图反推：`backend-py/app/skills/style-reference-reverse/SKILL.md`（⚠️ 当前 `agents: []`，**未默认注入**，见 §三）
 
@@ -180,10 +192,12 @@ python backend-py/app/scripts/check_skill_refs.py          # 退出码 1 = 存�
 python backend-py/app/scripts/check_skill_refs.py --verbose # 额外列出被跳过的候选，审计盲区
 ```
 
-**基线约定**：**141 文件 / 96 处待校验 / 致命 0 / 非致命 0**
+**基线约定**：**142 文件 / 104 处待校验 / 致命 0 / 非致命 0**（2026-09-25 实测）
 （跳过计数：上游/外来宿主 5 / 示意引用 2 / 基准不明 3）。
 三类跳过均按判据计数 ⇒ **致命与非致命任何非零都是真回归**，不是噪声。
 新增 / 删除 skill 会改变**文件数**与**待校验处数**（属预期变化）；**致命必须恒为 0**。
+⚠️ 本节基线、§一 的 skill 数量、§三 的注入体量**都是手写数字**，漂移时守卫**不会报警** ⇒
+动完 skill 请顺手重跑本守卫并同步这三处（本次新增 skill 即按此流程更新）。
 
 > 2026-09-12 补一处盲区：`docs/…` 形式的引用此前不在 `REPO_ROOT_PREFIXES` 里，
 > 会落进「基准不明」被**静默跳过** —— 即 skill 正文写 `` `docs/xxx.md` `` 指到空处也不报警。

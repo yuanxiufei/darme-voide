@@ -4,27 +4,116 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**129 套 / 4141 项 / 0 失败**（2026-09-25 深夜 ✓：**128 套按 `SUMMARY:` 收敛出
-4141 项** ✓、另 1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）+ `skip 7` ✓。
-⇒ 本轮较上一跑 **+7 项** ✓（= `infer_llm_config` 5 条 ✓ + 接线 2 条 ✓，套数不变 ✓）。
+最近一次**全量实测**（2026-09-25 深夜 ✓ **在 A5000 目标机**上跑 ✓、耗时 **199s** ✓；**与上一跑同一台机器** ✓
+⇒ 数字**可直接比** ✓）：登记 **132 套** ✓ ⇒ **OK 132 / FAIL 0** ✓；
+其中 **131 套按 `SUMMARY:` 收敛出 4236 项 / 4236 过（红 0 ✓）** ✓、
+1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）、**崩的 0 套** ✓。
+⚠️ **账要这么对**：`131(有摘要) + 1(常量守卫) = 132(登记)` ✓ —— **少一套就是"凭空消失"** ✗✗
+（本轮之前正是 129+1+2 崩 ✓ ⇒ 补完 ffmpeg 那两套才重新"出现"在全量表里 ✓）。
+⚠️ **更早那一跑**（同 2026-09-25 ✓ 但**是那台没显卡的机器**）：129 套 / 4141 项 / 0 失败 ✓；
+跨机还差着 `model_ecosystems_test` ✓ + `comfyui_runs_test` ✓ + `ollama_store_test` ✓（以 `TESTS` 为准 ✓）。
+项数差里**混着"换了机器 + 补了工具"**这两个变量 ✗ ⇒ 只能看"**同一台机器上**改前改后"的对比 ✓✗，跨机比大小是自欺 ✗。
+⭐ **同机改前改后**（这才是能比的 ✓）：`131/4222(红 3，崩 0)` → **`132/4236(红 0，崩 0)`** ⇒
+**+1 套 / +14 项**（全出在 `ollama_store_test`：28 → 42 ✓）✓；那 3 条**环境**红已转绿 ✓（活体那套把 `qwen3:14b` 拉下来 ✓ ⇒ 9/9 ✓）。
+
+⭐⭐⭐ **2026-09-25 深夜「A5000 目标机第一次全量」实测抓到一条产品缺陷** ✗✗（**记在这里，因为它是"判据"最该长成样的例子** ✓）：
+现象：`engine_dual_stream_test` **47/54** ✓✗（红 7 条全在 `pipe.run_sync` 的 `stage: 'sample'` ✓），
+`engine_io_test` / `engine_refine_test` **直接崩、无 `SUMMARY:`** ✓✗ ⇒ 报的话是
+`RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!` ✓
+⇒ **不是测试的锅** ✗：真因在产品 ✓ —— `h3_form.rope_angles` 把 `packed_layout` 用**纯常量**拼的
+坐标表（**天生在 CPU** ✓）与**模型缓冲区** `inv_freq`（跟着 `.to("cuda")` ✓）相乘 ✗ ⇒ **CUDA 上必炸** ✓；
+同族第二处：`forward` 把 `t_vals_for` 拼的时间戳表（同样在 CPU ✓）直接喂给 `time_embedder`（权重在 CUDA ✓）✗。
+⚠️⚠️ **在没显卡的机器上一切正常** ✓✗ ⇒ 这套判据**此前永远抓不到它** ✗（docstring 里那句「到 A5000 换 CUDA 轮子
+即可 ✓（`device` 自动探测 ✓）」当时是**没验过的话** ✓）⇒ 两处都改成**跟随模型/计算设备** ✓（`inv_freq.device` /
+`h.device` ✓，都写了"为什么"的注释 ✓），`engine_dual_stream_test` 当场 **54/54** ✓（真 CUDA ✓）。
+⭐ 另两套（`engine_io` 48/48 ✓、`engine_refine` 23/23 ✓）红的是**测试自己造了 CPU 张量** ✓✗
+（`dual_latents()` / `torch.randn(...)` 没给 device ✓）而 `TorchBackend()` 默认**自动探测** ⇒ 本机选 CUDA ✓ ⇒
+混用当场炸 ✓，报的还是 `aten::slow_conv3d_forward` 这种**指不到原因**的文案 ✗ ⇒ 这两套**显式钉 `device="cpu"`** ✓
+（验的是张量层数学 ✓、与设备无关 ✓；**真 CUDA 的整条管线**由 `engine_dual_stream_test` 覆盖 ✓）。
+⚠️ 产品侧**没动**那两处语义 ✗：调用方给 CPU 张量仍是错 ✓（真输入只有 `static/…`、`frames/…`、`C:\\…` 三类 ✓，
+管线内部张量都在 `self._device` 上 ✓）—— 若要**替调用方搬张量**，得先想清 `condition_first_frame` 的**原地改写**语义 ✗
+（拷一份搬走 ⇒ 调用方的张量就不再被改了 ✓✗）⇒ 留作待议 ✓，不静默改 ✗。
+⚠️ 同轮还发现 5 条**判据自己过期**（不是产品坏 ✓，都改了 ✓、都留了"为什么"✓）：
+① `smoke_test` 断言 `ollama status` 文案含「无法连接」✗ —— 而那**正是** 2026-09-25 要修掉的写法 ✗
+（服务没起时改说「服务未运行 + 盘上读到 N 个」✓，`source="disk"` ✓）⇒ 改成钉**两件事都说清** ✓（477/477 ✓）；
+② `http_logger_test` 用 `client.post(json=…)` ✗ —— httpx 的 `json.dumps` 默认 `ensure_ascii=True` ✓
+⇒ 线上字节是 `\\u65b0\\u5267` ✓ ⇒ 中间件**如实回显**就**不含「新剧」** ✗（这条问的和想验的不是一回事 ✗）
+⇒ 改成**自己发 UTF-8 字节** ✓（顺带钉住"按 UTF-8 解、不是 locale 乱码" ✓；13/13 ✓）；
+③④ `video_generation_test` / `sse_hub_frames_test` 拿 `/abs/x.mp4` 当"绝对路径" ✗ —— **无盘符根路径在
+Windows 上 `os.path.isabs` 是 False** ✓（Python ≥3.13 收紧的 `ntpath` ✓；**3.12 那会儿是 True** ⇒ 这条
+**只在 3.13+/Windows 上才翻** ✓✗）⇒ 判据改成**本平台原生绝对路径** ✓（"仍是绝对 ✓ + 没被拼到 storage 下 ✓"，
+平台无关 ✓；59/59 ✓、24/24 ✓）；
+⑤ `cosyvoice_seam_test` 在**包装源码没就位**时**整套崩**（`spec_from_file_location(None)` ✗）——
+而那份源码是 `.gitignore` 掉的**本地部署产物** ✓（干净检出里必不在 ✓）⇒ 改成**显式 SKIP + 打摘要** ✓
+（`0/0` ✓，比"崩"诚实 ✓：崩了连"这次没验"都看不见 ✗）。⚠️⚠️ **教训**：`skip`/红/崩三者的区别就是记账的全部 ✓ ——
+**崩 = 没摘要 = 在全量表里凭空消失** ✗（本轮**一开始正是这样** ✓：2 套 ffmpeg 系崩着 ⇒ 账是 `129+1+2` ✓、
+那 2 套的 40 项**根本没进统计** ✗；补完 ffmpeg 后变 `131+1` ✓、40 项回来了 ✓）。
+✅ **「像素级校色 / 参考图压缩」那两套的红已解除** ✓（2026-09-25 深夜 ✓ **环境补齐、产品代码一行没动** ✓）：
+本机 PATH 上**原本根本没有 ffmpeg/ffprobe** ✗（之前看到的 7.1 是我自己临时注入诊断目录的 ✓✗）⇒
+`winget install --id Gyan.FFmpeg -e` ⇒ 装到 **9.0.2-full_build** ✓（含真 `ffprobe` ✓，`-show_entries stream=pix_fmt`
+读 PNG 得 `rgb24` ✓）；别名落在 `%LOCALAPPDATA%\\Microsoft\\WinGet\\Links` ✓ ⇒ **重启 shell/IDE 后 PATH 自然生效** ✓
+（本轮是显式注入 `…\\ffmpeg-9.0.2-full_build\\bin` 跑的 ✓）。结果：像素级校色 **24/24** ✓、参考图压缩 **16/16** ✓。
+⚠️⚠️ **诊断过程留下的教训（值得记 ✓）**：**诊断目录里的工具也要验真伪** ✗ —— 这轮我差点把假货当既成事实 ✓✗：
+`D:\\老李skill\\_diag\\bin\\ffmpeg.exe` **是真的** ✓（7.1、87MB、能生成 PNG ✓），但同目录 `ffprobe.exe`（6.1.1、仅 7MB）
+**是残缺二进制** ✗ —— 连**它自己 ffmpeg 产出的** PNG/JPEG 都读不了（`Invalid data found when processing input` ✗）、
+`-demuxers` 输出**为空** ✗；另一个候选 `D:\\老李skill\\_ffprobe_test\\ffprobe.exe`（83.6MB ✓ 看着最像真的 ✓）
+**其实是改名的 `ffmpeg`** ✗ —— `-version` 自报 `ffmpeg version 7.1-…` ✓、`select_streams` 当场 `Unrecognized option` ✗。
+⇒ **判据就一句**：`-version` **加上真读一次目标格式** ✓（只看版本号/文件大小都会被骗 ✗）。
+✅ **那 1 套红已解除** ✓（2026-09-25 夜）：曾 **6/9**（3 条红**同根**：本机**没装产品内置的默认本地文本模型**
+`qwen3:14b` ✗ —— `app/services/ai_configs.py` 的内置预设就是它 ✓ + `gpu_manager` 按 9GB 登记 ✓；
+本机那会儿 14 个模型里**没有 14b** ✗（有 `qwen3:8b` / `qwen3:32b` / `gemma3:27b` / `deepseek-r1:32b` … ✓））。
+⭐⭐ **当时先证明「接缝本身是好的」** ✓（**拿本机真有的 `qwen3:8b` 打** ✓，不改判据 ✓）：`provider=ollama` ⇒ 原生
+`/api/chat` + `think:false` ⇒ **`200 '收到'`** ✓；同模型走 OpenAI 兼容 ⇒ `content=''` / `reasoning='好的，用户让我…'` ✓
+⇒ 印证「三条红 = 环境缺模型 ✓，不是代码坏 ✗」✓。⇒ 两条出路**当时都没擅自做** ✓（**待用户定** ✓）；
+用户选 **①**：`ollama pull qwen3:14b`（**9.3GB** ✓，本机库 14 → **15 个** ✓）⇒ 复跑 **9/9** ✓
+（`PASS ollama: 本地文本默认模型 qwen3:14b 已就位` ✓、`PASS ollama: **真推理**一次 → 原生适配器拿到非空文本` ✓、
+`PASS ollama: 记录成因 —— OpenAI 兼容端点下 content 为空而 reasoning 非空` ✓），skip 仍是 **5**
+（local-sd / comfyui / h3-8765 / cosyvoice 未起 ✓ 按设计 SKIP ✓ **不是通过** ✓）。
 ⚠️⚠️ **记账须与实测对得上** ✗✗：上一轮 docstring 把 `engine_refine_test` 记成 **14 条** ✓✗，实测是 **23 条** ✓
 （多出的 `case_second_pass`/`case_keyframes`/`case_gate` 是上一轮就写好的，记账时没跟上 ✓）⇒ 已校正 ✓；
 早前还把 `engine_cache_guard` 写成 **12/12** ✓✗（实测 20/20 ✓）⇒ ⭐ **判据一次写齐再跑全量** ✗，跑完再报数 ✓。
 
 ⭐⭐ **2026-09-25 夜「本机模型扫描不许依赖外部服务」入账** ✓：新增 `ollama_store_test.py` ✓，
-`TESTS` 登记 **129 → 130** ✓（**登记数是数出来的** ✓；本套实测 **28/28** ✓、全量总数**待实测** ✗ 不推算 ✗）。
+`TESTS` 登记 **129 → 130** ✓（**登记数是数出来的** ✓；本套实测 **28/28** ⇒ ⭐ 真机打脸后补到 **42/42** ✓，见下 ✓）。
+✅ **全量总数已实测补齐** ✓（不再是「待实测」✗）：见本文件开头「最近一次全量实测」✓
+（**132 套 / 132 绿 / 0 红** ✓；本套在其中 ✓ 42/42 ✓）。
 用户口径：**「以后关于扫描电脑内的模型，只要后端服务启动就可以扫描，不要依赖外部服务」** ✓ ——
 原来 `/ollama/status` 只认 `/api/tags` ✗（**唯一**的官方列模型接口 ✓，但要求 `ollama serve` 在跑 ✗）
 ⇒ 「服务没起 ⇒ 本机模型一个都看不见」✗✗（盘上明明有 ✓）。现补 `services/ollama_store.py` ✓：
-把 Ollama 模型库当**文件系统**读 ✓（`OLLAMA_MODELS` > `%LOCALAPPDATA%\\Ollama\\models` > `~/.ollama/models` ✓；
+把 Ollama 模型库当**文件系统**读 ✓（`OLLAMA_MODELS` > **桌面端声明的库根** > `%LOCALAPPDATA%\\Ollama\\models`
+> `~/.ollama/models` ✓；
 清单 `manifests/<registry>/[<ns>/]<model>/<tag>` ✓ + 内容寻址的 `blobs/sha256-*` ✓），**只读** ✓
 （删除仍走服务端 `/api/delete` ✓ —— 那是模型库一致性的边界 ✓）。⚠️ 与 `/api/tags` 的口径差异**是有意的** ✓：
 体积取**盘上真实字节** ✓、blob 缺失计 `missingBlobs` ✓ ⇒「清单在、权重没了 ≠ 能推理」✓（**没查 ≠ 通过** ✓）。
-⚠️ 另记一笔：`comfyui_runs_test.py` 在磁盘上但**未登记进 `TESTS`** ✓✗（本轮未动它 ✓，留待确认是有意排除还是漏登 ✓）。
+⭐⭐⭐ **2026-09-25 夜「离线扫描」被真机打脸一次并修掉** ✗✗→✓（**这条是「看着有库、却扫出 0 个」的活标本** ✓）：
+现象：本机离线路径给出 **0 个模型** ✗，而 `ollama list` / `/api/tags` 明明有 **14 个** ✓；更坏的是
+`is_available()` 还报 **True** ✓✗ ⇒ 前端只会显示「0 个模型」，**连「库找错地方」都看不出来** ✗✗。
+真因（两条，都在挑根逻辑上 ✗）：① 本机库在 `D:\\app\\LLM\\models\\ollama\\models` ✓，而那个 `OLLAMA_MODELS`
+**只被桌面端注入给 `ollama serve` 子进程** ✗（`HKCU`/`HKLM` 环境里都没有 ✗）⇒ 后端的候选里**根本没这个根** ✗；
+② 候选里最靠前的**存在**目录是空壳 `~/.ollama/models` ✗（存在、但既没 `manifests/` 也没 `blobs/` ✓✗）⇒
+按「第一个存在的候选」挑就挑中空壳 ✗ ⇒ `is_available()=True` + `list_models()=[]` ✗✗。
+修法（都**只读** ✓ 仍**不依赖外部服务** ✓）：候选根新增**桌面端配置库里的声明根** ✓ —— 桌面端把用户选的库根
+持久化在 `%LOCALAPPDATA%\\Ollama\\db.sqlite` 的 `settings.models` 列 ✓（真机读出正是
+`D:\\app\\LLM\\models\\ollama\\models` ✓）；挑根条件从「存在」改成「**先挑真能读（有 `manifests/`）的**」✓。
+⚠️ 只读的硬边界：sqlite 一律 `mode=ro` ✓（桌面端此刻也在写这个库 ⇒ 我们绝不能建日志/改文件 ✗）、
+`timeout=0.5s` ✓（被独占也不能把后端卡住 ✗）、读不到／不是 sqlite／没那一列／值不合格 ⇒ **静默 None** ✓ 不抛错 ✓；
+缓存按 `(mtime, 大小)` ✓（请求链路上会反复调用 ⇒ 不能每次开一次 sqlite ✗，桌面端改了就立刻跟上 ✓）。
+实测（本机 ✓）：`models_root()` → `D:\\app\\LLM\\models\\ollama\\models` ✓、离线模型 **14 → 15 个** ✓
+（`qwen3:14b` 拉完 ✓）、生态扫描里 ollama 命中 **15 条** ✓（改前 **0 条** ✗）；`ollama_store_test` **42/42** ✓
+（新增 14 条：真机声明根与**独立读出**的一致性 ✓、空壳 vs 真库的**回归** ✓、库不存在/垃圾文件/缺列/值不合格
+（JSON、相对路径、空）✓、**真抢一次独占锁**（桌面端正写着 ⇒ 静默 None ✓ 也不卡住 ✓）、缓存失效重读 ✓）；
+`model_ecosystems_test` **49/49** ✓、`local_models_test` **89/89** ✓、`smoke_test` **477/477** ✓。
+✅ **另记一笔已结** ✓（2026-09-25 深夜）：`comfyui_runs_test.py` 曾「在磁盘上但**未登记** ✗」⇒ **查完并登记** ✓。
+它不是活体 ✓：自起**真 HTTP stub 上游**（8765 形状 ✓）+ **真 DB**（临时数据根 ✓）⇒ 本机直接 **17/17** ✓
+（唯一一条 ERROR 行是**故意**造的上游失败 ✓：`⑩ 上游失败 ⇒ DB 里 failed 且保留**上游真原因**` ✓）⇒
+登记 **131 → 132** ✓。⚠️ 之所以必须登记而不是"搁着"：**磁盘上有、全量表里没有 = 它会静默腐烂** ✗✗。
 
 ⭐⭐ **2026-09-25 夜「扫描要覆盖世界各大模型，不只 Ollama」入账** ✓：新增 `model_ecosystems_test.py` ✓，
-`TESTS` 登记 **130 → 131** ✓（本套实测 **49/49** ✓；同轮 `ollama_store_test` 28/28 ✓、
-`local_models_test` 89/89 ✓ —— 全量总数仍**待实测** ✗ 不推算 ✗）。
+`TESTS` 登记 **130 → 131** ✓（本套实测 **49/49** ✓；同轮 `ollama_store_test` 当时 **28/28** ✓（后续补到 42/42 ✓）、
+`local_models_test` 89/89 ✓）。
+✅ **全量总数已实测补齐** ✓（**登记数 132 = 数出来的** ✓、**项数以刚跑出来的汇总为准** ✓）：
+**131 套按 `SUMMARY:` 收敛出 4236 项 / 4236 过（红 0 ✓）** ✓ + 1 套常量守卫（0 项 ✓）
++ **崩的 0 套** ✓ —— 详见本文件开头 ✓。
 口径：默认扫描根目录原来只有本仓 `models/`、`local_services/` 与 ComfyUI ✗ ⇒ HuggingFace /
 ModelScope / LM Studio / GPT4All / Jan / llama.cpp 里躺着的模型**扫不到也不报错** ✗✗。
 现补 `services/model_ecosystems.py` ✓（12 个生态的落点表 + 归属判定 + 「怎么才真能用」的实话 ✓）：
@@ -238,6 +327,8 @@ TESTS = [
     ("ComfyUI 能力（客户端 + UI→API 工作流转换；真 HTTP stub ComfyUI）", "h3_comfyui_test.py"),
     ("H3 阶段2 闭环（body → 组装/注入 → 提交 → 轮询 → 取片 → /files → /free）", "h3_stage2_test.py"),
     ("ComfyUI 能力门面（系统/目录/队列/历史/作业/媒体 + 通用工作流）", "comfyui_capability_test.py"),
+    ("ComfyUI 工作流运行（持久化/崩溃恢复/串行租约/产物落点/用量/归因；真 stub 上游 + 真 DB）",
+     "comfyui_runs_test.py"),
     ("自研引擎·加速链（配置解析 + 提交前校验 + 接线；零依赖）", "engine_accel_chain_test.py"),
     ("自研引擎·H3 prompt 契约（声明 / 跳过判据 / 标签 / 任务选择；零依赖）",
      "engine_conditioning_test.py"),
@@ -307,6 +398,8 @@ TESTS = [
      "engine_gguf_to_llm_test.py"),
     ("自研引擎·文本后端（describe 如实报缺 / 未装载拒生成 / encode→生成→decode 链路；缩小版 CPU 可验）",
      "engine_llm_backend_test.py"),
+    ("自研引擎·对话骨架（**骨架从权重元数据取** ✓ 不内置 ✗ / 逐字渲染 / 「没有」与「坏了」两回事 / "
+     "坏了当场拒；缩小版 CPU 可验）", "engine_chat_template_test.py"),
     ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；参考块四类入口 ✓ / 能力自述逐条报缺 / "
      "取整口径必填 / 当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片）", "engine_io_test.py"),

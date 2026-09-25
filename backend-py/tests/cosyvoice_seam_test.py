@@ -126,9 +126,14 @@ def start_server(app: FastAPI) -> tuple[str, uvicorn.Server, threading.Thread]:
     raise RuntimeError("stub 上游没能起来")
 
 
+#: ⚠️ 包装源码**不在本仓跟踪范围** ✓✗（`.gitignore`：`backend-py/app/local_services/*` 只留 ``h3/`` ✓）
+#: ⇒ 干净的检出里它**不存在** ✓ ⇒ 这套必须"没就位就显式跳过" ✗（见 :func:`main`）。
+WRAPPER_PATH = BACKEND_PY / "app" / "local_services" / "cosyvoice" / "server.py"
+
+
 def load_wrapper() -> Any:
     """按路径加载包装（它在 ``app/local_services/`` 下，**不是**应用分层代码，故按文件加载 ✓）。"""
-    path = BACKEND_PY / "app" / "local_services" / "cosyvoice" / "server.py"
+    path = WRAPPER_PATH
     spec = importlib.util.spec_from_file_location("cosyvoice_wrapper_server", path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -151,6 +156,17 @@ def parse_wav(data: bytes) -> dict[str, Any]:
 
 
 def main() -> int:  # noqa: C901
+    # ⚠️ **没就位就显式跳过** ✗（2026-09-25 实测抓到 ✓）：包装源码是**本地部署产物** ✓（不在仓里 ✓），
+    #   原来的 `spec_from_file_location(None)` 会直接抛 `FileNotFoundError` ⇒ **整套崩** ⇒
+    #   连"这条接缝这次根本没验"都看不见 ✗（比红更难查 ✗）⇒ 现在明说。
+    if not WRAPPER_PATH.exists():
+        skip(f"包装源码未就位（{WRAPPER_PATH.relative_to(BACKEND_PY)}）⇒ A/B 两组都验不了"
+             f"（C 组是活体、本就要上游 ✓）")
+        for name in _SKIPS:
+            print("SKIP  " + name + "（源码未就位 ⇒ 该套按设计未验证，**不是通过**）")
+        print()
+        print("SUMMARY: 0/0 passed（skip 1：本源码未就位）")
+        return 0
     base, server, thread = start_server(build_stub_upstream())
     try:
         # ⚠️ 包装在**模块级**读 COSYVOICE_UPSTREAM ⇒ 必须先设环境变量再加载 ✓

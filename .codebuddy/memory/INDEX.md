@@ -87,6 +87,14 @@ Q4_K block（d=1/dmin=0.5/scales 全 0xFF/qs 全 0x11 ⇒ 反量化**每元素�
 `text_generation.generate_text` 加 engine 分支 ✓：provider=engine ⇒ 走自研后端（`asyncio.to_thread` 包同步推理 ✓）而非 HTTP 调 ollama ✗；
 后端缓存（大权重只 load 一次 ✓）。⭐⭐ **文本不依赖 ollama 已闭环** ✓（剩「下载真权重 + chat 模板」这两件数据/细节 ✓）；
 全量 **129 套 / 4141 项 / 0 失败** ✓（+7 项 ✓：infer 5 + 接线 2 ✓）。
+⭐ **㉙ 对话骨架（chat 模板）**（2026-09-25 ✓，用户「继续实现功能」✓）：㉘ 自述「剩『下载真权重 + chat 模板』」⇒ 补 chat 模板 ✓ ——
+新建 `engine/chat_template.py` ✓（**骨架从权重元数据取** ✓ 不内置 ✗✗；`StrictUndefined` ✓✗ 缺变量**报错**而非静默空串 ✓；
+注入 `raise_exception` ✓）；接线 `llm_backend` ✓（load 读骨架 / generate 走骨架 / describe 如实报 ✓，**无骨架时老行为一字未动** ✓）；
+⭐⭐ **「没有模板」与「模板坏了」是两回事** ✗✗（坏了**当场拒** ✗ 不静默回落裸拼接 ✗）；自检 `engine_chat_template_test` **18 项** ✓
+（+1 套 / +18 项 ✓；既有 `engine_llm_backend_test` 8/8 ✓ 未破）；⚠️ 如实报「未核」✗：用骨架时 `add_special_tokens`
+仍 `True` ✓（待真词表定 ✓）。⭐ 同轮**核查用户点的方向** ✓ ⇒ 配音契约**早已闭环** ✓（那条「下一步」过时 ✗）、
+音色克隆**样本面无「静默错误」级真缺口** ✓（详见日志 ⑨ ✓）；⚠️ 清理 `.codebuddy` 踩坑 ✗✗：连带删了 `memory/` 10 篇日志
+⇒ `git restore` 完整恢复 ✓ 守卫复绿 ✓ 致命 0 ✓（教训：删除逐条 `-LiteralPath` ✓）。@486
 
 **`2026-09-23.md`**（H3 混合打包形态 + 掩码坐标空间）
 ① 找洞的路子换成**扫「注释里写着要求、代码不核」的措辞** ✓（`应与`/`必须一致`/`应当与` …）⇒ 多数已在

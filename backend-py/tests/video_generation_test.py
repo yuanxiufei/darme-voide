@@ -185,9 +185,18 @@ def main() -> int:  # noqa: C901
         and _rel.count("static") == 1,
         _rel,
     )
+    # ⚠️ **绝对路径要用"本平台原生"的那条** ✓（2026-09-25 实测）：`/abs/a.mp4` 这种**无盘符的
+    #   根路径**在 Windows 上 `os.path.isabs` 返回 **False** ✓（Python ≥3.13 的严格 `ntpath` ✓
+    #   —— 3.12 那会儿是 True ✓，所以这条**只在 3.13+/Windows 上才翻** ✓✗）⇒ `_absolute_path`
+    #   会把它当相对路径去拼 ✓（`Path(storage)/"/abs/a.mp4"` 还带走了盘符 ⇒ `D:\abs\a.mp4` ✓）。
+    #   ⚠️ **别据此改产品** ✗：真输入只有 `static/…`（相对 ✓）、`frames/…`（相对 ✓）、
+    #   `C:\….mp4`（真绝对 ✓）三类 ✓ —— 无盘符的 `/x` **产品里到不了这里** ✓。
+    #   ⇒ 判据改成"**原生绝对路径不被改写**" ✓，平台无关 ✓ 且照样能抓到"被拼到 storage 下" ✗。
+    _abs_in = str(Path(os.getcwd()) / "abs_probe" / "a.mp4")
     check(
         "probe: 绝对路径不被改写",
-        video_probe._absolute_path("/abs/a.mp4") == "/abs/a.mp4",
+        video_probe._absolute_path(_abs_in) == _abs_in,
+        video_probe._absolute_path(_abs_in),
     )
 
     # ================= 配置 + 入队 =================

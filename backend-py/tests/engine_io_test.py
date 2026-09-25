@@ -5,6 +5,13 @@
 
 ⚠️ 画面内容是**未经训练的参考 VAE** 的输出 ✓ ⇒ 看起来是噪声 ✓（**验的是管道** ✓，不是"H3 能出片" ✗）。
 
+⚠️ **设备口径**（2026-09-25 在 A5000 上实测后加的 ✓）：这套的 latents / mask 是**测试里造的
+CPU 张量** ✓，而 `TorchBackend()` 默认**自动探测设备** ✓ ⇒ 在有卡的机器上会选 `cuda` ✓✗ ——
+两者一混用就当场炸 ✓，而且报的是 `aten::slow_conv3d_forward`/`Expected all tensors to be on the
+same device` 这类**指不到原因**的文案 ✗（**在没卡的机器上一切正常** ✓✗ ⇒ 这台机器上才现形 ✓）。
+⇒ 这套**显式钉 CPU** ✓（验的是 IO / 接缝的数学 ✓ 与设备无关 ✓）；**真 CUDA 的整条管线**由
+`engine_dual_stream_test` 覆盖 ✓（它在 A5000 上真跑 ✓）。
+
 运行::
 
     ./.venv/Scripts/python.exe tests/engine_io_test.py
@@ -284,7 +291,12 @@ def case_backend_pipeline(root: Path) -> None:
     from app.services.engine import weights as weights_mod
     from app.services.engine.torch_backend import TorchBackend
 
-    backend = TorchBackend()
+    # ⚠️ **显式 CPU** ✓（2026-09-25 在 A5000 上实测）：`TorchBackend()` 默认**自动探测** ✓
+    #    ⇒ 本机（有卡 ✓）会选 `cuda` ✓，而本用例的 latents / mask **是在测试里造的 CPU 张量** ✓
+    #    ⇒ 混用当场炸 ✓✗，报的还是 `aten::slow_conv3d_forward` 这种**指不到原因**的文案 ✗（见测试头注 ✓）。
+    #    这几个判据验的是**盘上 IO / 首帧条件化 / VAE 接缝的数学** ✓ ⇒ 设备无关 ✓ ⇒ 钉 CPU ✓。
+    #    GPU 路径**不是没人测** ✓：`engine_dual_stream_test` 整条管线在真 CUDA 上跑 ✓（真机实测 ✓）。
+    backend = TorchBackend(device="cpu")
     if not backend.describe()["available"]:
         skip("torch 不可用 ⇒ 后端整链跳过 ✓")
         return
@@ -346,7 +358,8 @@ def case_first_frame(root: Path) -> None:
           and info["resized"] is True and info["originalWidth"] == 32, info)
     check("㉞ 图片不存在 ⇒ **可行动报错** ✓", "不存在" in str(_media_error(root / "nope.png")))
 
-    backend = TorchBackend()
+    # ⚠️ 同前一处 ✓：本用例的 latents 是测试里造的 **CPU 张量** ✓ ⇒ 钉 CPU ✓（别让"本机有卡"改判据 ✓✗）。
+    backend = TorchBackend(device="cpu")
     if not backend.describe()["available"]:
         skip("torch 不可用 ⇒ 首帧条件集成跳过 ✓")
         return

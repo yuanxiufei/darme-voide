@@ -27,8 +27,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("DATA_ROOT", tempfile.mkdtemp(prefix="ollamastore_"))
@@ -140,6 +142,178 @@ def main() -> int:  # noqa: C901
     check("可用性: 根不存在/manifests 缺失 ⇒ False（不抛错）",
           store.is_available(os.path.join(STORE, "nope")) is False
           and store.is_available(os.path.dirname(BLOBS)) is True)
+
+    # ================= 桌面端声明的库根（真机踩过的假阳性 ✓）=================
+    # 真机现场：桌面端把库装到 ``D:\app\LLM\models\ollama\models``（14 个模型 ✓），而那个
+    # ``OLLAMA_MODELS`` **只注入给 ``ollama serve`` 子进程** ✗ ⇒ 后端候选里只剩两个默认落点；
+    # 其中最靠前的**存在**目录是空壳 ``~/.ollama/models`` ✗ ⇒ ``is_available()`` 报 True 而
+    # ``list_models()`` 返回 ``[]`` ✗✗（前端只会说「0 个模型」，看不出**根挑错了** ✗）。
+    # 下面把「读桌面端声明」与「挑根不能只看存在」两条都钉死 ✓。
+
+    # ① 真机（装了桌面端的机器才跑）：与**独立读出**的结果比对，不允许各说各话 ✓
+    real_db = next((p for p in store.desktop_settings_databases() if os.path.isfile(p)), None)
+    if real_db:
+        expected: str | None = None
+        try:
+            probe = sqlite3.connect(f"{Path(real_db).as_uri()}?mode=ro", uri=True, timeout=0.5)
+            try:
+                if "models" in {row[1] for row in probe.execute("pragma table_info(settings)")}:
+                    row = probe.execute("select models from settings limit 1").fetchone()
+                    expected = (str(row[0]).strip() or None) if row and row[0] is not None else None
+            finally:
+                probe.close()
+        except sqlite3.Error as exc:   # pragma: no cover - 真机库被独占时才可能
+            print(f"SKIP  真机配置库读不了（{exc}）⇒ 这条不判 ✓")
+        store._DECLARED_CACHE.clear()
+        got = store.declared_models_root()
+        check("桌面端: 真机配置库存在 ⇒ 解析值 == 独立读出的值（本机实测 D:\\app\\LLM\\models\\ollama\\models ✓）",
+              got == (os.path.abspath(expected) if expected else None), (real_db, expected, got))
+    else:
+        print("SKIP  本机没装 Ollama 桌面端 ⇒ 真机那条不判（≠ 通过 ✓）")
+
+    saved_local_app_data = os.environ.get("LOCALAPPDATA")
+    saved_app_data = os.environ.get("APPDATA")
+    desktop_app_data = tempfile.mkdtemp(prefix="ollamastore_desktop_")
+    declared_store = tempfile.mkdtemp(prefix="ollamastore_declared_")
+    shell_root = tempfile.mkdtemp(prefix="ollamastore_shell_")    # 存在，但**没有 manifests** ✗
+    scratch_data = tempfile.mkdtemp(prefix="ollamastore_nodb_")
+
+    def _write_declared_db(value: str | None, *, column: str = store.DESKTOP_MODELS_COLUMN,
+                           folder: str = desktop_app_data, payload: bytes | None = None) -> str:
+        """在假 ``LOCALAPPDATA`` 下造桌面端配置库 ✓（``payload`` ⇒ 写个**非 sqlite** 的垃圾文件 ✓）。"""
+        db_path = os.path.join(folder, "Ollama", "db.sqlite")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        # ⚠️ 同一个路径会被反复重造（含「垃圾文件」那种 ✗）⇒ 先清干净，否则 sqlite 会拒绝打开 ✓
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(db_path + suffix)
+            except OSError:
+                pass
+        if payload is not None:
+            with open(db_path, "wb") as handle:
+                handle.write(payload)
+            return db_path
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(f"create table settings (id integer, {column} text)")
+            connection.execute(f"insert into settings (id, {column}) values (1, ?)", (value,))
+            connection.commit()
+        finally:
+            connection.close()
+        return db_path
+
+    # 声明根里放一个**真能读**的模型（有 manifests + blob ⇒ 才叫可读 ✓）
+    os.makedirs(os.path.join(declared_store, "blobs"), exist_ok=True)
+    with open(os.path.join(declared_store, "blobs", f"sha256-{LAYER_A}"), "wb") as handle:
+        handle.write(b"\0" * 1000)
+    manifest_path = os.path.join(declared_store, "manifests", "registry.ollama.ai",
+                                 "library", "qwen3", "8b")
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    with open(manifest_path, "wb") as handle:
+        handle.write(manifest([layer(LAYER_A, 1000)]))
+
+    real_candidates = store.models_root_candidates
+    try:
+        os.environ["LOCALAPPDATA"] = desktop_app_data
+        os.environ["APPDATA"] = desktop_app_data      # 两个候选都指到假目录 ⇒ 不碰真机 ✓
+        _write_declared_db(declared_store)
+        store._DECLARED_CACHE.clear()
+
+        check("桌面端: 从 settings 表读出**自定义**库根（真机 D:\\app\\LLM\\... 那条 ✓）",
+              store.declared_models_root() == os.path.abspath(declared_store),
+              store.declared_models_root())
+
+        candidates = store.models_root_candidates()
+        default_root = os.path.join(desktop_app_data, "Ollama", "models")
+        check("桌面端: 声明根进候选，且排在默认落点**之前**（用户真实设置优先 ✓）",
+              os.path.abspath(declared_store) in candidates and default_root in candidates
+              and candidates.index(os.path.abspath(declared_store)) < candidates.index(default_root),
+              candidates)
+        check("桌面端: 候选仍**绝对路径且不重复**（新增的取值不破坏原有约束 ✓）",
+              all(os.path.isabs(p) for p in candidates)
+              and len({os.path.normcase(p) for p in candidates}) == len(candidates), candidates)
+
+        # ② 假阳性回归（改之前必红 ✓）：空壳目录排前面也不许被选中
+        store.models_root_candidates = lambda: [shell_root, os.path.abspath(declared_store)]
+        check("回归: 空壳目录与真库并存 ⇒ 选**真库**（旧逻辑按「存在」挑 ⇒ 必挑空壳 ✗）",
+              store.models_root() == os.path.abspath(declared_store)
+              and store.is_available() is True and len(store.list_models()) == 1,
+              (store.models_root(), store.is_available()))
+        check("回归: 空壳目录自身**不算可读**（is_available=False ⇒ 才不会假报「有库、0 个模型」✗）",
+              store.is_available(shell_root) is False
+              and store.is_available(os.path.abspath(declared_store)) is True
+              and store.list_models(shell_root) == [],
+              (store.is_available(shell_root), store.list_models(shell_root)))
+        store.models_root_candidates = real_candidates
+
+        # ③ 边界：读不到就必须**静默且不抛错** ✓（桌面端没装 / 库被独占 / 格式变了 ✓）
+        os.environ["LOCALAPPDATA"] = scratch_data
+        os.environ["APPDATA"] = scratch_data
+        store._DECLARED_CACHE.clear()
+        check("桌面端: 配置库不存在 ⇒ None 且不抛错（没装桌面端也照样能用 ✓）",
+              store.declared_models_root() is None)
+
+        os.environ["LOCALAPPDATA"] = desktop_app_data
+        os.environ["APPDATA"] = desktop_app_data
+        _write_declared_db(None, payload=b"not a database")
+        store._DECLARED_CACHE.clear()
+        check("桌面端: 配置库是垃圾文件（不是 sqlite）⇒ None 不抛错",
+              store.declared_models_root() is None)
+
+        _write_declared_db(declared_store, column="working_dir")
+        store._DECLARED_CACHE.clear()
+        check("桌面端: 没有 `models` 那一列 ⇒ None（将来换存储格式别硬读 ✓）",
+              store.declared_models_root() is None)
+
+        # ⚠️ 并发占用是真会发生的（桌面端此刻也在写这个库 ✓）⇒ 必须**真抢一次独占锁**来判 ✓：
+        # 只靠「读不到就 None」的推理不算验过 ✗（超时 0.5s 到了就放弃 ✓ ⇒ 静默 None ✓ 不卡住 ✓）
+        _write_declared_db(declared_store)
+        holder = sqlite3.connect(os.path.join(desktop_app_data, "Ollama", "db.sqlite"), timeout=1.0)
+        try:
+            holder.execute("begin exclusive")
+            store._DECLARED_CACHE.clear()
+            started = time.monotonic()
+            locked_value = store.declared_models_root()
+            waited = time.monotonic() - started
+            check("桌面端: 配置库被**独占**（桌面端正写着）⇒ None、不抛错、也不把后端卡住 ✓",
+                  locked_value is None and waited < 5.0, (locked_value, round(waited, 2)))
+        finally:
+            holder.rollback()
+            holder.close()
+
+        for bad_value, why in ((json.dumps({"models": declared_store}), "JSON"),
+                               ("models/ollama", "相对路径"),
+                               ("", "空值")):
+            _write_declared_db(bad_value)
+            store._DECLARED_CACHE.clear()
+            check(f"桌面端: 声明值不合格（{why}）⇒ 丢弃且**不进候选**（垃圾不能污染候选 ✗）",
+                  store.declared_models_root() is None
+                  and os.path.abspath(declared_store)
+                  not in store.models_root_candidates(),
+                  bad_value)
+
+        # ④ 缓存：桌面端改了路径就得立刻跟上（不能粘住旧值 ✗）
+        _write_declared_db(declared_store)
+        store._DECLARED_CACHE.clear()
+        first_read = store.declared_models_root()
+        _write_declared_db(declared_store + "2")
+        check("桌面端: 配置一变（mtime/大小）⇒ 缓存失效并重读（不粘旧值 ✓）",
+              first_read == os.path.abspath(declared_store)
+              and store.declared_models_root() == os.path.abspath(declared_store + "2"),
+              (first_read, store.declared_models_root()))
+    finally:
+        store.models_root_candidates = real_candidates
+        if saved_local_app_data is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved_local_app_data
+        if saved_app_data is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = saved_app_data
+        store._DECLARED_CACHE.clear()      # ⚠️ 别把假目录的缓存留给后面的路由检查 ✗
+        for folder in (desktop_app_data, declared_store, shell_root, scratch_data):
+            shutil.rmtree(folder, ignore_errors=True)
 
     # ================= blob 定位 =================
     check("blob: `sha256:xxx` ⇒ 落盘名是**短横** `sha256-xxx`（API 里是冒号，容易抄错）",

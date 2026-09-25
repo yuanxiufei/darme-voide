@@ -113,12 +113,18 @@ def main() -> int:  # noqa: C901
             title="日志剧", created_at=stamp, updated_at=stamp))
         drama_id = int(created.lastrowid)
     buffer = io.StringIO()
+    # ⚠️ **显式发 UTF-8 字节** ✓（2026-09-25）：用 `client.post(json=...)` 时，httpx 走
+    #   `json.dumps` 默认 `ensure_ascii=True` ⇒ **线上字节里是 `\u65b0\u5267`** ✓ ⇒ 中间件
+    #   如实回显就**不含"新剧"** ✗（此前这条在 Windows 上一直红 ✓✗ —— 判据问的和它想验的不是一回事 ✗）。
+    #   自己发字节 ⇒ 既钉住"日志里能看到请求体" ✓，又顺带钉住**按 UTF-8 解码** ✓
+    #   （若按 locale 解（zh-CN ⇒ GBK ✓）会成乱码 ⇒ 这条当场红 ✓）。
     with contextlib.redirect_stdout(buffer):
-        response = client.post("/api/v1/dramas", json={"title": "新剧"})
+        response = client.post("/api/v1/dramas", content='{"title": "新剧"}'.encode("utf-8"),
+                               headers={"content-type": "application/json"})
     # ⚠️ `POST /dramas` 成功是 **201**（原 TS 的 `created`），不是 200
     check("缓存: 中间件读过 body 后，路由**仍能解析 JSON**（不是空 body 报 400）",
           response.status_code == 201, (response.status_code, response.text[:80]))
-    check("缓存: 同时确实打出了含请求体的日志行",
+    check("缓存: 同时确实打出了含请求体的日志行（且按 UTF-8 解 ✓ 不是乱码 ✓）",
           "body:" in buffer.getvalue() and "新剧" in buffer.getvalue(),
           buffer.getvalue()[-200:])
 

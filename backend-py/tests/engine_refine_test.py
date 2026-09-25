@@ -83,11 +83,17 @@ def dual_latents(temporal: int = 2, side: int = 2):
 
 
 def backend_or_skip() -> tb.TorchBackend | None:
+    """⚠️ **显式 CPU** ✓（2026-09-25 在 A5000 上实测）：默认 `device=None` ⇒ **自动探测** ✓
+    ⇒ 本机（有卡 ✓）选 `cuda` ✓，而本套的 latents 全是 :func:`dual_latents` 造的 **CPU 张量** ✓
+    ⇒ 混用当场炸 ✓✗（且报的是 `aten::slow_conv3d_forward` 这种指不到原因的文案 ✗）。
+    本套验的是**二采的张量层数学** ✓ ⇒ 设备无关 ✓ ⇒ 钉 CPU ✓；整条管线的真 CUDA 跑
+    由 `engine_dual_stream_test` 覆盖 ✓（真机实测 ✓）。
+    """
     available, reason = tb.torch_available()
     if not available:
         skip(f"没装 torch（{reason} ✓）⇒ 二采张量层验不了 ✓（⚠️ 这不是通过 ✓✗）")
         return None
-    return tb.TorchBackend()
+    return tb.TorchBackend(device="cpu")
 
 
 def case_happy(root: Path) -> None:

@@ -6,9 +6,22 @@
 于是「电脑里明明装着模型，服务没起就一个都看不见」✗✗（前端只显示「未运行」+ 空列表 ✗），
 与「**只要后端跑起来就能扫本机模型**」冲突 ✗。本模块把 Ollama 的模型库当**文件系统**读 ✓：
 
-* 根目录：``OLLAMA_MODELS`` > ``%LOCALAPPDATA%\\Ollama\\models`` > ``~/.ollama/models`` ✓；
+* 根目录：``OLLAMA_MODELS`` > **桌面端声明的库根** > ``%LOCALAPPDATA%\\Ollama\\models``
+  > ``~/.ollama/models`` ✓；
 * 清单：``manifests/<registry>/[<namespace>/]<model>/<tag>`` ✓（JSON ✓ 一个 tag 一个文件 ✓）；
 * 内容：``blobs/sha256-<hex>`` ✓（**内容寻址** ⇒ 多个 tag 共享同一个 blob ⇒ 求和前先按 digest 去重 ✓）。
+
+## ⚠️ 两个踩过的真坑（2026-09-25 真机复现 ✓）
+
+1. **桌面端把库装到自定义目录时，后端进程看不见那个环境变量** ✗✗：
+   ``OLLAMA_MODELS`` 只被 Ollama 桌面端**注入给 ``ollama serve`` 子进程** ✓，
+   ``HKCU``/``HKLM`` 环境里**没有** ✗ ⇒ 后端只剩两个默认落点可选 ✗。
+   真机实测：库在 ``D:\\app\\LLM\\models\\ollama\\models``（14 个模型 ✓），
+   而候选里最靠前的**存在**目录是空壳 ``~/.ollama/models`` ✗ ⇒ ``list_models()`` 返回 ``[]`` ✗✗。
+   正解：桌面端把该路径**持久化在自己的配置库里**（``settings.models`` ✓）⇒ 读它 ✓（只读、仍不依赖服务 ✓）。
+2. **「目录存在」不等于「库可读」** ✗：只有 ``manifests/`` 在，才真的列得出模型 ✓。
+   按「存在」挑根 ⇒ ``is_available()`` 报 True 而列表是空 ✗✗（最坏的一种：前端显示「0 个模型」，
+   连「库找错地方」都看不出来 ✗）⇒ 挑根条件改成**先挑真能读的** ✓。
 
 ## 边界（本仓铁律：**没查 ≠ 通过** ✓）
 
@@ -25,12 +38,15 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator
 
 from .ollama import format_bytes
 
 __all__ = [
     "blob_path",
+    "declared_models_root",
+    "desktop_settings_databases",
     "is_available",
     "list_models",
     "models_root",
@@ -45,18 +61,112 @@ BLOB_DIR = "blobs"
 DEFAULT_REGISTRY = "registry.ollama.ai"
 LIBRARY_NAMESPACE = "library"
 
+#: Ollama **桌面端**配置库的位置（相对 Windows 的 ``LOCALAPPDATA`` / ``APPDATA`` ✓）
+DESKTOP_DB_RELATIVE = os.path.join("Ollama", "db.sqlite")
+
+#: 桌面端 ``settings`` 表里存「模型库根」的列名 ✓（真机实测 ✓ 不是猜的 ✓）
+DESKTOP_MODELS_COLUMN = "models"
+
+#: ⚠️ 请求链路上 :func:`models_root` 会被反复调用 ⇒ 不能每次都开一次 sqlite ✗
+#: 缓存形如 ``db 路径 -> (mtime, 大小, 声明值)`` ✓：文件一变就重读 ✓
+_DECLARED_CACHE: dict[str, tuple[float, int, str | None]] = {}
+
+
+def desktop_settings_databases() -> list[str]:
+    """Ollama 桌面端配置库的候选位置 ✓（Windows 真机实测在 ``%LOCALAPPDATA%\\Ollama\\db.sqlite`` ✓）。"""
+    found: list[str] = []
+    for variable in ("LOCALAPPDATA", "APPDATA"):
+        base = os.environ.get(variable)
+        if not base or not base.strip():
+            continue
+        path = os.path.join(os.path.abspath(base.strip()), DESKTOP_DB_RELATIVE)
+        if path not in found:
+            found.append(path)
+    return found
+
+
+def _valid_declared_root(value: Any) -> str | None:
+    """桌面端声明值 → 可用的**绝对路径** ✓（不合格 ⇒ ``None`` ✓：绝不能把垃圾塞进候选 ✗）。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().strip('"').strip("'")
+    if not text or len(text) > 4096:
+        return None
+    # JSON / 多行 / 数组 ⇒ 那不是「一个路径」✗（版本升级换过存储格式时别硬读 ✓）
+    if any(mark in text for mark in ("\n", "\r", "\t", "{", "}", "[", "]")):
+        return None
+    if not os.path.isabs(text):
+        return None
+    return os.path.abspath(text)
+
+
+def _read_declared_root(database: str) -> str | None:
+    """真的去读一次桌面端配置库 ✓（**只读** ✓ 短超时 ✓ 桌面端正用着也不能把后端卡住 ✗）。"""
+    try:
+        import sqlite3
+    except ImportError:   # pragma: no cover - 标准库缺失才可能
+        return None
+
+    connection = None
+    try:
+        # ⚠️ 必须 ``mode=ro``：桌面端此刻也在写这个库 ⇒ 我们绝不能建日志/改文件 ✗
+        connection = sqlite3.connect(f"{Path(database).as_uri()}?mode=ro", uri=True, timeout=0.5)
+        columns = {row[1] for row in connection.execute("pragma table_info(settings)")}
+        if DESKTOP_MODELS_COLUMN not in columns:
+            return None
+        row = connection.execute(
+            f"select {DESKTOP_MODELS_COLUMN} from settings limit 1").fetchone()
+    except sqlite3.Error:
+        return None      # 不是 sqlite / 被独占 / 版本不认识 ⇒ 当它没说 ✓ 不抛错 ✓
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:   # pragma: no cover - 关不上也不该影响调用方 ✓
+                pass
+    return _valid_declared_root(row[0]) if row else None
+
+
+def declared_models_root() -> str | None:
+    """桌面端**声明**的模型库根 ✓（读不到 ⇒ ``None`` ✓ 不抛错 ✓）。
+
+    ⭐ 为什么非得读它：桌面端把库装到自定义目录时，那个 ``OLLAMA_MODELS``
+    只注入给 ``ollama serve`` 子进程 ✗ ⇒ 后端自己看不见 ✗（真机复现过 ✓）。
+    """
+    for database in desktop_settings_databases():
+        try:
+            stat = os.stat(database)
+        except OSError:
+            continue      # 没装桌面端 / 没这个库 ⇒ 静默跳过 ✓
+        cached = _DECLARED_CACHE.get(database)
+        if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+            if cached[2]:
+                return cached[2]
+            continue
+        value = _read_declared_root(database)
+        _DECLARED_CACHE[database] = (stat.st_mtime, stat.st_size, value)
+        if value:
+            return value
+    return None
+
 
 def models_root_candidates() -> list[str]:
-    """候选模型库根目录（**保序** ✓：环境变量 > Windows 新版落点 > 经典落点 ✓）。"""
+    """候选模型库根目录（**保序** ✓：环境变量 > 桌面端声明 > Windows 新版落点 > 经典落点 ✓）。"""
     candidates: list[str] = []
+    seen: set[str] = set()
 
     def add(value: str | None) -> None:
-        if value and value.strip():
-            cleaned = os.path.abspath(value.strip())
-            if cleaned not in candidates:
+        if value and str(value).strip():
+            cleaned = os.path.abspath(str(value).strip())
+            # ⚠️ 按 ``normcase`` 去重：Windows 上 ``D:\\app`` 与 ``d:\\app`` 是同一个目录 ✗
+            key = os.path.normcase(cleaned)
+            if key not in seen:
+                seen.add(key)
                 candidates.append(cleaned)
 
     add(os.environ.get("OLLAMA_MODELS"))
+    # ⭐ 桌面端自己选的库根（放在默认落点**之前** ✓：那是用户真实生效的设置 ✓）
+    add(declared_models_root())
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         # Ollama 0.3.x 起在 Windows 上改落这里 ✓（老装机仍是 ``~/.ollama/models`` ✓）
@@ -68,12 +178,19 @@ def models_root_candidates() -> list[str]:
 
 
 def models_root() -> str:
-    """实际使用的模型库根 ✓：**第一个存在的候选** ✓；都不存在 ⇒ 返回经典落点 ✓。
+    """实际使用的模型库根 ✓：**第一个真能读的候选** ✓ > 第一个存在的候选 ✓ > 经典落点 ✓。
 
     ⚠️ 都不存在时返回候选而不是空串 —— 调用方拿它拼「装在哪才找得到」的提示 ✓
     （本仓口径：说得出**怎么让它可查** ✓，而不是干巴巴一句「没找到」✗）。
+
+    ⚠️ **不能只挑「存在的」**：空壳目录（例如只有 ``~/.ollama/models`` 这个空目录 ✗）
+    会让 :func:`is_available` 报 True、而 :func:`list_models` 返回空 ✗✗
+    ⇒ 前端只会说「0 个模型」，看不出是**根挑错了** ✗（真机踩过 ✓）。
     """
     candidates = models_root_candidates()
+    for candidate in candidates:
+        if is_available(candidate):
+            return candidate
     for candidate in candidates:
         if os.path.isdir(candidate):
             return candidate

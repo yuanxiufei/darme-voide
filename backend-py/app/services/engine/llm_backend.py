@@ -13,8 +13,12 @@
 
 ## 生成（generate ✓）
 
-``prompt(+system) → tokenizer.encode → llm.generate_llm → tokenizer.decode`` ✓。
-⚠️ **chat 模板未做** ✗（Qwen3 的 ``<|im_start|>`` 对话骨架 ✗ 后续 ✓ —— 现在是裸拼接 ✓）。
+``prompt(+system) → 对话骨架 → tokenizer.encode → llm.generate_llm → tokenizer.decode`` ✓。
+
+对话骨架（chat 模板 ✓ **2026-09-25 补** ✓）走 :mod:`chat_template` ✓：模板**从权重元数据取** ✓
+（``tokenizer.chat_template`` ✓ —— **不内置任何模型骨架** ✗✗）；**没有** ⇒ 按裸拼接走 ✓（``describe``
+如实标 ✓）、**坏了** ⇒ **当场拒** ✗（不静默回落裸拼接 ✗✗）。⚠️ 用骨架时 ``add_special_tokens`` 仍是
+``True`` ✓ —— **未核** ✗（真权重的 ``tokenizer.ggml.add_bos_token`` 该不该跟？待有真词表时定 ✓✗）。
 
 ## 两条约束
 
@@ -26,6 +30,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import chat_template
+from . import gguf
 from . import gguf_to_llm
 from . import llm as llm_mod
 from . import tokenizer_hub
@@ -52,6 +58,9 @@ class LlmBackend:
         self._model: Any = None
         self._hub: Any = None
         self._load_error: str = ""
+        self._chat_template: chat_template.ChatTemplate | None = None
+        self._chat_template_error: str = ""
+        self._chat_template_note: str = "未读取 ✓（load() 之后才有结论 ✓）"
 
     # ── 自述 ✓
     def describe(self) -> dict[str, Any]:
@@ -74,6 +83,11 @@ class LlmBackend:
             "ggufPath": self._gguf_path or "",
             "tokenizerPath": self._tokenizer_path or "",
             "loadError": self._load_error,
+            "chatTemplate": {
+                "present": self._chat_template is not None,
+                "origin": self._chat_template.origin if self._chat_template is not None else "",
+                "note": self._chat_template_note,
+            },
         }
 
     # ── 装载 ✓
@@ -96,6 +110,7 @@ class LlmBackend:
             self._hub = None
             self._load_error = str(err)
             raise
+        self._read_chat_template()
         return self
 
     # ── 生成 ✓
@@ -107,11 +122,43 @@ class LlmBackend:
 
         import torch  # noqa: PLC0415
 
-        text = (system + "\n\n" + prompt) if system else prompt
-        ids = self._hub.encode(text, add_special_tokens=True)
+        ids = self._hub.encode(self._build_prompt_text(prompt, system), add_special_tokens=True)
         ids_tensor = torch.tensor([ids], dtype=torch.long)
         out = llm_mod.generate_llm(
             self._model, ids_tensor, max_new_tokens=max_new_tokens, temperature=temperature,
             top_p=top_p, top_k=top_k, eos_id=self._config.eos_id,
         )
         return self._hub.decode(out[0].tolist(), skip_special_tokens=True).strip()
+
+    # ── 对话骨架 ✓（2026-09-25 补 ✓）
+    def _read_chat_template(self) -> None:
+        """读**权重自带的**对话骨架 ✓（只读头部 ✓ 毫秒级 ✓）。
+
+        ⚠️ 模板出问题**不让装载失败** ✗（装载与骨架无关 ✓）—— 但**必须留痕** ✓：``describe`` 如实报 ✓，
+        「存在但坏了」在 ``generate`` 时**当场拒** ✗（不静默回落裸拼接 ✗✗）。
+        """
+        self._chat_template = None
+        self._chat_template_error = ""
+        try:
+            info = gguf.inspect(self._gguf_path or "")
+            self._chat_template = chat_template.ChatTemplate.from_metadata(info.metadata)
+        except chat_template.ChatTemplateError as err:
+            self._chat_template_error = str(err)
+            self._chat_template_note = f"模板**存在但不可用** ✗：{err}"
+            return
+        except Exception as err:  # noqa: BLE001 —— 读不出元数据 ⇒ 按「没有模板」报 ✓ 不假装有骨架 ✗
+            self._chat_template_note = (
+                f"元数据读不出模板 ⇒ 按**没有模板**处理 ✓（{type(err).__name__}: {err}）")
+            return
+        self._chat_template_note = (
+            f"用上权重自带的骨架 ✓（来源 ``{self._chat_template.origin}`` ✓）"
+            if self._chat_template is not None
+            else "权重元数据里没有 chat 模板 ✓ ⇒ 按**裸拼接**走 ✗（不是「用过骨架」✗）")
+
+    def _build_prompt_text(self, prompt: str, system: str | None = None) -> str:
+        """``(prompt, system)`` ⇒ 送进词表的文本 ✓（有骨架走骨架 ✓ / 没有走裸拼接 ✓ / 坏了 ⇒ 拒 ✗✗）。"""
+        if self._chat_template_error:
+            raise chat_template.ChatTemplateError(self._chat_template_error)
+        if self._chat_template is not None:
+            return self._chat_template.render(chat_template.build_messages(prompt, system))
+        return (system + "\n\n" + prompt) if system else prompt

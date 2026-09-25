@@ -779,6 +779,15 @@ def _build_torch_parts() -> dict[str, Any]:
         #    而且真权重那边 `inv_freq` 本来就是 fp32 ✓ ⇒ 混算没有意义 ✗。
         positions = positions.to(torch.float32)
         inv_freq = inv_freq.to(torch.float32)
+        # ⚠️⚠️ **设备必须对齐** ✗（2026-09-25 在 A5000 上实测抓到 ✓）：`positions` 是
+        #    `packed_layout` 用**纯常量**拼的坐标表 ✓（`frame_grid_coords` / `video_t_grid` /
+        #    `audio_grid` 里那几处 `torch.tensor(...)` 都没有 `device=` ✓）⇒ 它**天然在 CPU** ✓；
+        #    而 `inv_freq` 是**模型缓冲区** ✓（`self.rope` 的 buffer ✓ ⇒ 跟着 `.to("cuda")` 走 ✓）。
+        #    两者一乘 ⇒ CUDA 上当场 "Expected all tensors to be on the same device, but found
+        #    at least two devices, cuda:0 and cpu!" ✗✗（**CPU 上一切正常** ⇒ 此前挡不住 ✓✗，
+        #    而报错文案是"设备混用" ✗ —— 指不到"是布局坐标没搬" ✓）。
+        #    以**模型那侧**（`inv_freq`）为准 ✓：坐标表是派生物 ✓，跟随模型 ✓ 而不是反过来 ✗。
+        positions = positions.to(device=inv_freq.device)
         per_axis = positions.unsqueeze(-1) * inv_freq.reshape(1, 1, -1)   # [S, 3, F] ✓
         time_axis, height_axis, width_axis = per_axis.unbind(dim=1)
         half = torch.cat((time_axis, height_axis, width_axis), dim=-1)    # [S, 3F] ✓ t,h,w ✓
@@ -992,7 +1001,13 @@ def _build_torch_parts() -> dict[str, Any]:
 
             # ⚠️ 坐标**直接用布局产出的那份** ✓（与段表同一处算出 ✓ ⇒ 不可能"不同序"✓✗）
             angles = rope_angles(layout["position_ids"], self.rope.inv_freq)
-            t_emb = self.time_embedder(t_vals).to(h.dtype)
+            # ⚠️⚠️ **设备要对齐** ✗（2026-09-25 在 A5000 上实测抓到 ✓）：`t_vals` 是
+            #    :func:`t_vals_for` 用**纯数值**拼的时间戳表 ✓ ⇒ **天然在 CPU** ✓；
+            #    而 `time_embedder` 的权重在**模型设备**上 ✓ ⇒ 直接喂进去在 CUDA 上当场
+            #    "Expected all tensors to be on the same device ... mat1 is on cpu, different
+            #    from other tensors on cuda:0" ✗✗（**CPU 上一切正常** ✓✗ ⇒ 此前挡不住 ✓✗）。
+            #    以 `h`（已在计算设备上 ✓）为准 ✓：时间戳表是派生物 ✓，跟随计算设备 ✓。
+            t_emb = self.time_embedder(t_vals.to(device=h.device)).to(h.dtype)
             for block in self.blocks:
                 h = block(h, t_emb, mod_segments, angles, self.rot_dim)
 

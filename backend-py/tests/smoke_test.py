@@ -1693,9 +1693,16 @@ with TestClient(app) as client:
               and st["models"][1]["size_label"] == "8.4 GB"
               and st["models"][1]["digest"] == "abcdef123456", str(st)[:300])
         r = client.post("/api/v1/ai-configs/ollama/status", json={"base_url": dead_url})
-        check("ollama status: 不可达 -> running=false + 提示文案",
-              r.json()["data"]["running"] is False
-              and "无法连接" in r.json()["data"]["message"], r.text[:200])
+        # ⚠️ **文案口径 2026-09-25 变了** ✓（不是文案自己漂的 ✓）：服务没起时**照样把盘上的模型读出来** ✓
+        #   （`source="disk"` ✓）⇒ 再说"无法连接"就把「服务未运行」和「本机没有模型」混成一句 ✗✗，
+        #   而那正是当时要修的那个 bug ✗。⇒ 现在的契约是**两件事都说清** ✓：
+        #   ① 服务未运行 ✓；② 磁盘模型库读到几个 ✓（可查看/选用 ✓ 推理仍需先起服务 ✓）。
+        #   ⚠️ 磁盘库此时按**真机**读 ✓ ⇒ 有模型说"读出 N 个"✓、没有说"也没读到模型"✓ ⇒ 两条都含"磁盘模型库" ✓。
+        st = r.json()["data"]
+        check("ollama status: 不可达 -> running=false + 说清「服务未运行」与盘上模型",
+              st["running"] is False and st["source"] == "disk"
+              and "未运行" in st["message"] and "磁盘模型库" in st["message"],
+              str(st)[:300])
 
         # 模型列举：Ollama 允许省略 tag（qwen3 匹配 qwen3:14b）
         r = client.post("/api/v1/ai-configs/models",
