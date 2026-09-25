@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from ..core.db import engine, get_conn, get_tx
 from ..core.models import storyboards
+from ..core.request_utils import read_json
 from ..core.response import bad_request, not_found, parse_param_id, success
 from ..services.ffmpeg_compose import compose_storyboard
 from ..services.task_logger import log_task_error, log_task_start, log_task_success
@@ -52,19 +53,34 @@ async def _run_batch(episode_id: int, storyboard_ids: list[int]) -> None:
 
 
 @router.post("/storyboards/{storyboard_id}/compose")
-async def compose_one(storyboard_id: str):
+async def compose_one(storyboard_id: str, request: Request):
     """合成单个镜头（把该镜视频 + 配音 + 字幕烧成成片片段）。
 
     ⚠️ 不注入数据库连接：``compose_storyboard`` 自己开短事务写
     ``status`` / ``composed_video_url`` / ``tts_audio_url`` / ``subtitle_url``。
     若借用请求连接，**失败路径会被依赖的 rollback 抹掉**（写不进 ``compose_failed``）。
+
+    可选 body 字段（2026-09-24 接 ✓，**默认 false ⇒ 行为一字不差** ✗）：
+    ``mixModelAudio``（把视频自带的音轨与配音**混合** ✓✗ 顶替会让模型声直接消失 ✓）、
+    ``voiceMode``（``mix`` 混合 / ``replace`` 顶替 ✓）、``voiceVolume``（配音音量 ✓）。
     """
     sid = parse_param_id(storyboard_id)
     if sid is None:
         return not_found("Invalid storyboard id")
+    body = await read_json(request)
+    voice_mode = str(body.get("voiceMode") or "mix").strip().lower()
+    if voice_mode not in ("mix", "replace"):
+        return bad_request(f"voiceMode 只能是 mix / replace（收到 {voice_mode!r} ✗）")
+    raw_volume = body.get("voiceVolume")
+    try:
+        voice_volume = float(1.0 if raw_volume in (None, "") else raw_volume)
+    except (TypeError, ValueError):
+        return bad_request(f"voiceVolume 必须是数字（收到 {raw_volume!r} ✗）")
     try:
         log_task_start("ComposeAPI", "single-compose", {"storyboardId": sid})
-        composed_url = await compose_storyboard(sid)
+        composed_url = await compose_storyboard(
+            sid, mix_model_audio=bool(body.get("mixModelAudio")),
+            voice_mode=voice_mode, voice_volume=voice_volume)
         log_task_success("ComposeAPI", "single-compose", {"storyboardId": sid, "output": composed_url})
         return success({"id": sid, "composed_video_url": composed_url})
     except Exception as err:  # noqa: BLE001

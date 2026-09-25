@@ -84,6 +84,25 @@ except ImportError:  # pragma: no cover
     import comfyui_client as cc  # type: ignore[no-redef]
     import workflow as wf  # type: ignore[no-redef]
 
+# ── 契约层（提交前那两道关 ✓）：**包内导入**与**独立部署**（``python server.py`` ✓）都要能起来 ✓✗ ──
+#    ⚠️ 兄弟模块自己 import ``app.*``（``accel.py`` / ``prompt.py`` ✓）⇒ **仓库根必须先补进 sys.path** ✗
+#    （独立部署时 cwd 就在本目录 ✓，``app`` 根本不在路径上 ✓✗）。
+CONTRACT_ERROR: str | None = None
+_REPO_ROOT = Path(__file__).resolve().parents[3]        # …/backend-py（含 ``app/`` ✓）
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+try:  # pragma: no cover - 取决于加载方式
+    from . import accel as accel_seam                    # noqa: E402
+    from . import prompt as prompt_contract              # noqa: E402
+except ImportError:  # pragma: no cover
+    try:
+        import accel as accel_seam                       # type: ignore[no-redef]
+        import prompt as prompt_contract                 # type: ignore[no-redef]
+    except ImportError as err:
+        accel_seam = None                                # type: ignore[assignment]
+        prompt_contract = None                           # type: ignore[assignment]
+        CONTRACT_ERROR = f"{type(err).__name__}: {err}"
+
 PORT = int(os.environ.get("H3_PORT") or "8765")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188")
 TIMEOUT = float(os.environ.get("H3_TIMEOUT") or "1800")
@@ -165,6 +184,178 @@ def _widget_field(api_node: dict[str, Any], fallback: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 # 组装：body → API 格式工作流
 # ══════════════════════════════════════════════════════════════════════════
+def _as_list(raw: Any) -> list[Any]:
+    """**两种形态都认** ✗✗：``reference_audio`` 可能是列表 ✓、也可能是 JSON 字符串 ✓。
+
+    ⚠️ 只认一种 ⇒ 另一种被判成「0 路」⇒ 编号校验/声明全部按空的算 ✓✗（正是「静默错」的形状 ✓）。
+    """
+    import json
+
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, tuple):
+        return list(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: str) -> str:
+    """提示词过 **H3 prompt 契约** ✓（提交前 ✓）：文本写法 → 标签、**核编号**、**该追加的声明必须追加** ✗。
+
+    ⭐ 钉的就是那条实测坑 ✗✗：**只写 ``<Audio 1>`` 绑定句不算声明** ✓ —— 照标签跳过的话，
+    自动声明被吞、模型**不复用参考音频**（实测相关性≈0 ✓✗）。所以这一段必须在**提交前**跑 ✓。
+
+    ⚠️ 编号错 ⇒ **当场拒** ✗（``ConditioningError`` 冒上去 ⇒ 任务带可行动文案失败 ✓）；
+    ⚠️ 契约层没装上 ⇒ **如实告警「没跑」** ✗ 而不是当通过 ✓✗。
+    """
+    if prompt_contract is None:
+        _warn(task, f"H3 提示词契约层没装上（{CONTRACT_ERROR}）⇒ **提交前那道关没跑** ✗（没查不是通过 ✓✗）")
+        return prompt_text
+    cond_mod = getattr(prompt_contract, "cond", None)
+    audios = len(_as_list(body.get("reference_audio")))
+    pictures = len(_as_list(body.get("subject_reference")))
+    # 参考音频一律是**音色参考** ✓ ⇒ 协议关系 ``reference`` ✓（⚠️ 别用 ``fully_copy`` ✗ ——
+    # 那是「逐字复制内容」的意思 ✓，会把参考音频的台词念出来 ✓✗）
+    refs = [cond_mod.AudioReference(index=index + 1, relation="reference")
+            for index in range(audios)] if cond_mod is not None else []
+    settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+    result = prompt_contract.build_prompt(
+        prompt_text, pictures=pictures, audios=audios, videos=0, audio_refs=refs,
+        video_count=0, global_prompt=str((settings or {}).get("global_prompt") or ""),
+    )
+    _update(task, prompt_contract=result["plan"], prompt_markup=result["markup"],
+            prompt_prefixed=result["prefixed"])
+    return str(result["prompt"])
+
+
+def _io_ref(api: Dict[str, Any], class_type: str, slot: int = 0) -> list[Any] | None:
+    """在 API 图里找某个类节点的输出引用 ✓ ⇒ ``[节点id, 槽位]``（找不到 ⇒ ``None`` ✓）。"""
+    for node_id, node in api.items():
+        if isinstance(node, dict) and node.get("class_type") == class_type:
+            return [str(node_id), slot]
+    return None
+
+
+def _rewire(api: Dict[str, Any], old_ref: list[Any], new_ref: list[Any]) -> int:
+    """把图里所有指向 ``old_ref`` 的输入改指 ``new_ref`` ✓ ⇒ 改了几处 ✓。
+
+    ⚠️ 必须**按值逐处改** ✗（漏一处 ⇒ 那条流还在用没加速的模型 ✓✗，图看起来还是对的 ✓）。
+    """
+    changed = 0
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for key, value in list(inputs.items()):
+            if isinstance(value, list) and len(value) == 2 and list(value) == list(old_ref):
+                inputs[key] = list(new_ref)
+                changed += 1
+    return changed
+
+
+def _apply_accel_chain(client: "cc.ComfyUIClient", task: Dict[str, Any],
+                       api: Dict[str, Any]) -> None:
+    """把**加速链**接到图上 ✓（配置驱动 ✓；口径在 :mod:`app.services.engine.accel_chain` ✓）。
+
+    配置：``body.settings.accel_chain = {"chain": [...]}``（或裸数组 ✓）—— 没配 ⇒ **什么都不做**
+    （不告警 ✓，这是默认形态 ✓）。
+
+    三条判据（都是「出问题会静默变样」的形状 ✓✗）：
+    1. ⭐ 判 ``error`` 的环 ⇒ ``build=None`` ⇒ **整条链不上** ✓ 并**点名理由** ✗（静默少一环 = 图悄悄变样 ✓✗）；
+    2. ⭐ ComfyUI 连不上 ⇒ 判「**没查**」✗（``unchecked`` ✓）⇒ 照样不上链 ✓，但**必须说清是「没查」不是「没问题」** ✓✗；
+    3. ⭐ 加速链是**提速件** ✓ 不是正确性 ⇒ 装不上就**退回未加速**跑 ✓（比拒单合理 ✓），但这一定得在日志里看得见 ✓。
+    """
+    settings = task.get("body", {}).get("settings")
+    raw_chain = settings.get("accel_chain") if isinstance(settings, dict) else None
+    if not raw_chain:
+        return
+    if accel_seam is None:
+        _warn(task, f"加速链配置给了，但接缝层没装上（{CONTRACT_ERROR}）⇒ **没核也没接** ✗"
+                    f"（没查不是通过 ✓✗；这一单按未加速跑 ✓）")
+        return
+    model_ref = _io_ref(api, "UNETLoader") or _io_ref(api, "CheckpointLoaderSimple")
+    clip_ref = _io_ref(api, "CLIPLoader")
+    if model_ref is None or clip_ref is None:
+        _warn(task, f"模板里没找到 UNETLoader/CLIPLoader（{model_ref} / {clip_ref} ✓）⇒ "
+                    f"加速链**没接** ✗（链路要从这两条流上串 ✓）")
+        return
+    report = accel_seam.check_chain(client, raw_chain, model=model_ref, clip=clip_ref)
+    _update(task, accel_chain={"counts": report["counts"], "blocked": report["blocked"],
+                               "unreachable": report["unreachable"],
+                               "statuses": report["statuses"],
+                               "build": None if report["build"] is None else report["build"]["enabled"]})
+    if report["unreachable"]:
+        _warn(task, f"加速链**没核**（{report['unreachable']}）✗ ⇒ 这一单**不上链** ✓✗"
+                    f"（没查不是通过 ✓）")
+    if report["build"] is None:
+        for status in report["statuses"]:
+            for issue in status["issues"]:
+                if status["blocksSubmit"]:
+                    _warn(task, f"加速项 {status['id']} 判 error ✗ ⇒ 整条链不上：{issue['message']}")
+        return
+    build = report["build"]
+    api.update(build["nodes"])
+    rewired = _rewire(api, model_ref, build["model"])
+    if list(build["clip"]) != list(clip_ref):
+        rewired += _rewire(api, clip_ref, build["clip"])
+    skipped = ", ".join(f"{item['id']}（{item['reason']}）" for item in build["skipped"]) or "无"
+    # ⚠️ 接上了**不是** warn ✗（"warnings" 是给「出问题了」用的 ✓）；如实记在任务里 ✓ 让日志看得见 ✓
+    _update(task, accel_rewired=rewired, accel_enabled=list(build["enabled"]),
+            accel_skipped=skipped)
+    if rewired == 0:
+        _warn(task, "加速链建好了节点，但**没有任何一条输入指向它** ✗ ⇒ 等于没加速 ✓✗"
+                    "（模板结构与预期不符？检查 ✓）")
+
+
+def _pick_checkpoint(client: "cc.ComfyUIClient", task: Dict[str, Any], requested: str,
+                     checkpoint_map: Any) -> str | None:
+    """选 UNET 权重 ✓ ⇒ 文件名字符串（``None`` = 沿用模板默认 ✓）。
+
+    ⭐ **调用方给的 ``body.model`` 优先** ✗✗（2026-09-24 补 ✓）—— 后端已经按 H3 形态规则
+    （有参考素材 ⇒ 只能 Ref2VA ✓）选过一次了 ✓；这里**再按场景猜一遍**就是「同一件事两处判断」✓✗，
+    两份判据还会**互相覆盖**（后端按参考素材选的权重被这里按 ``scene`` 猜的顶掉 ✓✗）。
+    此前本函数的实际行为更糟：``body.model`` **从来没被读过** ✗ ⇒ 后端算出来的权重
+    **静默落空**、永远用模板自带的那一个 ✓✗（「能力接不出去不算功能」✓）。
+
+    ⚠️ 用它之前先核**这个文件在不在** ✗（``GET /models/diffusion_models`` ✓ 这是 ComfyUI 的权威目录 ✓）：
+    名字对不上就**沿用模板默认并告警** ✓✗ —— 直接塞给 ``UNETLoader`` 会让 ComfyUI 校验报错 ✓，
+    而静默换成别的权重更糟 ✓✗（换了模型你还看不出来 ✓）。⚠️ 清单取不到 ⇒ **告警说「没核」** ✗
+    而不是默认它存在 ✓。
+    """
+    chosen: str | None = None
+    if requested:
+        try:
+            available = client.models("diffusion_models")
+        except Exception as err:  # noqa: BLE001 —— 连不上/接口变了 ⇒ **没核** ✗ 不算通过 ✓
+            _warn(task, f"取 ComfyUI 模型清单失败（{type(err).__name__}: {err}）⇒ "
+                        f"**没核**调用方要的权重 {requested!r} ✗（没查不是通过 ✓✗）")
+        else:
+            if requested in available:
+                chosen = requested
+            else:
+                _warn(task, f"调用方指定的权重 {requested!r} **不在 ComfyUI 的 diffusion_models 里** ✗ ⇒ "
+                            f"不用它（该类现有 {len(available)} 个，例如 "
+                            f"{', '.join(available[:3]) if available else '（空）'} ✓）")
+    # ⚠️ 「没核」与「核了不认」都**继续往下走**✓✗ —— 兜底是 ``settings.checkpoint_map`` ✓，
+    #    最后才是模板默认 ✓（**别在这里提前 return** ✗：那会把兜底也跳掉 ✓✗）
+    if chosen is None and isinstance(checkpoint_map, dict) and checkpoint_map:
+        scene = str(task.get("body", {}).get("scene_type") or checkpoint_map.get("scene_type") or "").lower()
+        chosen = (checkpoint_map.get("ref2va") if scene and scene != "action" and scene != "silent"
+                  else checkpoint_map.get("fl2va")) or checkpoint_map.get("fl2va")
+    if chosen and isinstance(checkpoint_map, dict) and checkpoint_map.get("ref2va") \
+            and chosen == checkpoint_map.get("ref2va"):
+        _warn(task, "模板是 FL2VA 形态：已换 Ref2VA 权重名，但**参考图/参考音频不会生效** ✗")
+    return chosen if isinstance(chosen, str) and chosen else None
+
+
+
 def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
                       ) -> tuple[dict[str, Any], list[str]]:
     """把请求组装成可直接 ``POST /prompt`` 的 **API 格式**工作流；返回 (prompt, dropped 节点 id)。"""
@@ -219,7 +410,8 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     dropped: list[str] = []
     api = wf.ui_to_api(graph, object_info, dropped_out=dropped)
 
-    # ── 注入：提示词 ──
+    # ── 注入：提示词（**先过 H3 prompt 契约** ✓：文本写法→标签 / 核编号 / 该追加的声明必须追加 ✓）──
+    prompt_text = _contract_prompt(task, body, prompt_text)
     changed = wf.set_input(api, "MiniMaxH3ImageToVideo", "prompt", prompt_text)
     if not changed:
         _warn(task, "没找到 MiniMaxH3ImageToVideo.prompt 注入点 ✗（模板结构变了？）")
@@ -241,20 +433,17 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     if QUALITY:
         wf.set_input(api, "PrimitiveFloat", "value", float(QUALITY), title_contains="QUALITY")
 
-    # ── 注入：权重（FL2VA / Ref2VA 路由；模板是 FL2VA 形态 ⇒ ref2va 只换名字并告警 ✓）──
+    # ── 注入：权重（**调用方给的优先** ✓✗；模板是 FL2VA 形态 ⇒ ref2va 只换名字并告警 ✓）──
     settings = body.get("settings") or {}
     checkpoint_map = settings.get("checkpoint_map") if isinstance(settings, dict) else None
-    checkpoint = None
-    if isinstance(checkpoint_map, dict) and checkpoint_map:
-        scene = str(body.get("scene_type") or settings.get("scene_type") or "").lower()
-        checkpoint = (checkpoint_map.get("ref2va") if scene and scene != "action" and scene != "silent"
-                      else checkpoint_map.get("fl2va")) or checkpoint_map.get("fl2va")
-        if checkpoint and checkpoint_map.get("ref2va") and checkpoint == checkpoint_map.get("ref2va"):
-            _warn(task, "模板是 FL2VA 形态：已换 Ref2VA 权重名，但**参考图/参考音频不会生效** ✗")
+    checkpoint = _pick_checkpoint(client, task, str(body.get("model") or "").strip(), checkpoint_map)
     if checkpoint:
         wf.set_input(api, "UNETLoader", "unet_name", checkpoint)
     if body.get("reference_audio_urls") or body.get("referenceImageUrls") or body.get("subject_reference"):
         _warn(task, "当前模板不支持参考图/参考音频（Ref2VA）⇒ 这些入参被忽略 ✗")
+
+    # ── 注入：加速链（配置驱动 ✓；没配就是空操作 ✓）──
+    _apply_accel_chain(client, task, api)
 
     # ── 注入：种子（每次不同 ✓）与产物体名（便于追溯 ✓）──
     wf.set_seed(api, "RandomNoise")
@@ -376,6 +565,14 @@ def poll_task(task_id: str) -> JSONResponse:
         "expected_frames": task.get("expected_frames"),
         "expected_seconds": task.get("expected_seconds"),
         "freed_vram": task.get("freed_vram"),
+        # ⭐ 「提交前那两道关做了什么」也回给调用方 ✓✗ —— 判据要**响亮** ✗：
+        #    只写在服务端内存/日志里，出片不对时前端/后端都查不出为什么 ✓✗
+        "prompt_contract": task.get("prompt_contract"),
+        "prompt_markup": task.get("prompt_markup"),
+        "accel_chain": task.get("accel_chain"),
+        "accel_enabled": task.get("accel_enabled"),
+        "accel_skipped": task.get("accel_skipped"),
+        "accel_rewired": task.get("accel_rewired"),
     })
 
 

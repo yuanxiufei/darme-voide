@@ -281,6 +281,48 @@ def case_api(root: Path) -> None:
     check("㉗ 未知阶段 ⇒ 400（不静默回默认 ✗）",
           client.get("/api/v1/engine/readiness", params={"stage": "nope"}).status_code == 400)
 
+    # ── ㉗′ ⭐ 超清放大器可用性（2026-09-24 接 ✓）：关键在**「没查」不许装成「可用」** ✗✗ ──
+    up_missing = (data.get("upscale") or {})
+    check("㉗′ ⭐ 没给放大器权重 ⇒ ``checked=false``（**没查** ✗✗ —— 不是「超清可用」✓）"
+          "且**说清怎么让它可查** ✓",
+          up_missing.get("checked") is False and bool(up_missing.get("format"))
+          and any("没查" in note for note in (up_missing.get("notes") or [])), up_missing)
+
+    up_file = root / "upscaler.safetensors"
+    contract = {
+        "format": "minimax_h3_clean_latent_upscaler_v3_factorized_attention",
+        "base_config": {"in_channels": 24, "hidden_channels": 64, "num_blocks": 4,
+                        "refine_channels": 32, "refine_blocks": 2, "temporal_kernel": 3},
+        "config": {"width": 64, "blocks": 2, "heads": 4, "window": 8, "mlp_ratio": 2},
+        "strict_latent_only": True,
+    }
+    write_safetensors(up_file, {"w": ("F16", [4])},
+                      metadata={"metadata": json.dumps(contract)})
+    ok_report = client.get("/api/v1/engine/readiness",
+                           params={"stage": "h3", "upscaleKey": "", "upscalePath": str(up_file)})
+    up_ok = (ok_report.json().get("data") or {}).get("upscale") or {}
+    check("㉗″ 给了真带契约的放大器 ⇒ ``checked=true`` + 契约读出来 ✓（口径逐值 ✓：in_channels=24 ✓）"
+          "且**明说 >2× 要给 maxTile** ✗",
+          up_ok.get("checked") is True and up_ok.get("present") is True
+          and (up_ok.get("contract") or {}).get("base_config", {}).get("in_channels") == 24
+          and any("maxTile" in note for note in (up_ok.get("notes") or [])), up_ok)
+
+    ghost = client.get("/api/v1/engine/readiness",
+                       params={"stage": "h3", "upscalePath": str(root / "nope.safetensors")})
+    check("㉗‴ 权重**不在盘上** ⇒ ``present=false`` + 说明 ⇒ 超清会回退普通模式 ✓（不是通过 ✓✗）",
+          ((ghost.json().get("data") or {}).get("upscale") or {}).get("present") is False
+          and any("不在盘上" in note
+                  for note in ((ghost.json().get("data") or {}).get("upscale") or {}).get("notes", [])),
+          (ghost.json().get("data") or {}).get("upscale"))
+
+    bad_contract = root / "bad_upscaler.safetensors"
+    write_safetensors(bad_contract, {"w": ("F16", [4])}, metadata={"metadata": '{"format":"other"}'})
+    bad_report = client.get("/api/v1/engine/readiness",
+                            params={"stage": "h3", "upscalePath": str(bad_contract)})
+    up_bad = (bad_report.json().get("data") or {}).get("upscale") or {}
+    check("㉗⁴ ⭐ 契约不合法 ⇒ **具名原因** ✗（不是「文件坏了」那种笼统话 ✓✗）且注定回退普通模式 ✓",
+          up_bad.get("contract") is None and bool(up_bad.get("contractError")), up_bad)
+
     good = root / "api_good.safetensors"
     write_safetensors(good, {"weight": ("F16", [4, 4])}, metadata={"src": "api"})
     detail = client.post("/api/v1/engine/inspect", json={"path": str(good)})

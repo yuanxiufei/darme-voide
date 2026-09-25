@@ -89,6 +89,15 @@ SPECS: dict[str, dict[str, Any]] = {
         "scheduler": ["COMBO", {"options": ["simple"]}], "steps": ["INT", {"default": 10}],
         "denoise": ["FLOAT", {"default": 1.0}]}}},
     "ComfyMathExpression": {"input": {"required": {"expression": ["STRING", {}]}}},
+    # ⭐ 加速链要用的那一类 ✓：**必须带 ``output``** ✗ —— ``build_chain_nodes`` 靠注册表**数输出槽**
+    #    （没给 ⇒ 报「找不到 MODEL 槽」✓，本仓**不猜**槽位 ✗）。这里是 stub 的注册表声明 ✓，
+    #    口径与 ComfyUI 核心的 ``LoraLoader`` 一致 ✓（inputs: model/clip/lora_name/strength_* ✓）。
+    "LoraLoader": {"input": {"required": {
+        "lora_name": ["COMBO", {"options": ["accel.safetensors"]}],
+        "strength_model": ["FLOAT", {"default": 1.0}],
+        "strength_clip": ["FLOAT", {"default": 1.0}],
+        "model": ["MODEL", {}], "clip": ["CLIP", {}]}},
+        "output": ["MODEL", "CLIP"]},
 }
 
 
@@ -124,6 +133,12 @@ def build_stub(catalog: dict[str, Any]) -> FastAPI:
     @stub.get("/system_stats")
     def system_stats() -> dict[str, Any]:  # noqa: D103
         return {"system": {"comfyui_version": "stub-stage2"}, "devices": [{"name": "fake-gpu"}]}
+
+    @stub.get("/object_info")
+    def object_info_all() -> dict[str, Any]:  # noqa: D103
+        # ⭐ 加速链的接缝要**全量注册表**（``GET /object_info`` ✓）—— 真 ComfyUI 两个端点都有 ✓，
+        #    stub 少一个 ⇒ 接缝只能判「没查」✗ ⇒ 那一支就**永远验不到** ✓✗（本套第一版正是这样 ✓）。
+        return {cls: info for cls, info in catalog.items() if cls != MISSING_CLASS["name"]}
 
     @stub.get("/object_info/{node_class}")
     def object_info(node_class: str) -> dict[str, Any]:  # noqa: D103
@@ -237,7 +252,8 @@ def png_data_url(payload: bytes = b"\x89PNG-stub-frame") -> str:
 def main() -> int:  # noqa: C901
     t2v = graph_of("MiniMax_H3_Fast_T2V.json")
     i2v = graph_of("MiniMax_H3_Fast_I2V.json")
-    catalog = {**class_specs(t2v), **class_specs(i2v)}
+    # ⚠️ ``LoraLoader`` **不在模板图里**（是加速链要现挂上去的 ✓）⇒ 得单独并进注册表 ✓
+    catalog = {**class_specs(t2v), **class_specs(i2v), "LoraLoader": SPECS["LoraLoader"]}
     base, server, thread = start_server(build_stub(catalog))
     wrapper = load_wrapper(base)
     client = TestClient(wrapper.app)
@@ -323,6 +339,69 @@ def main() -> int:  # noqa: C901
               and src.get("class_type") == "PreviewImage"
               and "LAST FRAME" in str((src.get("_meta") or {}).get("title") or "").upper(),
               (last_link, (src or {}).get("class_type"), (src or {}).get("_meta")))
+
+        # ── ③′ ⭐ H3 **prompt 契约**（提交前 ✓）：文本写法→标签 + **该追加的声明必须追加** ✗✗ ──
+        #    那条实测坑：**只写 ``<Audio 1>`` 绑定句不算声明** ✓ ⇒ 照标签跳过会让模型**不复用配音** ✓✗。
+        created_c = client.post("/v1/video_generation", json={
+            "prompt": "雨夜街头，主角开口 @音1 说出台词",
+            "duration": 3, "aspect_ratio": "16:9",
+            "reference_audio": ["https://cdn.test/voice.mp3"],
+        }).json()
+        task_c = wait_terminal(client, created_c["task_id"])
+        prompt_c = str(find_node(SEEN["prompts"][-1], "MiniMaxH3ImageToVideo")
+                       .get("inputs", {}).get("prompt") or "")
+        check("⑰ ⭐ 文本写法 ``@音1`` ⇒ ``<Audio 1>`` 标签（提交前转换 ✓）",
+              "<Audio 1>" in prompt_c and "@音1" not in prompt_c, prompt_c[:120])
+        check("⑰′ ⭐⭐ 参考音频的**结构化声明被追加** ✗✗（只写标签**不算声明** ✓ ⇒ 不追加等于参考白给 ✓✗）",
+              "[reference generation + audio reference]" in prompt_c
+              and "retention_analysis" in prompt_c and "reference -" in prompt_c, prompt_c[-200:])
+        check("⑰″ 声明是**追加**的 ✓ 不覆盖原提示词 ✓；任务里留下契约报告 ✓",
+              prompt_c.startswith("雨夜街头，主角开口 <Audio 1> 说出台词")
+              and task_c.get("prompt_contract", {}).get("audioNeeded") is True,
+              (prompt_c[:60], task_c.get("prompt_contract")))
+        created_n = client.post("/v1/video_generation", json={
+            "prompt": "没有参考音频的段", "duration": 3, "aspect_ratio": "16:9",
+        }).json()
+        wait_terminal(client, created_n["task_id"])
+        prompt_n = str(find_node(SEEN["prompts"][-1], "MiniMaxH3ImageToVideo")
+                       .get("inputs", {}).get("prompt") or "")
+        check("⑰‴ 没有参考音频的段 ⇒ 提示词**一字不改** ✓（不往提示词里塞噪声 ✗）",
+              prompt_n == "没有参考音频的段", prompt_n)
+
+        # ── ③″ ⭐ **加速链**（配置驱动 ✓）：接上、且**真的有输入指向它** ✗✗ ──
+        created_a = client.post("/v1/video_generation", json={
+            "prompt": "加速链用例", "duration": 3, "aspect_ratio": "16:9",
+            "settings": {"accel_chain": [{"id": "lora1", "label": "蒸馏 LoRA",
+                                          "class_type": "LoraLoader", "kind": "lora",
+                                          "inputs": {"lora_name": "accel.safetensors",
+                                                     "strength_model": 1.0, "strength_clip": 1.0}}]},
+        }).json()
+        task_a = wait_terminal(client, created_a["task_id"])
+        prompt_a = SEEN["prompts"][-1]
+        lora_node = prompt_a.get("accel_lora1")
+        check("⑱ ⭐ 加速链被**并进提交的图**里 ✓（节点 id = ``accel_<id>`` ✓）",
+              isinstance(lora_node, dict) and lora_node.get("class_type") == "LoraLoader", lora_node)
+        check("⑱′ ⭐⭐ 而且**有输入真的指向它** ✗✗（建了节点没人用 = 图看着对、其实没加速 ✓✗）",
+              task_a.get("accel_rewired", 0) >= 1
+              and any(isinstance(v, list) and v[:1] == ["accel_lora1"]
+                      for n in prompt_a.values() if isinstance(n, dict)
+                      for v in (n.get("inputs") or {}).values()),
+              task_a.get("accel_rewired"))
+        check("⑱″ ⭐ LoRA 环的 ``clip`` 流也由链接管 ✓（``kind=lora`` 两条流都要接 ✓）",
+              isinstance(lora_node, dict) and isinstance(lora_node.get("inputs", {}).get("clip"), list),
+              (lora_node or {}).get("inputs"))
+
+        # ── ③‴ ⭐ 判 error 的环 ⇒ **整条链不上**且**点名** ✗（不静默少一环 ✗✗）──
+        created_e = client.post("/v1/video_generation", json={
+            "prompt": "坏加速链用例", "duration": 3, "aspect_ratio": "16:9",
+            "settings": {"accel_chain": [{"id": "ghost", "class_type": "NotInstalledNode",
+                                          "kind": "model_only", "inputs": {}}]},
+        }).json()
+        task_e = wait_terminal(client, created_e["task_id"])
+        check("⑲ ⭐⭐ 环不在注册表 ⇒ **不上链** ✓ 且任务里**点名**（静默少一环 = 图悄悄变样 ✓✗）",
+              "accel_ghost" not in SEEN["prompts"][-1]
+              and any("ghost" in str(w) for w in (task_e.get("warnings") or [])),
+              task_e.get("warnings"))
 
         # ── ④ 缺节点：报错要**指名**且**不能偷偷下载** ✓ ──
         MISSING_CLASS["name"] = "MiniMaxH3MemoryEfficientSageAttentionPatch"

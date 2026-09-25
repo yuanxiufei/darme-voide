@@ -67,6 +67,17 @@ def case_sane() -> None:
     check("①⁴ 头 JSON 坏 / 头不是对象（是数组 ✓）⇒ 拒 ✗（**不抛** ✓ —— 校验器自己炸了等于没校验 ✓✗）",
           guard.is_sane_head(struct.pack("<Q", 5) + b"{bad}" + b"\0" * 8) is False
           and guard.is_sane_head(struct.pack("<Q", 2) + b"[]" + b"\0" * 8) is False)
+    # ⭐ ``total_size``（2026-09-24 补 ✓）：只读「8 字节 + 头」也能判「数据区恰好吃满」✓✗ ——
+    #   ⚠️ 真权重 19.5 GiB ⇒ 为了判这一条把整个文件读进内存是荒唐的 ✓。判据**一字未改** ✓：
+    #   给了总长就该与整读**同结论** ✓（否则两条路会给出不同答案 ✓✗）。
+    full = _st(GOOD_HEADER, data=8)
+    head_only = _st(GOOD_HEADER)                                 # 只读「头长 + 头」✓（没有数据区 ✓）
+    check("①⁵ ⭐ 只读头 + 给 ``total_size`` ⇒ 与整读**同结论** ✓✗（同一判据，不是宽松版 ✓）",
+          guard.is_sane_head(head_only, total_size=len(full)) is True
+          and guard.is_sane_head(head_only, total_size=len(full) - 4) is False)
+    short = _st(GOOD_HEADER, data=8, drop_head=4)
+    check("①⁶ 头被截断时**给不给总长都拒** ✓（`total_size` 不是绕过口子 ✗✗）",
+          guard.is_sane_head(short, total_size=len(full)) is False)
     check("①⁵ ``dtype`` 不认识 ⇒ 拒 ✗（**别默认 1 或 0** ✗✗）；``shape`` 不是列表 ⇒ 也拒 ✗",
           guard.is_sane_head(_st({"w": {"dtype": "F999", "shape": [1], "data_offsets": [0, 1]}},
                                  data=1)) is False

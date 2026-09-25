@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -322,6 +323,81 @@ def main() -> int:  # noqa: C901
 
     _res = client.get("/api/v1/compose/episodes/abc/compose-status")
     check("路由: compose-status 非法 id -> 404", _res.status_code == 404)
+
+    # ================= 混音（2026-09-24 接 ✓：模型声 + 配音 → 一条音轨 ✓）=================
+    # ⚠️ 原有行为是 ``-map 1:a`` **顶替** ✗ ⇒ 生成视频自带的音轨（H3 是联合 AV ✓）被**直接丢掉** ✓✗。
+    #    混音是**显式开关** ✓（默认 false ⇒ 行为一字不差 ✗），判据在 ``engine/audio_mix`` ✓。
+    import wave as _wave
+
+    from app.services import segment_audio as _seg
+
+    async def _fake_extract(video_path: str, target: str) -> str:
+        """假「抽音轨」✓：写一段**真 wav**（模型声 0.5 直流 ✓）—— 不必真装 ffmpeg ✓。
+        ⚠️ 必须 ``async`` ✗：真身是协程 ✓（``await`` 一个 str 会当场 TypeError ✓✗）。"""
+        rows = [[0.5] * 800, [0.5] * 800]
+        data = bytearray()
+        for index in range(800):
+            for row in rows:
+                data += struct.pack("<h", int(row[index] * 32767))
+        with _wave.open(target, "wb") as handle:
+            handle.setnchannels(2)
+            handle.setsampwidth(2)
+            handle.setframerate(32000)
+            handle.writeframes(bytes(data))
+        return target
+
+    _real_extract = fc._extract_audio_wav
+    fc._extract_audio_wav = _fake_extract  # type: ignore[assignment]
+
+    # 配音那条也得是**真 wav** ✓（假 TTS 落的是 .mp3 ✗ ⇒ 混音读不了 ✓）
+    voice_wav = Path(get_storage_root()) / "audio" / "voice.wav"
+    voice_wav.parent.mkdir(parents=True, exist_ok=True)
+    _rows = [[0.5] * 800, [0.5] * 800]
+    _data = bytearray()
+    for _i in range(800):
+        for _row in _rows:
+            _data += struct.pack("<h", int(_row[_i] * 32767))
+    with _wave.open(str(voice_wav), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(32000)
+        handle.writeframes(bytes(_data))
+
+    def _inputs(args: list[str]) -> list[str]:
+        return [args[index + 1] for index, item in enumerate(args[:-1]) if item == "-i"]
+
+    sb_mix = new_sb(90, video_url="static/videos/v2.mp4", dialogue="林昭：混音用例。", duration=10)
+    with engine.begin() as conn:
+        conn.execute(storyboards.update().where(storyboards.c.id == sb_mix).values(
+            tts_audio_url="static/audio/voice.wav"))
+
+    out_mix = asyncio.run(fc.compose_storyboard(sb_mix, mix_model_audio=True))
+    args_mix = _FFMPEG_CALLS[-1]
+    mixed_input = _inputs(args_mix)[-1]
+    check("㊾ ⭐⭐ 开了混音 ⇒ ffmpeg 的第二路输入是**混合后的 wav** ✓✗（不是原配音 ✓）",
+          bool(out_mix) and Path(mixed_input).name.endswith("-mixed.wav"), mixed_input)
+    mixed_rows, _rate = _seg.read_wav_tracks(mixed_input)
+    check("㊿ ⭐⭐ 混的是**模型声×0.6 + 配音×音量** ✓（0.5→0.8 ✓ 逐样本核 ✓）",
+          abs(mixed_rows[0][0] - 0.8) < 1e-4, mixed_rows[0][:3])
+    check("㊿′ 长度跟**视频（模型声）** ✓ 不跟配音 ✓✗（音轨不许把视频拖长 ✓）",
+          len(mixed_rows[0]) == 800, len(mixed_rows[0]))
+
+    sb_plain = new_sb(91, video_url="static/videos/v3.mp4", dialogue="林昭：普通用例。", duration=10)
+    with engine.begin() as conn:
+        conn.execute(storyboards.update().where(storyboards.c.id == sb_plain).values(
+            tts_audio_url="static/audio/voice.wav"))
+    asyncio.run(fc.compose_storyboard(sb_plain))
+    args_plain = _FFMPEG_CALLS[-1]
+    check("㊿″ ⭐ 默认（不传开关）⇒ **一字不差** ✓：音轨仍是原配音 ✓ 且**没有**混音那条路 ✓✗",
+          _inputs(args_plain)[-1].endswith("voice.wav"), _inputs(args_plain))
+
+    _bad = client.post(f"/api/v1/compose/storyboards/{sb_plain}/compose",
+                       json={"voiceMode": "nope"})
+    check("㊿‴ 路由：``voiceMode`` 非法 ⇒ **400 带合法值** ✗（不静默按 mix 跑 ✓✗）",
+          _bad.status_code == 400 and "mix" in str(_bad.json().get("message")),
+          (_bad.status_code, _bad.json().get("message")))
+
+    fc._extract_audio_wav = _real_extract  # type: ignore[assignment]
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

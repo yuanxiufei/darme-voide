@@ -491,6 +491,29 @@ EasyDirector 后端是 PyInstaller（加速链执行 / 预设值 / 探测逻辑*
 - 参考数据（用得上再取 ✓）：官方 9 套分镜骨架（`h3_templates.js` ✓）；方案预设名单（漫剧快跑 / 漫剧正式 / 玄幻仙侠 / 悬疑诡异 / 都市写实 / 战斗燃向 ✓，**内部参数在编译层** ✗）；IndexTTS 情绪向量 **9 维**（开心/愤怒/悲伤/恐惧/厌恶/忧郁/惊讶/平静 + preset ✓）。
 
 
+### 接线进度：哪些能力**接出去了**、接在哪（2026-09-24 第五次腾预算 ⇒ 从 `MEMORY.md` 下移 ✓）
+
+> 判据（为什么接、接不出去有多坏）在 `MEMORY.md` §接线 ✓ / 过程与踩坑在 `2026-09-24.md` §⑲⑳ ✓。
+> 这里只留**落点表** ✓ —— 「谁被谁调用」是代码里能查的 ✓，本表只为**一眼看全** ✓。
+
+| 能力（判据所在模块） | 生产落点 | 备注 |
+|---|---|---|
+| H3 prompt 契约（声明三行键 / 编号校验 ✓） | `local_services/h3/server.py::_contract_prompt` ✓（提交前 ✓） | 只写 `<Audio 1>` **不算声明** ✗ |
+| H3 形态决策（有参考素材 ⇒ Ref2VA ✓） | `adapters/video_adapters.plan_h3_form` ✓ + 8765 `_pick_checkpoint` ✓ | 收端**核过** `body.model` 才用 ✓ |
+| 加速链（配置驱动 + 提交前校验 ✓） | 同上 `server.py::_apply_accel_chain` ✓ | `error` 的环 ⇒ 整条不上并点名 ✓ |
+| 配音契约（8 维定序 / 未知情绪拒 ✓） | `services/tts_generation._resolve_voice_params` ✓ | CosyVoice 克隆路径**收不了** ⇒ 进 dropped ✓ |
+| 混合加载：计划层 + **加载层** ✓ | `engine/hybrid_load.run_hybrid_load` ✓ ⇒ `POST /engine/hybrid-merge` ✓ | 键集不变 ✓ / 继承基底元数据 ✓ |
+| 参考素材指纹（哪段可跳过 ✓） | ⚠️ **无落点** ✗（要产品决定：跳过语义 + 谁是"上次产物" ✓） | 故意不硬接 ✓ |
+| 缓存完整性守卫 ✓ | 只被 `hybrid_load` 用 ✓（`total_size` 口子 ✓） | 不验数值 ✗ |
+| 段级音频合成（长度守恒 / 三支削波 ✓） | `services/segment_audio` ✓ ⇒ `ffmpeg_compose.mix_model_audio` ✓ | 默认 false ⇒ 行为一字不差 ✓ |
+| 超清双采（1.5× 先 2× ✓ / 4× 分块 ✓） | `pipeline` 的 `refine` 阶段 ✓ + `dryrun.refine_latents` ✓ | **音频流锁定**要后端自述 ✓ |
+| 联合 AV 容器互操作 ✓ | 同上 `dryrun.refine_latents` ✓ | 只换视频那一槽 ✓ |
+| 超清放大器可用性 ✓ | `inventory.readiness().upscale` ✓ ⇒ `GET /engine/readiness?upscalePath=` ✓ | 没给 ⇒ **「没查」** ✗ 不是可用 ✓ |
+| 档位表 ✓ | `inventory.readiness().tiers` ✓ | 没给显存 ⇒ 「没比」✗ |
+| 导演稿分段 ✓ | `POST /prompts/segments` ✓ | 一个字都不丢 ✓ |
+| 超清计划 ✓ | `POST /engine/upscale-plan` ✓ ⇒ 请求体 `upscale` ✓ | 管线**只执行**计划 ✗ 不自己判 ✓ |
+
+
 ### MEMORY.md 下移（2026-09-24 第四次）：Skill 体系细则 + 协作与提交细则 ✓
 
 下移原因：`MEMORY.md` 逼近 8k 硬预算 ✓（守卫的规矩是「本文件只留会导致 bug 的判据 ✓，细节下移 ✓」）。

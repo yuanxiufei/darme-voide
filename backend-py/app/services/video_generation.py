@@ -352,6 +352,22 @@ async def _process_video_generation(video_id: int, config: dict[str, Any]) -> No
             method = request["method"]
             headers = request["headers"]
             body = request["body"]
+
+            # ⭐ H3 形态决策（FL2VA / Ref2VA ✓）：**引擎拒了就响亮报** ✗✗
+            #    —— 例如「既要硬首帧又带参考素材」这种互斥要求 ✓：这时不要装作按规则选的 ✓✗
+            #    （``formPlan`` 不是厂商字段 ✗，只在本地日志里看 ✓）
+            form_plan = request.get("formPlan")
+            if isinstance(form_plan, dict):
+                if form_plan.get("blocked"):
+                    log_task_warn("VideoTask", "h3-form-blocked", {
+                        "id": video_id, "model": model,
+                        "checkpoint": form_plan.get("checkpoint"),
+                        "hasReferences": form_plan.get("has_references"),
+                        "hasFirstFrame": form_plan.get("has_first_frame"),
+                        "reason": form_plan.get("reason"),
+                    })
+                else:
+                    log_task_payload("VideoTask", "h3 form", {"id": video_id, **form_plan})
             log_task_progress("VideoTask", "request", {
                 "id": video_id, "provider": config.get("provider"), "method": method,
                 "url": redact_url(url), "model": model,

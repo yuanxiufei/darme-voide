@@ -32,9 +32,53 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import latent_container as lc
 from .pipeline import GenerationPlan, GenerationRequest
 
-__all__ = ["DryRunBackend", "TinyTensor"]
+__all__ = ["DryRunBackend", "TinyAVLatents", "TinyStream", "TinyTensor"]
+
+
+class TinyStream:
+    """**鸭子类型的「流」** ✓（latent_container 的最小协议：``shape`` + ``ndim`` ✓ —— 不碰张量 ✗）。"""
+
+    __slots__ = ("ndim", "shape")
+
+    def __init__(self, shape: Any) -> None:
+        self.shape = tuple(int(value) for value in shape)
+        self.ndim = len(self.shape)
+
+    def __repr__(self) -> str:  # pragma: no cover - 只为人看
+        return f"TinyStream{self.shape}"
+
+
+class TinyAVLatents:
+    """**鸭子类型的「联合 AV 容器」** ✓（``is_nested`` + ``unbind()`` ✓、可重建 ✓ 保类型 ✓）。
+
+    ⚠️ 存在的唯一理由 ✗：让「**音频流不重采**」这条口径跑在**真实调用路径**上 ✓✗ ——
+    干跑不去动真张量 ✓，但它走的就是 :mod:`app.services.engine.latent_container` 那套 ✓。
+    """
+
+    is_nested = True
+
+    def __init__(self, streams: Any) -> None:
+        self.streams = tuple(streams)
+
+    def unbind(self) -> tuple[Any, ...]:
+        return self.streams
+
+    def __len__(self) -> int:
+        return len(self.streams)
+
+    def __repr__(self) -> str:  # pragma: no cover - 只为人看
+        return f"TinyAVLatents({[stream.shape for stream in self.streams]})"
+
+
+def _double_spatial(stream: Any) -> TinyStream:
+    """空间 2× ✓（⚠️ **时间维不变** ✗✗ —— 时间插值会让动作速率变错 ✓；通道数也不动 ✓）。"""
+    shape = tuple(int(value) for value in stream.shape)
+    if len(shape) != 5:
+        raise lc.LatentContainerError(f"视频流应当是 5 维（收到 {shape} ✓）")
+    return TinyStream((shape[0], shape[1], shape[2], shape[3] * 2, shape[4] * 2))
 
 
 class TinyTensor:
@@ -128,6 +172,43 @@ class DryRunBackend:
         """
         g = min(0.5, float(sigma) / (float(sigma) + 1.0)) if sigma > 0 else 0.0
         return condition * (1.0 - g) + latents * g
+
+    def refine_latents(self, latents: TinyTensor, plan: Any, request: Any) -> TinyTensor:
+        """**二采精修（干跑版 ✓）**：把 H3 那套「联合 AV 容器」装出来 ✓ 并**只换视频槽** ✓。
+
+        ⚠️ 干跑**不动真张量** ✗（返回原 latents ✓）—— 它在这里买的只有一件事：
+        **把 :mod:`app.services.engine.latent_container` 的用法钉在真实调用路径上** ✓✗
+        （「音频流不重采」这条口径，靠的就是「认视频流 → 只换那一槽 → 别的流原对象放回」✓）。
+        细节落在 :attr:`refineDetails` ✓（管线会读走 ✓），供自检比对**音频流是不是同一个对象** ✓。
+        """
+        shape = self._av_shapes(plan, request)
+        container = TinyAVLatents([TinyStream(shape["video"]), TinyStream(shape["audio"])])
+        split = lc.split_video_stream(container)
+        refined = _double_spatial(split.video)
+        merged = lc.replace_video_stream(split, refined)
+        self.refineDetails = {
+            "splitIndex": split.index,
+            "isContainer": split.is_container,
+            "videoShapeBefore": list(split.video.shape),
+            "videoShapeAfter": list(refined.shape),
+            "containerType": type(merged).__name__,
+            # ⭐⭐ 音频流**逐位相同**（换流只动视频那一槽 ✓）—— 重采音频会把音轨弄坏 ✓✗
+            "audioIdentical": merged.streams[1] is container.streams[1],
+            "temporalUnchanged": list(refined.shape)[2] == list(split.video.shape)[2],
+        }
+        return latents
+
+    def _av_shapes(self, plan: Any, request: Any) -> dict[str, tuple[int, ...]]:
+        """干跑用的 H3 双流形状 ✓（视频 ``1×24×T×H×W`` ✓、音频 ``1×2×T`` ✓ —— 与真权重同形 ✓）。"""
+        width, height = int(getattr(plan, "width", 0) or 64), int(getattr(plan, "height", 0) or 64)
+        frames = int(getattr(plan, "frames", 0) or 16)
+        latent_t = max(2, frames // max(1, int(getattr(request, "temporal_compression", None) or 4)))
+        return {"video": (1, lc.H3_VIDEO_CHANNELS, latent_t, max(1, height // 8), max(1, width // 8)),
+                "audio": (1, 2, latent_t)}
+
+    #: ⭐ **自述「二采锁定音频流」** ✗✗ —— 没这条，管线会**明确拒绝**跑二采 ✓
+    refineNote = {"locksAudio": True,
+                  "note": "干跑：认视频流 → 只换那一槽 ✓（latent_container ✓），音频流原对象放回 ✓"}
 
     def condition_first_frame(self, latents: TinyTensor, image_path: str, mask: list[float],
                               plan: GenerationPlan, request: GenerationRequest) -> TinyTensor:

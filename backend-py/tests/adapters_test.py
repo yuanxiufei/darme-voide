@@ -27,6 +27,8 @@ from app.services.adapters import (  # noqa: E402
     get_video_adapter,
     join_provider_url,
 )
+from app.services.adapters.tts_adapters import map_emotion as _map_emotion  # noqa: E402
+from app.services.voice_contract import EMOTION_ORDER as _EMOTION_ORDER  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -433,10 +435,22 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
          ["voice_setting"]["emotion"] for e in ("furious", "EXCITED", "nervous")] == ["angry", "surprised", "sad"],
     )
     check(
-        "minimax tts: 未知 emotion -> happy",
-        minimax_tts.build_generate_request({"apiKey": "k"}, {"text": "x", "voice": "v", "emotion": "zzz"})["body"]
-        ["voice_setting"]["emotion"]
-        == "happy",
+        # ⚠️ 2026-09-24 改了**有意的行为** ✗（原来断言 ``|| 'happy'`` ✓✗）：未知情绪**当场拒** ✓，
+        #    静默换成 happy =「用户选了难过、成片用开心念完、日志里一切正常」✓✗（见 voice_contract ✓）。
+        "minimax tts: 未知 emotion -> **当场拒**（不再静默回落 happy ✗✗）",
+        _raises(lambda: minimax_tts.build_generate_request(
+            {"apiKey": "k"}, {"text": "x", "voice": "v", "emotion": "zzz"}))[0],
+    )
+    check(
+        # ⭐ 不变量：契约的 8 个规范名**要么能映射、要么具名落在「表达不了」那侧** ✗
+        #    （漏一个 ⇒ 用户选了却**生成到一半才炸** ✓✗ —— 正是这套接线要根除的形状 ✓）
+        "minimax tts: 8 个规范名只有 disgust 没有落点（且它在能力声明里被具名排除 ✓）",
+        [name for name in _EMOTION_ORDER if name not in minimax_tts.emotion_names] == ["disgust"],
+    )
+    check(
+        "minimax tts: 声明「能表达」的名字**个个真能映射**（声明与表同源 ✓✗）",
+        all(_map_emotion(name) for name in minimax_tts.emotion_names)
+        and _raises(lambda: _map_emotion("disgust"))[0],
     )
     check(
         "minimax tts: speed/pitch 是 nullish（传 0 要保留 0）",

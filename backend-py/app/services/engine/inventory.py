@@ -45,6 +45,7 @@ __all__ = [
     "estimate_vram",
     "load_catalog",
     "readiness",
+    "upscale_status",
 ]
 
 #: 本机目标显卡（A5000 24GB ✓）—— 只用于算「余量」，可覆盖 ✓
@@ -197,8 +198,63 @@ def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[st
     return status
 
 
+def upscale_status(*, root: Path | None = None, key: str = "", path: str = "") -> dict[str, Any]:
+    """**超清放大器**的可用性 ✓（2026-09-24 接 ✓）—— 让「超清到底能不能开」在**跑之前**就看得见 ✓✗。
+
+    ⚠️ 三段都要**能说清「没查」** ✗✗（本仓铁律：**没查 ≠ 通过** ✓）：
+    1. 没给 ``path`` / ``key`` ⇒ ``checked=False`` ✓ + 说明**怎么让它可查** ✓（不是通过 ✓✗）；
+    2. 清单里没有这个组件 ⇒ ``checked=True`` + ``present=False`` ✓ + **期望的格式串** ✓
+       （不然只能靠猜要什么权重 ✓✗）；
+    3. 权重在盘上 ⇒ 读它的**内嵌契约** ✓：读不出来 ⇒ 给**具名**原因 ✓（回退普通模式是有理由的 ✓）。
+    """
+    from . import upscale as upscale_mod   # 局部 import ✓：只有这条查询路需要它 ✓（避免清单层拉着引擎层 ✓）
+
+    resolved = str(path or "").strip()
+    if not resolved and key:
+        entry = next((item for item in load_catalog()["models"] if item.get("key") == key), None)
+        if entry is not None:
+            found = component_path(entry, root)
+            resolved = "" if found is None else str(found)
+    report: dict[str, Any] = {
+        "checked": False, "present": False, "key": str(key or ""), "path": resolved or None,
+        "contract": None, "contractError": None, "format": upscale_mod.CHECKPOINT_FORMAT,
+        "requiresMaxTileAbove2x": True, "notes": [],
+    }
+    if not resolved:
+        report["notes"].append(
+            "**没查** ✗：没给放大器权重（``upscale.path`` / ``upscale.key`` 或清单里的组件 ✓）"
+            "⇒ 超清计划会**回退普通模式**并给出理由 ✓ —— ⚠️ 别把这条读成「超清可用」✗✗")
+        return report
+    target = Path(resolved)
+    if not target.exists():
+        report.update({"checked": True, "notes": [
+            f"清单/入参指向的放大器权重**不在盘上** ✗：{target} ⇒ 超清会回退普通模式 ✓（把文件放上去再查 ✓）"]})
+        return report
+    report["checked"] = True
+    report["present"] = True
+    try:
+        metadata, _header = st.read_header(target)
+        contract = upscale_mod.read_upscaler_contract(metadata)
+    except Exception as err:  # noqa: BLE001 —— 读不了/契约不合法 ⇒ **具名拒绝** ✓ 不猜 ✓
+        contract = None
+        report["contractError"] = f"{type(err).__name__}: {err}"
+    report["contract"] = contract
+    if contract is None:
+        report["notes"].append(
+            "内嵌契约读不出来 ✗ ⇒ ``plan_upscale`` 会**回退普通模式**（理由就是上面那条 ✓）"
+            "—— ⚠️ 不是「文件坏了」的笼统话：真因在 ``contractError`` 里 ✓✗")
+    else:
+        report["notes"].append(
+            f"契约 OK ✓（``in_channels={contract['base_config']['in_channels']}`` ✓、"
+            f"``width={contract['config']['width']}`` / ``heads={contract['config']['heads']}`` ✓）"
+            f"⇒ 2× 可做 ✓；⚠️ **>2× 要调用方显式给 ``maxTile``** ✗（本仓不猜安全块大小 ✓）")
+    report["bytes"] = target.stat().st_size
+    return report
+
+
 def readiness(stage: str = "h3", *, root: Path | None = None,
-              capacity_gib: float = DEFAULT_CAPACITY_GIB) -> dict[str, Any]:
+              capacity_gib: float = DEFAULT_CAPACITY_GIB,
+              upscale_key: str = "", upscale_path: str = "") -> dict[str, Any]:
     """某阶段的**就绪报告** ✓：必需组件齐不齐、缺多少、显存够不够估。
 
     ``required`` 由清单的 ``required`` 字段决定 ✓；非必需组件也会列出来（可选件 ✓），
@@ -242,6 +298,9 @@ def readiness(stage: str = "h3", *, root: Path | None = None,
         # ⭐ 档位表随就绪报告一起给 ✓（2026-09-24 接的 ✓）：步数 / 分辨率 / 加速件 /
         #    显存建议 / **必备模型** ✓ —— ⚠️ 没给容量时各档的 advised 是「**没比**」✗ 不是通过 ✓。
         "tiers": tiers_mod.summary(gpu_gib=capacity_gib if capacity_gib else None),
+        # ⭐ 超清放大器可用性 ✓（2026-09-24 接的 ✓）：⚠️ 没给 key/path ⇒ ``checked=False``
+        #    **不是**「超清可用」✗✗（本仓铁律：没查 ≠ 通过 ✓）。
+        "upscale": upscale_status(root=root, key=upscale_key, path=upscale_path),
     }
 
 

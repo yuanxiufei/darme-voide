@@ -57,10 +57,15 @@ def _elements(shape: Any) -> int | None:
     return total
 
 
-def is_sane_head(data: bytes, *, dtype_size: Mapping[str, int] | None = None) -> bool:
+def is_sane_head(data: bytes, *, dtype_size: Mapping[str, int] | None = None,
+                 total_size: int | None = None) -> bool:
     """这段字节是不是**完整的 safetensors** ✓（8 条判据合起来 ⇒ 截断/偏移错/尾部不齐都拦下 ✓✗）。
 
     ⚠️ 任何解析异常都返回 ``False`` ✓（**不抛** ✗ —— 校验器自己炸了等于没校验 ✓✗）。
+
+    ``total_size``：**整个文件**的字节数 ✓（不给就用 ``len(data)`` ✓）。⭐ 为什么要这个口子 ✗：
+    真权重动辄 19.5 GiB ✓ ⇒ 为了判「数据区恰好吃满」而把**整个文件读进内存**是荒唐的 ✓✗；
+    现在只读「8 字节 + 头」✓、把文件长度单独告诉它 ✓（判据一字未改 ✓✗）。
     """
     table = dict(DTYPE_SIZE)
     if dtype_size:
@@ -77,7 +82,8 @@ def is_sane_head(data: bytes, *, dtype_size: Mapping[str, int] | None = None) ->
         header = json.loads(raw[8:8 + count].decode("utf-8", "strict"))
         if not isinstance(header, dict):
             return False
-        data_size = len(raw) - 8 - count
+        whole = int(total_size) if total_size is not None else len(raw)
+        data_size = whole - 8 - count
         max_end = 0
         spans: list[tuple[int, int]] = []
         for name, tensor in header.items():
@@ -140,13 +146,15 @@ def cache_sidecar_path(path: str | Path) -> Path:
 
 
 def is_cache_valid(*, cache_bytes: bytes, sidecar: Any,
-                   sources: Mapping[str, tuple[int, float, str] | None]) -> bool:
+                   sources: Mapping[str, tuple[int, float, str] | None],
+                   total_size: int | None = None) -> bool:
     """缓存有效吗 ✓ = **产物自证** ✓ + sidecar 里每个源的**三元组**都对 ✓ **且源数相等** ✓✗。
 
     ⚠️ 源数不等 = 失效 ✓（sidecar 里多出/少了源，说明合并时的输入集合变了 ✓✗）；
-    ⚠️ 源文件读不到（指纹为 ``None`` ✓）⇒ 失效 ✓（宁可重合并 ✓ 不拿可疑缓存去跑 ✓）。
+    ⚠️ 源文件读不到（指纹为 ``None`` ✓）⇒ 失效 ✓（宁可重合并 ✓ 不拿可疑缓存去跑 ✓）；
+    ``total_size`` 透传给 :func:`is_sane_head` ✓（见那里的说明：大文件只读头 ✓）。
     """
-    if not is_sane_head(cache_bytes):
+    if not is_sane_head(cache_bytes, total_size=total_size):
         return False
     if not isinstance(sidecar, Mapping) or not sidecar:
         return False

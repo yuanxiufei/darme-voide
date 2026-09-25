@@ -25,6 +25,7 @@ os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
 from app.services.engine import pipeline as pipe  # noqa: E402
+from app.services.engine import upscale as upscale_mod  # noqa: E402
 from app.services.engine.dryrun import DryRunBackend, TinyTensor  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -542,6 +543,130 @@ def case_api() -> None:
           img2vid.get("conditioning"))
     missing_compression = client.post("/api/v1/engine/dry-run", json={
         "prompt": "x", "steps": 2, "seconds": 2.5, "firstFrame": "首帧.png"}).json().get("data") or {}
+
+    # ── ㊾ 超清计划（2026-09-24 接线 ✓）：规划层此前**只有自检在调** ✗✗ ⇒ 现在业务面拿得到 ✓ ──
+    no_weights = client.post("/api/v1/engine/upscale-plan", json={"targetScale": 2})
+    nw = no_weights.json().get("data") or {}
+    check("㊾ 没给放大器权重 ⇒ 回退普通模式 ✓ 且 ``fallbackReason`` **必须给** ✗✗"
+          "（静默降级 = 你以为超清开着 ✓✗）",
+          no_weights.status_code == 200 and nw.get("mode") == "normal"
+          and nw.get("usesUpscaler") is False and bool(nw.get("fallbackReason")), nw)
+
+    weights = Path(tempfile.mkdtemp(prefix="upscaler_")) / "h3_upscaler.safetensors"
+    contract = {
+        "format": "minimax_h3_clean_latent_upscaler_v3_factorized_attention",
+        "base_config": {"in_channels": 24, "hidden_channels": 64, "num_blocks": 4,
+                        "refine_channels": 32, "refine_blocks": 2, "temporal_kernel": 3},
+        "config": {"width": 64, "blocks": 2, "heads": 4, "window": 8, "mlp_ratio": 2},
+        "strict_latent_only": True,
+    }
+    header = json.dumps({"__metadata__": {"metadata": json.dumps(contract)}}).encode()
+    weights.write_bytes(len(header).to_bytes(8, "little") + header)
+
+    check("㊿ ⭐有放大器却 >2 倍率**不给 maxTile ⇒ 400** ✗✗（本仓**不猜**安全块大小 ✓："
+          "大块解码出 NaN/Inf ✓✗；⚠️ 没权重那条走的是「回退普通」✓，**不是**这条 ✗）",
+          client.post("/api/v1/engine/upscale-plan",
+                      json={"targetScale": 4, "filePath": str(weights)}).status_code == 400)
+
+    tiled = client.post("/api/v1/engine/upscale-plan", json={
+        "targetScale": 4, "maxTile": 128, "frame": [1088, 608], "filePath": str(weights)})
+    td = tiled.json().get("data") or {}
+    tiles = td.get("tiles") or []
+    check("㊿′ 给了权重（真 safetensors 头 ✓）+ 倍率/分块 ⇒ ``tiled-ai-2x`` ✓（内嵌契约被真读 ✓）",
+          tiled.status_code == 200 and td.get("mode") == "tiled-ai-2x" and td.get("contractError") is None
+          and all(step for step in (td.get("steps") or [])), (tiled.status_code, td.get("contractError")))
+    check("㊿″ 分块是画面的**精确划分** ✓（各块宽之和 == 1088 ✓、高之和 == 608 ✓ —— "
+          "面积对得上**不算** ✗：错位/重叠的组合太多 ✓✗）",
+          sum(int(t[2]) for t in tiles if int(t[1]) == 0) == 1088
+          and sum(int(t[3]) for t in tiles if int(t[0]) == 0) == 608
+          and len(tiles) > 1, tiles)
+
+    half = client.post("/api/v1/engine/upscale-plan",
+                       json={"targetScale": 1.5, "filePath": str(weights)}).json().get("data") or {}
+    check("㊿‴ ⭐ 1.5× ⇒ 「**先合法的 2× 再缩放**」✗✗（直接提交 1.5× 会被放大器拒 ✓）",
+          half.get("mode") == "ai-2x-resize" and len(half.get("steps") or []) == 2, half)
+
+    ghost = client.post("/api/v1/engine/upscale-plan", json={
+        "targetScale": 2, "filePath": str(weights.with_name("nope.safetensors"))})
+    check("㊿⁗ 权重文件不存在 ⇒ **200 + 回退 + 带理由** ✓（不是 500 ✗、也不是静默当没配 ✗）",
+          ghost.status_code == 200 and (ghost.json().get("data") or {}).get("mode") == "normal"
+          and bool((ghost.json().get("data") or {}).get("contractError")),
+          (ghost.status_code, (ghost.json().get("data") or {}).get("contractError")))
+    # ── ⑤ 超清二采接进管线（2026-09-24 接 ✓）：计划在请求里 ✓、阶段真跑 ✓、音频流锁定 ✓ ──
+    ai2x = {"mode": "ai-2x", "scale": 2.0, "steps": ["AI 2×（潜空间放大器 ✓）", "带掩码的二次去噪 ✓"],
+            "notes": ["输出分辨率翻倍 ✓、耗时 ≈6× ✓"], "tiles": [], "fallbackReason": None}
+    planned_up = client.post("/api/v1/engine/plan",
+                             json={"prompt": "x", "steps": 4, "upscale": ai2x})
+    up_plan = (planned_up.json().get("data") or {}).get("upscale") or {}
+    check("⑤⁵ 请求带超清计划 ⇒ 计划里**如实带上** ✓ 且**提前说代价**（≈6× ✓ 与音频流锁定 ✗）",
+          planned_up.status_code == 200 and up_plan.get("mode") == "ai-2x"
+          and any("6×" in item or "音频流锁定" in item
+                  for item in ((planned_up.json().get("data") or {}).get("warnings") or [])),
+          (planned_up.status_code, up_plan))
+
+    normal = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4,
+        "upscale": {"mode": "normal", "scale": 1.0, "fallbackReason": "放大器权重缺失 ✓"}})
+    check("⑤⁶ ⭐ 计划说**不启用** ⇒ 必须**说清为什么** ✗✗（静默降级 = 用户以为超清开着 ✓✗）",
+          normal.status_code == 200
+          and any("未启用" in item and "放大器权重缺失" in item
+                  for item in ((normal.json().get("data") or {}).get("warnings") or [])),
+          (normal.json().get("data") or {}).get("warnings"))
+
+    check("⑤⁷ 编一个不存在的 mode ⇒ **400 并列出合法的** ✗（不静默回落普通模式 ✓✗）",
+          client.post("/api/v1/engine/plan",
+                      json={"prompt": "x", "steps": 2, "upscale": {"mode": "8x-magic"}}
+                      ).status_code == 400)
+
+    refined = client.post("/api/v1/engine/dry-run",
+                          json={"prompt": "超清用例", "steps": 3, "seconds": 2.5,
+                                "temporalCompression": 4, "upscale": ai2x}).json().get("data") or {}
+    details = (refined.get("refine") or {}).get("details") or {}
+    check("⑤⁸ ⭐⭐ 干跑真跑**二采阶段** ✓（``stageMs`` 里有 refine ✓、结果里带实况 ✓）",
+          refined.get("ok") is True and (refined.get("refine") or {}).get("applied") is True
+          and "refine" in (refined.get("stageMs") or {}), refined.get("refine"))
+    check("⑤⁹ ⭐⭐ **音频流逐位不变** ✗✗（只换视频那一槽 ✓；重采音频会把音轨弄坏而画面看着正常 ✓）",
+          details.get("audioIdentical") is True and details.get("isContainer") is True,
+          details)
+    check("⑤¹⁰ ⭐ 视频流空间 2× ✓ 而**时间维不变** ✗✗（时间插值会让动作速率变错 ✓）",
+          details.get("videoShapeAfter", [0] * 5)[3] == details.get("videoShapeBefore", [0] * 5)[3] * 2
+          and details.get("videoShapeAfter", [0] * 5)[4] == details.get("videoShapeBefore", [0] * 5)[4] * 2
+          and details.get("temporalUnchanged") is True,
+          (details.get("videoShapeBefore"), details.get("videoShapeAfter")))
+    check("⑤¹¹ 容器类型**保住了** ✓（不许退化成裸 list ✗✗ —— 那会让下游炸得莫名其妙 ✓）",
+          details.get("containerType") == "TinyAVLatents", details.get("containerType"))
+
+    plain = client.post("/api/v1/engine/dry-run",
+                        json={"prompt": "普通模式", "steps": 2}).json().get("data") or {}
+    check("⑤¹² 没要超清 ⇒ **不跑二采阶段** ✓（可选阶段的正面情形要保住 ✓✗）",
+          plain.get("refine") is None and "refine" not in (plain.get("stageMs") or {}),
+          (plain.get("refine"), list((plain.get("stageMs") or {}))))
+
+    class _NoLock(DryRunBackend):
+        refineNote = {"locksAudio": False, "note": "（故意的 ✓）"}
+
+    no_lock = pipe.run_sync(pipe.GenerationRequest(prompt="x", steps=2,
+                                                   upscale=upscale_mod.UpscalePlan(
+                                                       mode="ai-2x", scale=2.0)),
+                            _NoLock())
+    check("⑤¹³ ⭐⭐ 后端**没自述锁定音频流** ⇒ **明确拒绝**跑二采 ✗✗（不许重采音频还说成功 ✓）",
+          no_lock.ok is False and (no_lock.error or {}).get("stage") == "refine"
+          and "锁定音频流" in str((no_lock.error or {}).get("message")),
+          no_lock.error)
+
+    class _NoRefine(DryRunBackend):
+        refine_latents = None      # type: ignore[assignment]
+
+    no_hook = pipe.run_sync(pipe.GenerationRequest(prompt="x", steps=2,
+                                                   upscale=upscale_mod.UpscalePlan(
+                                                       mode="ai-2x", scale=2.0)),
+                            _NoRefine())
+    check("⑤¹⁴ 后端**没实现** ``refine_latents`` ⇒ 明确拒绝 ✗（**不静默按普通模式出片** ✗✗ —— "
+          "那会让用户以为超清开着 ✓）",
+          no_hook.ok is False and (no_hook.error or {}).get("stage") == "refine"
+          and "refine_latents" in str((no_hook.error or {}).get("message")),
+          no_hook.error)
+
     # 后端现状接口 ✓：分得清「缺依赖」与「实现待写」✓
     backends = client.get("/api/v1/engine/backends").json().get("data") or {}
     # ⚠️ 这里的断言**不随 torch 装没装而变** ✓（第一版写成"必须缺依赖"✗ ⇒ 装上就红 ✓）：

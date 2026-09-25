@@ -227,6 +227,35 @@ def case_api() -> None:
     check("㉝ 空 body ⇒ 400 或明确的缺参提示（不 500 ✗）",
           client.post("/api/v1/prompts/polish", json={}).status_code in (200, 400), "")
 
+    # ── ㉞ ⭐ **导演稿分段**（2026-09-24 接线 ✓）：口径此前**只有自检在调** ✗✗ ⇒ 现在业务面拿得到 ✓ ──
+    seg = client.post("/api/v1/prompts/segments", json={
+        "text": "[0s-6.6s] 雨夜，主角回头。\n[6.6s-12s] 他看见巷口有人。",
+    })
+    seg_body = seg.json().get("data") or {}
+    segs = seg_body.get("segments") or []
+    check("㉞ POST /prompts/segments 真能调用 ✓（200 + 逐段 ✓ 段标记时长被认 ✓ 且**往下吸附帧网格** ✓）",
+          seg.status_code == 200 and len(segs) == 2 and segs[0]["source"] == "range"
+          and 6.5 < float(segs[0]["seconds"]) <= 6.6
+          and (int(segs[0]["frames"]) - 5) % 17 == 0,  # ⚠️ 别拿「6.6 秒」当判据 ✗：会往下吸附 ✓
+          (seg.status_code, segs))
+
+    long_text = ("雨夜，主角贴着墙往前走。" * 4 + "\n\n" + "他推开消防门，走廊里只剩脚步声。" * 4)
+    plain = client.post("/api/v1/prompts/segments", json={"text": long_text}
+                        ).json().get("data") or {}
+    pl = plain.get("segments") or []
+    check("㉞′ 无标记稿 ⇒ 切成多段 ✓、每段都在网格上且 ≤15 s ✓、**一个字都没丢** ✗✗"
+          "（丢字是最隐蔽的那种错 ✓）",
+          len(pl) > 1
+          and all((int(s["frames"]) - 5) % 17 == 0 and float(s["seconds"]) <= 15.0 for s in pl)
+          and "".join(s["text"] for s in pl).replace(" ", "") == long_text.replace("\n", "").replace(" ", ""),
+          [{"s": s["seconds"], "n": s["chars"]} for s in pl])
+
+    check("㉞″ 参数给错 ⇒ **400 带理由** ✗（不是 500 ✓✗）；空稿 ⇒ 400 ✓",
+          client.post("/api/v1/prompts/segments", json={"text": "x", "unitsPerSecond": "abc"}
+                      ).status_code == 400
+          and client.post("/api/v1/prompts/segments", json={"text": ""}).status_code == 400,
+          client.post("/api/v1/prompts/segments", json={"text": ""}).status_code)
+
 
 def main() -> int:
     case_placeholders()

@@ -39,11 +39,16 @@ from ..core.models import characters, episodes, storyboards
 from ..core.response import now
 from .character_match import match_character_by_speaker_name
 from .file_storage import get_absolute_path
+from .segment_audio import SegmentAudioError, mix_model_and_voice
 from .storyboard_helpers import parse_dialogue_for_tts
 from .task_logger import log_task_error, log_task_progress, log_task_start, log_task_success
 from .tts_generation import generate_tts
 
 __all__ = ["compose_storyboard", "supports_subtitle_filter"]
+
+#: 混音中间产物目录名 ✓（放在数据根下的 ``static/mixed`` ✓ —— 与 ``composed`` 同级 ✓）：
+#: ⚠️ 用**固定目录**而不是临时目录 ✗：出问题时能**拿到那几路音轨**复盘 ✓（排查"音轨不对"只能靠听 ✓）。
+_MIX_SUBDIR = "static/mixed"
 
 #: 字幕滤镜支持探测的**记忆化**缓存（``None`` = 还没探测过）
 _subtitle_filter_support: bool | None = None
@@ -103,10 +108,50 @@ def _fetch(storyboard_id: int):
         ).first()
 
 
-async def compose_storyboard(storyboard_id: int) -> str:
+async def _extract_audio_wav(video_path: str, target: str) -> str:
+    """从视频里**抽出音轨**成 16-bit PCM wav ✓（**不重采样、不混声道** ✗ —— 见 :func:`engine.media.extract_wav` ✓）。
+
+    ⚠️ 单独成一个函数是为了**可测** ✓（自检里换掉它就能验混音接线 ✓，不必真装 ffmpeg ✓）。
+    ⚠️ 视频**没有音轨** ⇒ 这里会抛 ✓ —— 混音那一路**不当成"那就照旧顶替"** ✗（静默降级 ✓✗）。
+    """
+    from .engine import media as engine_media   # 局部 import ✓：只有混音这一条路才需要引擎的 ffmpeg 封装 ✓
+
+    await asyncio.to_thread(engine_media.extract_wav, video_path, target)
+    return target
+
+
+async def _build_mixed_track(video_path: str, voice_path: str, *, voice_mode: str,
+                             voice_volume: float, tag: str) -> str:
+    """把**视频自带音轨**与配音按口径合成一条 ✓ ⇒ 混合后 wav 的**绝对路径** ✓。
+
+    ⚠️ 失败**不静默退回顶替** ✗✗：调用方是**显式**要求混音的 ✓ ⇒ 拼不出来就**明确失败并把原因说清** ✓
+    （悄悄换成顶替 ⇒ 用户以为混了、模型声其实没了 ✓）。
+    """
+    target_dir = Path(get_storage_root()) / _MIX_SUBDIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    model_wav = target_dir / f"{tag}-model.wav"
+    mixed_wav = target_dir / f"{tag}-mixed.wav"
+    await _extract_audio_wav(video_path, str(model_wav))
+    report = await asyncio.to_thread(
+        mix_model_and_voice, model_audio_path=str(model_wav), voice_path=voice_path,
+        output_path=str(mixed_wav), voice_mode=voice_mode, voice_volume=voice_volume)
+    log_task_progress("ComposeTask", "mixed-model-audio", {
+        "mixed": report["path"], "voiceMode": report["voiceMode"],
+        "targetSeconds": report["targetSeconds"], "modelSeconds": report["modelSeconds"],
+        "voiceSeconds": report["voiceSeconds"], "clippedSamples": report["clippedSamples"],
+    })
+    return str(mixed_wav)
+
+
+async def compose_storyboard(storyboard_id: int, *, mix_model_audio: bool = False,
+                             voice_mode: str = "mix", voice_volume: float = 1.0) -> str:
     """合成单个镜头，返回**相对数据根**的成片路径（``static/composed/<uuid>.mp4``）。
 
     ⚠️ 本函数**自己管连接**（每次读写一个短事务），不接收外部连接 —— 见 ``_write``。
+
+    ``mix_model_audio=True``（**默认 false ⇒ 与原有行为一字不差** ✗）⇒ 把视频自带的音轨
+    （H3 是**联合 AV** ✓ 生成的）与配音**混合**成一条 ✓ 再喂给 ffmpeg ✓ —— 见
+    :mod:`app.services.segment_audio` 的三支削波口径 ✓✗（顶替会让模型声**直接消失** ✓）。
     """
     sb = _fetch(storyboard_id)
     if sb is None:
@@ -189,6 +234,19 @@ async def compose_storyboard(storyboard_id: int) -> str:
 
             srt_relative = f"static/subtitles/{srt_filename}"
             _write(storyboard_id, subtitle_url=srt_relative)
+
+        # 2b. **可选**：把模型自带的音轨与配音**混合** ✓（默认关 ⇒ 与原有行为**一字不差** ✗）
+        if mix_model_audio and audio_path:
+            try:
+                audio_path = await _build_mixed_track(
+                    video_path, audio_path, voice_mode=voice_mode, voice_volume=voice_volume,
+                    tag=f"{storyboard_id}-{uuid4().hex[:8]}")
+            except (SegmentAudioError, OSError) as err:
+                # ⭐ 显式要求混音却拼不出来 ⇒ **失败** ✗（不悄悄退回顶替 ✓✗：那等于模型声没了 ✓）
+                raise ValueError(
+                    f"混音失败（显式要求 ``mixModelAudio`` ✓）：{type(err).__name__}: {err}"
+                    f"　—— ⚠️ 不静默退回「配音顶替」✗（那会让模型自带的环境音**直接消失** ✓✗）"
+                ) from err
 
         # 3. FFmpeg 合成
         output_dir = Path(get_storage_root()) / "composed"

@@ -376,9 +376,12 @@ def select_h3_task(*, primary_model_kind: str, has_optional_fl2va: bool = False,
     规则（口径来自参考实现 ✓；判据与错因由本仓自己写 ✓）：
     1. 主模型是 FL2VA **且本段有参考素材** ⇒ **拒** ✗✗（FL2VA 单模型通道不支持参考 ⇒
        强行生成会**丢素材或直接失败** ✓✗）—— 这是**硬约束** ✓，不许「悄悄忽略参考图」✗；
-    2. 本段需要**硬首帧**续接 ⇒ 必须有 FL2VA ✓（主模型是 Ref2VA 又没接第二模型 ⇒ 拒，并给替代方案 ✓）；
-    3. 有参考素材 ⇒ Ref2VA ✓；
-    4. 其余：``prefer_fl2va`` 且可用 ⇒ FL2VA ✓；否则 Ref2VA ✓。
+    2. ⭐⭐ **「硬首帧」与「参考素材」同时要** ⇒ **拒** ✗✗（2026-09-24 补 ✓ —— 此前这两条会
+       互相压过：先判硬首帧 ⇒ 挑 FL2VA ⇒ **参考素材被静默失效** ✓✗）。两条要求**不可能同时满足** ✓，
+       随便挑一个就是静默丢另一个 ✗ ⇒ 必须由**上层**二选一 ✓；
+    3. 本段需要**硬首帧**续接 ⇒ 必须有 FL2VA ✓（主模型是 Ref2VA 又没接第二模型 ⇒ 拒，并给替代方案 ✓）；
+    4. 有参考素材 ⇒ Ref2VA ✓；
+    5. 其余：``prefer_fl2va`` 且可用 ⇒ FL2VA ✓；否则 Ref2VA ✓。
 
     ⚠️ 判不出模型形态（不是 ``ref2va``/``fl2va``）⇒ **拒** ✗ 不猜 ✓。
     """
@@ -395,6 +398,15 @@ def select_h3_task(*, primary_model_kind: str, has_optional_fl2va: bool = False,
             "解法：① 本机已装 Ref2VA 时，改走 Ref2VA 重试 ✓；"
             "② 没装就把 ``minimax_h3_ref2va_*`` 放到 ComfyUI 的 ``models/diffusion_models`` 并重启 ✓；"
             "③ 本段确实只有文本 ⇒ 去掉参考素材 ✓。")
+    if has_first_frame and has_references:
+        raise H3TaskError(
+            "本段**同时**要「硬首帧」（FL2VA ✓）与「参考素材」（只能 Ref2VA ✓）⇒ **直接拒** ✗✗："
+            "这两条要求**不可能同时满足** ✓（FL2VA 通道不支持参考 ⇒ 参考素材会**静默失效** ✓✗；"
+            "Ref2VA 通道不锁首帧 ⇒ 结束画面会飘 ✓✗）—— 随便挑一个就是**静默丢**另一个 ✓✗。"
+            "二选一：① 去掉本段的参考素材（保留首帧锁定 ✓）；"
+            "② 去掉尾帧目标、改用「软参考 Ref2VA（保人物一致性 ✓）」（保留参考素材 ✓）。"
+            "⚠️ 如果参考素材是系统**自动**挂上的（如出场角色声线样本 ✓），"
+            "那就该在**上层**决定挂不挂 ✓，别让「自动挂上的东西」把用户的硬设定顶掉 ✓✗。")
     fl2va_available = bool(has_optional_fl2va) or kind == "fl2va"
     if has_first_frame:
         if fl2va_available:

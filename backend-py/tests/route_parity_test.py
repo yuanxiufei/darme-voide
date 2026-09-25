@@ -112,7 +112,11 @@ _PARAM = re.compile(r"\{[^}]+\}")
 #: * ``/health`` 在 Node 的 ``index.ts`` 里定义，不在 routes 目录 ⇒ 不在本脚本的扫描范围；
 #: * ``/ai-providers`` 与 ``/ai-configs`` **同源一个文件**（``aiConfigs.ts`` 里 ``aiProviders``
 #:   是独立导出的 Hono app），一个文件只映射一个前缀，所以它得走白名单。
-_EXTRA_ALLOWLIST = {("GET", "/api/v1/health"), ("GET", "/api/v1/ai-providers")}
+_EXTRA_ALLOWLIST = {("GET", "/api/v1/health"), ("GET", "/api/v1/ai-providers"),
+                    # 2026-09-24 自研接线 ✓：导演稿分段工具 ✓、超清计划 ✓、混合加载 ✓（Node 侧从来没有 ✓）
+                    ("POST", "/api/v1/prompts/segments"),
+                    ("POST", "/api/v1/engine/upscale-plan"),
+                    ("POST", "/api/v1/engine/hybrid-merge")}
 
 
 def _node_path(prefix: str, ts_path: str) -> str:

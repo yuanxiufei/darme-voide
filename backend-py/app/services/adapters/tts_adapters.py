@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...core.response import js_nullish
+from ..voice_contract import EMOTION_ORDER
 from .jscompat import as_dict, dig, is_pure_hex, js_base64_to_hex
 from .url import join_provider_url
 
@@ -27,14 +28,25 @@ __all__ = [
 ]
 
 #: 通用 emotion 标签 → MiniMax 平台支持的 emotion 值
+#: ⚠️ 这张表是**厂商同义词表** ✓（``furious`` 与 ``angry`` 是同一个平台值 ✓），
+#: **不是**「猜最近邻」✗✗ —— 表里没有的**一律拒** ✗（见 :func:`map_emotion` ✓）。
+#: 规范名由 ``voice_contract.EMOTION_ORDER`` 那 8 个收口 ✓，本表额外保留历史同义写法 ✓。
 _MINIMAX_EMOTION_MAP = {
     "happy": "happy",
     "joyful": "happy",
     "sad": "sad",
     "sorrowful": "sad",
+    # ⚠️ 契约的 8 个规范名要**在本表里有落点** ✗✗（否则用户选了却生成不出来 ✓✗）：
+    #    ``fear`` / ``melancholy`` 与表内已有的 ``fearful`` / ``sorrowful`` **同义** ✓（平台值一样 ✓）；
+    #    ``surprise`` 与 ``surprised`` 同义 ✓。⚠️ ``disgust``（厌恶）**表里没有任何能表达它的平台值** ✗
+    #    ⇒ **不猜最近邻** ✗✗（猜成 angry 就是换了个情绪 ✓），改由 ``MiniMaxTTSAdapter.unsupported_emotions``
+    #    在**提交前**如实告知 ✓（见 ``voice_contract.resolve_voice_params`` ✓）。
+    "fear": "sad",
+    "melancholy": "sad",
     "angry": "angry",
     "furious": "angry",
     "excited": "surprised",
+    "surprise": "surprised",
     "surprised": "surprised",
     "calm": "calm",
     "peaceful": "calm",
@@ -50,14 +62,39 @@ TTSResult = dict[str, Any]
 
 
 def map_emotion(emotion: str) -> str:
-    """通用 emotion 标签 → MiniMax 平台值；未知标签回落 ``happy``。"""
-    return _MINIMAX_EMOTION_MAP.get(str(emotion).lower()) or "happy"
+    """通用 emotion 标签 → MiniMax 平台值；⚠️ **未知标签当场拒** ✗✗（原先回落 ``happy`` ✓✗）。
+
+    回落 ``happy`` 是这条链上最典型的「**出片不对还查不出来**」✓✗：用户选了「难过」的写法一旦
+    不在表里，成片会用「开心」的语气念完，而日志里一切正常 ✓✗。⇒ 宁可当场拒 ✓。
+    """
+    key = str(emotion).lower()
+    mapped = _MINIMAX_EMOTION_MAP.get(key)
+    if mapped is None:
+        raise ValueError(
+            f"MiniMax 平台没有与 {emotion!r} 对应的情绪值 ✗ ⇒ **不猜最近邻** ✓✗"
+            f"（猜错等于换了个情绪且你看不出来 ✓）—— 要么补这张表、要么改用"
+            f" {' / '.join(sorted(set(_MINIMAX_EMOTION_MAP.values())))} 里的某一个 ✓")
+    return mapped
 
 
 class MiniMaxTTSAdapter:
     """MiniMax TTS（``POST /v1/t2a_v2``）。"""
 
     provider = "minimax"
+
+    # ── 能力声明 ✓（给 ``voice_contract.resolve_voice_params`` 读 ✓；⚠️ 不声明 = 「没查」✗ 不是「支持」✗✗）──
+    #: 引擎认情绪 ✓（请求体里带 ``voice_setting.emotion`` ✓）
+    supports_emotion = True
+    #: ⚠️ 平台只收**单个情绪名** ⇒ 收不了 8 维向量 ✗（收不了就**拒** ✗，不静默丢 ✓✗）
+    supports_emotion_vector = False
+    #: ⚠️ **能表达的规范名 = 映射表里有的那些** ✓✗ —— 与表**同源** ⇒ 加名字只改表 ✓
+    #: （``disgust`` 因此天然落在「表达不了」那一侧 ✓）。
+    emotion_names = tuple(name for name in EMOTION_ORDER if name in _MINIMAX_EMOTION_MAP)
+    #: 引擎认语速 ✓（``voice_setting.speed`` ✓）
+    supports_speed = True
+    #: ⚠️ **语速区间本仓还没核过** ✗ ⇒ ``None``（= 只做有限性校验 ✓ 并**如实报告「区间没查」** ✓✗）。
+    #: 要启用区间校验：在本仓核到厂商口径后填 ``(low, high)`` ✓，或由调用方按配置传入 ✓。
+    speed_range: tuple[float, float] | None = None
 
     def build_generate_request(self, config: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         url = join_provider_url(config.get("baseUrl"), "/v1", "/t2a_v2")
@@ -131,6 +168,18 @@ class CosyVoiceTTSAdapter:
     """
 
     provider = "cosyvoice"
+
+    # ── 能力声明 ✓（同上 ✓）──
+    #: ⭐⭐ **两条路径都不收情绪** ✗✗：``/tts`` → 上游 ``/inference_sft`` 只认 ``tts_text``/``spk_id`` ✓；
+    #: 零样本 → 上游 ``/inference_zero_shot`` 只认 ``tts_text``/``prompt_text``/``prompt_wav`` ✓
+    #: （见 ``app/local_services/cosyvoice/server.py`` ✓ 包装器**明确忽略**这两个字段 ✓✗）。
+    #: ⇒ 声明 ``False`` ✓ ⇒ 用户选的情绪会进 ``dropped`` 并被**如实报告** ✓✗，不再静默消失 ✓。
+    supports_emotion = False
+    supports_emotion_vector = False
+    #: ⚠️ 语速**也不转发** ✗（包装器只发 ``tts_text``/``spk_id``/``prompt_text``/``prompt_wav`` ✓）
+    supports_speed = False
+    #: ⚠️ ``None`` = 区间没核 ✗（且本引擎根本不接语速 ⇒ 核了也没用 ✓✗，见 ``supports_speed`` ✓）
+    speed_range: tuple[float, float] | None = None
 
     def build_generate_request(self, config: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         # 零样本模式：带参考音频时走 CosyVoice 官方 /inference_zero_shot

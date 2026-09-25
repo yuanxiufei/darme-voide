@@ -15,6 +15,15 @@
    且**文件必须真实存在**（否则静默退回普通合成）。
 
 ⚠️ 有意的差异：**GPU 显存租约未迁**（``gpuManager.acquire('audio', …)``）。
+
+## 2026-09-24 接线：情绪/语速**契约**（:mod:`app.services.voice_contract` ✓）
+
+此前情绪/语速是**每个适配器自己**处理（MiniMax ``|| 'happy'`` ✗ / CosyVoice ``|| 'neutral'`` ✗）
+⇒ 两条「出片不对还查不出来」的路 ✓✗：① 表里没有的情绪**静默换成 happy** ✓；② 引擎根本不接的
+参数（CosyVoice 两条路径都不转发 ``emotion``/``speed`` ✓）**静默丢掉** ✓✗。
+
+现在**过契约**收口在 :func:`_resolve_voice_params` ✓（**提交之前** ✗）：非法**当场拒** ✓、
+引擎不认的**如实报告**（``dropped`` + ``notes`` 进任务日志 ✓✗）、**不替用户默认** ✗。
 """
 from __future__ import annotations
 
@@ -30,6 +39,7 @@ from sqlalchemy.engine import Connection
 
 from ..core.config import get_storage_root
 from ..core.models import ai_voices
+from . import voice_contract
 from .adapters.registry import get_tts_adapter
 from .ai_configs import is_local_config
 from .ai_providers import get_audio_config_by_id
@@ -68,24 +78,100 @@ def _hex_to_bytes(text: str) -> bytes:
     return bytes(out)
 
 
-def _load_cosyvoice_zero_shot(conn: Connection, voice_id: Any) -> dict[str, str]:
-    """CosyVoice 零样本复用：音色库里若存有**真实存在**的参考音频，则走 ``/inference_zero_shot``。"""
+def _cosyvoice_reference(conn: Connection, voice_id: Any) -> tuple[Path, Any] | None:
+    """音色库里的克隆参考 ✓ ⇒ ``(参考音频路径, 参考文本)``（行在 ✓、字段有 ✓、**文件真在** ✓）。
+
+    ⚠️ **不读文件** ✗（只判存在性 ✓）—— 所以既能当「这单是不是克隆路径 ✓」的**廉价探针** ✓，
+    也是 :func:`_load_cosyvoice_zero_shot` 的唯一数据来源 ✓（两处口径**同源** ✓✗）。
+    """
     if not voice_id:
-        return {}
+        return None
     row = conn.execute(
         select(ai_voices.c.reference_audio, ai_voices.c.prompt_text).where(
             ai_voices.c.voice_id == voice_id
         )
     ).first()
     if row is None or not row[0]:
-        return {}
+        return None
     audio_path = Path(get_storage_root()) / _STATIC_PREFIX_RE.sub("", row[0])
     if not audio_path.exists():
+        return None
+    return audio_path, row[1]
+
+
+def _load_cosyvoice_zero_shot(conn: Connection, voice_id: Any) -> dict[str, str]:
+    """CosyVoice 零样本复用：音色库里若存有**真实存在**的参考音频，则走 ``/inference_zero_shot``。"""
+    found = _cosyvoice_reference(conn, voice_id)
+    if found is None:
         return {}
+    audio_path, prompt_text = found
     return {
         "promptAudio": base64.b64encode(audio_path.read_bytes()).decode("ascii"),
-        "promptText": row[1] or "",
+        "promptText": prompt_text or "",
     }
+
+
+def _settings_speed_range(config: dict[str, Any]) -> tuple[float, float] | None:
+    """产品侧声明的语速区间 ✓（``settings.speedRange = [low, high]`` ✓）。
+
+    ⚠️ 语速区间**只能由调用方给** ✗（好取值取决于引擎 ✓ 契约层不内置 ✗）⇒ 三道来源：
+    ① 本次调用显式传 ✓、② 配置里的 ``speedRange`` ✓（这里读 ✓）、③ 适配器声明 ✓；
+    **都没有 ⇒ 「区间没查」** ✗✗（只做有限性校验 ✓ 并如实报告 ✓ —— **不当通过** ✗）。
+    """
+    settings = config.get("settings")
+    if not isinstance(settings, dict):
+        return None
+    raw = settings.get("speedRange")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    try:
+        return float(raw[0]), float(raw[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_voice_params(config: dict[str, Any], params: dict[str, Any], *,
+                          clone: bool = False) -> dict[str, Any]:
+    """情绪/语速过契约 ✓ ⇒ 一份「做了什么 / 没做什么」的规范化参数 ✓（**发请求之前** ✗）。
+
+    两种失败**必须分开** ✗✗：**用户给的值不合法** ⇒ 抛 :class:`VoiceContractError` ✓（当场拒 ✓，
+    **不许**顺手改成 ``happy`` ✓✗）；**引擎不认这个参数** ⇒ 进任务日志的 ``dropped`` ✓
+    （丢的是「这版引擎做不到」✓，不是「用户写错了」✓ —— 混在一起就查不出真因 ✓✗）。
+    """
+    try:
+        adapter = get_tts_adapter(config.get("provider"))
+    except Exception:  # noqa: BLE001 —— 未知 provider ✓：**别在这里另造一个说法** ✗
+        adapter = None   # ⇒ 交给下面循环里原来的报错路径 ✓（它才是这条链的既有判据 ✓）
+
+    try:
+        plan = voice_contract.resolve_voice_params(
+            params, adapter=adapter, clone=clone,
+            speed_range=_settings_speed_range(config) or None,
+        )
+    except voice_contract.VoiceContractError as err:
+        log_task_error("AudioTask", "voice-contract-rejected", {
+            "provider": config.get("provider"), "voice": params.get("voice"),
+            "emotion": params.get("emotion"), "speed": params.get("speed"),
+            "error": str(err),
+        })
+        raise
+
+    log_task_payload("AudioTask", "voice contract", plan)
+    for item in plan["dropped"]:
+        log_task_warn("AudioTask", "voice-contract-dropped",
+                      {"provider": config.get("provider"), "voice": params.get("voice"), **item})
+    for note in plan["notes"]:
+        log_task_warn("AudioTask", "voice-contract-note",
+                      {"provider": config.get("provider"), "note": note})
+
+    resolved = dict(params)
+    for field in ("emotion", "speed"):
+        if plan[field] is None:
+            # ⚠️ 「没给」与「引擎不认」都**不留字段** ✓✗ —— 留着会让适配器按自己的老写法补默认值 ✓✗
+            resolved.pop(field, None)
+        else:
+            resolved[field] = plan[field]
+    return resolved
 
 
 async def generate_tts(conn: Connection, params: dict[str, Any]) -> str:
@@ -97,6 +183,18 @@ async def generate_tts(conn: Connection, params: dict[str, Any]) -> str:
     models = list(config["models"]) if config.get("models") else [config.get("model")]
     is_local = is_local_config(config.get("baseUrl") or "", config.get("provider") or "")
     text = params.get("text") or ""
+
+    # ── ⭐ 情绪/语速过契约：**一次、且在重试循环之外** ✗（在循环里做 ⇒ 同一个非法值会被重试 N 次 ✓✗）──
+    #    ⚠️ 克隆判断只做**廉价探针**（不读文件、不 base64 ✓）—— 真正的加载仍在循环里原处 ✓✗：
+    #    探针只为「该不该把情绪/语速报成 dropped ✓」服务 ✓；探不出来 ⇒ 按「不是克隆」报 ✓
+    #    （不在这里抛 ✗ —— 真错误留给循环里那条**既有**路径去报 ✓，别抢它的活 ✓）。
+    clone = False
+    if config.get("provider") == "cosyvoice":
+        try:
+            clone = _cosyvoice_reference(conn, params.get("voice")) is not None
+        except Exception:  # noqa: BLE001 —— 探针失败**不改变**本函数的行为 ✓（下面照样会真加载 ✓）
+            clone = False
+    params = _resolve_voice_params(config, params, clone=clone)
 
     for attempt in range(len(models)):
         # ⚠️ `params.model || models[attempt]`：传了 model 就等于每次都用它（fallback 失效）

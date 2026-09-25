@@ -55,6 +55,8 @@ __all__ = [
 ]
 
 #: 阶段顺序（也是前端进度条的依据 ✓）
+#: ⚠️ 这里**只列必经阶段** ✗ —— 可选阶段（``condition`` ✓、``refine`` ✓）靠 :data:`STAGE_LABELS`
+#: 与耗时表体现 ✓（加进来会让"六个阶段都有耗时"这类判据失效 ✓✗）。
 STAGE_ORDER: tuple[str, ...] = ("plan", "encode", "init", "sample", "decode", "write")
 
 #: 各阶段的中文名（报错/事件里给人看 ✓）
@@ -65,6 +67,8 @@ STAGE_LABELS: dict[str, str] = {
     #: 可选阶段 ✓（只有图生视频会给首帧 ⇒ 不给就不出现在耗时表里 ✓）
     "condition": "首帧条件（图生视频）",
     "sample": "去噪采样",
+    #: 可选阶段 ✓（只有计划说"用放大器"才跑 ✓；**音频流不重采** ✗）
+    "refine": "二采精修（超清）",
     "decode": "解码（潜变量 → 帧）",
     "write": "落盘",
 }
@@ -126,6 +130,10 @@ class GenerationRequest:
     #: 首帧条件（图生视频 ✓）—— 只在给了 ``first_frame`` 时生效 ✓
     conditioning: conditioning_mod.ConditioningConfig = field(
         default_factory=conditioning_mod.ConditioningConfig)
+    #: 超清计划 ✓ —— 由 :func:`app.services.engine.upscale.plan_upscale` 算出 ✓（调用方先走
+    #: ``/engine/upscale-plan`` ✓）；``None`` ⇒ 普通模式 ✓。⚠️ 用 **frozen dataclass** 而非 dict ✗：
+    #: 本请求要能当**缓存键**（不可变 ✓ 可哈希 ✓），dict 会让它不可哈希 ✓✗。
+    upscale: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -146,6 +154,8 @@ class GenerationPlan:
     timesteps: list[float] = field(default_factory=list)
     steps: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: 超清计划（``None`` = 本次没要超清 ✓；有值就说明**会跑二采阶段** ✓）
+    upscale: dict[str, Any] | None = None
     #: **相对**耗时系数 ✓（1 步 euler 无引导 = 1 ✓）—— 见 :meth:`to_dict` 里为什么不报秒数 ✗
     cost_factor: float = 0.0
 
@@ -164,6 +174,7 @@ class GenerationPlan:
             #    刻意不给"秒" ✗：那需要每步的算力模型（我们还没有 ✓），
             #    硬报一个秒数就是**编** ✗。前端要秒数就等真后端跑一次后按实测标定 ✓。
             "costFactor": round(self.cost_factor, 4),
+            "upscale": self.upscale,
             "warnings": self.warnings,
         }
 
@@ -218,6 +229,17 @@ def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) 
             f"相对耗时约 ×{plan.cost_factor / max(1.0, float(plan.steps)):.2f}"
             f"（heun 每步还要 ×2 ✗）" +
             (f"（重标定 {config.rescale:g} ✓）" if config.rescale else ""))
+    # ── 超清计划（**照调用方给的** ✓ 不自己猜倍率/分块 ✗）────────────────────────
+    if request.upscale is not None:
+        plan.upscale = request.upscale.to_dict()
+        if plan.upscale.get("usesUpscaler"):
+            plan.warnings.append(
+                f"超清二采：{plan.upscale['mode']} ×{float(plan.upscale.get('scale') or 0):g}"
+                f"（⚠️ 只重采**视频流** ✓ 音频流锁定 ✗；耗时按逆向口径 ≈**6×** ✓）")
+        else:
+            # ⭐ **不启用也必须说清为什么** ✗（静默降级 = 用户以为超清开着 ✓✗）
+            plan.warnings.append(
+                f"超清**未启用** ⇒ 普通模式出片：{plan.upscale.get('fallbackReason') or '（没给理由 ✗）'}")
     if weights_bytes:
         from .inventory import estimate_vram
 
@@ -290,6 +312,8 @@ class PipelineResult:
     guidanceSteps: int = 0
     #: 首帧条件的实况 ✓（``None`` = 本次没要求图生视频 ✓；有值就说明**真的套上去了** ✓）
     conditioning: dict[str, Any] | None = None
+    #: 二采精修的实况 ✓（``None`` = 本次没要超清 / 计划说不启用放大器 ✓）
+    refine: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
 
     @property
@@ -318,6 +342,7 @@ class PipelineResult:
             "guidanceSteps": self.guidanceSteps, "conditioning": self.conditioning,
             "totalMs": self.totalMs, "stageMs": dict(self.stageMs),
             "plan": self.plan.to_dict() if self.plan else None,
+            "refine": self.refine,
             "outputs": self.outputs, "error": self.error,
         }
 
@@ -558,6 +583,42 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
         return _fail(result, "sample", err, step=holder["step"] or None)
     result.stageMs["sample"] = int((time.perf_counter() - started) * 1000)
     emit(result.event("sample", step=result.sampleSteps, total=plan.steps))
+
+    # ── ④b refine（**可选阶段** ✓：只有计划说"用放大器"才跑 ✓ 2026-09-24 接 ✓）────────
+    # 口径（逆向 ✓）：低清一采 ⇒ latent **空间 2×** ⇒ **低噪声二采精修**（⚠️ **音频流不重采** ✗✗ ——
+    # 重采音频会把音轨弄坏/丢掉 ✓✗）。计划由 :func:`app.services.engine.upscale.plan_upscale` 给出 ✓
+    # （调用方先走 ``/engine/upscale-plan`` ✓ 把计划放进请求 ✓ —— 管线**不自己猜**倍率/分块 ✗）。
+    if request.upscale is not None and getattr(request.upscale, "uses_upscaler", False):
+        started = time.perf_counter()
+        try:
+            ensure_not_cancelled("refine")
+            hook = getattr(backend, "refine_latents", None)
+            if not callable(hook):
+                raise StageError(
+                    "refine", f"后端 {getattr(backend, 'name', type(backend).__name__)} 未实现 "
+                              f"refine_latents ✗ ⇒ 做不了二采（**不静默按普通模式出片** ✗✗ —— "
+                              f"那会让用户以为超清开着 ✓）。要么后端把二采接上 ✓，要么这次别要超清 ✓")
+            # ⭐ 音频流锁定**必须是后端自述的** ✓✗：二采只重采视频流 ✓ —— 后端没声明就拒 ✗
+            #    （重采了音频 ⇒ 音轨坏掉而画面看着正常 ✓，属于最坏的"看不出来"✗）。
+            note = getattr(backend, "refineNote", None)
+            if not isinstance(note, dict) or note.get("locksAudio") is not True:
+                raise StageError(
+                    "refine", "后端**没有自述「二采锁定音频流」** ✗ ⇒ 不跑二采 ✗✗"
+                              "（重采音频会把音轨弄坏 ✓ 而画面上看不出来 ✓）；"
+                              "请让后端声明 refineNote={'locksAudio': True, ...} ✓")
+            latents = hook(latents, plan, request)
+            result.refine = {"applied": True, "mode": request.upscale.mode,
+                             "scale": request.upscale.scale,
+                             "tiles": len(request.upscale.tiles or ()),
+                             "backendNote": dict(note)}
+            details = getattr(backend, "refineDetails", None)
+            if isinstance(details, dict):
+                result.refine["details"] = dict(details)
+        except BaseException as err:  # noqa: BLE001
+            result.stageMs["refine"] = int((time.perf_counter() - started) * 1000)
+            return _fail(result, "refine", err)
+        result.stageMs["refine"] = int((time.perf_counter() - started) * 1000)
+        emit(result.event("refine", note=f"二采精修（{request.upscale.mode} ✓，音频流锁定 ✓）"))
 
     # ── ⑤ decode ──────────────────────────────────────────────────────────
     started = time.perf_counter()

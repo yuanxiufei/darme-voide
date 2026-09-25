@@ -49,6 +49,15 @@ def _json_or_none(raw: Any) -> Any:
         return None
 
 
+def _present(raw: Any) -> bool:
+    """「这一段带不带这种东西」的判据 ✓ —— **两种形态都要认** ✗✗（落库时是 JSON 字符串 ✓、
+    直接调用适配器时是列表 ✓ ⇒ 只认一种 ⇒ 另一种会被判成「没有」✓✗，正是硬约束被绕过的形状 ✓）。"""
+    if isinstance(raw, (list, tuple)):
+        return len(raw) > 0
+    parsed = _json_or_none(raw)
+    return isinstance(parsed, list) and len(parsed) > 0
+
+
 def _iterate_like_js(value: Any) -> list[Any]:
     """镜像 JS 的 ``for (const x of value)``。
 
@@ -68,8 +77,11 @@ class MiniMaxVideoAdapter:
     provider = "minimax"
 
     def build_generate_request(self, config: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        # ⭐ 形态决策（含硬约束 ✓）**只在这里算一次** ✗，并把过程随请求描述交给调用方 ✓
+        #    （``formPlan`` **不进 body** ✗ —— 它只给本仓的任务日志看 ✓）
+        form_plan = plan_h3_form(config, record)
         body: dict[str, Any] = {
-            "model": resolve_h3_checkpoint(config, record),
+            "model": form_plan["checkpoint"],
             "prompt": record.get("prompt") or "",
             "aspect_ratio": record.get("aspectRatio") or "16:9",
             "duration": record.get("duration") or 5,
@@ -102,6 +114,9 @@ class MiniMaxVideoAdapter:
             "method": "POST",
             "headers": {"Content-Type": _JSON_MIME, "Authorization": f"Bearer {config.get('apiKey')}"},
             "body": body,
+            # ⚠️ 额外键 ✓：**不发出去** ✗（调用方只取 url/method/headers/body ✓），
+            #    它是本仓任务日志要看的那份「这一单按什么选的」✓✗
+            "formPlan": form_plan,
         }
 
     def parse_generate_response(self, result: Any) -> dict[str, Any]:
@@ -151,8 +166,22 @@ class MiniMaxVideoAdapter:
         )
 
 
-def resolve_h3_checkpoint(config: dict[str, Any], record: dict[str, Any]) -> str:
-    """H3 双 checkpoint 路由：按 ``scene_type`` 选 FL2VA / Ref2VA。
+#: 场景类型里这些词 ⇒ **偏好 FL2VA**（动作 / 静默 / 空镜 / 转场 ✓ 口径与旧实现逐字一致 ✓）
+_FL2VA_SCENE_RE = re.compile(r"action|silent|transition|establishing|empty")
+
+
+def plan_h3_form(config: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """H3 形态决策 ✓ ⇒ ``{checkpoint, kind, has_references, has_first_frame, prefer_fl2va, blocked, reason}``。
+
+    ⚠️ **判据的唯一出口是 :func:`conditioning.select_h3_task`** ✗✗（2026-09-24 接线 ✓）——
+    此前这里是「``scene_type`` 正则 + ``or`` 兜底」✓✗，于是那条**硬约束**（有参考素材 ⇒ 只能 Ref2VA ✓）
+    在生产里**没有任何人执行** ✗：``scene_type=action`` 且带参考音频的镜头会挑到 FL2VA 权重、
+    参考素材**静默失效** ✓✗（收端只会丢一句 warning ✓）。
+
+    ⚠️ 引擎**拒**（要求互斥 / 没有可用 FL2VA ✓）时**不装作没发生** ✗：
+    ``blocked=True`` + ``reason``（引擎写的可行动文案 ✓）、``kind=None``、
+    ``checkpoint`` 退回**旧的启发式结果** ✓ —— 回退是为了**不炸既有流程** ✗，
+    但必须让调用方看得到「这一单不是按规则选的」✓✗。
 
     需在 ``ai_service_configs.settings`` 里声明 ``checkpoint_map``，例如::
 
@@ -160,18 +189,55 @@ def resolve_h3_checkpoint(config: dict[str, Any], record: dict[str, Any]) -> str
 
     未声明时退化为 ``record.model / config.model``（单 checkpoint 模式，云端亦然）。
     """
+    from ..engine import conditioning
+
     base = record.get("model") or config.get("model")
+    # ⭐ 判据只看**参考素材与首尾帧两条诉求** ✓（不拿「有没有首帧图」当首帧诉求 ✗✗ ——
+    #    每张 I2V 都有首帧图 ⇒ 那样会把所有 I2V 都判成「必须 FL2VA」✓✗）
+    has_references = _present(record.get("referenceImageUrls")) or \
+        _present(record.get("referenceAudioUrls")) or record.get("referenceMode") == "multiple"
+    has_first_frame = record.get("referenceMode") == "first_last"
+    prefer_fl2va = _FL2VA_SCENE_RE.search(str(record.get("sceneType") or "").lower()) is not None
+
     settings = config.get("settings")
     checkpoint_map = dig(settings, "checkpoint_map")
-    if not isinstance(checkpoint_map, dict):
-        return base
+    plan: dict[str, Any] = {
+        "kind": None, "checkpoint": base, "has_references": has_references,
+        "has_first_frame": has_first_frame, "prefer_fl2va": prefer_fl2va,
+        "blocked": False, "reason": None,
+    }
+    if not isinstance(checkpoint_map, dict) or not checkpoint_map:
+        return plan
 
-    scene_type = (record.get("sceneType") or "").lower()
-    # FL2VA（图生视频/首尾帧）：动作 / 静默 / 空镜 / 转场；其余走 Ref2VA
-    is_fl2va = re.search(r"action|silent|transition|establishing|empty", scene_type) is not None
-    key = "fl2va" if is_fl2va else "ref2va"
-    mapped = checkpoint_map.get(key) or checkpoint_map.get("fl2va") or checkpoint_map.get("ref2va")
-    return mapped if isinstance(mapped, str) and mapped else base
+    has_fl2va = isinstance(checkpoint_map.get("fl2va"), str) and bool(checkpoint_map["fl2va"])
+    has_ref2va = isinstance(checkpoint_map.get("ref2va"), str) and bool(checkpoint_map["ref2va"])
+    # ⭐ 主形态：**两套都在 ⇒ 以 Ref2VA 为主、FL2VA 作可选第二通道** ✓✗
+    #    （与旧实现的默认偏好一致 ✓：只有场景偏好或硬首帧时才转 FL2VA ✓）
+    primary = "ref2va" if has_ref2va else "fl2va"
+    try:
+        kind = conditioning.select_h3_task(primary_model_kind=primary,
+                                           has_optional_fl2va=has_fl2va and has_ref2va,
+                                           has_references=has_references,
+                                           has_first_frame=has_first_frame,
+                                           prefer_fl2va=prefer_fl2va)
+    except conditioning.H3TaskError as err:
+        # 引擎拒 ⇒ **不猜、不静默**：如实记下来，退回一个**能表达参考素材**的权重（不拦流程 ✓）。
+        # ⚠️ 回退口径只有一条：**有 Ref2VA 就用它** ✓✗（参考素材是唯一「只有 Ref2VA 能表达」的东西 ✓；
+        #    首尾帧字段**照样在请求体里** ✓ ⇒ 这一侧没有内容被丢掉 ✓）。三种拒绝情形下它的输出
+        #    与旧实现**逐字一致** ✓（只有 fl2va 时 ⇒ 只能 fl2va ✓；只有 ref2va 时 ⇒ 本就 ref2va ✓）。
+        mapped = checkpoint_map.get("ref2va") or checkpoint_map.get("fl2va")
+        plan.update({"blocked": True, "reason": str(err),
+                     "checkpoint": mapped if isinstance(mapped, str) and mapped else base})
+        return plan
+
+    mapped = checkpoint_map.get(kind) or base
+    plan.update({"kind": kind, "checkpoint": mapped if isinstance(mapped, str) and mapped else base})
+    return plan
+
+
+def resolve_h3_checkpoint(config: dict[str, Any], record: dict[str, Any]) -> str:
+    """H3 双 checkpoint 路由 ✓ ⇒ 权重名 ✓（**判据全部在** :func:`plan_h3_form` ✓）。"""
+    return plan_h3_form(config, record)["checkpoint"]
 
 
 class VolcEngineVideoAdapter:
