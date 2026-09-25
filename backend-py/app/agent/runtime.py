@@ -602,7 +602,20 @@ async def default_generate(
         budget_plan = context_budget.plan_compression(messages)
         if budget_plan.elide:
             messages = context_budget.apply_plan(messages, budget_plan)
+        if budget_plan.overBudget:
+            # ⚠️ **超预算必须留痕**（2026-09-25 修）：此前只在「有老 tool 输出可压」时才记 step ✗，
+            #    于是「机械层压不动」这种情况（``needsSummarize`` ✓ —— 中间没有可压的 tool 输出 /
+            #    最近 ``keep_recent`` 条一律不动 ✓）在运行记录里**完全查不到** ✗，
+            #    外部只表现为「模型毫无征兆地开始丢前文」✗。
+            #    本循环仍**刻意不**擅自调模型做摘要 ✓（成本 + 失真，见 ``context_budget`` 模块文档 ✓），
+            #    但把「已经超了」这个事实落进 steps 与控制台日志 ✓。
             steps.append({"contextBudget": budget_plan.to_dict()})
+            if budget_plan.needsSummarize:
+                log_task_warn("Agent", "context-over-budget", {
+                    "estimatedTokens": round(budget_plan.tokensAfter),
+                    "limitTokens": context_budget.Budget().limit_tokens,
+                    "messageCount": len(messages),
+                })
         request = adapter.build_request(config, {
             "model": model,
             "messages": messages,
