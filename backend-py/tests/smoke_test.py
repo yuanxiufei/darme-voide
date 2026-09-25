@@ -36,7 +36,10 @@ REAL_DB = REPO / "data" / "drama.db"
 
 if not REAL_DB.exists():
     print(f"FAIL  real db not found: {REAL_DB}")
-    print("      hint: 先启动一次 Node 后端让它建库（cd backend && npx tsx src/index.ts）")
+    # ⚠️ 原提示是「先启动一次 Node 后端让它建库」✗ —— ``backend/`` 2026-09-15 已删 ✓，
+    #    照那条走只会撞空 ✓（属本仓「删库后残留指引」那一类 ✓，2026-09-25 更正 ✓）。
+    print("      hint: 起一次后端就会自动建库（cd backend-py && python -m uvicorn app.main:app）；"
+          "只想单独建库可用 python backend-py/app/scripts/db_upgrade.py --plan")
     raise SystemExit(1)
 
 _report_path = Path(
@@ -185,6 +188,13 @@ check("schema: models == Node DDL table set", sorted(set(model_schema) - PY_ONLY
 check("schema: extra DB tables are known legacy only", set(only_db) <= LEGACY_DB_ONLY_TABLES, str(only_db))
 check("schema: no real missing column", not missing_cols, json.dumps(missing_cols))
 check("schema: no extra column in models", not extra_cols, json.dumps(extra_cols))
+if extra_cols:
+    # ⚠️ 报错必须**可操作** ✓：这一条（「模型有、库没有」✓）的成因几乎总是「旧库还没补列」✓，
+    #    后果是**每个碰新列的端点都 400** ✓（2026-09-25 实测：`GET /api/v1/dramas` 报
+    #    `no such column: dramas.era_background` ✓，本文件下一段就 KeyError 崩 ✓）；
+    #    而启动日志只打前 6 条 ✗ ⇒ 这里把入口指出来 ✓（别让人自己去翻日志 ✓）。
+    print("      hint: 旧库缺列 ⇒ python backend-py/app/scripts/db_upgrade.py（完整清单）"
+          " / --apply（备份后补列）")
 check("schema: table count == 29 + 白名单新增", len(model_schema) == 29 + len(PY_ONLY_TABLES),
       str(len(model_schema)))
 check("schema: matches Node schema.ts count（扣除白名单 ✓）",

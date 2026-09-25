@@ -11,6 +11,33 @@
 （多出的 `case_second_pass`/`case_keyframes`/`case_gate` 是上一轮就写好的，记账时没跟上 ✓）⇒ 已校正 ✓；
 早前还把 `engine_cache_guard` 写成 **12/12** ✓✗（实测 20/20 ✓）⇒ ⭐ **判据一次写齐再跑全量** ✗，跑完再报数 ✓。
 
+⭐⭐ **2026-09-25 夜「本机模型扫描不许依赖外部服务」入账** ✓：新增 `ollama_store_test.py` ✓，
+`TESTS` 登记 **129 → 130** ✓（**登记数是数出来的** ✓；本套实测 **28/28** ✓、全量总数**待实测** ✗ 不推算 ✗）。
+用户口径：**「以后关于扫描电脑内的模型，只要后端服务启动就可以扫描，不要依赖外部服务」** ✓ ——
+原来 `/ollama/status` 只认 `/api/tags` ✗（**唯一**的官方列模型接口 ✓，但要求 `ollama serve` 在跑 ✗）
+⇒ 「服务没起 ⇒ 本机模型一个都看不见」✗✗（盘上明明有 ✓）。现补 `services/ollama_store.py` ✓：
+把 Ollama 模型库当**文件系统**读 ✓（`OLLAMA_MODELS` > `%LOCALAPPDATA%\\Ollama\\models` > `~/.ollama/models` ✓；
+清单 `manifests/<registry>/[<ns>/]<model>/<tag>` ✓ + 内容寻址的 `blobs/sha256-*` ✓），**只读** ✓
+（删除仍走服务端 `/api/delete` ✓ —— 那是模型库一致性的边界 ✓）。⚠️ 与 `/api/tags` 的口径差异**是有意的** ✓：
+体积取**盘上真实字节** ✓、blob 缺失计 `missingBlobs` ✓ ⇒「清单在、权重没了 ≠ 能推理」✓（**没查 ≠ 通过** ✓）。
+⚠️ 另记一笔：`comfyui_runs_test.py` 在磁盘上但**未登记进 `TESTS`** ✓✗（本轮未动它 ✓，留待确认是有意排除还是漏登 ✓）。
+
+⭐⭐ **2026-09-25 夜「扫描要覆盖世界各大模型，不只 Ollama」入账** ✓：新增 `model_ecosystems_test.py` ✓，
+`TESTS` 登记 **130 → 131** ✓（本套实测 **49/49** ✓；同轮 `ollama_store_test` 28/28 ✓、
+`local_models_test` 89/89 ✓ —— 全量总数仍**待实测** ✗ 不推算 ✗）。
+口径：默认扫描根目录原来只有本仓 `models/`、`local_services/` 与 ComfyUI ✗ ⇒ HuggingFace /
+ModelScope / LM Studio / GPT4All / Jan / llama.cpp 里躺着的模型**扫不到也不报错** ✗✗。
+现补 `services/model_ecosystems.py` ✓（12 个生态的落点表 + 归属判定 + 「怎么才真能用」的实话 ✓）：
+`~`/`%VAR%`/`$VAR` 展开 ✓、变量没设**不编路径** ✓、`roots()` 只返回**真实存在**的目录 ✓；
+`detect()` **最长匹配** ✓（`hub-other` ≭ `hub` ✓）；**弱命中**（comfyui/unknown/ollama）才按生态改判 ✓，
+`h3`/`local-sd`/`cosyvoice` 等**强命中原样保留** ✓（HF 缓存里的 H3 DiT 依然是 H3 权重 ✓）。
+⚠️ 连带修掉一个**老误判** ✓：`tts-service` 规则原来把**整条路径**拼进正则 ✗ ⇒
+`…\ecosystems_tmp\…\flux1-dev.safetensors` 里的 “**ecosys**” 含 “cosy” ⇒ 图像权重被判成 TTS 模型 ✗
+（还会配一个 CosyVoice:9880 的**错建议** ✗）；现整条路径只认「以关键词开头的路径段」✓（89/89 未回退 ✓）。
+⚠️ Ollama 的权重是无扩展名 blob ⇒ 文件遍历**看不见** ✗，改由 manifests 清单并入 ✓，
+且**只在**「默认扫描」或「扫的目录覆盖了 Ollama 库」时并 ✓（免得「只扫 C: 盘」跨盘串味 ✗）。
+
+
 ⭐⭐ **2026-09-25 深夜这一轮起「自研运行时」** ✓✗（用户「要自研实现」✓）：文本生成此前走 ollama HTTP 服务 ✗ ⇒
 ① 新建 `engine/llm.py` ✓ —— 自研 decoder-only transformer（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样 ✓），
 Qwen3/Llama 这类 LLM 的架构 ✓；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗）；缩小版走同一条前向 ✓。
@@ -187,6 +214,9 @@ TESTS = [
     ("SSE 总线 + 尾帧提取", "sse_hub_frames_test.py"),
     ("全自动管线 + SSE 端点", "auto_pipeline_test.py"),
     ("本地模型扫描 + 11 端点", "local_models_test.py"),
+    ("本机 Ollama 模型库**离线**读取（服务没起也列得出；零外部依赖）", "ollama_store_test.py"),
+    ("**世界各大模型**生态落点（HF/ModelScope/LM Studio/GPT4All/Jan/llama.cpp…；离线 + 缓存≠能推理）",
+     "model_ecosystems_test.py"),
     ("角色生成链路 8 端点", "characters_generate_test.py"),
     ("物品/场景出图 2 端点", "props_scenes_generate_test.py"),
     ("分镜 TTS/出图/LLM 5 端点", "storyboards_generate_test.py"),

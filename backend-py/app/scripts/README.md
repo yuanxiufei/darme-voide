@@ -14,10 +14,17 @@
 | **仓库自检** | `check_skill_refs.py` / `check_memory.py` / `test_guards.py` / `check_all.py` —— 防资产**静默漂移** | Python 3.8+，**仅标准库**（零第三方依赖） |
 | **语料管线** | `corpus/fetch_raw.py` → `normalize.py` → `search.py`（+ `analyze{,2,3}.py` 统计） | Python 3.8+，**仅标准库** |
 | **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` | Python 3.8+，**仅标准库**（与后端通过 subprocess 解耦） |
-| **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改） | Python 3.8+，**仅标准库** |
+| **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改）<br>`db_upgrade.py`（旧库**补列**；2026-09-25 加，真实库当时缺 **32 列**） | Python 3.8+，**仅标准库** |
 
 > 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
-> （`run_all.py` = 66 套件 / 2481 项，那份清单才是权威；改后端代码请跑它）。
+> （`run_all.py` 的 `TESTS` 清单才是权威；改后端代码请跑它）。
+>
+> ⚠️ 本条原先写死「66 套件 / 2481 项」✗ —— 那份数字早就不对了 ✓（2026-09-25 实测已远超）。
+> **别再把套件数写死在这里** ✗：`run_all.py` 自己会打出总数 ✓，抄进来的数字只会变成下一条过期信息 ✓。
+>
+> ⚠️ `db_upgrade.py` 是「四类都仅标准库」的一个**边界**：它自身零第三方依赖 ✓，
+> 但「缺哪些列」只能由 `app/core/db.py`（读 SQLAlchemy `metadata`）算 ⇒ 它照
+> `model_manager.py` 的先例**用 subprocess 调 `python -m app.core.db`** ✓（见 `## 路径推导` 末条 ✓）。
 
 ## 仓库自检脚本（pre-commit 会按资产自动触发）
 
@@ -159,8 +166,15 @@ python backend-py/app/scripts/sd_h3_compat_probe.py --list     # 支持矩阵
 
 | 脚本位置 | 到仓库根 | 到 `backend-py/` |
 |---|---|---|
-| `scripts/*.py`（守卫 / 工具链） | `parents[2]`（`scripts` → `backend-py` → 仓库根） | `parents[1]` |
-| `scripts/corpus/*.py` | `parents[3]` | `parents[2]` |
+| `app/scripts/*.py`（守卫 / 工具链） | `parents[3]`（`scripts` → `app` → `backend-py` → 仓库根） | `parents[2]` |
+| `app/scripts/corpus/*.py` | `parents[4]` | `parents[3]` |
+
+⚠️ **2026-09-25 更正**：本表原先写作 ``scripts/*.py`` → 仓库根 ``parents[2]`` ✗ —— 那是按
+「脚本在 `backend-py/scripts/`」算的 ✗，而本目录实际在 `backend-py/app/scripts/` ✓（**整整差一级** ✗）。
+照错的那行写出来的症状**不是**「路径不存在」✗ 而是 `ModuleNotFoundError: No module named 'app'` ✓
+（`db_upgrade.py` 第一版真踩到了 ✓，报文里那个「找不到 app」跟路径推导八竿子打不着 ✓）。
+以**本目录实际脚本**为准：`tokenizer_bench.py` / `h3_readiness.py` = `parents[2]` ✓、
+`check_memory.py` = `parents[3]` ✓、`corpus/*.py` = `parents[4]` ✓（注释自带 `depth-adjusted-to-app` ✓）。
 
 （`Path(__file__).resolve()` 口径；`model_manager.py` / `sd_h3_pipeline.py` 用的是等价的 `os.path.dirname` 版。）
 

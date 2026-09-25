@@ -36,7 +36,13 @@ from sqlalchemy.engine import Connection
 from app.core.models import agent_configs, dramas
 from app.services.adapters.registry import get_text_adapter
 from app.services.agent_prompts import get_default_instructions
-from app.services.agent_registry import VALID_AGENT_TYPES, get_default_name
+from app.services.agent_registry import (
+    AGENT_SPECS,
+    STYLE_PROFILE_TYPES,
+    VALID_AGENT_TYPES,
+    get_agent_spec,
+    get_default_name,
+)
 from app.services.ai_configs import is_local_config
 from app.services.ai_providers import get_text_config, get_text_provider_base_url
 from app.services.style_profiles import get_active_profile_for_drama
@@ -90,8 +96,9 @@ DEFAULT_MAX_STEPS = 20
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.7
 
-#: 会被注入风格 Profile 的 Agent（其余直接透传）
-STYLE_PROFILE_TYPES = ("storyboard_breaker", "extractor", "script_rewriter")
+#: 会被注入风格 Profile 的 Agent（其余直接透传）。
+#: 成员集合的单一来源在 ``agent_registry.AGENT_SPECS`` 的 ``style_profile`` 字段 ——
+#: 本文件只 import（不再复述），加 Agent 时改一处即可。
 
 #: ``append_style_profile`` 追加的分节标题（**逐字与 TS 一致**）
 STYLE_PROFILE_HEADER = "\n\n【项目风格 Profile（house style，最高优先级，必须遵守）】"
@@ -295,38 +302,104 @@ def _as_registry(value: Any) -> ToolRegistry:
     return ToolRegistry(dict(value or {}))
 
 
+#: 工具集标识 → 工厂。**签名统一**为 ``(conn, type, episode_id, drama_id) -> ToolRegistry``。
+#:
+#: ⚠️ 用「声明 + 查表」而不是 if/elif 分派：漏掉一个分支的症状是**静默装配出 ``None``**
+#: ⇒ 该 Agent 报「不可运行」，却看不出是"忘了加分支"。加 Agent 现在只需在
+#: ``agent_registry._STRUCTURE`` 声明 ``tool_set`` + 在下表加一条映射。
+_TOOL_FACTORIES: dict[str, Callable[..., ToolRegistry]] = {}
+
+
+def _tool_factory(tool_set: str) -> Callable[..., ToolRegistry | None]:
+    """登记一个工具集工厂（装饰器形式，避免「函数名与表中的键」两处各写一遍）。"""
+    def register(factory: Callable[..., ToolRegistry]) -> Callable[..., ToolRegistry]:
+        _TOOL_FACTORIES[tool_set] = factory
+        return factory
+
+    return register
+
+
+@_tool_factory("script")
+def _tools_script(conn: Connection, type: str, episode_id: int,
+                  drama_id: int) -> ToolRegistry:
+    return _as_registry(create_script_tools(episode_id))
+
+
+@_tool_factory("extract")
+def _tools_extract(conn: Connection, type: str, episode_id: int,
+                   drama_id: int) -> ToolRegistry:
+    return _as_registry(create_extract_tools(episode_id, drama_id))
+
+
+@_tool_factory("storyboard")
+def _tools_storyboard(conn: Connection, type: str, episode_id: int,
+                      drama_id: int) -> ToolRegistry:
+    # 这两个 Agent 需要「找相似镜头」的参考 ⇒ 额外挂语料检索工具
+    # （⚠️ 语料目录已 gitignore，缺失时工具自身降级返回 available:false）
+    return ToolRegistry.of(
+        _as_registry(create_storyboard_tools(episode_id, drama_id)),
+        _as_registry(create_corpus_tools()),
+    )
+
+
+@_tool_factory("voice")
+def _tools_voice(conn: Connection, type: str, episode_id: int,
+                 drama_id: int) -> ToolRegistry:
+    return _as_registry(create_voice_tools(episode_id, drama_id))
+
+
+@_tool_factory("grid")
+def _tools_grid(conn: Connection, type: str, episode_id: int,
+                drama_id: int) -> ToolRegistry:
+    return ToolRegistry.of(
+        _as_registry(create_grid_prompt_tools(episode_id, drama_id)),
+        _as_registry(create_corpus_tools()),
+    )
+
+
+@_tool_factory("subagent")
+def _tools_subagent(conn: Connection, type: str, episode_id: int,
+                    drama_id: int) -> ToolRegistry:
+    from app.agent.subagent import create_run_subagent_tools  # noqa: PLC0415 —— 打破循环导入
+
+    return ToolRegistry(create_run_subagent_tools(
+        conn, drama_id, episode_id, parent_type=type))
+
+
 def create_agent_tools(conn: Connection, type: str, episode_id: int,
                        drama_id: int) -> ToolRegistry | None:
-    """按 Agent 类型装配工具集（未知类型返回 None ⇒ 该类型不可运行）。
+    """按 Agent 类型装配工具集（未知类型 / 未声明工具集 ⇒ ``None`` ⇒ 该类型不可运行）。
 
     ``orchestrator`` 装的是 ``run_subagent`` + ``list_available_agents``（``agents/subagent.py``，
     2026-09-15 起**已迁**；早先这里是空注册表占位 + 一条 ``orchestrator-tools-missing`` warn）。
     ⇒ 因此本函数需要 ``conn``（子 Agent 委托要跑一次真实 Agent run）。
-    """
-    if type == "script_rewriter":
-        return _as_registry(create_script_tools(episode_id))
-    if type == "extractor":
-        return _as_registry(create_extract_tools(episode_id, drama_id))
-    if type == "storyboard_breaker":
-        # 这两个 Agent 需要「找相似镜头」的参考 ⇒ 额外挂语料检索工具
-        # （⚠️ 语料目录已 gitignore，缺失时工具自身降级返回 available:false）
-        return ToolRegistry.of(
-            _as_registry(create_storyboard_tools(episode_id, drama_id)),
-            _as_registry(create_corpus_tools()),
-        )
-    if type == "voice_assigner":
-        return _as_registry(create_voice_tools(episode_id, drama_id))
-    if type == "grid_prompt_generator":
-        return ToolRegistry.of(
-            _as_registry(create_grid_prompt_tools(episode_id, drama_id)),
-            _as_registry(create_corpus_tools()),
-        )
-    if type == "orchestrator":
-        from app.agent.subagent import create_run_subagent_tools  # noqa: PLC0415 —— 打破循环导入
 
-        return ToolRegistry(create_run_subagent_tools(
-            conn, drama_id, episode_id, parent_type=type))
-    return None
+    分派依据 = ``agent_registry.AGENT_SPECS[*].tool_set``（**单一来源**；本文件不再有 if/elif）。
+    """
+    spec = get_agent_spec(type)
+    factory = _TOOL_FACTORIES.get(spec.tool_set) if spec and spec.tool_set else None
+    if factory is None:
+        return None
+    return factory(conn, type, episode_id, drama_id)
+
+
+def _assert_tool_sets_registered() -> None:
+    """每个声明的 ``tool_set`` 都必须有工厂 —— 否则**导入期硬失败**。
+
+    这是有意的「宁可起不来」：漏注册的症状是 ``create_agent_tools`` 静默返回 ``None``，
+    该 Agent 在界面上表现为「不可运行」，排查时会一路怀疑到 DB/权限/路由，而真正的
+    原因只是「少写了个装饰器」。
+    """
+    declared = {spec.tool_set for spec in AGENT_SPECS if spec.tool_set}
+    missing = sorted(declared - set(_TOOL_FACTORIES))
+    if missing:
+        raise RuntimeError(
+            f"Agent 声明了工具集但未注册工厂：{missing}。"
+            f"请在 runtime 用 @_tool_factory(\"<tool_set>\") 注册。"
+        )
+
+
+_assert_tool_sets_registered()
 
 
 def append_style_profile(
@@ -394,6 +467,28 @@ def append_style_profile(
         return instructions
 
 
+def assemble_full_instructions(
+    conn: Connection, type: str, episode_id: int, drama_id: int,
+    base_instructions: str, skill_instructions: str | None,
+) -> str:
+    """最终 system prompt 的**唯一组装点**：``base → skill → 协议契约 → 风格注入``。
+
+    ⚠️ 为什么必须只有一个（历史缺陷，2026-09-25 修）：
+    这里曾经有**两个组装点** —— ``build_agent_config`` 算出了带风格 Profile 的
+    ``AgentConfig.instructions``，而真实运行入口 ``run_agent_with_retry`` 传给
+    ``run_agent_with_instructions`` 的是**纯 ``base_instructions``**，后者再自行
+    组装（只做 base+skill+契约，**不含风格注入**）。两份结果静默分叉 ⇒
+    ``append_style_profile`` 追加的风格 Profile / 跨集节奏相位 / 视觉图谱
+    **从未进过模型**，全仓唯一的读取者是测试（``skills_test`` / ``agent_prompts_test``）。
+    这类缺陷不会报错、不会失败，只表现为「模型不遵守风格约束」——
+    所以改为两条路径共用本函数，结构上不可能再分叉。
+    """
+    return append_style_profile(
+        conn, type, episode_id, drama_id,
+        assemble_instructions(base_instructions, skill_instructions),
+    )
+
+
 def build_agent_config(
     conn: Connection, type: str, episode_id: int, drama_id: int
 ) -> AgentConfig | None:
@@ -418,9 +513,8 @@ def build_agent_config(
     skill_instructions = load_agent_skills(
         type, db_config.skills if db_config is not None else None
     )
-    instructions = append_style_profile(
-        conn, type, episode_id, drama_id,
-        assemble_instructions(base_instructions, skill_instructions),
+    instructions = assemble_full_instructions(
+        conn, type, episode_id, drama_id, base_instructions, skill_instructions,
     )
     name = (db_config.name if db_config is not None and db_config.name else "") \
         or get_default_name(type)
@@ -621,11 +715,15 @@ async def run_agent_with_instructions(
     trace = start_trace("Agent", f"run-{type}",
                         {"agentType": type, "episodeId": episode_id, "dramaId": drama_id})
 
-    # 统一组装：base + skill + 协议契约（与 build_agent_config 同源，避免重复注入 skill）
+    # 统一组装：base + skill + 协议契约 + 风格注入 —— 与 build_agent_config **同一个函数**。
+    # 这里刻意不复用 built.instructions：形参 instructions 可能是评测传入的候选提示词，
+    # 而 style Profile 必须按「真实运行上下文」现算，否则评测结论对不上线上表现。
     skill_instructions = load_agent_skills(
         type, built.db_config.skills if built.db_config is not None else None
     )
-    full_instructions = assemble_instructions(instructions, skill_instructions)
+    full_instructions = assemble_full_instructions(
+        conn, type, episode_id, drama_id, instructions, skill_instructions,
+    )
 
     models = model_candidates(built.text_config, built.db_config.model if built.db_config else None)
     if not models:
@@ -734,8 +832,9 @@ async def run_agent_with_retry(
 ) -> AgentRunResult:
     """按 DB/内置配置跑一次 Agent（真实入口）。
 
-    传**纯 baseInstructions**：skill 与协议契约由 ``run_agent_with_instructions``
-    统一组装，避免重复注入。
+    只传**纯 baseInstructions**：skill、协议契约与风格注入统一由
+    ``run_agent_with_instructions`` → ``assemble_full_instructions`` 组装，
+    避免在两个地方各拼一遍（历史上正是这里只传 base，导致风格 Profile 从未进模型）。
     """
     built = build_agent_config(conn, type, episode_id, drama_id)
     if built is None:

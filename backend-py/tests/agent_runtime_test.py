@@ -189,8 +189,10 @@ def main() -> int:  # noqa: C901
           and "多用过肩镜头" in injected and "三幕式" in injected
           and "曝光不过曝" in injected,
           injected[:120])
+    # ⚠️ 判据必须用独特标识 `【视觉图谱引导】`：原先写的是宽泛的 `"视觉"` 子串 ✗，
+    #    而 skill 正文里本来就有"视觉"二字 ⇒ 该 check 即使视觉图谱**完全没注入**也会 PASS（假阳性）。
     check("风格: storyboard_breaker 额外带**视觉图谱引导**",
-          "视觉" in injected, injected[-160:])
+          "【视觉图谱引导】" in injected, injected[-160:])
     with engine.begin() as conn:
         other = rt.append_style_profile(conn, "extractor", 1, drama_id, "原指令")
     check("风格: 非分镜类型**不带**视觉图谱（只在 storyboard_breaker 分支）",
@@ -224,6 +226,27 @@ def main() -> int:  # noqa: C901
           "多集节奏相位" not in no_rhythm, no_rhythm[-80:])
     check("节奏: episode 不存在 -> **不注入、不炸**（空串被跳过 ✓ 不产生空段 ✗）",
           "多集节奏相位" not in ghost and "原指令" in ghost, ghost[:60])
+
+    # ================= ⭐ 回归：风格注入必须**真的进模型**（2026-09-25 修） =================
+    # 历史缺陷：生产入口 `run_agent_with_retry` 只把**纯 base** 交给
+    # `run_agent_with_instructions`，后者自行组装时**不含风格注入** ⇒
+    # `append_style_profile` 的产出（风格 Profile / 跨集节奏 / 视觉图谱）**从未进过模型**，
+    # 全仓唯一读取者是测试。上面那几条 check 全部只单测 `append_style_profile` **本身**，
+    # 所以**测不出来** —— 这里改为断言**假驱动真实收到**的 instructions，才咬得住这条链。
+    style_driver = FakeDriver([_ok(text="ok")])
+    with engine.begin() as conn:
+        asyncio.run(rt.run_agent_with_instructions(
+            conn, "storyboard_breaker", ep_id, drama_id, "候选提示词", "hi",
+            generate=style_driver, sleep=_fake_sleep))
+    sent = style_driver.calls[0]["instructions"]
+    check("⭐回归: 风格 Profile **经运行路径**进入模型（不再只在 build_agent_config 里算完就丢）",
+          "【项目风格 Profile" in sent and "多用过肩镜头" in sent, sent[:120])
+    check("⭐回归: 跨集节奏相位同样经运行路径进入模型",
+          "【多集节奏相位要求】" in sent, sent[-200:])
+    check("⭐回归: 视觉图谱引导同样经运行路径进入模型（storyboard_breaker 专属）",
+          "【视觉图谱引导】" in sent, sent[-200:])
+    check("回归: 评测语义未被破坏 —— 形参 instructions 仍是 base（开头就是候选词）",
+          sent.startswith("候选提示词"), sent[:24])
 
     # ================= 工具装配 =================
     # ⚠️ `create_agent_tools` 自 2026-09-15 起需要 `conn`（orchestrator 的子 Agent 委托要跑真实 run）；

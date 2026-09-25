@@ -59,12 +59,74 @@ def _make_engine(db_path: Path) -> Engine:
     return eng
 
 
+def plan_schema_upgrade(eng: Engine | None = None) -> tuple[list[str], list[str]]:
+    """算出「已存在的表上缺的列」对应的 ``ALTER TABLE … ADD COLUMN``（**只算不执行** ✗）。
+
+    返回 ``(statements, blockers)``：
+
+    * ``statements``：**可直接执行**的语句 ✓（顺序按 ``metadata`` 的声明顺序 ⇒ 跑两遍一致 ✓）；
+    * ``blockers``：SQLite 的 ``ADD COLUMN`` **加不了**的列 ✗ —— ``PRIMARY KEY`` / ``UNIQUE``
+      加不上 ✓，``NOT NULL`` 也得先有默认值 ✓。这类**具名报出、不做猜测** ✓
+      （不偷偷塞 ``DEFAULT ''`` ✗：那是把「结构变化」伪装成「数据默认值」✗，
+      正是本仓「判不出来就拒绝」那条纪律要拦的 ✓）。
+
+    判据与 :func:`_ensure_tables` 的启动体检**同源** ✓（都读 ``metadata`` 这个唯一权威 ✓），
+    区别只在用途：那里打日志（**只取前 6 条** ✓，扫一眼就知道有事 ✓），这里给运维**完整清单** ✓
+    （``app/scripts/db_upgrade.py`` ✓）—— ⚠️ 2026-09-25 实测：真实库缺 **32 列**，
+    日志截断导致「到底要补哪些」得另外写探针才拿得到 ✗。
+    """
+    from sqlalchemy import inspect as sa_inspect  # noqa: PLC0415 —— 只在体检用 ✓
+
+    target = eng if eng is not None else engine
+    inspector = sa_inspect(target)
+    existing = set(inspector.get_table_names())
+    statements: list[str] = []
+    blockers: list[str] = []
+    for name in sorted(set(metadata.tables) & existing):
+        have = {column["name"] for column in inspector.get_columns(name)}
+        for column in metadata.tables[name].columns:
+            if column.name in have:
+                continue
+            where = f"{name}.{column.name}"
+            if column.primary_key or column.unique:
+                blockers.append(f"{where}（PRIMARY KEY / UNIQUE ⇒ SQLite 加不了，需重建表）")
+                continue
+            if not column.nullable:
+                blockers.append(f"{where}（NOT NULL ⇒ 必须先定默认值，由人决定）")
+                continue
+            statements.append(f'ALTER TABLE "{name}" ADD COLUMN "{column.name}" '
+                              f"{column.type.compile(target.dialect)}")
+    return statements, blockers
+
+
+def apply_schema_upgrade(eng: Engine | None = None) -> list[str]:
+    """**显式**执行补列，返回已执行的语句 ✓（只应由 ``db_upgrade.py --apply`` 在备份后调用 ✓）。
+
+    **全有或全无** ✓：只要有一条 ``blocker`` 就**一条都不执行** ✗ ——
+    半升级的库比旧库更难诊断 ✓（与 ``services/continuity_store.py`` 同口径 ✓）。
+    """
+    target = eng if eng is not None else engine
+    statements, blockers = plan_schema_upgrade(target)
+    if blockers:
+        raise RuntimeError(
+            "有列无法用 ALTER 添加 ⇒ 已拒绝执行任何一条（请人工处理）：\n  "
+            + "\n  ".join(blockers)
+        )
+    with target.begin() as conn:
+        for sql in statements:
+            conn.exec_driver_sql(sql)
+    return statements
+
+
 def _ensure_tables(eng: Engine, *, fresh: bool) -> None:
     """**只增不改**地调和 schema ✓：建缺失的表 + 报出缺失的列（不自动 ALTER ✗）。
 
     两条输出都只在**有问题**时打印 ✓（正常启动保持安静 ✓）：
     * ``created``：本次新建了哪些表（已有库升级到新版时最需要看到 ✓）；
     * ``columns missing``：已存在表上**缺列**（新加的列不会自动生效 ✗）⇒ 打印可执行的 ALTER 提示 ✓。
+
+    ⚠️ 提示**只取前 6 条**（日志要能扫一眼 ✓）⇒ 真要动手请用 ``plan_schema_upgrade()``
+    或 ``app/scripts/db_upgrade.py`` 拿**完整清单** ✓（2026-09-25：真实库那 32 条就是被截断的 ✓）。
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -80,20 +142,15 @@ def _ensure_tables(eng: Engine, *, fresh: bool) -> None:
     if created:
         print(f"[db-py] schema upgraded: created {created} in {_db_path}")
     # 列体检：**只报不改** ✗（改用户的库必须由人决定 ✓）
-    inspector = sa_inspect(eng)
-    gaps: list[str] = []
-    for name in sorted(expected & existing):
-        have = {column["name"] for column in inspector.get_columns(name)}
-        want = {column.name for column in metadata.tables[name].columns}
-        for column in sorted(want - have):
-            spec = metadata.tables[name].columns[column]
-            gaps.append(f'{name}.{column} (ALTER TABLE "{name}" ADD COLUMN "{column}" '
-                        f'{spec.type.compile(eng.dialect)}'
-                        f'{" NOT NULL DEFAULT ..." if not spec.nullable else ""})')
-    if gaps:
-        print(f"[db-py] ⚠️ columns missing in existing db ({len(gaps)}): {gaps[:6]}"
-              f"{' …' if len(gaps) > 6 else ''}")
-    if not created and not gaps:
+    statements, blockers = plan_schema_upgrade(eng)
+    if statements or blockers:
+        print(f"[db-py] ⚠️ columns missing in existing db "
+              f"({len(statements)} 可补 / {len(blockers)} 需人工): {statements[:6]}"
+              f"{' …' if len(statements) > 6 else ''}")
+        for item in blockers:
+            print(f"[db-py]   ✗ {item}")
+        print("[db-py]   补列入口: python app/scripts/db_upgrade.py --plan | --apply")
+    if not created and not statements and not blockers:
         print(f"[db-py] reusing existing db: {_db_path}")
 
 
@@ -139,3 +196,40 @@ def get_tx() -> Iterator[Connection]:
     """FastAPI 依赖：事务连接（正常返回时 commit，异常时 rollback）。"""
     with engine.begin() as conn:
         yield conn
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """补列入口（**供 ``app/scripts/db_upgrade.py`` 以 subprocess 调用** ✓，别直接当 API 用 ✗）。
+
+    ⚠️ 为什么入口在这儿而不是全写在 ``app/scripts/`` 里 ✗：那个目录**不是包** ✓
+    （``tests/engine_readiness_script_test.py`` 记着这条教训 ✓），而补列的「缺哪列」只能从
+    ``metadata``（唯一权威 ✓）算出来 ⇒ 逻辑留在本模块 ✓，脚本只负责**备份 + 转发** ✓。
+    """
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(
+        prog="python -m app.core.db",
+        description="旧库 schema 补列（只做 ALTER TABLE ADD COLUMN，不建表/不删列）",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--plan", action="store_true", help="只打印完整补列清单（不动库）")
+    group.add_argument("--apply", action="store_true", help="执行补列（调用方须先备份）")
+    args = parser.parse_args(argv)
+
+    print(f"[db-upgrade] db = {_db_path}")
+    statements, blockers = plan_schema_upgrade()
+
+    if args.plan:
+        for sql in statements:
+            print(f"[db-upgrade]   {sql};")
+        print(f"[db-upgrade] 待补 {len(statements)} 列；需人工 {len(blockers)} 列")
+    else:
+        applied = apply_schema_upgrade()
+        print(f"[db-upgrade] 已补 {len(applied)} 列")
+    for item in blockers:
+        print(f"[db-upgrade]   ✗ {item}")
+    return 1 if blockers else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

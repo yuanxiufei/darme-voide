@@ -55,6 +55,7 @@ from ..services.ai_configs import (
 )
 from ..services.gpu_manager import get_nvidia_smi, gpu_manager
 from ..services.task_logger import log_task_error
+from ..services import ollama_store
 from ..services.ollama import (
     LOCAL_RUNTIMES,
     find_ollama_exe,
@@ -393,20 +394,39 @@ async def _lenient_json(request: Request) -> dict[str, Any]:
 
 @router.post("/ollama/status")
 async def ollama_status(request: Request):
-    """检测 Ollama 运行状态并列出本机所有已安装模型。"""
+    """检测 Ollama 运行状态并列出本机所有已安装模型。
+
+    ⭐ 2026-09-25：**服务没起也照样列出盘上的模型** ✓（走 :mod:`app.services.ollama_store`，
+    零外部依赖 ✓）—— 本仓口径是「**只要后端跑起来就能扫本机模型**」✓，
+    所以**不能**把「服务未运行」直接等同于「本机没有模型」✗✗（那正是原来那个 bug ✗）。
+    ⚠️ 两条路的 ``source`` 不同（``service`` / ``disk`` ✓）：盘上读的**没有服务端校验** ⇒
+    ``missingBlobs > 0`` 就得当警告看 ✓（清单在、权重没了 ≠ 能推理 ✓）。
+    """
     try:
         body = await _lenient_json(request)
         base_url = normalize_ollama_url(body.get("base_url"))
         exe = find_ollama_exe()
+        # ⚠️ 盘上那份**只在真要回落时才读** ✗（服务在跑时它是白读 + 白算一份 sha256 ✗）
+        store_root = ollama_store.models_root()
 
         if not await is_ollama_reachable(base_url):
+            on_disk = ollama_store.list_models(store_root)
+            if on_disk:
+                message = (f"Ollama 服务未运行（{base_url}）；"
+                           f"已从磁盘模型库 {store_root} 读出 {len(on_disk)} 个模型"
+                           f"（只读：可查看/选用；删除与推理仍需先启动服务）")
+            else:
+                message = (f"Ollama 服务未运行（{base_url}），"
+                           f"磁盘模型库 {store_root} 里也没读到模型")
             return success(
                 {
                     "running": False,
                     "base_url": base_url,
-                    "models": [],
+                    "models": on_disk,
                     "exe": exe,
-                    "message": f"无法连接 {base_url}（Ollama 服务未运行）",
+                    "source": "disk",
+                    "store_root": store_root,
+                    "message": message,
                 }
             )
 
@@ -414,13 +434,18 @@ async def ollama_status(request: Request):
             resp = await client.get(f"{base_url}/api/tags")
 
         if not resp.is_success:
+            # 服务在跑但接口报错 ⇒ 仍然把**盘上读到的**给出去 ✓（总比空列表有用 ✓）
+            on_disk = ollama_store.list_models(store_root)
             return success(
                 {
                     "running": True,
                     "base_url": base_url,
-                    "models": [],
+                    "models": on_disk,
                     "exe": exe,
-                    "message": f"Ollama 响应异常 (HTTP {resp.status_code})",
+                    "source": "disk" if on_disk else "service",
+                    "store_root": store_root,
+                    "message": f"Ollama 响应异常 (HTTP {resp.status_code})"
+                               + (f"；已回落到磁盘模型库（{len(on_disk)} 个）" if on_disk else ""),
                 }
             )
 
@@ -447,6 +472,8 @@ async def ollama_status(request: Request):
                 "base_url": base_url,
                 "models": models,
                 "exe": exe,
+                "source": "service",
+                "store_root": store_root,
                 "message": f"检测到 {len(models)} 个本地模型",
             }
         )

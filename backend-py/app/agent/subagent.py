@@ -28,22 +28,14 @@ from typing import Any
 from sqlalchemy.engine import Connection
 
 from app.agent.tool import Tool, json_string, object_schema
+from app.services.agent_registry import SUBAGENT_REGISTRY
 
 __all__ = ["MAX_SUBAGENT_DEPTH", "SUBAGENT_REGISTRY", "create_run_subagent_tools"]
 
-#: 领域专家 Agent 能力清单（供 orchestrator 决策调度）—— **逐字**对齐 TS
-SUBAGENT_REGISTRY: tuple[dict[str, str], ...] = (
-    {"type": "script_rewriter", "name": "剧本改写",
-     "capability": "将小说/原始内容改写为格式化短剧剧本并保存到当前集"},
-    {"type": "extractor", "name": "角色场景提取",
-     "capability": "从剧本提取角色与场景（同名/同地点智能去重）并保存"},
-    {"type": "storyboard_breaker", "name": "分镜拆解",
-     "capability": "将剧本拆解为带完整字段的分镜方案并保存"},
-    {"type": "voice_assigner", "name": "角色音色分配",
-     "capability": "为每个角色匹配最合适的音色并保存"},
-    {"type": "grid_prompt_generator", "name": "图片提示词生成",
-     "capability": "生成角色/场景/宫格图的英文提示词"},
-)
+#: 领域专家 Agent 能力清单（供 orchestrator 决策调度）＝ **转发**
+#: ``services/agent_registry.AGENT_SPECS`` 的 ``subagent_*`` 字段。
+#: ⚠️ 这里**不再复述**成员与文案：漏一条的症状是「新 Agent 明明能跑，orchestrator 却
+#: 在 ``list_available_agents`` 里看不到它」——静默、且只在调度时才暴露。
 
 #: 最大委托深度：orchestrator → 领域 Agent（领域 Agent 无 run_subagent，天然终止）
 MAX_SUBAGENT_DEPTH = 2

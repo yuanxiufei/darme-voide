@@ -20,7 +20,13 @@
 5. ``comfyui_root`` 的判定顺序是 **环境变量 > model-paths.json > 探测候选**；
 6. **同步版与异步版上限不同**：同步 ``maxDepth=5 / maxFiles=8000``，异步 ``8 / 50000``，
    且异步版**每 1000 个文件**报一次进度、随时可取消；
-7. **排序**：``video > image > text > audio > unknown``，同类按**体积降序**（体积更能代表重要性）。
+7. **排序**：``video > image > text > audio > unknown``，同类按**体积降序**（体积更能代表重要性）；
+8. ⭐ **要覆盖「世界各大模型」**（2026-09-25 用户口径 ✓）：默认根目录含 HuggingFace / ModelScope /
+   LM Studio / GPT4All / Jan / llama.cpp / text-generation-webui / SD WebUI / Stability Matrix /
+   InvokeAI / torch hub 的本地落点 ✓（表在 ``services/model_ecosystems.py`` ✓），**全程只读、零外部依赖** ✓
+   —— **不许**要求 ``ollama serve`` / LM Studio 等**服务在跑**才能扫到 ✗✗（那正是「盘上有模型却
+   看不见」的老 bug ✓）；Ollama 的权重是无扩展名 blob ⇒ 文件遍历看不见 ✗，改由 **manifests 清单**读出 ✓
+   （见 ``_merge_ollama`` ✓）。
 """
 from __future__ import annotations
 
@@ -34,6 +40,7 @@ from typing import Any, Awaitable, Callable
 
 from ..core import config
 from ..core.config import PROJECT_ROOT
+from . import model_ecosystems, ollama_store
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
@@ -44,7 +51,10 @@ from ..core.config import PROJECT_ROOT
 LOCAL_SERVICES_ROOT = config.APP_ROOT / "local_services"
 
 __all__ = [
+    "ECOSYSTEM_SKIP_PREFIXES",
     "MODEL_EXTS",
+    "SKIP_DIRS",
+    "SYSTEM_DIRS",
     "ScanCancelledError",
     "build_suggestion",
     "classify",
@@ -105,6 +115,11 @@ RUNTIME_BASE_URLS: dict[str, str] = {
     "unknown": "",
 }
 
+#: 目录名**前缀**跳过（生态专用，见 ``model_ecosystems``）✓：
+#: HuggingFace 的 ``datasets--*`` 是**数据集**不是模型 ✗、``.no_exist`` 是「查过、不存在」的
+#: 负缓存标记 ✗（里面是 0 字节的同名占位文件 ⇒ 不跳会扫出**幽灵模型** ✗✗）。
+ECOSYSTEM_SKIP_PREFIXES = model_ecosystems.skip_prefixes()
+
 #: 类别排序权重（``video`` 最先 —— 体积大、最能代表机器上的模型资产）
 _KIND_ORDER = {"video": 0, "image": 1, "text": 2, "audio": 3, "unknown": 4}
 
@@ -147,10 +162,15 @@ _RULES: list[tuple[str, str, str, str, str, Callable[[str, str, str, str], bool]
 
     # ===== 音频 =====
     # 6. 语音合成（CosyVoice / GPT-SoVITS / VITS 等）
+    # ⚠️ 整条路径**只认「以关键词开头的路径段」** ✗ —— 不再无条件拼进正则 ✗✗：
+    #    `…\ecosystems_tmp\…\flux1-dev.safetensors` 的 "**ecosys**" 含 "cosy" ⇒
+    #    原来会把**图像**权重判成 TTS 模型 ✗，并给它配一个 CosyVoice:9880 的**错建议** ✗✗
+    #    （用户目录里叫 `ecosystems` / `my-tts-*` 都很常见 ⇒ 这不是理论风险 ✓）。
     ("tts-service", "audio", "cosyvoice", "high", "standalone",
      lambda p, d, name, _e: bool(re.search(
          r"cosyvoice|cosy|tts|speech|vits|gpt.?sovits|bert.?vits|fish.?speech|chat.?tts|xtts",
-         f"{d} {name} {p}"))),
+         f"{d} {name}"))
+     or bool(re.search(r"(?:^|[\\/])(?:cosy|tts|speech|vits|xtts|sovits)", p))),
 
     # ===== 文本 =====
     # 7. 独立 LLM GGUF（量化文本模型，可被 Ollama 导入）
@@ -328,17 +348,26 @@ def get_default_roots() -> list[str]:
                     or detect_comfyui())
     comfyui_models_dir = os.path.join(comfyui_root, "models") if comfyui_root else ""
 
-    for candidate in (models_dir, services_dir, comfyui_models_dir, comfyui_root):
+    def add(candidate: str) -> None:
         if candidate and os.path.exists(candidate):
             resolved = os.path.abspath(candidate)
-            if resolved not in roots:
+            if os.path.normcase(resolved) not in {os.path.normcase(r) for r in roots}:
                 roots.append(resolved)
 
+    add(models_dir)
+    add(services_dir)
+    # ⚠️ 用户**显式**加的目录排在约定落点之前 ✓：显式意图优先于约定 ✓
     for candidate in get_extra_roots():
-        if candidate and os.path.exists(candidate):
-            resolved = os.path.abspath(candidate)
-            if resolved not in roots:
-                roots.append(resolved)
+        add(candidate)
+    # ⭐ 2026-09-25：**世界各大模型生态**的落点 ✓（HuggingFace / ModelScope / LM Studio / GPT4All /
+    # Jan / llama.cpp / text-generation-webui / SD WebUI / Stability Matrix / InvokeAI / torch hub ✓，
+    # 表在 ``model_ecosystems`` ✓；只读 ✓、不要求任何生态的服务在跑 ✓）。
+    # ⚠️ 排在 ComfyUI **之前** ✗：ComfyUI 的 ``models/`` 动辄上万文件 ⇒ 后置会被 ``maxFiles``
+    # 上限吃光 ✗，生态落点就「**扫不到也不报错**」了 ✗✗ —— 那正是本轮要修的那类 bug ✓。
+    for _, path in model_ecosystems.roots():
+        add(path)
+    add(comfyui_models_dir)
+    add(comfyui_root)
 
     # 若完全没有可扫描目录，回退到本仓默认模型目录
     if not roots:
@@ -437,8 +466,16 @@ def _sort_models(models: list[dict[str, Any]]) -> None:
 def _make_model(full_path: str, filename: str, dir_name: str, ext: str,
                 size_bytes: int, kinds_filter: set[str] | None) -> dict[str, Any] | None:
     hit = classify(full_path)
+    # ⭐ 生态标注 ✓：文件**在哪**（HuggingFace 缓存 / LM Studio / SD WebUI…）——
+    # ⚠️ 只改「弱命中」（comfyui/unknown/ollama）✗，强命中（h3/local-sd/cosyvoice）保留事实判断 ✓
+    # ⚠️ 路径不在任何已知生态里 ⇒ ``""`` ✓（不硬猜 ✗）
+    ecosystem = model_ecosystems.detect(full_path)
+    if ecosystem:
+        hit = model_ecosystems.apply_ecosystem(hit, ecosystem)
     if kinds_filter and hit["kind"] not in kinds_filter:
         return None
+    suggested = (model_ecosystems.build_suggestion(ecosystem, hit, filename, ext)
+                 if ecosystem else None)
     return {
         "path": full_path,
         "filename": filename,
@@ -451,8 +488,62 @@ def _make_model(full_path: str, filename: str, dir_name: str, ext: str,
         "confidence": hit["confidence"],
         "role": hit["role"],
         "matchedBy": hit["matchedBy"],
-        "suggested": build_suggestion(hit, filename, ext),
+        "ecosystem": ecosystem,
+        "suggested": suggested if suggested is not None else build_suggestion(hit, filename, ext),
     }
+
+
+def _is_under(path: str, roots: list[str]) -> bool:
+    """``path`` 是否落在 ``roots`` 之下（含相等 ✓；大小写/分隔符按平台归一 ✓）。"""
+    if not path:
+        return False
+    target = os.path.normcase(os.path.abspath(path))
+    for root in roots:
+        base = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+        if base and (target == base or target.startswith(base + os.sep)):
+            return True
+    return False
+
+
+def _merge_ollama(models: list[dict[str, Any]], roots: list[str],
+                  explicit_roots: bool, kinds_filter: set[str] | None) -> None:
+    """把 Ollama **清单**里的模型并进结果 ✓（它的权重是无扩展名的 blob ⇒ 文件遍历看不见 ✗）。
+
+    ⚠️ 触发条件**故意保守**（不无条件并 ✗，否则「只扫某个盘」会凭空冒出别的盘的模型 ✗）：
+    1. 调用方**没指定** roots ⇒ 默认扫描 = 「把这台机器的模型都找出来」✓；
+    2. 或指定的 roots **覆盖了** Ollama 模型库 ✓（扫 ``C:`` 时它本来就在下面 ✓）。
+
+    ⚠️ ``path`` 填**清单文件**的真实路径 ✓（blob 路径对调用方没用 ✗）；``ext`` 留空 ✓
+    （硬写成 ``.gguf`` 是编 ✗：清单不保证底层 blob 的类型 ✓）。
+    """
+    if explicit_roots and not _is_under(ollama_store.models_root(), roots):
+        return
+    if kinds_filter and "text" not in kinds_filter:
+        return
+    seen = {str(m.get("path", "")).lower() for m in models}
+    for item in ollama_store.list_models():
+        name = str(item.get("name") or "")
+        path = str(item.get("path") or "")
+        if not name or (path and path.lower() in seen):
+            continue
+        seen.add(path.lower())
+        size = int(item.get("size") or 0)
+        missing = int(item.get("missingBlobs") or 0)
+        models.append({
+            "path": path,
+            "filename": name,
+            "dirname": os.path.basename(os.path.dirname(path)) or "ollama",
+            "sizeBytes": size,
+            "sizeHuman": human_size(size),
+            "ext": "",
+            "kind": "text",
+            "runtime": "ollama",
+            "confidence": "high",
+            "role": "standalone",
+            "matchedBy": ["ollama-store"],
+            "ecosystem": "ollama",
+            "suggested": model_ecosystems.build_ollama_manifest_suggestion(name, size, missing),
+        })
 
 
 def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -468,6 +559,7 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
     kinds = opts.get("kinds") or []
     kinds_filter = set(kinds) if kinds else None
 
+    explicit_roots = bool(opts.get("roots"))
     roots = _resolve_roots(opts.get("roots"))
     models: list[dict[str, Any]] = []
     file_count = 0
@@ -504,6 +596,8 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
                 low = entry.name.lower()
                 if low in SKIP_DIRS or low in SYSTEM_DIRS:
                     continue
+                if low.startswith(ECOSYSTEM_SKIP_PREFIXES):
+                    continue  # 生态的非模型目录（HF 数据集 / 负缓存标记…）
                 if entry.is_symlink():
                     continue  # 不跟随符号链接/junction
                 try:
@@ -540,6 +634,9 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
     for root in roots:
         walk(root, 0)
 
+    # ⭐ Ollama 清单里的模型也并进来 ✓（权重是无扩展名 blob ⇒ 文件遍历看不见 ✗，见 _merge_ollama）
+    _merge_ollama(models, roots, explicit_roots, kinds_filter)
+
     by_kind = {"text": 0, "image": 0, "video": 0, "audio": 0, "unknown": 0}
     for model in models:
         by_kind[model["kind"]] += 1
@@ -552,6 +649,7 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
         "truncated": state["truncated"],
         "elapsedMs": _now_ms() - start,
         "byKind": by_kind,
+        "byEcosystem": model_ecosystems.by_ecosystem(models),
     }
 
 
@@ -570,6 +668,7 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
     on_progress: Callable[[dict[str, Any]], None] | None = opts.get("onProgress")
     should_cancel: Callable[[], bool] | None = opts.get("shouldCancel")
 
+    explicit_roots = bool(opts.get("roots"))
     roots = _resolve_roots(opts.get("roots"))
     models: list[dict[str, Any]] = []
     counters = {"files": 0, "truncated": False, "cancelled": False}
@@ -615,6 +714,8 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
                 low = name.lower()
                 if low in SKIP_DIRS or low in SYSTEM_DIRS:
                     continue
+                if low.startswith(ECOSYSTEM_SKIP_PREFIXES):
+                    continue  # 生态的非模型目录（HF 数据集 / 负缓存标记…）
                 if is_symlink:
                     continue
                 try:
@@ -657,6 +758,9 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
     if counters["cancelled"]:
         raise ScanCancelledError()
 
+    # ⭐ Ollama 清单里的模型也并进来 ✓（与同步版**同一份**规则 ✓，见 _merge_ollama）
+    _merge_ollama(models, roots, explicit_roots, kinds_filter)
+
     by_kind = {"text": 0, "image": 0, "video": 0, "audio": 0, "unknown": 0}
     for model in models:
         by_kind[model["kind"]] += 1
@@ -669,6 +773,7 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
         "truncated": counters["truncated"],
         "elapsedMs": _now_ms() - start,
         "byKind": by_kind,
+        "byEcosystem": model_ecosystems.by_ecosystem(models),
     }
 
 

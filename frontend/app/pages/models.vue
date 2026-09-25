@@ -127,16 +127,22 @@
           <div v-if="ollamaModels.length" class="ollama-models">
             <div v-for="m in ollamaModels" :key="m.name" class="ollama-model">
               <span class="ollama-model-name mono">{{ m.name }}</span>
+              <span v-if="m.missingBlobs" class="ollama-model-warn" :title="`有 ${m.missingBlobs} 个权重 blob 不在盘上，可能无法加载`">缺权重</span>
               <span class="ollama-model-size">{{ m.size_label }}</span>
               <button class="btn btn-ghost btn-xs" :disabled="ollamaBusy" title="创建/切换本地文本配置使用该模型" @click="useOllamaModel(m.name)">
                 <Plus :size="12" /> 使用
               </button>
-              <button class="btn btn-ghost btn-icon" :disabled="ollamaBusy" title="删除该模型" @click="deleteOllamaModel(m.name)">
+              <button
+                class="btn btn-ghost btn-icon"
+                :disabled="ollamaBusy || !ollamaStatus?.running"
+                :title="ollamaStatus?.running ? '删除该模型' : '删除需要 Ollama 服务在运行（磁盘只读）'"
+                @click="deleteOllamaModel(m.name)"
+              >
                 <Trash2 :size="12" />
               </button>
             </div>
           </div>
-          <div v-else class="ollama-empty">{{ ollamaStatus?.running ? '本机暂无已安装模型，可在下方输入模型名下载' : 'Ollama 未运行，先点击「启动 Ollama」' }}</div>
+          <div v-else class="ollama-empty">{{ ollamaStatus?.running ? '本机暂无已安装模型，可在下方输入模型名下载' : '磁盘模型库里没有模型，先点击「启动 Ollama」或在下方下载' }}</div>
           <div class="ollama-pull">
             <input v-model="ollamaPullName" class="input" placeholder="输入模型名，如 qwen3:8b / qwen2.5:7b" @keyup.enter="pullOllamaModel" />
             <button class="btn btn-primary btn-sm" :disabled="ollamaPulling || !ollamaPullName.trim()" @click="pullOllamaModel">
@@ -304,6 +310,12 @@
             <span class="scan-summary-total">共识别 <b>{{ scanResult.total }}</b> 个模型文件</span>
             <span v-if="scanResult.truncated" class="tag tag-warning">结果已截断</span>
             <span v-for="(count, kind) in scanResult.byKind" :key="kind" class="tag" :class="`kind-tag-${kind}`">{{ KIND_META[kind]?.label || kind }} {{ count }}</span>
+            <span
+              v-for="eco in (scanResult.byEcosystem || [])"
+              :key="'eco-' + eco.id"
+              class="tag tag-eco"
+              title="模型文件所在的本机生态（只读来源，不代表服务在运行）"
+            >{{ eco.label }} {{ eco.count }}</span>
           </div>
 
           <div v-if="scanModels.length" class="scan-toolbar">
@@ -346,6 +358,7 @@
                 <div class="scan-item-meta">
                   <span class="tag" :class="`kind-tag-${m.kind}`">{{ KIND_META[m.kind]?.label || m.kind }}</span>
                   <span class="tag" :class="m.role === 'standalone' ? 'tag-accent' : ''">{{ ROLE_LABEL[m.role] || m.role }}</span>
+                  <span v-if="m.ecosystem" class="tag tag-eco">{{ ecosystemLabels[m.ecosystem] || m.ecosystem }}</span>
                   <span class="scan-item-path">{{ m.dirname }}</span>
                 </div>
                 <div v-if="m.suggested?.note" class="scan-item-note"><Info :size="12" /> {{ m.suggested.note }}</div>
@@ -1444,6 +1457,13 @@ const scanProgressPercent = computed(() => {
   return Math.min(100, Math.round((p.scannedFiles / p.total) * 100))
 })
 
+// 生态 id → 中文标签（标签**由后端给** ✓ —— 前端不另写一份，免得两边对不上 ✗）
+const ecosystemLabels = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const eco of scanResult.value?.byEcosystem || []) map[eco.id] = eco.label
+  return map
+})
+
 const scanModels = computed<any[]>(() => {
   const all: any[] = scanResult.value?.models || []
   if (scanFilter.value === 'all') return all
@@ -1843,6 +1863,7 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 .ollama-model { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .ollama-model-name { flex: 1; min-width: 0; font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ollama-model-size { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.ollama-model-warn { font-size: 10px; padding: 1px 6px; border-radius: 99px; background: var(--bg-3); color: var(--text-2); flex-shrink: 0; }
 .ollama-empty { margin-top: 10px; font-size: 12px; color: var(--text-3); }
 .ollama-pull { display: flex; gap: 8px; margin-top: 12px; }
 .ollama-pull .input { flex: 1; min-width: 0; }
@@ -2241,6 +2262,8 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
   color: var(--muted);
 }
 .scan-summary-total b { color: var(--text); }
+/* 来源生态角标（HuggingFace 缓存 / LM Studio / Ollama…）：与「类别」区分开，别混成一堆 */
+.tag-eco { --tag-c: #22d3ee; }
 .kind-tag-text { --tag-c: #38bdf8; }
 .kind-tag-image { --tag-c: #a78bfa; }
 .kind-tag-video { --tag-c: #f472b6; }
