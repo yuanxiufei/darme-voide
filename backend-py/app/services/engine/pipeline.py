@@ -606,7 +606,8 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
                     "refine", "后端**没有自述「二采锁定音频流」** ✗ ⇒ 不跑二采 ✗✗"
                               "（重采音频会把音轨弄坏 ✓ 而画面上看不出来 ✓）；"
                               "请让后端声明 refineNote={'locksAudio': True, ...} ✓")
-            latents = hook(latents, plan, request)
+            # ⚠️ 二采要**重跑主干** ⇒ 必须把条件递下去 ✗（不然后端只能拒绝 ✓ —— 见 refine 的注释 ✓）
+            latents = hook(latents, plan, request, condition=condition)
             result.refine = {"applied": True, "mode": request.upscale.mode,
                              "scale": request.upscale.scale,
                              "tiles": len(request.upscale.tiles or ()),

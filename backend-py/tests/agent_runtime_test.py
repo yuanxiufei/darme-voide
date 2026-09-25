@@ -36,7 +36,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.core.models import agent_configs, dramas, style_profiles  # noqa: E402
+from app.core.models import agent_configs, dramas, episodes, style_profiles  # noqa: E402
 from app.core.response import now  # noqa: E402
 from app.agent import runtime as rt  # noqa: E402
 
@@ -206,6 +206,24 @@ def main() -> int:  # noqa: C901
         global_prof = rt.append_style_profile(conn, "script_rewriter", 1, drama2, "原指令")
     check("风格: 本剧无专属 -> **回退全局** Profile（drama_id IS NULL 且激活）",
           "全局镜头偏好" in global_prof, global_prof[:80])
+
+    # ================= 多集节奏相位注入（2026-09-25 接线 ✓） =================
+    # ⭐ 早先这里是「`rhythm-phase.ts` 未迁」的 warn 占位 ✗，而 `services/rhythm_phase.py` 早已迁好
+    # ⇒ `storyboard_breaker` 一直少一段跨集节奏引导 ✓✗（「能力已有、没接出去」同族 ✓）。
+    with engine.begin() as conn:
+        ep_id = int(conn.execute(episodes.insert().values(
+            drama_id=drama_id, episode_number=1, title="节奏集", content="x",
+            created_at=now(), updated_at=now())).lastrowid)
+    with engine.begin() as conn:
+        with_rhythm = rt.append_style_profile(conn, "storyboard_breaker", ep_id, drama_id, "原指令")
+        no_rhythm = rt.append_style_profile(conn, "extractor", ep_id, drama_id, "原指令")
+        ghost = rt.append_style_profile(conn, "storyboard_breaker", 999999, drama_id, "原指令")
+    check("节奏: storyboard_breaker **注入跨集节奏引导**（不再是「未迁」warn ✓）",
+          "【多集节奏相位要求】" in with_rhythm and "climax(高潮" in with_rhythm, with_rhythm[-240:])
+    check("节奏: 非分镜类型**不带**节奏引导（只在 storyboard_breaker 分支 ✓）",
+          "多集节奏相位" not in no_rhythm, no_rhythm[-80:])
+    check("节奏: episode 不存在 -> **不注入、不炸**（空串被跳过 ✓ 不产生空段 ✗）",
+          "多集节奏相位" not in ghost and "原指令" in ghost, ghost[:60])
 
     # ================= 工具装配 =================
     # ⚠️ `create_agent_tools` 自 2026-09-15 起需要 `conn`（orchestrator 的子 Agent 委托要跑真实 run）；

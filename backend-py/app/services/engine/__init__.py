@@ -13,9 +13,10 @@
    * 数学/算法 **自己实现**（公开论文里的公式 ✓ 例如 Karras 2022 的 sigma 调度 ✓）；
    * 深度学习脚手架用 **Apache/MIT 许可**的库（``torch`` / ``diffusers`` / ``safetensors`` ✓）；
    * **一行 ComfyUI 源码都不抄** ✗。
-2. **依赖**：本机后端 venv 目前**没有任何推理依赖**（无 torch / numpy ✗）⇒ 引擎分两层落地：
+2. **依赖**：本机后端 venv **已装 CPU 版 torch** ✓（2026-09-17 ✓ 本机无 NVIDIA 显卡 ⇒ CPU 轮子 ✓，
+   见 `torch_backend.py` 模块头 ✓）⇒ 引擎分两层落地：
    * **纯算法层**（本目录的 ``schedules`` / ``geometry``）：**零依赖**、可立刻验证 ✓；
-   * **张量层**（``sampler`` / ``latents`` / 模型加载）：需要 ``torch``（懒加载 ✓，装了才跑 ✓）。
+   * **张量层**（``sampler`` / ``latents`` / 模型加载）：需要 ``torch``（**已装** ✓ 懒加载 ✓ 装了才跑 ✓）。
 
 ## 分层（与项目约定一致）
 
@@ -24,8 +25,8 @@
 """
 from __future__ import annotations
 
-__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "guidance",
-           "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "inventory", "latent_container", "loader", "mappings", "media", "pipeline",
+__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "guidance",
+           "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "inventory", "latent_container", "llm", "loader", "mappings", "media", "pipeline",
            "quant", "safetensors", "sampler", "schedules", "script_parse", "segments", "text_encoder",
            "tiers", "tokenizer_bpe", "tokenizer_hub", "tokenizer_own", "tokenizers_tuning",
            "torch_backend", "upscale", "upscale_net", "vae", "weights"]

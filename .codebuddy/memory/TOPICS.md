@@ -5,6 +5,7 @@
 
 ## 本地模型下载 + H3 视频推理
 - **下载闭环**：`routes/localModels.ts` + `aiConfigs.ts`/`settings.vue`/`backend-py/app/scripts/model_manager.py` + `configs/models.json`；三源 HF / hf-mirror / ModelScope + 断点续传（`.part` + Range）。**本机直连 HF 全超时 → 必须 `hf-mirror.com`**；大文件复用此机制，勿另写。
+- **⭐ 模型目录自主化（2026-09-25 ✓）**：``models_dir`` 默认从 ComfyUI 目录改为 **``<data_root>/models``** ✓（``local_model_scan.default_models_dir()`` ✓；``configs/model-paths.json`` 的 ``models_dir``/``comfyui_root`` 已清空走默认 ✓）。⚠️ 但「检测/扫描」**不排斥第三方** ✗：``get_default_roots`` 仍覆盖电脑内模型（本仓目录 + 本地服务 + ComfyUI 目录探测 + extra_roots ✓）—— 自主的是「从哪下载、存到哪」，**不是**「不许看见别人已装的模型」✓（先误删了 ComfyUI 扫描、用户一句话纠正 ✓）。
 - **H3**：ComfyUI(**8188**) 驻留 DiT/VAE/text_encoder；**8765** 薄封装（`POST /v1/video_generation`、`GET .../task/:id`）；卸载 GPU 走 ComfyUI `POST /free`。权重扫描 → `runtime='h3'`、`baseUrl='http://localhost:8765'`。FL2VA / Ref2VA 双路线；六键 Bible `CHAR_ID/SPEAKER_ID/VOICE_ID/LOCATION_ID/COSTUME_ID/STYLE_ID` 跨集锁定。方法论 `docs/local-h3-video-system.md`。
 - ⚠️ 此链路 provider 名 `minimax` 是 **AI 服务商标识**，与 `backend-py/app/skills/` 下外部技能库**无关**。
 - **GPU**：RTX A5000 22 GiB；CUDA UMD 13.3；PyTorch 2.13.0+cu130。**无 nvcc** → 编不了 CUDA 版 sd.cpp；H3 Turbo 唯一可用路线 = Turbo LoRA/int8 + ComfyUI（1–3min）。
@@ -488,7 +489,51 @@ EasyDirector 后端是 PyInstaller（加速链执行 / 预设值 / 探测逻辑*
 - **实测口径**：16 GB @0.4MP ⇒ 每 10 秒段 **8~12 分钟** ✓；0.4MP / 32 的倍数 = 官方基线 ✓；8GB 档 5.2 s = **124 帧**（= `17×7+5` ✓ 与本仓 `H3_FRAME_GRID`/`H3_MIN_FRAMES` 一致 ✓）。
 - **值得照做的手法** ✓：任务记录**原子写** ✓；**全局镜号唯一且从 1 开始** ✓；缩略图**按磁盘尾帧恢复** ✓；段配置哈希跳过 ✓；尾帧接力 ✓；每段**深度卸载** ✓；1.5x 超分**先做合法 2x 再缩放** ✓；4x 超分 NaN/Inf **小分块** ✓；缓存文件截断/偏移/非法编码一律拒 ✓。
 - **本仓 H3 事实获外部印证** ✓（24 fps / `17n+5` / 单次 ≤15 s / 0.4MP·32 / shift 12/3）。
-- 参考数据（用得上再取 ✓）：官方 9 套分镜骨架（`h3_templates.js` ✓）；方案预设名单（漫剧快跑 / 漫剧正式 / 玄幻仙侠 / 悬疑诡异 / 都市写实 / 战斗燃向 ✓，**内部参数在编译层** ✗）；IndexTTS 情绪向量 **9 维**（开心/愤怒/悲伤/恐惧/厌恶/忧郁/惊讶/平静 + preset ✓）。
+- 参考数据（用得上再取 ✓）：官方 9 套分镜骨架（`h3_templates.js` ✓）；方案预设名单（漫剧快跑 / 漫剧正式 / 玄幻仙侠 / 悬疑诡异 / 都市写实 / 战斗燃向 ✓，**内部参数在编译层** ✗）；IndexTTS 情绪向量 **8 维**（happy/angry/sad/fear/disgust/melancholy/surprise/calm ✓ —— ⚠️ 早先误记「9 维」✗ 已纠正 ✓；已落地 `voice_contract.EMOTION_ORDER` ✓；另两条情绪入口=**情绪参考音频** `emo_audio`+`alpha` / **文本情绪** qwen-emo ✗ 本仓 CosyVoice 无对应 ⇒ 用不上 ✓）。
+
+> **逆向待做项收口**（2026-09-25 ✓，用户「有用的就逆向，没用的就不做」✓）：§⑫ 记的「TTS 三件套 / 工作台 HTTP 面」判定如下 ——
+> ① **TTS 三件套**：有用部分（情绪 8 维顺序 + preset + 语速 `duration_factor` 0.5~2.0 ✓）**早已落地** `voice_contract.py` ✓（docstring 已注明「口径来自逆向 IndexTTS-2.5」✓）；声音克隆本仓 CosyVoice 零样本已有 ✓；剩下的**情绪参考音频 / 文本情绪**是 IndexTTS 引擎专属，本仓走 CosyVoice ⇒ **用不上，不做** ✗。
+> ② **工作台 HTTP 面**：核心（三档引擎表 ✓ → `tiers.py`、契约同步+离线兜底 ✓）已落地；后端是 PyInstaller 编译**读不到** ✗，前端 `app.js` 是 333 KB 编译 JS ⇒ 端点清单作 API 设计对照**边际价值低，已有等价物，不做** ✗。
+> ③ **COMPAT_WARN 冲突台账**：只拿到 4 条摘要（DaSila⇒WinError433 / EasyCache⨯TurboLoRA / CacheDiT⨯FirstBlockCache / SolAttn 仅快 3.5% ✓），完整 7 条在编译后端**读不到** ✗，且是特定第三方加速件冲突（本仓加速链只认 LoraLoader/TESpeed 等）⇒ **不落地，不做** ✗。
+
+
+### 超清二采的**口径**（2026-09-25 读上游可读源码核出 ✓ 落点：`studio_node.py` ✓ 不是 `h3_upscaler.py` ✗）
+
+> 判据（为什么这样实现、没核到怎么办）在 `MEMORY.md` §接线 ✓；这里是**事实与公式** ✓。
+
+* **掩码**（`_h3_build_denoise_mask` ✓）：`video=1`（重采样 ✓）/ `audio=0`（保持一采 ✓✗）——
+  ⚠️ 语义是**按流缩放该步更新量** ✓，**不是**"把音频排除出前向" ✗（音频照样参与主干 ✓）。
+* **σ 取尾部** ✓：`total = max(steps+1, round(steps / clamp(denoise, 0.15, 1)))` ⇒ 取最后 `steps+1` 个 σ ✓
+  （`denoise` = 从日程哪个**比例**开始 ✓）。⚠️ 曲线本身用 ComfyUI 的 `calculate_sigmas` ✗
+  ⇒ 本仓用**自研调度取尾部** ✓ 并在报告里注明「曲线未逐点对照」✗。
+* **噪声**：二采**会重新加噪** ✓，种子 = **段种子 + 1000001** ✓；⚠️ 本仓**只加在视频流** ✓
+  （给"锁住"的音频加噪再锁住 = 把干净音轨换成噪声 ✓✗）。
+* **关键帧**：cond 里的 keyframe latent **也要 2×** ✓（`_h3_scale_cond_refs` ✓）；⚠️ `references`
+  要不要跟着 2× **未核** ✗ ⇒ 本仓**具名拒绝** ✓✗。
+* **失败**：上游 `catch` ⇒ **回退一采结果** ✓ + 日志（不炸整段 ✓）⇒ 本仓照此 ✓ 但把 `denoiseError`
+  写进报告 ✓（不许哑巴 ✗）。
+* ⚠️ 两个参数（`refine_steps` / `refine_denoise`）的**默认值在编译层** ✗ ⇒ 本仓**必填** ✓✗
+  （不给 ⇒ `secondPass=False` + notes 说清 ✓）。
+
+
+### 接线细则（第六次腾预算 ⇒ 从 `MEMORY.md` §接线 下移 ✓ 2026-09-25）
+
+* ⚠️ **stub 少一个端点 ⇒ 那一支永远验不到** ✗✗：H3 的 ComfyUI stub 起初只有 `/object_info/{cls}` ✓
+  没有 `/object_info` ✓ ⇒ 加速链接缝**永远**只能判「没查」✓✗（绿得毫无意义 ✓）；
+  真 ComfyUI 两个端点都有 ✓ ⇒ stub 要按真服务补齐 ✓。
+* ⭐ **要提前知道「是不是克隆路径」⇒ 写廉价探针** ✓（查行 + 文件存在性 ✓ **不读文件** ✗）：
+  把重活（读文件/base64 ✓）提到前面会**改掉失败语义** ✗（实测打碎了「本地配置必须申请 audio 租约」
+  那条判据 ✓✗ —— 它原本在循环里的 try 内 ✓）。
+* ⚠️⚠️ **「同输入 ⇒ 跳过重算」的指纹（`engine/cache_key.py` ✓）**：
+  * ⭐ 上游口径**只看张量** ✓ ⇒ 非张量值一律塌成 ``"other"`` ✗ ⇒ **实测**``{"0":"a.png"}`` 与
+    ``{"0":"b.png"}`` **指纹相同** ✓✗（个数变了才会变 ✓）⇒ 本仓**请求层**是 URL/路径 ✓✗
+    ⇒ 接指纹**前**先补**标量按值进指纹** ✓（张量那条路一字未改 ✓；⚠️ **复合值仍塌 other** ✗ 已写明 ✓）；
+  * ⭐ **复用四条缺一不可** ✗（`video_generation.find_reusable_video` ✓）：非 ``force`` ✓ /
+    同分镜**成功**产物 ✓ / 指纹**全字段**一致（参考素材 + 提示词 + 镜头类型 + 时长 + 画幅 ✓）/
+    ⭐**产物文件真在盘上** ✓✗（远端 URL 证明不了 ⇒ **不复用** ✓ 宁可重算 ✓）；
+  * ⭐ **命中不许静默** ✗ ⇒ 响应带 ``reused`` + ``reuseReason`` ✓ + 日志一条 ✓；
+  * ⚠️ 指纹要**两种形态都认** ✗✗（``params`` camelCase / DB 行 snake_case ✓）—— 只认一种 ⇒
+    两侧都读成空的 ⇒ 两个不同素材算成相同 ⇒ **误跳过** ✓✗✗。
 
 
 ### 接线进度：哪些能力**接出去了**、接在哪（2026-09-24 第五次腾预算 ⇒ 从 `MEMORY.md` 下移 ✓）
@@ -503,15 +548,16 @@ EasyDirector 后端是 PyInstaller（加速链执行 / 预设值 / 探测逻辑*
 | 加速链（配置驱动 + 提交前校验 ✓） | 同上 `server.py::_apply_accel_chain` ✓ | `error` 的环 ⇒ 整条不上并点名 ✓ |
 | 配音契约（8 维定序 / 未知情绪拒 ✓） | `services/tts_generation._resolve_voice_params` ✓ | CosyVoice 克隆路径**收不了** ⇒ 进 dropped ✓ |
 | 混合加载：计划层 + **加载层** ✓ | `engine/hybrid_load.run_hybrid_load` ✓ ⇒ `POST /engine/hybrid-merge` ✓ | 键集不变 ✓ / 继承基底元数据 ✓ |
-| 参考素材指纹（哪段可跳过 ✓） | ⚠️ **无落点** ✗（要产品决定：跳过语义 + 谁是"上次产物" ✓） | 故意不硬接 ✓ |
+| 参考素材指纹（哪段可跳过 ✓） | `video_generation.find_reusable_video` ✓ ⇒ `routers/videos.py` ✓（响应带 `reused` ✓） | ⚠️ 接之前先补「标量按值进指纹」✗✗ |
 | 缓存完整性守卫 ✓ | 只被 `hybrid_load` 用 ✓（`total_size` 口子 ✓） | 不验数值 ✗ |
 | 段级音频合成（长度守恒 / 三支削波 ✓） | `services/segment_audio` ✓ ⇒ `ffmpeg_compose.mix_model_audio` ✓ | 默认 false ⇒ 行为一字不差 ✓ |
-| 超清双采（1.5× 先 2× ✓ / 4× 分块 ✓） | `pipeline` 的 `refine` 阶段 ✓ + `dryrun.refine_latents` ✓ | **音频流锁定**要后端自述 ✓ |
-| 联合 AV 容器互操作 ✓ | 同上 `dryrun.refine_latents` ✓ | 只换视频那一槽 ✓ |
+| 超清双采（1.5× 先 2× ✓ / 4× 分块 ✓） | `pipeline` 的 `refine` 阶段 ✓ + `dryrun.refine_latents` ✓ **+ `TorchBackend.refine_latents`** ✓（真装载 + 真前向 + **带掩码的二采** ✓） | **音频流锁定**要后端自述 ✓；二采参数**必填**（`refineSteps`/`refineDenoise` ✓）；⚠️ σ 曲线用自研调度（未逐点对照 ✗） |
+| 联合 AV 容器互操作 ✓ | 同上 `dryrun.refine_latents` ✓ | 只换视频那一槽 ✓；⚠️ torch 后端的双流是 **dict** 形态 ✓（不是容器 ✓） |
 | 超清放大器可用性 ✓ | `inventory.readiness().upscale` ✓ ⇒ `GET /engine/readiness?upscalePath=` ✓ | 没给 ⇒ **「没查」** ✗ 不是可用 ✓ |
 | 档位表 ✓ | `inventory.readiness().tiers` ✓ | 没给显存 ⇒ 「没比」✗ |
 | 导演稿分段 ✓ | `POST /prompts/segments` ✓ | 一个字都不丢 ✓ |
 | 超清计划 ✓ | `POST /engine/upscale-plan` ✓ ⇒ 请求体 `upscale` ✓ | 管线**只执行**计划 ✗ 不自己判 ✓ |
+| 多集节奏相位注入 ✓（2026-09-25 ✓） | `agent/runtime.py::append_style_profile` ✓（调 `rhythm_guidance_for_episode` ✓） | `storyboard_breaker` 专属 ✓；读库失败只 warn 不阻断 ✓；早先是「未迁」warn 占位 ✗ |
 
 
 ### MEMORY.md 下移（2026-09-24 第四次）：Skill 体系细则 + 协作与提交细则 ✓

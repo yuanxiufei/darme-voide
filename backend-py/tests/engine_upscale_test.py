@@ -173,11 +173,36 @@ def case_deep_contract() -> None:
                   {**GOOD, "config": {**GOOD["config"], "blocks": "4"}}))))
 
 
+def case_second_pass_params() -> None:
+    """⑤ 二采的两个参数 ✓（口径来自上游**可读源码** ✓；⚠️ 默认值在编译层 ✗ ⇒ **不给就不做** ✓✗）。"""
+    check("⑤ ⭐ 尾部步数公式照上游 ✓：``max(steps+1, round(steps/clamp(denoise,0.15,1)))`` ✓"
+          "（4 步 @0.5 ⇒ 8 ✓；4 步 @0.15 ⇒ 27 ✓；1 步 @0.15 ⇒ 7 ✓）",
+          up.refine_tail_steps(4, 0.5) == 8 and up.refine_tail_steps(4, 0.15) == 27
+          and up.refine_tail_steps(1, 0.15) == 7
+          and up.refine_tail_steps(4, 0.05) == 27,  # ⚠️ 低于 0.15 会被夹到 0.15 ✓（不是无限长 ✓）
+          (up.refine_tail_steps(4, 0.5), up.refine_tail_steps(4, 0.15)))
+    check("⑤′ 步数 <1 / denoise ∉(0,1] ⇒ **报错** ✗（两个都是**必填** ✓ —— 没核到默认值就不猜 ✓✗）",
+          all(_raises(call) is not None for call in (
+              lambda: up.refine_tail_steps(0, 0.5),
+              lambda: up.refine_tail_steps(4, 0.0),
+              lambda: up.refine_tail_steps(4, 1.5))))
+    plan_default = up.plan_upscale(target_scale=2.0, contract=GOOD)
+    check("⑤″ ⭐ **不给二采参数 ⇒ 不做二采** ✓ 且 ``notes`` 里**说清为什么** ✗✗"
+          "（静默不做 = 用户以为二采跑了 ✓✗）",
+          plan_default.does_second_pass is False and plan_default.refine_steps == 0
+          and any("二采未启用" in note for note in plan_default.notes), plan_default.notes)
+    plan_refine = up.plan_upscale(target_scale=2.0, contract=GOOD, refine_steps=4, refine_denoise=0.4)
+    check("⑤‴ 给了 ⇒ ``secondPass=True`` ✓ 且 notes 里写清**尾部步数 + 掩码口径**（video 1 / audio 0 ✓✗）",
+          plan_refine.does_second_pass is True
+          and any("video 1 / audio 0" in note for note in plan_refine.notes), plan_refine.notes)
+
+
 def main() -> int:
     case_contract()
     case_deep_contract()
     case_scale_rules()
     case_tiling()
+    case_second_pass_params()
     failures = [(name, detail) for name, passed, detail in _RESULTS if not passed]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

@@ -173,7 +173,8 @@ class DryRunBackend:
         g = min(0.5, float(sigma) / (float(sigma) + 1.0)) if sigma > 0 else 0.0
         return condition * (1.0 - g) + latents * g
 
-    def refine_latents(self, latents: TinyTensor, plan: Any, request: Any) -> TinyTensor:
+    def refine_latents(self, latents: TinyTensor, plan: Any, request: Any, *,
+                       condition: Any = None) -> TinyTensor:
         """**二采精修（干跑版 ✓）**：把 H3 那套「联合 AV 容器」装出来 ✓ 并**只换视频槽** ✓。
 
         ⚠️ 干跑**不动真张量** ✗（返回原 latents ✓）—— 它在这里买的只有一件事：

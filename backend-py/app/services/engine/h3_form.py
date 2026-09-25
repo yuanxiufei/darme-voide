@@ -1133,7 +1133,7 @@ def _build_torch_parts() -> dict[str, Any]:
                            sigmas: Any, *, shift_v: float = 12.0, shift_a: float = 3.0,
                            callback: Any = None, extra_video_rows: Any = None,
                            extra_audio_rows: Any = None, keyframes: Any = None,
-                           refs: Any = None) -> dict[str, Any]:
+                           refs: Any = None, denoise_mask: Any = None) -> dict[str, Any]:
         """**双流欧拉采样** ✓：视频走 `sigmas` ✓、音频走**换算后**的 σ ✓（各走各的日程 ✓）。
 
         更新式（按参考**取负**的 velocity 约定 ✓ —— 见 `CONST.calculate_denoised` 是 ``x − σ·v`` ✓）::
@@ -1149,6 +1149,12 @@ def _build_torch_parts() -> dict[str, Any]:
 
         ⚠️ 这里**不做** carry ✗（把音频潜变量缩放带到视频日程上那种做法 ✓）—— 本函数让**每条流
         待在自己的 σ 上** ✓，与 `denoise_step` 的口径一致 ✓（它内部按各自的 σ 出 velocity ✓）。
+
+        ``denoise_mask``（2026-09-25 补 ✓，口径**来自上游可读源码** ✓）：``(mask_video, mask_audio)`` ✓
+        —— ⭐⭐ 超清**二采**就是靠它锁音频的 ✗✗：上游 ``_h3_build_denoise_mask`` 明写
+        「video 流 mask=**1**（重采 ✓）、audio 流 mask=**0**（保持一采结果 ✓）」✓
+        （⚠️ **不是**"不把音频送进主干" ✗ —— 音频照样参与前向 ✓，只是**这一步的更新量按掩码缩放** ✓）。
+        ``mask=0`` ⇒ 该流**逐位不变** ✓（自检钉住 ✓）；``None`` ⇒ 与原来**逐位相同** ✓（默认路径不动 ✗）。
         """
         from app.services.engine import schedules  # noqa: PLC0415
         steps = list(sigmas)
@@ -1160,6 +1166,15 @@ def _build_torch_parts() -> dict[str, Any]:
         audio_sigmas = [schedules.time_shift_sigma(value, shift_v, shift_a)
                         for value in video_sigmas]
         state_video, state_audio = video_latent, audio_latent
+        mask_video: Any = None
+        mask_audio: Any = None
+        if denoise_mask is not None:
+            # ⚠️ 只认**二元组** ✗（不靠"能 unpack 就算对"✗ —— 张量恰好第一维是 2 时它能悄悄 unpack 成功 ✓✗）
+            if not isinstance(denoise_mask, (tuple, list)) or len(denoise_mask) != 2:
+                raise ValueError(
+                    "denoise_mask 要给 ``(mask_video, mask_audio)`` 两路 ✗（口径见函数注释："
+                    "超清二采 = video 1 / audio 0 ✓）—— ⚠️ 只给一路就没法表达「每条流各自锁不锁」✓✗")
+            mask_video, mask_audio = denoise_mask
         for index in range(len(video_sigmas) - 1):
             sigma_v, next_v = video_sigmas[index], video_sigmas[index + 1]
             sigma_a, next_a = audio_sigmas[index], audio_sigmas[index + 1]
@@ -1170,12 +1185,19 @@ def _build_torch_parts() -> dict[str, Any]:
                 # ⚠️ **整条**视频 σ 日程递下去 ✓（PDD 头库要靠它定位 span ✓）——
                 #    只在"本条流"的语义上给 ✓（音频那条由 `time_shift_sigma` 现算 ✓）
                 sample_sigmas=video_sigmas)
-            state_video = state_video + (next_v - sigma_v) * velocity_v
-            state_audio = state_audio + (next_a - sigma_a) * velocity_a
+            delta_v = (next_v - sigma_v) * velocity_v
+            delta_a = (next_a - sigma_a) * velocity_a
+            if mask_video is not None:
+                delta_v = delta_v * mask_video          # ⭐ mask=0 ⇒ 该流**逐位不变** ✓✗
+            if mask_audio is not None:
+                delta_a = delta_a * mask_audio
+            state_video = state_video + delta_v
+            state_audio = state_audio + delta_a
             if callback is not None:
                 callback(index, sigma_v, sigma_a)
         return {"video": state_video, "audio": state_audio, "steps": len(video_sigmas) - 1,
-                "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas}
+                "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas,
+                "masked": denoise_mask is not None}
 
     return {
         "torch": torch, "nn": nn, "RMSNorm": RMSNorm, "TimeEmbedder": TimeEmbedder,

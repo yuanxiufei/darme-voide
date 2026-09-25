@@ -26,7 +26,8 @@ from typing import Any, Mapping, Sequence
 
 from . import checkpoint_meta as meta_mod
 
-__all__ = ["BASE_CONFIG_FIELDS", "CHECKPOINT_FORMAT", "CONFIG_FIELDS", "REQUIRED_CONTRACT_KEYS",
+__all__ = ["BASE_CONFIG_FIELDS", "CHECKPOINT_FORMAT", "CONFIG_FIELDS", "REFINE_MIN_DENOISE",
+           "REQUIRED_CONTRACT_KEYS", "refine_tail_steps",
            "UpscalePlan", "check_upscaler_contract", "plan_upscale", "read_upscaler_contract",
            "tile_plan"]
 
@@ -132,6 +133,26 @@ def tile_plan(width: int, height: int, *, max_tile: int, align: int = 32) -> tup
     return tuple((x, y, w, h) for y, h in axis(int(height)) for x, w in axis(int(width)))
 
 
+#: 二采「低噪声尾段」的两个参数**必填** ✗（口径来自上游可读源码 ✓，但**默认值在编译层** ✗ ⇒ 不猜 ✓✗）。
+REFINE_MIN_DENOISE = 0.15
+
+
+def refine_tail_steps(refine_steps: int, refine_denoise: float) -> int:
+    """二采要从完整 σ 调度里取**尾部多少步** ✓（口径照上游 ``studio_node.py`` ✓）：
+
+    ``total = max(steps + 1, round(steps / clamp(denoise, 0.15, 1)))`` ⇒ 尾部 = ``total`` 的**最后
+    ``steps + 1`` 个 σ** ✓。⚠️ ``denoise`` 的意义是"从噪声日程的**哪个比例**开始" ✓（0.4 ⇒ 尾部 40% ✓）。
+    """
+    steps = int(refine_steps)
+    if steps < 1:
+        raise ValueError(f"refine_steps 必须 ≥1（收到 {refine_steps!r} ✗）—— 二采步数**没核到默认值** ✗，不猜 ✓")
+    ratio = float(refine_denoise)
+    if not (0.0 < ratio <= 1.0):
+        raise ValueError(f"refine_denoise 必须在 (0, 1] 内（收到 {refine_denoise!r} ✗）"
+                         f"—— 它决定从噪声日程的**哪个比例**开始 ✓，没核到默认值 ⇒ 不猜 ✗")
+    return max(steps + 1, int(round(steps / max(REFINE_MIN_DENOISE, ratio))))
+
+
 @dataclass(frozen=True)
 class UpscalePlan:
     """超清计划 ✓（``mode="normal"`` = **不启用**放大器 ✓，此时 ``fallback_reason`` 必须给 ✗✗）。"""
@@ -142,27 +163,65 @@ class UpscalePlan:
     notes: tuple[str, ...] = ()
     tiles: tuple[tuple[int, int, int, int], ...] = ()
     fallback_reason: str | None = None
+    #: 二采（带掩码的低噪声重去噪 ✓）的步数与起始比例 ✓ —— ⚠️ **两个都是必填** ✗✗：
+    #: 口径（步数/起始比例/掩码 ✓）来自上游**可读源码** ✓，但**默认值在编译层** ✗ ⇒ 不猜 ✓✗
+    #: （不给 ⇒ ``refine_steps=0`` ⇒ **不做二采** ✓ 并如实写进 ``notes`` ✓）。
+    refine_steps: int = 0
+    refine_denoise: float = 0.0
+    #: ⚠️ **派生量**（尾部实际取多少个 σ ✓）—— 刻意与 ``refine_steps`` **分开** ✗✗：
+    #: 曾经把派生值写回 ``refine_steps`` ✓✗ ⇒ 下游再算一次就**越滚越长** ✓✗（实测算出来 4→10→25 ✓）。
+    refine_tail_steps: int = 0
 
     @property
     def uses_upscaler(self) -> bool:
         return self.mode != "normal"
 
+    @property
+    def does_second_pass(self) -> bool:
+        return self.uses_upscaler and int(self.refine_steps) > 0
+
     def to_dict(self) -> dict[str, Any]:
         return {"mode": self.mode, "scale": self.scale, "usesUpscaler": self.uses_upscaler,
                 "steps": list(self.steps), "notes": list(self.notes),
                 "tiles": [list(tile) for tile in self.tiles],
-                "fallbackReason": self.fallback_reason}
+                "fallbackReason": self.fallback_reason,
+                "refineSteps": int(self.refine_steps), "refineDenoise": float(self.refine_denoise),
+                "refineTailSteps": int(self.refine_tail_steps),
+                "secondPass": self.does_second_pass}
+
+
+def _second_pass_notes(tail: int, denoise: float) -> list[str]:
+    """二采的两句话 ✓：**要么说清参数 ✓、要么说清"没做 + 为什么不猜"** ✗✗。"""
+    if tail <= 0:
+        return ["⚠️ **二采未启用** ✗（没给 ``refineSteps`` / ``refineDenoise`` ✓）—— 这两个的**默认值在"
+                "编译层** ✗ ⇒ 本仓**不猜** ✓：想要「带掩码的低噪声重去噪」就把两个都传上 ✓✗"]
+    return [f"二采：取完整 σ 调度的**尾部** ⇒ 实际尾部 {tail} 个 σ ✓、起始比例 denoise={denoise:g} ✓"
+            f"（口径照上游 `studio_node.py` ✓）；⭐ 掩码 = **video 1 / audio 0** ✓✗"
+            f"（audio 那条**逐位不变** ✓ —— 重采音频会把音轨弄坏而画面看着正常 ✓✗）"]
 
 
 def plan_upscale(*, target_scale: float, contract: Mapping[str, Any] | None,
                  frame: Sequence[int] | None = None, max_tile: int | None = None,
-                 align: int = 32) -> UpscalePlan:
+                 align: int = 32, refine_steps: int | None = None,
+                 refine_denoise: float | None = None) -> UpscalePlan:
     """决定「**能不能／怎么做**超清」✓ ⇒ :class:`UpscalePlan` ✓。
 
     * ``contract`` 是 :func:`read_upscaler_contract` 的结果 ✓；``None`` ⇒ **回退普通模式** ✓ 且给理由 ✗；
     * ``target_scale``：``2`` ⇒ 直接 AI 2× ✓；``1 < 目标 < 2``（如 1.5 ✓）⇒ **先 AI 2× 再缩放** ✓；
-      ``≥4`` ⇒ **小分块**（必须给 ``max_tile`` ✓ 不给就报错 ✗）；``≤1`` ⇒ 不需要放大器 ✓。
+      ``≥4`` ⇒ **小分块**（必须给 ``max_tile`` ✓ 不给就报错 ✗）；``≤1`` ⇒ 不需要放大器 ✓；
+    * ``refine_steps`` / ``refine_denoise``：**二采**（带掩码的低噪声重去噪 ✓）的两个参数 ✓ ——
+      ⚠️ 口径（video 掩码 1 / audio 掩码 0 ✓、尾部 σ 取法 ✓）来自上游**可读源码** ✓，但**默认值在
+      编译层** ✗ ⇒ **不给就"不做二采"** ✓ 并在 ``notes`` 里**说清** ✗✗（不猜一个"看起来合理"的步数 ✓）。
     """
+    # 二采参数**先校验** ✓（坏值要在「还没装模型」时就报 ✓，别等跑到一半 ✗）
+    # ⚠️ 这里算出来的是**派生量** ✓ —— ``refine_steps`` 必须保留**调用方给的原值** ✗✗，
+    #    否则下游（张量层 ✓）会拿派生值再算一次 ⇒ **越滚越长** ✓✗（实测 4→10→25 ✓）。
+    given_steps = int(refine_steps or 0)
+    denoise = float(refine_denoise if refine_denoise is not None else 0.0)
+    tail = 0
+    if refine_steps is not None or refine_denoise is not None:
+        tail = refine_tail_steps(given_steps, denoise)
+
     scale = float(target_scale)
     if contract is None:
         return UpscalePlan(mode="normal", scale=1.0, fallback_reason=(
@@ -175,8 +234,9 @@ def plan_upscale(*, target_scale: float, contract: Mapping[str, Any] | None,
         return UpscalePlan(
             mode="ai-2x-resize", scale=scale,
             steps=("AI 2×（合法的放大器倍率 ✓）", f"高质量缩放 2× → {scale:g}× ✓"),
-            notes=(f"⚠️ 放大器只会做**空间 2×** ✗ ⇒ 直接把 {scale:g}× 提交给它**会被拒** ✓✗；"
-                   f"所以是「先 2× 再缩」✓（口径来自逆向 ✓）",))
+            notes=tuple([f"⚠️ 放大器只会做**空间 2×** ✗ ⇒ 直接把 {scale:g}× 提交给它**会被拒** ✓✗；"
+                         f"所以是「先 2× 再缩」✓（口径来自逆向 ✓）", *_second_pass_notes(tail, denoise)]),
+            refine_steps=given_steps, refine_denoise=denoise, refine_tail_steps=tail)
     if scale > 2.0:
         if max_tile is None:
             raise ValueError(
@@ -191,11 +251,15 @@ def plan_upscale(*, target_scale: float, contract: Mapping[str, Any] | None,
         if int(frame[0]) % int(align) or int(frame[1]) % int(align):
             notes.append(f"⚠️ 画面边长不是 {align} 的整数倍 ✗ ⇒ 最后一块是余数 ✓"
                          f"（真链路里画面本来就该对齐 ✓✗）")
+        notes.extend(_second_pass_notes(tail, denoise))
         return UpscalePlan(mode="tiled-ai-2x", scale=scale, tiles=tiles, notes=tuple(notes),
-                           steps=("AI 2×（分块 ✓）", f"带掩码的二次去噪（先 {scale:g}× 的目标域 ✓）"))
+                           steps=("AI 2×（分块 ✓）", f"带掩码的二次去噪（先 {scale:g}× 的目标域 ✓）"),
+                           refine_steps=given_steps, refine_denoise=denoise, refine_tail_steps=tail)
     return UpscalePlan(mode="ai-2x", scale=2.0,
                        steps=("AI 2×（潜空间放大器 ✓）", "带掩码的二次去噪 ✓"),
-                       notes=("输出分辨率翻倍 ✓、耗时 ≈**6×** ✓（口径来自逆向 ✓）",))
+                       notes=tuple(["输出分辨率翻倍 ✓、耗时 ≈**6×** ✓（口径来自逆向 ✓）",
+                                    *_second_pass_notes(tail, denoise)]),
+                       refine_steps=given_steps, refine_denoise=denoise, refine_tail_steps=tail)
 
 
 def covered_area(tiles: Sequence[Sequence[int]]) -> int:

@@ -269,6 +269,67 @@ def main() -> int:  # noqa: C901
     # take 预算
     check("enqueue: 提交即消耗一次 take", _take_count(sb_id) >= 5, _take_count(sb_id))
 
+    # ================= 同段输入没变 ⇒ 复用上次成片（2026-09-25 接 ✓）=================
+    # ⚠️ 逆向口径叫「段配置哈希跳过」✓；⚠️⚠️ 指纹**必须两种形态都认** ✗✗（params camelCase /
+    #    DB 行 snake_case）—— 只认一种就会把两侧都读成空的 ⇒ **两个不同素材算成相同** ⇒ 误跳过 ✓✗✗。
+    fp_params = vg.references_fingerprint({"prompt": "p", "referenceImageUrls": '["a.png"]'})
+    fp_row = vg.references_fingerprint({"prompt": "p", "reference_image_urls": '["a.png"]'})
+    check("指纹: 同一份配置的**两种形态**（camelCase / snake_case）⇒ 同指纹 ✓✗",
+          fp_params == fp_row, (fp_params[:10], fp_row[:10]))
+    check("指纹: 换成 **另一个 URL** ⇒ 指纹必须变 ✗✗（否则会**误跳过**重生成 ✓✗✗）",
+          fp_params != vg.references_fingerprint({"prompt": "p", "referenceImageUrls": '["b.png"]'}))
+    check("指纹: 换**提示词** ⇒ 也变 ✓（只比参考素材是不够的 ✓ —— 换个提示词就是另一段 ✓）",
+          fp_params != vg.references_fingerprint({"prompt": "q", "referenceImageUrls": '["a.png"]'}))
+
+    product_rel = "static/videos/reusable.mp4"
+    # ⚠️ 必须落在**真数据根**上 ✗（`DATA_ROOT` 只是环境变量 ✓ —— 数据根还有 `.data-root`/
+    #    `config.yaml` 两级覆盖 ✓ ⇒ 拿环境变量当数据根会让"产物在不在"这条判据**假红** ✓✗）
+    from app.core.config import get_storage_root  # noqa: PLC0415
+
+    product_abs = Path(get_storage_root()) / product_rel
+    product_abs.parent.mkdir(parents=True, exist_ok=True)
+    product_abs.write_bytes(b"fake-mp4")
+    with engine.begin() as conn:
+        reusable_id = int(conn.execute(video_generations.insert().values(
+            storyboard_id=sb_id, drama_id=drama_id, provider="volcengine", model="m",
+            prompt="p", reference_image_urls='["a.png"]', reference_mode="none",
+            duration=5, aspect_ratio="16:9", status="succeeded",
+            local_path=product_rel, created_at=now(), updated_at=now(),
+        )).lastrowid)
+    # ⚠️ 参数字典要**完整**（缺的字段按 None 参与指纹 ⇒ 与行里的值对不上就判「变了」✓ ——
+    #    这正是"两处读取点都要认"的另一面 ✓✗：漏字段等于把「没给」当成「不一样」✓）
+    same = {"storyboardId": sb_id, "prompt": "p", "referenceImageUrls": '["a.png"]',
+            "referenceMode": "none", "sceneType": None, "duration": 5, "aspectRatio": "16:9"}
+    with engine.begin() as conn:
+        found = vg.find_reusable_video(conn, same)
+        row_now = conn.execute(select(video_generations)
+                              .where(video_generations.c.id == reusable_id)).first()
+    # ⚠️ 失败时把**两侧指纹**一起打出来 ✓✗ —— 只说 ``None`` 的话，排查得从头猜一遍 ✓
+    check("复用: 同分镜 + 指纹一致 + **产物真在盘上** ⇒ 命中 ✓（并给出理由 ✓）",
+          isinstance(found, dict) and found.get("id") == reusable_id and bool(found.get("reason")),
+          {"found": found, "paramsFp": vg.references_fingerprint(same),
+           "rowFp": vg.references_fingerprint(row_now),
+           "row": {"prompt": row_now.prompt, "refs": row_now.reference_image_urls,
+                   "mode": row_now.reference_mode, "scene": row_now.scene_type,
+                   "duration": row_now.duration, "ratio": row_now.aspect_ratio,
+                   "status": row_now.status, "local": row_now.local_path}})
+    with engine.begin() as conn:
+        check("复用: ``force`` ⇒ **不复用** ✓（门禁统一支持 force ✓ —— 要重跑就必须重跑 ✓）",
+              vg.find_reusable_video(conn, {**same, "force": True}) is None)
+        check("复用: 换了 URL ⇒ 不复用 ✓",
+              vg.find_reusable_video(conn, {**same, "referenceImageUrls": '["b.png"]'}) is None)
+        check("复用: 换了提示词 ⇒ 不复用 ✓",
+              vg.find_reusable_video(conn, {**same, "prompt": "changed"}) is None)
+    product_abs.unlink()
+    with engine.begin() as conn:
+        check("复用: ⭐ **产物文件没了 ⇒ 不复用** ✗✗（否则用户拿到的是个死链 ✓✗）",
+              vg.find_reusable_video(conn, same) is None)
+    with engine.begin() as conn:
+        conn.execute(video_generations.update().where(video_generations.c.id == reusable_id).values(
+            local_path=None, video_url="https://cdn.test/remote.mp4"))
+        check("复用: ⭐ 产物是**远端 URL** ⇒ 不复用 ✓（证明不了它还在 ✓ 宁可重算 ✓✗）",
+              vg.find_reusable_video(conn, same) is None)
+
     # ================= 参考图归一化 =================
     check("ref: 空/坏 JSON -> []",
           run(vg._normalize_video_reference_urls(None)) == []

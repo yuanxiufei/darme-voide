@@ -39,6 +39,39 @@ MiniMax H3** ✓ 上 ✓ —— ⭐ 最值三件：**三档引擎表** ✓（官
 （权威在工作台 `/api/workflow_tiers` ✓）⇒ 细节见 `TOPICS.md` §SLM 逆向笔记 ✓；⚠️ 它的提示词/工作流在
 74.7 MB 的 `v3.5.40` 包里 ✗ 未拉 ✓）@108
 
+⭐ **⑨~⑳ 两轮「接线」**（用户「没有实现的继续实现」✓）：**判据层立了却只被自检调用** ✗✗ ⇒ 一轮补
+**提交前那几道关**（配音契约 / H3 形态决策 / prompt 契约 + 加速链 / 分段与超清计划端点 ✓ ③④⑤⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱），
+二轮补**加载层与张量层**（混合加载**加载层** ✓ / 超清**二采阶段** ✓ / 段级音频合成接进单镜合成 ✓ ⑲⑳）
+⇒ 落点表见 `TOPICS.md` §接线进度 ✓、判据见 `MEMORY.md` §接线 ✓；⚠️ 早先「仍未接 `cache_key`」已过时 ✗ —— 二轮已接上 ✓
+（`find_reusable_video` ✓ 先补「标量按值进指纹」✓✗）。⭐ **㉑ 第三轮收尾**（2026-09-25 ✓，用户「请继续」✓）：「能力已有、没接出去」最后两处 ✓
+① 多集节奏相位注入 ✓（`runtime.py` 早先「`rhythm-phase.ts` 未迁」warn 占位 ✗，`rhythm_phase.py` 早已迁好 ⇒ `storyboard_breaker`
+少一段跨集节奏引导 ✓✗ ⇒ 真调 ✓）；② `refineNote` **自述与实现相反** ✓✗（`denoise:False` ✗ 而 `_second_pass` 已实现 ✓ ⇒ 对齐 ✓）。
+全量 **125 套 / 4099 项 / 0 失败** ✓（+3 项 ✓；顺带校正 `engine_refine_test` 记 14 条、实测 23 条 ✓）。
+⭐ **㉒ 逆向收口 + 自述对齐**（2026-09-25 ✓，用户「有用的就逆向，没用的就不做」+「继续完善」✓）：① 逆向待做项判定收口 ✓ ——
+TTS 三件套**有用部分早已落地**（`voice_contract.EMOTION_ORDER` 8 维 = 照抄 IndexTTS ✓，另两条情绪入口 emo_audio/文本情绪是
+IndexTTS 专属、本仓 CosyVoice 用不上 ✗）；工作台 HTTP 面**核心已落地**（三档表→`tiers.py` ✓）后端 PyInstaller 编译读不到 ✗ ⇒ 不做 ✓
+（详见 `TOPICS.md` §逆向待做项收口 ✓）；顺手纠正「IndexTTS 情绪 9 维」✗ → 实为 **8 维** ✓。② 清掉 3 处**自述与实现相反**的 stale ✓
+（`refineNote.denoise` ✓ / `torch_backend` 模块头「架构装载还没写」✗ / `engine/__init__`「本机无 torch」✗ —— 实已装 CPU 版 torch ✓）。
+⚠️ 功能层面**已无「不需要真权重」的可做** ✓，余下全卡真权重/真机 ✓。
+⭐ **㉓ 模型目录自主化**（2026-09-25 ✓，用户「完全自主不依赖第三方」+「也要能检测电脑内模型」✓）：① **下载/存储自主** ✓ ——
+models_dir 默认从 ComfyUI 目录改为 **`<data_root>/models`** ✓（`local_model_scan.default_models_dir()` ✓ + `get_model_paths` 与
+`model_manager.resolve_paths` 默认回落 ✓；`configs/model-paths.json` 清空 ComfyUI 硬编码 ✓）；② ⚠️ **「检测/扫描」不排斥第三方** ✗ ——
+`get_default_roots` 仍覆盖电脑内模型（本仓目录 + 本地服务 + ComfyUI 目录探测 + extra_roots ✓）：自主的是「从哪下载、存到哪」，
+**不是**「不许看见别人已装的模型」✓（先误删了 ComfyUI 扫描、用户一句话纠正 ✓）；③ 全量 **125 套 / 4099 项 / 0 失败** ✓（项数不变 ✓
+只改 1 条「清空 models_dir 回落到默认」的断言 ✓）。
+⭐ **㉔ 自研 LLM 运行时起步**（2026-09-25 ✓，用户「要自研实现」✓）：文本生成此前走 ollama（HTTP 11434）✗ ⇒ 新建
+`engine/llm.py` ✓ —— 自研 decoder-only transformer（RMSNorm / GQA 分组查询 / RoPE / SwiGLU / 因果掩码 / KV cache /
+采样 greedy+top-p+top-k ✓）；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗ 本仓纪律 ✓）；自检 `engine_llm_test` **13 条** ✓
+（⭐⭐ KV cache 不变量：整段 vs 逐 token 逐位相同 ✓ / 因果掩码「改后不动前」✓ / RoPE 保范数 ✓ / GQA ✓ / tie embeddings ✓）。
+⚠️ **尚未接线** ✗：GGUF 权重加载 + k-quant 反量化**未做** ✗（quant.py 现只 cover fp8/int8 ✗）⇒ 下一轮 ✓；
+全量 **126 套 / 4112 项 / 0 失败** ✓（+1 套 / +13 项 ✓）。
+⭐ **㉕ GGUF 反量化**（2026-09-25 ✓，用户「继续」✓）：新建 `engine/gguf_dequant.py` ✓ —— 把 GGUF 数据区的量化字节 ⇒
+fp32 张量 ✓（F32/F16/BF16/Q8_0/Q4_K ✓；公式照 llama.cpp `ggml-quants.c` ✓ **MIT** ✓ web_fetch 取权威 ✓）；⭐⭐ 判据 = 手造
+Q4_K block（d=1/dmin=0.5/scales 全 0xFF/qs 全 0x11 ⇒ 反量化**每元素精确 = 31.5** ✓✗ —— 字节布局或 6-bit 解包错一处就对不上 ✓）；
+⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗；`load_weights` 能整文件提权重 ✓ 但大文件（14B≈17GiB fp32）要**逐张量**读 ✓。
+⚠️ **下一步** ✗：GGUF 张量名 → `llm.LlmModel` 参数的**映射**（`model.layers.N.self_attn.q_proj.weight` → `blocks.N.attn.q_proj.weight` ✓）未做 ✗；
+全量 **127 套 / 4121 项 / 0 失败** ✓（+1 套 / +9 项 ✓）。
+
 **`2026-09-23.md`**（H3 混合打包形态 + 掩码坐标空间）
 ① 找洞的路子换成**扫「注释里写着要求、代码不核」的措辞** ✓（`应与`/`必须一致`/`应当与` …）⇒ 多数已在
 自检钉住 ✓，这条路子暂时收口 ✓；② ⭐⭐ **关键帧 + 参考块一起给**（现实常用组合 ✓）此前**一条用例都没有**

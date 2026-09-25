@@ -48,6 +48,7 @@ __all__ = [
     "ScanCancelledError",
     "build_suggestion",
     "classify",
+    "default_models_dir",
     "detect_comfyui",
     "get_default_roots",
     "get_extra_roots",
@@ -292,6 +293,15 @@ def detect_comfyui() -> str:
     return ""
 
 
+def default_models_dir() -> str:
+    """本仓**自己的**模型存储目录 ✓：``<data_root>/models`` ✓。
+
+    2026-09-25 自主化 ✓：模型不再依赖 ComfyUI 目录 ✗ —— 下载/扫描/就绪/加载统一落到这里 ✓
+    （``MODELS_DIR`` 环境变量或 ``model-paths.json`` 的 ``models_dir`` 仍可覆盖 ✓）。
+    """
+    return str(Path(config.get_data_root()) / "models")
+
+
 def get_extra_roots() -> list[str]:
     """用户自定义的额外扫描目录（``configs/model-paths.json`` 的 ``extra_roots``）。"""
     extra = _read_paths_config().get("extra_roots")
@@ -301,19 +311,24 @@ def get_extra_roots() -> list[str]:
 
 
 def get_default_roots() -> list[str]:
-    """解析「默认扫描根目录」集合：环境变量 > model-paths.json > 探测候选。"""
+    """解析「默认扫描根目录」集合：环境变量 > model-paths.json > 默认。
+
+    ⭐ 2026-09-25 语义修正 ✓：**下载/存储**默认到本仓 <data_root>/models（自主 ✓），
+    但**扫描发现**要尽量覆盖电脑里已有的模型 ✓ —— 含 ComfyUI 目录 ✗（**发现不排斥第三方** ✓：
+    自主的是「从哪下载、存到哪」，不是「不许看见别人已装的模型」✓）。
+    """
     cfg = _read_paths_config()
     roots: list[str] = []
 
+    models_dir = (os.environ.get("MODELS_DIR") or cfg.get("models_dir")
+                  or default_models_dir())
+    services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
+                    or str(LOCAL_SERVICES_ROOT))
     comfyui_root = (os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root")
                     or detect_comfyui())
     comfyui_models_dir = os.path.join(comfyui_root, "models") if comfyui_root else ""
-    models_dir = os.environ.get("MODELS_DIR") or cfg.get("models_dir") or comfyui_models_dir
-    services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
-                    or str(LOCAL_SERVICES_ROOT))
 
-    # 模型存储目录与 ComfyUI 默认模型目录**并存**扫描（设置自定义存储目录后，ComfyUI 目录仍会被扫）
-    for candidate in (models_dir, comfyui_models_dir, services_dir, comfyui_root):
+    for candidate in (models_dir, services_dir, comfyui_models_dir, comfyui_root):
         if candidate and os.path.exists(candidate):
             resolved = os.path.abspath(candidate)
             if resolved not in roots:
@@ -325,12 +340,11 @@ def get_default_roots() -> list[str]:
             if resolved not in roots:
                 roots.append(resolved)
 
-    # 若完全没有可扫描目录，回退到磁盘常见模型目录，避免空结果
+    # 若完全没有可扫描目录，回退到本仓默认模型目录
     if not roots:
-        for candidate in COMFYUI_CANDIDATES:
-            if os.path.exists(candidate):
-                roots.append(candidate)
-                break
+        default = os.path.abspath(default_models_dir())
+        if os.path.exists(default):
+            roots.append(default)
     return roots
 
 
@@ -356,7 +370,8 @@ def get_model_paths() -> dict[str, Any]:
     return {
         "comfyui_root": os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root")
         or detect_comfyui() or "",
-        "models_dir": os.environ.get("MODELS_DIR") or cfg.get("models_dir") or "",
+        "models_dir": os.environ.get("MODELS_DIR") or cfg.get("models_dir")
+        or default_models_dir(),
         "nodes_dir": cfg.get("nodes_dir") or "",
         "local_services_dir": cfg.get("local_services_dir") or "",
         "extra_roots": get_extra_roots(),

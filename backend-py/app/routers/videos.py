@@ -59,7 +59,7 @@ from ..services.prompt_utils import (
 )
 from ..services.shot_router import VIDEO_ROUTE_DIALOGUE_PATTERN, decide_shot_route
 from ..services.task_logger import log_task_error, log_task_payload, log_task_start, log_task_success
-from ..services.video_generation import generate_video
+from ..services.video_generation import find_reusable_video, generate_video
 
 router = APIRouter(prefix="/api/v1/videos", tags=["videos"])
 
@@ -223,7 +223,7 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
                 or None
             )
 
-        video_id = await generate_video(conn, {
+        params = {
             "storyboardId": body.get("storyboard_id"),
             "dramaId": body.get("drama_id"),
             "prompt": prompt,
@@ -242,12 +242,33 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
             "force": body.get("force"),
             "route": route_decision.get("route"),
             "routeReason": route_decision.get("reason"),
-        })
+        }
+
+        # ── ⭐ 「同段输入没变 ⇒ 复用上次成片」✗✗（逆向口径「段配置哈希跳过」✓）────────────────
+        #    ⚠️ **不许静默** ✗：命中时响应里带 ``reused`` + ``reuseReason`` ✓，日志也记一条 ✓
+        #    （判据在 :func:`video_generation.find_reusable_video` ✓：非 force ✓ + 同分镜成功产物 ✓
+        #     + 指纹一致 ✓ + **产物文件真在** ✓）。
+        reuse = find_reusable_video(conn, params)
+        if reuse is not None:
+            record = _fetch_video(conn, reuse["id"])
+            log_task_success("VideoAPI", "reuse-same-inputs", {
+                "generationId": reuse["id"], "storyboardId": params["storyboardId"],
+                "fingerprint": reuse["fingerprint"], "product": reuse["product"],
+                "reason": reuse["reason"],
+            })
+            payload = row_to_camel(record, "video_generations")
+            payload["reused"] = True
+            payload["reuseReason"] = reuse["reason"]
+            return created(payload)
+
+        video_id = await generate_video(conn, params)
 
         record = _fetch_video(conn, video_id)
         log_task_success("VideoAPI", "generate",
                          {"generationId": video_id, "provider": getattr(record, "provider", None)})
-        return created(row_to_camel(record, "video_generations"))
+        payload = row_to_camel(record, "video_generations")
+        payload["reused"] = False
+        return created(payload)
     except Exception as exc:  # noqa: BLE001
         log_task_error("VideoAPI", "generate", {"error": str(exc)})
         return bad_request(str(exc))

@@ -26,13 +26,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection, Row
 
+from ..core.config import get_storage_root
 from ..core.db import engine
 from ..core.models import api_usage, storyboards, video_generations
 from ..core.response import js_truthy, now
@@ -40,6 +43,7 @@ from .adapters.registry import get_video_adapter, video_adapters
 from .ai_configs import is_local_config
 from .ai_providers import get_active_config, get_active_config_by_provider, get_config_by_id
 from .asset_versions import record_asset_version
+from .engine import cache_key
 from .file_storage import download_file, read_image_as_compressed_data_url
 from .gpu_manager import gpu_manager
 from .prompt_utils import strip_video_prompt_tags
@@ -123,6 +127,111 @@ def release_video_gpu_lease(video_id: int) -> None:
     lease = _video_gpu_leases.pop(video_id, None)
     if lease is not None:
         lease.release()
+
+
+#: 「同段要不要重算」的指纹里**必须**参与比较的字段 ✓✗ —— ⚠️ 两侧**同一份** ✗✗：
+#: 新请求是 ``params``（camelCase ✓）、老产物是 DB 行（snake_case ✓）⇒ 只认一种就等于
+#: 把另一侧读成空的 ✓✗（**两个不同素材会被算成相同 ⇒ 误跳过** ✓✗✗，本仓在别处刚踩过同款 ✓）。
+_FINGERPRINT_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("prompt",), ("referenceMode", "reference_mode"), ("sceneType", "scene_type"),
+    ("duration",), ("aspectRatio", "aspect_ratio"),
+    ("referenceImageUrls", "reference_image_urls"),
+    ("referenceAudioUrls", "reference_audio_urls"),
+)
+
+
+def _fingerprint_field(source: Any, *names: str) -> Any:
+    """按**两种形态**取值 ✓✗：dict（params ✓）优先按 key、其余走 :func:`_col`（DB 行 ✓）。"""
+    if isinstance(source, dict):
+        for name in names:
+            if name in source:
+                return source[name]
+        return None
+    for name in names:
+        value = _col(source, name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def references_fingerprint(source: Any) -> str:
+    """一次生成的**输入指纹** ✓（同输入 ⇒ 同指纹 ⇒ 可**跳过重算** ✓；任一输入变了 ⇒ 换指纹 ✓✗）。
+
+    ⚠️ 两条都别省 ✗：
+    * **参考素材**走 :func:`app.services.engine.cache_key.refs_fingerprint` ✓（顺序无关 ✓、
+      两种形态都认 ✓）—— ⚠️ 它**默认只按值认张量与标量** ✓：URL 字符串算标量 ✓（本仓补的扩展 ✓✗）；
+    * **提示词/镜头类型/时长/画幅**这些**标量**单独哈希再拼上 ✓（逆向口径里叫「段配置哈希」✓）——
+      只比参考素材是不够的 ✗（同一批立绘换个提示词就是**另一段** ✓）。
+    """
+    payload = [_fingerprint_field(source, *names) for names in _FINGERPRINT_FIELDS]
+    refs: dict[str, Any] = {}
+    fields = [str(item) for item in payload]
+    for name, value in (("ref_images", payload[5]), ("ref_audios", payload[6])):
+        refs[name] = _refs_map(value)
+    refs_digest = cache_key.refs_fingerprint(refs)
+    config_digest = hashlib.sha256("|".join(fields[:5]).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(f"{refs_digest}|{config_digest}".encode("utf-8")).hexdigest()[:32]
+
+
+def _refs_map(raw: Any) -> dict[str, Any]:
+    """参考素材的落库形态（**紧凑 JSON 字符串** ✓）或直接列表 ✓ ⇒ ``{下标: 值}`` ✓。"""
+    if raw in (None, "", "[]"):
+        return {}
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except (ValueError, TypeError):
+            items = []
+    if not isinstance(items, (list, tuple)):
+        return {}
+    return {str(index): value for index, value in enumerate(items) if value not in (None, "")}
+
+
+def find_reusable_video(conn: Connection, params: dict[str, Any]) -> dict[str, Any] | None:
+    """**同段输入没变 ⇒ 复用上次成片** ✓（逆向口径「段配置哈希跳过」✓）⇒ 可复用的那条 ✓ / ``None`` ✓。
+
+    ⚠️ 四条缺一不可 ✗✗（少一条就是"拿别的素材的成片来交差"✓✗）：
+    1. 不是 ``force`` ✓（门禁统一支持 force ✓ —— 用户要重跑就必须重跑 ✓）；
+    2. 同一分镜上**成功**的产物 ✓（``failed`` / ``processing`` 不算 ✓）；
+    3. 指纹**完全一致** ✓（参考素材 + 提示词 + 镜头类型 + 时长 + 画幅 ✓）；
+    4. ⭐ **产物文件真的在** ✓✗（指向不存在的文件不算可复用 ✓ —— 否则用户拿到一个死链 ✓）。
+    ⚠️ 本函数**只回答"能不能复用"** ✗，**不替调用方决定** ✓：跳过的实况必须由路由**如实回给调用方** ✓✗。
+    """
+    if params.get("force"):
+        return None
+    storyboard_id = params.get("storyboardId")
+    if not storyboard_id:
+        return None
+    wanted = references_fingerprint(params)
+    rows = conn.execute(
+        select(video_generations)
+        .where(and_(video_generations.c.storyboard_id == storyboard_id,
+                    video_generations.c.status == "succeeded",
+                    video_generations.c.deleted_at.is_(None)))
+        .order_by(video_generations.c.id.desc())
+        .limit(8)
+    ).all()
+    for row in rows:
+        if references_fingerprint(row) != wanted:
+            continue
+        product = str(_col(row, "local_path") or _col(row, "video_url") or "")
+        if not product:
+            continue
+        if product.startswith(("http://", "https://")):
+            # ⚠️ 远端 URL ⇒ **证明不了产物还在** ✗ ⇒ 不复用 ✓（宁可重算一次 ✓ 不拿可疑产物交差 ✓✗）
+            log_task_warn("VideoTask", "reuse-product-remote",
+                          {"id": _col(row, "id"), "product": product})
+            continue
+        local = Path(product) if Path(product).is_absolute() else Path(get_storage_root()) / product
+        if not local.exists():
+            log_task_warn("VideoTask", "reuse-product-missing",
+                          {"id": _col(row, "id"), "product": product})
+            continue
+        return {"id": int(_col(row, "id")), "fingerprint": wanted, "product": product,
+                "reason": ("同一分镜 + 同一批参考素材 + 同样的提示词/镜头类型/时长/画幅 ⇒ "
+                           "输入没变 ⇒ **复用上次成片** ✓（要重跑请带 ``force`` ✓）")}
+    return None
 
 
 async def generate_video(conn: Connection, params: dict[str, Any]) -> int:

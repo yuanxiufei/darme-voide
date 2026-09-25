@@ -730,6 +730,33 @@ def main() -> int:
           and "至少要有 2 个" in str(_raises(lambda: h3.sample_dual_stream(
               trunk, tiny_video, tiny_audio, text, [1.0]))))
 
+    # ── 掩码更新（2026-09-25 补 ✓ 口径来自**可读源码** ✓：超清二采 = video 1 / audio 0 ✓）──
+    zeros_v = torch.zeros_like(tiny_video)
+    zeros_a = torch.zeros_like(tiny_audio)
+    with torch.no_grad():
+        # ⭐ 口径照上游 ✓：video = **1**（重采 ✓）、audio = **0**（锁住一采结果 ✓）
+        locked_audio = h3.sample_dual_stream(trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0],
+                                             denoise_mask=(torch.ones_like(tiny_video), zeros_a))
+        all_masked = h3.sample_dual_stream(trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0],
+                                           denoise_mask=(torch.ones_like(tiny_video),
+                                                         torch.ones_like(tiny_audio)))
+    check("㊳′ ⭐⭐⭐ **audio 流 mask=0 ⇒ 逐位不变** ✗✗（超清二采就是靠这条锁音频 ✓；"
+          "⚠️ 错的那条路是「重采音频」⇒ 音轨坏掉而画面看着正常 ✓✗）",
+          torch.equal(locked_audio["audio"], tiny_audio)
+          and not torch.equal(locked_audio["video"], tiny_video),
+          (torch.equal(locked_audio["audio"], tiny_audio),
+           torch.equal(locked_audio["video"], tiny_video)))
+    check("㊳″ ⭐⭐ **两路都给 1 ⇒ 与不给掩码逐位相同** ✗✗（掩码不是随便乘的 ✓ —— "
+          "这条保证「默认路径一字未动」✓）",
+          torch.equal(all_masked["video"], sampled["video"])
+          and torch.equal(all_masked["audio"], sampled["audio"]), all_masked["masked"])
+    check("㊳‴ 两路都 mask=0 ⇒ **两条流都逐位不变** ✓（mask 语义是「按流缩放更新量」✓）",
+          torch.equal(h3.sample_dual_stream(trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0],
+                                            denoise_mask=(zeros_v, zeros_a))["video"], tiny_video))
+    check("㊳⁴ 只给一路（没配成二元组）⇒ **报错** ✗（别静默当成「都锁」✓✗ —— 那等于整段没采样 ✓）",
+          "两路" in str(_raises(lambda: h3.sample_dual_stream(
+              trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0], denoise_mask=zeros_v))))
+
     return _report()
 
 

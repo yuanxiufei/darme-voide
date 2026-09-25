@@ -4,12 +4,26 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**124 套 / 4050 项 / 0 失败**（2026-09-24 夜 ✓：**123 套按 `SUMMARY:` 收敛出
-4050 项** ✓、另 1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）+ `skip 7` ✓。
-⇒ 本轮较上一跑 **+2 套 / +67 项** ✓（= 混合加载**加载层** 32 条 + 段级音频合成 14 条 ✓
-+ 另 4 套里**加判据** 21 条：管线 10（二采阶段 ✓）/ 合成 5（混音接线 ✓）/ 缓存守卫 2（只读头口子 ✓）/
-清单 4（超清可用性 ✓）。
-⚠️ **记账须与实测对得上** ✗：我曾在日志把 `engine_cache_guard` 写成 **12/12** ✓✗，实测是 **20/20** ✓ 已改正 ✓。
+最近一次**全量实测**：**127 套 / 4121 项 / 0 失败**（2026-09-25 深夜 ✓：**126 套按 `SUMMARY:` 收敛出
+4121 项** ✓、另 1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）+ `skip 7` ✓。
+⇒ 本轮较上一跑 **+1 套 / +9 项** ✓（= 自研 GGUF 反量化 `engine_gguf_dequant_test` **9 条** ✓）。
+⚠️⚠️ **记账须与实测对得上** ✗✗：上一轮 docstring 把 `engine_refine_test` 记成 **14 条** ✓✗，实测是 **23 条** ✓
+（多出的 `case_second_pass`/`case_keyframes`/`case_gate` 是上一轮就写好的，记账时没跟上 ✓）⇒ 已校正 ✓；
+早前还把 `engine_cache_guard` 写成 **12/12** ✓✗（实测 20/20 ✓）⇒ ⭐ **判据一次写齐再跑全量** ✗，跑完再报数 ✓。
+
+⭐⭐ **2026-09-25 深夜这一轮起「自研运行时」** ✓✗（用户「要自研实现」✓）：文本生成此前走 ollama HTTP 服务 ✗ ⇒
+① 新建 `engine/llm.py` ✓ —— 自研 decoder-only transformer（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样 ✓），
+Qwen3/Llama 这类 LLM 的架构 ✓；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗）；缩小版走同一条前向 ✓。
+② 新建 `engine/gguf_dequant.py` ✓ —— GGUF 权重**反量化**（F32/F16/BF16/Q8_0/Q4_K ✓ 公式照 llama.cpp ggml-quants.c ✓ MIT ✓；
+Q4_K 的 6-bit 解包逐字节核过 ✓）；⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗ 未实现 ✓。
+⚠️ **尚未接线** ✗：GGUF 张量名 → `LlmModel` 参数的**映射**未做 ✗（下一轮 ✓）⇒ 本套只验架构/反量化不变量，不宣称会生成文本 ✗。
+
+⭐⭐ **2026-09-25 晚这一轮补的是「能力已有、没接出去」的收尾** ✓✗：
+① **多集节奏相位注入** ✓ —— `runtime.py::append_style_profile` 里早先是「`rhythm-phase.ts` 未迁」的 warn 占位 ✗，
+而 `services/rhythm_phase.py` 的 `rhythm_guidance_for_episode` 早就迁好了 ⇒ `storyboard_breaker` 一直少一段跨集节奏引导 ✓✗
+（与 `assign_rhythm_phases` 那半「光收不读」同族 ✓）⇒ 现在真调它 ✓（读库失败只 warn 不阻断 ✓ 与视觉图谱分支同口径 ✓）；
+② `TorchBackend.refineNote` **自述与实现相反** ✓✗ —— 它写着 `denoise: False` +「带掩码二采**未实现**」✗，但
+`refine_latents` 的 `_second_pass` 早就实现了带掩码二采 ✓（调用方读到 `denoise=False` 会以为二采没做 ✗）⇒ 对齐 ✓。
 
 ⭐ **这一轮补的是「加载层/张量层」的接线** ✓✗（上一轮补的是提交前那几道关 ✓）：
 ① 混合加载从「计划层」补到**真加载层**（搬字节 / 原子落盘 / 缓存两道门 / 磁盘余量 ✓）
@@ -218,6 +232,8 @@ TESTS = [
      "engine_hybrid_load_test.py"),
     ("段级音频合成（模型声×0.6 + 配音 / 长度守恒 / 不静默重采样；标准库读写 wav）",
      "segment_audio_test.py"),
+    ("超清二采的**张量层**（真装载放大器 / 只换视频流 / 时间维不变；CPU 可跑）",
+     "engine_refine_test.py"),
     ("自研引擎·混合加载计划（fl2va 基底 + ref2va 的 adaLN 覆盖；零依赖）",
      "engine_hybrid_merge_test.py"),
     ("自研引擎·档位表（步数 / 分辨率 / 加速件 / 显存建议 / 必备模型；零依赖）",
@@ -248,6 +264,10 @@ TESTS = [
      "engine_h3_form_test.py"),
     ("自研引擎·音频 VAE（32 kHz 立体声 ⇄ 潜变量；**真写 wav + 标准库读回核对** ✓）",
      "engine_audio_vae_test.py"),
+    ("自研引擎·decoder-only LLM（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样；缩小版 CPU 可验）",
+     "engine_llm_test.py"),
+    ("自研引擎·GGUF 权重反量化（F32/F16/BF16/Q8_0/Q4_K 精确字节布局 + 6-bit 解包；未实现具名拒绝）",
+     "engine_gguf_dequant_test.py"),
     ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；参考块四类入口 ✓ / 能力自述逐条报缺 / "
      "取整口径必填 / 当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片）", "engine_io_test.py"),

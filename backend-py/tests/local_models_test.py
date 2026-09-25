@@ -296,8 +296,8 @@ def main() -> int:  # noqa: C901
               ls.get_extra_roots() == [os.path.abspath(TREE)]
               and ls.get_model_paths()["models_dir"] == TREE)
         client.put("/api/v1/local-models/roots", json={"models_dir": ""})
-        check("端点: PUT /roots 传**空串** = 清空该字段（partial 更新）",
-              ls.get_model_paths()["models_dir"] == "")
+        check("端点: PUT /roots 传**空串** = 清空该字段（partial 更新 ⇒ 回落到默认 <data_root>/models ✓）",
+              ls.get_model_paths()["models_dir"] == ls.default_models_dir())
         client.put("/api/v1/local-models/roots", json={"roots": [TREE]})
         check("端点: PUT /roots 不传 roots 时保留现状（不会清空）",
               ls.get_extra_roots() == [os.path.abspath(TREE)])

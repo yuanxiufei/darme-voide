@@ -88,6 +88,14 @@ def _entry_parts(key: str, value: Any, sampler: Sampler | None) -> list[str]:
             parts.append(f"{key}:h" + (_sample_digest(waveform, sampler) if sampler else "?"))
             return parts
         return [f"{key}:dict"]
+    if isinstance(value, (str, bytes, bool, int, float)):
+        # ⭐⭐ **本仓扩展** ✗✗：**标量/字符串要按值进指纹** ✓ —— 上游只看张量 ✓（它的参考素材是内存张量），
+        #    而本仓**请求层**的参考是 **URL / 路径字符串** ✓ ⇒ 若按"非张量 ⇒ ``other``"处理，
+        #    **改了 URL 指纹却不变** ✓✗（实测：``{"0": "a.png"}`` 与 ``{"0": "b.png"}`` **同指纹** ✓✗）
+        #    ⇒ 会**误判成「素材没变」而跳过重生成** ✓✗✗（拿上一段的成片去交差，且看不出来 ✓）。
+        #    ⚠️ 张量那条路**一字未改** ✗（判据仍在 ``_sample_digest`` ✓）。
+        raw = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        return [f"{key}:v{len(raw)}:{hashlib.sha256(raw).hexdigest()[:16]}"]
     if not _is_tensorish(value):
         return [f"{key}:other"]
     parts = [f"{key}:{_shape_of(value)}"]

@@ -87,6 +87,25 @@ def detect_comfyui():
     return None
 
 
+def _default_data_root():
+    """与 ``app/core/config.py`` 同口径的 data_root 默认值（marker > DATA_ROOT env > <PROJECT_ROOT>/data）。
+
+    ⚠️ 脚本不 import ``app.*`` ⇒ 这里**复制**那份解析 ✓（靠注释同步 ✗ —— 改 config.py 时要回头改这里 ✓）。
+    """
+    marker = os.path.join(PROJECT_ROOT, ".data-root")
+    try:
+        with open(marker, "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+        if value and os.path.isdir(value):
+            return value
+    except OSError:
+        pass
+    env = os.environ.get("DATA_ROOT")
+    if env:
+        return os.path.join(PROJECT_ROOT, env)
+    return os.path.join(PROJECT_ROOT, "data")
+
+
 def resolve_paths(cli_comfyui=None, cli_models=None, cli_nodes=None, cli_services=None):
     """统一解析本地模型路径，返回 Paths。优先级：CLI > 环境变量 > 配置文件 > 默认。"""
     cfg = load_paths_config()
@@ -97,7 +116,9 @@ def resolve_paths(cli_comfyui=None, cli_models=None, cli_nodes=None, cli_service
         or detect_comfyui()
         or ""
     )
-    default_models = os.path.join(comfyui_root, "models") if comfyui_root else ""
+    # ⭐ 自主化（2026-09-25 ✓）：模型默认落本仓自己的 <data_root>/models ✓ —— 不再回落 ComfyUI/models ✗
+    #    （ComfyUI 目录只在显式配 COMFYUI_PATH / comfyui_root 时仍可作下载目标 ✓）。
+    default_models = os.path.join(_default_data_root(), "models")
     default_nodes = os.path.join(comfyui_root, "custom_nodes") if comfyui_root else ""
     default_services = os.path.join(APP_ROOT, "local_services")
     return Paths(

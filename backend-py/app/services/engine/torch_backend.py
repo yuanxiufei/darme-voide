@@ -7,10 +7,10 @@
 **张量本身** | ✅ **真 torch 张量** ✓（`realTensors=True` ✓）—— 不再用 `dryrun` 那个 12 行 `list[float]` 假张量 ✓ |
 **随机与复现** | ✅ 真 `torch.Generator().manual_seed(seed)` + `torch.randn` ✓ ⇒ 同种子**逐位可复现** ✓ |
 **采样/引导/首帧数学** | ✅ 全部跑在真张量上 ✓（与 `dryrun` 共用同一份 `sampler`/`guidance`/`conditioning` ✓） |
-**模型前向（DiT/TE/VAE）** | ❌ **未接** ✗ —— H3 权重（主 DiT **19.53 GiB** ✗）没下载 ✓，架构装载也还没写 ✓ ⇒ 前向是**占位实现** ✗ |
-**产物** | ❌ **不是生成画面** ✗ ⇒ `synthetic` **保持 True** ✓（`write` 落的是张量清单 ✓，不是 mp4 ✗） |
+**模型前向（DiT/TE/VAE）** | ✅ **机制已接** ✓（`load_weights` 真装载 DiT/H3 形态 ✓ + `denoise`/`encode_text`/`decode` 真前向 ✓ + H3 双流 `sample_dual` 真前向 ✓）—— ⚠️ **真权重（主 DiT 19.53 GiB ✗）没下载** ⇒ 没装模型时前向是**占位** ✓（如实标 ✓ 不冒充 ✗） |
+**产物** | ✅ **H3 双流已出真 mp4 + 真 wav** ✓（`engine_dual_stream_test` ✓）—— ⚠️ 没装真权重/单流时仍是合成产物 ✗（`synthetic=True` ✓） |
 
-⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（画面不真 ✗）。
+⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（没装真权重时画面不真 ✗）。
 UI/接口据此可以显示「真张量 ✓ / 真模型 ✗」而不至于误导 ✓。
 
 ## 为什么本机是 CPU 版
@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -245,6 +246,10 @@ class TorchBackend:
         self._tokenizer: Any = None
         #: 首帧条件**实际走了哪条路** ✓（真 VAE 编码 / 占位 ✓ —— 由管线回给调用方 ✓）
         self._conditioningNote: dict[str, Any] | None = None
+        #: 超清放大器 ✓（按**需求装载** ✓ —— 没要超清就不装 ✓ 省显存）；装载报告与本次二采的实况 ✓
+        self._upscaler: Any = None
+        self._upscalerReport: dict[str, Any] | None = None
+        self.refineDetails: dict[str, Any] | None = None
 
     @property
     def conditioningNote(self) -> dict[str, Any] | None:  # noqa: N802 —— 与前端 camelCase 对齐 ✓
@@ -855,6 +860,239 @@ class TorchBackend:
             shift_v=float(shifts["sigma_shift_video"]), shift_a=float(shifts["sigma_shift_audio"]),
             callback=on_step, extra_video_rows=extra_video, extra_audio_rows=extra_audio,
             keyframes=keyframes or None, refs=refs or None)
+
+    def _upscaler_path(self) -> str | None:
+        """放大器权重的解析顺序 ✓：显式 ``H3_UPSCALER`` ✓ > 清单里 ``kind=upscale_models`` 的第一条 ✓。
+
+        ⚠️ 与 :meth:`_default_dit_path` **同一份清单** ✓（不另开一处配置 ✗）；⚠️ 解析不到 ⇒ ``None`` ✓
+        （由调用方给**明确拒绝**的文案 ✓ 不猜路径 ✗）。
+        """
+        explicit = str(os.environ.get("H3_UPSCALER") or "").strip()
+        if explicit:
+            return explicit
+        for entry in inv.load_catalog()["models"]:
+            if str(entry.get("kind")) == "upscale_models":
+                resolved = inv.component_path(entry)
+                return str(resolved) if resolved else None
+        return None
+
+    def refine_latents(self, latents: Any, plan: Any, request: Any, *,
+                       condition: Any = None) -> Any:
+        """**超清二采（张量层 ✓ 2026-09-25 补 ✓）**：空间 2× ✓ ⇒（可选）**带掩码的低噪声重去噪** ✓✗。
+
+        ⚠️⚠️ 四条口径（都是「看着像超分、其实坏了」的形状 ✓✗）：
+        1. ⭐ **只重采视频流** ✗✗：``audio`` **原对象放回** ✓（重采音频会把音轨弄坏而画面看着正常 ✓）——
+           二采那条路靠的是**掩码**（video **1** / audio **0** ✓，口径来自上游 ``_h3_build_denoise_mask`` ✓✗）；
+        2. ⭐ **时间维不变** ✗✗（``T`` 前后必须相等 ⇒ 不等就**拒** ✓ —— 时间插值会让动作速率变错 ✓✗）；
+        3. ⭐ 放大器**严格装载** ✓：契约与张量不符（缺键/形状不一 ✓）⇒ **拒** ✗
+           （``strict=False`` 会留下随机初始化的层 ⇒ 输出是「像超分」的噪声 ✓✗）；
+        4. ⭐ **二采的两个参数必填** ✗（``plan.refine_steps`` / ``refine_denoise`` ✓）—— 默认值在
+           **编译层** ✗ ⇒ 不给就**只做上采样** ✓ 并如实写进报告 ✓；给了一半 ⇒ ``plan_upscale`` 就报错 ✓。
+        ⚠️ **要二采就必须给 ``condition``** ✗（二采要重跑主干 ✓ —— 没条件就**拒** ✓，不猜 ✓✗）。
+        """
+        self._gate()
+        torch = self._torch()
+        from app.services.engine import h3_form, upscale as upscale_mod, upscale_net  # noqa: PLC0415
+        from app.services.engine import latent_container as lc  # noqa: PLC0415
+
+        if not isinstance(latents, dict) or "video" not in latents or "audio" not in latents:
+            raise TorchBackendUnavailable(
+                "二采需要 :meth:`init_dual_latents` 的产出（含 video/audio 两条 ✓）✗"
+                "　—— ⚠️ 别拿单流潜变量来二采 ✓✗", reason="pending")
+        path = self._upscaler_path()
+        if path is None or not Path(path).exists():
+            raise TorchBackendUnavailable(
+                "放大器权重未就绪（" + (path or "清单里 ``kind=upscale_models`` 一条都没有 ✗") + " ✓）"
+                "　⇒ 先放权重（或用 ``H3_UPSCALER`` 指路 ✓），或让计划层按 ``contract=None`` "
+                "**回退普通模式** ✓（⚠️ 本仓不静默降级出「看着像超清」的片子 ✗）", reason="pending")
+        metadata, _header = st.read_header(path)
+        contract = upscale_mod.read_upscaler_contract(metadata)
+        channels = int(contract["base_config"]["in_channels"])
+        # ⭐ 跨来源**同一个事实** ✓✗：契约的 ``in_channels`` ↔ **本次装的主干**的视频流通道 ✓。
+        #    ⚠️ 通道数**从已装主干推** ✗（不写死 24 ✗）—— 自检的**缩小版**与真权重要走**同一条路** ✓✗
+        #    （真权重推出来就是 24 ✓，缩小版推出来是它自己的 latents_dim ✓）。
+        expected = int((self._config or {}).get("latents_dim") or lc.H3_VIDEO_CHANNELS)
+        if channels != expected:
+            raise TorchBackendUnavailable(
+                f"放大器契约的 ``in_channels={channels}`` ✗，而本次主干/视频流是 {expected} 通道 ✓ "
+                f"（真权重下应当都是 {lc.H3_VIDEO_CHANNELS} ✓）⇒ 不是同一套 ✓✗（拒，不硬套 ✗）",
+                reason="pending")
+        if self._upscaler is None:
+            # ⚠️ 用 ``weights.load_module_weights`` 而不是 ``upscale_net.build_upscaler`` ✗：
+            #    后者要**内存里的 state_dict** ✓，而本仓的装载入口是**文件 + 严格报告** ✓
+            #    （``complete=False`` ⇒ 拒 ✓ —— 与 ``strict=True`` **同一条纪律** ✓✗）。
+            net = upscale_net.H3LatentUpscalerV3(contract["base_config"], contract["config"])
+            report = weights_mod.load_module_weights(net, path, device=self._device)
+            if not report.complete:
+                raise TorchBackendUnavailable(
+                    f"放大器的张量与声明的架构**不符** ✗（缺 {len(report.missing)} 键 / "
+                    f"形状不符 {len(report.shapeMismatch)} 处 ✓，如 {report.missing[:4]} ✓）"
+                    f"　⇒ 拒 ✗（**不许** ``strict=False`` 糊过去 ✓✗）", reason="pending")
+            self._upscaler = net.to(self._device).eval().requires_grad_(False)
+            self._upscalerReport = {**report.to_dict(), "path": path, "contract": dict(contract)}
+
+        video = latents["video"]
+        shape = tuple(int(value) for value in video.shape)
+        if len(shape) != 4 or shape[0] != channels:
+            raise TorchBackendUnavailable(
+                f"视频流形状 {shape} ✗：本后端的双流是 ``[C,T,H,W]``（C 必须是 {channels} ✓）— "
+                f"⚠️ 拿别的流当视频解会得到一堆噪声 ✓✗", reason="pending")
+        with torch.no_grad():
+            refined = self._upscaler(video.unsqueeze(0)).squeeze(0)
+        after = tuple(int(value) for value in refined.shape)
+        if after[1] != shape[1]:
+            raise TorchBackendUnavailable(
+                f"放大器**改了时间维** ✗：{shape[1]} → {after[1]} ✓（时间插值会让动作速率变错 ✓✗）"
+                f" ⇒ 拒，不用这个产物 ✓", reason="pending")
+        tail_steps = int(getattr(plan, "refine_steps", 0) or 0)
+        denoise = float(getattr(plan, "refine_denoise", 0.0) or 0.0)
+        details: dict[str, Any] = {
+            "videoShapeBefore": list(shape), "videoShapeAfter": list(after),
+            "temporalUnchanged": after[1] == shape[1],
+            # ⭐ 真话：音频那条流**不进**任何"会改它"的路 ✓ 原对象放回 ✓
+            "audioIdentical": True, "audioTouched": False,
+            "denoiseSteps": 0, "mask": None,
+            "upscalerPath": path,
+            "notes": [],
+        }
+        out_video = refined
+        keyframes = self._upscale_keyframes(latents, refined, shape)
+        if tail_steps > 0:
+            out_video, denoise_report = self._second_pass(
+                refined, latents, plan, request, condition=condition, keyframes=keyframes)
+            details.update(denoise_report)
+        else:
+            details["notes"].append(
+                "⚠️ **二采未跑** ✗：``plan.refine_steps`` = 0 ✓（这两个参数的默认值在**编译层** ✗ ⇒ "
+                "本仓**不猜** ✓）⇒ 本次只做了放大器上采样 ✓；要二采请把 ``refineSteps`` / "
+                "``refineDenoise`` 一起给上 ✓✗")
+        if keyframes is not None:
+            details["keyframesScaled"] = len(keyframes)
+        self.refineDetails = details
+        merged = {**latents, "video": out_video}
+        if keyframes is not None:
+            merged["keyframes"] = keyframes
+        # ⚠️ 音频流**原对象**放回 ✓（不是 copy ✗ —— copy 也会让「是同一份」这条判据失效 ✓✗）
+        return merged
+
+    def _upscale_keyframes(self, latents: Any, refined: Any, shape: tuple[int, ...]) -> Any:
+        """⭐ 关键帧/参考行的潜变量**也要 2×** ✗✗（口径来自上游 ``_h3_scale_cond_refs`` ✓）。
+
+        ⚠️ 不同步就会「目标域 2× 而关键帧还是 1×」✓✗ —— 形状对不上一般会**报错** ✓，
+        但**擦边对得上**的组合会**静默**错 ✓✗（所以这里也顺手核一遍）。
+        ⚠️ ``references`` 要不要跟着 2× **没核到** ✗ ⇒ **拒** ✗（不猜 ✓✗）。
+        """
+        if latents.get("references"):
+            raise TorchBackendUnavailable(
+                "二采遇到 ``references`` ✗：它们在超清二采里**要不要跟着 2× 我们没核到** ✓ ⇒ "
+                "**不猜** ✗（要么先去核上游、要么这次别带参考 ✓✗）", reason="pending")
+        from app.services.engine import upscale_net  # noqa: PLC0415
+
+        items = latents.get("keyframes")
+        if not items:
+            return None
+        scaled: list[Any] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("latent") is None:
+                scaled.append(item)          # 不是"带 latent 的帧"⇒ 原样带过去 ✓（不猜它是什么 ✗）
+                continue
+            latent = item["latent"]
+            if len(tuple(int(value) for value in latent.shape)) != 5:
+                raise TorchBackendUnavailable(
+                    f"关键帧潜变量应当是 5 维（收到 {tuple(int(v) for v in latent.shape)} ✓）✗",
+                    reason="pending")
+            # ⚠️ 用**同一个** 2× 口径 ✓（`upscale_net.spatial_bilinear_2x` ✓ —— 与放大器内部一致 ✓✗）
+            upscaled = upscale_net.spatial_bilinear_2x(latent.float())
+            scaled.append({**item, "latent": upscaled.to(latent.dtype)})
+        return scaled
+
+    def _second_pass(self, refined: Any, latents: Any, plan: Any, request: Any, *,
+                     condition: Any, keyframes: Any) -> tuple[Any, dict[str, Any]]:
+        """**带掩码的低噪声二采** ✓✗（口径来自上游可读源码 ✓；σ 曲线用**本仓自研**调度 ✓ 已注明 ✓）。
+
+        上游 ``studio_node.py`` 的可核事实 ✓：① 掩码 = video **1** / audio **0** ✓；
+        ② ``total = max(steps+1, round(steps/clamp(denoise,0.15,1)))`` ⇒ 取**尾部** ``steps+1`` 个 σ ✓；
+        ③ 噪声种子 = 段种子 **+1000001** ✓；④ cond 的 keyframes 也要 2× ✓；⑤ 失败 ⇒ **回退一采结果** ✓。
+        """
+        from app.services.engine import h3_form, schedules  # noqa: PLC0415
+        from app.services.engine import upscale as upscale_mod  # noqa: PLC0415
+
+        torch = self._torch()
+        if condition is None:
+            raise TorchBackendUnavailable(
+                "要跑二采就必须给 ``condition`` ✗（二采要重跑主干 ✓ —— 没条件就**拒** ✓ 不猜 ✓✗）",
+                reason="pending")
+        if self._model is None:
+            raise TorchBackendUnavailable(
+                "二采要重跑主干，而**主 DiT 还没装载** ✗ ⇒ 先 load_weights ✓（不静默跳过二采 ✗✗）",
+                reason="pending")
+        tail_steps = int(getattr(plan, "refine_steps", 0))
+        denoise = float(getattr(plan, "refine_denoise", 0.0))
+        total = upscale_mod.refine_tail_steps(tail_steps, denoise)
+        try:
+            full = schedules.sigmas_for(total, str(getattr(request, "schedule", "karras") or "karras"))
+        except (ValueError, TypeError) as err:
+            raise TorchBackendUnavailable(f"二采取不到 σ 调度 ✗：{err}", reason="pending") from err
+        tail_sigmas = [float(value) for value in list(full)[-(tail_steps + 1):]]
+        tail_sigmas[-1] = 0.0
+        states = condition
+        if isinstance(condition, dict):
+            if condition.get("negative") is not None:
+                raise TorchBackendUnavailable(
+                    "二采**不做 CFG** ✗（参考实现无引导 ✓）⇒ 条件里不该有 negative ✓ "
+                    "（给了就说明按可引导的方式准备了条件 ✓ 不静默忽略 ✓）", reason="pending")
+            states = condition.get("positive")
+            if states is None:
+                raise TorchBackendUnavailable("条件 dict 里没有 ``positive`` ✗ ⇒ 二采没法跑 ✓",
+                                               reason="pending")
+        seed = int(getattr(request, "seed", 0) or 0) + 1000001
+        generator = torch.Generator(device=getattr(refined, "device", self._device)).manual_seed(seed)
+        # ⚠️ 噪声**只加在视频流** ✗（音频那条锁住 ✓ —— 给它加噪再锁住就等于"把干净音轨换成噪声"✓✗）
+        noisy = refined + torch.randn(refined.shape, generator=generator, device=refined.device,
+                                      dtype=refined.dtype) * float(tail_sigmas[0])
+        ones = torch.ones_like(noisy)
+        zeros = torch.zeros_like(latents["audio"])
+        try:
+            sampled = h3_form.sample_dual_stream(
+                self._model, noisy, latents["audio"], states, tail_sigmas,
+                keyframes=keyframes or None, denoise_mask=(ones, zeros))
+        except Exception as err:  # noqa: BLE001 —— 上游口径：二采失败 ⇒ **回退一采结果** ✓ + 如实记 ✗
+            return refined, {"denoiseSteps": tail_steps, "mask": "video=1,audio=0",
+                             "secondPass": False, "seed": seed, "tailSigmas": len(tail_sigmas),
+                             "denoiseError": f"{type(err).__name__}: {err}",
+                             "notes": [f"⚠️ 二采**失败** ⇒ **回退到上采样结果** ✓（上游口径 ✓）；"
+                                       f"原因：{type(err).__name__}: {err} ✓✗"]}
+        after = tuple(int(value) for value in sampled["video"].shape)
+        if after != tuple(int(value) for value in refined.shape):
+            raise TorchBackendUnavailable(
+                f"二采改了形状 ✗：{tuple(int(v) for v in refined.shape)} → {after} ✓ ⇒ 拒 ✗",
+                reason="pending")
+        return sampled["video"], {
+            "denoiseSteps": tail_steps, "secondPass": True, "seed": seed,
+            "mask": "video=1,audio=0", "tailSigmas": len(tail_sigmas),
+            # ⭐⭐ 音频**逐位不变**的证明（掩码 0 ⇒ 该流不更新 ✓）—— 真跑出来的事实 ✓✗
+            "audioIdentical": torch.equal(sampled["audio"], latents["audio"]),
+            "temporalUnchanged": after[1] == int(refined.shape[1]),
+            "notes": [f"二采：尾部 {tail_steps} 步（denoise={denoise:g} ⇒ total={total} ✓）、"
+                      f"种子 = 段种子 + 1000001 ✓、掩码 video=1/audio=0 ✓",
+                      "⚠️ σ **曲线**用本仓自研调度 ✓（上游那套在 ComfyUI 里 ✗）—— 口径是「取尾部」✓，"
+                      "曲线本身**未逐点对照** ✗"],
+        }
+
+    #: ⭐ **自述「二采锁定音频流」** ✗✗ —— 没这条，管线会**明确拒绝**跑二采 ✓（见 pipeline 的 refine 阶段 ✓）
+    @property
+    def refineNote(self) -> dict[str, Any]:  # noqa: N802 —— 与前端 camelCase 对齐 ✓
+        # ⚠️ 2026-09-25 更正 ✗：这里早先写 ``denoise: False`` +「带掩码二采**未实现**」✗，但
+        #    :meth:`refine_latents` 的 ``_second_pass`` **早就实现了**带掩码二采 ✓✗（自述与实现相反 ✓ ——
+        #    调用方读到 ``denoise=False`` 会以为二采没做 ✗）。现已对齐 ✓：``denoise=True`` 是**能力自述** ✓，
+        #    「这一次做没做」由 ``plan.refine_steps`` 决定（不给 ⇒ 只上采样 ✓ 见 ``refine_latents`` ✓）。
+        return {"locksAudio": True,
+                "note": "只把**视频流**送进放大器 ✓（音频流原对象放回 ✓）；"
+                        "带掩码二采**已实现** ✓（要 ``refineSteps``/``refineDenoise`` + ``condition`` + 主干 ✓；"
+                        "σ 曲线用本仓自研调度 ✓ 未逐点对照上游 ✗）",
+                "denoise": True,
+                "upscalerReady": self._upscaler is not None,
+                "upscalerPath": self._upscaler_path()}
 
     def denoise(self, latents: Any, sigma: float, condition: Any, request: Any) -> Any:
         """**真前向**（装了模型 ✓）或**占位**（没装 ✓）—— 由 :meth:`describe` 如实标注 ✓。

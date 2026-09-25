@@ -92,6 +92,21 @@ def case_order_and_forms() -> None:
           != ck.refs_fingerprint({"ref_images": {"0": FakeTensor((1,))}}, sampler=sampler)
           and ck.refs_fingerprint({"ref_images": {"0": "路径字符串"}}, sampler=sampler)
           != ck.refs_fingerprint({"ref_images": {"0": None}}, sampler=sampler))
+    # ── ②⁴ ⭐⭐ **标量/字符串按值进指纹**（2026-09-25 补的本仓扩展 ✗✗）──────────────────
+    #    起因：**请求层**的参考素材是 **URL/路径字符串** ✗（不是内存张量 ✓）—— 按上游"非张量 ⇒ ``other``"
+    #    处理时，**改了 URL 指纹却不变** ✓✗（实测过 {"0": "a.png"} 与 {"0": "b.png"} **同指纹** ✓✗）
+    #    ⇒ 会**误判「素材没变」而跳过重生成** ✓✗✗（拿上一段成片交差、还看不出来 ✓）。
+    left = ck.refs_fingerprint({"ref_images": {"0": "a.png"}}, sampler=sampler)
+    right = ck.refs_fingerprint({"ref_images": {"0": "b.png"}}, sampler=sampler)
+    check("②⁴ ⭐⭐ **URL 变了 ⇒ 指纹必须变** ✗✗（这条不成立就会**误跳过**重生成 ✓✗✗）",
+          left != right, (left[:12], right[:12]))
+    check("②⁴′ 同一 URL ⇒ 指纹**稳定** ✓（否则每次都判「变了」⇒ 永远重算 ✓✗）",
+          ck.refs_fingerprint({"ref_images": {"0": "a.png"}}, sampler=sampler) == left)
+    check("②⁴″ 标量也按值 ✓（采样率/时长这类数字同理 ✓）；⚠️ **复合值仍塌成 ``other``** ✗"
+          "（本仓请求层不会出现 ✓ —— 真出现了就该一起改成按值 ✓）",
+          ck.refs_fingerprint({"ref_images": {"0": 1}}) != ck.refs_fingerprint({"ref_images": {"0": 2}})
+          and ck.refs_fingerprint({"ref_images": {"0": ["a"]}})
+          == ck.refs_fingerprint({"ref_images": {"0": ["b"]}}))
 
 
 def case_degrade() -> None:

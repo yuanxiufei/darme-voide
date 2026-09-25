@@ -96,10 +96,19 @@ def _upscale_from(body: dict[str, Any]) -> Any:
         scale = float(raw.get("scale") or 1.0)
     except (TypeError, ValueError) as err:
         raise pipe.StageError("plan", f"超清倍率不是数字 ✗（收到 {raw.get('scale')!r} ✓）") from err
+    # ⚠️ 二采的两个数**照收** ✓（管线**只执行计划** ✗ —— 缺了就等于「不做二采」✓ 并在 notes 里说清 ✓）
+    try:
+        refine_steps = int(raw.get("refineSteps") or 0)
+        refine_denoise = float(raw.get("refineDenoise") or 0.0)
+    except (TypeError, ValueError) as err:
+        raise pipe.StageError(
+            "plan", f"超清二采参数不是数字 ✗（refineSteps/refineDenoise 收到 "
+                    f"{raw.get('refineSteps')!r}/{raw.get('refineDenoise')!r} ✓）") from err
     return upscaler.UpscalePlan(
         mode=mode, scale=scale, steps=tuple(str(item) for item in raw.get("steps") or ()),
         notes=tuple(str(item) for item in raw.get("notes") or ()), tiles=tuple(tiles),
-        fallback_reason=raw.get("fallbackReason"))
+        fallback_reason=raw.get("fallbackReason"),
+        refine_steps=refine_steps, refine_denoise=refine_denoise)
 
 
 def _generation_request(body: dict[str, Any]) -> pipe.GenerationRequest:
@@ -298,9 +307,23 @@ async def upscale_plan(request: Request) -> Any:
         target = float(body.get("targetScale") or 2.0)
     except (TypeError, ValueError):
         return bad_request(f"targetScale 必须是数字（收到 {body.get('targetScale')!r} ✗）")
+    # 二采的两个参数 ✓（⚠️ **默认值在编译层** ✗ ⇒ 不给就"不做二采" ✓ 并写进 notes ✓ 绝不猜 ✗）
+    raw_refine_steps = body.get("refineSteps") if body.get("refineSteps") is not None \
+        else body.get("refine_steps")
+    raw_denoise = body.get("refineDenoise") if body.get("refineDenoise") is not None \
+        else body.get("refine_denoise")
+    try:
+        refine_steps = int(raw_refine_steps) if raw_refine_steps not in (None, "") else None
+    except (TypeError, ValueError):
+        return bad_request(f"refineSteps 必须是整数（收到 {raw_refine_steps!r} ✗）")
+    try:
+        refine_denoise = float(raw_denoise) if raw_denoise not in (None, "") else None
+    except (TypeError, ValueError):
+        return bad_request(f"refineDenoise 必须是数字（收到 {raw_denoise!r} ✗）")
     try:
         plan = upscaler.plan_upscale(target_scale=target, contract=contract, frame=frame,
-                                     max_tile=max_tile)
+                                     max_tile=max_tile, refine_steps=refine_steps,
+                                     refine_denoise=refine_denoise)
     except ValueError as err:
         return bad_request(str(err))
     return success({**plan.to_dict(), "contractError": contract_error,

@@ -11,7 +11,7 @@
 
 ⚠️ 与 Node 的**已知且刻意**的差异（都是「依赖未迁」而非取舍）：
 
-* **``rhythm_phase`` 未迁** ⇒ ``storyboard_breaker`` 少一段跨集节奏引导；
+* **``rhythm_phase`` 已迁**（``services/rhythm_phase.py``）⇒ ``storyboard_breaker`` 注入跨集节奏引导 ✓；
 * **``subagent`` 已迁**（``agents/subagent.py``）⇒ ``orchestrator`` 装 ``run_subagent`` +
   ``list_available_agents``，可自主委托领域专家（深度 2、防自调用/防环形）；
 * （``DEFAULT_PROMPTS`` **已落地** —— 见 ``services/agent_prompts.py``，出厂提示词现在是真回落值；
@@ -51,6 +51,7 @@ from app.services.task_logger import (
 )
 from app.services.vendor_errors import fetch_with_retry, format_vendor_http_error
 from app.services.visual_graph import build_visual_graph_guidance
+from app.services import rhythm_phase
 from app.mcp.client import discover_mcp_tools
 from app.agent import context_budget
 from app.agent.protocol import build_protocol_contract, parse_agent_protocol
@@ -358,11 +359,18 @@ def append_style_profile(
         if profile.get("qcRules"):
             parts.append(f"验收规则（qc_rules，涉及画面/音频标准时必须遵守）：\n{profile['qcRules']}")
 
-        # 多集节奏相位：⚠️ `rhythm-phase.ts` 未迁 ⇒ 这一段**缺失**（已记录为待补）
+        # 多集节奏相位：⭐ 2026-09-25 接线 ✓ —— 早先这里是「`rhythm-phase.ts` 未迁」的 warn 占位 ✗，
+        # 而 `services/rhythm_phase.py` 的 `rhythm_guidance_for_episode` 早就迁好了 ⇒ `storyboard_breaker`
+        # 一直少一段跨集节奏引导 ✓✗（与「能力已有、没接出去」同族 ✓）。现在真调它 ✓。
         if type == "storyboard_breaker" and episode_id:
-            log_task_warn("AgentFactory", "rhythm-guidance-skipped", {
-                "episodeId": episode_id, "reason": "rhythm-phase.ts 未迁",
-            })
+            try:
+                guidance = rhythm_phase.rhythm_guidance_for_episode(conn, episode_id)
+                if guidance:
+                    parts.append(guidance)
+            except Exception as err:  # noqa: BLE001 —— 读库失败只 warn 不阻断 ✓（与视觉图谱分支同口径 ✓）
+                log_task_warn("AgentFactory", "rhythm-guidance-inject-failed", {
+                    "episodeId": episode_id, "type": type, "error": str(err),
+                })
 
         # 视觉图谱：景别/构图/运镜/灯光引导（用剧的 genre/style 取子图）
         if type == "storyboard_breaker" and drama_id:

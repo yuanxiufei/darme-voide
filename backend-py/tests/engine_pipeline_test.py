@@ -586,6 +586,30 @@ def case_api() -> None:
     check("㊿‴ ⭐ 1.5× ⇒ 「**先合法的 2× 再缩放**」✗✗（直接提交 1.5× 会被放大器拒 ✓）",
           half.get("mode") == "ai-2x-resize" and len(half.get("steps") or []) == 2, half)
 
+    # ── 二采参数（2026-09-25 ✓）：口径已核 ✓ ⇒ 走真链路验一遍「API → 计划 → 请求」✗✗ ──
+    refine_plan = client.post("/api/v1/engine/upscale-plan", json={
+        "targetScale": 2, "filePath": str(weights), "refineSteps": 4, "refineDenoise": 0.4})
+    rp = refine_plan.json().get("data") or {}
+    check("⑤¹⁵ ⭐ 给了二采参数 ⇒ ``secondPass=true`` ✓ + notes 写清**掩码口径**（video 1 / audio 0 ✓✗）；"
+          "⚠️ ``refineSteps`` 必须**保留原值 4** ✗✗ 而派生量单列（``refineTailSteps=10`` ✓）"
+          "—— 曾把派生值写回原值 ⇒ 下游再算一次就**越滚越长**（4→10→25 ✓✗）",
+          refine_plan.status_code == 200 and rp.get("secondPass") is True
+          and rp.get("refineSteps") == 4 and rp.get("refineTailSteps") == 10
+          and any("video 1 / audio 0" in note for note in (rp.get("notes") or [])), rp)
+    check("⑤¹⁶ 只给一半（有 steps 没 denoise）⇒ **400 带理由** ✗（默认值在编译层 ⇒ 不猜 ✓✗）",
+          client.post("/api/v1/engine/upscale-plan",
+                      json={"targetScale": 2, "filePath": str(weights), "refineSteps": 4}
+                      ).status_code == 400)
+    planned_refine = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4, "upscale": {**rp, "usesUpscaler": True}})
+    refine_warn = ((planned_refine.json().get("data") or {}).get("warnings") or [])
+    check("⑤¹⁷ ⭐ 计划经请求体送到管线 ✓（``upscale.refineSteps`` 到得了 ✓）且**提前说清**"
+          "二采与音频锁定 ✓（不是跑起来才知道 ✓✗）",
+          planned_refine.status_code == 200
+          and ((planned_refine.json().get("data") or {}).get("upscale") or {}).get("refineSteps") == 4
+          and any("音频流锁定" in note or "6×" in note for note in refine_warn),
+          (planned_refine.status_code, refine_warn))
+
     ghost = client.post("/api/v1/engine/upscale-plan", json={
         "targetScale": 2, "filePath": str(weights.with_name("nope.safetensors"))})
     check("㊿⁗ 权重文件不存在 ⇒ **200 + 回退 + 带理由** ✓（不是 500 ✗、也不是静默当没配 ✗）",
