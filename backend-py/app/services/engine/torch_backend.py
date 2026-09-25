@@ -317,6 +317,91 @@ class TorchBackend:
     def device(self) -> str:
         return self._device
 
+    # ── ⚠️ 调用方给的张量：**只点破，不搬运** ✗（2026-09-25 定的语义 ✓）─────────────────────
+    def _device_torch(self) -> Any:
+        """``self._device`` 的**具体** :class:`torch.device` ✓（``"cuda"`` ⇒ ``cuda:0`` ✓）。
+
+        ⚠️⚠️ **必须规范化，不许比字符串** ✗✗（这是**真踩过的坑** ✓）：后端写的是 ``"cuda"`` ✓，
+        而张量的 ``.device`` 永远带卡号 —— ``cuda:0`` ✓ ⇒ ``str()`` 一比就成了"不是同一设备" ✗。
+        2026-09-25 本校验器**初版正是这么写的** ✗，当场把 `engine_pipeline_test` 的真链路
+        （管线自己的张量 ✓，本来就该放行 ✓）误判成混用 ✗✗ —— 好在报错文案里
+        ``cuda:0`` vs ``cuda`` 并排摆着 ✓，一眼看得出是**判据**错而不是链路错 ✓。
+
+        ⚠️ 规范化**不等于放水** ✗：多卡机器上 ``cuda:1`` 与 ``cuda:0`` 是**真不同** ✓
+        ⇒ 补完卡号后照旧要报错 ✓（本仓判据：宁可当场说清 ✓，不许"看着能跑就放过" ✗）。
+        ⚠️ 没卡时 ``cuda.is_available()`` 为假 ⇒ 就按 ``torch.device("cuda")`` 比 ✓，
+        那种情况下张量也不可能是 ``cuda:0`` ✓ ⇒ 仍然会如实报错 ✓。
+        """
+        torch = self._torch()
+        device = torch.device(self._device)
+        if device.type == "cuda" and device.index is None and torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+        return device
+
+    def _require_own_device(self, where: str, **tensors: Any) -> None:
+        """校验调用方给的张量**已经在** :attr:`device` 上 ✓✗ —— 不在就**明确报错** ✗（**不替它搬** ✗）。
+
+        ⚠️⚠️ **为什么不替调用方搬**（这是**有意留着**的语义 ✓，不是没做完 ✗）：
+        唯一的搬法是拷一份 ``.to(...)`` ✓ ⇒ 调用方手里那个张量**不再被就地改写** ✗ ——
+        而 :meth:`condition_first_frame` 的语义正是「按掩码混进第 0 个潜帧、**回新的 latents**」✓；
+        悄悄改其中任何一半都是**静默换语义** ✗✗（比报错坏得多 ✓）。再者：搬走要多占一份显存 ✗
+        （真权重下潜变量几百 MB ✓），而「该在哪个设备上」**只有调用方知道** ✓。
+
+        ⚠️⚠️ **为什么非要点破**：混用时 torch 原生报错是
+        ``Expected all tensors to be on the same device`` / ``aten::slow_conv3d_forward`` ✓✗ ——
+        它**不说是哪个参数** ✗、也不说后端在哪个设备 ✗ ⇒ 在**有卡那台**上排查成本极高 ✓✗
+        （本仓 2026-09-25 正为此烧掉一轮 ✓）。
+
+        ⚠️ 只认**带 `device` 的对象**（真 torch 张量 ✓、挂上的模块 ✓）：``None`` / 数字 / 字符串 /
+        干跑后端的 ``TinyTensor``（**没有** `device` 属性 ✓）/ 引擎给的 ``plan.sigmas``（纯 float 列表 ✓）
+        一律**原样放行** ✓ —— 宁可放过 ✓，绝不许误伤真链路 ✗。
+
+        ## ⭐ 入口**逐个查过**的清点表 ✓（2026-09-25 ✓ —— 「全」是这么个全法 ✓：**写明结论** ✗✗）
+
+        | 入口 | 吃调用方张量？ | 处置 |
+        |---|---|---|
+        | :meth:`denoise` | ✓ `latents` / `condition` | **校验** ✓ |
+        | :meth:`condition_first_frame` | ✓ `latents` | **校验** ✓ |
+        | :meth:`sample_dual` | ✓ `latents` / `condition`（``sigmas`` 是纯 float ✓ 自动放行 ✓） | **校验** ✓ |
+        | :meth:`refine_latents` | ✓ `latents` / `condition`（放大器在 ``self._device`` ✓） | **校验** ✓ |
+        | :meth:`decode` | ✓ `latents` | **校验** ✓ |
+        | :meth:`write` | ✓ `outputs["frames"]` | ⚠️ **不校验** ✗ —— 落盘边界自己收口 ✓✗：``media.write_video`` / ``write_wav`` 结尾都 ``.to("cpu", …)`` ✓ ⇒ **cpu 上解出来的帧照样能落盘** ✓（加了校验反而把这条正当用法拒掉 ✗✗，见该方法的注释 ✓） |
+        | :meth:`init_latents` / :meth:`init_dual_latents` | ✗ **出**张量（自己造 ✓ 已在 ``self._device`` ✓） | 无需 ✓ |
+        | :meth:`encode_text` / :meth:`latent_shape` / :meth:`condition_width` / :meth:`describe` | ✗（只吃 ``request`` / ``plan`` ✓） | 无需 ✓ |
+        | :meth:`load_weights` / :meth:`attach_*` | ✗（吃**模块/配置** ✓ 不是张量 ✓） | 无需 ✓ |
+        | 私有 ``_decode_dual`` / ``_dual_extra_rows`` / ``_second_pass`` / ``_upscale_keyframes`` | ✗ 内部 ✓（张量都来自上面已校验的入口 ✓） | 无需 ✓ |
+
+        ⇒ 真链路（管线 ✓）**一个校验都碰不到** ✓：它拿到手的每个张量都是本后端自己造的 ✓。
+        """
+        for name, value in tensors.items():
+            self._require_one_device(where, name, value)
+
+    def _require_one_device(self, where: str, name: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                self._require_one_device(where, f"{name}[{key!r}]", item)
+            return
+        if isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                self._require_one_device(where, f"{name}[{index}]", item)
+            return
+        found = getattr(value, "device", None)
+        if found is None:
+            return
+        expected = self._device_torch()
+        if found == expected:
+            return
+        raise TorchBackendUnavailable(
+            f"{where}：调用方给的 ``{name}`` 在 **{found}** ✗，而本后端（含已装的权重/放大器）在 "
+            f"**{expected}** ✓（``self._device = {self._device!r}`` ✓）⇒ 混用必炸 ✗。"
+            f"⚠️ 本仓**不替调用方搬张量** ✗ ⇒ 该由调用方自己 ``.to(\"{expected}\")`` ✓。"
+            f"⚠️ **管线自己**的张量全在 {expected} 上 ✓ ⇒ 真链路永远走不到这里 ✓；"
+            f"走到这儿说明有人**拿自己造的张量**直接调了后端 ✓（正是自检的用法 ✓ ⇒ "
+            f"自检要像 engine_io / engine_refine 那样**显式钉同一个设备** ✓✗）。"
+            f"⚠️ 点破它只为让报错**指得到原因** ✓：torch 原生只会说 "
+            f"``Expected all tensors to be on the same device`` ✗、不说是哪个参数 ✗。",
+            reason="pending")
+
     def load_weights(self, *, path: str | None = None,
                      config: Any = None) -> dict[str, Any]:
         """**装载真模型** ✓ ⇒ 之后 :meth:`denoise` 走**真前向** ✓（不再占位 ✓）。
@@ -843,6 +928,8 @@ class TorchBackend:
         ⚠️ ``shift`` 取自 `h3_form.H3_SIGMA_SHIFTS` ✓（**唯一一处** ✓ 事实 = 12.0 / 3.0 ✓）。
         """
         self._gate()
+        # ⚠️ `sigmas` 是引擎给的**纯 float 列表** ✓（没 `device` ⇒ 校验器原样放行 ✓）。
+        self._require_own_device("sample_dual", latents=latents, sigmas=sigmas, condition=condition)
         if not isinstance(latents, dict) or "video" not in latents or "audio" not in latents:
             raise TorchBackendUnavailable(
                 "双流采样需要 :meth:`init_dual_latents` 的产出（含 video/audio 两条 ✓）✗",
@@ -891,6 +978,8 @@ class TorchBackend:
         ⚠️ **要二采就必须给 ``condition``** ✗（二采要重跑主干 ✓ —— 没条件就**拒** ✓，不猜 ✓✗）。
         """
         self._gate()
+        # ⚠️ 放大器在 `self._device` 上 ✓ ⇒ 拿 CPU 潜变量进来必炸 ✗（2026-09-25 真机踩过 ✓）⇒ 先点破 ✓。
+        self._require_own_device("refine_latents", latents=latents, condition=condition)
         torch = self._torch()
         from app.services.engine import h3_form, upscale as upscale_mod, upscale_net  # noqa: PLC0415
         from app.services.engine import latent_container as lc  # noqa: PLC0415
@@ -1101,6 +1190,8 @@ class TorchBackend:
         * 占位：``(1−g)·cond + g·x``（``g→0`` 当 ``σ→0`` ✓ 保证采样按时收敛 ✓）。
         """
         self._gate()
+        # ⚠️ 调用方给的张量（自检常用 ✓）必须已在后端设备上 ✓✗ —— 不搬，只点破 ✓（见校验器 ✓）。
+        self._require_own_device("denoise", latents=latents, condition=condition)
         torch = self._torch()
         sigma = float(sigma)
         if self._model is not None:
@@ -1115,6 +1206,9 @@ class TorchBackend:
                               plan: Any, request: Any) -> Any:
         """首帧条件 ✓ —— **真张量按掩码混合** ✓（掩码由引擎算出 ✓ 见 `conditioning` ✓）。"""
         self._gate()
+        # ⚠️ 这条最有必要点破 ✓：这里的 latents 常是**自检自己造的**（真链路里来自 `init_latents` ✓）⇒
+        #    在**有卡那台**上最容易"自检 cpu / 后端 cuda" ⇒ 原报错指向 `aten::slow_conv3d_forward` ✗。
+        self._require_own_device("condition_first_frame", latents=latents)
         torch = self._torch()
         # ⚠️ 两条路都要支持（初版只按 5 维写 ⇒ 占位一维时 `reshape` 直接崩 ✗，自检 ㊾ 抓到 ✓）：
         #   * **真形状潜变量** (B,C,T,h,w) ⇒ 按掩码**逐潜帧**混 ✓（引擎算的 mask ✓ 长度 = T ✓）；
@@ -1431,6 +1525,9 @@ class TorchBackend:
         （见 :meth:`_decode_dual` ✓）。
         """
         self._gate()
+        # ⚠️ 解码同样吃**调用方给的**潜变量（真链路里来自 `init_latents` ✓，自检里常是自己造的 ✓）
+        #    —— VAE 在 `self._device` 上 ✓ ⇒ 混设备必炸 ✗（报错又是那串 `aten::` ✗）⇒ 先点破 ✓。
+        self._require_own_device("decode", latents=latents)
         if isinstance(latents, dict) and "video" in latents and "audio" in latents:
             return self._decode_dual(latents)
         if self._vae is not None:
@@ -1458,6 +1555,12 @@ class TorchBackend:
     def write(self, outputs: dict[str, Any], plan: Any, request: Any) -> dict[str, Any]:
         """有**真帧张量**就落**真 mp4** ✓（ffmpeg ✓）；否则落张量清单 JSON ✓ —— 两种情况都如实标 ✓。"""
         self._gate()
+        # ⚠️ 这条入口**刻意不做**设备校验 ✗（与上面五个入口**不同** ✓ —— 是查清后的判断 ✓ 不是漏 ✓）：
+        #    `frames` 是 :meth:`decode` 的产物 ✓，而**落盘边界自己在收口** ✓✗ ——
+        #    `media.write_video` / `write_wav` 结尾都 ``.to("cpu", …)`` ✓
+        #    （见 `media.py` 的 ``scaled * 255`` 与 ``pcm`` 两处 ✓）⇒ **cpu 上解出来的帧照样能落盘** ✓。
+        #    在这里加校验会把那条正当用法**拒掉** ✗✗（自检就常在 cpu 上解码 ✓），
+        #    而它本来完全跑得通 ✓ ⇒ 「功能要全」= **逐个入口查清并写下结论** ✓，不是一律加 ✗。
         where = Path(request.outputs_dir) if request.outputs_dir else Path(
             tempfile.mkdtemp(prefix="engine_torch_"))
         where.mkdir(parents=True, exist_ok=True)

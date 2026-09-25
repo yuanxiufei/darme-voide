@@ -392,7 +392,7 @@ A: 后端会在首次启动时自动创建所有表，检查日志确认初始�
 常用检查命令：
 
 ```bash
-cd backend-py && .venv\Scripts\python.exe tests\run_all.py    # 后端自检（82 套件 / 2911 项）
+cd backend-py && .venv\Scripts\python.exe tests\run_all.py    # 后端自检（套件/项数以 tests\run_all.py 的 TESTS 为准）
 cd ../frontend && npm run build
 ```
 

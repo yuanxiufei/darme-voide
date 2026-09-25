@@ -5,12 +5,18 @@
 
 ⚠️ 画面内容是**未经训练的参考 VAE** 的输出 ✓ ⇒ 看起来是噪声 ✓（**验的是管道** ✓，不是"H3 能出片" ✗）。
 
-⚠️ **设备口径**（2026-09-25 在 A5000 上实测后加的 ✓）：这套的 latents / mask 是**测试里造的
-CPU 张量** ✓，而 `TorchBackend()` 默认**自动探测设备** ✓ ⇒ 在有卡的机器上会选 `cuda` ✓✗ ——
-两者一混用就当场炸 ✓，而且报的是 `aten::slow_conv3d_forward`/`Expected all tensors to be on the
-same device` 这类**指不到原因**的文案 ✗（**在没卡的机器上一切正常** ✓✗ ⇒ 这台机器上才现形 ✓）。
-⇒ 这套**显式钉 CPU** ✓（验的是 IO / 接缝的数学 ✓ 与设备无关 ✓）；**真 CUDA 的整条管线**由
+⚠️ **设备口径**（2026-09-25 在 A5000 上实测后加的 ✓；⭐ 同日晚**已收口** ✓ 见 `case_device_guard` ✓）：
+这套的 latents / mask 是**测试里造的 CPU 张量** ✓，而 `TorchBackend()` 默认**自动探测设备** ✓ ⇒
+在有卡的机器上会选 `cuda` ✓✗ —— 两者一混用就当场炸 ✓，而且报的是 `aten::slow_conv3d_forward` /
+`Expected all tensors to be on the same device` 这类**指不到原因**的文案 ✗
+（**在没卡的机器上一切正常** ✓✗ ⇒ 这台机器上才现形 ✓）。
+⇒ ① 这套**显式钉 CPU** ✓（验的是 IO / 接缝的数学 ✓ 与设备无关 ✓）；**真 CUDA 的整条管线**由
 `engine_dual_stream_test` 覆盖 ✓（它在 A5000 上真跑 ✓）。
+⇒ ② 产品侧同时收口 ✓：五个吃调用方张量的入口（`denoise` / `condition_first_frame` / `sample_dual` /
+`refine_latents` / `decode` ✓）现在会**当场明确报错** ✓（说清**哪个参数**、**哪个设备**、**该怎么办** ✓），
+而**刻意不替调用方搬张量** ✗（搬 = 拷一份 ⇒ 破坏 `condition_first_frame` 的"就地改写"语义 ✗✗）——
+逐入口清点表见 `TorchBackend._require_own_device` ✓；`write` 那条**查过后判定不校验** ✓
+（落盘边界自己 `.to("cpu")` ✓）。这套的 `case_device_guard` 把上面每一条都钉成了判据 ✓。
 
 运行::
 
@@ -409,6 +415,137 @@ def _media_error(path: Path) -> Exception | None:
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑦ 设备口径：调用方给的张量不在后端设备上 ⇒ **可行动报错**（2026-09-25 收 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_device_guard(root: Path) -> None:
+    """⭐⭐ 设备口径**逐个入口**收一遍 ✓✗（2026-09-25 ✓ —— 「全」= 连**不校验的**入口也写明结论 ✓）。
+
+    ⚠️⚠️ 本仓**不替调用方搬张量** ✗（这是**有意留**的语义 ✓，不是没做完 ✗）：唯一的搬法是拷一份 ✓
+    ⇒ 调用方手里那个张量**不再被就地改写** ✗ —— 而 `condition_first_frame` 的语义正是
+    「按掩码混进第 0 个潜帧、**回新的** latents」✓；悄悄改其中一半就是**静默换语义** ✗✗。
+    再者：搬走要多占一份显存 ✓（真权重下潜变量几百 MB ✓），而「该在哪个设备上」只有调用方知道 ✓。
+
+    ⚠️ 这套**不需要显卡** ✓：把后端的 `_device` 改成 ``"cuda"`` ✓、张量留在 CPU ✓ ⇒ 错配就造出来了 ✓；
+    **有卡那台**上这些判据**一模一样地成立** ✓（``cuda:0`` ≠ ``cpu`` 更不等 ✓）。真正只有有卡才验得了的
+    是「``"cuda"`` ⇒ ``cuda:0`` 的具体化」✓ —— 那条**两支都写成判据** ✓（哪台机器都有一条绿 ✓，不 skip ✓）。
+
+    ⚠️ 真链路（管线 ✓）**一个校验都碰不到** ✓：它拿到的每个张量都是本后端自己造的 ✓
+    —— 上面 `case_first_frame` 里那条 `pipe.run_sync` 就是活证 ✓。
+    """
+    if not _have_torch():
+        skip("torch 未安装 ⇒ 设备口径跳过 ✓")
+        return
+    import torch  # noqa: PLC0415
+
+    from app.services.engine import pipeline as pipe
+    from app.services.engine.torch_backend import TorchBackend, TorchBackendUnavailable
+
+    backend = TorchBackend(device="cpu")
+    if not backend.describe()["available"]:
+        skip("torch 不可用 ⇒ 设备口径跳过 ✓")
+        return
+
+    plan = pipe.build_plan(pipe.GenerationRequest(prompt="x", steps=2))
+    request = pipe.GenerationRequest(prompt="x", steps=2)
+    latents = torch.randn(1, 4, 3, 4, 4)                     # (B,C,T,h,w) ✓ CPU ✓
+    condition = torch.randn(7, 5)
+    dual = {"video": torch.randn(24, 3, 4, 4), "audio": torch.randn(2, 5)}
+    before = latents.clone()
+    # ⚠️ 图片要**真写一张** ✓：设备校验在最前面 ✓ 现在拦得住 ✓ —— 但万一将来校验顺序被挪到读图之后，
+    #    这条判据就会变成"图片不存在"⇒ **判据变味** ✗（那种假绿最难查 ✓）⇒ 干脆给真的 ✓。
+    image = media_mod.write_image(torch.rand(1, 3, 2, 32, 32) * 2.0 - 1.0,
+                                  root / "guard.png", index=1)["path"]
+
+    def _is_device_error(err: BaseException) -> bool:
+        """是不是**这条**设备错 ✓ —— 认它独有的标记 ✓（比比对整段文案稳 ✓）。"""
+        return isinstance(err, TorchBackendUnavailable) and "混用必炸" in str(err)
+
+    calls = {
+        "denoise": lambda: backend.denoise(latents, 0.5, condition, request),
+        "condition_first_frame": lambda: backend.condition_first_frame(
+            latents, image, [1.0, 0.0, 0.0], plan, request),
+        "sample_dual": lambda: backend.sample_dual(dual, plan.sigmas, condition, request),
+        "refine_latents": lambda: backend.refine_latents(dual, plan, request, condition=condition),
+        "decode": lambda: backend.decode(latents, plan, request),
+    }
+
+    # ── ① 错设备：**五个入口逐个**都要拦下来 ✓（伪装成 cuda 是造错配最省的办法 ✓）────────
+    backend._device = "cuda"                                 # noqa: SLF001 —— 有意伪装 ✓
+    errors: list[BaseException | None] = []
+    for call in calls.values():
+        try:
+            call()
+            errors.append(None)
+        except BaseException as err:                         # noqa: BLE001 —— 要的就是"它报了什么" ✓
+            errors.append(err)
+    for number, (name, err) in zip("㊵㊶㊷㊸㊹", zip(calls, errors)):
+        check(f"{number} {name}：调用方给 **CPU 张量** ⇒ **明确报错** ✓（不是 `aten::slow_conv3d_forward` "
+              f"那串指不到原因的 ✗）、类型 `TorchBackendUnavailable` ✓",
+              _is_device_error(err) if err is not None else False,
+              f"{type(err).__name__}: {str(err)[:70]}" if err is not None else "没报错（静默跑了 ✗）")
+
+    # ── ② 文案**指得到原因** ✓（这是"点破"的全部价值 ✓）──────────────────────────────────
+    text = str(errors[0] or "")
+    check("㊺ 报错**指得到原因** ✓：含**参数名**（`latents` ✓）+ **两个设备**（`cpu` 与 `cuda` ✓）"
+          "+ 「不替调用方搬张量」与 ``.to(…)`` 的**行动指引** ✓",
+          all(mark in text for mark in ("latents", "cpu", "cuda", "不替调用方搬", ".to(")), text[:140])
+
+    # ── ③ **真的没搬** ✓（搬了就破坏"就地改写"语义 ✗✗）──────────────────────────────────
+    check("㊻ **真没搬**：报错之后原张量仍在 CPU ✓、且**一字未改** ✓（搬 = 拷一份 ⇒ 调用方那份就"
+          "不再被就地改写了 ✗✗，而首帧条件正是靠就地改写语义 ✓✗）",
+          str(latents.device) == "cpu" and bool(torch.equal(latents, before)), str(latents.device))
+
+    backend._device = "cpu"                                  # noqa: SLF001 —— 装回真设备 ✓
+
+    # ── ④ 只认**带 `device` 的对象** ✓（干跑后端 / `plan.sigmas` 靠这条不受影响 ✓）────────
+    class _NoDevice:                                         # 干跑后端的 TinyTensor 就是这形态 ✓
+        pass
+
+    try:
+        backend._require_own_device("自检", a=None, b=0.5, c="static/x.png",   # noqa: SLF001
+                                    d=[1.0, 2.0], e={"k": 3}, f=_NoDevice())
+        relaxed = True
+    except BaseException as err:                             # noqa: BLE001
+        relaxed = False
+        text = f"{type(err).__name__}: {err}"
+    check("㊼ 只认带 `device` 的对象 ✓：``None`` / 数字 / 字符串 / float 列表 / 无 `device` 的假张量"
+          "**一律放行** ✓（宁可放过 ✓，绝不许误伤真链路 ✗）", relaxed, "" if relaxed else text)
+
+    # ── ⑤ ⚠️ **不许比字符串** ✗✗（初版就是这么错的 ✓ —— 把真链路误判成混用 ✗）────────────
+    backend._device = "cuda"                                 # noqa: SLF001
+    fake_cuda = backend._device_torch()                      # noqa: SLF001
+    backend._device = "cpu"                                  # noqa: SLF001
+    check("㊽ ⚠️ ``torch.device('cuda') != torch.device('cuda:0')`` ✓ 而**两者是同一设备** ✓ ⇒ "
+          "判据必须比**规范化后的具名设备** ✓（比字符串就是 2026-09-25 那个把 `engine_pipeline_test` "
+          "真链路误判成混用的错 ✗✗）+ CPU 规范化后仍是 `cpu` ✓",
+          torch.device("cuda") != torch.device("cuda:0")
+          and backend._device_torch() == torch.device("cpu")   # noqa: SLF001
+          and fake_cuda.type == "cuda", f"{fake_cuda!r}")
+
+    # ── ⑥ ⭐⭐ **不许误伤**：同设备张量在五个入口上都要照旧能用 ✓（真链路就是这么用的 ✓）────
+    hurt: list[str] = []
+    for name, call in calls.items():
+        try:
+            call()
+        except BaseException as err:                         # noqa: BLE001 —— 别的错都不算这条红 ✓
+            if _is_device_error(err):
+                hurt.append(name)
+    check("㊾ ⭐⭐ **不许误伤**：同设备（CPU）张量在**五个入口**上都不报设备错 ✓（别的错照旧允许 ✓"
+          " —— 没装模型/放大器没就绪本来就该报 ✓）；⚠️ 这正是把真链路判错过的那个坑 ✗",
+          not hurt, hurt)
+
+    # ── ⑦ 具体化：``"cuda"`` ⇒ ``cuda:0`` ✓（**两支都判** ✓ —— 哪台机器都不 skip ✓）────────
+    named = TorchBackend(device="cuda")._device_torch()      # noqa: SLF001
+    if torch.cuda.is_available():
+        check("㊿ ⭐ 有卡时 ``\"cuda\"`` **具体化**成 ``cuda:0`` ✓（张量的 `.device` 永远带卡号 ✓ ⇒ "
+              "不比字符串就对了 ✓）；⚠️ 多卡时 ``cuda:1`` 与 ``cuda:0`` 是**真不同** ✓ 照旧报错 ✓",
+              named == torch.device("cuda:0"), repr(named))
+    else:
+        check("㊿ 无卡时 ``\"cuda\"`` 保持 ``device('cuda')`` ✓（此时真张量也上不去 cuda ✓ ⇒ 仍然照实报错 ✓）",
+              named == torch.device("cuda"), repr(named))
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_io_"))
     case_vae(root)
@@ -417,6 +554,7 @@ def main() -> int:
     case_end_to_end(root)
     case_backend_pipeline(root)
     case_first_frame(root)
+    case_device_guard(root)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
