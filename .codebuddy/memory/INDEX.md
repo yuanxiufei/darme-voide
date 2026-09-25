@@ -71,6 +71,16 @@ Q4_K block（d=1/dmin=0.5/scales 全 0xFF/qs 全 0x11 ⇒ 反量化**每元素�
 ⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗；`load_weights` 能整文件提权重 ✓ 但大文件（14B≈17GiB fp32）要**逐张量**读 ✓。
 ⚠️ **下一步** ✗：GGUF 张量名 → `llm.LlmModel` 参数的**映射**（`model.layers.N.self_attn.q_proj.weight` → `blocks.N.attn.q_proj.weight` ✓）未做 ✗；
 全量 **127 套 / 4121 项 / 0 失败** ✓（+1 套 / +9 项 ✓）。
+⭐ **㉖ GGUF → LlmModel 装载**（2026-09-25 ✓，用户「继续」✓）：新建 `engine/gguf_to_llm.py` ✓ —— ggml 命名
+（`blk.N.attn_q.weight` ✓）→ LlmModel 命名（`blocks.N.attn.q_proj.weight` ✓）+ 6 类线性层**转置** ✓（GGUF (in,out)→PyTorch (out,in) ✓）
++ tie embeddings 时 `output.weight` 跳过 ✓；⭐⭐ 判据 = **往返恒等**（LlmModel state_dict → 反向转 GGUF 命名 → 正向映射回 ⇒ 逐张量相等 ✓✗）；
+`load_llm_from_gguf` 逐张量读 + `load_state_dict(strict=True)` ✓（漏/形状错当场报 ✓）。⚠️ **下一步** ✗：自研文本后端
+（describe+generate）替换 `OllamaTextAdapter` ✗（这才是「不调 ollama」的最后一跳 ✓）；全量 **128 套 / 4128 项 / 0 失败** ✓（+1 套 / +7 项 ✓）。
+⭐ **㉗ 自研文本后端**（2026-09-25 ✓，用户「继续」✓）：新建 `engine/llm_backend.py` ✓ —— 把「架构+反量化+装载」收成**一个后端**
+（像 `TorchBackend` ✓）：`describe` 如实报缺（权重/词表/模型缺啥报啥 ✓ 不冒充 ✗）/ `load` 幂等装载 / `generate` 走 encode→生成→decode ✓
+（⚠️ **同步** ✗ CPU 推理会阻塞 ✗ 接线要 `asyncio.to_thread` ✓；⚠️ chat 模板未做 ✗ 裸拼接 ✓）。⭐⭐ 判据 = 未装载就 generate ⇒ 明确拒 ✗
+（不静默返回空串 ✗）。⚠️ **下一步** ✗：`text_generation` 的 engine 分支 + `infer_llm_config`（从 GGUF 元数据读架构参数 ✓）⇒ 这才是「接线」闭环 ✗；
+全量 **129 套 / 4134 项 / 0 失败** ✓（+1 套 / +6 项 ✓）。
 
 **`2026-09-23.md`**（H3 混合打包形态 + 掩码坐标空间）
 ① 找洞的路子换成**扫「注释里写着要求、代码不核」的措辞** ✓（`应与`/`必须一致`/`应当与` …）⇒ 多数已在

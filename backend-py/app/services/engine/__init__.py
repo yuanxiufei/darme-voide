@@ -25,8 +25,8 @@
 """
 from __future__ import annotations
 
-__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "guidance",
-           "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "inventory", "latent_container", "llm", "loader", "mappings", "media", "pipeline",
+__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "gguf_to_llm", "guidance",
+           "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "inventory", "latent_container", "llm", "llm_backend", "loader", "mappings", "media", "pipeline",
            "quant", "safetensors", "sampler", "schedules", "script_parse", "segments", "text_encoder",
            "tiers", "tokenizer_bpe", "tokenizer_hub", "tokenizer_own", "tokenizers_tuning",
            "torch_backend", "upscale", "upscale_net", "vae", "weights"]
