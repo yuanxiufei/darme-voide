@@ -24,7 +24,7 @@ from . import gguf as gguf_mod
 from . import gguf_dequant
 from . import llm as llm_mod
 
-__all__ = ["gguf_state_dict", "load_llm_from_gguf", "map_name"]
+__all__ = ["gguf_state_dict", "infer_llm_config", "load_llm_from_gguf", "map_name"]
 
 #: GGUF 层名 → LlmModel 层名 ✓（``{}`` 是层号 ✓）
 _LAYER_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -102,3 +102,62 @@ def _read_tensor(path: str | Path, info: Any, tensor: Any) -> Any:
         blob = handle.read(tensor.nbytes)
     arr = gguf_dequant.dequantize_tensor(blob, tensor.type_id, tensor.numel)
     return arr.reshape(tensor.shape)
+
+
+def infer_llm_config(metadata: dict[str, Any], *, arch: str | None = None) -> llm_mod.LlmConfig:
+    """从 GGUF 元数据推导 :class:`llm.LlmConfig` ✓（架构参数**全从权重读** ✓ 不猜 ✗）。
+
+    ⚠️ GGUF 的架构参数前缀是 ``general.architecture``（``llama`` / ``qwen2`` / ``qwen3`` ✓），
+    字段名同族：``{arch}.embedding_length`` / ``{arch}.block_count`` / ``{arch}.attention.head_count``
+    / ``{arch}.attention.head_count_kv``（GQA ✓）/ ``{arch}.feed_forward_length`` / ``{arch}.rope.freq_base``
+    / ``{arch}.attention.layer_norm_rms_epsilon`` 等 ✓（Qwen3 GGUF 偶尔沿用 ``llama.`` 前缀 ⇒ 回退读 ✓）。
+
+    ⚠️ 缺必需字段 ⇒ **具名拒绝** ✗（不猜默认值 ✗ —— 猜了会装出「名字对、形状全错」的模型 ✗）。
+    """
+    if arch is None:
+        arch = str(metadata.get("general.architecture") or "llama")
+
+    def _get(name: str) -> Any:
+        for prefix in (arch, "llama"):
+            value = metadata.get(f"{prefix}.{name}")
+            if value is not None:
+                return value
+        return None
+
+    vocab_size = _get("vocab_size")
+    hidden = _get("embedding_length")
+    depth = _get("block_count")
+    heads = _get("attention.head_count")
+    kv_heads = _get("attention.head_count_kv")
+    ffn = _get("feed_forward_length")
+    head_dim = _get("attention.head_dim")
+    rope_theta = _get("rope.freq_base")
+    rms_eps = _get("attention.layer_norm_rms_epsilon")
+
+    required = {"vocab_size": vocab_size, "embedding_length": hidden, "block_count": depth,
+                "attention.head_count": heads, "feed_forward_length": ffn}
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise GgufDequantError(
+            f"GGUF 元数据缺架构参数：{missing} ✗（arch={arch} ✓）⇒ 推不出 LlmConfig ✗ "
+            f"（不猜默认值 ✗）")
+
+    if kv_heads is None:
+        kv_heads = heads
+    if head_dim is None:
+        if int(hidden) % int(heads) != 0:
+            raise GgufDequantError(
+                f"embedding_length（{hidden}）不被 head_count（{heads}）整除 ✗ ⇒ head_dim 推不出 ✗")
+        head_dim = int(hidden) // int(heads)
+
+    eos = metadata.get("tokenizer.ggml.eos_token_id")
+    pad = metadata.get("tokenizer.ggml.pad_token_id")
+    return llm_mod.LlmConfig(
+        vocab_size=int(vocab_size), hidden=int(hidden), depth=int(depth),
+        heads=int(heads), kv_heads=int(kv_heads), head_dim=int(head_dim),
+        ffn=int(ffn), rope_theta=float(rope_theta if rope_theta is not None else 10000.0),
+        rms_eps=float(rms_eps if rms_eps is not None else 1e-6),
+        tie_embeddings=bool(metadata.get(f"{arch}.tie_embeddings", False)),
+        pad_id=int(pad) if pad is not None else 0,
+        eos_id=int(eos) if eos is not None else None,
+    )

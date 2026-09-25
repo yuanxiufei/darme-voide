@@ -104,10 +104,43 @@ def case_generate() -> None:
     check("③″ 装载后 describe 转可用 ✓（canGenerate=True ✓）", d["canGenerate"] is True, d)
 
 
+def case_wiring() -> None:
+    """接线层 ✓：`text_generation` 的 engine 分支走自研后端（非 HTTP ✗）。"""
+    import asyncio  # noqa: PLC0415
+
+    from app.services import text_generation as tg  # noqa: PLC0415
+
+    class _FakeBackend:
+        def generate(self, prompt, *, system=None, temperature=1.0, max_new_tokens=256):
+            return f"ENGINE:{prompt[:6]}"
+
+    original = tg._get_engine_backend
+    tg._get_engine_backend = lambda gguf, tok: _FakeBackend()
+    try:
+        async def _missing():
+            try:
+                await tg._generate_with_engine({"settings": {}}, "hi", {})
+                return False
+            except ValueError:
+                return True
+
+        check("④ 接线: 缺 ggufPath ⇒ 报错 ✗（不静默回落 HTTP ✗）", asyncio.run(_missing()))
+
+        async def _ok():
+            return await tg._generate_with_engine(
+                {"settings": {"ggufPath": "/m.gguf", "tokenizerPath": "/t"}}, "你好", {"temperature": 0.5})
+
+        out = asyncio.run(_ok())
+        check("④′ 接线: 走自研后端（非 HTTP）✓ 返回后端产物 ✓", out == "ENGINE:你好", out)
+    finally:
+        tg._get_engine_backend = original
+
+
 def main() -> int:
     case_describe()
     case_unavailable()
     case_generate()
+    case_wiring()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

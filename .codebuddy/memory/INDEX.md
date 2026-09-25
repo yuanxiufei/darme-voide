@@ -81,6 +81,12 @@ Q4_K block（d=1/dmin=0.5/scales 全 0xFF/qs 全 0x11 ⇒ 反量化**每元素�
 （⚠️ **同步** ✗ CPU 推理会阻塞 ✗ 接线要 `asyncio.to_thread` ✓；⚠️ chat 模板未做 ✗ 裸拼接 ✓）。⭐⭐ 判据 = 未装载就 generate ⇒ 明确拒 ✗
 （不静默返回空串 ✗）。⚠️ **下一步** ✗：`text_generation` 的 engine 分支 + `infer_llm_config`（从 GGUF 元数据读架构参数 ✓）⇒ 这才是「接线」闭环 ✗；
 全量 **129 套 / 4134 项 / 0 失败** ✓（+1 套 / +6 项 ✓）。
+⭐ **㉘ 接线闭环**（2026-09-25 ✓，用户「继续」✓）：① `gguf_to_llm.infer_llm_config` ✓ —— 从 GGUF 元数据读架构参数
+（`{arch}.embedding_length/block_count/attention.head_count[_kv]/feed_forward_length/rope.freq_base/...` ✓，Qwen3 GGUF 沿用 `llama.` 前缀 ⇒ 回退读 ✓）；
+缺必需字段 ⇒ **具名拒绝** ✗（不猜默认 ✗ —— 猜了装出「名字对、形状全错」的模型 ✗）；head_dim 缺省 = hidden/heads 推导 ✓。② **接线** ✓ ——
+`text_generation.generate_text` 加 engine 分支 ✓：provider=engine ⇒ 走自研后端（`asyncio.to_thread` 包同步推理 ✓）而非 HTTP 调 ollama ✗；
+后端缓存（大权重只 load 一次 ✓）。⭐⭐ **文本不依赖 ollama 已闭环** ✓（剩「下载真权重 + chat 模板」这两件数据/细节 ✓）；
+全量 **129 套 / 4141 项 / 0 失败** ✓（+7 项 ✓：infer 5 + 接线 2 ✓）。
 
 **`2026-09-23.md`**（H3 混合打包形态 + 掩码坐标空间）
 ① 找洞的路子换成**扫「注释里写着要求、代码不核」的措辞** ✓（`应与`/`必须一致`/`应当与` …）⇒ 多数已在

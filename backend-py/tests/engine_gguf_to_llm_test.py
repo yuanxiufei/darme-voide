@@ -107,10 +107,60 @@ def case_tie() -> None:
           g2l.map_name("output.weight", tie_embeddings=True) is None)
 
 
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 —— GgufDequantError / LlmError 都算「按预期拒」✓
+        return True
+    return False
+
+
+def case_infer() -> None:
+    meta = {
+        "general.architecture": "llama",
+        "llama.vocab_size": 32, "llama.embedding_length": 16, "llama.block_count": 2,
+        "llama.attention.head_count": 2, "llama.attention.head_count_kv": 1,
+        "llama.feed_forward_length": 32, "llama.rope.freq_base": 100.0,
+        "llama.attention.layer_norm_rms_epsilon": 1e-5,
+        "tokenizer.ggml.eos_token_id": 31,
+    }
+    config = g2l.infer_llm_config(meta)
+    check("④ infer: 完整元数据 → LlmConfig ✓（GQA kv_heads=1 ✓ head_dim=hidden/heads=8 ✓ eos ✓）",
+          config.vocab_size == 32 and config.hidden == 16 and config.depth == 2
+          and config.heads == 2 and config.kv_heads == 1 and config.head_dim == 8
+          and config.ffn == 32 and config.eos_id == 31 and config.rms_eps == 1e-5,
+          config)
+
+    meta3 = {
+        "general.architecture": "qwen3",
+        "qwen3.vocab_size": 64, "qwen3.embedding_length": 32, "qwen3.block_count": 4,
+        "qwen3.attention.head_count": 4, "qwen3.feed_forward_length": 64,
+    }
+    config3 = g2l.infer_llm_config(meta3)
+    check("④′ infer: qwen3 前缀 ✓（kv_heads 缺省=head ✓ head_dim 推导=8 ✓）",
+          config3.vocab_size == 64 and config3.hidden == 32
+          and config3.kv_heads == 4 and config3.head_dim == 8, config3)
+
+    meta_fb = {"general.architecture": "qwen3", "llama.vocab_size": 32,
+               "llama.embedding_length": 16, "llama.block_count": 1,
+               "llama.attention.head_count": 2, "llama.feed_forward_length": 32}
+    config_fb = g2l.infer_llm_config(meta_fb)
+    check("④″ infer: qwen3 缺字段 ⇒ **回退 llama 前缀** ✓", config_fb.vocab_size == 32)
+
+    check("④‴ infer: 缺必需字段 ⇒ 具名拒绝 ✗（不猜默认 ✗）",
+          _raises(lambda: g2l.infer_llm_config({"general.architecture": "llama"})))
+    check("④⁴ infer: head_dim 推不出（hidden 不被 heads 整除）⇒ 拒 ✗",
+          _raises(lambda: g2l.infer_llm_config({
+              "general.architecture": "llama", "llama.vocab_size": 32,
+              "llama.embedding_length": 15, "llama.block_count": 1,
+              "llama.attention.head_count": 2, "llama.feed_forward_length": 32})))
+
+
 def main() -> int:
     case_map()
     case_roundtrip()
     case_tie()
+    case_infer()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

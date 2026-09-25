@@ -144,6 +144,40 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 **唯一硬缺口 = 真权重 + 真配置** ✗（见 `torch_backend.PENDING_PARTS` ✓：H3 主 DiT 19.53 GiB 未下载 ✓
 ⇒ 上机前先跑 `python app/scripts/h3_readiness.py` ✓）⇒ `canGenerate=False` ✓。
 
+## 自主化进度 + 下一步待办（2026-09-25 ✓ 用户「完全自主不依赖第三方」—— **下次接手看这里** ✓）
+
+> 目标：模型下载/存储/管理 + 四类生成（文本/图片/视频/音频）**全自研**，不依赖第三方运行时
+> （ollama 11434 / SD-WebUI 7860 / CosyVoice 9880 / ComfyUI 8188+8765 ✓）。参考 `reference/ollama`、
+> `reference/ollama-python`、`reference/ComfyUI` 只是为了**抄模型管理/推理机制**，不是要调它们 ✓。
+
+**已完成 ✓（2026-09-25）：**
+1. **模型目录自主化** ✓ —— `models_dir` 默认 `<data_root>/models` ✓（`local_model_scan.default_models_dir()` ✓；
+   `configs/model-paths.json` 已清空 ComfyUI 硬编码 ✓）；⚠️ 检测/扫描**不排斥第三方**（`get_default_roots` 仍扫电脑内模型 ✓
+   —— 自主的是「从哪下载、存到哪」，不是「不许看见别人装的」✓）。
+2. **文本 LLM 自研闭环** ✓（不依赖 ollama）—— 四块拼图 + 接线，全在 `engine/` 下：
+   - `llm.py` ✓（decoder-only：RMSNorm / GQA / RoPE / SwiGLU / 因果 mask / KV cache / 采样 greedy+top-p+top-k）
+   - `gguf_dequant.py` ✓（F32/F16/BF16/Q8_0/Q4_K 反量化；公式照 llama.cpp ggml-quants.c ✓ MIT ✓）
+   - `gguf_to_llm.py` ✓（ggml 命名映射 + 线性层转置 + tie embeddings + `infer_llm_config` 从 GGUF 元数据读架构）
+   - `llm_backend.py` ✓（`describe` 如实报缺 / `load` / `generate` encode→生成→decode）
+   - 接线 ✓（`text_generation.generate_text` 的 engine 分支：provider=engine ⇒ 走自研后端，`asyncio.to_thread` 包同步推理 + 后端缓存）
+   全量 **129 套 / 4141 项 / 0 失败** ✓（记账见 `INDEX.md §㉓~㉘` ✓）。
+
+**下一步待办 ✗（「完全自主」的剩余，按优先级）：**
+1. **图片自研**：SDXL UNet 架构（替代 SD-WebUI 7860）—— 引擎已有 `vae`/`sampler`/`schedules`/`dit` ✓，
+   缺的是 **SDXL UNet**（卷积扩散，非 DiT ✓）；参考 `reference/ComfyUI` 的 SD 节点 ✓。开工前先仿 `llm.py` 立一个
+   `engine/sdxl.py`（架构参数全显式 + 缩小版走同一条前向验证）✓。
+2. **TTS 自研**：声学模型（替代 CosyVoice 9880）—— 引擎已有 `audio_vae`（声码器那半 ✓），缺的是
+   **文本→声学特征**（音素化/时长/声学模型）✓；参考 `reference/ollama` 之外的 TTS 方案（IndexTTS 逆向已收口：本仓走 CosyVoice，
+   情绪 8 维已落地 `voice_contract.EMOTION_ORDER` ✓）。这块最复杂，放最后 ✓。
+3. **真权重下载**：H3 主 DiT 19.53 GiB + Qwen3 GGUF ≈9 GiB + 词表 ✓ —— 文本代码已闭环但**没权重跑不动** ✗；
+   下载入口 `model_manager.py download --category text/video` ✓（三源 HF/hf-mirror/ModelScope ✓）。
+4. **小项收尾**：chat 模板（Qwen3 `<|im_start|>` 对话骨架，现为裸拼接 ✗）；其余 k-quant 反量化（Q2_K/Q3_K/Q5_K/Q6_K，现具名拒绝 ✗）。
+
+**下次写代码要遵守（本仓红线，摘要在 `MEMORY.md` ✓）：**
+半角引号（中文文案嵌半角双引号 ⇒ SyntaxError ✓ 已踩 4 次 ✓）/ 懒导入 torch（模块级不 import ✓）/ `__all__` 惰性导出
+（先查名单再构造 ✓）/ 架构参数全显式（不猜 ✗）/ 缩小版模型走同一条前向验证（不下载真权重就能验 ✓）/ 判据一次写齐
+再跑全量、跑完再报数（`tests/run_all.py` 是规模唯一权威 ✓）/ 记账 + `check_memory.py` ✓。
+
 ## 自 MEMORY.md 下移（2026-09-20，第三次腾 8k 预算）
 
 **Skill 体系完整表述**（红线仍留在 `MEMORY.md` §Skill 体系）：绑定解析入口唯一 = `resolveDefaultSkills(agentType)`（**只扫自有**），消费 `loadAgentSkills`/`getAgentDefaults`/`routes/skills.ts`；**改绑定 = 改 md**（`AGENT_SKILL_MAP` 已删）。注入闸：`SKILL_CHAR_BUDGET`（默认 6 万，`AGENT_SKILL_BUDGET` 覆盖，0=关）→ 超预算按 priority 跳过并给诊断（口径 = `renderSkill(parseSkill(...)).length`，不等于字节数）；`agents.vue` 绑定面板是外部库 Skill **唯一 UI 挂载入口**，**拖拽真实生效**（列表顺序 = 注入顺序 = 超预算跳过顺序），合计**只算 `enabled=true`**。同一规则只留一处：`shared/prompt-blocks.ts` 的 `SCREENPLAY_FORMAT_RULES`、`IMAGE_PROMPT_TEMPLATE_CHARACTER/SCENE/SHOT`。兜底库：顶层目录无 `library.yaml` ⇒ `/meta.sources` 补合成条目（`declared:false`，label = 目录名）⇒ 「core + Σ各库 = 总数」自洽且侧栏可达。`meta.yaml` 是**死数据**（改它不生效 ✓ 全仓零读取）但 `version`/`author-*`/`source` **只此一处** ⇒ 勿擅自删 ✗（丢溯源）。改名/挪库后必核对 DB 绑定：只读直开 `{ readonly: true }`（绕开清洗副作用）；实测 5 行全 `NULL` ⇒ 当时改名零影响。

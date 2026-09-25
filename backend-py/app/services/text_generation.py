@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -65,6 +66,9 @@ async def generate_text(
     """
     options = options or {}
     config = get_text_config(conn)
+    # ⭐ 自研引擎分支（2026-09-25 ✓）：provider=engine ⇒ 走**进程内**自研 LLM ✓（不 HTTP 调 ollama ✗）
+    if (config.get("provider") or "").lower() == "engine":
+        return await _generate_with_engine(config, user_prompt, options)
     models = (
         list(config["models"])
         if config.get("models") and len(config["models"]) > 0
@@ -143,6 +147,44 @@ async def generate_text(
     if last_error is not None:
         raise last_error
     raise ValueError("文本生成失败")
+
+
+#: 自研文本后端缓存 ✓（key = ``(gguf_path, tokenizer_path)`` ✓ —— 大权重只 load 一次 ✗）
+_engine_backends: dict[tuple[str, str | None], Any] = {}
+
+
+def _get_engine_backend(gguf_path: str, tokenizer_path: str | None) -> Any:
+    """自研文本后端（缓存 + 幂等 load ✓）。"""
+    from .engine import gguf, gguf_to_llm, llm_backend
+
+    key = (gguf_path, tokenizer_path)
+    backend = _engine_backends.get(key)
+    if backend is not None:
+        return backend
+    info = gguf.inspect(gguf_path)
+    config = gguf_to_llm.infer_llm_config(info.metadata)
+    backend = llm_backend.LlmBackend(config, gguf_path=gguf_path, tokenizer_path=tokenizer_path)
+    backend.load()
+    _engine_backends[key] = backend
+    return backend
+
+
+async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
+                                options: dict[str, Any]) -> str:
+    """provider=engine ⇒ 走**自研文本后端**（进程内推理 ✓ 不 HTTP 调 ollama ✗）。"""
+    settings = config.get("settings") or {}
+    gguf_path = settings.get("ggufPath") or settings.get("gguf_path")
+    tokenizer_path = settings.get("tokenizerPath") or settings.get("tokenizer_path")
+    if not gguf_path:
+        raise ValueError("自研文本后端缺少 ggufPath（在文本服务 settings 里配 ✓）")
+    backend = _get_engine_backend(str(gguf_path), str(tokenizer_path) if tokenizer_path else None)
+    return await asyncio.to_thread(
+        backend.generate, user_prompt,
+        system=options.get("system"),
+        temperature=float(options.get("temperature")
+                          if options.get("temperature") is not None else 1.0),
+        max_new_tokens=int(options.get("maxTokens") or 256),
+    )
 
 
 # ====== 分镜动作建议 ======

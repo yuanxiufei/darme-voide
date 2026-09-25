@@ -4,9 +4,9 @@
 
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
-最近一次**全量实测**：**129 套 / 4134 项 / 0 失败**（2026-09-25 深夜 ✓：**128 套按 `SUMMARY:` 收敛出
-4134 项** ✓、另 1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）+ `skip 7` ✓。
-⇒ 本轮较上一跑 **+1 套 / +6 项** ✓（= 自研文本后端 `engine_llm_backend_test` **6 条** ✓）。
+最近一次**全量实测**：**129 套 / 4141 项 / 0 失败**（2026-09-25 深夜 ✓：**128 套按 `SUMMARY:` 收敛出
+4141 项** ✓、另 1 套是常量守卫型（`OK: 镜像常量漂移 0 条` ✓ 无项数 ✓）+ `skip 7` ✓。
+⇒ 本轮较上一跑 **+7 项** ✓（= `infer_llm_config` 5 条 ✓ + 接线 2 条 ✓，套数不变 ✓）。
 ⚠️⚠️ **记账须与实测对得上** ✗✗：上一轮 docstring 把 `engine_refine_test` 记成 **14 条** ✓✗，实测是 **23 条** ✓
 （多出的 `case_second_pass`/`case_keyframes`/`case_gate` 是上一轮就写好的，记账时没跟上 ✓）⇒ 已校正 ✓；
 早前还把 `engine_cache_guard` 写成 **12/12** ✓✗（实测 20/20 ✓）⇒ ⭐ **判据一次写齐再跑全量** ✗，跑完再报数 ✓。
@@ -16,11 +16,12 @@
 Qwen3/Llama 这类 LLM 的架构 ✓；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗）；缩小版走同一条前向 ✓。
 ② 新建 `engine/gguf_dequant.py` ✓ —— GGUF 权重**反量化**（F32/F16/BF16/Q8_0/Q4_K ✓ 公式照 llama.cpp ggml-quants.c ✓ MIT ✓；
 Q4_K 的 6-bit 解包逐字节核过 ✓）；⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗ 未实现 ✓。
-③ 新建 `engine/gguf_to_llm.py` ✓ —— GGUF 权重 → LlmModel 的**装载**（ggml 命名映射 ✓ + 线性层转置 ✓ + tie embeddings ✓；
-⭐⭐ 往返恒等验证：state_dict → GGUF → 映射回 ⇒ 逐张量相等 ✓）。
+③ 新建 `engine/gguf_to_llm.py` ✓ —— GGUF 权重 → LlmModel 的**装载**（ggml 命名映射 ✓ + 线性层转置 ✓ + tie embeddings ✓ +
+`infer_llm_config` 从 GGUF 元数据读架构 ✓）；⭐⭐ 往返恒等验证：state_dict → GGUF → 映射回 ⇒ 逐张量相等 ✓。
 ④ 新建 `engine/llm_backend.py` ✓ —— 自研文本后端（`describe` 如实报缺 / `load` 装载 / `generate` encode→生成→decode ✓；
 未装载就 generate ⇒ 明确拒 ✓）。
-⚠️ **尚未接线** ✗：自研文本后端（`describe`+`generate`）替换 `OllamaTextAdapter` 未做 ✗（下一轮 ✓）。
+⑤ **接线** ✓ —— `text_generation.generate_text` 加 engine 分支 ✓：provider=engine ⇒ 走自研后端（`asyncio.to_thread` 包同步推理 ✓）
+而非 HTTP 调 ollama ✗；后端缓存（大权重只 load 一次 ✓）。⇒ **文本不依赖 ollama 已闭环** ✓（剩「下载真权重」这一步 ✓）。
 
 ⭐⭐ **2026-09-25 晚这一轮补的是「能力已有、没接出去」的收尾** ✓✗：
 ① **多集节奏相位注入** ✓ —— `runtime.py::append_style_profile` 里早先是「`rhythm-phase.ts` 未迁」的 warn 占位 ✗，
