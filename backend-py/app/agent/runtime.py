@@ -9,13 +9,11 @@
 3. **驱动**（网络）：``run_agent_with_instructions`` 的「模型 fallback + 瞬态退避重试」循环，
    ``generate`` 与 ``sleep`` **可注入** ⇒ 测试用假驱动，不打真实网络。
 
-⚠️ 与 Node 的**已知且刻意**的差异（都是「依赖未迁」而非取舍）：
-
-* **``rhythm_phase`` 已迁**（``services/rhythm_phase.py``）⇒ ``storyboard_breaker`` 注入跨集节奏引导 ✓；
-* **``subagent`` 已迁**（``agents/subagent.py``）⇒ ``orchestrator`` 装 ``run_subagent`` +
-  ``list_available_agents``，可自主委托领域专家（深度 2、防自调用/防环形）；
-* （``DEFAULT_PROMPTS`` **已落地** —— 见 ``services/agent_prompts.py``，出厂提示词现在是真回落值；
-  ``skills`` **已落地** —— 见 ``agents/skills.py``，skill 段现在真的会注入。）
+✅ 曾经的「依赖未迁」项**现已全部落地接线**：
+``rhythm_phase``（``services/rhythm_phase.py``）⇒ ``storyboard_breaker`` 注入跨集节奏引导；``subagent``
+（``agents/subagent.py``）⇒ ``orchestrator`` 装 ``run_subagent`` + ``list_available_agents``，可自主委托
+领域专家（深度 2、防自调用/防环形）；``DEFAULT_PROMPTS``（``services/agent_prompts.py``，出厂提示词是
+真回落值）；``skills``（``agents/skills.py``，skill 段真的注入）；MCP 工具发现见下方 ``discover_mcp_tools``。
 
 ⚠️ 传输层是**自建**的：Node 走 Mastra ``agent.generate``（AI SDK 负责工具循环），
 而 Python 的文本适配器（``text_adapters``）**不含 tools 支持**（全仓 ``tools`` 出现 0 次）
@@ -611,7 +609,7 @@ async def run_agent_with_instructions(
     由本函数统一组装 —— 保证评测上下文与真实运行一致，且**不碰 DB 的 agent_configs**。
 
     ``generate`` / ``sleep`` 可注入（测试用假驱动与假时钟）；``mcp_tools`` 为 MCP 外部工具的
-    注入点（``mcp.ts`` 未迁 ⇒ 默认空，合并行为保留）。
+    注入点（缺省时按 ``discover_mcp_tools()`` 懒连接发现，见 ``app/mcp/client.py``；失败只降级）。
     """
     options = options or {}
     built = build_agent_config(conn, type, episode_id, drama_id)

@@ -1255,13 +1255,20 @@ with TestClient(app) as client:
     r = client.put("/api/v1/app-settings", json={"art_style": "anime"})
     check("app-settings put: anime accepted", r.json()["data"].get("art_style") == "anime", r.text[:200])
 
-    # ⚠️ 已知缺陷锁定：画风体系有 10 种，但此处白名单只有 6 种 ⇒ noir 被拒。
-    # 若将来两边一起修好，这条用例会失败 —— 那是预期的信号，不是回归。
+    # ✅ 2026-09-25 已修：白名单改为引用 ``prompt_utils.ART_STYLE_KEYS``（10 种），
+    #    不再只放行 6 种 ⇒ 设置页 10 张画风卡片全部可保存。
     r = client.put("/api/v1/app-settings", json={"art_style": "noir"})
-    dump("PUT /app-settings noir (known defect)", r)
-    check("app-settings: noir rejected (KNOWN DEFECT: stale 6-key whitelist vs 10 art styles)",
-          r.status_code == 400 and r.json()["message"] == "art_style 必须是 realistic/anime/ghibli/cinematic/comic/watercolor 之一或留空",
-          r.text[:200])
+    dump("PUT /app-settings noir (fixed)", r)
+    check("app-settings: noir accepted（曾是已知缺陷：6 项白名单 vs 10 种画风）",
+          r.status_code == 200 and r.json()["data"].get("art_style") == "noir", r.text[:200])
+    r = client.put("/api/v1/app-settings", json={"art_style": "pixar3d"})
+    check("app-settings: pixar3d accepted（另一个曾被 400 的画风）",
+          r.status_code == 200 and r.json()["data"].get("art_style") == "pixar3d", r.text[:200])
+    # 反套套逻辑：白名单只是**修正**，不是**取消** —— 非法值必须仍被拒。
+    r = client.put("/api/v1/app-settings", json={"art_style": "not-a-real-style"})
+    dump("PUT /app-settings not-a-real-style (must stay 400)", r)
+    check("app-settings: 非法画风仍被 400 拒绝（白名单没被放开）",
+          r.status_code == 400, r.text[:200])
 
     client.put("/api/v1/app-settings", json={"art_style": original_style or ""})
 

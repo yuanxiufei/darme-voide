@@ -18,10 +18,10 @@
 ⚠️ 类设计：**live-aware** —— 8765 未在跑则**显式 SKIP**（不是「通过」✓）。CI 上不因此变红 ✓，
    但跳过条数会打印出来 ✓（沿用 ``local_services_live_test.py`` 的约定）。
 
-⚠️ 已知缺口：薄封装的 ``_run_h3`` 目前是阶段 2 的**占位桩** ⇒ 终态必为 ``failed``
-   （``H3 ComfyUI backend not wired yet``）。**阶段 2 落地后请翻转 ⑤/⑥ 两条断言**
-   （那时应拿到 ``completed`` 且 ``video_url`` 非空）—— 与 ``h3_chain_test.py`` 的 ⑦ 是同一处缺口，
-   只是这一份**跨了真网络与真数据库** ✓。
+✅ 阶段 2 已接线（2026-09-17 翻转）：薄封装 ``_run_h3`` 已真提交 ComfyUI 并取回产物，不再是
+   占位桩 ⇒ ⑥ 断言已改为「终态必须是 ``succeeded``(+``video_url``) 或 ``failed`` + **真原因**，
+   且**不得**再出现 ``not wired yet``」；⑦ 再反套套逻辑（error_msg 不能是网络层失败特征）。
+   本文件跨了真网络与真数据库 ✓，与 ``h3_chain_test.py`` 的 in-process 契约互补。
 
 运行::
 

@@ -8,9 +8,9 @@
 ✅ ``read_script_for_extraction``（⚠️ 取值链是 ``scriptContent || content``，与剧本工具**相反**）
 ✅ ``read_existing_characters`` / ``read_existing_scenes``（返回**整行**供去重）
 ✅ ``read_existing_props``（关联表反查 prop_templates，过滤软删）
-⬜ ``save_dedup_characters`` / ``save_dedup_scenes`` / ``save_dedup_props``（去重合并保存）
+✅ ``save_dedup_characters`` / ``save_dedup_scenes`` / ``save_dedup_props``（去重合并保存）
 
-⚠️ 三处**必须照抄**的细节（下批做保存工具时会用到，先记在这里）：
+⚠️ 三处**必须照抄**的细节（保存工具已实现，这三条仍是判定依据）：
 
 * ``core_features`` / ``costumes`` 落库要**紧凑 JSON**（与 Node 共用该列）；
 * 场景去重键是 ``location + (time || '')``（同地点**不同时段**算新场景）；
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import and_, select, update  # noqa: F401  (update 供下批保存工具使用)
+from sqlalchemy import and_, select, update  # `update` 供去重合并保存使用（见 save_dedup_*）
 from sqlalchemy.engine import Connection
 
 from app.core.db import engine

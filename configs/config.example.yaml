@@ -5,7 +5,9 @@ app:
   language: "zh" # 系统语言：zh(中文) 或 en(英文)
 
 server:
-  port: 5789
+  # ⚠️ 仅作形状保留：Python 后端**刻意不读** server.port（此键属已删除的 Node 后端）。
+  #    实际端口优先级：PY_PORT > PORT > 5790。想单端口服务 API+前端时显式给 PY_PORT=5790。
+  port: 5790
   host: "0.0.0.0"
   cors_origins:
     - "http://localhost:3013"
@@ -27,14 +29,19 @@ database:
   max_open: 100
 
 storage:
+  # 整段已废弃：生成文件固定存 <dataRoot>/static，媒体绝对 URL 由 PUBLIC_BASE_URL 环境变量决定
+  # （默认回落到 http://localhost:5789，只跑 Python 后端时**必须**设 PUBLIC_BASE_URL=http://localhost:5790）。
   type: "local"
   local_path: "./data/static"   # 已废弃：生成文件固定存 <dataRoot>/static，此项不再单独生效
-  base_url: "http://localhost:5789/static"
+  base_url: "http://localhost:5790/static"   # 已废弃：Python 侧不读，见上方说明
 
 ai:
+  # 整段已废弃：Python 侧不读该段。文本/图片/视频/音频服务商在 Web「设置 → AI 服务配置」中
+  # 落库（ai_service_configs 表），按 priority 取用。注意视频服务商名是 `volcengine`
+  # （doubao-seedance-* 是它的模型名，不存在名为 doubao 的服务商）。
   default_text_provider: "openai"
   default_image_provider: "openai"
-  default_video_provider: "doubao"
+  default_video_provider: "volcengine"
 
 evaluation:
   auto_optimize:

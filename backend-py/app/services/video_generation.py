@@ -758,7 +758,7 @@ async def _handle_video_complete(
                 meta={"duration": gen_duration} if js_truthy(gen_duration) else None,
             )
 
-    # 触发镜头级 QC 打分（fire-and-forget，**未迁**）
+    # 触发镜头级 QC 打分（已接线：规则打分 + 技术维度，见下方 ``_run_qc_after_video_complete``）
     qc_storyboard_id = storyboard_id or (_col(gen, "storyboard_id") if gen is not None else None)
     if qc_storyboard_id:
         _run_qc_after_video_complete(qc_storyboard_id, video_id)

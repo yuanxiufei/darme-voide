@@ -1,9 +1,11 @@
 """AI 服务配置 —— 移植 ``routes/aiConfigs.ts`` 的**纯 DB 部分**所需的辅助。
 
-移植范围（已迁移）：`GET /`、`POST /`、`POST /quick-preset`、`POST /quick-local`、
+移植范围（本模块负责的**纯 DB 辅助**）：`GET /`、`POST /`、`POST /quick-preset`、`POST /quick-local`、
 `GET /:id`、`PUT /:id`、`DELETE /:id`、`GET /configs/local`、以及 `GET /ai-providers`。
-未迁移：`/ollama/*`（子进程 + HTTP 探测）、`POST /models`（厂商 HTTP）、`POST /test`（HTTP 探测）、
-`GET /gpu/status`（nvidia-smi）、`POST /gpu/release-all`（GPU 管理器）、`GET /runtime/health`（HTTP 探测）。
+
+⚠️ 早期版本这里标着「未迁移」的那批端点**现已全部迁完（2026-09-15）**，只是实现不落在本模块：
+`/ollama/*`(4) 与 `POST /models` 见 ``services/ollama.py``；`POST /test` 与 `GET /runtime/health`
+见路由层；`GET /gpu/status`、`POST /gpu/release-all` 见 ``services/gpu_manager.py``（GPU 显存租约已接线）。
 
 ⚠️ 两处 JSON 语义照抄：
 
@@ -12,7 +14,7 @@
 * ``build_settings`` 的关键在于**合并而非覆盖**：`negative_prompt` / `checkpoint_map` 是一等字段，
   `settings` 整体兜底合并；任一出现即重算，从而保住 `checkpoint_map` 等既有扩展配置不被抹掉。
 
-⚠️ ``is_local_config`` 来自 ``services/gpu-manager.ts``（那里的其余部分依赖 GPU/HTTP，未迁）。
+⚠️ ``is_local_config`` 来自 ``services/gpu-manager.ts``（那里的其余部分依赖 GPU/HTTP，**现已迁至** ``services/gpu_manager.py``）。
 它按「provider 白名单 + baseUrl 主机名」双判据识别本地服务 —— 注释里明确 **openai 不在白名单**：
 Ollama 的 OpenAI 兼容接口 baseUrl 指向 localhost，会被主机名判据命中；而真实云端 OpenAI
 不该被误判成本地。后续 ``local-models`` 域也会用到它。
