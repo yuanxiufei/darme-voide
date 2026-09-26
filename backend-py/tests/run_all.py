@@ -544,6 +544,7 @@ from pathlib import Path
 
 TESTS = [
     ("契约冒烟", "smoke_test.py"),
+    ("CPU 线程预算", "cpu_budget_test.py"),
     ("适配器层", "adapters_test.py"),
     ("厂商错误归因", "vendor_errors_test.py"),
     ("文本生成", "text_generation_test.py"),
@@ -710,6 +711,9 @@ TESTS = [
      "**设备口径逐入口**：错设备当场说清 / 判据不许比字符串 / 不许误伤真链路）", "engine_io_test.py"),
     ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
     ("自研引擎·长视频分段（网格长度/重叠接缝/保留帧守恒 + 首帧落 PNG 传递）", "engine_segments_test.py"),
+    ("自研引擎·多段成片（**超单段上限就分段**：拼接守恒 / 链式规范化**真拉小漂移** / 逐段产物各归其位 / "
+     "失败·取消·缺帧都不静默 + **接线静态守卫**：runtime 走链子、pipeline 真调交棒回调）",
+     "engine_chain_test.py"),
     ("自研引擎·在机运行时（**装/排队/取消/卸** + 真出 mp4/wav；串行有证据 + 设备口径逐入口）",
      "engine_runtime_test.py"),
     ("自研引擎·业务桥（`provider=engine` 那条路：装配键集与运行时**逐键对账** / 缺 DiT 就报 / "
@@ -779,10 +783,27 @@ def main() -> int:
     #    这里给子进程强制 PYTHONIOENCODING=utf-8，两边编码就对齐了。
     # 2. 自身 stdout 也加 errors="replace"，保证任何字符都不会让汇总步骤崩。
     child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
+    # ⚠️ **CPU 线程预算**（用户口径 ✓ 2026-09-26 —— 「这几次都是 CPU 占比高、GPU 几乎没用到，
+    #    造成 CPU 负载过高」✓✗）：病根之一 = 全仓没有线程钳制 ✗ ⇒ torch/numpy/OpenBLAS 的默认
+    #    并行度 = **逻辑核数** ✓✗ ⇒ 自检里一次张量运算就能把**整机**拉满 ✓✗（实测本机 32 逻辑核 ✓），
+    #    而此刻 GPU 全闲 ✓ —— 两侧都失衡 ✗。
+    #    ⚠️ 环境变量只有在子进程 **import torch/numpy 之前**写进去才管用 ✓ ⇒ 只能走 `env=` 这条路 ✓✗
+    #    （本进程自己再 `apply_env` 已经晚了 ✗：它早就 import 过 numpy 了 ✓）。
+    #    口径**只有一处** ✓：`app/core/cpu_budget.py` ✓（与引擎共用 ✓，不许在这里另写一套 ✗）。
+    sys.path.insert(0, str(here.parent))  # 懒导入 ⇒ 顶层仍只依赖 stdlib ✓
+    from app.core import cpu_budget  # noqa: PLC0415
+
     try:
         sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
     except (AttributeError, OSError):  # pragma: no cover
         pass
+
+    budget = cpu_budget.describe()
+    child_env.update(cpu_budget.env_for_child())
+    print(f"CPU 线程预算：{budget['threads']}/{budget['logicalCores']} 逻辑核"
+          f"（{budget['source']} ✓；想改就设 {cpu_budget.ENV_OVERRIDE}=N 显式覆盖 ✓）")
+    print()
 
     for label, filename in TESTS:
         completed = subprocess.run(

@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.core import cpu_budget
+
 from . import audio_vae as audio_vae_mod
 from . import dit as dit_mod
 from . import geometry as geometry_mod
@@ -413,6 +415,11 @@ class TorchBackend:
         * 权重没下载 ⇒ ``reason="pending"`` ✓ + 给出还缺多少 ✓（`loader` 的口径 ✓）。
         """
         self._gate()
+        # ⚠️ **CPU 线程预算**（用户口径 ✓ 2026-09-26）：本仓重张量运算走 GPU ✓，CPU 只负责加载/IO/搬张量 ✓
+        #    ⇒ 必须**钳住** torch 的线程池 ✗（不钳时它的默认并行度 = **逻辑核数** ✓✗ ⇒ 装权重这一步的
+        #    反量化 + `to(dtype)` 就能把**整机**拉满 ✓✗ —— 实测本机 32 逻辑核 ✓）。
+        #    口径**只有一处** ✓：`app/core/cpu_budget.py` ✓（自检驱动与引擎共用 ✓）。
+        self._threadBudget = cpu_budget.apply_torch(self._torch())
         target = Path(path) if path else self._default_dit_path()
         if target is None or not Path(target).exists():
             plan = self._plan_for_default_dit()

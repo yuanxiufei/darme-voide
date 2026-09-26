@@ -772,11 +772,22 @@ def case_torch_backend() -> None:
           "—— 不许因为「用上 torch 了」就把 synthetic 翻成 False ✗",
           described["realTensors"] is True and described["synthetic"] is True
           and described["canGenerate"] is False, described["pendingParts"])
+    # ⚠️ **钉空域** ✗（2026-09-26 全量实测抓出来的 ✓）：本条要验的是「**权重没下载** ⇒ pending」✓，
+    #    而 `_default_dit_path()` 走的是「解析只有一条」的口径 ✓（清单落点 → **动态探测根** ✓）
+    #    ⇒ 在这台机器上它会**解析到盘上那份真文件** ✓✗（落在 ComfyUI 共享目录 ✓），于是
+    #    `load_weights()` 不再停在「未下载」✗、而是往下走到**形态自检** ✓ 报「结构对不上」✓✗
+    #    ⇒ 断言**随机器装了什么都变** ✗✗（正撞本仓「自检不得随机器翻脸」✗）。
+    #    钉法：把落点钉到**空的临时目录** ✓ ⇒ 「缺权重 ⇒ pending」在任何机器上都成立 ✓。
+    pinned = Path(tempfile.mkdtemp(prefix="voide-no-weights-")) / "diffusion_models" / "没有这个文件.safetensors"
+    original_default_dit = backend._default_dit_path  # type: ignore[attr-defined]
+    backend._default_dit_path = lambda: str(pinned)  # type: ignore[method-assign, assignment]
     try:
         backend.load_weights()
         weights_error: Exception | None = None
     except tb.TorchBackendUnavailable as err:
         weights_error = err
+    finally:
+        backend._default_dit_path = original_default_dit  # type: ignore[method-assign, assignment]
     if described["available"]:
         # ⚠️ 这条断言随实现推进**改过含义** ✓（原来断言"实现未写 ⇒ pending" ✗）：
         #    现在 `load_weights` **真的实现了** ✓ ⇒ `pending` 的含义变成「**权重没下载**」✓

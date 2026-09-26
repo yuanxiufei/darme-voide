@@ -40,6 +40,7 @@
 ## 前端验证与测试工具（自 MEMORY.md §前端约定 下移）
 - **工作台元素计数**（点击测试定位用）：`nav button` = 12 主步骤；`aside button` = 18（12 + 5 `sidebar-jump-dot` + 1 `.refresh-btn`）。**工作台改版后须重新核对**。
 - **验证 SFC 编译**：`node -e "require('@vue/compiler-sfc')"` 跑 `compileScript` + `compileTemplate`，**无需启 dev server**；纯 TS（如 `useApi.ts`）用 `ts.transpileModule`。两者都能在改完立刻抓语法/模板错误。
+- **playwright-cli 用法**（2026-09-26 自 `MEMORY.md` §前端约定 下移）：常被转后台丢 stdout ⇒ `... *> .log` 落盘再读 ✓；eval 输出**只用 ASCII** ✓；用 `nav button[i]` 定位 ✓。
 
 ## 自 MEMORY.md 下移（2026-09-20 第三次腾 8k 预算）
 
@@ -73,6 +74,7 @@
 ## ⭐ 可照抄项目清单（用户 2026-09-20 点名；原话「这几个项目**功能可以直接抄**，**不要忘记**」）
 
 > ⚠️ 用户当时补了一句「不要忘记」⇒ 这是**长期挂账的待办源** ✓：能力缺口优先从这五个项目里找现成实现 ✓。
+> 🆕 **另有 10 个未点名参考仓**（`reference/` 实有 **18 项** ✓）—— 逐仓取证见本节末「未点名的参考仓」✓。
 
 | 参考项目（`reference/` 下） | 它提供什么 | 该抄进本仓哪里 |
 |---|---|---|
@@ -86,6 +88,29 @@
 **抄的姿势（延续本仓判据 ✓）**：① 只抄**能接线**的 ✓（搬来没人调用 = 没抄 ✓ 见第 106 步教训 ✓）；
 ② 抄**机制**不抄**体量** ✗（尤其 `ComfyUI` ✓）；③ 抄完**写清出处** ✓（`docs/` 或模块 docstring ✓，
 与「他人提示词正文不得搬运」的红线不冲突 ✓ —— 那是**语料**✗，这是**代码/机制** ✓）。
+
+### 🆕 未点名的参考仓（2026-09-26 逐仓取证 ✓，共 **10** 项）
+
+> 取证方式 = 读**它自己的 README** + 文件/符号级证据 ✓；⚠️ **没打开确认的一律标「名字像」** ✗，**不许把猜测写成事实** ✗。
+> ⚠️ 抄之前**先问一声** ✗（点名清单才是授权 ✓）；⚠️ **许可即硬约束** ✗ —— `ArcReel` = **AGPL-3.0** ⇒ **只借设计、不搬代码** ✗；
+> `agent-voide` / `awesome-ai-short-drama` **无 LICENSE** ⇒ 只当**情报/文档** ✗；⚠️ `reference/` 整目录 gitignore 且**完善后要删** ⇒ 想抄**趁早** ✓。
+
+| 未点名参考仓 | 一句话定位（自身 README） | 能抄什么（含落点） | 许可 |
+|---|---|---|---|
+| `Comic-drama` | 剧本 → 结构化场景/角色资产/对白音频/分镜复核/剪辑时间线的开源漫剧流水线（早期 local-first 原型） | **①TTS 多引擎 + 回退链**（`scripts/tts_engines.py`：edge/cosyvoice/gpt_sovits/fish/indextts + `engine_chain()` + `tts_diagnostics()` ⇒ 自研 TTS **接入层的形状** ✓）；**④** `canonical_timeline`（OTIO 式 ✓）+ `backend/consistency_governance.py` / `consistency_validator.py`（continuity ledger ⇒ 对照本仓 `continuity` ✓）；**⑤** `workflows/{comfyui_keyframe,asset,faceid}_template.json` **结构性注入** + `comfyui_health.py` | MIT |
+| `ComfyUI-H3-Multishot` | H3 多镜头**无缝一镜到底**节点包（无可见剪切 / 无色偏 / 不断音） | **⑤** 节点注册范式（`__init__.py` 合并 `NODE_CLASS_MAPPINGS` + `h3_keyframes`/`h3_lora_stack`/`h3_chain_normalize`/`h3_extend`/`h3_retake` 子模块 ✓）+ `h3_gguf_arch.py` 的 **DiT 架构注入** ✓；**②** 内嵌 `libs/ltx_core/{conditioning,schedulers,noisers,guiders}` + `libs/ltx_distillation/{vae_wrapper,text_encoder_wrapper}` + `libs/ltx_core/quantization/*`（**真条件注入 / VAE / 量化**参照 ✓） | MIT |
+| `MiniMax-H3-Codex-Drama` | Codex-first 的 H3 视频 + 原生音频生产插件（分镜路由 / 监控本地 ComfyUI / 可续跑） | **④⑤** 生产化 Skill 范本：`skills/minimax-h3-*/SKILL.md`、`docs/skill-config.md`、`docs/turbo-vs-standard.md`、`examples/exp-001-jiangnan-ancient-drama/{entity,scene,storyboard}` + 真 `final.mp4` / `audio/*.flac` ✓ | MIT |
+| `ArcReel` | 开源自托管的 AI 视频生产工作台（小说/剧本 → 角色一致、可追踪、可续编短视频） | **④最成熟**（`lib/artifact_manifest.py` 92KB ✓ / `lib/episode_ledger.py` ✓ / `lib/artifact_provenance.py` ✓ / `agent_runtime_profile/CLAUDE.*.md` ✓）；⚠️ 其 `lib/audio_backends/*` 是 **API TTS 适配层**（**非**自研声学模型 ✗）、搜 `snapshot_download`/`hf_hub_download` **0 命中** ⇒ **无**本地模型下载/管理 ✗ | ⚠️ **AGPL-3.0** |
+| `ComfyUI-MiniMax-H3-Turbo` | H3 联合音视频、**4 步**采样 + Turbo LoRA | **⑤** 单文件即可移植：`__init__.py` 的 `MiniMaxH3TurboSampler` / `MiniMaxH3TurboLoRA` / `_FrugalLoRA(comfy.weight_adapter.LoRAAdapter)`（**双流 flow schedule**：video shift 12 / audio shift 3 ✓） | Apache-2.0 |
+| `moonlit-showrunner` | premise → **角色锁定** animatic（+ 可选 Sora 视频）的轻量原型 | **④** 小而全：`app/character_locking.py` ✓ / `app/continuity.py` ✓ / `app/agents/{showrunner,storyboard,visual_director,continuity}_agent.py` ✓ / `app/schemas.py` ✓；缺口②**弱** ✗（外调 `image_client` / `sora_client`） | MIT |
+| `logamee-film-forge` | 把文章变成**有口播 / 有字幕 / 能录屏**演示视频的两个 Claude Skill | **④文档级**：`references/tts-source-selection.md` ✓ / `cloned-voice-video-production.md` ✓（选型与方法论 ⇒ **只借思路、无代码可抄** ✗） | MIT |
+| `agent-voide` | 六环节（剧本→资产→分镜→出视频→配乐→过审）智能体规格 + 规则引擎 | **④素材**：`AI漫剧智能体工作流/02-服化道/模板/{ASSET_CARD.yaml,VISUAL_BIBLE.md,PROJECT_STATE.yaml}` ✓ + `…/引擎/CONSISTENCY-CHECKLIST.md` ✓（**字段设计**参照 ✓；可执行部分仅 `工具/校验.py` / `07-智能体运行时/main.py` ✓） | ⚠️ **无 LICENSE** |
+| `awesome-ai-short-drama` | AI 短剧开源项目 **curated list**（只有 README + `projects.yml`） | **选型情报**：竞品分级清单（Toonflow / Jellyfish / VideoClaw / DramaClaw / LocalMiniDrama… ✓）；**无代码可抄** ✗ | ⚠️ **无 LICENSE** |
+| `lora` | **16 个 LoRA/扩散「训练」框架**集合（kohya_ss / sd-scripts / musubi-tuner / OneTrainer / diffusers / ai-toolkit / diffusion-pipe…） | **关系最弱** ✗：缺口②是**推理**管线、③是**下载/存储/管理**，这批是**训练**框架 ⇒ 只作「将来训角色一致性 LoRA」的**工具选型** ✓（⚠️ 子仓许可混杂，逐一确认 ✓） | 各子仓各自 |
+
+⭐ **取证结论（前 3 名 ✓）**：`Comic-drama`（MIT + FastAPI 结构与本仓 `backend-py/` 最像 + **①④⑤ 三面命中** ✓）> `ComfyUI-H3-Multishot`（⑤ 最完整 + 真条件注入代码 ✓）> `MiniMax-H3-Codex-Drama`（H3 生产化 Skill/契约 ✓）。
+⚠️ 若可接受 AGPL 或**仅作架构参照**，`ArcReel` 应**升第 1 梯队** ✓（它的生产契约层比前三名都成熟 ✓✗）。
+⚠️ 本轮**只取证、未抄一行** ✗（产品代码**零改动** ✓）。
 
 ## 外部调用审计（2026-09-20 实测；用户要求「不要调用外部的」）
 
@@ -135,7 +160,7 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 
 **已能自主完成的**（能力面 ✓ 与上条独立 —— 能力有没有比"有几个模块"稳 ✓）：
 σ 调度 ✓ / 采样循环 + CFG 引导 ✓ / 首帧条件（图生视频 ✓ 真 VAE 编码 + 掩码混合 ✓）/
-长视频分段（保留帧数守恒 ✓）/ DiT 真前向 ✓ / **自研词表三件套** ✓（BPE ✓ / Unigram ✓ / WordPiece ✓ +
+长视频分段 + **多段成片**（保留帧数守恒 ✓ 拼接 + 接缝治理 ✓ ⇒ 见下「多段成片」节 ✓）/ DiT 真前向 ✓ / **自研词表三件套** ✓（BPE ✓ / Unigram ✓ / WordPiece ✓ +
 11 种 normalizer + 10 种预分词器 ✓ —— 规则逐例对齐参考 ✓）/ H3 行级主干 + 双流 ✓（真 mp4 + 真 wav ✓）/
 **低精度权重反量化** ✓（fp8/int8 ✓ 四种布局 ✓ 判不出来就拒绝 ✓）/ VAE 解码 ✓ / 帧→真 mp4（ffprobe 复核 ✓）/
 音频→真 wav（标准库 `wave` ✓）/ 权重体检 + 加载计划 ✓（含**反量化计划** ✓）/ 管线编排（进度 / 取消 /
@@ -177,6 +202,25 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
   **故意放慢 300 ms** 拉宽窗口 ✓；⚠️ 该自检**自己也被证伪过** ✓（用一次性探针把 `_execute` 在**内存里**
   换回旧写法 ⇒ 两条断言**当场红** ✓，**不改源码** ✓、探针已删 ✓）—— 「只在当前实现下绿」的自检**不算数** ✗。
   ⇒ **以后再往引擎里加"常驻大权重"，都要在装完 + 跑完各还一次** ✓，别让缓存「看着占满整卡」✗。
+
+* ⭐⭐ **多段成片**（`app/services/engine/chain.py` ✓ 2026-09-26 落地 ✓，细节见 `2026-09-26.md` ⑲ ✓）——
+  **超单段上限的请求拆段顺序生成、再拼成一条** ✓（缺口是查过的 ✓：`segments` 只产计划 ✗、`media.write_video`
+  对 `batch != 1` **明确拒绝** ✗ ⇒ 中间那层此前是空的 ✗✗；没有它只能放大帧数直到显存爆 ✓✗）：
+  * **单段上限 362 帧有来源** ✓：`ComfyUI-H3-Multishot` 的 `README.md` verified recipe `1280x736 / 362 / 14` ✓
+    （`362 = 17×21 + 5` ✓ 落在 `geometry` 的帧网格上 ✓ ⇒ **不自己编数** ✗）。
+  * **接口**：`needs_chain` ✓ / `plan_chain` ✓（**单段请求回 `None`** ✓ ⇒ 调用方走**原路** ✗✗）/
+    `stitch_frames` ✓ / `normalize_chain` ✓（默认口径 = 参考实现实测值 ✓ 见 `NORM_DEFAULTS` ✓）/
+    `assemble_chain` ✓ / `run_chain(request, backend, run_segment=pipe.run_sync, …)` ✓。
+  * ⚠️ **接线口径**（`runtime` ✓）：`plan_chain` 为 `None` ⇒ 单段原路**一字不改** ✓；否则先发 `stage="chain-plan"`
+    **事件**（拆段**必须让用户看见** ✗）再跑 `run_chain` ✓；`pipeline.run_sync` 的 `on_decoded` 回调 ✓
+    在 **decode 的 try 里面** ✓（不破「不抛异常」契约 ✗），拿**无损**张量 ✓，**别去读刚落的 mp4** ✗。
+  * ⚠️ **三条硬契约** ✗：① 拼接前后都断言 **`Σ keep == 总帧数`** ✓（不符就报 ✓ **不静默补/裁** ✗）；
+    ② 每段产物写各自的 `segments/segN/` **子目录** ✓（同目录互相覆盖 ⇒ 只剩最后一段能核对 ✗）；
+    ③ 任一段失败 ⇒ **整链失败**（阶段名带段号 ✓）、段间被叫停 ⇒ **取消**（≠失败 ✓，已完成段留住 ✓）。
+  * ⚠️ **两条实测踩过的坑** ✗：帧/通道维写反 ⇒ `IndexError: index 48 out of bounds … size 3` ✓✗（该
+    `frames[0].permute(1,2,3,0)` ✓）；接缝锚点传 **4 维** ⇒ `MediaError … 收到 (1,1,3,48,48)` ✓✗
+    （`segments._as_frame_batch` 把 4 维当 `(T,C,H,W)` ⇒ 再包一层 ✓）⇒ 传 3 维 `frames[0, :, keepTo-1]` ✓。
+  * 判据 `tests/engine_chain_test.py` ✓（含**接线静态守卫 5 条** ⇒ 删接线必红 ✓✗），规模见 `run_all.py` 表头 ✓。
 
 ## 自主化进度 + 下一步待办（2026-09-25 ✓ 用户「完全自主不依赖第三方」—— **下次接手看这里** ✓）
 
@@ -276,6 +320,9 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 * ⭐ **占位符不许留在模块体里** ✗ —— 同名空壳会把**真实现静默遮住** ✓✗（导入拿到空壳 ✓，到调用才炸 ✓）；要"可选依赖"就用**取名字时才构造**（`__getattr__` ✓），且**先查名单再构造** ✓（否则问一个不存在的名字也会去 `import torch` ✗）。
 * ⭐ **判据要"响亮"不要"静默"** ✗ —— 惰性导出的模块一定配一份**名字名单**（`__all__` ✓）并**先校验**：漏加名单时立刻 `AttributeError` ✓（本仓实测：新加的 `packed_rows` 忘了进名单 ⇒ 一跑就**点名**报出来 ✓✓），而不是给一个空壳/None 让错误漂到下游 ✓。
 * ⭐ **写断言时，凡"顺序 / 布局 / 形状 / dtype"都要当场算一遍** ✗（实测：一天里 7 处红全是**我的期望**错，代码都是对的 ✓ —— 典型如「笛卡尔积两列逐位相等」✗（应为**值集合相同** ✓）、「token 逐个递增 t」✗（实为**一帧内共用同一个 t** ✓）、`nn.Linear(in,out).weight` = **(out,in)** ✓、`float64 × float32` 直接 `RuntimeError` ✓）。
+* ⭐ **同一份配置的两种形态（dataclass / dict）** ⇒ **每个读取点都要两处都认** ✗（取不到会**悄悄回落默认值** ✓✗；2026-09-26 自 `MEMORY.md` §代码约定 下移 ✓）。
+* ⭐ **能算出 0 宽度的结构不变量要在构造期就报** ✗（否则报的是第三方后端的**天书** ✓✗）。
+* ⭐ **多流各按落盘工具的契约报形状** ✗（对称去维 ⇒ **静默走错分支** ✓✗）。
 
 ## Skill 体系坑清单（2026-09-15 自 `MEMORY.md` 下移，腾 8k 预算 —— 本文件逼近上限时**尾部区块最先被截断**）
 
@@ -878,3 +925,20 @@ github.com/mamad8c/ComfyUI-H3-Latent-Upscaler-Mamad8」✓ ⇒ 本仓**可以实
 **⚡ 2026-09-20 加严**：「**所有都要自己实现，不要调用外部的**」⇒ 外部队商 API **不是可选通道，是要去掉的** ✗。
 **边界**（可纠正 ✓）：**功能 / 能力**不外包 ✗；`ffmpeg` / SQLite / 标准库 / 框架属**本地基础设施** ✓ 不算 ✗。
 ⚠️ 现状（2026-09-20 实测，详见 §外部调用审计 ✓）：四类生成曾**全部**解析到厂商 API ✗（`ai_providers.py` 按 priority 降序 ✓）。
+
+## 自 MEMORY.md 下移（2026-09-26 第六次腾 8k 预算）—— 线程预算明细 / 点击测试工具
+
+> 起因 ✓：守卫报 `MEMORY.md` **7844/8000（余量仅 156 ✓）** ⇒ 本轮移**三处**（playwright-cli 用法 ✓ /
+> 代码约定 3 条 ✓ / 线程预算明细 ✓），`MEMORY.md` 每处只留**判据 + 指针** ✓（纪律：加新内容前先清等量的旧 ✓）。
+
+**① 线程预算 `app/core/cpu_budget.py`（唯一口径，2026-09-26 ✓）**：
+- **自动档** = `clamp(逻辑核 // 4, 2, 8)` ✓（本机 32 逻辑核 ⇒ **8** ✓，故意**不**吃满 ⇒ 留住裕量 ✓）；
+  `VOIDE_CPU_THREADS` **显式优先** ✓；设 `0` 或**负数直接报错** ✓✗（「想自己决定就别设」✓）；`AUTO_RULE_LABEL` 是**公开常量** ✓ 自检逐字比它 ✓。
+- **接线点**（各**恰好 1 次** ✓）：`engine/torch_backend.load_weights` ✓ / `engine/sdxl_backend.load_weights` ✓；
+  ⚠️ `tests/run_all.py` 必须在**子进程 import torch/numpy 之前**经 `env=` 注入 ✓✗（本进程再设已晚 ✓）；体检报告出 `cpuThreads` 字段 ✓。
+- **守卫** ✓：`tests/cpu_budget_test.py` **34/34** ✓（含**静态守卫**扫源码 ⇒ 删掉任一处接线必红 ✓✗）；`run_all` 首行打印预算 ✓。
+- **观测** ✓：`app/scripts/resource_watch.py` ✓（逐秒 GPU util / 显存 + **整机 CPU 核等效** ✓，`--run` 给子进程带预算 ✓）。
+- ⚠️ **判「卡死」看子进程 CPU 动没动** ✗，**不是**「日志几分钟不涨」✗✗（实测冤枉过一个慢用例 `TTS / 音色复刻` ✓，该轮作废 ✓）。
+- **实测（自检正在跑时）** ✓：CPU 峰值 **37.6%** / 均值 **18.6%**（≈5.95/32 核 ✓）、GPU 峰值 **48%** / 均值 **19.9%** ✓ ⇒ 两侧都留裕量 ✓。
+
+**② playwright-cli 用法**（自 `MEMORY.md` §前端约定 下移 ✓）：常被转后台**丢 stdout** ✗ ⇒ `... *> .log` 落盘再读 ✓；eval 输出**只用 ASCII** ✓；用 `nav button[i]` 定位 ✓（元素计数与 SFC 编译验证见 §前端验证与测试工具 ✓）。

@@ -28,6 +28,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.core import cpu_budget
+
 from .engine import h3_keys
 from .engine import inventory as inv
 from .engine import loader as loader_mod
@@ -78,6 +80,10 @@ def environment_report() -> dict[str, Any]:
         "ffmpegVersion": media_mod.ffmpeg_version(),
         # ⭐ 设备**实测** ✓（2026-09-26 加 ✓）：没有这一项，报告就只能靠"猜本机有没有卡" ✓✗
         "device": device_facts(),
+        # ⭐ CPU 线程预算**实测口径** ✓（2026-09-26 加 ✓，同一轮用户口径「两侧都留裕量」✓）：
+        #    报它 ⇒ 「为什么这台机器 CPU 没被拉满 ✓ / 拉满了该改哪里 ✓」在**报告里**就能读到 ✓✗
+        #    （口径只有一处 ✓：`app/core/cpu_budget.py` ✓ —— 这里只**转述** ✓，不重算 ✗）。
+        "cpuThreads": cpu_budget.describe(),
     }
 
 

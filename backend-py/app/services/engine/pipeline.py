@@ -459,8 +459,12 @@ CancelFn = Callable[[], bool]
 
 def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
              on_event: Callable[[dict[str, Any]], None] | None = None,
-             cancel: CancelFn | None = None) -> PipelineResult:
+             cancel: CancelFn | None = None,
+             on_decoded: Callable[[dict[str, Any]], None] | None = None) -> PipelineResult:
     """**同步**跑完一次生成（FastAPI 的同步端点跑在线程池里 ✓ ⇒ 不会卡事件循环 ✓）。
+
+    ``on_decoded``：⑤ decode 之后回调一次 ✓（收到 decoded ✓）—— 多段成片
+    （``app.services.engine.chain`` ✓）靠它拿**无损**帧张量 ✓；不给就完全没这回事 ✓。
 
     返回 :class:`PipelineResult` ✓（**不抛异常** ✗ —— 失败也体现在结果里 ✓，
     因为「阶段 + 步号 + 文案」比异常栈对用户有用得多 ✓）。
@@ -734,6 +738,12 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
     try:
         ensure_not_cancelled("decode")
         decoded = backend.decode(latents, plan, request)
+        # ⭐ ⑤b 出片前的**交棒点** ✓：多段成片（见 app.services.engine.chain ✓）要的正是这里的
+        #    **无损**张量 ✓ —— 不让它去读刚落的 mp4 ✗（那要多一次编解码 ✓，还会把 yuv420p 的
+        #    色度损失带进拼接件 ✓✗）。⚠️ 刻意放在 decode 的 try **里面** ✓：回调自己炸了也得算
+        #    「decode 阶段失败」✓ —— run_sync「不抛异常」的契约不能被一个可选回调破掉 ✗。
+        if on_decoded is not None:
+            on_decoded(decoded)
     except BaseException as err:  # noqa: BLE001
         result.stageMs["decode"] = int((time.perf_counter() - started) * 1000)
         return _fail(result, "decode", err)

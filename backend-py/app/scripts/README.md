@@ -13,7 +13,7 @@
 |---|---|---|
 | **仓库自检** | `check_skill_refs.py` / `check_memory.py` / `test_guards.py` / `check_all.py` —— 防资产**静默漂移** | Python 3.8+，**仅标准库**（零第三方依赖） |
 | **语料管线** | `corpus/fetch_raw.py` → `normalize.py` → `search.py`（+ `analyze{,2,3}.py` 统计） | Python 3.8+，**仅标准库** |
-| **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` | Python 3.8+，**仅标准库**（与后端通过 subprocess 解耦） |
+| **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` / `resource_watch.py` | Python 3.8+，**仅标准库**（与后端通过 subprocess 解耦） |
 | **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改）<br>`db_upgrade.py`（旧库**补列**；2026-09-25 加，真实库当时缺 **32 列**） | Python 3.8+，**仅标准库** |
 
 > 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
@@ -147,6 +147,10 @@ python backend-py/app/scripts/model_manager.py remove-model --key ...
 
 python backend-py/app/scripts/sd_h3_pipeline.py                # 顺序执行 doctor→download→build→probe
 python backend-py/app/scripts/sd_h3_compat_probe.py --list     # 支持矩阵
+
+python backend-py/app/scripts/resource_watch.py --seconds 30                     # 负载观测：GPU 几成 / CPU 几核
+python backend-py/app/scripts/resource_watch.py --run "python backend-py/tests/run_all.py"
+                                                                                # 顺带跑，并给子进程带上 CPU 线程预算
 ```
 
 数据源：`configs/models.json`（模型清单）+ `configs/model-paths.json`（路径配置）。

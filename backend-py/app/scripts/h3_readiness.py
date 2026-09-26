@@ -46,6 +46,14 @@ def render(report: dict[str, Any]) -> None:
         print(f"设备：{device['device']}{vram}")
     else:
         print("设备：探不到 ✗（torch 不可用 ✓）")
+    # ⭐ CPU 线程预算 ✓（2026-09-26 加 ✓）：报它 ⇒ 「这台机器 CPU 会不会被拉满」在**报告里**就有答案 ✓✗
+    #    （用户口径：「两侧都参与、谁也别闲着 ✓，但都不许被打满过载 ✗」✓）
+    budget = env.get("cpuThreads") or {}
+    if budget:
+        print(f"CPU 线程预算：{budget.get('threads')}/{budget.get('logicalCores')} 逻辑核"
+              f"（{budget.get('source')} ✓；设 VOIDE_CPU_THREADS=N 可显式覆盖 ✓）")
+    else:  # pragma: no cover - 旧报告没这一项
+        print("CPU 线程预算：报告里没有这一项 ✗")
 
     ready = report["weightsReadiness"]
     residency = report["loadPlan"]["residency"]

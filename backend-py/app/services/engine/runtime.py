@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import audio_vae as audio_vae_mod
+from . import chain
 from . import pipeline as pipe
 from . import vae as vae_mod
 from .dryrun import DryRunBackend
@@ -360,8 +361,27 @@ class EngineRuntime:
         if task.cancelEvent.is_set():
             return ("cancelled", None)
         task.status = "running"
-        result = pipe.run_sync(task.request, backend, on_event=task.events.append,
-                              cancel=task.cancelEvent.is_set)
+        # ⭐ 多段成片 ✓（2026-09-26 接 ✓）：超过单段原生上限的请求**不再**一路上调帧数直到显存爆掉 ✗
+        #    —— 而是拆成几段**顺序**生成（每段带上一段保留尾帧当首帧 ✓）再拼成一条 ✓
+        #    （分段计划见 app.services.engine.chain ✓、每段输入见 app.services.engine.segments ✓）。
+        #    ⚠️ 单段请求**原路一字不改** ✓：`plan_chain` 回 None ⇒ 那个分支与从前完全一样 ✓。
+        chain_plan = chain.plan_chain(task.request)
+        if chain_plan is None:
+            result = pipe.run_sync(task.request, backend, on_event=task.events.append,
+                                  cancel=task.cancelEvent.is_set)
+        else:
+            # ⚠️ 拆段这件事**必须让用户看见** ✗（悄悄替人拆 = 他以为一次就出 ✓✗）
+            task.events.append({
+                "kind": "stage", "stage": "chain-plan",
+                "note": f"请求 {chain_plan.seconds:.2f}s 超过单段上限 "
+                        f"（{chain_plan.maxFrames} 帧 ≈ "
+                        f"{chain_plan.maxFrames / max(1, chain_plan.fps):.2f}s ✓）"
+                        f"⇒ 拆成 {chain_plan.segmentCount} 段顺序生成、再拼成一条 ✓",
+                "chainPlan": chain_plan.to_dict(),
+            })
+            result = chain.run_chain(task.request, backend, run_segment=pipe.run_sync,
+                                     on_event=task.events.append,
+                                     cancel=task.cancelEvent.is_set)
         task.result = result.to_dict()
         if result.cancelled:
             return ("cancelled", None)

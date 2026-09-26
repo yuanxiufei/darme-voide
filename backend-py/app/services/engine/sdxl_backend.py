@@ -54,6 +54,8 @@ try:  # ⚠️ torch 是**可选**依赖 ✓（纯数学部分没它也能跑能
 except ImportError:  # pragma: no cover - 无 torch 环境只走纯数学自检 ✓
     torch = None  # type: ignore[assignment]
 
+from app.core import cpu_budget
+
 __all__ = [
     "SDXL_CLIP_G_KEY_PREFIX",
     "SDXL_CLIP_L_KEY_PREFIX",
@@ -493,6 +495,10 @@ class SdxlBackend:
     # ── 装配 ─────────────────────────────────────────────────────────────
     def load_weights(self, path: str | Path, *, tokenizer: Any = None) -> dict[str, Any]:
         """装四件套 ✓ 并返回报告 ✓。⚠️ 任一件不齐 ⇒ **报错** ✗（不会留下半个模型 ✓）。"""
+        # ⚠️ **CPU 线程预算**（用户口径 ✓ 2026-09-26）：重张量运算走 GPU ✓，CPU 只做加载/IO/搬张量 ✓
+        #    ⇒ 钳住 torch 线程池 ✗（默认并行度 = **逻辑核数** ✓✗ ⇒ 四件套的 `to(device, dtype)`
+        #    反量化 + 文本编码前后处理就能把整机拉满 ✓✗）。口径只有一处 ✓：`app/core/cpu_budget.py` ✓。
+        self._threadBudget = cpu_budget.apply_torch(torch)
         parts, report = load_sdxl_components(path, device=self.device, dtype=self.dtype,
                                             vae_dtype=self.vae_dtype)
         self._unet = parts["unet"]
