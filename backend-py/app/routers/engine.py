@@ -12,17 +12,30 @@
 * ``POST /api/v1/engine/plan``      生成请求 → **具体数字**（尺寸/帧数/σ 序列 ✓ 不跑推理 ✓）
 * ``POST /api/v1/engine/dry-run``   用**干跑后端**把整条管线走一遍（验编排 ✓ 输出标 ``synthetic`` ✗）
 
+**运行时**（2026-09-26 起 ✓ —— 这一组才是「真跑」那条路 ✓）：
+
+* ``GET  /api/v1/engine/runtime``       运行时现状（依赖 / 装了没 / 忙不忙 / 队列 / 最近任务 ✓）
+* ``POST /api/v1/engine/load``          装齐引擎（主 DiT ⇒ TE ⇒ VAE ✓ 幂等 ✓）
+* ``POST /api/v1/engine/unload``        丢掉张量 + 清缓存 ✓（**这就是"不依赖外部"的卸载** ✗✗ 不通知任何人）
+* ``POST /api/v1/engine/generate``      **真生成** ✓（默认入队 ⇒ 拿 ``taskId`` 轮询 ✓；``wait=true`` 同步等 ✓）
+* ``GET  /api/v1/engine/tasks`` / ``/tasks/{id}`` / ``POST /tasks/{id}/cancel``   队列与进度 ✓
+
 ⚠️ 前两个**不加载模型、不占显存** ✓（只读文件头，毫秒级 ✓）。
 ⚠️ ``dry-run`` **不生成真画面** ✗（零依赖小向量 ✓）⇒ 返回值里 ``synthetic: true`` ✓，
-前端必须据此打标，**不许**当成生成结果展示 ✗（等 ``torch`` 后端落地后再加 ``/generate`` ✓）。
+前端必须据此打标，**不许**当成生成结果展示 ✗。
+⚠️ ``generate`` 走**进程内**运行时（:mod:`app.services.engine.runtime` ✓）—— **不用 ComfyUI /
+SD WebUI / Ollama** ✓、不起任何子进程 ✓；但它**同样**标 ``synthetic`` ✓✗：主 DiT 权重是真的 ✓，
+参考 TE / VAE **未经训练** ✗ ⇒ 产物是真文件 + 噪声画面 ✓（真权重到位前不许改口 ✗）。
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
+from ..core.config import get_storage_root
 from ..core.response import bad_request, success
 from ..core.request_utils import read_json
 from ..services.engine import conditioning
@@ -30,12 +43,13 @@ from ..services.engine import guidance
 from ..services.engine import hybrid_load
 from ..services.engine import inventory as inv
 from ..services.engine import loader
-from ..services.engine import safetensors as st
+from ..services.engine import runtime
 from ..services.engine import upscale as upscaler
 from ..services.engine import pipeline as pipe
 from ..services.engine import safetensors as st
 from ..services.engine.dryrun import DryRunBackend
-from ..services.engine.torch_backend import TorchBackend
+from ..services.engine.runtime import engine_runtime
+from ..services.engine.torch_backend import TorchBackend, TorchBackendUnavailable
 
 router = APIRouter(prefix="/api/v1/engine", tags=["engine"])
 
@@ -413,3 +427,168 @@ async def dry_run(request: Request) -> Any:
     if body_events:
         payload["events"] = events
     return success(payload)
+
+
+# ── 运行时：真跑那条路（**进程内** ✓ 不依赖任何外部服务 ✓）──────────────────────
+#: 装配字段（前端 camelCase ✓ / 后端 snake_case ✓ 都收 ✓ 取第一个非空的 ✓）
+_ASSEMBLY_KEYS: dict[str, str] = {
+    "stage": "stage",
+    "ditPath": "dit_path", "dit_path": "dit_path",
+    "tokenizerPath": "tokenizer_path", "tokenizer_path": "tokenizer_path",
+    "device": "device",
+    "audioLatentMode": "audio_latent_mode", "audio_latent_mode": "audio_latent_mode",
+    "attachVae": "attach_video_vae", "attachVideoVae": "attach_video_vae",
+    "attach_video_vae": "attach_video_vae",
+    "attachAudioVae": "attach_audio_vae", "attach_audio_vae": "attach_audio_vae",
+    "force": "force",
+}
+
+#: 取整口径的合法值 ✓（口径在 `torch_backend.dualStream` ✓）——
+#: ⚠️ 不认识 ⇒ **报错并列出合法的** ✗ 且**不给默认值** ✗✗（本仓老账：好默认值会把"未核实"伪装成"已实现" ✓）
+_AUDIO_LATENT_MODES = ("round", "ceil", "floor")
+
+
+def _bool_from(body: dict[str, Any], *names: str) -> bool | None:
+    """取布尔 ✓（``None`` = 没给 ✓ —— 与"给了 false"分得开 ✓✗）。"""
+    for name in names:
+        if name in body and body[name] not in (None, ""):
+            return bool(body[name])
+    return None
+
+
+def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
+    """JSON → :meth:`runtime.EngineRuntime.ensure_loaded` 的**关键字参数** ✓（不给的项**不出现** ✗ ⇒ 走默认 ✓）。"""
+    values: dict[str, Any] = {}
+    for source, target in _ASSEMBLY_KEYS.items():
+        if target in values or source not in body or body[source] in (None, ""):
+            continue
+        values[target] = body[source]
+    for key in ("dit_path", "tokenizer_path", "device", "stage"):
+        if key in values:
+            values[key] = str(values[key])
+    if "audio_latent_mode" in values:
+        mode = str(values["audio_latent_mode"]).strip()
+        # ⚠️ 不认的口径**必须报错** ✗（静默当成单流 = 用户以为双流开着 ✓✗）
+        if mode not in _AUDIO_LATENT_MODES:
+            raise pipe.StageError(
+                "plan", f"未知 audioLatentMode {mode!r} ✗ ⇒ 只能是 "
+                        f"{' / '.join(_AUDIO_LATENT_MODES)} ✓（不给 ⇒ 双流不启用 ✓）")
+        values["audio_latent_mode"] = mode
+    for key in ("attach_video_vae", "attach_audio_vae", "force"):
+        if key in values:
+            values[key] = bool(values[key])
+    return values
+
+
+def _default_outputs_dir() -> Path:
+    """产物默认落 ``<数据根>/static/engine`` ✓ —— 这样前端能直接用 ``/static`` 取 ✓。"""
+    return Path(get_storage_root()) / "engine"
+
+
+@router.get("/runtime")
+def runtime_status() -> Any:
+    """运行时现状 ✓：依赖齐不齐 / 装了哪几个组件 / 忙不忙 / 队列 + 最近任务 ✓。
+
+    ⚠️ ``available=false`` 与 ``loaded.dit=false`` 是**两件事** ✗：前者是 ``torch`` 没装 ✓，
+    后者是权重没装 ✓（治法完全不同 ✓ —— 见 ``reason`` ✓）。
+    """
+    return success(engine_runtime.status())
+
+
+@router.post("/load")
+async def load_runtime(request: Request) -> Any:
+    """**装齐引擎** ✓（主 DiT ⇒ TE ⇒ VAE ✓ 幂等 ✓）。
+
+    ⚠️ 装载是**阻塞**的 ✗（19.53 GiB 光读盘就很久 ✓）⇒ 用 ``to_thread`` 扔出事件循环 ✓✗
+    （**不**在事件循环里直接调 ✓：那会把整个后端卡死 ✓✗ —— 本模块第一条纪律 ✓）。
+    装不上 ⇒ **400 + 缺什么** ✓（``reason``: ``deps`` 依赖没装 / ``pending`` 权重或结构没到 ✓）。
+    """
+    body = await read_json(request)
+    try:
+        assembly = _assembly_from(body)
+    except pipe.StageError as err:
+        return bad_request(str(err))
+    try:
+        report = await asyncio.to_thread(engine_runtime.ensure_loaded, **assembly)
+    except runtime.EngineBusy as err:
+        return bad_request(str(err))
+    except TorchBackendUnavailable as err:
+        return bad_request(f"{err}（reason={getattr(err, 'reason', 'pending')} ✓）")
+    return success({"loadReport": report, "runtime": engine_runtime.status()})
+
+
+@router.post("/unload")
+async def unload_runtime(request: Request) -> Any:
+    """**丢掉张量 + 清缓存** ✓ —— 与外部服务那套（发 HTTP 让人家卸载 ✓）**不是一回事** ✗✗。
+
+    ``force=true`` 可在有任务在跑时强卸 ✓（⚠️ 那个任务会跟着失败 ✗ —— 所以默认**拒** ✓）。
+    """
+    body = await read_json(request)
+    try:
+        return success(await asyncio.to_thread(engine_runtime.unload, force=bool(body.get("force"))))
+    except runtime.EngineBusy as err:
+        return bad_request(str(err))
+
+
+@router.post("/generate")
+async def generate(request: Request) -> Any:
+    """**真生成** ✓ —— 送上请求、入队、拿 ``taskId`` 轮询 ✓（``wait=true`` 则同步等 ✓）。
+
+    三种用法（都能用 ✓，按需要挑 ✓）：
+
+    * ``dryRun=true`` —— 用**干跑后端**过一遍运行时自身的队列/装载/事件 ✓（**不装权重** ✗ ⇒
+      没权重时也能验这条管道 ✓）；
+    * 默认 —— ``assembly`` 给装配口径 ✓（``ditPath`` / ``tokenizerPath`` / ``audioLatentMode`` ✓），
+      装不上就把**原因写进任务** ✓（不拒绝请求 ✓：``/readiness`` 已经答过"能不能跑" ✓）；
+    * ``wait=true`` + ``timeoutSeconds`` —— 同步等结果 ✓（产物路径在 ``result.outputs`` ✓）。
+
+    ⚠️ 产物仍是 ``synthetic`` ✓✗（参考 TE / VAE 未训练 ✗）—— 前端必须打标 ✗。
+    """
+    body = await read_json(request)
+    if not str(body.get("outputsDir") or body.get("outputs_dir") or "").strip():
+        # ⚠️ 默认给**数据根下的 engine 目录** ✓：不给 ⇒ 管线落到临时目录 ✓✗（前端取不到 ✓）
+        body = {**body, "outputsDir": str(_default_outputs_dir())}
+    try:
+        generation = _generation_request(body)
+        assembly = _assembly_from(body)
+    except pipe.StageError as err:
+        return bad_request(str(err))
+    assembly["dryRun"] = bool(body.get("dryRun"))
+    task_id = engine_runtime.submit(generation, assembly=assembly, stage=str(assembly.get("stage") or "h3"))
+    poll = {"taskId": task_id, "pollUrl": f"/api/v1/engine/tasks/{task_id}"}
+    if not bool(body.get("wait")):
+        return success({**poll, "status": "queued", "waited": False, "synthetic": True})
+    try:
+        timeout = float(body.get("timeoutSeconds") or body.get("timeout_seconds") or 0) or None
+    except (TypeError, ValueError):
+        return bad_request(f"timeoutSeconds 不是数字（收到 {body.get('timeoutSeconds')!r} ✗）")
+    task = engine_runtime.wait(task_id, timeout=timeout)
+    return success({**poll, "waited": True, "timeoutSeconds": timeout, "task": task})
+
+
+@router.get("/tasks")
+def list_engine_tasks(limit: int = 20) -> Any:
+    """最近的任务 ✓（**瘦身版** ✗ 不带事件 ✓ —— 详情走 ``/tasks/{id}`` ✓）。"""
+    return success({"tasks": engine_runtime.list_tasks(limit=limit)})
+
+
+@router.get("/tasks/{task_id}")
+def get_engine_task(task_id: str, events_limit_raw: int = Query(200, alias="eventsLimit")) -> Any:
+    """单个任务 ✓（带事件 ✓ —— 前端按它画进度 ✓；截断时 ``eventsTruncated`` 会说明 ✓）。"""
+    task = engine_runtime.get_task(task_id, events_limit=max(0, int(events_limit_raw)))
+    if task is None:
+        return bad_request(f"没有这个任务 {task_id!r} ✓（列表见 /api/v1/engine/tasks ✓）")
+    return success(task)
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_engine_task(task_id: str) -> Any:
+    """请求取消 ✓ —— **排队中的**立刻终结 ✓ / **跑着的**由管线在下一步停 ✗（不是瞬停 ✓）。"""
+    task = engine_runtime.cancel(task_id)
+    if task is None:
+        return bad_request(f"没有这个任务 {task_id!r} ✓（列表见 /api/v1/engine/tasks ✓）")
+    return success(task)
+
+
+# ⚠️ 这里**没有** "同步端点读 body" 的辅助函数 ✗ —— 读不了 ✓✗（`read_json` 是 async ✗）
+#   ⇒ 需要读体的端点一律 ``async def`` + ``await read_json`` + ``asyncio.to_thread`` ✓。

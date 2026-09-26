@@ -13,11 +13,12 @@
 ⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（没装真权重时画面不真 ✗）。
 UI/接口据此可以显示「真张量 ✓ / 真模型 ✗」而不至于误导 ✓。
 
-## 为什么本机是 CPU 版
+## 关于 CPU / CUDA（⚠️ 2026-09-26 更正）
 
-本机核实**没有 NVIDIA 显卡** ✗（Iris Xe 集显 ✓、无 `nvidia-smi` ✓）⇒ 装 **CPU 轮子**（124 MB ✓）才有意义 ✓
-（2.5 GB CUDA 轮子在这里白装 ✗）。代码**一行都不用改** ✓：到 A5000 那台机器换 CUDA 轮子即可 ✓
-（`device` 自动探测 ✓）。
+**别在代码或文档里写死"本机没有 N 卡"** ✗✗ —— 本仓换过机器 ✓：笔记本时代是 Iris Xe 集显 ✓（CPU 轮子 ✓），
+现在跑在 **A5000 工作站**上 ✓（torch 2.13.0+cu130 ✓、RTX A5000 22.5 GiB ✓、`device=cuda` ✓）。
+⇒ 设备一律**实测** ✓（``_detect_device()`` / ``engine_readiness.device_facts()`` ✓，
+`/engine/runtime` 的 ``device`` + ``deviceSource`` 也是它 ✓）；代码**一行都不用改** ✓。
 
 ## 依赖闸门（保留 ✓）
 

@@ -53,9 +53,10 @@ def main() -> int:  # noqa: C901
         profile["cooldownMs"] = 0
 
     # ================= 本地判定 =================
-    check("本地: provider 白名单（ollama / local-sd / cosyvoice）",
+    check("本地: provider 白名单（ollama / local-sd / cosyvoice / **engine**）",
           gm.is_local_provider("OLLAMA") and gm.is_local_provider("local-sd")
-          and gm.is_local_provider("cosyvoice") and not gm.is_local_provider("chatfire"))
+          and gm.is_local_provider("cosyvoice") and gm.is_local_provider("engine")
+          and not gm.is_local_provider("chatfire"))
     check("本地: baseUrl 命中 localhost/127.0.0.1/192.168.* —— 任意 provider 都算本地",
           gm.is_local_config("http://localhost:11434", "openai")
           and gm.is_local_config("http://127.0.0.1:7860", "minimax")
@@ -188,6 +189,17 @@ def main() -> int:  # noqa: C901
               and await manager.unload_model("x", {"unloadStrategy": "passive"}) is True)
         check("卸载: 未登记策略（none）-> False", 
               await manager.unload_model("x", {"unloadStrategy": "none"}) is False)
+
+        # ---- ⭐ 自研引擎：**本进程内** ⇒ 卸载靠运行时丢张量，**一个 HTTP 都不许发** ✓✗ ----
+        engine_profile = manager.get_profile("engine", "h3")
+        check("引擎: 账本登记 19.5 GiB（= 主 DiT 真实体积，与 /engine/readiness 同一口径）",
+              engine_profile["vramGB"] == 19.5 and engine_profile["unloadStrategy"] == "engine-unload",
+              engine_profile)
+        posted_before = len(_POSTED)
+        check("引擎: 没装东西时卸载 ⇒ **False**（如实：这次没腾出任何显存 ✗ 不假装成功 ✓）",
+              await manager.unload_model("engine:h3", engine_profile) is False)
+        check("⭐ 引擎: 卸载**一个 HTTP 都没发**（进程内引擎 ⇒ 不依赖任何外部服务 ✓）",
+              len(_POSTED) == posted_before, _POSTED[posted_before:])
 
     asyncio.run(scenario())
 

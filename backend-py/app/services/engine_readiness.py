@@ -36,6 +36,31 @@ from .engine import media as media_mod
 __all__ = ["collect", "precheck_weights", "quant_plan", "summary", "next_steps", "planned_gib"]
 
 
+def device_facts() -> dict[str, Any]:
+    """本机**实测**设备 ✓（设备名 / 显存总量 ✓）—— ⚠️ **只报实测** ✗：缺 torch 就报 ``None`` ✓，
+    **绝不**写死"本机无 NVIDIA 卡"这类断言 ✓✗（本仓在 A5000 工作站上也跑 ✓：写死的断言会把
+    「现在就能真跑」说成「得换机器」✗）。
+    """
+    from .engine import torch_backend as tb  # noqa: PLC0415 —— 局部引 ✓：它模块级不碰 torch ✓
+
+    available, _ = tb.torch_available()
+    if not available:
+        return {"device": None, "cudaAvailable": False, "deviceName": None, "totalGiB": None}
+    described = tb.TorchBackend().describe()          # 轻 ✓：只探设备 ✓ 不装权重 ✓
+    facts: dict[str, Any] = {"device": described.get("device"),
+                             "cudaAvailable": described.get("cudaAvailable"),
+                             "deviceName": None, "totalGiB": None}
+    if facts["cudaAvailable"]:
+        try:
+            import torch  # noqa: PLC0415 —— 只有真在 CUDA 上才需要它 ✓
+
+            facts["deviceName"] = torch.cuda.get_device_name(0)
+            facts["totalGiB"] = round(torch.cuda.get_device_properties(0).total_memory / 1024 ** 3, 1)
+        except Exception:  # noqa: BLE001 —— 问不到名字不影响"有没有卡"这个结论 ✓
+            pass
+    return facts
+
+
 def environment_report() -> dict[str, Any]:
     """① 环境 ✓（**不导入**重库 ✓ ⇒ 秒级 ✓）。"""
     from .engine import torch_backend as tb  # noqa: PLC0415 —— 局部引 ✓：它模块级不碰 torch ✓
@@ -51,6 +76,8 @@ def environment_report() -> dict[str, Any]:
         "installOptional": status.get("installOptional", []),
         "ffmpeg": media_mod.have_ffmpeg(),
         "ffmpegVersion": media_mod.ffmpeg_version(),
+        # ⭐ 设备**实测** ✓（2026-09-26 加 ✓）：没有这一项，报告就只能靠"猜本机有没有卡" ✓✗
+        "device": device_facts(),
     }
 
 
@@ -166,8 +193,22 @@ def next_steps(report: dict[str, Any]) -> list[str]:
                      f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓ "
                      f"⇒ 本仓不猜 ✗；先换成**非分组**量化的重导出 ✓ 或把 group size 给出来 ✓）")
     if isinstance(check, dict) and (check.get("audit") or {}).get("ok"):
-        steps.append("⭐ 权重核对通过 ✓ ⇒ 下一步在工作站：`TorchBackend.load_weights(path=…)` "
-                     "→ `pipeline.run_sync(...)` ✓（本机无 NVIDIA 卡 ✗）")
+        # ⚠️ 下一步说什么，**要看本机实测设备** ✗ —— 不许再写死"本机无 NVIDIA 卡" ✓✗
+        #    （本仓在 A5000 工作站上也跑 ✓：2026-09-26 实测 `device=cuda` ✓ 22.5 GiB ✓ ⇒
+        #     写死的断言会把"能真跑"说成"得换机器" ✓✗ —— 判据一律**实测** ✓）
+        device = (report["environment"].get("device") or {})
+        where = str(device.get("device") or "?")
+        if where == "cuda":
+            steps.append(
+                f"⭐ 权重核对通过 ✓ ⇒ 本机就是 CUDA（{device.get('deviceName') or '?'} "
+                f"{device.get('totalGiB') or '?'} GiB ✓）⇒ **现在就能真跑** ✓："
+                f"`POST /api/v1/engine/load` ✓ → `POST /api/v1/engine/generate` ✓"
+                f"（或 `TorchBackend.load_weights(path=…)` → `pipeline.run_sync(...)` ✓）；"
+                f"⚠️ 单靠一次 simple 装载装不下 39.55 GiB 全量 ✗ ⇒ 大权重走 hybrid 计划 ✓")
+        else:
+            steps.append("⭐ 权重核对通过 ✓ ⇒ 下一步：`TorchBackend.load_weights(path=…)` "
+                         "→ `pipeline.run_sync(...)` ✓"
+                         f"（本机实测 device={where} ✓ —— CPU 上能跑但很慢 ✗）")
     return steps
 
 

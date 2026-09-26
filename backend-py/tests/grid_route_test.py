@@ -345,4 +345,6 @@ def _insert_character(drama_id: int, name: str, **extra) -> int:
 
 
 if __name__ == "__main__":
+    # ⚠️ Windows 中文控制台是 **GBK**（py3.14 及以前不会自动 UTF-8 ✗）⇒ 不加这行，裸跑第一条 `print` 就 `UnicodeEncodeError` 崩 ✗（守口径见 `check_cli_encoding.py` ✓）
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

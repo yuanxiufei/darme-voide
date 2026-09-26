@@ -15,12 +15,15 @@
   造故障 → 断言「退出码 1 + 命中预期文案」。真仓库全程只读，跑完删临时目录。
   仓库根相对路径（``docs/api-contract.md`` 等）仍按真实 ROOT 解析 ⇒ 用例贴近实战。
 
-用例（``check_memory.py``：基线 1 + 负向 7 ｜ ``check_skill_refs.py``：基线 1 + 负向 3）
+用例（``check_memory.py``：基线 1 + 负向 7 ｜ ``check_skill_refs.py``：基线 1 + 负向 3 ｜
+``check_cli_encoding.py``：基线 1 + 负向 3）
   基线  副本未改动          ⇒ 0 致命（防「用例自身把基线弄坏」）
   ① 缺 TOPICS.md ｜② MEMORY.md 超 8k ｜③ 锚点越界 ｜④ 末节未登记锚点 ｜④b 中间**步骤小节**未登记锚点
   ⑤ 磁盘日志未登记 ｜⑥ 落点表路径不存在 ｜⑥b 落点表 §小节指针落空
   ⑦ 引用真断链 ｜⑧ ``docs/`` 引用断链（守住 2026-09-12 才补上的 ``docs/`` 前缀）
   ⑨ 示意引用不误报（``e.g.`` 紧邻的路径必须被跳过，否则真信号会被噪声淹没）
+  ⓪ 含 locale 外字符 + 有 print + 无 ``reconfigure`` ⇒ 报 ✗ ｜⓪b 纯 ASCII ⇒ **不报**（防假警 ✓）
+  ⓪c 老写法 ``sys.stdout = io.TextIOWrapper(...)`` **不算数** ✗（丢原 wrapper ⇒ 必须报 ✗）
 
 刻意不做
   - **不校验「没报致命」之外的输出**：只认退出码与命中文案，避免把措辞变动变成回归。
@@ -47,6 +50,10 @@ MEM = ROOT / ".codebuddy" / "memory"
 SCRIPTS = Path(__file__).resolve().parent
 GUARD = SCRIPTS / "check_memory.py"
 REFS_GUARD = SCRIPTS / "check_skill_refs.py"
+#: 2026-09-25 新增的**编码守卫**（拦「GBK 控制台裸跑就崩」✗，见 `check_cli_encoding.py` ✓）：
+#: ⚠️ 它与其他两套的**指路方式不同** ✗ —— 那两套靠环境变量指夹具 ✓，它靠 `--root` 参数 ✓
+#: （所以 `_spawn` 才要支持透传 `*args` ✓）。
+ENC_GUARD = SCRIPTS / "check_cli_encoding.py"
 SKILLS = ROOT / "backend-py" / "app" / "skills"  # 2026-09-15 起技能库并入 app/
 
 SECTION_RE = re.compile(r"^(#{1,4}\s|-\s*【)")
@@ -165,6 +172,54 @@ def _case_last_section_unregistered() -> None:
     raise AssertionError(f"夹具失配：INDEX.md 的 {block['log']} 块内找不到 @{last}")
 
 
+#: ④b 的**合成夹具**日志名（找不到真实步骤日志时用；见 ``_synthetic_step_log``）。
+SYNTH_STEP_LOG = "2099-01-01.md"
+
+
+def _synthetic_step_log() -> tuple[dict, list[int]]:
+    """自己造一篇带 3 个步骤小节的日志，并把它登记进副本的 ``INDEX.md``。
+
+    ⚠️ 2026-09-26 实测踩到：记忆层清理成「只保留最新一天」后，仓里再没有 ``## S7 第 N 步`` 形态的
+    日志 ⇒ ④b 直接「夹具失配」整体红 ✗。**用例意图是「抹掉中间某步的锚点」，不该依赖仓库此刻恰好
+    存在哪种日志** ✗ —— 故找不到就自己造一篇（判据、文案一字不改 ✓）。
+    """
+    lines = [
+        "# 2099-01-01 守卫夹具（合成）",
+        "",
+        "## S7 第 1 步：合成第一步",
+        "",
+        "正文。",
+        "",
+        "## S7 第 2 步：合成第二步",
+        "",
+        "正文。",
+        "",
+        "## S7 第 3 步：合成第三步",
+        "",
+        "正文。",
+    ]
+    steps = [index + 1 for index, line in enumerate(lines) if line.startswith("## S7 第")]
+    _write(SYNTH_STEP_LOG, "\n".join(lines) + "\n")
+
+    # 块必须落在「## 日志清单」小节内（守卫只在该小节内解析 @N）⇒ 插到下一个 `## ` 之前。
+    index_lines = _read("INDEX.md").split("\n")
+    list_at = next(i for i, line in enumerate(index_lines) if line.startswith("## 日志清单"))
+    next_at = next(i for i in range(list_at + 1, len(index_lines))
+                   if index_lines[i].startswith("## "))
+    entry = [
+        "",
+        f"**`{SYNTH_STEP_LOG}`**（合成夹具：④b 步骤小节锚点用例）",
+        "三个步骤小节，锚点 " + " / ".join(f"@{num}" for num in steps) + "。",
+    ]
+    index_lines[next_at:next_at] = entry
+    _write("INDEX.md", "\n".join(index_lines))
+
+    for block in _blocks("\n".join(index_lines)):
+        if block["log"] == SYNTH_STEP_LOG:
+            return block, steps
+    raise AssertionError("夹具失配：合成日志没登记进 INDEX.md")
+
+
 def _case_step_section_unregistered() -> None:
     """抹掉**倒数第二个步骤小节**的锚点（末节已被 ④ 覆盖，这里专测「中间小节被挤掉」）。
 
@@ -175,6 +230,7 @@ def _case_step_section_unregistered() -> None:
     #    ⇒ 硬要求 ≥2 会让自检**自己失配**（2026-09-16 实测：「夹具失配：2026-09-16.md 内步骤小节
     #    不足 2 个」✗）。改为「按日期**从新到旧**取第一篇含 ≥2 个步骤小节的日志」✓ ——
     #    用例意图不变（抹掉中间某步的锚点），且对「日记粒度」不敏感 ✓。
+    # ⚠️ 2026-09-26 再补一层：真实日志**一篇都没有**时（记忆层只留最新一天 ✗）自己造 ✓。
     chosen = None  # (INDEX 里的日志块, 该日志的步骤小节行号列表)
     for candidate in sorted(_blocks(_read("INDEX.md")), key=lambda item: item["log"], reverse=True):
         log_lines = _lines_of(_read(candidate["log"]))
@@ -184,7 +240,7 @@ def _case_step_section_unregistered() -> None:
             chosen = (candidate, found)
             break
     if chosen is None:
-        raise AssertionError("夹具失配：INDEX.md 里没有任何日志含 ≥2 个步骤小节")
+        chosen = _synthetic_step_log()
     block, steps = chosen
     target = steps[-2]
     lines = list(block["lines"])
@@ -247,9 +303,50 @@ REF_CASES: list[tuple[str, int, str, object]] = [
 ]
 
 
-def _spawn(guard: Path, extra_env: dict[str, str]):
+def fresh_enc() -> Path:
+    """编码守卫的夹具：一个**假的 backend-py** ✓（只需它扫的两个目录 ✓）。
+
+    ⚠️ 与另两套夹具的取向**相反** ✗：那两套拷**真实资产**（结论依赖真实内容 ✓），
+    这一套**必须造空壳** ✓ —— 它扫的是**源码文本**，拷全仓既慢、又会让断言随仓库自身
+    改动漂 ✓✗（真实仓库一旦全合规，「还能不能报错」就再也测不出来了 ✓）。
+    """
+    box = Path(tempfile.mkdtemp(prefix="enc-guard-"))
+    (box / "tests").mkdir()
+    (box / "app" / "scripts").mkdir(parents=True)
+    return box
+
+
+def _write_enc(box: Path, relative: str, text: str) -> None:
+    (box / relative).write_text(text, encoding="utf-8")
+
+
+#: 编码守卫用例（`check_cli_encoding.py`：基线 1 + 负向 3）。
+#: ⚠️ 夹具文件**不必语法完整** ✗（守卫只读源码文本 ✓ 不 import ✗）⇒ 摆得越短越能看清判据 ✓。
+#: 三条负向分别守住口径的三条：① locale 外字符（⓪）② 真的 print（⓪b 反向）③ reconfigure（⓪c）✓。
+ENC_CASES: list[tuple[str, int, str, object]] = [
+    ("基线（假入口已 reconfigure）", 0, "",
+     lambda box: _write_enc(box, "tests/fake_test.py",
+                            'import sys\n'
+                            'sys.stdout.reconfigure(encoding="utf-8", errors="replace")\n'
+                            'print("✓")\n')),
+    ("⓪ 裸跑会崩：含 locale 外字符 + 有 print + **无** reconfigure", 1, "致命",
+     lambda box: _write_enc(box, "tests/fake_test.py", 'print("✓ 判据")\n')),
+    ("⓪b 纯 ASCII ⇒ **不报**（口径①不成立 ✓ —— 守住「别变成见 print 就红」✗）", 0, "",
+     lambda box: _write_enc(box, "tests/fake_test.py", 'print("plain ascii")\n')),
+    ("⓪c 老写法 `sys.stdout = io.TextIOWrapper(...)` **不算数** ✗（丢原 wrapper ✓ ⇒ 必须报 ✗）",
+     1, "致命",
+     lambda box: _write_enc(box, "app/scripts/fake.py",
+                            'import io, sys\n'
+                            'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")\n'
+                            'print("✓")\n')),
+]
+
+
+def _spawn(guard: Path, extra_env: dict[str, str], *args: str):
+    """``*args`` 供**按目录扫描**的守卫用 ✓（编码守卫靠 ``--root`` 指夹具 ✓，
+    记忆 / 引用守卫则是靠环境变量指夹具 ✓ —— 两种指路方式都收在这儿 ✓）。"""
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", **extra_env}
-    return subprocess.run([sys.executable, str(guard)], capture_output=True, text=True,
+    return subprocess.run([sys.executable, str(guard), *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", env=env)
 
 
@@ -299,20 +396,43 @@ def main() -> int:
                     )
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"{name} → {exc}")
+        for name, expect, needle, mutate in ENC_CASES:
+            box = fresh_enc()
+            try:
+                if mutate:
+                    mutate(box)  # type: ignore[operator]
+                result = _spawn(ENC_GUARD, {}, "--root", str(box))
+                out = (result.stdout or "") + (result.stderr or "")
+                if expect == 0:
+                    if result.returncode == 0 and re.search(r"致命[^\n]*0 处", out):
+                        passed.append(f"{name} → exit 0 / 致命 0")
+                    else:
+                        failed.append(f"{name} → 期望 exit 0/致命 0，实得 exit {result.returncode}：{out.strip()}")
+                elif result.returncode == 1 and needle in out:
+                    passed.append(f"{name} → exit 1 / 命中「{needle}」")
+                else:
+                    failed.append(
+                        f"{name} → 期望 exit 1 且含「{needle}」，实得 exit {result.returncode}：{out.strip()}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{name} → {exc}")
+            finally:
+                shutil.rmtree(box, ignore_errors=True)  # 夹具是空壳 ✓ 每例一删 ✓
     finally:
         for key in ("base", "skills_base"):
             target = _state[key]
             if isinstance(target, Path) and target.exists():
                 shutil.rmtree(target, ignore_errors=True)
 
-    total = len(MEM_CASES) + len(REF_CASES)
+    total = len(MEM_CASES) + len(REF_CASES) + len(ENC_CASES)
     for item in passed:
         print(f"✓ {item}")
     for item in failed:
         print(f"✗ {item}")
     print(
         f"守卫自检：{len(passed)}/{total} 通过 ｜ check_memory.py 基线+①~⑥（含 ④b，{len(MEM_CASES)} 例）｜ "
-        f"check_skill_refs.py 基线+⑦~⑨（{len(REF_CASES)} 例）"
+        f"check_skill_refs.py 基线+⑦~⑨（{len(REF_CASES)} 例）｜ "
+        f"check_cli_encoding.py 基线+⓪~⓪c（{len(ENC_CASES)} 例）"
     )
     return 1 if failed else 0
 

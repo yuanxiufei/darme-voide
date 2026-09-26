@@ -746,3 +746,50 @@ github.com/mamad8c/ComfyUI-H3-Latent-Upscaler-Mamad8」✓ ⇒ 本仓**可以实
 **先核现状再动手** ✓，尤其别重复造脱敏、上传上限、克隆那三层 ✗。
 **未提交** ✓：工作区 16 改 + 28 新增（全量 **120 套 / 3912 项 / 0 失败** ✓ 已验证 ✓）。
 ⚠️ 提交需**用户明确要求** ✗；message 用**英文** ✓；`.codebuddy/memory/` 改动**随同批** ✓。
+
+## CLI 裸跑编码：GBK 控制台（2026-09-25 ✓ 实测事故 —— 「全量自检全绿、裸跑就崩」的静默掩盖 ✗✗）
+
+**触发** ✓：照 `torch_backend.PENDING_PARTS` 说的「上机前先跑一次」跑 `app/scripts/h3_readiness.py`（本机真 H3 权重 ✓）
+⇒ **裸跑第一条 `print` 就 `UnicodeEncodeError` 崩** ✗（连「① 环境」都打不出来 ✗ —— 它满屏 ✓/✗ / `⇒` / `⚠️`）。
+
+**根因** ✗：本机 **Python 3.14.5** ⇒ stdout 仍按 **locale（GBK）** 编码 ✗（PEP 686 的 UTF-8 默认要 **3.15** 才生效 ✓）。
+
+**四层掩盖链** ✗✗（一层套一层，谁都没把它暴露出来）：
+1. `h3_readiness.py` 裸跑即崩 ✓✗（它正是 `PENDING_PARTS` 让人上机前先跑的那条命令 ✗ ⇒ 等于「上机当天才发现跑不起来」✓✗）；
+2. `tests/engine_readiness_script_test.py` ⑩（`--json` 必须是合法 JSON）FAIL ✗ ⇒ 根因就是 ① 里脚本崩了、stdout 不是 JSON ✓✗；
+3. 而该测试**自己也崩在「打印失败原因」上** ✗✗：`print(f"FAIL … ⇒ {detail}")` 里的 `⇒` = U+21D2，GBK 编不了 ✓
+   ⇒ 只剩一个 `EXIT=1`，**失败原因一个字都打不出来** ✓✗（最恶劣的一层 ✓）；
+4. `tests/run_all.py` **给子进程灌了 `PYTHONIOENCODING=utf-8`** ✓（它自己的注释就写着这个双坑 ✓）⇒ **全量 133 套全绿** ✓✗
+   ⇒ 而文档里推荐的**单跑**用法（`python tests/<某个>_test.py` ✓）在本机裸控制台是坏的 ✗✗。
+⇒ 修 ①③ 两处 `reconfigure` 后 ⑩ **自动转绿**（18/18 ✓）—— 反证了「⑩ 的 FAIL 根因就是脚本自己崩」✓。
+
+**判定口径** ✓（守卫复用同一条 ✓，三条**缺一不报** ✗）：
+① 文件里含**locale 编不了的字符** ✓ 且 ② 文件里**真有会执行的 `print`** ✓ 且 ③ CLI 入口**没有** `reconfigure` ✓
+⇒ 判「裸跑会崩」✗。⚠️ 少了 ①/② 的（纯 ASCII 文件、没有 `print` 的模块）必须**不报** ✓ —— 否则会变成「见 `print` 就红」✗。
+
+**收口** ✓：新建守卫 `backend-py/app/scripts/check_cli_encoding.py` ✓（扫 `tests/` + `app/scripts/`，本次 **152 个文件** ✓）
+—— 探针照上面口径命中 **65 个** ✗（62 测试 + `app/scripts/corpus/analyze3.py` / `app/scripts/db_upgrade.py` / `app/scripts/tokenizer_bench.py` ✓）
+⇒ 63 个由**一次性 AST 补丁脚本**批量改 ✓（跑完即删 ✓），剩 2 个**模块级脚本**（没有 `if __name__ == "__main__":` 块 ✓）手改：
+`backend-py/tests/smoke_test.py` ✓、`backend-py/app/scripts/corpus/analyze3.py` ✓。
+⚠️ **只认** `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` ✗：老写法
+`sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")` **丢掉原 wrapper** ✗（刷新顺序与调用方不一致 ✓✗、
+遇 locale 外字符仍抛异常 ✗）⇒ 守卫认不出它、会**一直报** ✓✗（本次就是它被报出来的 ✓）。
+**已接进**：`check_all.py` 第 3 道 ✓（现共四道 ✓）+ `test_guards.py` 负向 3 例 ✓
+（基线 ✓ / ⓪ 会崩 ⇒ 报 ✓ / ⓪b 纯 ASCII ⇒ 不报 ✓ / ⓪c 老写法 ⇒ 必须报 ✓ ⇒ 共 **17/17** ✓）。
+**硬证据** ✓：`check_all.py` 四道全绿 ✓；抽样**裸跑**（不带 `PYTHONIOENCODING` ✓）4 套测试 `exit=0` ✓：
+`agent_prompts_test` 20/20 ✓、`engine_quant_test` 18/18 ✓、`engine_h3_keys_test` 29/29 ✓、`skills_test` 45/45 ✓。
+
+## 自 MEMORY.md 下移（2026-09-25 第五次腾 8k 预算）—— 自研优先：原话 / 三条硬约束 / 边界
+
+> 起因：`MEMORY.md` 7913/8000（余量 87 ✓），守卫提示「下轮进内容前先下移」✓。本轮把 §自研优先 的
+> **原话与举例**移到这里 ✓，`MEMORY.md` 只留**一句话缩写 + 指针** ✓（用户 2026-09-24 纪律：加新内容前先清等量的旧 ✓）。
+
+**用户原话**（2026-09-20 ✓）：「**所有功能不要对外依赖，自己实现所有的功能，要参考我给你的几个项目**」⇒ 落成三条硬约束：
+1. **能力自研**：功能要能在**本仓自己实现**（推理 / 生成 / 解析 / 合成 都算 ✓）⇒ 不许把关键能力**只**挂在外部队商 API 上 ✗；
+2. **不对外依赖**：默认形态是**离线可跑**（本地服务 / 本地权重 / 纯计算 ✓）⇒ 外部队商适配器**可以有**（作为可选通道 ✓），但**不能是唯一出路** ✗；
+3. **参考 `reference/` 那几个项目**（Mini-Agent / minimax-desgin-plugin / ollama-python / ollama /
+   Open-AI-Micro-Drama-Generator / short-drama-agent ✓）：**有用的功能搬过来自己实现** ✓（判据同「没人调用的库不算功能」✓：搬来要**真接线** ✓）。
+
+**⚡ 2026-09-20 加严**：「**所有都要自己实现，不要调用外部的**」⇒ 外部队商 API **不是可选通道，是要去掉的** ✗。
+**边界**（可纠正 ✓）：**功能 / 能力**不外包 ✗；`ffmpeg` / SQLite / 标准库 / 框架属**本地基础设施** ✓ 不算 ✗。
+⚠️ 现状（2026-09-20 实测，详见 §外部调用审计 ✓）：四类生成曾**全部**解析到厂商 API ✗（`ai_providers.py` 按 priority 降序 ✓）。

@@ -438,6 +438,23 @@ async def _process_video_generation(video_id: int, config: dict[str, Any]) -> No
                 "referenceMode": _col(record, "reference_mode"),
             })
 
+            # ⭐ 自研引擎分支（2026-09-26 ✓）：``provider=engine`` ⇒ 走**进程内**引擎 ✓
+            #    （**不 HTTP 调 ComfyUI / MiniMax 云 ✗** —— 这就是「不依赖外部」那条路 ✓）。
+            #    ⚠️ 必须**在取适配器之前**分叉 ✓：引擎不是 HTTP 适配器 ✗（registry 里没有它 ✓）。
+            from .engine import bridge  # 局部 import ✓：非引擎的配置一个字节都不多加载 ✓
+            if bridge.is_engine_provider(config.get("provider")):
+                await _run_video_with_engine(
+                    video_id, attempt_config, record,
+                    storyboard_id=_col(record, "storyboard_id"),
+                    resolved={
+                        "imageUrl": resolved_image_url,
+                        "firstFrameUrl": resolved_first_frame,
+                        "lastFrameUrl": resolved_last_frame,
+                        "referenceImageUrls": resolved_reference_images,
+                    },
+                )
+                return
+
             adapter = get_video_adapter(config.get("provider"))
             request = adapter.build_generate_request(attempt_config, {
                 "id": _col(record, "id"),
@@ -699,7 +716,43 @@ async def _handle_video_complete(
     with _tx() as conn:
         _mark_usage_by_video_gen(conn, video_id, "completed")
     local_path = await download_file(video_url, "videos")
+    await _finalize_video(video_id, video_url, local_path, duration, storyboard_id)
 
+
+async def _handle_video_complete_local(
+    video_id: int,
+    local_path: str,
+    duration: Any = None,
+    storyboard_id: Any = None,
+) -> None:
+    """**本机已有产物**时的收尾 ✓（自研引擎那条路 ✓ —— 不"下载" ✗，它本来就在盘上 ✓）。
+
+    收口语义与 :func:`_handle_video_complete` **完全一致** ✓（同一份 :func:`_finalize_video` ✓），
+    只把「下载」换成「本地文件已在」✓。``video_url`` 也写这个**相对数据根**的路径 ✓
+    （与 ``_finalize_video`` 里回写分镜的 ``video_url`` 同一口径 ✓ —— 本机产物没有远程 URL 可写 ✓）。
+    """
+    release_video_gpu_lease(video_id)
+    with _tx() as conn:
+        _mark_usage_by_video_gen(conn, video_id, "completed")
+    await _finalize_video(video_id, local_path, local_path, duration, storyboard_id,
+                          event="saved-local")
+
+
+async def _finalize_video(
+    video_id: int,
+    video_url: str,
+    local_path: str,
+    duration: Any,
+    storyboard_id: Any = None,
+    *,
+    event: str = "downloaded",
+) -> None:
+    """**拿到本地文件之后**的公共收尾 ✓：补时长 → 更新记录 → 回写分镜 → 留档 → 触发 QC ✓。
+
+    ⚠️ ``storyboard_id`` 为 None 时**不更新分镜行**（同步完成路径就是这样）——
+    但版本留档与 QC 会用「形参 ?? 记录里的 storyboard_id」回退，仍然生效。
+    ⚠️ ``event`` 只影响**日志事件名** ✓：本机产物不能记成 ``downloaded`` ✗（没有下载这回事 ✓）。
+    """
     # 异步提供商（轮询/Webhook）不返回时长时，用 ffprobe 探测本地文件实际时长
     resolved_duration = duration if duration is not None else None
     if resolved_duration is None:
@@ -719,7 +772,7 @@ async def _handle_video_complete(
                 updated_at=now(),
             )
         )
-    log_task_success("VideoTask", "downloaded", {
+    log_task_success("VideoTask", event, {
         "id": video_id, "localPath": local_path,
         "storyboardId": storyboard_id, "duration": resolved_duration,
     })
@@ -762,6 +815,76 @@ async def _handle_video_complete(
     qc_storyboard_id = storyboard_id or (_col(gen, "storyboard_id") if gen is not None else None)
     if qc_storyboard_id:
         _run_qc_after_video_complete(qc_storyboard_id, video_id)
+
+
+async def _run_video_with_engine(
+    video_id: int,
+    config: dict[str, Any],
+    record: Row,
+    *,
+    storyboard_id: Any = None,
+    resolved: dict[str, Any] | None = None,
+) -> None:
+    """``provider=engine`` ⇒ **进程内自研引擎** ✓（不调 ComfyUI / MiniMax 云 ✗ —— 「不依赖外部」✓）。
+
+    ⚠️ **两条必须照实的边界**（宁可少给功能，也不假装支持 ✗）：
+    · ``lastFrameUrl`` 引擎请求里**没有**这个位置 ✗ ⇒ 记一条 warn ✓ 并**不静默丢掉** ✗；
+    · 没有音轨 ⇒ 由 :func:`bridge.run_job` 统一记 ``engine-no-audio`` ✓（不是失败 ✓，是功能边界 ✓）。
+
+    失败一律**抛错** ✗ ⇒ 外层已有的 fallback / 失败收口接管 ✓。
+    """
+    from .engine import bridge  # 局部 import ✓
+
+    urls = resolved or {}
+    settings = bridge.normalize_settings(config)
+    _dit_path, dit_source = bridge.resolve_dit_path(settings)
+    outputs_dir = bridge.outputs_dir_for("video", video_id)
+    log_task_progress("VideoTask", "engine-assembly", {
+        "id": video_id, "provider": bridge.PROVIDER,
+        "ditSource": dit_source, "outputsDir": str(outputs_dir),
+        "note": "进程内自研引擎 ✓（**不依赖** ComfyUI / MiniMax 云 ✓）",
+    })
+    if urls.get("lastFrameUrl"):
+        log_task_warn("VideoTask", "engine-last-frame-ignored", {
+            "id": video_id,
+            "note": "引擎请求暂**没有**尾帧这个位置 ✗ ⇒ 本次**只按首帧**生成 ✓（不假装用了尾帧 ✗）",
+        })
+
+    assembly = bridge.assembly_from_config(config)
+    request = bridge.request_from_video_record(
+        {
+            "prompt": _col(record, "prompt"),
+            "negativePrompt": _col(record, "negative_prompt"),
+            "duration": _col(record, "duration"),
+            "aspectRatio": _col(record, "aspect_ratio") or _col(record, "resolution"),
+            # 条件素材：引擎只吃**本机文件** ✓ ⇒ 桥负责把 data URL 落盘 ✓（远程 URL 记 warn 跳过 ✓）
+            "firstFrame": urls.get("firstFrameUrl") or urls.get("imageUrl"),
+            "referenceImages": urls.get("referenceImageUrls"),
+            "referenceAudios": _col(record, "reference_audio_urls"),
+        },
+        outputs_dir=outputs_dir,
+        settings=settings,
+    )
+    task = await bridge.run_job(request, assembly, task_type="VideoTask",
+                                record_id=video_id, label="视频")
+
+    paths = bridge.artifact_paths(task)
+    video_path = paths.get("videoPath")
+    if not video_path:
+        raise RuntimeError(f"引擎任务 {task.get('id')} 成功了却没报视频路径 ✗（outputs={paths} ✗）")
+
+    await _handle_video_complete_local(
+        video_id,
+        bridge.static_relative(video_path),
+        _col(record, "duration"),
+        storyboard_id,
+    )
+    if paths.get("audioPath"):
+        log_task_progress("VideoTask", "engine-audio-track", {
+            "id": video_id, "engineTaskId": task.get("id"),
+            "audioPath": paths["audioPath"], "localPath": bridge.static_relative(paths["audioPath"]),
+            "note": "引擎这次**出了音轨** ✓（双流已启用 ✓）",
+        })
 
 
 def _run_qc_after_video_complete(storyboard_id: Any, video_generation_id: int) -> None:
@@ -825,6 +948,17 @@ def recover_video_tasks_on_startup() -> None:
                     continue
 
                 provider = (_col(row, "provider") or "").lower()
+
+                # ⭐ 自研引擎：任务活在**进程内的内存队列**里 ✗ ⇒ 进程重启即丢失 ✓ ⇒ 明确判失败 ✓
+                #    （**绝不重提交** ✓ —— 引擎不需要外部回调 ✓，没有任何"还在路上"的可能 ✓）。
+                #    ⚠️ 必须在 task_id 检查**之前**判 ✓：引擎那条路本来就不写 task_id ✗。
+                from .engine import bridge
+                if bridge.is_engine_provider(provider):
+                    _mark_recover_failed(
+                        conn, _col(row, "id"),
+                        "自研引擎任务在**进程内内存队列**里 ✗ ⇒ 进程重启即丢失 ✓（不自动重提交 ✓）",
+                    )
+                    continue
 
                 if not _col(row, "task_id"):
                     _mark_recover_failed(conn, _col(row, "id"), "Interrupted before task submit")

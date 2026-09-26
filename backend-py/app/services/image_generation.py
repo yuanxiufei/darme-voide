@@ -356,6 +356,14 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
                 "frameType": _col(record, "frame_type"),
             })
 
+            # ⭐ 自研引擎分支（2026-09-26 ✓）：``provider=engine`` ⇒ 走**进程内**引擎 ✓
+            #    （**不 HTTP 调 SD WebUI / ComfyUI ✗** —— 这就是「不依赖外部」那条路 ✓）。
+            #    ⚠️ 必须**在取适配器之前**分叉 ✓：引擎不是 HTTP 适配器 ✗（registry 里没有它 ✓）。
+            from .engine import bridge  # 局部 import ✓：非引擎的配置一个字节都不多加载 ✓
+            if bridge.is_engine_provider(config.get("provider")):
+                await _run_image_with_engine(image_id, attempt_config, record)
+                return
+
             adapter = get_image_adapter(config.get("provider"))
             request = adapter.build_generate_request(attempt_config, {
                 "id": _col(record, "id"),
@@ -467,6 +475,60 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
                     )
                     # 资产验收门禁：图片生成失败 → 分镜资产标记 needs_regeneration
                     _mark_storyboard_asset_needs_regeneration(conn, image_id)
+
+
+async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: Row) -> None:
+    """``provider=engine`` ⇒ **进程内自研引擎** ✓（不调 SD WebUI / ComfyUI ✗ —— 「不依赖外部」✓）。
+
+    ⚠️ 一件必须说清的事：H3 是**视频**模型 ✓ ⇒ 这里跑的是**最短的那段**（5 帧 ✓），
+    再取**首帧**当图片 ✓（记 ``engine-still-from-video`` ✓）。**别把它讲成"引擎直接画了张图"** ✗
+    —— 产物是视频 ✓，图片是**派生**出来的 ✓。
+
+    失败一律**抛错** ✗ ⇒ 由外层已有的 fallback / 失败收口逻辑接管 ✓（不重写一套 ✓）。
+    """
+    from .engine import bridge  # 局部 import ✓：只有这条分叉才需要引擎 ✓
+
+    settings = bridge.normalize_settings(config)
+    _dit_path, dit_source = bridge.resolve_dit_path(settings)
+    outputs_dir = bridge.outputs_dir_for("image", image_id)
+    log_task_progress("ImageTask", "engine-assembly", {
+        "id": image_id, "provider": bridge.PROVIDER,
+        "ditSource": dit_source, "outputsDir": str(outputs_dir),
+        "note": "进程内自研引擎 ✓（**不依赖** ComfyUI / SD WebUI / Ollama ✓）",
+    })
+
+    assembly = bridge.assembly_from_config(config)
+    request = bridge.request_from_image_record(
+        {
+            "prompt": _col(record, "prompt"),
+            "negativePrompt": _col(record, "negative_prompt"),
+            "size": _col(record, "size"),
+            # 参考图：引擎只吃**本机文件** ✓ ⇒ 由桥把 data URL 落成临时文件 ✓（远程 URL 记 warn 跳过 ✓）
+            "referenceImages": _col(record, "reference_images"),
+        },
+        outputs_dir=outputs_dir,
+        settings=settings,
+    )
+    task = await bridge.run_job(request, assembly, task_type="ImageTask",
+                                record_id=image_id, label="图片")
+
+    paths = bridge.artifact_paths(task)
+    video_path = paths.get("videoPath")
+    if not video_path:
+        raise RuntimeError(f"引擎任务 {task.get('id')} 成功了却没报视频路径 ✗（outputs={paths} ✗）")
+
+    still = await bridge.extract_still_to_storage(video_path, record_id=image_id)
+    log_task_progress("ImageTask", "engine-still-from-video", {
+        "id": image_id, "engineTaskId": task.get("id"),
+        "videoPath": video_path, "localPath": still.get("localPath"),
+        "width": still.get("width"), "height": still.get("height"),
+        "sourceFrames": still.get("sourceFrames"),
+        "note": "H3 没有「单张图」这个模式 ✓ ⇒ 上面那份**视频**的首帧就是这张图 ✓",
+    })
+    await _handle_image_complete_local(image_id, bridge.PROVIDER, str(still["localPath"]),
+                                       extra={"engineTaskId": task.get("id"),
+                                              "sourceVideo": video_path,
+                                              "sourceFrames": still.get("sourceFrames")})
 
 
 async def _normalize_reference_images(raw: Any) -> list[str]:
@@ -844,6 +906,33 @@ async def _handle_image_complete(image_id: int, provider: str, image_url: str) -
         await _finalize_image(conn, record, image_id, provider, image_url=image_url, local_path=local_path)
 
 
+async def _handle_image_complete_local(
+    image_id: int,
+    provider: str,
+    local_path: str,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """**本机已有产物**时的收尾 ✓（自研引擎那条路 ✓ —— 不"下载" ✗，它本来就在盘上 ✓）。
+
+    与 :func:`_handle_image_complete_base64` 同一套收口语义 ✓：释放租约 ✓、用量记 completed ✓、
+    ``image_url`` **不写** ✓（没有远程 URL 可写 ✓ —— base64 那条路也是这么做的 ✓）、
+    然后交给 :func:`_finalize_image` ✓（校色 / 回写关联表 / 留档一处不落 ✓）。
+    """
+    release_image_gpu_lease(image_id)
+    with _tx() as conn:
+        _mark_usage_by_image_gen(conn, image_id, "completed")
+        record = _fetch_record(conn, image_id)
+    log_task_success("ImageTask", "saved-local",
+                     {"id": image_id, "provider": provider, "localPath": local_path,
+                      **(extra or {})})
+    if record is None:
+        return
+    with _tx() as conn:
+        await _finalize_image(conn, record, image_id, provider, image_url=None,
+                              local_path=local_path)
+
+
 async def _handle_image_complete_base64(
     image_id: int, provider: str, base64_data: str, mime_type: str
 ) -> None:
@@ -932,6 +1021,18 @@ def recover_image_tasks_on_startup() -> None:
                     continue
 
                 provider = (_col(row, "provider") or "").lower()
+
+                # ⭐ 自研引擎：任务活在**进程内的内存队列**里 ✗ ⇒ 进程一重启就**没了** ✓
+                #    ⇒ 明确判失败 ✓（**绝不重提交** ✓：「不依赖外部」意味着这次失败的只是本进程 ✓，
+                #    而重提交会把"跑过的活"再跑一遍 ✓✗）。⚠️ 必须在 task_id 检查**之前**判 ✓ ——
+                #    引擎那条路本来就不写 task_id ✗，否则会被报成 "Interrupted before task submit" ✓✗。
+                from .engine import bridge
+                if bridge.is_engine_provider(provider):
+                    _mark_image_recover_failed(
+                        conn, _col(row, "id"),
+                        "自研引擎任务在**进程内内存队列**里 ✗ ⇒ 进程重启即丢失 ✓（不自动重提交 ✓）",
+                    )
+                    continue
 
                 if not _col(row, "task_id"):
                     _mark_image_recover_failed(

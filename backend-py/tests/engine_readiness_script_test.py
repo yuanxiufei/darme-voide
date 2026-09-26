@@ -267,4 +267,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # ⚠️ 与 `check_memory.py` / `h3_readiness.py` 同一写法 ✓（Windows GBK 控制台裸跑必加 ✗✗）：
+    #    本文件打的是**判据名**（满屏 ✓/✗ ✓）与失败详情里的 `⇒` ✓ ⇒ 不加就「**崩在打印失败原因上**」✗✗。
+    #    ⚠️ 2026-09-25 实测踩到：⑩ 那条 FAIL，可报错信息**一个字都打不出来** ✓✗
+    #    （崩在 `print(f"FAIL ... ⇒ {detail}")` 的 U+21D2 上 ✗ ⇒ 只看到 `EXIT=1` ✓✗）。
+    #    ⇒ 全量自检**也不会**暴露它 ✗：`run_all.py` 给子进程兜了 `PYTHONIOENCODING=utf-8` ✓。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

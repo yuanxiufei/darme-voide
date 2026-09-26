@@ -13,8 +13,9 @@
    * 数学/算法 **自己实现**（公开论文里的公式 ✓ 例如 Karras 2022 的 sigma 调度 ✓）；
    * 深度学习脚手架用 **Apache/MIT 许可**的库（``torch`` / ``diffusers`` / ``safetensors`` ✓）；
    * **一行 ComfyUI 源码都不抄** ✗。
-2. **依赖**：本机后端 venv **已装 CPU 版 torch** ✓（2026-09-17 ✓ 本机无 NVIDIA 显卡 ⇒ CPU 轮子 ✓，
-   见 `torch_backend.py` 模块头 ✓）⇒ 引擎分两层落地：
+2. **依赖**：本机后端 venv **已装 torch** ✓（2026-09-17 是 CPU 轮子 ✓；**2026-09-26 更正** ✓：
+   现在跑在 A5000 工作站上 ✓ ⇒ CUDA 轮子 ✓、`device=cuda` ✓ —— ⚠️ **别写死设备** ✗，
+   一律实测 ✓，见 `torch_backend.py` 模块头 ✓ 与 `engine_readiness.device_facts()` ✓）⇒ 引擎分两层落地：
    * **纯算法层**（本目录的 ``schedules`` / ``geometry``）：**零依赖**、可立刻验证 ✓；
    * **张量层**（``sampler`` / ``latents`` / 模型加载）：需要 ``torch``（**已装** ✓ 懒加载 ✓ 装了才跑 ✓）。
 
@@ -25,7 +26,7 @@
 """
 from __future__ import annotations
 
-__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "gguf_to_llm", "guidance",
+__all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "chat_template", "checkpoint_meta", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "gguf_to_llm", "guidance",
            "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "inventory", "latent_container", "llm", "llm_backend", "loader", "mappings", "media", "pipeline",
            "quant", "safetensors", "sampler", "schedules", "script_parse", "segments", "text_encoder",
            "tiers", "tokenizer_bpe", "tokenizer_hub", "tokenizer_own", "tokenizers_tuning",

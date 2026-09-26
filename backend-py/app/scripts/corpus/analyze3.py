@@ -1,6 +1,11 @@
-import json, collections, statistics, re, sys, io
+import json, collections, statistics, re, sys
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# ⚠️ 2026-09-25 统一成 `reconfigure` ✓：原写法 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`
+#    **丢掉原 wrapper** ✗ ⇒ 与调用方（`run_all.py` / `check_all.py` 等）的缓冲与刷新顺序不一致 ✓✗，
+#    而且守卫 `check_cli_encoding.py` 认不出它 ⇒ 会被误报成「裸跑会崩」✓✗（本次就是它报的 ✓）。
+#    语义等价 ✓ 但更稳：保留原 wrapper 与 line buffering ✓，还能顺带设 `errors="replace"` ✓
+#    （原写法遇 locale 外字符是**抛异常** ✗ 而这里不会 ✗）。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import os as _os, pathlib as _pathlib
 P = (_os.environ.get('SEEDANCE2_CORPUS')

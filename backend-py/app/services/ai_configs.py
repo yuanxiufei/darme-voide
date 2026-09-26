@@ -31,7 +31,12 @@ from sqlalchemy.engine import Row
 from ..core.response import js_truthy, row_to_dict
 
 #: 本地 provider 白名单（运行在本机 GPU 上的服务）
-LOCAL_PROVIDERS = {"ollama", "local-sd", "cosyvoice"}
+#: ⚠️ 2026-09-26 加 ``engine`` ✓ —— 它与前三个**不是同一类** ✗：``ollama`` / ``local-sd`` /
+#: ``cosyvoice`` 都是「本机上的**另一个进程**」✓（靠 HTTP 说话 ✓，卸载靠通知它自己卸 ✓）；
+#: ``engine`` 是**本后端自己进程内**的自研引擎 ✓（`services/engine/` ✓ —— **不起任何外部服务** ✓✗，
+#: 卸载 = 丢张量 ✓）。放进同一张白名单只因为**判据相同**：都在本机 ✓、都吃本机 GPU ✓
+#: （`gpu_manager` 的显存账要把它算进来 ✓）。
+LOCAL_PROVIDERS = {"ollama", "local-sd", "cosyvoice", "engine"}
 
 #: 内部哨兵：区分「调用方没传这个键」与「传了 null」（对齐 TS 的 ``undefined``）
 UNSET: Any = object()

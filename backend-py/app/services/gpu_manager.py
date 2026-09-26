@@ -109,6 +109,11 @@ VRAM_ESTIMATES: dict[str, dict[str, Any]] = {
     # MiniMax H3 本地视频模型（权重驻留 ComfyUI 显存，卸载走 ComfyUI /free）
     "minimax:hailuo-02": {"vramGB": 15, "unloadStrategy": "comfyui-free",
                           "unloadBaseUrl": COMFYUI_BASE_URL, "cooldownMs": 5000},
+    # ⭐ 自研引擎（2026-09-26 ✓）：**本进程内** ✓✗ —— 不依赖任何外部服务 ✓（不起子进程 ✓、无 HTTP ✓）。
+    # ⚠️ 19.5 GiB 是**主 DiT 权重的真实体积** ✓（`torch_backend.PENDING_PARTS` 记的 19.53 GiB ✓，
+    #    与 `/engine/readiness` 同一口径 ✓）—— 本机 A5000 22.5 GiB 能装下 ✓，但**装下 = 几乎占满** ✓✗
+    #    ⇒ 它与 ollama / SD / ComfyUI **同时**要显存时必然打起来 ✓ ⇒ 这条数就是那个矛盾的账本 ✓。
+    "engine:h3": {"vramGB": 19.5, "unloadStrategy": "engine-unload", "cooldownMs": 1000},
     # 默认兜底
     "default": {"vramGB": 8, "unloadStrategy": "none", "cooldownMs": 1000},
 }
@@ -240,6 +245,23 @@ class GpuMemoryManager:
                 log_task_warn("GpuManager", "unload-comfyui-failed",
                               {"modelKey": model_key, "status": status})
                 return False
+
+            if strategy == "engine-unload":
+                # ⚠️ 自研引擎在**本进程内** ✗ ⇒ 没有 URL 可打 ✓✗：卸载 = 让运行时**丢掉张量 + 清缓存** ✓
+                #    （lazy import ✓ —— 免得 gpu_manager 在**导入期**就把整个引擎包拖进来 ✓）。
+                from .engine.runtime import EngineBusy, engine_runtime  # noqa: PLC0415
+
+                try:
+                    report = await asyncio.to_thread(engine_runtime.unload)
+                except EngineBusy as err:
+                    # ⚠️ 正忙 ⇒ **没卸成** ✗ ⇒ 返回 False（对齐模块 docstring 第 2 条 ✓）——
+                    #    绝不能像 ollama 那样"无论响应码都算成功" ✗✗：那会让驱逐逻辑以为腾出了空间 ✓✗
+                    log_task_warn("GpuManager", "unload-engine-busy",
+                                  {"modelKey": model_key, "reason": str(err)})
+                    return False
+                log_task_progress("GpuManager", "unload-engine-ok",
+                                  {"modelKey": model_key, **report})
+                return bool(report.get("unloaded"))
 
             if strategy == "passive":
                 log_task_progress("GpuManager", "unload-passive", {"modelKey": model_key})

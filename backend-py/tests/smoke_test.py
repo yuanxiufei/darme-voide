@@ -30,6 +30,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# ⚠️ Windows 中文控制台是 **GBK**（py3.14 及以前不会自动 UTF-8 ✗，PEP 686 要 3.15 ✓）：
+#    本文件满屏 `⇒ / ⚠️ / ✅ / ✓ / ✗` ✓ ⇒ 不加这行**第一条 `print` 就 `UnicodeEncodeError` 崩** ✗
+#    （2026-09-25 由守卫 `check_cli_encoding.py` 抓出 ✓；此前全量自检被 `run_all.py` 的
+#    `PYTHONIOENCODING=utf-8` 兜住 ⇒ 一直没暴露 ✓✗）。
+#    ⚠️ 本文件是**模块级**脚本（没有 `if __name__ == "__main__":` 块 ✓）⇒ 只能放这儿、
+#    且必须**早于任何 `print`** ✓（下面第 5 行那段找不到 DB 的 `FAIL` 就是第一个 ✓）。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 BACKEND_PY = Path(__file__).resolve().parents[1]
 REPO = BACKEND_PY.parent
 REAL_DB = REPO / "data" / "drama.db"
