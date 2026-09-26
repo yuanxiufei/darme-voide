@@ -163,9 +163,27 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
    全量 **129 套 / 4141 项 / 0 失败** ✓（记账见 `INDEX.md §㉓~㉘` ✓）。
 
 **下一步待办 ✗（「完全自主」的剩余，按优先级）：**
-1. **图片自研**：SDXL UNet 架构（替代 SD-WebUI 7860）—— 引擎已有 `vae`/`sampler`/`schedules`/`dit` ✓，
-   缺的是 **SDXL UNet**（卷积扩散，非 DiT ✓）；参考 `reference/ComfyUI` 的 SD 节点 ✓。开工前先仿 `llm.py` 立一个
-   `engine/sdxl.py`（架构参数全显式 + 缩小版走同一条前向验证）✓。
+1. **图片自研**：SDXL 那条路 ✓（替代 SD-WebUI 7860）——
+   ✅ **UNet 已落地** ✓（2026-09-26）：`engine/sdxl.py` ✓（`SdxlUnetConfig` 全显式 ✓ + `build_sdxl_unet` / `load_sdxl_unet_state_dict` ✓），
+   逐块布局**照本机真权重头**量出 ✓ ⇒ 与官方 `sd_xl_base_1.0` **1680 键逐键形状全等 + 参数量 2,567,463,684 全等** ✓（`tests/engine_sdxl_test.py` **39/39** ✓）；
+   ⚠️ 口径：上行 ResBlock 吃 **`cat([h, skip])`** ✗✗、eps **两档**（GroupNorm 1e-5 / SpatialTransformer 1e-6 ✓）、时间嵌入 **cos 在前** ✓、
+   ADM **6 个 id**（`build_adm` ✓）、`out.2` 零初始化 ✓；⚠️ 参考实现本机**导不进来**（`comfy_kitchen` 版本对不上 ✓）⇒ **没做数值对拍** ✓。
+   ✅ **潜空间口径表 + 图像算子集已落地** ✓（2026-09-26）：`engine/latent_formats.py` ✓（一个族一条口径：
+   scale/shift/通道/维数/下采样 ✓ + `process_in`/`process_out` **五种**语义 ✓；⚠️ `meanstd` 的 mean/std 属**权重** ⇒
+   不假装有 ✓、`rearrange` 型**具名拒绝** ✗、认不出**报错** ✗✗ **不回退默认 4 通道**；⭐ H3 的 **24** 通道**引用**
+   `latent_container` ✓、音频 **32** 与 `h3_form` 同源 ✓ ⇒ 测试**逐值比对** ✓ 不另发明 ✓）+
+   `engine/image_ops.py` ✓（**纯 torch** ✓：六核重采样含自研 `bislerp`/`lanczos` ✓、缩放族/裁剪旋转翻转/拼接/
+   Porter-Duff **18 模式**/掩罩族/形态学/BT.601 色彩/量化/Canny ✓；⚠️ 自检当场抓出两条「看着对的错值」已修：
+   Canny 平坦图**伪边缘** ⇒ 加 `CANNY_NOISE_FLOOR` ✓、`quantize` 借灰阶调色板 ⇒ Pillow **忽略 `colors`** 且压成灰阶 ⇒
+   改**中位切分** ✓）；规模与最近实测见 `tests/run_all.py` 表头 ✓（**唯一权威** ✓，本处**不罗列** ✗）。
+   ✗ **仍缺**：**接线**（`image_generation.generate_image` 的 engine 分支：CLIP-L + OpenCLIP-bigG 双文本编码 → `build_adm` → 采样循环 → `vae` 解码落盘 ✓）
+   + **真权重**（TE ≈2.5 GiB ×2 + VAE 334 MB ✓，`sd_xl_base_1.0.safetensors` 本身含 US 版 TE/V AE ✓）。
+   ⚠️ **接线的前置**（2026-09-26 实测 ✓）：**扫描器看不见本机那份 SDXL / VAE / TE** ✓✗ ——
+   `detect_comfyui()` **只取第一个命中** ⇒ 挑中 `ComfyUI-Installs/…/ComfyUI`、把
+   **`ComfyUI-Shared/models` 遮住** ✗（默认根扫**扫不到** `…/ComfyUI-Shared/models/checkpoints/sd_xl_base_1.0.safetensors` ✓；
+   补上 `COMFYUI_CANDIDATES` 后 22 ms 命中 ✓）。两条路选一 ✓：**修扫描语义**（`get_default_roots` 收**所有**存在的
+   ComfyUI 模型根 ✓ —— 但该模块有 TS 镜像与多处守卫 ⇒ 得连 `model_manager.py` / `local_models_test` 一起改 ✓）
+   或**显式配**（`COMFYUI_PATH` / `configs/model-paths.json` 的 `comfyui_root` / `extra_roots` ✓）—— **等定** ✗。
 2. **TTS 自研**：声学模型（替代 CosyVoice 9880）—— 引擎已有 `audio_vae`（声码器那半 ✓），缺的是
    **文本→声学特征**（音素化/时长/声学模型）✓；参考 `reference/ollama` 之外的 TTS 方案（IndexTTS 逆向已收口：本仓走 CosyVoice，
    情绪 8 维已落地 `voice_contract.EMOTION_ORDER` ✓）。这块最复杂，放最后 ✓。

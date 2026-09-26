@@ -17,7 +17,9 @@
 3. **系统目录要跳过**（``SYSTEM_DIRS``）：磁盘/全盘扫描时不进 Windows/Program Files/AppData，
    否则大量 EACCES + 杀软拦截 + OneDrive 占位文件；
 4. **ComfyUI 只作「只读扫描来源」**：``baseUrl`` 为空、``callable=false``、不注册为可调用后端；
-5. ``comfyui_root`` 的判定顺序是 **环境变量 > model-paths.json > 探测候选**；
+5. ``comfyui_root`` 的判定顺序是 **环境变量 > model-paths.json > 动态探测** ✓（探测 = 家目录 + **各盘符**
+   往下找「名字含关键词且带 ``models/``」的目录 ✓ ⇒ 多装几个 ComfyUI **全部可见** ✓；⚠️ 旧的写死候选表
+   且**只取第一个** ⇒ 后面的**被遮住** ✗✗，2026-09-26 修的正是这条 ✓）；
 6. **同步版与异步版上限不同**：同步 ``maxDepth=5 / maxFiles=8000``，异步 ``8 / 50000``，
    且异步版**每 1000 个文件**报一次进度、随时可取消；
 7. **排序**：``video > image > text > audio > unknown``，同类按**体积降序**（体积更能代表重要性）；
@@ -27,6 +29,10 @@
    —— **不许**要求 ``ollama serve`` / LM Studio 等**服务在跑**才能扫到 ✗✗（那正是「盘上有模型却
    看不见」的老 bug ✓）；Ollama 的权重是无扩展名 blob ⇒ 文件遍历看不见 ✗，改由 **manifests 清单**读出 ✓
    （见 ``_merge_ollama`` ✓）。
+9. ⭐ **不许写死机器路径** ✗（2026-09-26 用户口径 ✓）：模型机可以装到**用户指定目录** ✓（``models_dir`` ✓）、
+   也要能扫**电脑任意目录** ✓（``extra_roots`` ✓ + 盘符枚举 ``list_drives`` ✓，整盘扫也行 ✓）——
+   权威来源只有**配置 / 环境变量 / 盘符枚举** ✓，源码里**不出现** ``D:/…`` 这类字面量 ✗
+   （静态守卫在同一套自检里 ✓：``local_models_test`` ✓）。
 """
 from __future__ import annotations
 
@@ -40,7 +46,7 @@ from typing import Any, Awaitable, Callable
 
 from ..core import config
 from ..core.config import PROJECT_ROOT
-from . import model_ecosystems, ollama_store
+from . import model_ecosystems, model_folders, ollama_store
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
@@ -51,6 +57,9 @@ from . import model_ecosystems, ollama_store
 LOCAL_SERVICES_ROOT = config.APP_ROOT / "local_services"
 
 __all__ = [
+    "COMFYUI_BLANKET_DEPTH",
+    "COMFYUI_DIR_HINTS",
+    "COMFYUI_PROBE_DEPTH",
     "ECOSYSTEM_SKIP_PREFIXES",
     "MODEL_EXTS",
     "SKIP_DIRS",
@@ -60,6 +69,7 @@ __all__ = [
     "classify",
     "default_models_dir",
     "detect_comfyui",
+    "detect_comfyui_roots",
     "get_default_roots",
     "get_extra_roots",
     "get_model_paths",
@@ -93,16 +103,26 @@ SYSTEM_DIRS = frozenset([
     "onedrive", "onedrivetemp", "intel", "amd", "nvidia", "drivers",
 ])
 
-#: ComfyUI 安装位置探测候选（与 ``backend-py/app/scripts/model_manager.py`` 保持一致）
-COMFYUI_CANDIDATES = [
-    "D:/Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI",
-    "D:/Comfy-Desktop/ComfyUI-Shared",
-    "D:/code/ComfyUI/ComfyUI",
-    "D:/code/ComfyUI",
-    "D:/ComfyUI/ComfyUI",
-    "D:/ComfyUI",
-    "C:/ComfyUI",
-]
+#: ⭐ 2026-09-26 用户口径 ✓：**不许写死路径** ✗ —— 模型既可以装在**用户指定的任意目录** ✓，
+#: 也要能扫**电脑上任意目录**里已有的模型 ✓。所以这里**没有** ``D:/Comfy-Desktop/…`` 这类机器字面量 ✗，
+#: 只有「**按名字动态探测 + 全盘枚举**」的口径 ✓：
+#:
+#: * **权威来源**（优先于探测）：环境变量 ``COMFYUI_PATH`` / ``model-paths.json`` 的 ``comfyui_root`` ✓、
+#:   用户的「额外扫描目录」``extra_roots`` ✓（**任意目录**都行 ✓，见 ``get_default_roots`` ✓）；
+#:   下载/存放的**主目录** = ``MODELS_DIR`` / ``model-paths.json`` 的 ``models_dir`` ✓（默认 ``<data_root>/models`` ✓）；
+#: * **探测回退** = 家目录 + **各现存盘符**（``list_drives`` ✓）往下找「名字含关键词」的目录 ✓，
+#:   判定「像 ComfyUI 根」只看**目录下有没有 ``models/``** ✓（与旧口径一致 ✓ ⇒ 桌面端的**共享模型目录**
+#:   ``…/ComfyUI-Shared`` ✓ 也算一个根 ✓，本机那份 SDXL 正在它下面 ✓）；
+#: * ⚠️ 关键词是**产品名**不是机器路径 ✓：用户把 ComfyUI 装在 ``D:\AI\MyComfy`` 这类名字里照样命中 ✓
+#:   （名字毫不相干的目录 = 不瞎猜 ✗，靠用户显式配 ``extra_roots`` / ``comfyui_root`` ✓）。
+COMFYUI_DIR_HINTS = ("comfyui", "comfy-desktop", "comfyui-desktop", "comfy")
+#: 探测深度（层）：**关键词目录**最深看到这里 ✓。
+#: ⚠️ 桌面端把安装藏在 ``<盘>/Comfy-Desktop/ComfyUI-Installs/<名字>/ComfyUI`` ✓ ⇒ **5 层**才够 ✓。
+COMFYUI_PROBE_DEPTH = 5
+#: 「顺便看一眼」的深度（层）：名字**不沾边**的目录只在最上面这几层进一下 ✓ ——
+#: 因为开发/自建目录常挂在 ``<盘>/code/ComfyUI`` 这类**父目录名不含关键词**的地方 ✗
+#: （只认关键词会漏掉它 ✗）；再深就**不乱翻** ✗（省时的同时避开无关目录树 ✓）。
+COMFYUI_BLANKET_DEPTH = 2
 
 #: 运行时 → 默认 baseUrl。
 #: ⚠️ ``comfyui`` **有意为空**：它只作「只读的可选扫描来源」，不生成可调用注册建议。
@@ -305,12 +325,79 @@ def _write_paths_config(cfg: dict[str, Any]) -> None:
         handle.write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
 
 
+def _probe_bases() -> list[str]:
+    """探测起点：家目录 + 各现存盘根（``list_drives`` ✓ —— POSIX 上取不到盘符 ⇒ 只剩家目录 ✓）。"""
+    bases: list[str] = []
+    home = os.path.expanduser("~")
+    if home and os.path.isdir(home):
+        bases.append(home)
+    for drive in list_drives():
+        root = str(drive.get("root") or "")
+        if root and os.path.isdir(root):
+            bases.append(root)
+    return bases
+
+
+def detect_comfyui_roots(bases: list[str] | None = None) -> list[str]:
+    """**动态**探测本机全部「ComfyUI 类」目录（保序：起点顺序 + 浅→深 ✓）。
+
+    ⚠️ 与旧 ``detect_comfyui()`` 的关键差别：这里返回**全部**命中 ✓ —— 旧实现只取**第一个** ⇒
+    机器上装了两个以上 ComfyUI 时，**后面的全被遮住** ✗✗（本机就是这么漏掉那份 SDXL 的 ✓：
+    候选表把 ``ComfyUI-Installs/…`` 排在前 ⇒ ``ComfyUI-Shared/models`` 永远扫不到 ✗）。
+
+    做法：从起点往下走，**名字含关键词**（``COMFYUI_DIR_HINTS``）的目录一路下潜
+    （最多 ``COMFYUI_PROBE_DEPTH`` 层 ✓），名字不沾边的只在最上面 ``COMFYUI_BLANKET_DEPTH`` 层
+    「顺便看一眼」✓ —— 因为自建/开发目录常挂在 ``<盘>/code/ComfyUI`` 这种**父目录名不含关键词**的地方 ✗；
+    命中判定 = **名字含关键词 + 目录下有 ``models/``** ✓（与旧口径一致 ✓）。``SKIP_DIRS`` / ``SYSTEM_DIRS``
+    照旧跳过 ✓（⇒ 再怎么「顺便看」也不会进 ``Windows`` / ``AppData`` ✓）。
+
+    ``bases=None`` ⇒ 家目录 + 各现存盘根 ✓；测试**注入临时目录** ✓（不碰真实磁盘 ✓）。
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    queue: list[tuple[str, int]] = [
+        (base, 0) for base in (bases if bases is not None else _probe_bases())
+    ]
+    while queue:
+        current, depth = queue.pop(0)
+        try:
+            with os.scandir(current) as scanned:
+                children: list[tuple[str, str, bool]] = []
+                for entry in sorted(scanned, key=lambda item: item.name.lower()):
+                    try:
+                        children.append((entry.name.lower(), os.path.abspath(entry.path),
+                                         entry.is_dir(follow_symlinks=False)))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        for name, path, is_dir in children:
+            if not is_dir or name.startswith(".") or name in SKIP_DIRS or name in SYSTEM_DIRS:
+                continue
+            hinted = any(hint in name for hint in COMFYUI_DIR_HINTS)
+            # ⚠️ 名字不沾边的**只在最上面几层**「顺便看一眼」✓（``<盘>/code/ComfyUI`` 这种 ✗）；
+            #    再往下只跟着关键词走 ✗ —— 既不乱翻无关目录树 ✓、对普通名字也**不瞎猜**是根 ✓
+            #    （用户的任意目录另有显式入口：``extra_roots`` / ``comfyui_root`` ✓）
+            if not hinted and depth + 1 >= COMFYUI_BLANKET_DEPTH:
+                continue
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if hinted and os.path.isdir(os.path.join(path, "models")):
+                found.append(path)
+            if depth + 1 < COMFYUI_PROBE_DEPTH:
+                queue.append((path, depth + 1))
+    return found
+
+
 def detect_comfyui() -> str:
-    """探测本机 ComfyUI 安装位置（看候选目录下是否有 ``models``）。"""
-    for candidate in COMFYUI_CANDIDATES:
-        if candidate and os.path.exists(os.path.join(candidate, "models")):
-            return candidate
-    return ""
+    """探测**第一个** ComfyUI 安装位置（保留给「单值要用」的调用方 ✓）。
+
+    ⚠️ **扫描一律走** :func:`detect_comfyui_roots` ✓（只取第一个 = 漏 ✗，2026-09-26 修的正是这条 ✓）。
+    """
+    roots = detect_comfyui_roots()
+    return roots[0] if roots else ""
 
 
 def default_models_dir() -> str:
@@ -331,11 +418,17 @@ def get_extra_roots() -> list[str]:
 
 
 def get_default_roots() -> list[str]:
-    """解析「默认扫描根目录」集合：环境变量 > model-paths.json > 默认。
+    """解析「默认扫描根目录」集合：环境变量 > model-paths.json > 动态探测 > 默认。
 
     ⭐ 2026-09-25 语义修正 ✓：**下载/存储**默认到本仓 <data_root>/models（自主 ✓），
     但**扫描发现**要尽量覆盖电脑里已有的模型 ✓ —— 含 ComfyUI 目录 ✗（**发现不排斥第三方** ✓：
     自主的是「从哪下载、存到哪」，不是「不许看见别人已装的模型」✓）。
+
+    ⭐ 2026-09-26 用户口径 ✓：**不许写死路径** ✗、**任意目录**都要能装能用 ✓：
+    * ``models_dir``（``MODELS_DIR`` / ``models_dir`` ✓）= 用户指定的**存放/下载主目录** ✓；
+    * ``extra_roots``（用户显式加的**任意目录** ✓）**排在约定落点之前** ✓（显式意图优先 ✓）；
+    * ComfyUI 类目录 = **显式配的** ``comfyui_root`` ✓ + :func:`detect_comfyui_roots` 的**全部**命中 ✓
+      —— ⚠️ 修的就是「只取第一个 ⇒ 后面几个被遮住」✗✗（本机因此扫不到 ``ComfyUI-Shared/models`` ✓）。
     """
     cfg = _read_paths_config()
     roots: list[str] = []
@@ -344,9 +437,13 @@ def get_default_roots() -> list[str]:
                   or default_models_dir())
     services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
                     or str(LOCAL_SERVICES_ROOT))
-    comfyui_root = (os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root")
-                    or detect_comfyui())
-    comfyui_models_dir = os.path.join(comfyui_root, "models") if comfyui_root else ""
+    # ⚠️ 显式配置（env / json）**优先且靠前** ✓；探测结果只是**补充** ✓（探测错了也不影响显式配置 ✓）
+    comfyui_root = os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root") or ""
+    comfyui_roots: list[str] = []
+    for candidate in [comfyui_root, *detect_comfyui_roots()]:
+        text = os.path.abspath(str(candidate)) if str(candidate or "").strip() else ""
+        if text and os.path.normcase(text) not in {os.path.normcase(r) for r in comfyui_roots}:
+            comfyui_roots.append(text)
 
     def add(candidate: str) -> None:
         if candidate and os.path.exists(candidate):
@@ -359,6 +456,15 @@ def get_default_roots() -> list[str]:
     # ⚠️ 用户**显式**加的目录排在约定落点之前 ✓：显式意图优先于约定 ✓
     for candidate in get_extra_roots():
         add(candidate)
+    # ⭐ 2026-09-26：**用户声明过的任意目录** ✓（ComfyUI 的 ``extra_model_paths.yaml`` ✓、
+    #    ``model-paths.json`` 的 ``extra_paths`` ✓、环境变量 ``EXTRA_MODEL_PATHS`` ✓）——
+    #    「模型放任意目录，**声明一下就能用**」✓，口径见 ``model_folders`` ✓。
+    #    ⚠️ 与 ``extra_roots`` 同属**显式意图** ⇒ 也排在生态落点之前 ✓（显式优先于约定 ✓）。
+    #    ⚠️ **环境变量**指向的声明文件读不开 ⇒ 如实抛 ✓（用户自己指的文件 ✗ 不许静默跳过 ✗）；
+    #       而 ComfyUI 那边别人的 ``extra_model_paths.yaml`` 坏掉 ⇒ 只跳过 ✓（不连坐 ✗）。
+    for candidate in model_folders.declared_extra_dirs(
+            cfg, os.path.dirname(_paths_config_file()), comfyui_roots):
+        add(candidate)
     # ⭐ 2026-09-25：**世界各大模型生态**的落点 ✓（HuggingFace / ModelScope / LM Studio / GPT4All /
     # Jan / llama.cpp / text-generation-webui / SD WebUI / Stability Matrix / InvokeAI / torch hub ✓，
     # 表在 ``model_ecosystems`` ✓；只读 ✓、不要求任何生态的服务在跑 ✓）。
@@ -366,8 +472,16 @@ def get_default_roots() -> list[str]:
     # 上限吃光 ✗，生态落点就「**扫不到也不报错**」了 ✗✗ —— 那正是本轮要修的那类 bug ✓。
     for _, path in model_ecosystems.roots():
         add(path)
-    add(comfyui_models_dir)
-    add(comfyui_root)
+    # ⭐ 2026-09-26 修「只取第一个」✗：**每个** ComfyUI 类目录的 ``models/`` 都加 ✓
+    #    （本机三个：``ComfyUI-Installs/…/ComfyUI`` / ``ComfyUI-Shared`` / ``D:/code/ComfyUI/ComfyUI`` ✓
+    #     —— 旧实现只加第一个 ⇒ 共享目录里那份 SDXL 扫不到 ✗✗）
+    for root in comfyui_roots:
+        add(os.path.join(root, "models"))
+    # ⚠️ **只有显式配的那个根**整体也加上 ✓（``COMFYUI_PATH`` / ``comfyui_root`` ✓）：
+    #    探测到多个安装时，各自的整包（web / tests … 动辄上万文件）会把 ``maxFiles`` 吃光 ✗
+    #    ⇒ 生态落点又变成「扫不到也不报错」✗✗；而根下除 ``models/`` 外基本是代码/输出 ✓（不是模型 ✓）。
+    if comfyui_root:
+        add(comfyui_root)
 
     # 若完全没有可扫描目录，回退到本仓默认模型目录
     if not roots:
@@ -394,7 +508,12 @@ def save_extra_roots(roots: list[str]) -> list[str]:
 
 
 def get_model_paths() -> dict[str, Any]:
-    """完整模型路径配置（comfyui_root / models_dir / nodes_dir / local_services_dir / extra_roots）。"""
+    """完整模型路径配置（comfyui_root / models_dir / nodes_dir / local_services_dir / extra_roots）。
+
+    ⚠️ ``comfyui_root`` 是**单值**字段 ✓（给「要写一份配置」的地方用 ✓）：显式配置优先 ✓、
+    否则取**第一个**探测命中 ✓；**扫描不靠它** ✗ —— 扫描走 :func:`get_default_roots` ✓
+    （那里把**所有** ComfyUI 类目录的 ``models/`` 都收进来 ✓）。
+    """
     cfg = _read_paths_config()
     return {
         "comfyui_root": os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root")

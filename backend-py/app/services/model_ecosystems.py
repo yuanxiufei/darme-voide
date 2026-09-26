@@ -69,7 +69,7 @@ class Ecosystem:
 
 #: ⭐ 生态表（**声明顺序即优先级** ✓：同一个目录只归**先声明**的生态 ✓）。
 #: ⚠️ 只列「模型库/模型缓存」⇒ 不放**代码**目录 ✗；ComfyUI 不在这里 ——
-#: 它由 ``local_model_scan.COMFYUI_CANDIDATES`` 单独管（避免循环 import ✓），
+#: 它由 ``local_model_scan.detect_comfyui_roots`` 单独管（避免循环 import ✓），
 #: 且其模型 runtime 本就是 ``comfyui`` ✓，无需生态再标注 ✓。
 ECOSYSTEMS: tuple[Ecosystem, ...] = (
     Ecosystem(

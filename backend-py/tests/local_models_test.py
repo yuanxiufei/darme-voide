@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -38,6 +39,7 @@ from app.main import app  # noqa: E402
 from app.core.models import ai_service_configs  # noqa: E402
 from app.routers import local_models as r  # noqa: E402
 from app.services import local_model_scan as ls  # noqa: E402
+from app.services import model_folders as mf  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -262,6 +264,132 @@ def main() -> int:  # noqa: C901
           and r.build_download_url("hf_mirror", "Q/R", "main", "a.bin")
           == "https://hf-mirror.com/Q/R/resolve/main/a.bin",
           r.build_download_url("hf", "Q/R", "main", "sub dir/a b.bin"))
+
+    # ================= ComfyUI 根探测（⚠️ 不写死路径 ✓ 2026-09-26 用户口径 ✓）=================
+    probe = tempfile.mkdtemp(prefix="comfyprobe_")
+    for rel in (
+        "Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI/models",   # 桌面端安装（藏得深 ✓）
+        "Comfy-Desktop/ComfyUI-Shared/models",                     # 桌面端**共享模型目录**（同一祖先下 ✓）
+        "code/ComfyUI/ComfyUI/models",                             # 自建：**父目录名不含关键词** ✓
+        "ComfyUI-NoModels",                                        # 名字像但**没有 models/** ⇒ 不算根 ✗
+        "RandomTool/models",                                       # 名字不沾边 ⇒ 埋深了**不瞎猜** ✗
+        "node_modules/ComfyUI/models",                             # SKIP_DIRS ⇒ 不进 ✗
+    ):
+        os.makedirs(os.path.join(probe, *rel.split("/")), exist_ok=True)
+    probed = ls.detect_comfyui_roots([probe])
+    found = sorted(os.path.relpath(path, probe).replace("\\", "/") for path in probed)
+    check("探测: **多个 ComfyUI 全部可见** ✓✓（旧实现只取第一个 ⇒ 共享目录那份 SDXL 被遮住 ✗✗）",
+          found == ["Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI",
+                    "Comfy-Desktop/ComfyUI-Shared", "code/ComfyUI/ComfyUI"], found)
+    check("探测: 没 ``models/`` 的不算根 ✗、``node_modules`` 不进 ✗、名字不沾边又埋很深的不瞎猜 ✗",
+          all("NoModels" not in p and "node_modules" not in p and "RandomTool" not in p for p in found),
+          found)
+    check("探测: 保序（浅→深 ✓）⇒ 旧的 ``detect_comfyui()`` 只取第一个当兼容 ✓、**扫描不用它** ✗",
+          bool(probed) and probed[0].endswith("ComfyUI-Shared"),
+          [os.path.relpath(p, probe) for p in probed])
+    saved_detect = ls.detect_comfyui_roots
+    fake_roots = [os.path.join(probe, "Comfy-Desktop", "ComfyUI-Shared"),
+                  os.path.join(probe, "code", "ComfyUI", "ComfyUI")]
+    ls.detect_comfyui_roots = lambda *a, **k: list(fake_roots)  # type: ignore[assignment]
+    try:
+        roots_now = {os.path.normcase(p) for p in ls.get_default_roots()}
+    finally:
+        ls.detect_comfyui_roots = saved_detect  # type: ignore[assignment]
+    check("根: ``get_default_roots`` 把**每个** ComfyUI 类目录的 ``models/`` 都收进来 ✗✗（旧实现只收第一个 ✗、"
+          "⇒ 应用自己也「看不见」其余安装里的模型 ✓）",
+          {os.path.normcase(os.path.join(p, "models")) for p in fake_roots} <= roots_now, sorted(roots_now))
+    # ⚠️ 静态守卫：**不许写死机器路径** ✗（模型可装任意目录 ✓、也能扫任意目录 ✓ 用户口径 ✓）
+    drive_literal = re.compile(r"""["'][A-Za-z]:[\\/]""")
+    literals = {
+        name: drive_literal.findall(Path(path).read_text(encoding="utf-8"))
+        for name, path in (
+            ("local_model_scan.py", ls.__file__),
+            ("model_manager.py", os.path.join(os.path.dirname(ls.__file__), "..", "scripts",
+                                              "model_manager.py")),
+        )
+    }
+    check("守卫: 扫描器与 ``model_manager`` **都没有写死的盘符路径** ✗（用户口径 ✓：不许写死 ✗）",
+          not any(literals.values()), literals)
+
+    # ================= 模型目录类别 + 「任意目录」声明（ComfyUI 口径 ✓ 自研 ✓）=================
+    check("类别: **父目录名优先** ✓（ComfyUI 口径 ✓）—— checkpoints / vae / unet / t2i_adapter / clip 都认得",
+          mf.category_of_path("/x/models/checkpoints/a.safetensors") == "checkpoints"
+          and mf.category_of_path("/x/models/vae/b.safetensors") == "vae"
+          and mf.category_of_path("/x/models/unet/c.safetensors") == "diffusion_models"
+          and mf.category_of_path("/x/models/t2i_adapter/d.pth") == "controlnet"
+          and mf.category_of_path("/x/models/clip/e.safetensors") == "text_encoders"
+          and mf.category_of_path("/x/models/loras/lycoris/f.safetensors") == "loras")
+    check("类别: 目录名认不出才按**文件名**兜底 ✓（esrgan⇒放大 ✓ / t5xxl⇒文本编码器 ✓ / MyLora⇒LoRA ✓）",
+          mf.category_of_path("/x/misc/RealESRGAN_x4.pth") == "upscale_models"
+          and mf.category_of_path("/x/misc/t5xxl_fp16.safetensors") == "text_encoders"
+          and mf.category_of_path("/y/MyLora_v2.safetensors") == "loras")
+    check("类别: 认不出 ⇒ **None** ✓（不硬塞类别 ✗）；``default_subdir`` = 下载/安装落点 ✓",
+          mf.category_of_path("/x/misc/whatever.bin") is None
+          and mf.default_subdir("unet") == "diffusion_models"
+          and mf.default_subdir("vae") == "vae"
+          and ".safetensors" in mf.category_extensions("loras"))
+
+    declared_dir = os.path.join(TREE, "declared")
+    os.makedirs(os.path.join(declared_dir, "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(declared_dir, "sub", "loras"), exist_ok=True)
+    declared_yaml = os.path.join(TREE, "extra_model_paths.yaml")
+    with open(declared_yaml, "w", encoding="utf-8") as handle:
+        handle.write(
+            "comfyui:\n"
+            f"    base_path: {declared_dir.replace(chr(92), '/')}\n"
+            "    is_default: true\n"
+            "    checkpoints: |\n"
+            "        checkpoints\n"
+            "        sub/loras\n"
+            "    loras: loras\n")
+    parsed = mf.load_extra_paths_file(declared_yaml)
+    check("声明: ``extra_model_paths.yaml`` 与 ComfyUI **同一种格式** ✓ —— ``base_path`` ✓、多行值 ✓、"
+          "``is_default`` 只作标记 ✓、相对路径以 base_path 为基准 ✓",
+          parsed.get("checkpoints") == [os.path.join(declared_dir, "checkpoints"),
+                                        os.path.join(declared_dir, "sub", "loras")]
+          and parsed.get("loras") == [os.path.join(declared_dir, "loras")], parsed)
+    empty_root = os.path.join(TREE, "NoDeclareRoot")
+    os.makedirs(empty_root, exist_ok=True)
+    check("声明: 没有 ``extra_model_paths.yaml`` 的根 ⇒ **空** ✓（不报错也不瞎编 ✗）",
+          mf.comfyui_declared_dirs([empty_root]) == [], mf.comfyui_declared_dirs([empty_root]))
+    fake_comfy = os.path.join(TREE, "FakeComfy")
+    os.makedirs(fake_comfy, exist_ok=True)
+    shutil.copyfile(declared_yaml, os.path.join(fake_comfy, "extra_model_paths.yaml"))
+    check("声明: ``comfyui_declared_dirs`` 收 ComfyUI 那句声明的全部目录 ✓",
+          mf.comfyui_declared_dirs([fake_comfy]) == parsed["checkpoints"] + parsed["loras"],
+          mf.comfyui_declared_dirs([fake_comfy]))
+    check("声明: 环境变量 ``EXTRA_MODEL_PATHS`` 既可指**声明文件** ✓ 也可指**目录** ✓",
+          mf.env_declared_dirs({"EXTRA_MODEL_PATHS": declared_yaml})
+          == parsed["checkpoints"] + parsed["loras"]
+          and mf.env_declared_dirs({"EXTRA_MODEL_PATHS": declared_dir}) == [declared_dir],
+          mf.env_declared_dirs({"EXTRA_MODEL_PATHS": declared_yaml}))
+    json_yaml = os.path.join(TREE, "extra_model_paths.json")
+    with open(json_yaml, "w", encoding="utf-8") as handle:
+        json.dump({"comfyui": {"base_path": declared_dir, "vae": "vae"}}, handle)
+    check("声明: JSON 写法等价 ✓（不想装/不想用 yaml 的人也有路走 ✓）",
+          mf.load_extra_paths_file(json_yaml) == {"vae": [os.path.join(declared_dir, "vae")]},
+          mf.load_extra_paths_file(json_yaml))
+    broken_yaml = os.path.join(TREE, "broken.yaml")
+    with open(broken_yaml, "w", encoding="utf-8") as handle:
+        handle.write("comfyui: [unclosed\n")
+    try:
+        mf.load_extra_paths_file(broken_yaml)
+        declared_broken = False
+    except ValueError:
+        declared_broken = True
+    check("声明: 声明文件读不开 ⇒ **抛** ✓（不静默 ✗ —— 「声明了却没生效」必须能被看见 ✓）", declared_broken)
+    saved_extra_env = os.environ.get("EXTRA_MODEL_PATHS")
+    os.environ["EXTRA_MODEL_PATHS"] = declared_yaml
+    try:
+        declared_roots = {os.path.normcase(p) for p in ls.get_default_roots()}
+    finally:
+        if saved_extra_env is None:
+            os.environ.pop("EXTRA_MODEL_PATHS", None)
+        else:
+            os.environ["EXTRA_MODEL_PATHS"] = saved_extra_env
+    check("根: 声明里的目录**真的进了扫描根** ✓（「模型放任意目录 + 声明一下就能用」✓）",
+          os.path.normcase(os.path.join(declared_dir, "checkpoints")) in declared_roots,
+          sorted(declared_roots))
 
     # ================= 端点 =================
     client = TestClient(app)

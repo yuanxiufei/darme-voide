@@ -55,16 +55,75 @@ PATHS_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "model-paths.json")
 # 优先级：命令行参数 > 环境变量 > configs/model-paths.json > 默认/探测
 Paths = namedtuple("Paths", ["comfyui_root", "models_dir", "nodes_dir", "local_services_dir"])
 
-# 仅作为「探测回退」，真正的目录以配置/环境变量/参数为准
-COMFYUI_CANDIDATES = [
-    "D:/Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI",
-    "D:/Comfy-Desktop/ComfyUI-Shared",
-    "D:/code/ComfyUI/ComfyUI",
-    "D:/code/ComfyUI",
-    "D:/ComfyUI/ComfyUI",
-    "D:/ComfyUI",
-    "C:/ComfyUI",
-]
+# ---- ComfyUI 根探测（⚠️ **不许写死路径** ✗ 2026-09-26 用户口径 ✓）----
+# 权威来源（优先于探测）：命令行参数 > 环境变量 COMFYUI_PATH > configs/model-paths.json 的 comfyui_root
+# ⚠️ 与 ``app/services/local_model_scan.py`` 的 ``COMFYUI_DIR_HINTS`` / ``COMFYUI_PROBE_DEPTH`` /
+#    ``detect_comfyui_roots`` 是**同一套口径** ✓（脚本不 import ``app.*`` ⇒ 这里复制一份 ✗ 靠注释同步 ✓；
+#    改那边要回头改这里 ✓）。旧实现写死 ``D:/Comfy-Desktop/…`` 这类**机器字面量** ✗，且**只取第一个**命中
+#    ⇒ 多装几个 ComfyUI 时后面的**被遮住** ✗✗（共享模型目录 ``…/ComfyUI-Shared`` 就这么被漏掉 ✓）——
+#    2026-09-26 改成「家目录 + 各现存盘符 往下找**名字含关键词**且带 ``models/`` 的目录」✓。
+COMFYUI_DIR_HINTS = ("comfyui", "comfy-desktop", "comfyui-desktop", "comfy")
+COMFYUI_PROBE_DEPTH = 5
+#: 名字不沾边的目录只在最上面这几层「顺便看一眼」（``<盘>/code/ComfyUI`` 这类父目录名不含关键词 ✓）
+COMFYUI_BLANKET_DEPTH = 2
+#: ⚠️ 与 ``local_model_scan`` 的 ``SKIP_DIRS`` / ``SYSTEM_DIRS`` 同口径（只留「探测时别进」的那几类 ✓）
+COMFYUI_PROBE_SKIP = frozenset([
+    "node_modules", ".git", "venv", ".venv", "__pycache__", ".cache", "output", "temp", "input",
+    "assets", "metadata", "samples", "custom_nodes", "python", "lib", "site-packages",
+    "windows", "program files", "program files (x86)", "programdata", "$recycle.bin",
+    "system volume information", "recovery", "perflogs", "appdata", "onedrive",
+])
+
+
+def _probe_bases():
+    """探测起点：家目录 + 各现存盘根（POSIX 上取不到盘符 ⇒ 只剩家目录）。"""
+    bases = []
+    home = os.path.expanduser("~")
+    if home and os.path.isdir(home):
+        bases.append(home)
+    for code in range(65, 91):
+        root = "%s:\\" % chr(code)
+        if os.path.isdir(root):
+            bases.append(root)
+    return bases
+
+
+def detect_comfyui_roots(bases=None):
+    """**动态**探测本机**全部** ComfyUI 类目录（口径同 ``local_model_scan.detect_comfyui_roots`` ✓）。
+
+    ``bases=None`` ⇒ 家目录 + 各盘根 ✓；只下潜名字含关键词的目录 ✓（天然不进系统目录 ✓）。
+    """
+    found = []
+    seen = set()
+    queue = [(base, 0) for base in (bases if bases is not None else _probe_bases())]
+    while queue:
+        current, depth = queue.pop(0)
+        try:
+            with os.scandir(current) as scanned:
+                children = []
+                for entry in sorted(scanned, key=lambda item: item.name.lower()):
+                    try:
+                        children.append((entry.name.lower(), os.path.abspath(entry.path),
+                                         entry.is_dir(follow_symlinks=False)))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        for name, path, is_dir in children:
+            if not is_dir or name.startswith(".") or name in COMFYUI_PROBE_SKIP:
+                continue
+            hinted = any(hint in name for hint in COMFYUI_DIR_HINTS)
+            if not hinted and depth + 1 >= COMFYUI_BLANKET_DEPTH:
+                continue
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if hinted and os.path.isdir(os.path.join(path, "models")):
+                found.append(path)
+            if depth + 1 < COMFYUI_PROBE_DEPTH:
+                queue.append((path, depth + 1))
+    return found
 
 
 def load_paths_config(path=PATHS_CONFIG_PATH):
@@ -80,11 +139,13 @@ def load_paths_config(path=PATHS_CONFIG_PATH):
 
 
 def detect_comfyui():
-    """返回 ComfyUI 根目录（含 models/ 与 custom_nodes/），找不到返回 None。"""
-    for cand in COMFYUI_CANDIDATES:
-        if cand and os.path.isdir(os.path.join(cand, "models")):
-            return cand
-    return None
+    """返回**第一个** ComfyUI 根目录（含 models/），找不到返回 None（兼容旧调用 ✓）。
+
+    ⚠️ 单值只是给「``comfyui_root`` 这类只能填一个」的地方用 ✓；要看**全部**用
+    :func:`detect_comfyui_roots` ✓（只取第一个 = 漏 ✗，2026-09-26 修的正是这条 ✓）。
+    """
+    roots = detect_comfyui_roots()
+    return roots[0] if roots else None
 
 
 def _default_data_root():
