@@ -1148,7 +1148,8 @@ def _build_torch_parts() -> dict[str, Any]:
                            sigmas: Any, *, shift_v: float = 12.0, shift_a: float = 3.0,
                            callback: Any = None, extra_video_rows: Any = None,
                            extra_audio_rows: Any = None, keyframes: Any = None,
-                           refs: Any = None, denoise_mask: Any = None) -> dict[str, Any]:
+                           refs: Any = None, denoise_mask: Any = None,
+                          pin: Any = None, pin_mask: Any = None) -> dict[str, Any]:
         """**双流欧拉采样** ✓：视频走 `sigmas` ✓、音频走**换算后**的 σ ✓（各走各的日程 ✓）。
 
         更新式（按参考**取负**的 velocity 约定 ✓ —— 见 `CONST.calculate_denoised` 是 ``x − σ·v`` ✓）::
@@ -1170,6 +1171,23 @@ def _build_torch_parts() -> dict[str, Any]:
         「video 流 mask=**1**（重采 ✓）、audio 流 mask=**0**（保持一采结果 ✓）」✓
         （⚠️ **不是**"不把音频送进主干" ✗ —— 音频照样参与前向 ✓，只是**这一步的更新量按掩码缩放** ✓）。
         ``mask=0`` ⇒ 该流**逐位不变** ✓（自检钉住 ✓）；``None`` ⇒ 与原来**逐位相同** ✓（默认路径不动 ✗）。
+
+        ⭐⭐ ``pin`` / ``pin_mask``（2026-09-26 补 ✓，口径**来自上游可读源码** ✓）：**掩码冻结的局部重绘** ✓
+        —— 「续拍」与「重拍」共用这一个原语 ✓（`h3_edit` 那层只算窗口 ✓）。
+        ``pin = (pin_video, pin_audio)`` 给**原始潜变量**（冻结区的**真值** ✓，与两条流同形状 ✓）；
+        ``pin_mask = (mask_video, mask_audio)`` **1 = 重画** ✓ / **0 = 冻结** ✓（可 broadcast ✓）。
+
+        ⚠️⚠️ 与 `denoise_mask` **不是一回事** ✗✗（差在最关键的一点上）：
+        `denoise_mask` 缩放的是**增量** ✓ ⇒ ``mask=0`` 那片停在**第 0 步的含噪值**上 ✓；
+        而 ``pin_mask=0`` 那片**收敛到原始潜变量** ✓ —— 上游 ``KSamplerX0Inpaint`` 的写法是
+        ``x = x·m + noise_scaling(σ, noise, z0)·(1−m)`` ✓、**并且**把主干输出也
+        ``out = out·m + z0·(1−m)`` ✓ —— 等价于「把冻结区那份 velocity 换成**它自己的噪声方向** ✓」
+        （本函数就是这么实现的 ✓：``noise_dir = (x₀ − pin)/σ₀`` ✓，**不需要**随机数发生器 ✓
+        因为 x₀ = pin + σ₀·noise 是构造出来的 ✓）。这样 ``σ→0`` 时冻结区**逐位等于 pin** ✓
+        （自检钉住 ✓）—— 这正是重拍「窗外原样不动 ✓」与续拍「上一段尾巴逐位保留 ✓」要的语义 ✓。
+
+        ⚠️ 两条掩码**不许同时给同一路** ✗（语义会叠在一起 ✗ ⇒ **当场报错** ✓ 不猜 ✗）。
+        ⚠️ 要 pin 就必须 ``sigmas[0] > 0`` ✗（``σ₀=0`` 时反推不出噪声方向 ✓ ⇒ 报错 ✓ 不猜 ✗）。
         """
         from app.services.engine import schedules  # noqa: PLC0415
         steps = list(sigmas)
@@ -1190,6 +1208,60 @@ def _build_torch_parts() -> dict[str, Any]:
                     "denoise_mask 要给 ``(mask_video, mask_audio)`` 两路 ✗（口径见函数注释："
                     "超清二采 = video 1 / audio 0 ✓）—— ⚠️ 只给一路就没法表达「每条流各自锁不锁」✓✗")
             mask_video, mask_audio = denoise_mask
+        # ⭐⭐ 冻结区（pin）：先反推**噪声方向**，再在循环里把那片 velocity 换成它 ✓（见 docstring ✓）
+        pin_video: Any = None
+        pin_audio: Any = None
+        pin_mask_video: Any = None
+        pin_mask_audio: Any = None
+        noise_video: Any = None
+        noise_audio: Any = None
+        if (pin is None) != (pin_mask is None):
+            raise ValueError(
+                "`pin` 与 `pin_mask` 必须**一起给** ✗（只给 pin 不知道冻结哪一片 ✓、只给 pin_mask "
+                "不知道那片要收敛到什么 ✓）")
+        if pin is not None:
+            if mask_video is not None or mask_audio is not None:
+                raise ValueError(
+                    "`denoise_mask` 与 `pin_mask` 不许同时用 ✗ —— 两者都是掩码，叠在一起语义不明 ✓"
+                    "（要「窗外收敛到原始潜变量」就用 pin ✓；要「整条锁住不动」才用 denoise_mask ✓）")
+            if not isinstance(pin, (tuple, list)) or len(pin) != 2:
+                raise ValueError("`pin` 要给 ``(pin_video, pin_audio)`` 两路 ✗（只钉一路 ⇒ 那一路给 None ✓）")
+            if not isinstance(pin_mask, (tuple, list)) or len(pin_mask) != 2:
+                raise ValueError("`pin_mask` 要给 ``(mask_video, mask_audio)`` 两路 ✗（同上 ✓）")
+            pin_video, pin_audio = pin
+            pin_mask_video, pin_mask_audio = pin_mask
+            for stream, state, pinned, pin_only_mask, sigma0 in (
+                    ("视频", state_video, pin_video, pin_mask_video, video_sigmas[0]),
+                    ("音频", state_audio, pin_audio, pin_mask_audio, audio_sigmas[0])):
+                if pinned is None:
+                    if pin_only_mask is not None:
+                        raise ValueError(f"pin_mask 给了{stream}一路而 pin 没给 ✗（两路要成对 ✓）")
+                    continue
+                if pin_only_mask is None:
+                    raise ValueError(f"pin 给了{stream}一路而 pin_mask 没给 ✗（两路要成对 ✓）")
+                if not hasattr(pinned, "shape") or not hasattr(pin_only_mask, "shape"):
+                    raise ValueError(
+                        f"pin/pin_mask 的{stream}一路不是张量（{type(pinned).__name__} ✗）"
+                        "—— 这两者只对**真后端**开放 ✓（干跑后端的占位张量没有 shape ✓ 语义 ✓）")
+                if tuple(pinned.shape) != tuple(state.shape):
+                    raise ValueError(
+                        f"pin 的{stream}与**本条流的初始潜变量**形状不等 ✗（pin {tuple(pinned.shape)} "
+                        f"vs 状态 {tuple(state.shape)} ✓）—— pin 是**同一条流**的原始潜变量 ✓ ⇒ "
+                        "要钉头部就把 pin **补齐到整条长度**（计划层的事 ✓ 本函数不补齐 ✗ 也不猜 ✗）")
+                if float(sigma0) <= 0.0:
+                    raise ValueError(
+                        f"要 pin{stream}就必须**首 σ > 0** ✗（收到 {sigma0} ✓）—— 冻结区的噪声方向靠 "
+                        "``x₀ = pin + σ₀·noise`` 反推 ✓ ⇒ σ₀=0 时反推不出来 ✓（报错不猜 ✗）")
+                try:
+                    torch.broadcast_shapes(tuple(state.shape), tuple(pin_only_mask.shape))
+                except RuntimeError as err:
+                    raise ValueError(
+                        f"pin_mask 的{stream}一路 broadcast 不到 {tuple(state.shape)} ✗（{err} ✓）"
+                        "—— 掩码要能落到每一个槽位（如 ``(1,T,1,1)`` ✓）") from None
+            if pin_video is not None:
+                noise_video = (state_video - pin_video) / float(video_sigmas[0])
+            if pin_audio is not None:
+                noise_audio = (state_audio - pin_audio) / float(audio_sigmas[0])
         for index in range(len(video_sigmas) - 1):
             sigma_v, next_v = video_sigmas[index], video_sigmas[index + 1]
             sigma_a, next_a = audio_sigmas[index], audio_sigmas[index + 1]
@@ -1200,6 +1272,12 @@ def _build_torch_parts() -> dict[str, Any]:
                 # ⚠️ **整条**视频 σ 日程递下去 ✓（PDD 头库要靠它定位 span ✓）——
                 #    只在"本条流"的语义上给 ✓（音频那条由 `time_shift_sigma` 现算 ✓）
                 sample_sigmas=video_sigmas)
+            if pin_video is not None:
+                # ⭐ 冻结区那份 velocity = **它自己的噪声方向** ✓（= 上游 `KSamplerX0Inpaint` 的
+                #    ``out = out·m + z0·(1−m)`` 在「x₀ = x − σ·v」约定下的等价写法 ✓）
+                velocity_v = velocity_v * pin_mask_video + noise_video * (1.0 - pin_mask_video)
+            if pin_audio is not None:
+                velocity_a = velocity_a * pin_mask_audio + noise_audio * (1.0 - pin_mask_audio)
             delta_v = (next_v - sigma_v) * velocity_v
             delta_a = (next_a - sigma_a) * velocity_a
             if mask_video is not None:
@@ -1208,11 +1286,18 @@ def _build_torch_parts() -> dict[str, Any]:
                 delta_a = delta_a * mask_audio
             state_video = state_video + delta_v
             state_audio = state_audio + delta_a
+            if pin_video is not None:
+                # ⚠️ 逐位收口 ✓：浮点上 `a + b − b` 不保证等于 `a` ✗ ⇒ 冻结区显式写回 ✓
+                state_video = (state_video * pin_mask_video
+                               + (pin_video + next_v * noise_video) * (1.0 - pin_mask_video))
+            if pin_audio is not None:
+                state_audio = (state_audio * pin_mask_audio
+                               + (pin_audio + next_a * noise_audio) * (1.0 - pin_mask_audio))
             if callback is not None:
                 callback(index, sigma_v, sigma_a)
         return {"video": state_video, "audio": state_audio, "steps": len(video_sigmas) - 1,
                 "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas,
-                "masked": denoise_mask is not None}
+                "masked": denoise_mask is not None, "pinned": pin is not None}
 
     return {
         "torch": torch, "nn": nn, "RMSNorm": RMSNorm, "TimeEmbedder": TimeEmbedder,

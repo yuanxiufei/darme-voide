@@ -363,6 +363,48 @@ def assemble_chain(parts: Sequence[Any], plans: Sequence[Any], *, fps: int,
     return normalized, {"stitch": stitch_report, "normalize": norm_report}
 
 
+def _continuation_carry(decoded: Any, segment: Any, continuation: Any) -> dict[str, Any]:
+    """上一段产物 → **续拍的头部锚**（尾部潜变量 ✓ 2026-09-26 补 ✓）。
+
+    事实来源：上游 ``h3_extend`` / context_pin —— 把上一窗口的**尾段潜变量**钉进新窗口的**开头** ✓
+    （**不用**解码后的帧 ✗：省一趟 VAE ✓ 且颜色与速度都逐位接得上 ✓）。
+
+    ⚠️ 三条都要**当场**点破 ✗（否则就成了"看着像续拍、其实是拼接"✓✗）：
+    1. 本段的重叠尾巴必须**正好**是钉长 ✗（不等 ⇒ 钉进去的内容与拼接时丢掉的帧**对不上** ✓）；
+    2. ``decoded`` 必须带 ``latents`` ✗（拿不出来就**报错** ✓ —— **不退回**单帧锚 ✗，
+       那会静默换成另一种产物 ✓✗）；
+    3. 潜变量时间维要**够切** ✗（尾巴比成片还长 ⇒ 切不出来 ✓）。
+    """
+    if int(getattr(segment, "overlapTail", 0)) != int(continuation.pin_frames):
+        raise ChainError(
+            f"续拍的钉长与分段的**重叠尾巴**对不上 ✗：第 {segment.index} 段重叠 "
+            f"{int(getattr(segment, 'overlapTail', 0))} 帧 ✓，而钉长是 {int(continuation.pin_frames)} 帧 ✓"
+            "　—— 钉进下一段头部的那段**就是**「重叠再生」的那段 ✓ ⇒ 两者必须相等 ✓"
+            "（``run_chain(overlap_frames=…)`` 与 ``h3_edit.continuation_pin(pin_frames=…)`` 同源 ✓）")
+    latents = (decoded or {}).get("latents") if isinstance(decoded, dict) else None
+    if not isinstance(latents, dict) or "video" not in latents or "audio" not in latents:
+        keys = sorted(decoded.keys()) if isinstance(decoded, dict) else type(decoded).__name__
+        raise ChainError(
+            f"第 {segment.index} 段的 decode **没交回潜变量** ✗ ⇒ 续拍拿不到要钉的尾巴 ✓"
+            f"（该段 decode 的键：{keys} ✓）—— 后端 `_decode_dual` 会顺手给 ``latents`` ✓"
+            "；⚠️ 本函数**不会**退回单帧 PNG 锚 ✗（那是另一条产物 ✓✗）")
+    video, audio = latents["video"], latents["audio"]
+    shape_v = tuple(int(value) for value in getattr(video, "shape", ()) or ())
+    shape_a = tuple(int(value) for value in getattr(audio, "shape", ()) or ())
+    want_v, want_a = int(continuation.video_slots), int(continuation.audio_slots)
+    if len(shape_v) != 4 or len(shape_a) != 3:
+        raise ChainError(
+            f"续拍要 ``[C,T,H,W]`` / ``[C,ch,Ta]`` 两条潜变量 ✗（收到 {shape_v} / {shape_a} ✓）")
+    if shape_v[1] < want_v or shape_a[2] < want_a:
+        raise ChainError(
+            f"这一段的潜变量**不够切** ✗：要尾巴 {want_v} / {want_a} 槽 ✓，本段只有 "
+            f"{shape_v[1]} / {shape_a[2]} 槽 ✓（钉长 {int(continuation.pin_frames)} 帧 "
+            f"= {continuation.seconds:.3f} s ✓ 比成片还长 ✓ ⇒ 调小钉长 ✓ 或加长窗口 ✓）")
+    return {"video": video[:, shape_v[1] - want_v:, :, :],
+            "audio": audio[:, :, shape_a[2] - want_a:],
+            "frames": int(continuation.pin_frames)}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ④ 跑起来：逐段生成 → 拼接 → 规范化 → 落**一条**成片
 # ══════════════════════════════════════════════════════════════════════════
@@ -372,7 +414,8 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
               max_frames: int = H3_NATIVE_MAX_FRAMES,
               overlap_frames: int = DEFAULT_OVERLAP_FRAMES,
               normalize: bool = True, norm_kwargs: dict[str, Any] | None = None,
-              frame_key: str = "frames") -> Any:
+              frame_key: str = "frames",
+              continuation: Any = None) -> Any:
     """多段跑完 ⇒ 返回 ``PipelineResult``（**同形** ✓ 调用方无感 ✓）。
 
     ⚠️ 阶段编排**不在这里重写** ✗：``run_segment`` 由调用方给（生产上是
@@ -381,11 +424,36 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
 
     ⚠️ 每段**一个子目录** ✓（``…/segments/segNNN/``）：否则各段都写 ``video_seed{seed}.mp4`` ✓✗
     同目录下**互相覆盖** ✗ —— 只剩最后一段能核对 ✓（那正是"静默丢事实"✗）。
+
+    ## ⭐ **续拍**（``continuation`` ✓ 2026-09-26 补 ✓）
+
+    给 :class:`h3_edit.ContinuationPin` ⇒ 走**续拍** ✓：段与段之间交的是**尾部潜变量** ✓
+    （下一段的头部锚 ✓ 逐位 ✓ 见 :meth:`torch_backend.init_dual_latents` ✓）而不是**一帧 PNG** ✓。
+    事实来源：``reference/ComfyUI-H3-Multishot/h3_extend.py`` 的 context_pin 口径 ✓。
+
+    ⚠️ 三条同步口径（不说清就会"看着像续拍、其实是拼接"✓✗）：
+    1. ``overlap_frames`` 要**等于** ``continuation.pin_frames`` ✗ —— 钉进下一段头部的那段
+       正是"重叠再生"的那段 ✓（两者不等 ⇒ 钉的内容与拼掉的内容对不上 ✓ ⇒ 本函数**报错** ✗）；
+    2. 续拍模式下**不用** ``carryFrames``（单帧锚 ✓）✗：两套锚语义重叠 ✓（见
+       :func:`segments.build_segment_requests` ✓）；
+    3. 上一段必须交回 ``decoded["latents"]`` ✓（后端 `_decode_dual` 会顺手给 ✓）——
+       给不出来就**报错** ✗，**不退回**单帧锚 ✗（那会静默换成另一种产物 ✓✗）。
     """
     from dataclasses import replace  # noqa: PLC0415
 
     from . import pipeline as pipeline_mod  # noqa: PLC0415 —— 局部导入：避免模块级互相 import ✓
 
+    if continuation is not None:
+        # ⚠️ 续拍的计划**只认** `h3_edit.ContinuationPin` ✓（钉多少槽是**算出来的** ✓）——
+        #    真给个 True/"yes" 就只能猜 ✓ ⇒ 当场报错 ✓ 不猜 ✗。
+        from . import h3_edit as h3_edit_mod  # noqa: PLC0415
+        if not isinstance(continuation, h3_edit_mod.ContinuationPin):
+            raise ChainError(
+                "续拍要的是 :class:`h3_edit.ContinuationPin` ✓（由 "
+                "`h3_edit.continuation_pin(pin_frames, temporal_compression=…, "
+                "audio_latent_mode=…)` 算出来 ✓），收到 "
+                f"{type(continuation).__name__} ✗ —— 钉多少**槽**取决于压缩比与音频潜帧率 ✓ "
+                "⇒ 这里不猜 ✗")
     plan = plan_chain(request, max_frames=max_frames, overlap_frames=overlap_frames)
     if plan is None:
         raise ChainError("这个请求单段就够 ✓ ⇒ 不该走 run_chain ✓"
@@ -400,6 +468,8 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
     steps = 0
     guided = 0
     carry: dict[int, Any] = {}
+    #: 续拍：下一段的**头部锚**（上一段尾部潜变量 ✓）—— 与 ``carry``（单帧锚 ✓）**互斥** ✓
+    carry_latents: dict[int, Any] = {}
 
     def emit(payload: dict[str, Any]) -> None:
         if on_event:
@@ -413,8 +483,12 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
             return _stopped(pipeline_mod, backend, stage_ms, runs, segment.index)
         seg_dir = root / "segments" / f"seg{segment.index:03d}"
         base = replace(request, outputs_dir=str(seg_dir))
+        # ⚠️ 续拍模式**不交**单帧锚 ✗（只交尾部潜变量 ✓）：两套锚语义重叠 ✓
+        #    ⇒ `build_segment_requests` 同段同时收到两者会**报错** ✓（这里就不给它机会 ✓）。
         seg_request = segments_mod.build_segment_requests(
-            base, [segment], root=seg_dir, carryFrames=carry)[0]
+            base, [segment], root=seg_dir,
+            carryFrames={} if continuation is not None else carry,
+            carryLatents=carry_latents)[0]
         holder: list[Any] = []
 
         def grab(decoded: Any, _holder: list[Any] = holder) -> None:
@@ -457,11 +531,16 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
                 raise ChainError(
                     f"接缝对不上 ✗：第 {nxt.index} 段的首帧取自全局第 {nxt.carryFrame} 帧 ✓，"
                     f"而第 {segment.index} 段保留到第 {expected_at} 帧 ✓（内部矛盾 ✓）")
-            # 锚点 = 本段**保留区间**的最后一帧 ✓（不是整段最后一帧 ✗ —— 那还在重叠区里 ✓✗）
-            # ⚠️ 交的是**单帧 3 维** `(3,H,W)` ✓：`segments._as_frame_batch` 把 4 维当
-            #    `(T,C,H,W)` 的**序列**看 ✓ ⇒ 给 4 维会被再包一层成 `(1,1,3,H,W)` ✗
-            #    （2026-09-26 实测踩到 ✓ `media.write_image` 当场报形状 ✓）。
-            carry = {int(nxt.index): frames[0, :, int(segment.keepTo) - 1]}
+            if continuation is not None:
+                # ⭐ **续拍**：交**尾部潜变量** ✓（不是那一帧像素 ✗）
+                carry_latents = {int(nxt.index): _continuation_carry(
+                    decoded, frame_key, segment, continuation)}
+            else:
+                # 锚点 = 本段**保留区间**的最后一帧 ✓（不是整段最后一帧 ✗ —— 那还在重叠区里 ✓✗）
+                # ⚠️ 交的是**单帧 3 维** `(3,H,W)` ✓：`segments._as_frame_batch` 把 4 维当
+                #    `(T,C,H,W)` 的**序列**看 ✓ ⇒ 给 4 维会被再包一层成 `(1,1,3,H,W)` ✗
+                #    （2026-09-26 实测踩到 ✓ `media.write_image` 当场报形状 ✓）。
+                carry = {int(nxt.index): frames[0, :, int(segment.keepTo) - 1]}
         emit({"kind": "stage", "stage": "segment", "segment": int(segment.index),
               "segmentTotal": plan.segmentCount,
               "note": f"第 {segment.index + 1}/{plan.segmentCount} 段完成 ✓"

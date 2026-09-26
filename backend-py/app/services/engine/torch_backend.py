@@ -764,16 +764,152 @@ class TorchBackend:
         torch = self._torch()
         audio_frames = geometry_mod.audio_latent_frames(
             int(plan.frames) / max(1, int(plan.fps)), mode=str(self._audioLatentMode))
-        generator = torch.Generator(device="cpu").manual_seed(int(request.seed))
-        video = torch.randn(1, video_dim, int(latent_frames), height // scale, width // scale,
-                            generator=generator, dtype=torch.float32)[0]
+        video, audio = self._dual_noise(int(latent_frames), int(audio_frames), height // scale,
+                                        width // scale, int(request.seed))
+        keyframes = self._dual_keyframes(plan, request, scale)
+        payload: dict[str, Any] = {"video": video, "audio": audio,
+                                   "audioLatentFrames": int(audio_frames), "vaeScale": scale,
+                                   "keyframes": keyframes,
+                                   "references": self._dual_references(plan, request)}
+        # ⭐⭐ **续拍**（2026-09-26 ✓）：上一段的**尾部潜变量**当作本段**头部**的冻结锚 ✓。
+        #    上游 ``h3_extend`` 的 context_pin 就是这个口径 ✓（钉的是潜变量 ✓ 不是帧 ✓ ——
+        #    颜色与速度都逐位接得上 ✓）。⚠️ 与「拼接」的单帧 PNG 锚（``first_frame`` ✓）**是两回事** ✗：
+        #    那个要过 VAE 一趟 ✓ 只能管住一帧的颜色 ✓；这个管住整段尾巴 ✓。
+        carry = getattr(request, "carry_latents", None)
+        if carry is not None:
+            pin_video, pin_audio, (pin_v, pin_a) = self._dual_carry_pin(
+                carry, video, audio,
+                temporal_compression=getattr(request, "temporal_compression", None))
+            sigma_v0, sigma_a0 = self._dual_sigma0(plan)
+            slots_v, slots_a = int(video.shape[1]), int(audio.shape[2])
+            mask_v = torch.ones((1, slots_v, 1, 1), device=self._device, dtype=torch.float32)
+            mask_a = torch.ones((1, 1, slots_a), device=self._device, dtype=torch.float32)
+            mask_v[:, :pin_v] = 0.0        # 头部**冻结** ✓（0 = 冻结 ✓ 见 sample_dual_stream ✓）
+            mask_a[:, :, :pin_a] = 0.0
+            payload["video"] = pin_video + sigma_v0 * video
+            payload["audio"] = pin_audio + sigma_a0 * audio
+            payload["pin"] = (pin_video, pin_audio)
+            payload["pinMask"] = (mask_v, mask_a)
+            payload["continuation"] = {"pinFrames": int(carry.get("frames") or 0),
+                                       "videoSlots": pin_v, "audioSlots": pin_a,
+                                       "sigmaVideo0": sigma_v0, "sigmaAudio0": sigma_a0,
+                                       "source": "carry_latents"}
+        return payload
+
+    def _dual_sigma0(self, plan: Any) -> tuple[float, float]:
+        """续拍要用的**首 σ** ✓：视频取 ``plan.sigmas[0]`` ✓、音频走 ``time_shift_sigma`` ✓。
+
+        ⚠️ **必须能读到 ``plan.sigmas``** ✗：续拍的 ``x₀ = 尾巴 + σ₀·noise`` ✓ ⇒ 没有 σ₀ 就
+        钉不出那条含噪轨迹 ✓（凭空写一个 1.0 ✗ 会让钉进去的尾巴与噪声水平**对不上** ✓✗）。
+        口径与 :func:`h3_form.sample_dual_stream` 的入口校验**同一份** ✓（≥2 个、末位 0 ✓）。
+        """
+        from app.services.engine import h3_form, schedules  # noqa: PLC0415
+        steps = [float(value) for value in (getattr(plan, "sigmas", None) or [])]
+        if len(steps) < 2 or steps[-1] != 0.0:
+            raise TorchBackendUnavailable(
+                f"续拍要钉尾部潜变量 ⇒ 必须能从 ``plan.sigmas`` 读到 σ 日程 ✗（读到 {len(steps)} 个、"
+                f"末位 {steps[-1] if steps else '无'} ✓）—— 编译层没算 sigmas ✓", reason="pending")
+        if steps[0] <= 0.0:
+            raise TorchBackendUnavailable(
+                f"续拍的首 σ 必须 > 0 ✗（收到 {steps[0]} ✓ —— 钉住的尾巴要按 ``x₀ = 尾巴 + σ₀·noise`` "
+                "铺进采样轨迹 ✓）", reason="pending")
+        shifts = h3_form.H3_SIGMA_SHIFTS
+        return steps[0], schedules.time_shift_sigma(steps[0], float(shifts["sigma_shift_video"]),
+                                                    float(shifts["sigma_shift_audio"]))
+
+    def _dual_carry_pin(self, carry: Any, video: Any, audio: Any, *,
+                        temporal_compression: int | None) -> tuple[Any, Any, tuple[int, int]]:
+        """``carry_latents`` → **补齐到整条长度**的 pin ✓（头部放尾巴 ✓ 其余位置是**没用的填充** ✓）。
+
+        ``carry`` 要有 ``video`` / ``audio``（**上一段的尾部潜变量** ✓ 与 ``[C,T,h,w]`` /
+        ``[C,ch,Ta]`` 同族 ✓）与 ``frames``（那段尾巴覆盖多少**像素帧** ✓ —— 本仓**不猜** ✗：
+        没有它就说不清"钉了多少" ✓）。
+
+        ⚠️ ``temporal_compression`` **必须**给 ✓：``frames`` 是像素帧 ✓、尾巴是潜槽 ✓ ⇒ 两者之间
+        只有 :func:`geometry.latent_frames` 这一条换算 ✓，而压缩比**不在** ``plan`` 上（它是请求的
+        字段 ✓）⇒ 由调用方显式递进来 ✓，缺了就报错 ✓（**不**拿「读不到」当「没问题」✗）。
+
+        ⚠️ 未钉到的位置填 **0** ✓：那儿的 ``pin_mask`` 是 1（要重画 ✓）⇒ pin 的取值**用不上** ✓
+        （``noise_dir = (x₀ − pin)/σ₀`` 只在 mask=0 处生效 ✓）—— 填 0 而不是复制噪声 ✗ 是为了
+        **一眼看得出**那是填充 ✓（复制噪声反而像"有语义" ✓✗）。
+        """
+        from app.services.engine import geometry as geometry_mod  # noqa: PLC0415
+        self._require_own_device("续拍尾巴", carry=carry)
+        torch = self._torch()
+        if not isinstance(carry, dict) or "video" not in carry or "audio" not in carry:
+            raise TorchBackendUnavailable(
+                f"``carry_latents`` 要给 ``video`` / ``audio`` 两路（**上一段的尾部潜变量** ✓）✗"
+                f"（收到 {sorted(carry.keys()) if isinstance(carry, dict) else type(carry).__name__} ✓）"
+                "—— 别拿解码后的帧来钉 ✓（那是「拼接」的单帧锚 ✗ 两回事 ✓）", reason="pending")
+        if not carry.get("frames"):
+            raise TorchBackendUnavailable(
+                "``carry_latents`` 缺 ``frames``（那段尾巴覆盖多少**像素帧** ✓）✗ —— "
+                "本仓**不猜**钉了多少 ✓（要按秒对齐音频 ✓ 见 `h3_edit.continuation_pin` ✓）",
+                reason="pending")
+        tail_v, tail_a = carry["video"], carry["audio"]
+        shape_v = tuple(int(value) for value in getattr(tail_v, "shape", ()) or ())
+        shape_a = tuple(int(value) for value in getattr(tail_a, "shape", ()) or ())
+        want_v = tuple(int(value) for value in video.shape)
+        want_a = tuple(int(value) for value in audio.shape)
+        if (len(shape_v) != 4 or len(shape_a) != 3 or shape_v[0] != want_v[0]
+                or shape_v[2:] != want_v[2:] or shape_a[0] != want_a[0]
+                or shape_a[1] != want_a[1]):
+            raise TorchBackendUnavailable(
+                f"续拍尾巴与本次窗口**不是同一套潜空间** ✗：尾巴 {shape_v} / {shape_a} ✓，"
+                f"本次 {want_v} / {want_a} ✓ —— 通道数与空间尺寸必须**逐项相等** ✓（换了模型/尺寸就钉不上 ✓）",
+                reason="pending")
+        if shape_v[1] > want_v[1] or shape_a[2] > want_a[2]:
+            raise TorchBackendUnavailable(
+                f"续拍尾巴比本次窗口**还长** ✗：尾巴 {shape_v[1]} / {shape_a[2]} 槽 ✓，"
+                f"窗口 {want_v[1]} / {want_a[2]} 槽 ✓（钉不下 ✓ —— 缩短钉子或加长窗口 ✓）",
+                reason="pending")
+        # ⭐ 第二份事实：``frames`` 必须与**视频槽数**对得上 ✓（``latent_frames`` 是**唯一**换算 ✓）
+        #    ⚠️ 2026-09-26 纠：原来读 ``getattr(plan, "temporal_compression", None)`` —— 而
+        #    :class:`~app.services.engine.pipeline.GenerationPlan` 上**没有**这个字段 ✗（压缩比是
+        #    :class:`GenerationRequest` 的 ✓，plan 只存换算结果 ``latent_frames`` ✓）⇒ 这条守卫在
+        #    真管线里**永远不触发** ✓✗：拿「读不到」当「没问题」就是**静默兜底** ✓。压缩比**只能**
+        #    从请求来 ✓ ⇒ 显式传入 ✓；缺了 ⇒ 响亮报错 ✓（口径同 ``latent_frames`` 未知那一条 ✓、
+        #    也同 :meth:`_dual_sigma0` 对 ``plan.sigmas`` 的态度 ✓ —— 本仓**不猜**压缩比 ✓）。
+        #    ⚠️ 另一份佐证：原来那行连 :func:`geometry.latent_frames` 的**调用签名**都是错的 ✗
+        #    （压缩比是**关键字**参数 ✓）⇒ 它要是真跑过一次，早就 ``TypeError`` 了 ✓。
+        #    ℹ️ 走 :meth:`init_dual_latents` 这条真路时，上面 ``plan.latent_frames`` 那道守卫已经先
+        #    拦过一次 ✓（两者同源：都来自请求的 ``temporalCompression`` ✓）⇒ 这里再要一次压缩比
+        #    是**给直接调用兜底** ✓ 并把不变量写进签名 ✓（自检 ㊶′ 专钉它 ✓）。
+        if not temporal_compression:
+            raise TorchBackendUnavailable(
+                "钉续拍尾巴要按**压缩比**把 ``frames`` 折成视频潜槽 ✓ 而这次请求没给 "
+                "``temporalCompression`` ✗ ⇒ 「``frames`` 与槽数」这条**同一件事写两处**的就"
+                "**没得对** ✓（本仓不猜压缩比 ✓ —— 见 `geometry.latent_frames` ✓）", reason="pending")
+        expected = geometry_mod.latent_frames(int(carry["frames"]),
+                                               temporal_compression=int(temporal_compression))
+        if int(expected) != shape_v[1]:
+            raise TorchBackendUnavailable(
+                f"``carry_latents['frames']={carry['frames']}`` 按压缩比 {temporal_compression} 算是 "
+                f"{expected} 个视频潜槽 ✓，而尾巴实际有 {shape_v[1]} 个 ✗"
+                "（同一件事写两处 ✓ 不等 ⇒ 必有一处错 ✓）", reason="pending")
+        pin_video = torch.zeros(want_v, device=self._device, dtype=tail_v.dtype)
+        pin_audio = torch.zeros(want_a, device=self._device, dtype=tail_a.dtype)
+        pin_video[:, :shape_v[1]] = tail_v
+        pin_audio[:, :, :shape_a[2]] = tail_a
+        return pin_video, pin_audio, (shape_v[1], shape_a[2])
+
+    def _dual_noise(self, latent_frames: int, audio_frames: int, latent_height: int,
+                    latent_width: int, seed: int) -> tuple[Any, Any]:
+        """双流的**初始噪声** ✓（``[C,T,H,W]`` 与 ``[C,ch,T_a]`` ✓ 无 batch 维 ✓）。
+
+        ⚠️ 抽成一处 ✓ **只为让重拍能复用同一条噪声路径** ✓（2026-09-26 ✓）—— 重拍要的是
+        ``x₀ = 原始潜变量 + σ₀·noise`` ✓ ⇒ 它必须拿到**与首采同一条**噪声 ✓（另起一处生成 ✗
+        就会悄悄换掉重拍窗口里的随机性 ✓✗）。两条流共用一个 generator ✓ ⇒ 同 seed 逐位可复现 ✓。
+        """
+        torch = self._torch()
+        video_dim = int((self._config or {}).get("latents_dim") or 0)
+        audio_dim = int((self._config or {}).get("audio_latents_dim") or 0)
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        video = torch.randn(1, video_dim, int(latent_frames), int(latent_height),
+                            int(latent_width), generator=generator, dtype=torch.float32)[0]
         audio = torch.randn(1, audio_dim, geometry_mod.AUDIO_LATENT_CHANNELS, int(audio_frames),
                             generator=generator, dtype=torch.float32)[0]
-        keyframes = self._dual_keyframes(plan, request, scale)
-        return {"video": video.to(self._device), "audio": audio.to(self._device),
-                "audioLatentFrames": int(audio_frames), "vaeScale": scale,
-                "keyframes": keyframes,
-                "references": self._dual_references(plan, request)}
+        return video.to(self._device), audio.to(self._device)
 
     def _dual_keyframes(self, plan: Any, request: Any, scale: int) -> list[dict[str, Any]]:
         """首帧 → **关键帧条件块** ✓（H3 的 ``cond`` 段 ✓）—— 没给首帧 ⇒ 空列表 ✓（正常 ✓）。
@@ -955,11 +1091,122 @@ class TorchBackend:
         #    现在逐块按段序拼 ⇒ **多关键帧也支持** ✓（不再是"明确拒绝" ✓）。
         extra_video, extra_audio = self._dual_extra_rows(latents, condition)
         shifts = h3_form.H3_SIGMA_SHIFTS
+        # ⭐ **冻结区**（续拍 / 重拍 ✓ 2026-09-26 ✓）：构造方是 :meth:`init_dual_latents`（续拍 ✓）
+        #    或 :meth:`retake_latents`（重拍 ✓）—— 两者都把 ``pin`` / ``pinMask`` 放进同一个 dict ✓
+        #    ⇒ 采样这条路**只有一份** ✓（本方法不自己造 pin ✗ 也不猜 ✗）。
+        pin = latents.get("pin")
+        pin_mask = latents.get("pinMask")
+        if (pin is None) != (pin_mask is None):
+            raise TorchBackendUnavailable(
+                f"`latents` 里 ``pin`` 与 ``pinMask`` 必须**成对**出现 ✗（收到 pin="
+                f"{'有' if pin is not None else '无'} / pinMask="
+                f"{'有' if pin_mask is not None else '无'} ✓）—— 构造方见 :meth:`retake_latents` ✓",
+                reason="pending")
         return h3_form.sample_dual_stream(
             self._model, latents["video"], latents["audio"], condition, sigmas,
             shift_v=float(shifts["sigma_shift_video"]), shift_a=float(shifts["sigma_shift_audio"]),
             callback=on_step, extra_video_rows=extra_video, extra_audio_rows=extra_audio,
-            keyframes=keyframes or None, refs=refs or None)
+            keyframes=keyframes or None, refs=refs or None,
+            pin=pin, pin_mask=pin_mask)
+
+    def retake_latents(self, latents: Any, plan: Any, request: Any, *, condition: Any,
+                       sigmas: Any, retake: Any, on_step: Any = None) -> dict[str, Any]:
+        """**重拍**（retake ✓ 2026-09-26 移植 ✓）：把**成片**的双流潜变量按窗口重画一遍 ✓，
+        窗外**逐位保留** ✓（自检钉住 ✓）。
+
+        事实来源：``reference/ComfyUI-H3-Multishot/h3_retake.py``（MIT ✓）—— 上游是
+        ``VAEEncode(成片)`` → ``noise_mask`` 划窗 → ``SamplerCustomAdvanced`` ✓，窗外那片由上游
+        ``KSamplerX0Inpaint`` **逐位写回原始潜变量** ✓。本仓对应 :func:`h3_form.sample_dual_stream`
+        的 ``pin`` / ``pin_mask`` ✓——⚠️ **不是** ``denoise_mask`` ✗✗（那个冻结在"第 0 步的含噪值"上 ✓，
+        见那儿的 docstring ✓）。
+
+        ⚠️⚠️ 四条口径（都是「看着像重拍、其实坏了」的形状 ✓✗）：
+        1. **``latents`` 是原始潜变量** ✗ 不是噪声 ✗（形状与首采同一套 ``[C,T,H,W]`` / ``[C,ch,T_a]`` ✓）
+           —— 给错就是"拿噪声重拍噪声" ✓✗；
+        2. **槽位数三方一致** ✓✗：``retake.video_slots`` / ``retake.audio_slots``（**计划层按秒算的** ✓）
+           必须等于张量的**实际时间维** ✓ ⇒ 不等就**拒** ✗（一路按秒 ✓ 一路按张量 ✗ ⇒ 一定有一处错 ✓；
+           悄悄按张量改窗口 = 静默换产物 ✗）；
+        3. **首 σ 必须 > 0** ✗（冻结区的噪声方向靠 ``x₀ = pin + σ₀·noise`` 反推 ✓）；
+        4. **锚只有 pin** ✓：首帧/参考块的处理见下面注释 ✓（随机性由 ``request.seed`` 交代 ✓
+           —— 本方法**不自己摇随机数** ✗）。
+        """
+        self._gate()
+        self._require_own_device("retake_latents", latents=latents, condition=condition)
+        torch = self._torch()
+        from app.services.engine import h3_edit, h3_form, schedules  # noqa: PLC0415
+        if not isinstance(latents, dict) or "video" not in latents or "audio" not in latents:
+            raise TorchBackendUnavailable(
+                "重拍要**成片的双流潜变量**（含 video/audio ✓）✗ —— 别拿噪声/单流来重拍 ✓✗",
+                reason="pending")
+        if not isinstance(retake, h3_edit.RetakePlan):
+            raise TorchBackendUnavailable(
+                "重拍必须给计划层的 :class:`h3_edit.RetakePlan` ✗（窗口与槽位是**算出来的** ✓ "
+                "⇒ 后端**不自己猜窗口** ✗：猜错就是「重拍了一整段别的」✓✗）", reason="pending")
+        steps = [float(value) for value in sigmas]
+        if len(steps) < 2 or steps[-1] != 0.0:
+            raise TorchBackendUnavailable(
+                f"重拍的 σ 日程必须 ≥2 个且**末位为 0** ✗（收到 {len(steps)} 个、末位 "
+                f"{steps[-1] if steps else '无'} ✓）—— 与 :func:`h3_form.sample_dual_stream` 同口径 ✓",
+                reason="pending")
+        video, audio = latents["video"], latents["audio"]
+        shape_v = tuple(int(value) for value in getattr(video, "shape", ()) or ())
+        shape_a = tuple(int(value) for value in getattr(audio, "shape", ()) or ())
+        if len(shape_v) != 4 or len(shape_a) != 3:
+            raise TorchBackendUnavailable(
+                f"重拍的潜变量形状要 ``[C,T,H,W]`` / ``[C,ch,T_a]`` ✗（收到 {shape_v} / {shape_a} ✓）"
+                "—— ⚠️ 别把别的流当视频解 ✓✗", reason="pending")
+        v_slots, a_slots = shape_v[1], shape_a[2]
+        if v_slots != int(retake.video_slots) or a_slots != int(retake.audio_slots):
+            raise TorchBackendUnavailable(
+                f"计划层算的槽位与**张量实际时间维**不一致 ✗：视频 {retake.video_slots} vs {v_slots} ✓、"
+                f"音频 {retake.audio_slots} vs {a_slots} ✓ —— 窗口是**按秒映射到槽位**算的 ✓ ⇒ 两处必须"
+                "是**同一条片子**的同一个事实 ✓（不等 ⇒ 必有一处错 ✓ 拒 ✗，不按张量改窗口 ✗）",
+                reason="pending")
+        # ⭐ 与 ``plan`` 的**第二份事实**对一遍 ✓✗（同一件事写两处 ⇒ 不等就是有一处错了 ✓）：
+        #    潜帧数由 ``plan.latent_frames`` 算 ✓、音频潜帧由**秒数**算 ✓ —— 两边都必须落回同一批槽位 ✓。
+        planned_slots = getattr(plan, "latent_frames", None)
+        if planned_slots and int(planned_slots) != v_slots:
+            raise TorchBackendUnavailable(
+                f"``plan.latent_frames={planned_slots}`` 与成片潜变量的 T={v_slots} 不一致 ✗"
+                "（同一件事写两处 ✓ 不等 ⇒ 必有一处错 ✓）", reason="pending")
+        planned_audio = geometry_mod.audio_latent_frames(
+            int(getattr(plan, "frames", 0)) / max(1, int(getattr(plan, "fps", 24))),
+            mode=str(self._audioLatentMode))
+        if int(planned_audio) != a_slots:
+            raise TorchBackendUnavailable(
+                f"按 ``plan`` 的秒数算出来是 {planned_audio} 个音频潜帧 ✓，而成片是 {a_slots} 个 ✗"
+                "（重拍的音频窗口要按**秒**对齐 ✓ ⇒ 两边必须是同一条片子 ✓）", reason="pending")
+        if steps[0] <= 0.0:
+            raise TorchBackendUnavailable(
+                f"重拍的首 σ 必须 > 0 ✗（收到 {steps[0]} ✓）—— 冻结区的噪声方向是反推出来的 ✓",
+                reason="pending")
+        noise_v, noise_a = self._dual_noise(v_slots, a_slots, shape_v[2], shape_v[3],
+                                            int(request.seed))
+        shifts = h3_form.H3_SIGMA_SHIFTS
+        sigma_v0 = steps[0]
+        sigma_a0 = schedules.time_shift_sigma(sigma_v0, float(shifts["sigma_shift_video"]),
+                                              float(shifts["sigma_shift_audio"]))
+        # 掩码：**1 = 重画 / 0 = 冻结** ✓ —— 整条先置 0（全冻结 ✓）再把窗口开成 1 ✓
+        # ⚠️ 某条流"整条冻结"（video only / audio only ✓）时掩码**全 0** ✓：主干是**联合**前向 ✓
+        #    ⇒ 那条流仍要逐步喂进去 ✓（velocity 换成它自己的噪声方向 ⇒ 净效果 = 原样 ✓ 不白算 ✓）。
+        mask_v = torch.zeros((1, v_slots, 1, 1), device=self._device, dtype=torch.float32)
+        if retake.video is not None:
+            mask_v[:, int(retake.video[0]):int(retake.video[1])] = 1.0
+        mask_a = torch.zeros((1, 1, a_slots), device=self._device, dtype=torch.float32)
+        if retake.audio is not None:
+            mask_a[:, :, int(retake.audio[0]):int(retake.audio[1])] = 1.0
+        noisy = {"video": video + sigma_v0 * noise_v,
+                 "audio": audio + sigma_a0 * noise_a,
+                 "pin": (video, audio), "pinMask": (mask_v, mask_a),
+                 # ⚠️⚠️ **锚只有 pin** ✓：首帧（``cond`` 段）**清掉** ✗ —— 它是个**时间锚** ✓，
+                 #    会跟"窗外冻结"打架 ✓✗（重拍要的是"这段用同样的提示词重画" ✓，不是"接在首帧后面" ✓）；
+                 #    参考块（``ref_img``）**保留** ✓ —— 那是"这条片子里是谁/什么风格" ✓ 重拍**不该换人** ✓。
+                 "keyframes": [], "references": list(latents.get("references") or []),
+                 "audioLatentFrames": a_slots,
+                 "vaeScale": int(vae_mod.H3_VIDEO_VAE_FACTS["vaeScale"])}
+        result = self.sample_dual(noisy, steps, condition, request, on_step=on_step)
+        result["retake"] = {**retake.to_dict(), "sigmaVideo0": sigma_v0, "sigmaAudio0": sigma_a0}
+        return result
 
     def _upscaler_path(self) -> str | None:
         """放大器权重的解析顺序 ✓：显式 ``H3_UPSCALER`` ✓ > 清单里 ``kind=upscale_models`` 的第一条 ✓。
@@ -1524,6 +1771,11 @@ class TorchBackend:
             #    2026-09-20 自检抓到过：视频也去掉 ⇒ `write` 认不出帧张量 ⇒ **默默走成"张量清单 JSON"**
             #    那条路 ✗✗（错在 `json.dumps(Tensor)` 才炸 ✓ —— 属于"响亮但指不到真因" ✓）。
             "frames": frames, "frameCount": int(frames.shape[2]),
+            # ⭐ **顺手把潜变量交回** ✓（2026-09-26 ✓）：**续拍**要拿上一段的**尾部潜变量**当下一段的
+            #    头部锚 ✓（`chain.run_chain` 的 ``continuation`` ✓）—— 上游 `h3_extend` 的 context_pin
+            #    正是这么做的 ✓（钉的是**潜变量** ✓ 不是解码后的帧 ✓：省一趟 VAE ✓ 且逐位干净 ✓）。
+            #    ⚠️ 这里交的是**引用** ✓（不多占显存 ✗）：调用方自己决定什么时候丢掉 ✓（链上只留尾巴 ✓）。
+            "latents": {"video": latents["video"], "audio": latents["audio"]},
             "shape": list(frames.shape), "dtype": str(frames.dtype), "device": str(frames.device),
             "audioWaveform": waveform[0], "audioShape": list(waveform.shape),
             "sampleRate": sample_rate,

@@ -7,7 +7,8 @@
 
 ## 日志清单（按需跳读）
 
-**`2026-09-26.md`**（记忆层只留最新一天 + 守卫夹具自审修正 + ⭐⭐ **SDXL UNet 落地** + ⭐⭐ **CLIP 文本塔** + 口径落成机械守卫（扫描路径 / `reference` 可删）+ ⭐⭐ **SDXL 默认精度 fp16 + 两个真 bug** + ⭐⭐ **管线接线** + 收尾：全量 **142 套 / 4699 项 全绿**（原写「141 套 / 4663 项」**无落盘** ⇒ 已按实证改账 ✗）+ ⭐⭐ **钳线程**（`app/core/cpu_budget.py` ✓ 8/32 ⇒ CPU 不再被打满）+ ⭐⭐ **出图链找得着**：本地落点口径唯一 + 换根**不换名** + ⭐⭐ **SDXL 真权重端到端已通**（真 PNG ✓）+ 显存回收 + 一条**被自检证伪**的收尾竞态 + ⭐⭐ **「盘上那份权重」解析只留一条**（体检/加载/路由同口径）+ ⭐ **未点名参考仓盘点**（`reference/` 18 项 ⇒ 未上榜 10 项逐仓取证，只取证未抄 ✗）+ ⭐ **MEMORY.md 第六次腾 8k 预算**（7844 → 7573 ✓）+ ⭐⭐ **多段成片**（`engine/chain.py` + `engine_chain_test.py` ✓ 超单段上限自动分段续接 + 拼接守恒 + 链式规范化 ✓，单段原路不变 ✗））
+**`2026-09-26.md`**（记忆层只留最新一天 + 守卫夹具自审修正 + ⭐⭐ **SDXL UNet 落地** + ⭐⭐ **CLIP 文本塔** + 口径落成机械守卫（扫描路径 / `reference` 可删）+ ⭐⭐ **SDXL 默认精度 fp16 + 两个真 bug** + ⭐⭐ **管线接线** + 收尾：全量 **142 套 / 4699 项 全绿**（原写「141 套 / 4663 项」**无落盘** ⇒ 已按实证改账 ✗）+ ⭐⭐ **钳线程**（`app/core/cpu_budget.py` ✓ 8/32 ⇒ CPU 不再被打满）+ ⭐⭐ **出图链找得着**：本地落点口径唯一 + 换根**不换名** + ⭐⭐ **SDXL 真权重端到端已通**（真 PNG ✓）+ 显存回收 + 一条**被自检证伪**的收尾竞态 + ⭐⭐ **「盘上那份权重」解析只留一条**（体检/加载/路由同口径）+ ⭐ **未点名参考仓盘点**（`reference/` 18 项 ⇒ 未上榜 10 项逐仓取证，只取证未抄 ✗）+ ⭐ **MEMORY.md 第六次腾 8k 预算**（7844 → 7573 ✓）+ ⭐⭐ **多段成片**（`engine/chain.py` + `engine_chain_test.py` ✓ 超单段上限自动分段续接 + 拼接守恒 + 链式规范化 ✓，单段原路不变 ✗）
++ ⚠️ **提交 `b0fc3ad`** ✓（19 文件 / +2075 ✓）+ ⭐ **第二批取证**（`comfy-org` MIT 模板 ✓ / H3 `retake`·`extend` 范式 ✓ / Turbo 双流 shift ✓ / ⚠️ `Comic-drama` ①TTS **作废** ✗、`writer_pack/**` 非商用 ⇒ ⑰ 那条参照**作废** ✗））
 ① 清理：11 篇 → 1 篇 ✓（`INDEX.md` 128 KB → 17 KB、`memory/` 715 KB → 223 KB ✓）；删掉的 10 篇原文在**清理前那次提交 `83743d6`** 里 ✓。@3
 ② ⚠️ 守卫自检 ④b 夹具改成「真实日志缺失时自己合成」✓（夹具不该耦合仓库此刻的内容 ✗）；`test_guards.py` 17/17 ✓、`check_memory.py` 致命 0 ✓。@9
 ③ ⚠️ 我的统计口径错（`Matches` 打在整卷 INDEX 上没切范围）⇒ 误判 09-20 是最新主线 ✗；按单文件重测：内含日期只到 09-20 ✓ ⇒ **不必捞回** ✓。@14
@@ -60,6 +61,15 @@ CLI ② 段与 `next_steps` **明说「不需要下载」** ✓✗；⚠️ `/in
 ⚠️ 期间 `cpu_budget_test` 的静态守卫**误红** ✓✗（根因 = 环境里被灌了 `VOIDE_CPU_THREADS=8` ✗）⇒ **干净环境复跑 34/34** ✓（**是环境不是代码** ✓）；
 **全量复核** ✓：`run_all` **143 套 / OK 143 · FAIL 0 / `SUMMARY:` 合计 4744/4744** ✓、末行逐字「143 项自检全部通过」✓、`EXIT=0` ✓（`tmp/run_all_round20.log` ✓；⚠️ **PowerShell `>` 落盘是 UTF-16LE** ✗ ⇒ 按 utf-8 读全成乱码 ✓✗，该按 `utf-16` 解 ✓）；
 对账：上轮 **142 套 / 4699 项** ⇒ **+1 套 / +45 项 = 4744** ✓（**数字自己对上** ✓✓）；⚠️ 记账 ✓：`MEMORY.md` 只加**一条指针** + 同批下移两条等量旧内容（CLI 裸跑编码细节 ✓ / 语料细节 ✓ —— 全文都在 `TOPICS.md` ✓）⇒ 实测 **7573 → 7583 字符**（余量 427 → **417** ✓ 仍高于提示线 400 ✓）；守卫 ✓ 日志 **2/2** ✓ / 锚点 **22 处** ✓ / 落点表 **18 处** ✓ / **致命 0** ✓ / `EXIT=0` ✓。@341
+⑳ ⚠️ **提交 + 第二批取证**（用户「提交之后继续看看还有哪些可以用和参考」✓；⚠️ **只取证、未抄一行** ✗、产品代码零改动 ✓）：⭐ **提交 `b0fc3ad`** ✓（「feat(engine): long-video segment chaining + CPU thread budget」✓ **19 文件 / +2075 / −23** ✓、分支 `feat/python-backend` ✓、新增 5 文件 ✓ = `core/cpu_budget.py` / `scripts/resource_watch.py` / `engine/chain.py` / `tests/cpu_budget_test.py` / `tests/engine_chain_test.py` ✓，⑯ 起未提交的批次一并提 ✓；
+⚠️ 提交信息走 **`tmp/*.txt` + `git commit -F`** ✓（PowerShell 传多行会乱 ✓）、**完即删** ✓；⚠️ **`core.hooksPath` 本机未设** ✗ ⇒ 钩子**不自动跑** ✓✗ ⇒ 提交前**手动** `check_all.py` 4 道全绿 ✓）；
+⚠️ 顺手更正 `MEMORY.md` 的 git 身份 ✗（写 `yuanxf`/`yuanxf@wedoctor.com` ✗ ⇒ 实测 `yuanxiufei`/`reginyuan@gmail.com` ✓）；⭐ 补 ⑰ **漏掉的 `comfy-org/`** ✓（84 仓整仓镜像 ✓）：`workflow_templates/` = **MIT** ✓ ⇒ **7 个 H3 模板** ✓（含 **`video_minimax_h3_i2v_continuation.json`** = 续拍 ✓；我们现只有 2 个 ✓）+ `site/src/lib/demos/mmh3/config.ts`（采样器/调度器枚举 ✓ + ⭐ **帧数 17k+5** ✓ 与 `geometry.H3_FRAME_GRID` **互证** ✓✓）+ `agent-prompt.md` ✓；⚠️ **`ComfyUI/` 本体 = GPL-3.0** ✗ ⇒ 其**原生** H3 实现（`comfy/ldm/minimax/*` ✓ / `comfy_extras/nodes_minimax_h3.py` ✓）**只可读事实、不可搬** ✗；
+⭐⭐ `ComfyUI-H3-Multishot` **剩两件真金**（根 `h3_*.py` = MIT ✓）：`h3_retake.py` = **冻结 latent + 窗内 `noise_mask`** 局部重绘 ✓（视频/音频可分开 ✓）与「尾帧续接」「拼接」**正交** ✓；`h3_extend.py`/`h3_multishot_utils.py` 的 `context_pin` = **钉上一段 latent 尾段 + 音频参考** ✓（我们钉**解码后尾帧** ✓✗）；⚠️ 排除三条 ✗（`h3_keyframes` 绑宿主 VAE/`PackedLayout` ✓ / `h3_lora_stack` `comfy.sd` 薄包装 ✓ / `h3_gguf_arch` 改别人全局集合 ✓）；
+⚠️ **许可更正** ✗：`writer_pack/**`（含 `libs/ltx_core/*` ✓、`ltx_distillation/*` ✓）**无 LICENSE + README 声明仅学术/非商用** ✗ ⇒ ⑰ 列为「条件注入/VAE/量化参照」**作废** ✗（其中唯一**纯 torch**、我们**全无**的是 `components/guiders.py` 的 **STG/APG** ✓ ⇒ **不可搬，自己按论文写** ✗）；
+⚠️ **`Comic-drama` ①TTS 作废** ✗（`tts_engines.py` = **外部服务适配层** ✓：`edge_tts` 在线 / pyttsx3·SAPI / `urlopen` POST ✓，回退链只按引擎名分支 ✓，全仓 **0 处**声学模型·声码器·ONNX·torch 推理 ✗ ⇒ **自研 TTS 在参考仓无现成答案** ✓）；真价值 = **④**（角色 = 直方图×0.6 + ahash×0.4 ≥**0.6** ✓、道具 0.55/0.45 ✓、风格 0.7 ✓、镜头 = **纯规则罚分** ✓、治理 = **五维** + `report|block` + `deliverable` 门 + 台账汇总 ✓）；
+⭐ `ComfyUI-MiniMax-H3-Turbo` **纯 torch 事实** ✓（Apache-2.0 ✓）：`SHIFT_V, SHIFT_A = 12.0, 3.0` ✓ / `_time_shift_sigma/_slope` 闭式 ✓ / 双流 = 同一串 sigmas 当视频时钟 + 音频侧 shift 映射 ✓ / **native 分支避免 double-shift** ✓ / `_FrugalLoRA.bypass_forward` = **in-place `add_`** 省两份临时张量（数值等价 ✓）✓；⚠️ 我们引擎**尚无 LoRA 路径** ✗；
+**产出** ✓：`TOPICS.md` 三行更正 + 新增行 + 结论行修正 ✓（**产品代码零改动** ✗ ⇒ 不必跑全量 ✓）；⚠️ **待用户裁决**（红线：**抄前先问** ✓）：A 续拍/重拍 ✓ / B MIT 模板对齐 ✓ / C Turbo 双流 + LoRA ✓ / D 一致性治理 ✓。@377
+
 
 
 **`2026-09-24.md`**（消费方核查 + 网格规则逐值钉住）

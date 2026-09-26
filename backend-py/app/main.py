@@ -66,6 +66,7 @@ from .routers.agent import router as agent_router
 from .routers.auto_pipeline import router as auto_pipeline_router
 from .routers.local_models import router as local_models_router
 from .routers.engine import router as engine_router
+from .routers.lora_train import router as lora_train_router
 from .routers.prompt_tools import router as prompt_tools_router
 from .routers.asset_gate import router as asset_gate_router
 from .routers.continuity import router as continuity_router
@@ -227,6 +228,7 @@ app.include_router(ai_providers_router)
 app.include_router(skills_router)
 app.include_router(upload_router)
 app.include_router(export_router)
+app.include_router(lora_train_router)
 # 下一个域迁完后在这里 include（ai-configs / 本地模型 / evaluation / ...）
 
 

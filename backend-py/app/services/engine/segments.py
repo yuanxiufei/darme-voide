@@ -147,7 +147,8 @@ def plan_segments(total_frames: int, *, max_frames: int, overlap_frames: int = 0
 
 def build_segment_requests(request: Any, plans: list[SegmentPlan], *,
                            root: str | Path,
-                           carryFrames: dict[int, Any] | None = None) -> list[Any]:
+                           carryFrames: dict[int, Any] | None = None,
+                           carryLatents: dict[int, Any] | None = None) -> list[Any]:
     """分段计划 → **每段一个** ``GenerationRequest`` ✓（第 k>0 段自动带**首帧** ✓）。
 
     ``carryFrames[段号]`` = 调用方从**上一段产物**里取出的**边界帧张量** ✓
@@ -156,18 +157,33 @@ def build_segment_requests(request: Any, plans: list[SegmentPlan], *,
 
     ⚠️ 没给 ``carryFrames[k]`` ⇒ 该段**不带首帧** ✓，并记进 ``reference_frames`` 之外的
     ``_segmentNotes`` ✓（不假装有 ✓）。**本函数不生成画面** ✗。
+
+    ``carryLatents[段号]`` = **续拍**的头部锚 ✓（上一段的**尾部潜变量** ✓ 2026-09-26 ✓）——
+    ⚠️ 与 ``carryFrames`` **不是一回事** ✗：那个是**一帧像素**（要过 VAE 一趟 ✓ 只压住颜色 ✓），
+    这个是**整段尾巴的潜变量**（逐位 ✓ 见 :meth:`torch_backend.init_dual_latents` ✓）。
+    本函数只做**交接** ✓：用 ``object.__setattr__`` **旁挂**成 ``carry_latents`` ✓
+    —— 与 ``_with_note`` 同一个理由 ✓（``GenerationRequest`` 加字段会牵动序列化 ✓✗）。
+    ⚠️ 两套锚**同时给同一段** ⇒ 本函数**报错** ✗（一个说"接在这一帧后面"✓、一个说"开头这段照抄"✓
+    ⇒ 语义重叠而口径不同 ✓ 叠着用只会让人分不清是哪条在起作用 ✓✗）。
     """
     from . import media as media_mod  # noqa: PLC0415
 
     where = Path(root)
     where.mkdir(parents=True, exist_ok=True)
     carry = carryFrames or {}
+    latents = carryLatents or {}
     built: list[Any] = []
     for plan in plans:
         seconds = plan.frames / max(1, int(getattr(request, "fps", 24) or 24))
         first_frame: str | None = None
         note = ""
         frame = carry.get(plan.index)
+        pinned = latents.get(plan.index)
+        if pinned is not None and frame is not None:
+            raise ValueError(
+                f"第 {plan.index} 段同时给了 ``carryFrames``（单帧锚 ✓）与 ``carryLatents``"
+                f"（尾部潜变量锚 ✓）✗ —— 续拍与拼接是**两套锚** ✓（各管一段连续性的写法不同 ✓）"
+                "⇒ 一次只用一套 ✓✗")
         if plan.carryFrame is not None and frame is not None:
             target = where / f"carry_{plan.index:03d}_from{plan.carryFrame}.png"
             media_mod.write_image(_as_frame_batch(frame), target)
@@ -177,8 +193,24 @@ def build_segment_requests(request: Any, plans: list[SegmentPlan], *,
             note = (f"未提供第 {plan.carryFrame} 帧的张量 ⇒ 本段**不带首帧** ✓"
                     f"（接缝连续性会变差 ✗ —— 如实标注，不假装有 ✓）")
         updated = replace(request, seconds=seconds, first_frame=first_frame)
+        if pinned is not None:
+            # ⚠️ 必须在 ``replace`` **之后**旁挂 ✗：``replace`` 造的是**新对象** ✓
+            #    ⇒ 挂在旧对象上的属性会**悄悄丢掉** ✓✗（同一个坑 `_with_note` 也踩得到 ✓）。
+            object.__setattr__(updated, "carry_latents", pinned)
+            note = (note + " | " if note else "") + _carry_latents_note(pinned)
         built.append(updated if not note else _with_note(updated, plan, note))
     return built
+
+
+def _carry_latents_note(latents: Any) -> str:
+    """续拍交接的一句话事实 ✓（**如实**报出钉了多少 ✓ —— 报不出来就说"形状未知" ✓ 不编 ✗）。"""
+    shape_v = tuple(getattr(latents.get("video") if isinstance(latents, dict) else None,
+                            "shape", ()) or ())
+    shape_a = tuple(getattr(latents.get("audio") if isinstance(latents, dict) else None,
+                            "shape", ()) or ())
+    frames = int((latents or {}).get("frames") or 0) if isinstance(latents, dict) else 0
+    return (f"续拍头部锚 = 上一段尾部潜变量 ✓（视频槽 {shape_v[1] if len(shape_v) == 4 else '?'} ✓ / "
+            f"音频槽 {shape_a[2] if len(shape_a) == 3 else '?'} ✓ / 覆盖 {frames} 像素帧 ✓）")
 
 
 def _as_frame_batch(frame: Any) -> Any:
