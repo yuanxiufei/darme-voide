@@ -5,7 +5,7 @@
 （张量表 / 量化方案 / 对齐 ✓）+ 一组「故意坏的」反向证明（截断 / 块不整除 /
 未知类型 / 坏 magic / 重叠 ✓）。
 
-结构事实来源：``reference/ollama/fs/gguf/``（``gguf.go`` 头格式 / ``tensor.go`` 块布局 /
+结构事实来源：``ollama/fs/gguf/``（``gguf.go`` 头格式 / ``tensor.go`` 块布局 /
 ``file_type.go`` 方案名 ✓）。
 
 运行::

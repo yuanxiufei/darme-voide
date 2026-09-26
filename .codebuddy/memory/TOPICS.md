@@ -141,8 +141,42 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
 音频→真 wav（标准库 `wave` ✓）/ 权重体检 + 加载计划 ✓（含**反量化计划** ✓）/ 管线编排（进度 / 取消 /
 错误归因 ✓）/ 干跑后端 ✓。
 
-**唯一硬缺口 = 真权重 + 真配置** ✗（见 `torch_backend.PENDING_PARTS` ✓：H3 主 DiT 19.53 GiB 未下载 ✓
-⇒ 上机前先跑 `python app/scripts/h3_readiness.py` ✓）⇒ `canGenerate=False` ✓。
+**唯一硬缺口 = 真权重 + 真配置** ✗（⚠️ **2026-09-26 更正** ✓✗ —— 见当日日志 ⑮ ✓）：H3 全套
+（**≈39.55 GiB** ✓：DiT 19.53×2 + TE 14.61 + 视频 VAE 4.85 + 音频 VAE 0.56 ✓）**盘上早就有** ✓ ——
+在**动态探测到的** ComfyUI 共享根里 ✓（不在 `models_dir` ✓）⇒ **视频侧不再是"权重缺口"** ✓；
+真正缺的是**文本侧 LLM**（`qwen3_14b` / `qwen3_32b` ≈25.00 GiB ✓，`--stage text` 会点名 ✓）与真配置 ✓。
+⚠️ 判据**别问"下载了没"** ✗，跑 `python app/scripts/h3_readiness.py [--stage …]` ✓（**唯一权威** ✓）：
+它现在把「**在盘上、但不在 `models_dir`**」与「**真缺**」**分开报** ✓✗（二者混为一谈就出过"扫描不出来"的乌龙 ✓）。
+（⚠️ **出图**那条路不在此缺口内 ✓ —— SDXL 真权重端到端 2026-09-26 已通 ✓，见「下一步待办」第 1 条 ✓。）
+
+* ⭐⭐ **权重解析只有一条**（2026-09-26 定 ✓，用户当场戳穿一次 ✓✗）：`inventory.resolve_component` ✓ =
+  **清单落点（`<data_root>/models/<kind>/<文件名>` ✓）优先 → 动态探测根** ✓；**给 `root` 就只认那个根** ✓
+  （自检钉根 ⇒ 结论与机器无关 ✗✗）。体检 / 加载计划 / `bridge.resolve_dit_path` / `torch_backend`
+  （`_default_dit_path` ✓ `_upscaler_path` ✓）/ `vae_h3` / 路由 `/inspect` ✓ `/load` ✓ upscale-plan ✓ **全走它** ✗。
+  ⚠️ 以前几处**各自只看 `models_dir`** ✗✗ ⇒ 实测出过「盘上有 39.55 GiB 全套、报告却说缺件、还要下」✓✗
+  （详见 `2026-09-26.md` ⑮ ✓）。⇒ **报告里「真缺」与「在盘上但不在 `models_dir`」必须分开说** ✗
+  （`missingRequired` vs `resolvedElsewhere` ✓；⚠️ 查询参数是 `models_dir` ✗ —— 写成 `modelsDir` 会被
+  FastAPI **静默忽略** ✓✗）。
+
+* ⭐⭐ **显存口径（2026-09-26 实测 ✓ —— 用户要求「CPU/GPU 相互分担、两侧都留裕量、不许逼近上限」✓）**：
+  **装载收尾 + 每张任务收尾各还一次缓存** ✓（`runtime._reclaim_cuda_cache` ✓）—— 还把「还了多少」
+  写进**装载报告的 `cache`** ✓ 与任务**末尾那条 `kind="reclaim"` 事件** ✓（**不静默** ✗，前端看得见 ✓）。
+  实测（A5000 22.49 GiB ✓；本机 **User** 环境预设 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024` ✓
+  —— 这是碎片源头 ✓，⚠️ **不许替用户改环境** ✗）：装完 SDXL 四件套**真占用 6.73 GiB** ✓，而不还时
+  缓存**保留 13.88 GiB** ✗（驱动视角只剩 7.37 ✓）；采样一张 1024² 后保留 **15.76 GiB** ✗（只剩 5.47 ✓✗）；
+  **还完保留 8.24 GiB** ✓（驱动视角 13.00 / 12.98 ✓）—— 在用的 6.73 GiB **一点没少** ✓、采样耗时不变 ✓。
+  ⚠️ **回收 ≠ 卸载** ✗：不变量 = `memory_allocated` 前后一致 ✓ + `loadKeyTuple` 不变 ✓ + `loaded.dit` 仍 True ✓
+  （自检 `engine_runtime_test.case_reclaim` 锁的就是这条 ✓）。
+  ⚠️⚠️ **顺序不变量（2026-09-26 被实测证伪后钉死 ✓）**：**读到「终结」的那一刻，那条 `reclaim` 事件必须
+  已经在事件里** ✗✗。病根 = 「终结态先写 ✗、事件后 append ✗」—— 我先前的说法「先还、后唤醒 ⇒ 读任务的人
+  一定看得见」**只对"被唤醒"的读者成立** ✓✗，而 `bridge.run_job` 是**带超时轮询**的 ✗ ⇒ 终结态一可见就
+  **收工走人** ✓ ⇒ 实测同进程连跑两张，**第 1 张 `reclaimEvent` 为空、第 2 张有** ✓✗。修法 ✗：
+  `_execute` **只返回「该怎么封口」（status/error ✓）自己不写终结态** ✗ + worker `finally` 里顺序钉死为
+  **先还 → 记事件 → 最后封口 → 再唤醒** ✓，且 append 与封口**同一段临界区** ✓（`runtime._settle` ✓，
+  docstring 明写**必须持 `_wake` 调用** ✗）。自检 `engine_runtime_test.case_terminal_order` ✓ 把"还"
+  **故意放慢 300 ms** 拉宽窗口 ✓；⚠️ 该自检**自己也被证伪过** ✓（用一次性探针把 `_execute` 在**内存里**
+  换回旧写法 ⇒ 两条断言**当场红** ✓，**不改源码** ✓、探针已删 ✓）—— 「只在当前实现下绿」的自检**不算数** ✗。
+  ⇒ **以后再往引擎里加"常驻大权重"，都要在装完 + 跑完各还一次** ✓，别让缓存「看着占满整卡」✗。
 
 ## 自主化进度 + 下一步待办（2026-09-25 ✓ 用户「完全自主不依赖第三方」—— **下次接手看这里** ✓）
 
@@ -176,19 +210,50 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
    Porter-Duff **18 模式**/掩罩族/形态学/BT.601 色彩/量化/Canny ✓；⚠️ 自检当场抓出两条「看着对的错值」已修：
    Canny 平坦图**伪边缘** ⇒ 加 `CANNY_NOISE_FLOOR` ✓、`quantize` 借灰阶调色板 ⇒ Pillow **忽略 `colors`** 且压成灰阶 ⇒
    改**中位切分** ✓）；规模与最近实测见 `tests/run_all.py` 表头 ✓（**唯一权威** ✓，本处**不罗列** ✗）。
-   ✗ **仍缺**：**接线**（`image_generation.generate_image` 的 engine 分支：CLIP-L + OpenCLIP-bigG 双文本编码 → `build_adm` → 采样循环 → `vae` 解码落盘 ✓）
-   + **真权重**（TE ≈2.5 GiB ×2 + VAE 334 MB ✓，`sd_xl_base_1.0.safetensors` 本身含 US 版 TE/V AE ✓）。
-   ⚠️ **接线的前置**（2026-09-26 实测 ✓）：**扫描器看不见本机那份 SDXL / VAE / TE** ✓✗ ——
-   `detect_comfyui()` **只取第一个命中** ⇒ 挑中 `ComfyUI-Installs/…/ComfyUI`、把
-   **`ComfyUI-Shared/models` 遮住** ✗（默认根扫**扫不到** `…/ComfyUI-Shared/models/checkpoints/sd_xl_base_1.0.safetensors` ✓；
-   补上 `COMFYUI_CANDIDATES` 后 22 ms 命中 ✓）。两条路选一 ✓：**修扫描语义**（`get_default_roots` 收**所有**存在的
-   ComfyUI 模型根 ✓ —— 但该模块有 TS 镜像与多处守卫 ⇒ 得连 `model_manager.py` / `local_models_test` 一起改 ✓）
-   或**显式配**（`COMFYUI_PATH` / `configs/model-paths.json` 的 `comfyui_root` / `extra_roots` ✓）—— **等定** ✗。
+   ✅ **接线已落**（2026-09-26 ✓）：`image_generation.generate_image` 的 engine 分支：CLIP-L + OpenCLIP-bigG 双文本编码
+   → `build_adm` → 采样循环 → `vae` 解码落盘 ✓（`engine/sdxl_backend.py` ✓ + `engine/sdxl_vae.py` ✓；⚠️ 顺带修掉
+   `bridge.run_job` **漏传 `stage`** ✓✗ ⇒ 出图任务曾被 `submit` 的默认 `h3` 盖掉 ✓，见 `2026-09-26.md` ⑬ ✓）。
+   ✅✅ **真权重端到端已通**（2026-09-26 实测 ✓ —— 这条待办**可以划掉了** ✓）：不走任何外部服务 ✓，
+   从**空 settings** 起（只给 `device/steps/seed` ✓ ⇒ 权重与词表全靠扫盘口径自己找 ✓）走
+   `bridge.assembly_from_config` → `request_from_image_record` → `run_job` → `engine_runtime` ✓，
+   真产出 1024² **真 PNG** ✓（`synthetic=False` ✓、`sampleSteps=20` ✓、`guidanceSteps=0` ✓ ——
+   CFG 是引擎的"不被要求的干预一律不做"默认 ✓ 没去动它 ✗）。实测账（A5000 ✓，`PYTHONIOENCODING=utf-8` ✓，
+   `torch.set_num_threads(8)` 钳住 ✓）：
+   * 装载 **14.17 s** ✓（1680+248+197+390 件小张量 ✓，CPU 侧读盘+转型 ✓ 顺手活 ✓）；
+   * 单张 1024²/20 步：墙钟 **4.09~4.48 s** ✓（`sample` 3.39~3.44 s ✓ / `decode` 0.60 s ✓ / `encode` 0.03 s ✓
+     / `write` 0.09 s ✓）—— **复用已装的** ⇒ 第二张不再装载 ✓；
+   * 在用的显存 **6.73 GiB** ✓（fp16 计算组件 + fp32 VAE ✓），采样峰值 alloc **13.27 GiB** ✓ ⇒
+     **两侧都留裕量** ✓（CPU 本进程 47.69 s / 墙钟 28.57 s ≈ 1.7 个核等效 ✓，32 逻辑核里远没打满 ✓）；
+   * 像素统计（把「真出一张图」与「纯色/全黑」分开 ✓✗）逐张记在 `2026-09-26.md` ⑭ ✓；实物 3 张 PNG 留着 ✓
+     （`backend-py/tmp/probe_image_out/` ✓ —— ⚠️ 探针脚本本身**已删** ✓，只留**产物 + 实测账**
+     `tmp/probe_final.json` ✓；`tmp/` 已 gitignore ✓）。
+   ⚠️ 这一路**必须给 `device`** ✗：不给 ⇒ `resolve_sdxl_dtype_names` 落到 **CPU + fp32** ✓✗
+   （正是"GPU 摸鱼、32 核打满"那个老毛病 ✗）；权重 TE ≈2.5 GiB ×2 + VAE 334 MB ✓，文件本身含 US 版 TE/VAE ✓。
+   ✅ **前置（同上 2026-09-26 批 ✓「等定」→ 选**修扫描语义** ✓）**：`get_comfyui_roots()` ✓ 收**所有**
+   存在的 ComfyUI 模型根 ✓（不再「只取第一个命中」✗ ⇒ 不再把 `ComfyUI-Shared/models` 遮住 ✓；
+   `COMFYUI_PATH` / `configs/model-paths.json` 的 `comfyui_root` / `detect_comfyui_roots()` 关键词探测
+   三者合并去重 ✓ 各带来源 ✓，`get_default_roots` **复用**它 ✓ ⇒ 一份口径 ✓）。
+   ⚠️ 同时**真机抓出并修掉**两条「扫描看得见、装载看不见」✓✗：
+   ① **落点口径**（`inventory.component_path` ✓）—— 清单里的 `file_path` 是**远端**仓库内的路径 ✓✗
+   （`model_manager.build_download_url` 用的正是它 ✓ —— SDXL 那个 HF 仓库**是平的** ✓），
+   ⇒ **不作**本地落点 ✗；本地落点只有一个 = `<models_dir>/<kind>/<文件名>` ✓ = **安装器**
+   （装/查/删**三处** ✓）算的那个位置 ✓（自检**跨模块对账** ✓：直接调安装器的 `model_status` 逐字比 ✓，
+   **不许手抄公式** ✗ —— 手抄那份自己也会漂 ✓✗）。
+   ② **换根不换名**（`bridge.resolve_sdxl_path` / `resolve_dit_path` 补第 ③ 级 ✓）—— 同一份清单条目去
+   `inventory.candidate_roots()` 那些探测根里找**同名**文件 ✓（本机那两份 SDXL/DiT 都在
+   `…/ComfyUI-Shared/models/<kind>/` 里 ✓）；⚠️ **DiT 是同一种病、视频侧也真中过** ✓✗（以前只认
+   `models_dir` ⇒ 视频永远报缺 DiT ✓）；⚠️ **词表另有口径**（`comfy/sd1_tokenizer` ✓ 上游约定
+   ⇒ 只在**上游安装根**里找 ✓，**不在**模型根里找 ✗；缺词表出图**当场报** ✗ 不挂桩 ✓）。
+   ✅ 真机实测（2026-09-26 ✓）：SDXL ✓ / DiT ✓ / 词表 ✓ **三条全命中** ✓；体检仍**如实**报
+   `ready=False` + 补记 `resolvedElsewhere` ✓（**不**因为「扫到了」就改判 ✓）。规模与最近实测见
+   `tests/run_all.py` 表头 ✓（**唯一权威** ✓，本处**不罗列** ✗）。
 2. **TTS 自研**：声学模型（替代 CosyVoice 9880）—— 引擎已有 `audio_vae`（声码器那半 ✓），缺的是
    **文本→声学特征**（音素化/时长/声学模型）✓；参考 `reference/ollama` 之外的 TTS 方案（IndexTTS 逆向已收口：本仓走 CosyVoice，
    情绪 8 维已落地 `voice_contract.EMOTION_ORDER` ✓）。这块最复杂，放最后 ✓。
-3. **真权重下载**：H3 主 DiT 19.53 GiB + Qwen3 GGUF ≈9 GiB + 词表 ✓ —— 文本代码已闭环但**没权重跑不动** ✗；
+3. **真权重**（⚠️ **2026-09-26 更正** ✓）：**视频侧 H3 全套盘上已有** ✓（39.55 GiB ✓，在**探测根**里 ✓
+   ⇒ **不再是缺口** ✓，见 ⑮）；**真缺的是文本侧 LLM**（`qwen3_14b` / `qwen3_32b` ✓ —— `--stage text` 点名 ✓）+ 词表 ✓；
    下载入口 `model_manager.py download --category text/video` ✓（三源 HF/hf-mirror/ModelScope ✓）。
+   ⚠️ 想让**本仓自持**（换机器 / 整目录搬走 ✓）⇒ 把探测根里那批**收进 `models_dir`** ✓（体检会逐件点名 ✓）。
 4. **小项收尾**：chat 模板（Qwen3 `<|im_start|>` 对话骨架，现为裸拼接 ✗）；其余 k-quant 反量化（Q2_K/Q3_K/Q5_K/Q6_K，现具名拒绝 ✗）。
 
 **下次写代码要遵守（本仓红线，摘要在 `MEMORY.md` ✓）：**
@@ -458,7 +523,9 @@ audio | cosyvoice | http://localhost:9880 | 本地 ✓ | 82 |
   分词本身已由**自研三血统**接管 ✓ ⇒ 它只剩**核对价值** ✓。
 * ⚠️ **自检汇总行必须写 `SUMMARY: n/m passed`** ✗（`run_all.py` 按此前缀收敛项数 ✓；写成「n/m 项通过」
   ⇒ 总表**空摘要**、项数缺一套 ✓✗）。
-* ⚠️ **别同时开多个全量回归** ✗（并发抢 CPU ⇒ 像"卡死" ✓✗）；**判据 = 日志里有没有 `结论：` 行** ✗
+* ⚠️ **别同时开多个全量回归** ✗（并发抢 CPU ⇒ 像"卡死" ✓✗）；⚠️ 这条的**变体**同样犯不得 ✗：
+  为了"看账目"**把编排脚本再调一次** ✗✗（`run_full.py` 不是查看器 ✓ —— 它**又整跑一遍** ✓✗，2026-09-26 真犯过 ✓）
+  ⇒ **要看账目就读日志文件** ✓；**判据 = 日志里有没有 `结论：` 行** ✗
   （半截日志不算跑过 ✓）。⚠️ 有红时的顺序 ✗：先数进程 ✓（>1 就清 ✓）→ **单独连跑 3 次** ✓
   （一次绿说明不了什么 ✗）→ 还绿再去查「什么时候写终态」这类**时序** ✗ —— ⭐ **「单独复跑就好了」≠
   「不是代码问题」** ✗✗（`h3_stage2_test` 那条偶发红就是这么被误判过一轮 ✓）。

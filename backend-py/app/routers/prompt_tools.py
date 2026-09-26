@@ -1,6 +1,6 @@
 """**提示词生产工具**（占位符解析 + 五段质感层 ✓）。
 
-移植自 ``reference/short-drama-agent``（``tagged-storyboard-format.md`` +
+移植自 ``short-drama-agent``（``tagged-storyboard-format.md`` +
 ``mx-shell-workflow-adapter.md`` ✓）—— 这两件事本项目**原来没有** ✓：
 
 * ``POST /api/v1/prompts/resolve`` —— 把 ``<location>L1</location>`` / ``<role>R5</role>`` /

@@ -210,7 +210,7 @@ def _error(fn) -> Exception:  # noqa: ANN001
 
 
 def case_minimax_h3() -> None:
-    """⭐ H3 专用预设（2026-09-20 抄自 `reference/ComfyUI` 的实测键名 ✓）。"""
+    """⭐ H3 专用预设（2026-09-20 抄自 `ComfyUI` 的实测键名 ✓）。"""
     spec = mp.preset("minimax-h3")
     check("⑱ ⭐ H3 预设存在，且**故意不带合并规则** ✗（H3 权重里 qkv 本就是融合的 ✓）",
           spec is not None and spec.merges == (), spec.merges)

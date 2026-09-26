@@ -194,8 +194,9 @@ const skillPickerQuery = ref('')     // 候选面板搜索词（外部库近 30 
 const cfgs = ref<AiServiceConfigVO[]>([])
 
 // 出厂默认配置由后端下发（GET /agent-configs/defaults），单一事实来源：
-//   提示词 = backend/src/agents/index.ts 的 DEFAULT_PROMPTS
-//   Skill 绑定 = 各 SKILL.md 的 frontmatter `agents:`（backend/src/agents/skills.ts 解析）
+//   提示词 = backend-py/app/services/agent_prompts.py 的 DEFAULT_PROMPTS
+//   Skill 绑定 = 各 SKILL.md 的 frontmatter `agents:`（backend-py/app/agent/skills.py 解析）
+//   （溯源：TS 时代这两处分别在 backend/src/agents/index.ts 与 agents/skills.ts，已随 Node 后端删除）
 // 前端不再本地维护副本 —— 历史副本会与后端漂移（曾长期挂在外部 skill 库上）
 type AgentDefault = { name?: string; instructions?: string; skills?: string[] }
 const agentDefaults = ref<Record<string, AgentDefault>>({})

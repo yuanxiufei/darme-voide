@@ -179,7 +179,10 @@ def readiness(
     """就绪报告：``ready`` + 缺哪些（``missingRequired``）+ 坏哪些（``brokenRequired``）✓。
 
     ``capacityGiB`` 用于算显存余量（默认 24 = 本机 A5000 ✓，可覆盖 ✓）。
-    ``modelsDir`` 不给就用清单里配置的模型根目录 ✓（便于「先看看别的盘上有没有」✓）。
+    ``models_dir`` 不给 ⇒ 搜索域 = 清单落点（``models_dir`` ✓）+ **动态探测根** ✓（= 加载时用的那条 ✓）；
+    给了 ⇒ **只认那个根** ✓（便于「只按这个目录对账」✓）。
+    ⚠️ 查询参数名就是 ``models_dir`` ✗（**没有** ``modelsDir`` 这个别名 ✓ —— 文档里曾写成 camelCase ✓✗，
+    而 FastAPI 不别名就按 Python 形参名匹配 ✓ ⇒ 照文档写会**静默按默认域**算 ✓✗）。
     ``upscaleKey`` / ``upscalePath`` 可选 ⇒ 顺带回答**超清放大器能不能用** ✓
     （⚠️ 不给就是 ``checked=false`` **「没查」** ✗ —— **不是**「超清可用」✗✗）。
     """
@@ -211,9 +214,17 @@ async def inspect_file(request: Request) -> Any:
         entry = next((item for item in inv.load_catalog()["models"] if item.get("key") == key), None)
         if entry is None:
             return bad_request(f"清单里没有 key={key!r} ✓")
-        resolved = inv.component_path(entry)
+        # ⚠️ 走**同一条解析** ✗（2026-09-27 修 ✓）：清单落点优先 → 动态探测根 ✓ —— 与加载 /
+        #    体检 / :func:`inventory.resolve_component` 完全一致 ✓。以前只看 ``models_dir`` ✗
+        #    ⇒ 盘上那份在探测根里时，这里会报"没有可解析路径" ✓✗（同一件事两个说法 ✓）。
+        resolved, _source = inv.resolve_component(entry)
         if resolved is None:
-            return bad_request("清单里该条目没有可解析路径（且 models_dir 未配置 ✗）")
+            # ⚠️ 盘上没有**不报 400** ✗：这条路的语义是"体检这个文件" ✓ —— 落点算得出来就照检 ✓
+            #    （`st.inspect` 会回「文件不存在」✓，前端照旧能显示"没下"✓、也能看到 ``expectedPath`` ✓）；
+            #    连**落点**都算不出来（清单没 filename / models_dir 没配 ✓）才 400 ✓。
+            resolved = inv.component_path(entry)
+            if resolved is None:
+                return bad_request("清单里该条目没有可解析路径（filename 为空，或 models_dir 未配置 ✗）")
         raw_path = str(resolved)
     if not raw_path:
         return bad_request("需要 path / filePath / key 之一 ✓")
@@ -222,7 +233,11 @@ async def inspect_file(request: Request) -> Any:
 
 
 def _resolve_component_path(raw: str, key: str) -> str | None:
-    """``path`` 或**组件 key** ⇒ 真实路径 ✓（与 ``/inspect`` 同一口径 ✓ ⇒ 前端不用自己拼 ``kind/filename`` ✓）。"""
+    """``path`` 或**组件 key** ⇒ 真实路径 ✓（与 ``/inspect`` 同一口径 ✓ ⇒ 前端不用自己拼 ``kind/filename`` ✓）。
+
+    ⚠️ 解析走 :func:`inventory.resolve_component` ✓（清单落点优先 → 动态探测根 ✓），
+    与加载 / 体检**同一条** ✗ —— 2026-09-27 修 ✓（以前只看 ``models_dir`` ✓✗）。
+    """
     if raw:
         return raw
     if not key:
@@ -230,7 +245,11 @@ def _resolve_component_path(raw: str, key: str) -> str | None:
     entry = next((item for item in inv.load_catalog()["models"] if item.get("key") == key), None)
     if entry is None:
         return None
-    resolved = inv.component_path(entry)
+    # ⚠️ 盘上没有时**回落清单落点** ✗（不是返回 None ✓）：这样加载会带着**真实期望路径**报错 ✓
+    #    （「文件不存在：…/diffusion_models/xxx.safetensors」比「没找到路径」可行动得多 ✓）。
+    resolved, _source = inv.resolve_component(entry)
+    if resolved is None:
+        resolved = inv.component_path(entry)
     return None if resolved is None else str(resolved)
 
 
@@ -290,9 +309,14 @@ async def upscale_plan(request: Request) -> Any:
         entry = next((item for item in inv.load_catalog()["models"] if item.get("key") == key), None)
         if entry is None:
             return bad_request(f"清单里没有 key={key!r} ✓")
-        resolved = inv.component_path(entry)
+        # ⚠️ 与 ``/inspect`` / 加载同一条解析 ✓（2026-09-27 修 ✓：清单落点优先 → 动态探测根 ✓）；
+        #    盘上没有时回落清单落点（下面读契约那步会给出"读不到"的具名原因 ✓ —— 不是 500 ✓）。
+        resolved, _source = inv.resolve_component(entry)
         if resolved is None:
-            return bad_request("清单里该条目没有可解析路径（且 models_dir 未配置 ✗）")
+            resolved = inv.component_path(entry)
+            if resolved is None:
+                return bad_request("清单里该条目没有可解析路径（filename 为空，或 models_dir 未配置 ✗）")
+        raw_path = str(resolved)
 
     contract: dict[str, Any] | None = None
     contract_error: str | None = None

@@ -1,4 +1,4 @@
-"""**连续性表**（移植 ``reference/short-drama-agent`` 的 ``production-plan-contract.md`` §6-§11 ✓ 零依赖 ✓）。
+"""**连续性表**（移植 ``short-drama-agent`` 的 ``production-plan-contract.md`` §6-§11 ✓ 零依赖 ✓）。
 
 ## 为什么需要它（本项目原来只有"事后看图" ✗）
 

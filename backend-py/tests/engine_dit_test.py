@@ -80,7 +80,7 @@ def case_config() -> None:
     check("④ `vae_scale` 默认 0 = **未给** ✓（像素↔潜空间比是 VAE 的知识，本模块不猜 ✗）",
           dit_mod.DiTConfig().vae_scale == 0)
 
-    # ⭐ 2026-09-20：H3 结构事实（抄自 `reference/ComfyUI` ✓ 逐条带出处 ✓ 不是猜的 ✗）
+    # ⭐ 2026-09-20：H3 结构事实（抄自 `ComfyUI` ✓ 逐条带出处 ✓ 不是猜的 ✗）
     h3 = dit_mod.H3_SHAPE_FACTS
     check("④′ ⭐ H3 事实自洽：**heads × headDim ≠ hidden** ✓（56×128=7168 vs 5376 ✓）"
           "—— 这条正是「本仓 MHA 装不下 H3 权重」的根因 ✓",

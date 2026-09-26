@@ -5,7 +5,7 @@
 ComfyUI 里流通的 workflow 有两种形态，**互不通用** ✗：
 
 * **UI 格式**（``{"nodes": [...], "links": [...]}``）—— 界面里能打开、能看连线，但**不能** POST；
-  参考项目（``reference/minimax-h3-comfyui/workflows/MiniMax_H3_Fast_T2V.json`` 等）导出的都是这种 ✓。
+  参考项目（``minimax-h3-comfyui/workflows/MiniMax_H3_Fast_T2V.json`` 等）导出的都是这种 ✓。
 * **API 格式**（``{"3": {"class_type": "...", "inputs": {...}}, ...}``）—— 只有它能 ``POST /prompt`` ✓。
 
 界面上的「导出 → API 格式」是**前端**做的：它拿 ``/object_info`` 里每个节点的

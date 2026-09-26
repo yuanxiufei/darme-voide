@@ -1,7 +1,7 @@
 """ComfyUI 口径的「模型目录类别」表 + **任意目录**模型根声明解析（自研重写 ✓）。
 
-⚠️ 口径来源（2026-09-26 逐条核对 ✓）：``reference/ComfyUI/folder_paths.py``（类别表 ✓）与
-``reference/ComfyUI/utils/extra_config.py``（``extra_model_paths.yaml`` 语义 ✓）——
+⚠️ 口径来源（2026-09-26 逐条核对 ✓）：``ComfyUI/folder_paths.py``（类别表 ✓）与
+``ComfyUI/utils/extra_config.py``（``extra_model_paths.yaml`` 语义 ✓）——
 ⚠️⚠️ 那份参考副本是 **GPL-3.0** ⇒ 这里只搬**语义**（类别名 / 目录名 / 扩展名 / 声明格式 ✓），
 代码**自己写** ✗（不拷源码 ✗）。
 

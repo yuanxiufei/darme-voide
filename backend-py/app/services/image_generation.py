@@ -480,24 +480,56 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
 async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: Row) -> None:
     """``provider=engine`` ⇒ **进程内自研引擎** ✓（不调 SD WebUI / ComfyUI ✗ —— 「不依赖外部」✓）。
 
-    ⚠️ 一件必须说清的事：H3 是**视频**模型 ✓ ⇒ 这里跑的是**最短的那段**（5 帧 ✓），
-    再取**首帧**当图片 ✓（记 ``engine-still-from-video`` ✓）。**别把它讲成"引擎直接画了张图"** ✗
-    —— 产物是视频 ✓，图片是**派生**出来的 ✓。
+    ⚠️ 两条路的**产物不是一回事** ✗✗ ⇒ 产物路径与 ``engineBackend`` 标签**都要如实区分** ✓：
+
+    * **SDXL 路**（首选 ✓ ✓）：**真·文生图** ✓ ⇒ 产物本来就是**一张 PNG** ✓，标 ``sdxl`` ✓、
+      ``synthetic=false`` ✓（四件套全是真权重 ✓）；**没有**取帧这一步 ✗。
+    * **H3 兜底路**：H3 是**视频**模型 ✓ ⇒ 只能跑**最短的那段**（5 帧 ✓）再取**首帧** ✓
+      ⇒ 标 ``engine-still-from-video`` ✓。**别把它讲成"引擎直接画了张图"** ✗
+      —— 产物是**视频** ✓，图片是从它**派生**的 ✓。
+
+    ⚠️ 兜底**必须记下原因** ✗（静默换路 = 用户以为拿到的是 SDXL 的图 ✓✗，本仓最忌这类 ✓）。
 
     失败一律**抛错** ✗ ⇒ 由外层已有的 fallback / 失败收口逻辑接管 ✓（不重写一套 ✓）。
     """
     from .engine import bridge  # 局部 import ✓：只有这条分叉才需要引擎 ✓
 
     settings = bridge.normalize_settings(config)
-    _dit_path, dit_source = bridge.resolve_dit_path(settings)
     outputs_dir = bridge.outputs_dir_for("image", image_id)
+
+    # ── 选路 ✓：装得上 SDXL ⇒ **真·文生图** ✓；装不上 ⇒ **明说原因**再走 H3 兜底 ✓ ──────────
+    # ⚠️ `resolve_sdxl_path` 的报错**自带可行动指引** ✓ ⇒ 直接当兜底原因记下来 ✓ 不吞 ✗。
+    fallback_reason = ""
+    tokenizer_source = ""
+    try:
+        _weights, weights_source = bridge.resolve_sdxl_path(settings)
+        # ⚠️ 2026-09-26 补 ✓：**词表也得能定** ✗✗ —— SDXL 要的是「权重 **+** 一张 CLIP 词表」✓✗，
+        #    只查权重就选 SDXL 那条路 ⇒ 会在**装载**时才炸（运行时如实报「缺 CLIP 词表」✓）✓✗
+        #    —— 本来能走 H3 兜底交一张图，却变成一次失败 ✓✗。口径与权重**一致** ✓：
+        #    缺哪样、为什么缺，都进 ``fallbackReason`` 让用户看见 ✓（不静默换路 ✗）。
+        _tokenizer, tokenizer_source = bridge.resolve_tokenizer_path(settings)
+        stage, route, route_note = bridge.IMAGE_STAGE, "sdxl", (
+            "SDXL **真·文生图** ✓：产物是**单张 PNG** ✓（**不是**从视频取帧 ✗）")
+    except ValueError as error:
+        _weights, weights_source = bridge.resolve_dit_path(settings)
+        stage, route = bridge.VIDEO_STAGE, "h3-still-from-video"
+        fallback_reason = str(error)
+        route_note = "H3 **兜底**：装不了 SDXL ⇒ 跑 5 帧视频再**取首帧** ✓。原因：" + fallback_reason
+
     log_task_progress("ImageTask", "engine-assembly", {
         "id": image_id, "provider": bridge.PROVIDER,
-        "ditSource": dit_source, "outputsDir": str(outputs_dir),
-        "note": "进程内自研引擎 ✓（**不依赖** ComfyUI / SD WebUI / Ollama ✓）",
+        "stage": stage, "route": route, "weightsSource": weights_source,
+        "tokenizerSource": tokenizer_source or None,
+        "outputsDir": str(outputs_dir), "fallbackReason": fallback_reason or None,
+        "note": route_note + " ｜ 进程内自研引擎 ✓（**不依赖** ComfyUI / SD WebUI / Ollama ✓）",
     })
+    if fallback_reason:
+        log_task_warn("ImageTask", "engine-route-fallback", {
+            "id": image_id, "route": route, "reason": fallback_reason,
+            "note": "⚠️ 这张图**不是** SDXL 出的 ✓ —— 是 H3 视频的首帧 ✓（**别**当成文生图 ✓）",
+        })
 
-    assembly = bridge.assembly_from_config(config)
+    assembly = bridge.assembly_from_config(config, stage=stage)
     request = bridge.request_from_image_record(
         {
             "prompt": _col(record, "prompt"),
@@ -508,11 +540,32 @@ async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: 
         },
         outputs_dir=outputs_dir,
         settings=settings,
+        stage=stage,
     )
     task = await bridge.run_job(request, assembly, task_type="ImageTask",
                                 record_id=image_id, label="图片")
-
     paths = bridge.artifact_paths(task)
+
+    if route == "sdxl":
+        png_path = paths.get("primaryPath")
+        if not png_path:
+            # ⚠️ 这条路**不该**只有视频 ✗ —— 报出来说明后端选错了 ✓✗（比"悄悄去取帧"好得多 ✓）
+            raise RuntimeError(
+                f"SDXL 任务 {task.get('id')} 成功了却没报图片路径 ✗（outputs={paths} ✗）"
+                "：多半是装配的 stage 与实际跑的后端对不上 ✓")
+        stored = await bridge.store_image_to_storage(png_path, record_id=image_id)
+        log_task_progress("ImageTask", "engine-sdxl-image", {
+            "id": image_id, "engineTaskId": task.get("id"),
+            "enginePath": png_path, "localPath": stored.get("localPath"),
+            "bytes": stored.get("bytes"),
+            "note": "SDXL 真·文生图 ✓ —— 产物本来就是**一张 PNG** ✓，**没有**取帧这一步 ✓",
+        })
+        await _handle_image_complete_local(
+            image_id, bridge.PROVIDER, str(stored["localPath"]),
+            extra={"engineTaskId": task.get("id"), "engineBackend": "sdxl",
+                   "engineStage": stage, "engineImagePath": png_path})
+        return
+
     video_path = paths.get("videoPath")
     if not video_path:
         raise RuntimeError(f"引擎任务 {task.get('id')} 成功了却没报视频路径 ✗（outputs={paths} ✗）")
@@ -523,10 +576,13 @@ async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: 
         "videoPath": video_path, "localPath": still.get("localPath"),
         "width": still.get("width"), "height": still.get("height"),
         "sourceFrames": still.get("sourceFrames"),
+        "fallbackReason": fallback_reason or None,
         "note": "H3 没有「单张图」这个模式 ✓ ⇒ 上面那份**视频**的首帧就是这张图 ✓",
     })
     await _handle_image_complete_local(image_id, bridge.PROVIDER, str(still["localPath"]),
                                        extra={"engineTaskId": task.get("id"),
+                                              "engineBackend": "h3-still-from-video",
+                                              "engineStage": stage,
                                               "sourceVideo": video_path,
                                               "sourceFrames": still.get("sourceFrames")})
 

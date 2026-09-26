@@ -593,7 +593,7 @@ async def default_generate(
     text = ""
 
     for _ in range(max(1, int(max_steps))):
-        # ⚠️ **上下文预算**（移植自 reference/Mini-Agent 的思路 ✓）：
+        # ⚠️ **上下文预算**（移植自 Mini-Agent 的思路 ✓）：
         #    这个循环每步把**整份 messages** 重发 ✓ ⇒ 多步工具链会一路撑大 ✗。
         #    这里做的是**只机械层**（老的 tool 输出换占位正文 ✓）—— 零 LLM 调用 ✓、
         #    **消息条数不变** ✓ ⇒ tool 往返的成对关系不会被破坏 ✓（破坏它会直接 400 ✗）。

@@ -16,8 +16,10 @@
 1. **桌面端把库装到自定义目录时，后端进程看不见那个环境变量** ✗✗：
    ``OLLAMA_MODELS`` 只被 Ollama 桌面端**注入给 ``ollama serve`` 子进程** ✓，
    ``HKCU``/``HKLM`` 环境里**没有** ✗ ⇒ 后端只剩两个默认落点可选 ✗。
-   真机实测：库在 ``D:\\app\\LLM\\models\\ollama\\models``（14 个模型 ✓），
+   真机实测（2026-09-25 ✓）：库被装到**非默认盘的自建目录**（该机 14 个模型 ✓），
    而候选里最靠前的**存在**目录是空壳 ``~/.ollama/models`` ✗ ⇒ ``list_models()`` 返回 ``[]`` ✗✗。
+   ⚠️ 具体盘符/目录**不写进代码** ✗（用户 2026-09-26 口径 ✓：扫描路径一律不写死 ✗、
+   机器布局不进注释 ✗）⇒ 这里只留「确实发生过这件事」+ 机制本身 ✓。
    正解：桌面端把该路径**持久化在自己的配置库里**（``settings.models`` ✓）⇒ 读它 ✓（只读、仍不依赖服务 ✓）。
 2. **「目录存在」不等于「库可读」** ✗：只有 ``manifests/`` 在，才真的列得出模型 ✓。
    按「存在」挑根 ⇒ ``is_available()`` 报 True 而列表是空 ✗✗（最坏的一种：前端显示「0 个模型」，
@@ -158,7 +160,7 @@ def models_root_candidates() -> list[str]:
     def add(value: str | None) -> None:
         if value and str(value).strip():
             cleaned = os.path.abspath(str(value).strip())
-            # ⚠️ 按 ``normcase`` 去重：Windows 上 ``D:\\app`` 与 ``d:\\app`` 是同一个目录 ✗
+            # ⚠️ 按 ``normcase`` 去重：Windows 盘符**大小写不敏感** ✗（同一目录的两种写法会撞 ⇒ 不去重就重复统计 ✗）
             key = os.path.normcase(cleaned)
             if key not in seen:
                 seen.add(key)

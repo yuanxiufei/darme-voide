@@ -43,7 +43,9 @@ from . import conditioning as conditioning_mod
 from . import geometry, guidance as guidance_mod, sampler as sampler_mod, schedules
 
 __all__ = [
+    "IMAGE_STAGE",
     "STAGE_ORDER",
+    "VIDEO_STAGE",
     "GenerationBackend",
     "GenerationCancelled",
     "GenerationPlan",
@@ -53,6 +55,15 @@ __all__ = [
     "build_plan",
     "run_sync",
 ]
+
+#: 两条**阶段**名 ✓（= `runtime.ensure_loaded(stage=…)` 认的那两个 ✓ —— 一个概念贯穿三层 ✓）。
+#: * :data:`VIDEO_STAGE` ✓：H3 双流视频（默认 ✓）；
+#: * :data:`IMAGE_STAGE` ✓：SDXL **单张图片** ✓。
+#: ⚠️ 名字与 `SdxlBackend.name`（``"sdxl"`` ✓）**刻意相同** ✓ ——
+#: `runtime` 按 stage 选后端 ✓、`bridge` 按 stage 拼装配 ✓、出图链路按后端名分流 ✓，
+#: 三处对不上就会「装的是视频后端、跑的是图片 plan」✓✗（那种错**不报错** ✓ 只是结果全错 ✓）。
+VIDEO_STAGE = "h3"
+IMAGE_STAGE = "sdxl"
 
 #: 阶段顺序（也是前端进度条的依据 ✓）
 #: ⚠️ 这里**只列必经阶段** ✗ —— 可选阶段（``condition`` ✓、``refine`` ✓）靠 :data:`STAGE_LABELS`
@@ -134,6 +145,12 @@ class GenerationRequest:
     #: ``/engine/upscale-plan`` ✓）；``None`` ⇒ 普通模式 ✓。⚠️ 用 **frozen dataclass** 而非 dict ✗：
     #: 本请求要能当**缓存键**（不可变 ✓ 可哈希 ✓），dict 会让它不可哈希 ✓✗。
     upscale: Any = None
+    #: 走哪条**阶段** ✓：``"h3"`` = 视频（默认 ✓，H3 双流）/ ``"sdxl"`` = **单张图片** ✓。
+    #: ⚠️ 与 `runtime` 装配的 ``stage=`` 是**同一个概念** ✓（一个名字贯穿三层 ✓）——
+    #: ``runtime`` 按它选后端 ✓、:func:`build_plan` 按它选 plan 口径 ✓、
+    #: `bridge` 按它拼装配 ✓、`image_generation` 按它选产物路径 ✓。
+    #: ⚠️ 放在**末尾** ✗ 不是随手 ✗：插在中间会移动位置参数 ✓✗。
+    stage: str = "h3"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -195,6 +212,15 @@ def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) 
     if str(request.sampler or "").lower() not in sampler_mod.SAMPLERS:
         raise StageError("plan", f"未知采样器 {request.sampler!r}；可用：{sorted(sampler_mod.SAMPLERS)}")
 
+    stage = str(request.stage or VIDEO_STAGE).strip().lower()
+    if stage == IMAGE_STAGE:
+        _fill_image_plan(request, plan)
+        return _finish_plan(request, plan, weights_bytes)
+    if stage != VIDEO_STAGE:
+        raise StageError(
+            "plan", f"未知 stage {request.stage!r} ✗；可用：{sorted((VIDEO_STAGE, IMAGE_STAGE))} ✓"
+            "（⚠️ 别随手编一个名字 ✓ —— 它决定选哪个后端 ✓✗）")
+
     plan.width, plan.height = geometry.size_for_megapixels(
         max(0.05, float(request.megapixels)), request.ratio)
     plan.frames = geometry.snap_frames(request.seconds, fps=plan.fps)
@@ -214,6 +240,87 @@ def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) 
         plan.warnings.append("未给 temporalCompression ⇒ 潜空间帧数未知（不影响采样，解码时后端自行决定 ✓）")
     plan.warnings.append(f"{plan.frames} 帧 @{plan.fps}fps ≈ {plan.frames / max(1, plan.fps):.2f}s"
                          f"（已吸附到 {geometry.H3_FRAME_GRID}k+{geometry.H3_MIN_FRAMES} 网格 ✓）")
+    return _finish_plan(request, plan, weights_bytes)
+
+
+def _fill_image_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
+    """SDXL **单张图片**的 plan ✓。
+
+    ⚠️ 与视频那条路**刻意分开** ✗✗（不是"顺手复用" ✓）：四处口径根本不同 ✓ ——
+    ① **尺寸**要吸附到 **8 的倍数** ✓（SDXL 潜空间 1/8 ✓；不整除会在下采样时报错 ✗）；
+    ② **帧数恒为 1** ✓、**没有帧率**概念 ✓（``fps = 0`` ✓ —— 不拿 24/30 冒充 ✗）；
+    ③ **σ 序列必须按 0..999 的离散格取** ✓✗（见 :func:`sdxl_backend.sdxl_sigmas_for_steps` ✓）——
+       套视频那边的 karras ρ-ramp ⇒ σ 落不到格上 ✓ ⇒ 相邻两步被 :func:`sigma_to_timestep`
+       映到**同一个 t** ✓ ⇒ 白跑一遍同样的噪声水平（**不报错、图还能出** ✓ 属"看不出来"那类 ✓✗）；
+    ④ **画布恒按训练预算收** ✓（= :data:`sdxl_backend.SDXL_TRAINED_MEGAPIXELS` ✓，只保留
+       **比例** ✗）—— 视频默认那 0.65 MP 是**视频模型**的实测口径 ✓，而生产线上图片记录又默认
+       **1920×1080 = 2.07 MP** ✓ ⇒ 一个偏低、一个偏高，**两个方向都坏、且都不报错** ✓✗
+       （症状与实测数据见 :data:`sdxl_backend.SDXL_TRAINED_RESOLUTION` 的注释 ✓）。
+    """
+    from . import sdxl_backend as image_mod  # 局部 import ✓：这条路的可选依赖别拖累视频 ✓
+
+    # ⚠️ **画布只能是训练预算** ✗✗（不是"用户要多大就给多大" ✓）—— **两个方向**都会**不报错地**坏掉 ✓✗，
+    #    而且都在本仓"看不出来"那一类里 ✓：
+    #    * **低于**预算：实测（同 seed / 同提示词 ✓）512×512 ⇒ **物体重复 + 霓虹过饱和**（一长串苹果 +
+    #      荧光绿 ✓），256×256 ⇒ **纯色块** ✓ —— 症状与**代码写错**长得一模一样 ✓✗；
+    #    * **高于**预算：实测 1440×1440（2.07 MP ✓）⇒ VAE 解码的 ``reserved`` 冲到 **30.66 GiB**，
+    #      而物理显存只有 **22.49 GiB** ✗✗ ⇒ 走 WDDM **共享显存换页** ⇒ **光解码就 11.0 s**
+    #      （1024² 同条件 **0.66 s** ✓）—— 这正是用户口径里明令不许的"逼近/超过显存上限"✓✗。
+    #      顺带把更大的那个误算也钉住 ✗：**生产默认的 1920×1080 ⇒ 2.07 MP** ✓（见
+    #      `image_generation.py` 里 ``size=params.get("size") or "1920x1080"`` ✓）⇒ 默认就落在换页区 ✓✗。
+    #    ⇒ 两个方向都**按训练预算收** ✓ 并**如实报改过** ✗（不静默 ✓）；**要更大像素走超清那条** ✓
+    #      （放大是常规做法 ✓；把扩散画布硬撑大 = 拿"没训过的档位"换画质与显存 ✗）。
+    wanted_mp = max(0.05, float(request.megapixels))
+    budget_mp = image_mod.SDXL_TRAINED_MEGAPIXELS
+    # ⚠️ 容差 1% ✗（不拿"完全相等"当判据 ✓）：UI 给的 1024×1024 经 `geometry.megapixels_for_size`
+    #    会被 round 成 1.0486（真值 1.048576 ✓）⇒ 差 0.0024% ✓ ⇒ 这种**不能被判成"改了用户的"** ✓✗。
+    if abs(wanted_mp - budget_mp) > 0.01 * budget_mp:
+        direction = "低于" if wanted_mp < budget_mp else "高于"
+        # ⭐ **如实报改过** ✓ 不静默改 ✗（同下面"吸附到 8 的倍数"那条纪律 ✓）
+        plan.warnings.append(
+            f"像素预算{direction} SDXL 的训练分辨率 ⇒ **已按训练预算收到 {budget_mp:g} MP** ✓"
+            f"（原 {wanted_mp:g} MP ✓；训练分辨率 "
+            f"{image_mod.SDXL_TRAINED_RESOLUTION}×{image_mod.SDXL_TRAINED_RESOLUTION} ✓，"
+            "出处见 `sdxl_backend.SDXL_TRAINED_RESOLUTION` 注释 ✓）。"
+            "⚠️ 两个方向都**不报错**但都会坏 ✓✗：低 ⇒ 物体重复 + 霓虹过饱和（实测 512×512 ✓）/ "
+            "纯色块（实测 256×256 ✓）；高 ⇒ 解码 reserved 超物理显存 ⇒ 共享显存换页 ⇒ 光解码 11 s"
+            "（实测 1440×1440 ✓）。要更大像素请走**超清**那条 ✓"
+            "（把扩散画布撑大是拿没训过的档位换画质 ✗）")
+
+    want_w, want_h = geometry.size_for_megapixels(budget_mp, request.ratio)
+    plan.width, plan.height, snapped = image_mod.snap_image_size(want_w, want_h)
+    if snapped:
+        # ⭐ **如实报改过** ✓ 不静默改 ✗（用户要 1023 却拿到 1016 而不被告知 ⇒ "看不出来" ✓✗）
+        plan.warnings.append(
+            f"尺寸已吸附到 {image_mod.SDXL_LATENT_SCALE} 的倍数：{want_w}×{want_h} ⇒ "
+            f"**{plan.width}×{plan.height}** ✓（SDXL 潜空间按 1/{image_mod.SDXL_LATENT_SCALE} 采样 ✓，"
+            "不整除会在下采样时报错 ✗）")
+    plan.frames = 1
+    plan.fps = 0                       # 单张图没有帧率 ✓（`to_dict` 据此报 durationSeconds=0 ✓）
+    plan.steps = int(request.steps)
+    schedule = str(request.schedule or "").strip().lower()
+    try:
+        plan.sigmas = image_mod.sdxl_sigmas_for_steps(plan.steps, schedule=schedule)
+    except image_mod.SdxlBackendError as err:
+        raise StageError(
+            "plan",
+            f"SDXL 的 σ 调度不可用：{err}\n"
+            f"  · 当前 schedule={request.schedule!r} ✓；可用：{list(image_mod.SDXL_SCHEDULES)} ✓\n"
+            "  · ⚠️ 视频那套 karras/linear 是**连续**调度 ✗，套到离散格上算出的 σ 会落不到格 ✓✗",
+            cause=err) from err
+    # ⚠️ 这里的 `timesteps` 是**真·UNet 时间步** ✓（整数 ✓）—— 视频那边的 `timesteps` 不是这个含义 ✗。
+    plan.timesteps = [float(image_mod.sigma_to_timestep(value)) for value in plan.sigmas]
+    plan.warnings.append(
+        f"{plan.width}×{plan.height} 单张图片 ✓、{plan.steps} 步 {schedule or 'normal'} ✓"
+        f"（σ {plan.sigmas[0]:.4g} ⇒ 0 ✓；UNet 时间步 {plan.timesteps[0]:.0f} ⇒ {plan.timesteps[-1]:.0f} ✓）")
+
+
+def _finish_plan(request: GenerationRequest, plan: GenerationPlan,
+                 weights_bytes: int | None) -> GenerationPlan:
+    """两条路**共用**的收尾 ✓（相对耗时系数 ✓ / 超清计划 ✓ / 显存估算 ✓）。
+
+    ⚠️ 刻意**不含尺寸与 σ** ✗ —— 那两样两条路口径不同 ✓，各自在前面算好了 ✓。
+    """
     # ── 相对耗时系数（**可精确算** ✓：步数 × 采样器 × 引导 ✓）────────────────
     # heun 每个区间调模型 2 次 ✓；CFG 让"施加引导的那些步"再翻倍 ✓ ⇒ 引导只需要按**生效比例**算 ✓：
     # cost = (步数 + 生效步数) × 采样器倍数 ✓（全程引导时正好 = 步数 × 2 × 倍数 ✓）。

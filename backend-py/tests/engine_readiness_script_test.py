@@ -8,7 +8,11 @@
 2. **「还要下多少」不能拿 `bytes` 求和** ✗（缺文件时它恒为 0 ⇒ 打出「还差 0.00 GiB」✓✗）；
 3. ⚠️ **逻辑必须在服务层** ✗ —— 第一版全在 `app/scripts/` 里 ✓✗，而那个目录**不是包** ✓
    ⇒ 路由**引用不到** ✓✗（"只有人手敲命令才能用" = 没人调用的能力 ✓）⇒ 本条钉住
-   「路由端点真的在、且与服务层同源」✓。
+   「路由端点真的在、且与服务层同源」✓；
+4. ⚠️ **「盘上那份在探测根里」不许读成「缺件、还得下」** ✗✗（2026-09-27 加 ✓）：
+   解析只有一条 —— 清单落点（`models_dir`）优先 → 动态探测根 ✓（体检 / 加载计划 / 加载口同一条 ✓）；
+   ⚠️ 想验"缺件"那种世界就**钉空域**（`collect(root=…)` ✓）✗ —— 不钉 ⇒ 结论随本机装了什么变 ✓✗
+   （见 `case_probe_root` ✓ 与 `case_without_weights` 的说明 ✓）。
 
 运行::
 
@@ -84,8 +88,10 @@ def tiny_tokenizer_dir(root: Path) -> Path:
 # ══════════════════════════════════════════════════════════════════════════
 # ① 无权重：**「没查」不许说成「通过」** ✗
 # ══════════════════════════════════════════════════════════════════════════
-def case_without_weights() -> None:
-    report = svc.collect()
+def case_without_weights(root: Path) -> None:
+    # ⚠️ **钉一个空目录当 `models_dir`** ✗✗（2026-09-27 ✓）：不钉 ⇒ 域里带着**动态探测根** ✓
+    #    ⇒ 「缺不缺」会随"本机恰好装了什么"翻脸 ✓✗（本仓铁律：自检结论与机器无关 ✓）。
+    report = svc.collect(root=root / "empty")
     check("① 没给权重路径 ⇒ `weightsCheck=None` ✓ 且 `unchecked` **点名**「没查」✓"
           "（**不许**读成通过 ✗ —— 无从体检 ≠ 绿灯 ✓）",
           report["weightsCheck"] is None and report["unchecked"]
@@ -208,7 +214,7 @@ def case_route() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 # ⑤ 反量化结论：**三档分开说** ✗（支持 / 不支持 / **没查** ✓）+ GGUF 豁免 ✓
 # ══════════════════════════════════════════════════════════════════════════
-def case_quant() -> None:
+def case_quant(root: Path) -> None:
     """`quant_plan` 是**纯函数** ✓ ⇒ 直接喂合成的 `load_plan` ✓（不用造真文件 ✓）。"""
     plan = {"components": [
         {"key": "dit_int8", "present": True,
@@ -236,8 +242,8 @@ def case_quant() -> None:
           "dit_gguf" not in [item["key"] for item in quant["unsupported"]]
           and "dit_gguf" not in quant["notChecked"], quant)
 
-    report = svc.collect()
-    check("③ 本机现状（一个都没下）⇒ `notChecked` 非空 ✓ 且**不许**因此变阻塞 ✗"
+    report = svc.collect(root=root / "empty")   # ⚠️ 钉空域 ⇒ 与本机装没装无关 ✓（见 ① 的说明 ✓）
+    check("③ 一份都没下（钉空域 ✓）⇒ `notChecked` 非空 ✓ 且**不许**因此变阻塞 ✗"
           "（**没查 ≠ 通过** ✓：不阻塞 ✓、但也不假装绿 ✓ —— `ready` 的阻塞项里只有「权重没齐」✓）",
           report["quantPlan"]["notChecked"] and not report["quantPlan"]["supported"]
           and not any("反量化" in item for item in report["blockers"]),
@@ -250,14 +256,69 @@ def case_quant() -> None:
           svc.summary(report).get("quant"))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑥ ⭐ 「盘上那份在**探测根**里」⇒ 说清「已就绪、不需要下载」✗（2026-09-27 加 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_probe_root(root: Path) -> None:
+    """⚠️ 钉**用户当场指出的那个毛病** ✗（2026-09-27 ✓）：
+
+    H3 全套（19.53 GiB ×2 + 14.61 + 4.85 + 0.56 ✓）就装在**探测到的** ComfyUI 共享目录里 ✓，
+    可体检 / 加载计划**只看 `models_dir`** ✗✗ ⇒ 报告说「缺件、还要下 39.55 GiB」✓✗ ——
+    报告与实底打架 ✓（引擎加载其实**会**用它 ✓）。
+
+    这里把域换成**自造的**探测根（`candidate_roots` 打桩 ✓、`models_dir` 钉空目录 ✓）⇒
+    结论与本机装没装**无关** ✓：必需件一铺上 ⇒ 摘要必须说「**在盘上、不需要下载**」✓
+    且**不再**列「下权重」那一步 ✓。
+    """
+    from app.services.engine import inventory as inv  # noqa: PLC0415
+    from app.services.engine import safetensors as st  # noqa: PLC0415
+
+    entries = {str(item.get("key")): item for item in inv.load_catalog()["models"]}
+    baseline = inv.readiness("h3", root=root / "empty")     # 空域 ⇒ 缺的就是"必需件全集" ✓
+    shared = root / "probe_shared"                           # 假装是"动态探测到的共享目录" ✓
+    for key in baseline["missingRequired"]:
+        where = inv.component_path(entries[key], shared)
+        assert where is not None
+        if where.suffix.lower() == ".gguf":
+            where.parent.mkdir(parents=True, exist_ok=True)
+            where.write_bytes(b"GGUF" + b"\x00" * 64)
+        else:
+            header = json.dumps({"weight": {"dtype": "F16", "shape": [2, 2],
+                                            "data_offsets": [0, 8]}}).encode("utf-8")
+            where.parent.mkdir(parents=True, exist_ok=True)
+            where.write_bytes(len(header).to_bytes(8, "little") + header + bytes(8))
+        assert st.inspect(where).ok, where
+
+    original_models_dir, original_roots = inv.models_dir, inv.candidate_roots
+    inv.models_dir = lambda: root / "empty"                       # type: ignore[assignment]
+    inv.candidate_roots = lambda: [(shared, "动态探测根（自检合成 ✓）")]  # type: ignore[assignment]
+    try:
+        report = svc.collect()
+        summary = svc.summary(report)
+    finally:
+        inv.models_dir, inv.candidate_roots = original_models_dir, original_roots  # type: ignore[assignment]
+
+    keys = list(report["weightsReadiness"]["resolvedElsewhere"])
+    check("⭐⑥ 探测根里那份 ⇒ **算就绪** ✓（`ready=True` ✓、`remainingGiB=0` ✓ —— 报告与实底一个说法 ✓）",
+          report["ready"] is True and summary["weights"]["remainingGiB"] == 0
+          and bool(keys) and summary["weights"]["resolvedElsewhere"], summary["weights"])
+    check("⭐⑥′ 下一步**明说「不需要下载」** ✗✗ 且**不再**列「下权重」（否则报告会被读成"
+          "「还得下 39.55 GiB」✓✗ —— 这正是用户当场指出的毛病 ✓）",
+          not any("下权重" in step for step in report["nextSteps"])
+          and any("不需要下载" in step for step in report["nextSteps"])
+          and any(str(shared) in step for step in report["nextSteps"]),
+          report["nextSteps"])
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        case_without_weights()
+        case_without_weights(root)
         case_with_weights(root)
         case_cli(root)
         case_route()
-        case_quant()
+        case_quant(root)
+        case_probe_root(root)
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n      ↳ {detail}"))

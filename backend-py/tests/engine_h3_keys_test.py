@@ -6,7 +6,7 @@
 `ok=True` ✓；故意弄坏（缺键 / 形状不符 / 非整数头库 / Refiner 多出 adaLN ✗）→ 当场红 ✓；
 再验接线（`inventory.component_status` 对 H3 形态文件自动核对 ✓）。
 
-结构事实来源：`reference/ComfyUI/comfy/ldm/minimax/model.py`（2026-09-20 读全 ✓）。
+结构事实来源：`ComfyUI/comfy/ldm/minimax/model.py`（2026-09-20 读全 ✓）。
 
 运行::
 

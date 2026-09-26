@@ -1,4 +1,4 @@
-"""**资产清单 + 验收门**（移植 ``reference/short-drama-agent`` 的 ``asset-to-video-pipeline.md`` ✓ 零依赖 ✓）。
+"""**资产清单 + 验收门**（移植 ``short-drama-agent`` 的 ``asset-to-video-pipeline.md`` ✓ 零依赖 ✓）。
 
 ## 它守的是哪条线
 

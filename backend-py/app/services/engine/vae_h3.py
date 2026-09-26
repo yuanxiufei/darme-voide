@@ -4,7 +4,7 @@
 真权重**装不进**它 ✗（键名/形状逐条不符 ✓）⇒ `strict=True` 报一整页缺键 ✗，而 `strict=False` 更坏 ✗✗
 （静默跳过 ✓ 画面"看着有东西" ✓ 其实是随机权重 ✗）。本模块装**真的**那份 fp16 ✓。
 
-出处与许可 ⚠️：事实读自本仓只读参考 ``reference/ComfyUI/comfy/ldm/minimax/vae.py``（711 行 ✓，
+出处与许可 ⚠️：事实读自**上游只读源码** ``ComfyUI/comfy/ldm/minimax/vae.py``（711 行 ✓，
 GPL-3.0 ✓）。本模块按「公开的架构事实」自写 ✓（张量名/形状/超参都能从真权重独立核出 ✓），
 **没有逐行照抄** ✗ —— 但事实同源 ✓ ⇒ 将来若要再分发，**许可需自行评估** ✓✗（留给人定 ✓）。
 
@@ -948,7 +948,13 @@ def h3_video_vae_weights_on_disk(*, root: str | Path | None = None) -> dict[str,
             candidates.append({"key": key, "path": None, "present": False, "bytes": 0,
                                "note": "清单里没有这个键 ✗"})
             continue
-        found = inventory_mod.component_path(entry, resolved_root)
+        # ⚠️ **同一条解析** ✗（2026-09-27 修 ✓）：给了 ``root`` ⇒ 只认那个根 ✓；否则清单落点
+        #    （``models_dir``）优先 → 动态探测根 ✓（= 引擎加载与体检用的那条 ✓）。
+        #    以前只看 ``models_dir`` ✗ ⇒ 权重在探测根里也会被报成"不在盘上" ✓✗（同一件事两个说法 ✓）。
+        if resolved_root is not None:
+            found: Path | None = inventory_mod.component_path(entry, resolved_root)
+        else:
+            found = inventory_mod.resolve_component(entry)[0]
         present = bool(found is not None and found.is_file())
         candidates.append({
             "key": key, "path": None if found is None else str(found), "present": present,

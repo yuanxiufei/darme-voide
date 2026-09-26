@@ -6,7 +6,11 @@
 * safetensors 容器格式极简 ⇒ 我们**自己读写**它（测试里的「合法文件 / 截断文件 / 头部矛盾」
   都用我们自己合成的小文件造出来 ✓ —— 不靠下载真权重才能测 ✗）；
 * 就绪报告跑的是**真实清单** `configs/models.json` ✓，但权重根目录指向临时目录 ⇒
-  「缺什么 / 装齐了会怎样」都能真验一遍 ✓。
+  「缺什么 / 装齐了会怎样」都能真验一遍 ✓；
+* ⚠️ **「盘上那份在探测根里」也得算数** ✗✗（2026-09-27 加 ✓）：解析只有一条 —— 清单落点
+  （`models_dir`）优先 → 动态探测根 ✓，体检 / 加载计划 / `vae_h3` / `torch_backend` 全走它 ✓。
+  以前几处各自只看 `models_dir` ✗ ⇒ 实测出过「盘上有 39.55 GiB 全套、报告却说缺件要下载」✓✗
+  （见 `case_probe_root` ✓）。
 
 运行::
 
@@ -269,7 +273,12 @@ def case_api(root: Path) -> None:
 
     client = TestClient(app)
 
-    report = client.get("/api/v1/engine/readiness", params={"stage": "h3"})
+    # ⚠️ `modelsDir` 必须给 ✗✗：不给 ⇒ 域里带着**动态探测根** ✓ ⇒ 结论会随"本机恰好装了什么"而变 ✓✗
+    #    （本仓铁律：同一份自检在任何机器上给同一个结论 ✓）。这里钉一个空目录 = 干净世界 ✓。
+    # ⚠️ 查询参数名是 `models_dir` ✗（**没有** `modelsDir` 别名 ✓ —— 写成 camelCase 会被 FastAPI
+    #    **静默忽略** ✓✗，于是又按默认域算 ⇒ 自检随机器翻脸 ✓）。
+    report = client.get("/api/v1/engine/readiness",
+                        params={"stage": "h3", "models_dir": str(root / "empty")})
     data = report.json().get("data") or {}
     check("㉕ GET /engine/readiness 真能调用（200 ✓）且给出逐条缺件清单",
           report.status_code == 200 and data.get("ready") is False
@@ -332,8 +341,17 @@ def case_api(root: Path) -> None:
           and payload.get("tensorCount") == 1 and payload.get("biggest"),
           (detail.status_code, payload.get("problems")))
 
-    by_key = client.post("/api/v1/engine/inspect", json={"key": "dit_fl2va_int8"})
-    key_payload = by_key.json().get("data") or {}
+    # ⚠️ 这条要的是「**没装**时照实说」⇒ 必须先把域钉成**空世界** ✗✗（2026-09-27 ✓）：
+    #    解析现在会走**动态探测根** ✓ ⇒ 不钉 ⇒ 本机恰好装了那份权重时这里会读到真文件 ✓✗
+    #    （自检随机器翻脸 ✓）。
+    original_models_dir, original_roots = inv.models_dir, inv.candidate_roots
+    inv.models_dir = lambda: root / "empty"      # type: ignore[assignment]
+    inv.candidate_roots = lambda: []             # type: ignore[assignment]
+    try:
+        by_key = client.post("/api/v1/engine/inspect", json={"key": "dit_fl2va_int8"})
+        key_payload = by_key.json().get("data") or {}
+    finally:
+        inv.models_dir, inv.candidate_roots = original_models_dir, original_roots  # type: ignore[assignment]
     check("㉙ 按**清单 key** 体检（前端不用自己拼 kind/filename ✓）；没装也照实说",
           by_key.status_code == 200 and key_payload.get("ok") is False
           and any("不存在" in p or "未安装" in p for p in key_payload.get("problems") or []),
@@ -343,11 +361,79 @@ def case_api(root: Path) -> None:
           client.post("/api/v1/engine/inspect", json={}).status_code == 400)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ④ ⭐ 「盘上那份在**探测根**里」必须算数 ✗✗（2026-09-27 修 ✓ —— 用户当场指出 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_probe_root(root: Path) -> None:
+    """⚠️ 钉的是**一个真踩过的坑** ✗（2026-09-27 ✓）：
+
+    本机 H3 全套（19.53 GiB ×2 + 14.61 + 4.85 + 0.56 ✓）就装在 ComfyUI 共享目录里 ✓，
+    可体检 / 加载计划**只看 `models_dir`** ✗✗ ⇒ 报告说「缺 `dit_fl2va_int8` ✗、还要下 39.55 GiB」✓✗
+    —— 而盘上那份**明明在** ✓、引擎加载也真会用它 ✓ ⇒ **同一件事两个说法**（本仓最忌那个 ✓）。
+
+    这里把探测根换成**自造的**（`candidate_roots` 打桩 ✓）⇒ 结论与本机装没装**无关** ✓：
+    必需件铺在 ``<探测根>/<kind>/<文件名>`` ✓ ⇒ 必须算**在盘上** ✓（`ready=True` ✓、
+    `resolvedElsewhere` 如实点名 ✓），而且**加载口**（`vae_h3` ✓ / `torch_backend._default_dit_path` ✓）
+    必须看得见**同一份** ✗ —— 三条路只能是同一条解析 ✓。
+    """
+    from app.services.engine import loader as loader_mod  # noqa: PLC0415
+    from app.services.engine import torch_backend as tb  # noqa: PLC0415
+    from app.services.engine import vae_h3 as vae_mod  # noqa: PLC0415
+
+    catalog = inv.load_catalog()
+    video = [item for item in catalog["models"] if item.get("category") == "video"]
+    required = [item for item in video if item.get("required")]
+    shared = root / "probe_shared"                 # 假装是"动态探测到的 ComfyUI 共享目录" ✓
+    for item in required:
+        where = inv.component_path(item, shared)
+        assert where is not None
+        if where.suffix.lower() == ".gguf":
+            where.parent.mkdir(parents=True, exist_ok=True)
+            where.write_bytes(b"GGUF" + b"\x00" * 64)
+        else:
+            write_safetensors(where, {"weight": ("F16", [4, 4])})
+
+    original = inv.candidate_roots
+    inv.candidate_roots = lambda: [(shared, "动态探测根（自检合成 ✓）")]  # type: ignore[assignment]
+    try:
+        report = inv.readiness("h3")               # ⚠️ 不给 root ⇒ 默认域（清单落点 + 探测根 ✓）
+        plan = loader_mod.plan_stage("h3")
+        vae = vae_mod.h3_video_vae_weights_on_disk()
+        # ⚠️ `__new__` 绕过 `__init__` ✗：这条只验**路径解析** ✓，不该顺手去探设备 / 碰 torch ✓
+        default_dit = tb.TorchBackend.__new__(tb.TorchBackend)._default_dit_path()  # noqa: SLF001
+    finally:
+        inv.candidate_roots = original  # type: ignore[assignment]
+
+    keys = {str(item["key"]): item for item in report["components"]}
+    present_bytes = sum(int(item["bytes"]) for item in report["components"] if item["present"])
+    check("⭐㉛ 探测根里那份 ⇒ **算在盘上** ✓（`ready=True` ✓、`missingRequired` 空 ✓、"
+          "而且逐件都带**真实字节数** ✓ —— 报告与实底必须一个说法 ✓）"
+          "⚠️ 别看 `requiredWeightsGiB` ✗：合成件只有几十字节 ✓ ⇒ 四舍五入到两位小数就是 0.00 ✓✗",
+          report["ready"] is True and report["missingRequired"] == [] and present_bytes > 0,
+          (report["missingRequired"], report["requiredWeightsGiB"], present_bytes))
+    check("⭐㉛′ 「不在 `models_dir`」**分开报** ✓：`expectedPath`（清单落点）≠ `path`（实际找到 ✓），"
+          "且 `resolvedElsewhere` 逐件点名 ✓（=「想让本仓自持就收进去」的依据 ✓）",
+          all(keys[str(item["key"])]["path"] != keys[str(item["key"])]["expectedPath"]
+              for item in required)
+          and set(report["resolvedElsewhere"]) == {str(item["key"]) for item in required},
+          (report["resolvedElsewhere"], keys[str(required[0]["key"])]["expectedPath"]))
+    check("⭐㉛″ 加载计划走**同一条** ✓：`residency.missing` 空 ✓（不再被「缺件」压成 `fits=False` ✓）",
+          plan["residency"]["missing"] == [] and plan["ready"] is True, plan["residency"]["missing"])
+    check("⭐㉛‴ 真**加载口**也看得见同一份 ✗（`vae_h3` ✓ 与 `torch_backend._default_dit_path` ✓ 都在探测根里 ✓）",
+          bool(vae.get("path")) and str(shared) in str(vae.get("path"))
+          and bool(default_dit) and str(shared) in str(default_dit),
+          (vae.get("path"), default_dit))
+    check("⭐㉛⁴ 但**钉了根**就只认那个根 ✓✗（域由调用方圈定 ⇒ 自检结论不随机器变 ✓）",
+          inv.readiness("h3", root=root / "empty")["ready"] is False,
+          inv.readiness("h3", root=root / "empty")["missingRequired"])
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engineinv_files_"))
     case_safetensors(root)
     case_readiness(root)
     case_api(root)
+    case_probe_root(root)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

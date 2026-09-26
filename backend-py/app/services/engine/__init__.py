@@ -8,7 +8,7 @@
 
 ## 两条硬约束（决定了实现方式，见各模块注释）
 
-1. **许可证**：``reference/ComfyUI`` 是 **GPL-3.0** ✗ ⇒ 它的源码**不能搬进本仓库**
+1. **许可证**：``ComfyUI`` 是 **GPL-3.0** ✗ ⇒ 它的源码**不能搬进本仓库**
    （会把整个项目传染成 GPL ✗）。所以这里的原则是：
    * 数学/算法 **自己实现**（公开论文里的公式 ✓ 例如 Karras 2022 的 sigma 调度 ✓）；
    * 深度学习脚手架用 **Apache/MIT 许可**的库（``torch`` / ``diffusers`` / ``safetensors`` ✓）；
@@ -28,6 +28,6 @@ from __future__ import annotations
 
 __all__ = ["accel_chain", "audio_mix", "audio_vae", "cache_guard", "cache_key", "chat_template", "checkpoint_meta", "clip_text", "conditioning", "dit", "dryrun", "geometry", "gguf", "gguf_dequant", "gguf_to_llm", "guidance",
            "h3_form", "h3_keys", "hybrid_load", "hybrid_merge", "image_ops", "inventory", "latent_container", "latent_formats", "llm", "llm_backend", "loader", "mappings", "media", "pipeline",
-           "quant", "safetensors", "sampler", "schedules", "script_parse", "sdxl", "segments", "text_encoder",
+           "quant", "safetensors", "sampler", "schedules", "script_parse", "sdxl", "sdxl_backend", "sdxl_vae", "segments", "text_encoder",
            "tiers", "tokenizer_bpe", "tokenizer_hub", "tokenizer_own", "tokenizers_tuning",
            "torch_backend", "upscale", "upscale_net", "vae", "weights"]

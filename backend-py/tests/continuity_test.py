@@ -1,6 +1,6 @@
 """S7 自检：**连续性表**（契约 §6-§11 ✓ 零依赖 ✓ 2026-09-18）。
 
-移植自 ``reference/short-drama-agent``（``production-plan-contract.md`` §6-§11 ✓）。
+移植自 ``short-drama-agent``（``production-plan-contract.md`` §6-§11 ✓）。
 本项目原来只有**事后**的 ``consistency_qc``（对已生成的相邻画面算 dHash ✗ ——
 "拍完才发现不对"✗）；本套管的是**事前**：还没花钱生成，就说清「这一镜接不上上一镜」✓。
 

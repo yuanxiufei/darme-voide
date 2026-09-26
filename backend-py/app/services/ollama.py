@@ -42,7 +42,19 @@ def format_bytes(size: int | None = None) -> str:
 
 
 def find_ollama_exe() -> str | None:
-    """探测 Ollama 可执行文件位置（Windows 优先查 PATH，再查常见安装位置）。"""
+    """探测 Ollama 可执行文件位置：PATH → 用户声明 → **标准安装位置**（找不到 ⇒ ``None``）。
+
+    ⚠️ 顺序与理由（2026-09-26 用户口径 ✓：**扫描/探测类路径一律不许写死** ✗）：
+    1. ``where ollama`` —— 用户把哪个装进了 PATH，就以哪个为准 ✓（最权威 ✓ 不用我们猜 ✗）；
+    2. 环境变量 ``OLLAMA_EXE`` ✓ —— 装到**非标准位置**时的唯一正解 ✓（显式声明 ✓，与
+       ``COMFYUI_PATH`` / ``EXTRA_MODEL_PATHS`` 同一套习惯 ✓）。⚠️ 声明了就以声明为准 ✓
+       **不回退**：路径写错时启动会**当场报错** ✓（免得变成「我明明设了变量」这种最难查的静默错 ✗）；
+    3. **标准安装位置**（官方 per-user 安装 → ``Program Files``）✓ —— 这两处**不是本机专有** ✗
+       （任何机器装上都在同一处 ✓）⇒ 这是 ``tests/local_models_test.py`` 里唯一带理由的豁免 ✓；
+    ✗ **不写死**「某盘某自建目录」✗（曾有一条本机自建目录的候选 ✗ 已删 ✓）：换台机器就悬空 ✗，
+    且会踩 ``app/`` 的静态守卫 ✗。返回 ``None`` 时调用方给明示错误（「请先安装（ollama.com）」✓），
+    不静默兜底 ✗。
+    """
     try:
         proc = subprocess.run(
             "where ollama",
@@ -57,12 +69,15 @@ def find_ollama_exe() -> str | None:
     except Exception:  # noqa: BLE001 - 不在 PATH 中
         pass
 
+    declared = (os.environ.get("OLLAMA_EXE") or "").strip()
+    if declared:
+        return declared
+
     local_app_data = os.environ.get("LOCALAPPDATA")
     candidates = [
         f"{local_app_data}\\Programs\\Ollama\\ollama.exe" if local_app_data else "",
         "C:\\Program Files\\Ollama\\ollama.exe",
         "C:\\Program Files (x86)\\Ollama\\ollama.exe",
-        "D:\\app\\ollama\\ollama.exe",
     ]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):

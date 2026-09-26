@@ -7,11 +7,14 @@
 
 | 文件 | 来源 | 说明 |
 |---|---|---|
-| `MiniMax_H3_Fast_T2V.json` | `reference/minimax-h3-comfyui/workflows/`（上游仓库 *MiniMax H3 Fast ComfyUI Workflows*，随 `reference/` 一并收录） | 文生视频（T2VA）：FL2VA INT8 + Qwen3-VL 32B NVFP4 + 10 步 + 内存友好 SageAttention ✓ |
+| `MiniMax_H3_Fast_T2V.json` | `minimax-h3-comfyui/workflows/`（上游仓库 *MiniMax H3 Fast ComfyUI Workflows*） | 文生视频（T2VA）：FL2VA INT8 + Qwen3-VL 32B NVFP4 + 10 步 + 内存友好 SageAttention ✓ |
 | `MiniMax_H3_Fast_I2V.json` | 同上 | 图生视频（I2VA）：默认只用首帧；**可选尾帧通道默认关闭** ✓（要用需显式把那段节点的 `mode` 改回 0 并接上连线 ✓） |
 
-⚠️ 上游未在仓库内声明许可证（`reference/minimax-h3-comfyui/` 只有 README + workflows + .gitignore ✗）。
-这里**原样复制**仅为让本机服务自包含（`reference/` 是开发期资料、不进镜像 ✗）。
+⚠️ 上游未在仓库内声明许可证（`minimax-h3-comfyui/` 只有 README + workflows + .gitignore ✗）。
+这里**原样复制**是为了让本机服务**自包含** ✓：⚠️ 开发期的上游副本放在脚手架目录 ``reference/`` 下，
+而**项目完善后整目录删除** ✗（用户 2026-09-26 口径 ✓）⇒ 所以
+① **本目录里的这份副本才是长期事实** ✓、② 别处（含注释/文档）**不许**再把 ``reference/…`` 当落点 ✗、
+③ **删掉 ``reference/`` 之后本文件读起来必须仍然是对的** ✓（因此正文不写那边的具体路径 ✗）。
 若将来上游补许可或要求移除，请以那边为准 ✓。
 
 上游 README 的实测耗时（用于设置超时）：冷启动 T2V 3 秒片 **53s**、热启 **23s**、I2V 热启 **27s**、
@@ -19,7 +22,7 @@
 
 ## 这份工作流用到什么（2026-09-16 在本版本 ComfyUI 源码里逐个核对过 ✓）
 
-`reference/ComfyUI` 这一版里：**16 个节点是核心自带** ✓（含 `MiniMaxH3ImageToVideo` —— 它在
+`ComfyUI` 这一版里：**16 个节点是核心自带** ✓（含 `MiniMaxH3ImageToVideo` —— 它在
 `comfy_extras/nodes_minimax_h3.py` ✓，**不是**第三方节点 ✓）；另有 3 个需要第三方节点包、
 1 个是界面便签（**不执行** ✗）：
 

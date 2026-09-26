@@ -24,12 +24,19 @@
 
 ===================  ==========================================================
 ``ditPath``          **必需**（不给则按清单自动找 ✓）
-``tokenizerPath``    可选 —— 不给则挂**桩**分词器 ✓（分词无语义 ✓，运行时会如实标注 ✓）
+``tokenizerPath``    **视频**可选 —— 不给则挂**桩**分词器 ✓（分词无语义 ✓，运行时会如实标注 ✓）；
+                     **出图必需** ✗ —— 不给则按上游约定探测 ✓，探测不到**当场报** ✗（见下）
 ``device``           可选 —— ``cuda`` / ``cpu``；不给则由引擎自己探 ✓
 ``audioLatentMode``  可选 —— ``round`` / ``ceil`` / ``floor``；**不给就不开双流** ✗（见下）
 ``temporalCompression`` 可选 —— 双流/潜帧要对齐时**必须显式给** ✓（本仓不猜 ✗）
 ``megapixels`` / ``steps`` / ``sampler`` / ``schedule`` / ``seed``  可选 —— 覆盖默认 ✓
 ===================  ==========================================================
+
+⚠️ **出图那条路（``stage="sdxl"``）另外说** ✓：它要的是 **SDXL 主权重 + 一张 CLIP 词表** ✓✗。
+``sdxlPath`` 不给 ⇒ 按清单 ``sdxl_base`` 自动找 ✓（先在 ``models_dir`` ✓，再到**动态探测**出来的
+根下找**同名**文件 ✓）；``tokenizerPath`` 不给 ⇒ 按**上游约定**在 ComfyUI 类安装的
+``comfy/sd1_tokenizer/`` 里探测 ✓ —— **两处都没有就当场报** ✗（视频那边缺词表只是"挂桩" ✓，
+出图缺词表是**真跑不了** ✗，见 :func:`resolve_tokenizer_path` ✓）。
 
 ⚠️ 另外把服务的 ``model`` 写成 ``h3`` ✓：``gpu_manager`` 的显存台账按 ``provider:model`` 查表 ✓，
 ``engine:h3`` 那条**登记了 19.5 GB + ``engine-unload`` 策略** ✓（写别的名字会落到 ``default`` 档 ⇒
@@ -115,15 +122,27 @@ def normalize_settings(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return {_CAMEL_BOUNDARY.sub("_", str(key)).lower(): value for key, value in raw.items()}
 
 
+#: 两条**阶段**名 ✓（= `pipeline.VIDEO_STAGE` / `pipeline.IMAGE_STAGE` ✓ = `runtime` 装配的 ``stage=`` ✓）。
+#: ⚠️ 这里用**字面量** ✗ 而不是 ``from .pipeline import …`` —— 桥刻意**只做懒加载** ✓
+#: （见各函数里的局部 import ✓），模块级引入会把 pipeline 那串依赖一起拖进来 ✓✗。
+#: ⚠️ 代价是**可能悄悄分叉** ✗ ⇒ 自检里有一条**钉住三者相等**的判据 ✓
+#: （`bridge.IMAGE_STAGE == pipeline.IMAGE_STAGE == SdxlBackend.name` ✓），分叉必红 ✓。
+VIDEO_STAGE = "h3"
+IMAGE_STAGE = "sdxl"
+
+
 def resolve_dit_path(settings: Mapping[str, Any] | None) -> tuple[str, str]:
     """定 DiT 主权重路径 ✓ ⇒ ``(路径, 来源说明)`` ✓ —— **查不到就报** ✗，绝不猜 ✓。
 
-    来源**两级**（顺序固定 ✓）：
+    三级来源（顺序固定 ✓，口径与 :func:`resolve_sdxl_path` **一模一样** ✓）：
     1. ``settings.ditPath``（调用方**明确**指的 ✓ —— 永远优先 ✓）；
-    2. ``configs/models.json`` 清单 ⇒ ``models_dir``（``dit_fl2va_int8`` ⇒ ``dit_ref2va_int8`` ✓，
-       且要求**文件真在盘上** ✓）。
+    2. ``configs/models.json`` 清单 ⇒ ``models_dir/<kind>/<文件名>`` ✓（``dit_fl2va_int8`` ⇒
+       ``dit_ref2va_int8`` ✓，且要求**文件真在盘上** ✓）；
+    3. **同一份**清单条目在 :func:`app.services.engine.inventory.candidate_roots` 那些**动态探测**
+       出来的根里 ✓（``<根>/diffusion_models/…`` 这类 ComfyUI 惯例布局 ✓ —— 本机的 DiT 就在这种
+       目录里 ✓✗，以前只认 ``models_dir`` ⇒ **扫描能看见、视频看不见** ✓✗，2026-09-26 真机实测 ✓）。
 
-    ⚠️ 第 2 级**只认清单**✗，不做"扫目录猜文件名" ✓ —— 猜中的代价是加载到**别的**权重 ✓✗
+    ⚠️ 第 2/3 级**只认清单**✗，不做"扫目录猜文件名" ✓ —— 猜中的代价是加载到**别的**权重 ✓✗
     （那会「装得进去、跑得出来、结果不对」✓✗）。
     """
     values = settings or {}
@@ -135,6 +154,7 @@ def resolve_dit_path(settings: Mapping[str, Any] | None) -> tuple[str, str]:
 
     catalog = inventory.load_catalog()
     by_key = {item.get("key"): item for item in catalog.get("models") or []}
+    searched: list[str] = []
     for key in ("dit_fl2va_int8", "dit_ref2va_int8"):
         entry = by_key.get(key)
         if entry is None:
@@ -142,31 +162,155 @@ def resolve_dit_path(settings: Mapping[str, Any] | None) -> tuple[str, str]:
         path = inventory.component_path(entry)
         if path is not None and Path(path).exists():
             return str(path), f"清单 configs/models.json ⇒ {key}"
+        searched.append(key)
+        # ③ 换根 ✓：同一份清单条目，去动态探测出来的根里找**同名**文件 ✓（文件名仍然只来自清单 ✓）
+        for found, source in inventory.component_candidates(entry):
+            if path is not None and found == path:
+                continue
+            if found.exists():
+                return str(found), f"清单 {key}（文件名取自清单 ✓）⇒ {source}"
 
     raise ValueError(
         "自研引擎缺 DiT 主权重 ✗：``settings.ditPath`` 没给 ✗，清单里也找不到在盘上的 "
-        "``dit_fl2va_int8`` / ``dit_ref2va_int8`` ✗。\n"
+        f"``{'`` / ``'.join(searched) or 'dit_fl2va_int8 / dit_ref2va_int8'}``"
+        "（``models_dir`` 与所有**动态探测**到的根都找过了 ✓）。\n"
         f"  · 清单：{inventory.catalog_path()}（模型根 = {inventory.models_dir() or '未配置 ✗'}）\n"
-        "  · 怎么修：在图像/视频服务的 settings 里配 ``ditPath`` ✓，"
-        "或按清单把权重放进 ``models_dir`` ✓。\n"
+        "  · 怎么修：在图像/视频服务的 settings 里配 ``ditPath`` ✓；或按清单把权重放进 "
+        "``models_dir`` ✓；或放进任一被探测到的 ComfyUI 的 ``models/diffusion_models/`` ✓"
+        "（探测根表见 ``local_model_scan.get_default_roots`` ✓）。\n"
         "⚠️ 这里**不猜路径** ✗：猜错会「装得进去、跑得出来、结果不对」✓✗。"
     )
 
 
-def assembly_from_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
+def resolve_sdxl_path(settings: Mapping[str, Any] | None) -> tuple[str, str]:
+    """定 **SDXL 主权重**路径 ✓ ⇒ ``(路径, 来源说明)`` ✓（口径与 :func:`resolve_dit_path` **一模一样** ✓）。
+
+    三级来源（顺序固定 ✓）：1. ``settings.sdxlPath`` ✓；2. 清单 ``sdxl_base`` 在 ``models_dir`` 里 ✓；
+    3. **同一份**清单条目在 :func:`app.services.engine.inventory.candidate_roots` 那些
+    **动态探测**出来的根里 ✓（``<根>/checkpoints/…`` 这类 ComfyUI 惯例布局 ✓ —— 那台机器上的
+    SDXL 就在这种目录里 ✓✗，以前只认 ``models_dir`` ⇒ **扫描能看见、出图看不见** ✓✗）。
+
+    ⚠️ 出图与视频是**两份不同的权重** ✗✗：拿 H3 的 DiT 去装 SDXL ⇒ 四个前缀一个都对不上 ✓
+    ⇒ `load_sdxl_components` 当场报「这不是 SDXL 主权重」✓（反过来同理 ✓）。
+    ⚠️ 第 3 级**换根不换名** ✗：文件名仍然只来自清单 ✓（见 ``inventory.component_candidates`` ✓）。
+    """
+    values = settings or {}
+    given = str(values.get("sdxl_path") or "").strip()
+    if given:
+        return given, "settings.sdxlPath"
+
+    from . import inventory  # 局部 import ✓：桥不该把清单层的可选依赖拖进来 ✓
+
+    entry = inventory.catalog_entry("sdxl_base")
+    if entry is not None:
+        # ② 清单声明的落点（``models_dir`` ✓）—— 口径与消息**一字不改** ✓（既有自检钉着它 ✓）
+        path = inventory.component_path(entry)
+        if path is not None and Path(path).exists():
+            return str(path), "清单 configs/models.json ⇒ sdxl_base"
+        # ③ 换根 ✓：同一份清单条目，去动态探测出来的根里找**同名**文件 ✓
+        for found, source in inventory.component_candidates(entry):
+            if path is not None and found == path:
+                continue
+            if found.exists():
+                return str(found), f"清单 sdxl_base（文件名取自清单 ✓）⇒ {source}"
+
+    raise ValueError(
+        "自研引擎出图缺 **SDXL 主权重** ✗：``settings.sdxlPath`` 没给 ✗，清单里也找不到在盘上的 "
+        "``sdxl_base`` ✗（``models_dir`` 与所有**动态探测**到的根都找过了 ✓）。\n"
+        f"  · 清单：{inventory.catalog_path()}（模型根 = {inventory.models_dir() or '未配置 ✗'}）\n"
+        "  · 怎么修：在出图服务的 settings 里配 ``sdxlPath`` ✓；或按清单把 "
+        "``sd_xl_base_1.0.safetensors`` 放进 ``models_dir`` ✓；或放进任一被探测到的 ComfyUI 的 "
+        "``models/checkpoints/`` ✓（探测根表见 ``local_model_scan.get_default_roots`` ✓）。\n"
+        "⚠️ 这里**不猜路径** ✗：猜错会「装得进去、跑得出来、结果不对」✓✗。"
+    )
+
+
+#: CLIP 词表目录里可以长什么样 ✓（口径来自 :mod:`app.services.engine.tokenizer_bpe` 的**形态嗅探** ✓）：
+#: 单文件 ``tokenizer.json`` ✓，或 ``vocab.json`` + ``merges.txt`` 这一对 ✓。
+_TOKENIZER_FILES = ("tokenizer.json",)
+_TOKENIZER_BPE_FILES = ("vocab.json", "merges.txt")
+
+#: ComfyUI 装完之后**它自己**那份 CLIP 词表的落点 ✓ —— **相对**于 ComfyUI 安装根 ✓
+#: （⚠️ **不是**本机盘符 ✗）：上游把 SD1/SDXL 共用的那份 CLIP-BPE 词表放在 ``comfy/sd1_tokenizer/`` ✓
+#: （SDXL 的 CLIP-L 与 OpenCLIP-bigG **共用**这一份 ✓ —— 两个塔的 BPE 表是同一张 ✓）。
+_COMFYUI_TOKENIZER_SUBDIR = ("comfy", "sd1_tokenizer")
+
+
+def _looks_like_tokenizer(directory: Path) -> bool:
+    """这个目录是不是一份**能直接喂给** ``load_tokenizer`` 的词表 ✓（判据 = 文件**真在** ✓ ✗ 不是"目录存在"）。"""
+    if any((directory / name).is_file() for name in _TOKENIZER_FILES):
+        return True
+    return all((directory / name).is_file() for name in _TOKENIZER_BPE_FILES)
+
+
+def resolve_tokenizer_path(settings: Mapping[str, Any] | None) -> tuple[str, str]:
+    """定 **CLIP 词表目录** ✓ ⇒ ``(目录, 来源说明)`` ✓ —— 定不下来就**报** ✗。
+
+    两级来源（顺序固定 ✓）：1. ``settings.tokenizerPath`` ✓；
+    2. ComfyUI 类安装根（``local_model_scan.get_comfyui_roots`` ✓）下的 ``comfy/sd1_tokenizer/`` ✓。
+
+    ⚠️ 词表**不是**权重 ✗：它是**一张 BPE 表** ✓ ⇒ 靠"有没有 ``.safetensors``"是找不着它的 ✓✗；
+    但也**不瞎找** ✗ —— 只在**上游约定**的那个落点上找 ✓（``comfy/sd1_tokenizer`` 是 ComfyUI
+    自己的目录约定 ✓，跟本机盘符无关 ✓ ⇒ 与"扫描路径不写死"的口径**不冲突** ✓）。
+    """
+    values = settings or {}
+    given = str(values.get("tokenizer_path") or "").strip()
+    if given:
+        return given, "settings.tokenizerPath"
+
+    from ..local_model_scan import get_comfyui_roots  # 局部 import ✓
+
+    seen: list[str] = []
+    for root, source in get_comfyui_roots():
+        directory = Path(root).joinpath(*_COMFYUI_TOKENIZER_SUBDIR)
+        if str(directory) in seen:
+            continue
+        seen.append(str(directory))
+        if _looks_like_tokenizer(directory):
+            return str(directory), f"{source} ⇒ {'/'.join(_COMFYUI_TOKENIZER_SUBDIR)}"
+
+    raise ValueError(
+        "自研引擎出图缺 **CLIP 词表** ✗：``settings.tokenizerPath`` 没给 ✗，ComfyUI 类安装里也找不到 "
+        f"``{'/'.join(_COMFYUI_TOKENIZER_SUBDIR)}/`` ✗。\n"
+        "  · 词表长这样：``tokenizer.json`` ✓ 或 ``vocab.json`` + ``merges.txt`` 一对 ✓"
+        "（SDXL 双塔**共用**这一张 CLIP-BPE 表 ✓）。\n"
+        "  · 怎么修：在出图服务的 settings 里配 ``tokenizerPath`` ✓；或设 ``COMFYUI_PATH`` 指向装了 "
+        "ComfyUI 的那份 ✓。\n"
+        "⚠️ 词表**不是权重** ✗：去 ``.safetensors`` 里找是找不着它的 ✓✗（本仓**不猜**它放哪 ✓）。"
+    )
+
+
+def assembly_from_config(config: Mapping[str, Any] | None, *,
+                         stage: str = VIDEO_STAGE) -> dict[str, Any]:
     """业务 ``config`` ⇒ 运行时装配参数 ✓（``engine_runtime.submit(assembly=…)`` ✓）。
 
     只产出运行时装得下的键 ✓ —— 多给一个键会被 ``_ensure_loaded_internal`` 当成
     ``TypeError`` 炸掉 ✓✗，所以这里**逐项白名单** ✓ 而不是 ``**settings`` 整包铺开 ✓。
     ⚠️ 因此"DiT 是从哪来的"（:func:`resolve_dit_path` 的第 2 个返回值 ✓）**不进**装配 ✓
     —— 那是**日志事实** ✓ 不是装载参数 ✗，调用方自己拿它记一条 ✓。
+
+    ⚠️ ``stage`` **必须由调用方明说** ✗（默认视频 ✓）：它决定装**哪一套**组件 ✓ ——
+    ``"h3"`` ⇒ H3 的 DiT + 参考 TE/VAE ✓；``"sdxl"`` ⇒ SDXL 的 **UNet + VAE + 双文本塔** ✓
+    （两者**根本不是一份权重** ✓✗）。⚠️ 猜错的后果是「装得进去、跑得出来、结果全错」✓✗
+    ⇒ 这里**不按 config 里的字段自己推** ✗（图片服务知道自己是图片 ✓，就由它明说 ✓）。
     """
     settings = normalize_settings(config)
-    dit_path, _source = resolve_dit_path(settings)
-    assembly: dict[str, Any] = {"dit_path": dit_path}
+    wanted = str(stage or VIDEO_STAGE).strip().lower()
+    if wanted == IMAGE_STAGE:
+        image_path, _image_source = resolve_sdxl_path(settings)
+        assembly: dict[str, Any] = {"stage": IMAGE_STAGE, "dit_path": image_path}
+        # ⭐ 2026-09-26 补 ✓：出图**另外**还要一份 CLIP 词表 ✓✗ —— 视频那边缺词表是**挂桩** ✓
+        #    （分词无语义、运行时如实标注 ✓），出图**缺词表就是跑不了** ✗ ⇒ 这里就定下来 ✓：
+        #    settings 给了用给的 ✓，没给按上游约定探测 ✓，两处都没有 ⇒ **当场报** ✗
+        #    （口径同 :func:`resolve_sdxl_path` ✓：早报早好，别装作能跑 ✓）。
+        tokenizer_path, _tokenizer_source = resolve_tokenizer_path(settings)
+        assembly["tokenizer_path"] = tokenizer_path
+    else:
+        dit_path, _source = resolve_dit_path(settings)
+        assembly = {"stage": VIDEO_STAGE, "dit_path": dit_path}
 
     tokenizer = str(settings.get("tokenizer_path") or "").strip()
-    if tokenizer:
+    if tokenizer and not assembly.get("tokenizer_path"):
         assembly["tokenizer_path"] = tokenizer
 
     device = str(settings.get("device") or "").strip()
@@ -314,29 +458,45 @@ def _materialize_extras(record: Mapping[str, Any], settings: Mapping[str, Any]) 
 
 def request_from_image_record(record: Mapping[str, Any], *,
                               outputs_dir: str | Path,
-                              settings: Mapping[str, Any] | None = None) -> Any:
-    """图片生成记录 ⇒ 引擎请求 ✓。
+                              settings: Mapping[str, Any] | None = None,
+                              stage: str = VIDEO_STAGE) -> Any:
+    """图片生成记录 ⇒ 引擎请求 ✓（``stage`` 决定走**哪条**路 ✓，见下 ✓）。
 
-    ⚠️ **必须说清的一件事**：H3 是**视频**模型 ✓ —— 引擎这里跑的是**最短那段视频** ✓
-    （5 帧 ✓），调用方再取**首帧**当图片 ✓（见 :func:`extract_still` ✓）。
-    所以"图片链路走引擎" ≠ "引擎会画单张图" ✓✗。
+    ⚠️ 默认取 **``h3``** ✗ 而不是 ``sdxl`` ✓ —— 与 :func:`assembly_from_config` 的默认**逐字对齐** ✓：
+    调用方两个都不传 ⇒ 请求与装配落到**同一条**路 ✓（两处默认各写各的 ⇒ 会出现"请求按图建 ✓、
+    权重按视频装 ✓"这种**错配** ✓✗ —— 实测撞到过 ✓，现在有 :func:`run_job` 的闸门兜住 ✓）。
+
+    ⚠️ **两条路产物不同** ✗✗，别混为一谈 ✓：
+
+    * ``stage="sdxl"``：SDXL **真·文生图** ✓ ⇒ 产物是**单张 PNG** ✓。⚠️ 出图服务**显式**传它 ✓。
+      ⚠️ σ 调度要**离散**的 ✓（``normal`` / ``simple`` ✓）：**settings 没明说 ⇒ 给 ``normal``** ✓
+      （SDXL 的常规默认 ✓）；**明说了别的**（如视频那套 ``karras`` ✓）⇒ 交给
+      :func:`pipeline.build_plan` **当场报错** ✗ —— 这里**不悄悄替换** ✓✗
+      （静默换调度 = 出现"你要的和你拿到的不是一回事" ✓）。
+    * ``stage="h3"``（默认 ✓）：H3 是**视频**模型 ✓ ⇒ 只能跑**最短那段视频** ✓（5 帧 ✓）再取**首帧** ✓
+      （见 :func:`extract_still` ✓）⇒ 「图片链路走引擎」**≠**「引擎会画单张图」✓✗。
     """
     from . import geometry, pipeline  # 局部 import ✓：桥不把引擎层拉进业务模块的 import 期 ✓
 
     values = settings or {}
     ratio = _parse_size(record.get("size"))
     megapixels = values.get("megapixels")
+    wanted = str(stage or VIDEO_STAGE).strip().lower()
     kwargs: dict[str, Any] = {
         "prompt": str(record.get("prompt") or ""),
         "negative": str(record.get("negativePrompt") or ""),
         "seconds": float(values.get("seconds") or _STILL_SECONDS),
         "outputs_dir": str(outputs_dir),
+        "stage": wanted,
     }
     if ratio is not None:
         kwargs["ratio"] = ratio
         if megapixels is None:
             kwargs["megapixels"] = geometry.megapixels_for_size(*ratio)
     kwargs.update(_visual_kwargs(values))
+    if wanted == pipeline.IMAGE_STAGE and "schedule" not in kwargs:
+        # ⚠️ 只是**补默认** ✓ 不是覆盖 ✓：`_visual_kwargs` 是"给了才传" ✓ ⇒ 走到这里就是"没配" ✓。
+        kwargs["schedule"] = "normal"
     kwargs.update(_materialize_extras(record, values))
     return pipeline.GenerationRequest(**kwargs)
 
@@ -386,10 +546,31 @@ async def run_job(request: Any, assembly: Mapping[str, Any], *,
     """
     from .runtime import engine_runtime  # 局部 import ✓：`provider=engine` 才需要引擎 ✓
 
-    task_id = engine_runtime.submit(request, assembly=dict(assembly))
+    # ⚠️ **两个 stage 必须是同一份** ✗✗（实测撞到过 ✓）：请求那边的 ``stage`` 决定 **σ 调度与帧数** ✓
+    #    （图片 1 帧 / 视频 17k+5 帧 ✓、离散 σ 表 / karras ✓），装配那边的 ``stage`` 决定**装哪套权重** ✓。
+    #    对不上 ⇒ H3 的 DiT 去解 SDXL 的潜变量那种事 ✓✗ —— 后果是「装得进去、跑得出来、
+    #    结果全错」✓✗（**最坏情况甚至不报错** ✓）。⇒ 这儿当场拦下 ✓，报错里写明**怎么修** ✓。
+    declared = str((assembly or {}).get("stage") or VIDEO_STAGE).strip().lower()
+    wanted = str(getattr(request, "stage", None) or VIDEO_STAGE).strip().lower()
+    if declared != wanted:
+        raise ValueError(
+            f"请求与装配的 **stage 对不上** ✗✗：请求 ``stage={wanted}`` / 装配 ``stage={declared}`` ✓。\n"
+            "  · 这两个必须是**同一个**值 ✓：一个决定 σ 调度与帧数 ✓、一个决定装哪套权重 ✓ —— "
+            "对不上就是「装得进去、跑得出来、结果全错」✓✗。\n"
+            "  · 怎么修：``assembly_from_config(config, stage=…)`` 与 "
+            "``request_from_image_record(…, stage=…)`` 传**同一个**值 ✓"
+            f"（视频 ``{VIDEO_STAGE}`` / 出图 ``{IMAGE_STAGE}`` ✓）。"
+        )
+
+    # ⚠️ 2026-09-26 修 ✓：``submit`` 的 ``stage`` **必须跟着传** ✗✗ —— 不传就按它自己的默认 ``h3`` ✓
+    #    ⇒ 出图任务在**任务事实**里被标成 ``h3`` ✓✗（前面那两个 stage 我明明已经对齐过了 ✓，
+    #    唯独没把同一个值交给 ``submit`` ✓）⇒ 进度/摘要/排障全看着像视频任务 ✓✗。
+    #    这里传的是**刚刚对齐过的那个** ``wanted`` ✓（不另起一份取值 ✓）。
+    task_id = engine_runtime.submit(request, assembly=dict(assembly), stage=wanted)
     prefix = f"{label + ' ' if label else ''}"
     log_task_progress(task_type, "engine-submit",
-                      {"id": record_id, "engineTaskId": task_id, "assembly": dict(assembly)})
+                      {"id": record_id, "engineTaskId": task_id,
+                       "stage": wanted, "assembly": dict(assembly)})
 
     emitted = 0
     while True:
@@ -473,3 +654,26 @@ async def extract_still_to_storage(video_path: str | Path, *, record_id: Any,
     target = directory / f"engine-{record_id}-{uuid.uuid4().hex[:8]}.png"
     written = await extract_still(video_path, target)
     return {**written, "localPath": static_relative(target), "absolutePath": str(target)}
+
+
+async def store_image_to_storage(source: str | Path, *, record_id: Any,
+                                 sub_dir: str = "images") -> dict[str, Any]:
+    """**真·图片文件** ⇒ **落进数据目录** ✓ ⇒ 返回带 ``localPath``（``static/...`` ✓）的事实 ✓。
+
+    ⚠️ 与 :func:`extract_still_to_storage` 共用**同一条**「相对数据根」的约定 ✓✗（落点口径只该有
+    一个来源 ✓）：SDXL 后端把 PNG 写在 ``outputs_dir`` ✓（``<storageRoot>/engine/image-<id>/`` ✓），
+    那是**引擎产物区** ✓、不是图片资产区 ✗ ⇒ 这里**复制**一份进 ``images/`` ✓，与
+    ``download_file`` / ``save_base64_image`` 的落点一致 ✓。
+    ⚠️ 是**复制**不是移动 ✗：引擎产物留着可复查 ✓（排障时要看原始 PNG ✓）。
+    """
+    import shutil  # noqa: PLC0415
+
+    origin = Path(source)
+    if not origin.exists():
+        raise RuntimeError(f"图片产物不在盘上 ✗：{origin}（引擎报的路径对不上 ✓？）")
+    directory = Path(get_storage_root()) / sub_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"engine-{record_id}-{uuid.uuid4().hex[:8]}{origin.suffix or '.png'}"
+    await asyncio.to_thread(shutil.copyfile, origin, target)
+    return {"sourcePath": str(origin), "absolutePath": str(target),
+            "localPath": static_relative(target), "bytes": int(target.stat().st_size)}

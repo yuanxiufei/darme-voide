@@ -184,6 +184,18 @@ def next_steps(report: dict[str, Any]) -> list[str]:
         steps.append(f"下权重到 `{models_dir}` ✓：缺 {missing} ✓"
                      f"（还要下约 {planned_gib(report['weightsReadiness'], only_missing=True):.2f} GiB ✓；"
                      f"全量约 {planned_gib(report['weightsReadiness']):.2f} GiB ✓）")
+    # ⭐ 2026-09-27 加 ✓✗：**"在盘上、但不在 `models_dir`"** 的那些 —— 引擎加载会直接用它们 ✓
+    #    ⇒ 必须**明说"不需要下载"** ✗，否则报告会读成"缺件、得下 39.55 GiB" ✓✗
+    #    （用户当场指出这个毛病：盘上那份明明在探测到的 ComfyUI 共享目录里 ✓）。
+    elsewhere = report["weightsReadiness"].get("resolvedElsewhere") or {}
+    if elsewhere and not missing:
+        shown = "、".join(f"`{key}` → `{item.get('path')}`" for key, item in list(elsewhere.items())[:3])
+        more = f"（等 {len(elsewhere)} 件 ✓）" if len(elsewhere) > 3 else ""
+        steps.append(
+            f"⚠️ 这些必需件**在盘上、但不在 `models_dir`** ✓ ⇒ **不需要下载** ✗"
+            f"（引擎加载时就在这些位置找 ✓）：{shown}{more}；"
+            f"⚠️ 想让本仓**自持**（换机器 / 整目录搬走 ✓）⇒ 把它们收进 "
+            f"`{report['weightsReadiness'].get('modelsDir')}` ✓")
     check = report.get("weightsCheck")
     if check is None and not missing:
         steps.append("权重已在盘上 ⇒ 加 `--weights <DiT 路径> [--tokenizer <词表目录>]` "
@@ -213,11 +225,17 @@ def next_steps(report: dict[str, Any]) -> list[str]:
 
 
 def collect(*, weights: str | None = None, tokenizer: str | None = None,
-            stage: str = "h3", capacity_gib: float = inv.DEFAULT_CAPACITY_GIB) -> dict[str, Any]:
-    """把四块串成**一次调用** ✓（纯函数 ✓ 不打印 ✓ —— 路由与 CLI 都调它 ✓）。"""
+            stage: str = "h3", capacity_gib: float = inv.DEFAULT_CAPACITY_GIB,
+            root: str | Path | None = None) -> dict[str, Any]:
+    """把四块串成**一次调用** ✓（纯函数 ✓ 不打印 ✓ —— 路由与 CLI 都调它 ✓）。
+
+    ⚠️ ``root`` **只用来圈定搜索域** ✗（体检 / 加载计划都传到 ✓）：给了它就**只认那个根**
+    ✓（自检钉根 ⇒ 结论不随本机恰好装了什么而变 ✓✗ —— 见 :func:`inventory.resolve_component`
+    的三条域口径 ✓）；不给 ⇒ 清单落点（``models_dir``）优先 → 动态探测根 ✓（生产口径 ✓）。
+    """
     env = environment_report()
-    ready = inv.readiness(stage, capacity_gib=capacity_gib)
-    plan = loader_mod.plan_stage(stage, capacity_gib=capacity_gib)
+    ready = inv.readiness(stage, root=Path(root) if root else None, capacity_gib=capacity_gib)
+    plan = loader_mod.plan_stage(stage, root=Path(root) if root else None, capacity_gib=capacity_gib)
     report: dict[str, Any] = {
         "stage": stage,
         "environment": env,
@@ -285,6 +303,11 @@ def summary(report: dict[str, Any]) -> dict[str, Any]:
             "plannedGiB": round(planned_gib(ready), 2),
             "downloadedGiB": round(float(ready.get("requiredWeightsGiB") or 0.0), 2),
             "remainingGiB": round(planned_gib(ready, only_missing=True), 2),
+            # ⭐ 2026-09-27 加 ✓✗：**在盘上、但不在 `models_dir`** 的那些（引擎加载会用它们 ✓）
+            #    ⇒ 不报 ⇒ 前端只能看到"remainingGiB"，把"已就绪"读成"还得下" ✓✗
+            #    （用户当场指出：盘上那份 H3 明明在探测到的 ComfyUI 共享目录里 ✓）。
+            "resolvedElsewhere": ready.get("resolvedElsewhere") or {},
+            "resolvedElsewhereNote": ready.get("resolvedElsewhereNote"),
         },
         "vram": {
             "capacityGiB": residency.get("capacityGiB"),

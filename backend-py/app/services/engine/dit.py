@@ -31,7 +31,7 @@ from . import safetensors as st
 __all__ = ["DiTConfig", "DiTConfigError", "H3_SHAPE_FACTS", "H3_PACK_FACTS", "H3_STRUCTURAL_GAPS",
            "H3_GAPS_CLOSED", "build_dit", "flow_match_x0", "infer_config_from_info"]
 
-#: ⭐ **H3 的结构事实**（2026-09-20 抄自 `reference/ComfyUI` ✓，逐条带出处 ✓ —— 不是猜的 ✗）。
+#: ⭐ **H3 的结构事实**（2026-09-20 抄自 `ComfyUI` ✓，逐条带出处 ✓ —— 不是猜的 ✗）。
 #: 用途：① 让"真权重到手"那一刻**不必重新翻参考项目** ✓；② 让下面的缺口清单**可被机械核对** ✓。
 #: 出处：`comfy/ldm/minimax/model.py:474-481`（默认值）、`comfy/model_detection.py:390-418`（从权重反推）、
 #: `comfy/sd.py:1011-1017`（VAE 压缩比）、`comfy/text_encoders/llama.py:289-297`（TE ✓）。

@@ -19,7 +19,7 @@
 * **RefinerBlock 没有 adaLN** ✓ —— 早年「近似实现」多出来的
   `token_refiner.blocks.N.adaln_proj.*` 会被当 unexpected 报出 ✗。
 
-## 事实来源（`reference/ComfyUI/comfy/ldm/minimax/model.py` ✓ 2026-09-20 读全 ✓）
+## 事实来源（`ComfyUI/comfy/ldm/minimax/model.py` ✓ 2026-09-20 读全 ✓）
 
 * 顶层模块（`MiniMaxH3Model.__init__` ✓）：`video_patch_proj` / `audio_patch_proj`
   （**都 fp32** ✓）/ `condition_proj` / `time_embedder{proj_in, proj_out}`（或 `adaln_t_table` ✓）/

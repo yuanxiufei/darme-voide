@@ -91,9 +91,8 @@ def _quantized(root: Path, *, blocks: int = 3, drop_scale_for: int | None = None
         tensors[f"blocks.{index}.attn.wq.weight"] = ("F8_E4M3", [8, 8])
         if drop_scale_for != index:
             tensors[f"blocks.{index}.attn.wq.scale"] = ("F32", [8, 8])
-    # ⚠️ 落点必须与 entry 的 `file_path` **一致**（`component_path` 会拼成
-    #    `<root>/diffusion_models/dit.safetensors` ✓）—— 初版写到 `<root>/dit.safetensors`，
-    #    于是"文件其实存在"却判成缺失 ✗，自检自己就红 ✓。
+    # ⚠️ 落点必须拼成 `<根>/<kind>/<文件名>` ✓（`component_path` 的口径 ✓，也是**安装器**的口径 ✓）
+    #    —— 初版写到 `<根>/dit.safetensors`，于是"文件其实存在"却判成缺失 ✗，自检自己就红 ✓。
     path = root / "diffusion_models" / "dit.safetensors"
     write_safetensors(path, tensors)
     return path
@@ -128,9 +127,13 @@ def case_component(root: Path) -> None:
 
     # 纯 bf16 权重**不要求** scale（不误报 ✓）
     naive = root / "naive"
-    write_safetensors(naive / "bf16.safetensors", {"blocks.0.attn.wq.weight": ("BF16", [4, 4]),
-                                                   "blocks.1.attn.wq.weight": ("BF16", [4, 4])})
-    naive_plan = ld.plan_component({**entry, "file_path": "bf16.safetensors"}, root=naive)
+    # ⚠️ 换名只换 ``filename`` ✗（``kind`` 照旧 ⇒ 落点 ``<根>/<kind>/<文件名>`` ✓）——
+    #    ``file_path`` 是**远端**仓库内的路径 ✓ **不作**本地落点 ✓✗（2026-09-26 修 ✓，
+    #    见 ``inventory.component_path`` ✓）；以前这里靠它把落点挪到平处 ✓✗（同一条口径错误 ✓）。
+    write_safetensors(naive / "diffusion_models" / "bf16.safetensors",
+                      {"blocks.0.attn.wq.weight": ("BF16", [4, 4]),
+                       "blocks.1.attn.wq.weight": ("BF16", [4, 4])})
+    naive_plan = ld.plan_component({**entry, "filename": "bf16.safetensors"}, root=naive)
     check("⑨ 整份 bf16 的权重**不会**被要求有 scale（不误报 ✓）",
           naive_plan.quantScheme == "none" and naive_plan.problems == [],
           (naive_plan.quantScheme, naive_plan.problems))
@@ -149,8 +152,8 @@ def case_component(root: Path) -> None:
 
     # ⚠️ 块量化的 scale 形状（[2,2] 对不上权重 [8,8] ✓）⇒ **体检就要拦下** ✓（装的时候会中止 ✓）
     blocked = root / "blocked"
-    # ⚠️ 落点必须拼成 `<root>/diffusion_models/dit.safetensors` ✗（与 entry 的 `file_path` 一致 ✓）
-    #    —— 第一版直接写 `<root>/blocked/dit.safetensors` ⇒ 被当成「文件缺失」⇒ 早退 ⇒
+    # ⚠️ 落点必须拼成 `<根>/<kind>/<文件名>` ✓（``component_path`` 的唯一口径 ✓，与**安装器**一致 ✓）
+    #    —— 第一版直接写 `<根>/blocked/dit.safetensors` ⇒ 被当成「文件缺失」⇒ 早退 ⇒
     #    `dequantPlan` 还是空的 `{}` ⇒ `KeyError` ✓✗（**同一个坑这仓已经注释过一次了** ✓ 我又踩 ✓）。
     write_safetensors(blocked / "diffusion_models" / "dit.safetensors",
                       {"blocks.0.attn.wq.weight": ("F8_E4M3", [8, 8]),
@@ -166,9 +169,10 @@ def case_component(root: Path) -> None:
     # GGUF：2026-09-20 起有**真读取器** ✓（详见 engine_gguf_test.py ✓）
     # —— 垃圾 GGUF（GGUF + 全零 ✗）现在**真的去读** ⇒ 结构坏 ⇒ 阻断 ✓（不再是 `gguf-unknown` ✗）
     gguf = root / "gguf"
-    (gguf).mkdir(parents=True, exist_ok=True)
-    (gguf / "w.gguf").write_bytes(b"GGUF" + b"\x00" * 128)
-    gguf_plan = ld.plan_component({**entry, "filename": "w.gguf", "file_path": "w.gguf"}, root=gguf)
+    # ⚠️ 同上：落点看 ``kind``/``filename`` ✓，不看 ``file_path`` ✓（那个字段只用于拼下载直链 ✓）
+    (gguf / "diffusion_models").mkdir(parents=True, exist_ok=True)
+    (gguf / "diffusion_models" / "w.gguf").write_bytes(b"GGUF" + b"\x00" * 128)
+    gguf_plan = ld.plan_component({**entry, "filename": "w.gguf"}, root=gguf)
     check("⑩ 垃圾 GGUF ⇒ 真读取后结构坏 ⇒ problems 非空 + verified=False（不假装读过 ✓）",
           bool(gguf_plan.problems) and gguf_plan.verified is False,
           (gguf_plan.quantScheme, gguf_plan.problems, gguf_plan.verified))
@@ -254,7 +258,7 @@ def case_stage(root: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 # ⑤ 路由：加载计划要**真能被调用** ✓
 # ══════════════════════════════════════════════════════════════════════════
-def case_api() -> None:
+def case_api(root: Path) -> None:
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -265,8 +269,15 @@ def case_api() -> None:
     check("㉕ GET /engine/load-plan 真能调用（200 ✓）并给出逐组件计划",
           response.status_code == 200 and len(data.get("components") or []) >= 4
           and "residency" in data, (response.status_code, len(data.get("components") or [])))
-    check("㉖ 本机现状（权重全缺）⇒ ready=False、fits=False、缺件逐条列出 ✓",
-          data.get("ready") is False and (data.get("residency") or {}).get("fits") is False
+    # ⚠️ 这条验的是「**缺件**时计划怎么说」⇒ 必须把域钉成**空世界** ✗✗（2026-09-27 ✓）：
+    #    解析现在会走**动态探测根** ✓（2026-09-27 之前只看 `models_dir` ✓✗）⇒ 不钉 ⇒
+    #    本机恰好装了 H3 全套时这里会变成 `missing=[]` ✓✗（自检随机器翻脸 ✓）。
+    empty = client.get("/api/v1/engine/load-plan",
+                       params={"stage": "h3", "models_dir": str(root / "empty")})
+    data = empty.json().get("data") or {}
+    check("㉖ 钉空域（权重全缺 ✓）⇒ ready=False、fits=False、缺件逐条列出 ✓",
+          empty.status_code == 200 and data.get("ready") is False
+          and (data.get("residency") or {}).get("fits") is False
           and bool((data.get("residency") or {}).get("missing")),
           (data.get("ready"), (data.get("residency") or {}).get("missing")))
     check("㉗ 计划里带**排班说明**（告诉我们这顺序是怎么推出来的 ✓，不是黑箱 ✓）",
@@ -280,10 +291,10 @@ def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_loader_"))
     case_basics()
     case_component(root)
+    case_api(root)
     case_mode_thresholds()
     case_residency()
     case_stage(root)
-    case_api()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

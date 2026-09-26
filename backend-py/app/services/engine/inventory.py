@@ -13,7 +13,8 @@
 ## 事实来源（不猜 ✓）
 
 * 清单：``configs/models.json``（``models[]`` 每项含 ``kind`` / ``filename`` / ``file_path`` /
-  ``size_gib`` / ``required`` ✓）；
+  ``size_gib`` / ``required`` ✓；⚠️ ``file_path`` 是**远端仓库内**的路径 ✗ —— 只用来拼下载直链 ✓，
+  **本地落点只看 ``kind`` + ``filename``** ✓，见 :func:`component_path` ✓）；
 * 目录：``configs/model-paths.json`` 的 ``models_dir`` ✓（解析优先级由
   :func:`app.services.local_model_scan.get_model_paths` 统一提供 ✓ 与本仓其它地方同一份来源 ✓）；
 * 校验：:mod:`app.services.engine.safetensors`（纯 Python ✓）与
@@ -29,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -41,10 +43,15 @@ from . import tiers as tiers_mod
 
 __all__ = [
     "DEFAULT_CAPACITY_GIB",
+    "candidate_roots",
+    "catalog_entry",
+    "component_candidates",
+    "component_path",
     "component_status",
     "estimate_vram",
     "load_catalog",
     "readiness",
+    "resolve_component",
     "upscale_status",
 ]
 
@@ -91,18 +98,134 @@ def models_dir() -> Path | None:
 
 
 def component_path(entry: dict[str, Any], root: Path | None = None) -> Path | None:
-    """按清单算出该组件的**期望落点** ✓：优先 ``file_path``（含类别子目录 ✓），否则 ``kind/filename`` ✓。"""
+    """按清单算出该组件的**期望落点** ✓ ⇒ ``<根>/<kind>/<文件名>`` ✓（落点**只此一份口径** ✗）。
+
+    ⚠️ ``file_path`` **不是**本地落点 ✗✗（2026-09-26 修 ✓）：它是**远端仓库内**的路径 ✓ ——
+    只用来拼下载直链（``scripts/model_manager.py`` 拿 ``repo`` + ``file_path`` 拼出
+    ``…/resolve/main/<file_path>`` ✓）。本地落点由**安装器**定 ✓，而它的装 / 查 / 删**三处**算的
+    都是 ``models_dir/<kind>/<文件名>`` ✓ ⇒ 那才是唯一事实来源 ✓。
+
+    例子（也是最容易混的那个 ✓）：``stabilityai/stable-diffusion-xl-base-1.0`` 这个 HF 仓库**是平的** ✓
+    ⇒ ``file_path`` = ``sd_xl_base_1.0.safetensors`` ✓（照它算本地落点，就会去找
+    ``<models_dir>/sd_xl_base_1.0.safetensors`` ✓✗ —— 那是**安装器永远不会写**的位置 ✓），
+    而盘上（与 ComfyUI 的惯例一致 ✓）它在 ``<models_dir>/checkpoints/`` 里 ✓。
+    以前两者混用 ⇒ 体检 / 「按 key 体检」/ hybrid-merge 的**按 key 解析**全都指错地方 ✓✗
+    （本机实测：扫描看得见、装载看不见 ✓✗）。
+    """
     root = root if root is not None else models_dir()
     if root is None:
         return None
-    relative = str(entry.get("file_path") or "").strip()
-    if not relative:
-        filename = str(entry.get("filename") or "").strip()
-        if not filename:
-            return None
-        kind = str(entry.get("kind") or "").strip()
-        relative = f"{kind}/{filename}" if kind else filename
-    return root / relative
+    filename = str(entry.get("filename") or "").strip()
+    if not filename:
+        # ⚠️ 连**文件名**都没有 ⇒ 算不出来就是算不出来 ✗：本地叫什么名字**没有事实来源** ✓
+        #    （``file_path`` 也救不了 ✓ —— 它是**远端**路径，见上 ✓）。
+        return None
+    kind = str(entry.get("kind") or "").strip()
+    return root / (f"{kind}/{filename}" if kind else filename)
+
+
+def catalog_entry(key: str) -> dict[str, Any] | None:
+    """按 ``key`` 取清单条目 ✓（取不到 ⇒ ``None`` ✓ —— "报"还是"跳过"由调用方定 ✓）。"""
+    wanted = str(key or "").strip()
+    if not wanted:
+        return None
+    return next((item for item in load_catalog()["models"] if item.get("key") == wanted), None)
+
+
+def candidate_roots() -> list[tuple[Path, str]]:
+    """清单落点的**候选根** ✓ ⇒ ``[(根, 来源说明)]`` ✓（去重保序 ✓）。
+
+    根表**只此一份** ✗ —— 直接摊平 :func:`app.services.local_model_scan.get_default_roots` ✓
+    （``models_dir`` 排第一 ✓ / 用户显式加的目录 ✓ / 各生态落点 ✓ / **每个** ComfyUI 类目录的
+    ``models/`` ✓ —— 见那份函数自己的说明 ✓）。
+
+    ⚠️ 这里**一个路径字面量都没有** ✗：根全部来自用户配置或动态探测 ✓（口径同
+    ``tests/local_models_test.py`` 的静态守卫 ✓）。⚠️ 探测根**只用来对文件名** ✗，
+    绝不"挑一个看着像的权重" ✓ —— 见 :func:`component_candidates` ✓。
+    """
+    from ..local_model_scan import get_default_roots  # 局部 import ✓：清单层不把扫描层拖到 import 期 ✓
+
+    declared = models_dir()
+    declared_key = os.path.normcase(str(declared)) if declared is not None else ""
+    roots: list[tuple[Path, str]] = []
+    for raw in get_default_roots():
+        path = Path(raw)
+        source = ("清单 configs/model-paths.json 的 models_dir"
+                  if declared_key and os.path.normcase(str(path)) == declared_key
+                  else "扫描根 local_model_scan.get_default_roots()")
+        roots.append((path, source))
+    return roots
+
+
+def component_candidates(entry: dict[str, Any],
+                         roots: Sequence[tuple[Path, str]] | None = None) -> list[tuple[Path, str]]:
+    """清单条目 ⇒ **有序候选落点** ✓ ⇒ ``[(文件, 来源说明)]`` ✓。
+
+    每个候选根下试 ``<根>/<kind>/<文件名>`` ✓（ComfyUI 那套「按类别分子目录」的惯例 ✓ ——
+    本机那份 SDXL 就在 ``…/models/checkpoints/`` 里 ✓，也正是安装器的落点 ✓；
+    ⚠️ 根**本身就已经是** ``<kind>`` 那个目录时**只试平的** ✓，见下 ✓）。
+
+    ⚠️ 这里**不再**拿 ``file_path`` 当本地落点 ✗✗（2026-09-26 修 ✓，口径同 :func:`component_path` ✓）：
+    它是**远端仓库内**的路径 ✓，而"上游那个 HF 仓库平不平"跟**本地**落点**根本没关系** ✓✗
+    （SDXL 那个仓库就是平的 ✓，本地仍在 ``checkpoints/`` ✓）。以前两种布局并列 ⇒ 候选表凭空
+    翻一倍 ✓✗，其中一半还在找 ``<根>/sd_xl_base_1.0.safetensors`` 这种**不可能存在**的形状 ✓✗。
+
+    ⚠️ **文件名一律来自清单** ✗（``filename`` ✓）⇒ 这里**没有猜名字** ✓：
+    猜中的代价是加载到**别的**权重 ⇒「装得进去、跑得出来、结果不对」✓✗
+    （见 :func:`app.services.engine.bridge.resolve_dit_path` 的说明 ✓）。
+    """
+    filename = str(entry.get("filename") or "").strip()
+    if not filename:
+        return []
+    kind = str(entry.get("kind") or "").strip()
+    layout = f"{kind}/{filename}" if kind else filename
+    table = list(roots) if roots is not None else candidate_roots()
+    found: list[tuple[Path, str]] = []
+    for root, source in table:
+        # ⚠️ 根**本身就已经是** ``<kind>`` 那个目录时**别再拼一层** ✗✗ —— 本机的根表里，每个
+        #    ComfyUI 类别目录（``checkpoints`` / ``clip`` / …）**各自都是一条根** ✓ ⇒ 再拼
+        #    ``<kind>/`` 只会造出 ``…/checkpoints/checkpoints/…`` 这种**不可能存在**的形状 ✓✗
+        #    （候选表翻一倍还全是噪声 ✓）。⇒ 这种根下**只试平的那一种** ✓。
+        here = filename if (kind and root.name == kind) else layout
+        found.append((root / here, source))
+    return found
+
+
+def resolve_component(entry: dict[str, Any], root: Path | None = None,
+                      *, roots: Sequence[tuple[Path, str]] | None = None) -> tuple[Path | None, str]:
+    """清单条目 ⇒ **盘上那一份** + 来源说明 ✓（取不到 ⇒ ``(None, "")`` ✓ —— 不猜 ✓）。
+
+    ⚠️ 搜索域**由调用方圈定** ✗✗（三种写法，语义互不相同 ✓）：
+    ① 什么都不给 ⇒ 域 = ``models_dir`` 的清单落点 ✓ + **动态探测**根（:func:`candidate_roots` ✓）
+       —— 生产侧就是这个用法 ✓；
+    ② ``root``（自检注入临时目录 ✓）⇒ 域 = **只有它** ✗：再往下翻真实磁盘，会把「钉住的那份没装」
+       变成「其实装了**别的**」✓✗（体检结果随机器变 ✓✗，本仓铁律：自检要能在任何机器上给出
+       同一个结论 ✓）；
+    ③ ``roots``（**根表** ✓ —— 形参口径与 :func:`component_candidates` 的 ``roots`` **同一份** ✓）
+       ⇒ 域 = **那张表** ✓✗ —— ⚠️ 此时**不再**另取 ``models_dir`` ✗：调用方既然圈定了域，再往里塞
+       一条它**没说过**的落点，等于替它做主 ✓✗（自检注入临时根时，结论会随**本机** ``models_dir``
+       里恰好有什么而变 ✓✗ —— 同一份自检在两台机器上给两个答案，正是本仓最忌的那个 ✓）。
+
+    ``roots`` 必须传**根表**而不是**候选文件表** ✗：后者会被当成根再摊一层
+    （``…/checkpoints/sd_xl_base.safetensors/checkpoints/…`` ✓✗ —— 曾经的真 bug ✓）。
+    """
+    if roots is not None:
+        table: Sequence[tuple[Path, str]] = list(roots)
+        declared = component_path(entry, root) if root is not None else None
+    elif root is not None:
+        table = []
+        declared = component_path(entry, root)
+    else:
+        table = candidate_roots()
+        declared = component_path(entry)
+    if declared is not None and declared.exists():
+        return declared, "清单落点"
+    for found, source in component_candidates(entry, table):
+        if declared is not None and found == declared:
+            continue
+        if found.exists():
+            return found, source
+    return None, ""
 
 
 def _audit_h3_form(status: dict[str, Any], tensors: Mapping[str, Sequence[int] | None]) -> None:
@@ -131,8 +254,22 @@ def _audit_h3_form(status: dict[str, Any], tensors: Mapping[str, Sequence[int] |
 
 
 def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
-    """单个组件的体检结论（不抛错 ✓ —— 缺文件也是**结论**的一种 ✓）。"""
-    path = component_path(entry, root)
+    """单个组件的体检结论（不抛错 ✓ —— 缺文件也是**结论**的一种 ✓）。
+
+    ⚠️ **"盘上那一份"只有一处解析** ✗✗（2026-09-27 修 ✓，用户当场指出 ✓）：不给 ``root`` 时走
+    :func:`resolve_component` ✓ —— 也就是**引擎加载时**用的那份（``models_dir`` 清单落点优先 ✓
+    → 动态探测根 ✓）；给了 ``root`` ⇒ **只认那个根** ✓（自检钉根 ⇒ 结论不随机器变 ✓）。
+
+    以前这里**只看** ``models_dir`` ✗✗ ⇒ **同一件事两个说法** ✓✗：体检说「缺 ``dit_fl2va_int8`` ✗、
+    还要下 19.53 GiB」，可盘上那份**明明就在**探测到的 ComfyUI 共享目录里 ✓、引擎加载也真会用它 ✓
+    （实测：``…/ComfyUI-Shared/models/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors`` ✓）
+    ⇒ 报告把"已经就绪"说成"没下载" ✓✗ —— 报告与实底打架，比没有报告更坏 ✗。
+    """
+    expected_path = component_path(entry)
+    if root is not None:
+        path, source = component_path(entry, root), "调用方钉的模型根 ✓"
+    else:
+        path, source = resolve_component(entry)
     expected_gib = entry.get("size_gib")
     status: dict[str, Any] = {
         "key": entry.get("key"),
@@ -141,6 +278,12 @@ def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[st
         "category": entry.get("category"),
         "required": bool(entry.get("required")),
         "path": str(path) if path else None,
+        #: ⚠️ 清单算出来的**期望落点**（``models_dir`` 那份 ✓）—— 与实际找到的 ``path`` **分开报** ✗：
+        #: 不分开 ⇒ 读者答不出「这份是不是本仓自己那份」✓✗（口径见 :func:`readiness` 的
+        #: ``resolvedElsewhere`` ✓）。
+        "expectedPath": str(expected_path) if expected_path else None,
+        #: 这份是**在哪儿**找到的 ✓（清单落点 / 动态探测根 ✓）—— 缺件时给的是"找过哪儿" ✓。
+        "source": source if path is not None else "",
         "present": False,
         "bytes": 0,
         "expectedGiB": expected_gib,
@@ -151,7 +294,12 @@ def component_status(entry: dict[str, Any], root: Path | None = None) -> dict[st
         status["problems"].append("清单里没有可解析的路径（filename/file_path 皆空，或 models_dir 未配置 ✗）")
         return status
     if not path.exists():
-        status["problems"].append("未安装 ✗")
+        # ⚠️ 文案里必须说清"找过哪里" ✗：只说「未安装」⇒ 用户没法判断该往哪儿放 ✓✗
+        #    （2026-09-27 实测：盘上明明有，报告却只说"未安装" ✓）。
+        #    ⚠️ 钉了 ``root`` 就不许再提探测根 ✗（那等于偷偷翻真实磁盘 ✓✗ —— 见 :func:`resolve_component` 的域口径 ✓）。
+        where = (f"清单落点 {path} ✗" if root is not None
+                 else f"清单落点 {expected_path} 与动态探测根都没有 ✓")
+        status["problems"].append(f"未安装 ✗（{where} —— 期望落点见 expectedPath ✓）")
         return status
     try:
         status["bytes"] = path.stat().st_size
@@ -213,7 +361,11 @@ def upscale_status(*, root: Path | None = None, key: str = "", path: str = "") -
     if not resolved and key:
         entry = next((item for item in load_catalog()["models"] if item.get("key") == key), None)
         if entry is not None:
-            found = component_path(entry, root)
+            # ⚠️ **同一条解析** ✗（2026-09-27 修 ✓）：给了 ``root`` ⇒ 只认那个根 ✓；否则
+            #    清单落点优先 → 动态探测根 ✓。以前只看 ``models_dir`` ✗ ⇒ 盘上那份会被当成"不在"
+            #    ✓✗（就是"同一件事两个说法"那个毛病 ✓，见 :func:`component_status` 的说明 ✓）。
+            found = (component_path(entry, root) if root is not None
+                     else resolve_component(entry)[0])
             resolved = "" if found is None else str(found)
     report: dict[str, Any] = {
         "checked": False, "present": False, "key": str(key or ""), "path": resolved or None,
@@ -280,6 +432,23 @@ def readiness(stage: str = "h3", *, root: Path | None = None,
     optional_missing = [item["key"] for item in components
                         if not item["required"] and not item["present"]]
 
+    # ⭐ **"不在 `models_dir`、但引擎加载会用"的那些** ✓ —— ⚠️ 2026-09-27 重修 ✓✗：
+    #    以前这里做的是"给 `missing` 补一份"✗，且**不**改 `ready`（口径是：`missingRequired` 按
+    #    `models_dir` 说 ✓）⇒ 结果报告自相矛盾 ✓✗：说「缺 `dit_fl2va_int8` ✗、还要下 19.53 GiB」，
+    #    可那份**就在**探测到的 ComfyUI 共享目录里 ✓、引擎加载也真会用它 ✓（用户当场指出 ✓）。
+    #    现在 :func:`component_status` **自己**就走"清单落点优先 → 动态探测根" ✓ ⇒ 这类件**已计入**
+    #    `present` / `bytes` / `requiredWeightsGiB` / `ready` ✓（因为"能不能跑"取决于引擎找不找得到 ✓）。
+    #    ⇒ 本表只剩**另一个问题** ✓：哪些件**不在**本仓 `models_dir` 里（想让本仓自持 / 想整目录搬走
+    #    ⇒ 得把它们收进去 ✓）。⚠️ 只对 ``root is None`` 有意义 ✗（钉了根 ⇒ 那一整个域就是调用方给的 ✓）。
+    #    ⚠️ **不再走盘** ✓：判据就是 `component_status` 已经记下的 `source` ✓（体检不该为一句提示扫全盘 ✓）。
+    resolved_elsewhere: dict[str, dict[str, str]] = {}
+    if root is None:
+        for item in components:
+            source = str(item.get("source") or "")
+            if item["present"] and source and source != "清单落点":
+                resolved_elsewhere[str(item["key"])] = {"path": str(item.get("path") or ""),
+                                                        "source": source}
+
     weights_bytes = sum(int(item["bytes"]) for item in components if item["required"])
     weights_gib = round(weights_bytes / 1024 ** 3, 2)
     return {
@@ -292,6 +461,13 @@ def readiness(stage: str = "h3", *, root: Path | None = None,
         "brokenRequired": [item["key"] for item in broken],
         "suspectRequired": [item["key"] for item in suspect],
         "optionalMissing": optional_missing,
+        # ⭐ "**在盘上、但不在 ``models_dir``**"的那些 ✓ —— 它们**已经算进** `ready` ✓（引擎加载会用它 ✓）；
+        #    本表只提醒"想让本仓自持就得收进去"✓（口径见上面那段注释 ✓）。
+        "resolvedElsewhere": resolved_elsewhere,
+        "resolvedElsewhereNote": (
+            "这些件**已经算进** ``ready`` / ``requiredWeightsGiB`` ✓ —— 引擎加载时会在这些位置找到它们 ✓"
+            "（清单落点优先 ✓ → 动态探测根 ✓，与加载同一条解析 ✓）；⚠️ 但它们**不在** ``models_dir`` ✓"
+            "⇒ 想让本仓**自持**（能整目录搬走 / 换机器不靠别人的 ComfyUI ✓）就把它们收进 ``models_dir`` ✓"),
         "requiredWeightsGiB": weights_gib,
         "vram": estimate_vram(weights_bytes, capacity_gib=capacity_gib),
         "catalogNodes": len(catalog.get("nodes") or []),

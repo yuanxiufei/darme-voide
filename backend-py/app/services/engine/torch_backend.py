@@ -512,12 +512,17 @@ class TorchBackend:
         return self._loadReport
 
     def _default_dit_path(self) -> str | None:
-        """按清单找主 DiT ✓（``category=video`` 且 ``required`` 的第一个 ✓ —— 与体检同一份清单 ✓）。"""
+        """按清单找主 DiT ✓（``category=video`` 且 ``required`` 的第一个 ✓ —— 与体检同一份清单 ✓）。
+
+        ⚠️ **同一条解析** ✗（2026-09-27 修 ✓）：走 :func:`inventory.resolve_component` ✓ ——
+        清单落点（``models_dir`` ✓）优先 → 动态探测根 ✓。以前这里只看 ``models_dir`` ✗✗ ⇒
+        「体检/桥接看得见那份权重、装载这条路看不见」✓✗ —— 同一件事两个说法 ✓（用户当场指出 ✓）。
+        """
         for entry in inv.load_catalog()["models"]:
             if entry.get("category") == "video" and entry.get("required") \
                     and str(entry.get("kind")) == "diffusion_models":
-                resolved = inv.component_path(entry)
-                return str(resolved) if resolved else None
+                found, _source = inv.resolve_component(entry)
+                return str(found) if found else None
         return None
 
     def _plan_for_default_dit(self) -> str:
@@ -960,7 +965,8 @@ class TorchBackend:
             return explicit
         for entry in inv.load_catalog()["models"]:
             if str(entry.get("kind")) == "upscale_models":
-                resolved = inv.component_path(entry)
+                # ⚠️ 与 :meth:`_default_dit_path` 同一条解析 ✓（清单落点优先 → 动态探测根 ✓）
+                resolved, _source = inv.resolve_component(entry)
                 return str(resolved) if resolved else None
         return None
 

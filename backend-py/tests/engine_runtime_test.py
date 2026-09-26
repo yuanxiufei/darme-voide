@@ -7,7 +7,12 @@
 3. **产物** 真 mp4 + 真 wav ✓（`result.outputs.videoPath` 落盘 ✓、文件真在 ✓）；
 4. **诚实** `synthetic` **必须**是 `True` ✗（参考 TE / VAE 未训练 ⇒ 是噪声画面 ✓；
    若哪天它变成 `False` 而实现没换 ⇒ **这条自检就该红** ✓✗）；
-5. **卸载** 真丢张量 ✓（之后 `loaded.dit` 必须回到 `False` ✓）且**正忙时拒卸** ✓。
+5. **卸载** 真丢张量 ✓（之后 `loaded.dit` 必须回到 `False` ✓）且**正忙时拒卸** ✓；
+6. **回收缓存** 还的只是"空着的块" ✓ —— `memory_allocated` 前后必须**一致** ✓、装好的东西必须**还在** ✓
+   （⚠️ 回收 ≠ 卸载 ✗；不还的话缓存会"看着占满整卡"✗ —— 实测见 `case_reclaim` 的注释 ✓）；
+7. **收尾顺序** 读到「终结」的那一刻，"这一张还了多少"必须**已经在事件里** ✓
+   （⚠️ 读者不止"被唤醒"那种 ✗：`bridge.run_job` 是**带超时轮询**的 ✓ ⇒ 一到终结就收工走人 ✗
+   ⇒ 顺序错了那条事实就永远漏掉 ✓✗ —— 2026-09-26 被实测证伪过一次 ✓，见 `case_terminal_order` ✓）。
 
 ⚠️ 「不依赖外部」的**反向证明**也在这里 ✓：`status()["externalDependencies"]` 必须是空列表 ✓
 （它一旦不是空的，就说明这条路上又接回了 ComfyUI / SD WebUI / Ollama 之类外部服务 ✓✗）。
@@ -114,6 +119,62 @@ def case_queue(out_dir: Path) -> None:
     engine_runtime.wait(cancelled, timeout=120)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ②b 收尾顺序：**终结态可见 ⇒ "还了多少"已经在事件里** ✓（踩过一次的坑 ✗）
+# ══════════════════════════════════════════════════════════════════════════
+def case_terminal_order(tmp: Path) -> None:
+    """⚠️ 这条钉的是**一个实测踩过的窗口** ✗（2026-09-26 ✓）：
+
+    原来那句「先还、后唤醒 ⇒ 读任务的人一定看得见」**不成立** ✗✗ —— 它只保证了**被唤醒**的读者 ✓，
+    而 `bridge.run_job` 是**带超时轮询**的 ✓ ⇒ 终结态一可见，它当场收工走人 ✓ ⇒ 若"还了多少"
+    那条事件还没写进去，就**永远**看不到 ✓✗。实测：同进程连跑两张，**第 1 张 `reclaimEvent`
+    为空、第 2 张有** ✓✗（第 1 张要还的量最大 ⇒ 窗口最宽 ✓）。
+
+    这里把"还"**故意放慢** ✗（300 ms ✓）⇒ 窗口被拉宽 ⇒ 旧写法**必红** ✓、修好的写法必绿 ✓。
+    用**干跑**任务 ✓：不碰真权重、不依赖这台机器有没有卡 ✓（假回收自己报 ``released=True`` ✓，
+    所以最后那条断言在没卡的机器上也照跑 ✓）。
+    """
+    import time as time_mod  # noqa: PLC0415
+
+    from app.services.engine import runtime as runtime_mod  # noqa: PLC0415
+
+    real_reclaim = runtime_mod._reclaim_cuda_cache  # noqa: SLF001
+
+    def slow_reclaim() -> dict[str, Any]:
+        """**假装有卡 + 放慢** ✓：就是要把"终结已可见、事件还没写"的窗口拉宽 ✓。"""
+        time_mod.sleep(0.3)
+        return {"released": True, "reclaimedGiB": 1.5, "reservedGiB": 1.0,
+                "allocatedGiB": 0.5, "freeGiB": 20.0, "totalGiB": 22.49}
+
+    runtime_mod._reclaim_cuda_cache = slow_reclaim  # noqa: SLF001
+    try:
+        task_id = engine_runtime.submit(_request(tmp / "order"), assembly={"dryRun": True})
+        # ⚠️ 按 `bridge.run_job` 的口径读 ✓：**带超时地轮询** ✓（不是干等被唤醒 ✓）
+        snapshots: list[dict[str, Any]] = []
+        deadline = time_mod.monotonic() + 120
+        while time_mod.monotonic() < deadline:
+            snapshot = engine_runtime.wait(task_id, timeout=0.01)
+            if snapshot is None:
+                break
+            snapshots.append(snapshot)
+            if snapshot.get("terminal"):
+                break
+    finally:
+        runtime_mod._reclaim_cuda_cache = real_reclaim  # noqa: SLF001
+
+    last = snapshots[-1] if snapshots else {}
+    events = last.get("events") or []
+    kinds = [event.get("kind") for event in events]
+    reclaim_events = [event for event in events if event.get("kind") == "reclaim"]
+    check("⭐ 收尾顺序: 读到**终结**的那一刻，「还了多少」已经在事件里、且是最后一条"
+          "（封口与 append 同一段临界区 ⇒ 一个窗口都不留）",
+          last.get("status") == "done" and kinds[-1:] == ["reclaim"],
+          (last.get("status"), kinds[-3:]))
+    check("收尾顺序: 事件里带的就是「还」那一步返回的数字（口径一致，不另编一份）",
+          bool(reclaim_events) and reclaim_events[-1].get("reclaimedGiB") == 1.5,
+          reclaim_events)
+
+
 def case_missing_weights(tmp: Path) -> None:
     """⚠️ 权重不在 ⇒ 必须**报出缺哪个文件** ✓（不是"引擎不可用"一句糊过去 ✗）。"""
     try:
@@ -160,6 +221,66 @@ def case_real_run(tmp: Path) -> None:
     check("真跑: status 自述里 dit 已装（loaded.dit=True）",
           engine_runtime.status()["loaded"]["dit"] is True,
           engine_runtime.status()["loaded"])
+    load_report = task.get("loadReport") or {}
+    cache = load_report.get("cache") or {}
+    check("⭐ 真跑: 装载报告里带**回收事实**（cache.released / reclaimedGiB ⇒ 显存口径可见不静默）",
+          "released" in cache and "reclaimedGiB" in cache, cache)
+
+    import torch  # noqa: PLC0415 —— 只为"这台机器有没有卡"这一句 ✓
+
+    events = task.get("events") or []
+    reclaim_events = [event for event in events if event.get("kind") == "reclaim"]
+    if torch.cuda.is_available():
+        check("⭐ 真跑: 任务**末尾**留了一条回收事件（先还后唤醒 ⇒ 读任务的人一定看得见）",
+              bool(reclaim_events) and events[-1].get("kind") == "reclaim",
+              [event.get("kind") for event in events[-3:]])
+    else:
+        check("真跑: 没卡 ⇒ 如实**不留**回收事件（不编数字）✗",
+              not reclaim_events, reclaim_events)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ③b 回收缓存：还的是"空着的"，**不许**把在用的还掉 ✓
+# ══════════════════════════════════════════════════════════════════════════
+def case_reclaim() -> None:
+    """⚠️ 回收 **≠ 卸载** ✗ —— 这条就是钉住这个区别的 ✓。
+
+    ⚠️ 为什么要还 ✗（2026-09-26 实测 ✓，A5000 22.49 GiB ✓）：装完 SDXL **真占用 6.73 GiB** ✓
+    而缓存**保留 13.88 GiB** ✗ ⇒ 驱动视角只剩 7.37 GiB ✗；再采样一张 ⇒ 保留 **15.76 GiB** ✗
+    ⇒ 只剩 5.47 GiB ✗✗；还一次 ⇒ 保留 **8.24 GiB** ✓、驱动视角 **12.98 GiB** ✓ —— 而在用的
+    6.73 GiB **一点没少** ✓。不还就等于「缓存看着占满整卡」✗，同机 ComfyUI 先撞它 ✓✗。
+    """
+    import torch  # noqa: PLC0415
+
+    from app.services.engine import runtime as runtime_mod  # noqa: PLC0415
+
+    before = runtime_mod._vram_facts()  # noqa: SLF001 —— 白盒：就为这条不变量 ✓
+    allocated_before = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    key_before = engine_runtime._loadKeyTuple  # noqa: SLF001
+
+    report = runtime_mod._reclaim_cuda_cache()  # noqa: SLF001
+
+    allocated_after = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    check("回收: 台账口径是**四个键**（allocated/reserved/free/total，单位 GiB）",
+          before is None or set(before) == {"allocatedGiB", "reservedGiB", "freeGiB", "totalGiB"},
+          before)
+    if before is None:
+        check("回收: 没卡 ⇒ 如实说「没得还」（released=False + note ✗ 不抛 ✓）",
+              report.get("released") is False and "note" in report, report)
+    else:
+        check("回收: 有卡 ⇒ released=True 且还回的量**非负**",
+              report.get("released") is True and float(report.get("reclaimedGiB", -1)) >= 0,
+              report)
+        check("回收: 还完的账**只减不增**（reserved 不涨 / free 不降）",
+              float(report.get("reservedGiB") or 0) <= float(before["reservedGiB"]) + 1e-6
+              and float(report.get("freeGiB") or 0) >= float(before["freeGiB"]) - 1e-6,
+              (before, report))
+    check("⭐ 回收 **≠** 卸载: 在用的张量**一点没动**（memory_allocated 前后必须一致）",
+          allocated_after == allocated_before, (allocated_before, allocated_after))
+    check("⭐ 回收 **≠** 卸载: 装好的东西**还在**（loadKeyTuple 不变 + loaded.dit=True）",
+          engine_runtime._loadKeyTuple == key_before  # noqa: SLF001
+          and engine_runtime.status()["loaded"]["dit"] is True,
+          (key_before, engine_runtime.status()["loaded"]))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -191,6 +312,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="engine_runtime_"))
     case_status()
     case_queue(tmp)
+    case_terminal_order(tmp)
     case_missing_weights(tmp)
     if not _have_torch():
         skip("缺 torch ⇒ 真装载 / 真产物 / 真卸载 跳过 ✓")
@@ -198,6 +320,7 @@ def main() -> int:
         skip("缺 ffmpeg ⇒ 落盘那几条跳过 ✓")
     else:
         case_real_run(tmp)
+        case_reclaim()
         case_unload()
 
     failures = [item for item in _RESULTS if not item[1]]

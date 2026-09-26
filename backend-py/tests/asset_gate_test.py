@@ -1,6 +1,6 @@
 """S7 自检：**资产清单 + 验收门**（零依赖 ✓ 2026-09-18）。
 
-移植自 ``reference/short-drama-agent``（``asset-to-video-pipeline.md`` ✓）。它守的是一条**产品硬规则**：
+移植自 ``short-drama-agent``（``asset-to-video-pipeline.md`` ✓）。它守的是一条**产品硬规则**：
 
 > 「不要从被拒或缺失的锚定资产**提交付费视频任务**。」
 

@@ -70,6 +70,7 @@ __all__ = [
     "default_models_dir",
     "detect_comfyui",
     "detect_comfyui_roots",
+    "get_comfyui_roots",
     "get_default_roots",
     "get_extra_roots",
     "get_model_paths",
@@ -417,6 +418,33 @@ def get_extra_roots() -> list[str]:
     return []
 
 
+def get_comfyui_roots() -> list[tuple[str, str]]:
+    """ComfyUI 类**安装根** + 来源说明 ✓ ⇒ ``[(根, 来源)]`` ✓（**显式配的排在前** ✓）。
+
+    三处来源（顺序固定 ✓）：``COMFYUI_PATH`` ✓ → ``configs/model-paths.json`` 的 ``comfyui_root``
+    ✓ → :func:`detect_comfyui_roots` 的**全部**命中 ✓（⚠️ 是**全部** ✗ 不是第一个 ✓：只取第一个
+    会把后面几个安装整份遮住 ✗✗，见 :func:`detect_comfyui_roots` 的说明 ✓）。
+
+    ⚠️ 与 :func:`get_default_roots` 的分工 ✗：那个要的是「**扫模型**的根」（``<根>/models`` ✓），
+    这个要的是「**安装根**」（``<根>/comfy/…`` 这类**安装内部**的落点 ✓）—— 两者**共用**这一份
+    根表 ✓（哪一块都不许各写一份 ✗：一处改了另一处不跟着改，就会出现「扫描能看见、加载看不见」✓✗）。
+
+    ⚠️ 这里**一个路径字面量都没有** ✗：根全部来自用户配置或动态探测 ✓（口径见
+    ``tests/local_models_test.py`` 的静态守卫 ✓）。
+    """
+    cfg = _read_paths_config()
+    explicit = os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root") or ""
+    found: list[tuple[str, str]] = []
+    for candidate, source in (
+        (explicit, "COMFYUI_PATH" if os.environ.get("COMFYUI_PATH") else "清单 configs/model-paths.json 的 comfyui_root"),
+        *((item, "动态探测 detect_comfyui_roots()") for item in detect_comfyui_roots()),
+    ):
+        text = os.path.abspath(str(candidate)) if str(candidate or "").strip() else ""
+        if text and os.path.normcase(text) not in {os.path.normcase(path) for path, _ in found}:
+            found.append((text, source))
+    return found
+
+
 def get_default_roots() -> list[str]:
     """解析「默认扫描根目录」集合：环境变量 > model-paths.json > 动态探测 > 默认。
 
@@ -438,12 +466,10 @@ def get_default_roots() -> list[str]:
     services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
                     or str(LOCAL_SERVICES_ROOT))
     # ⚠️ 显式配置（env / json）**优先且靠前** ✓；探测结果只是**补充** ✓（探测错了也不影响显式配置 ✓）
+    #    ⚠️ 根表**只此一份** ✗：安装根表由 :func:`get_comfyui_roots` 给 ✓（引擎侧要 ``<根>/comfy/…``
+    #    这类**安装内部**落点 ✓，两处各写一份就会「扫描能看见、加载看不见」✓✗）。
     comfyui_root = os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root") or ""
-    comfyui_roots: list[str] = []
-    for candidate in [comfyui_root, *detect_comfyui_roots()]:
-        text = os.path.abspath(str(candidate)) if str(candidate or "").strip() else ""
-        if text and os.path.normcase(text) not in {os.path.normcase(r) for r in comfyui_roots}:
-            comfyui_roots.append(text)
+    comfyui_roots: list[str] = [path for path, _source in get_comfyui_roots()]
 
     def add(candidate: str) -> None:
         if candidate and os.path.exists(candidate):

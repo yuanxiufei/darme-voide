@@ -662,7 +662,13 @@ cd backend-py
 
 ## 下一个域的迁移 SOP
 
-1. 读对应的 `backend/src/routes/<domain>.ts`（以及它依赖的 `services/*.ts`），
+> ⚠️ **2026-09-26 口径修正**：本节是 **Node 并存期**的做法（那时逐个域抄 TS）。`backend/`
+> 已于 **2026-09-15 真删**、且迁移**已完成**（S1–S7 全 ✅、未注册端点 **0** 条）⇒ 本节
+> **只剩历史价值**；现在要读那份 TS 源码，只能走快照（`tests/frozen_ts_source.py`，
+> `PARITY_USE_FROZEN=1` 可强制），**不要再去找 `backend/src/`**（那里没有东西了）。
+
+1. 读对应的 TS 源码 —— 真源码已删 ⇒ 从快照取（快照键名即 `backend/src/routes/<domain>.ts`
+   这类**删库前路径**，以及它依赖的 `services/*.ts`），
    逐个端点抄下来：方法、路径、查询参数、错误文案、响应形状。
 2. 在 `app/routers/<domain>.py` 建 `APIRouter(prefix="/api/v1/<domain>")`。
    **路径顺序有语义**：静态子路径（如 `/stats`）必须声明在 `/{id}` 之前，否则会被吃掉。
@@ -714,7 +720,10 @@ cd backend-py
 3. **冻结脚本的自动发现依赖真源码存在** ⇒ 删库后「表驱动普通字符串形态」会**静默扫不到**。
    已改成：真源码在 ⇒ 看文件是否存在；真源码已删 ⇒ **改看快照里有没有**（`--check` 在删库后依然有效）。
 
-### 仍需在「删库当天」处理（**现在做会打断 Node，故留到最后一起做**）
+### 删库当天的收尾项
+
+> ⚠️ **2026-09-26 口径修正**：原标题是「**仍需在「删库当天」处理（现在做会打断 Node，故留到最后一起做）**」——
+> 但 `backend/` 已于 **2026-09-15 真删**，那个前提**早已不成立**。现况：**1–4 项全 ✅**、**只剩第 5 项**（见下）。
 
 | # | 项 | 说明 / 改法 |
 |---|---|---|
@@ -722,7 +731,7 @@ cd backend-py
 ✅ 2 | **共享契约类型已搬到前端**（2026-09-15 提前做） | `git mv backend/src/shared/contracts.ts frontend/app/types/contracts.ts`（git 记为 `R`，79 行纯类型零 import）+ nuxt 别名两处 + 唯一 importer `app/composables/useApi.ts`；Node 侧 `era-background.ts` 同步改成跨项目 import（它随 `backend/` 一起消失）。**已用 `npm run generate` 真构建验证**（`✔ Server built` / `Prerendered 15 routes` / `✔ Generated public .output/public`） |
 ✅ 3 | **`Dockerfile` 已重写为 Python 镜像**（2026-09-15 提前做） | 运行时 `python:3.12-slim` + uvicorn（Node 只留前端构建阶段）、端口 **5790**、`COPY backend-py/app/skills/`、前端产物落 `frontend/dist`（与 `FRONTEND_DIST` 一致）、`.dockerignore` 补排除 `.venv` / `__pycache__` / `tests` / `scripts`。⚠️ **本机无 Docker ⇒ 未做真构建**；布局/端口/产物路径已由新增自检 `dockerfile_contract_test.py`（**23 用例**）钉在代码常量上，改任一侧立刻报错 |
 ✅ 4 | **`parity_run.py` / `parity_diff.py` 已写明生命周期**（2026-09-15） | 两者 docstring 顶部都加了「本工具与 `backend/` 绑定 ⇒ 删库后失效；留作历史证据」，并指明日常回归走 `run_all.py` + `route_parity_test.py` 的快照模式（**不需要 Node**） |
-5 | **文档/记忆里的溯源引用** | 全仓还有 ~137 处提到 `backend/src/…`，**绝大多数是「移植自 X」的溯源注释**（应保留，正是它们的价值）。只需清理那些「把它当权威源去查」的指路语（`docs/api-contract.md` 等） |
+🔶 5 | **文档/记忆里的溯源引用** | **2026-09-26 实测精确量**（`git grep -I`）：全仓 `backend/src` 命中 **123 行 / 93 文件** —— 且**没有任何真代码在读它**（与 `open(` / `Path(` / `read_text` 的同现检查为空 ✓），**绝大多数是「移植自 X」的溯源注释**（保留 ✓ 正是它们的价值）。**「把它当权威源去查」的指路语已清 4 处**：`frontend/app/pages/agents.vue`（→ `services/agent_prompts.py` + `agent/skills.py`）、`frontend/app/pages/settings.vue` 与 `frontend/app/utils/artStyles.ts`（→ `services/prompt_utils.py`）、本文上方「下一个域的迁移 SOP」。`docs/api-contract.md` 那 2 处**已由该文件自身的 ⚠️ 注就地拆掉**（明写「现行权威见 `backend-py/README.md`」）⇒ **未动**。⚠️ 其余 85 个都在 `backend-py/` 内的「与 X 对齐」溯源 ⇒ **不再逐条改**（改了反而丢溯源价值） |
 
 > 第 1、2 项做完后又干跑了一次（`backend/` 临时改名）：`check_all.py` rc=0（引用 102 处 / 0 断链）、
 > `route_parity_test.py` rc=0（224 / 227 / 未注册 0 / 0 漂移）⇒ **删库当天只剩「删目录 + Dockerfile 重写」**。

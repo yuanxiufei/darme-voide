@@ -46,7 +46,9 @@ from fastapi.responses import JSONResponse, Response  # noqa: E402
 from app.local_services.h3 import comfyui_client as cc  # noqa: E402
 from app.local_services.h3 import workflow as wf  # noqa: E402
 
-#: 真实参考工作流（随 `reference/` 收录；本服务目录里也存了副本 ✓）
+#: 真实参考工作流：⚠️ 上游副本在**开发期脚手架** ``reference/`` 下 ✓ —— 用户 2026-09-26 口径 ✓
+#: 「等项目完善了之后 reference 这里是要删除的」✗ ⇒ **长期事实以本服务目录里的副本为准** ✓
+#: （本常量读的就是它 ✓ 不指脚手架 ✗：删掉 ``reference/`` 后本测试**照样跑** ✓）
 REF_WORKFLOW = BACKEND_PY / "app" / "local_services" / "h3" / "workflows" / "MiniMax_H3_Fast_T2V.json"
 #: 界面便签：ComfyUI 里**不是执行节点** ✗（本版本核心源码里没有这个类 ✓）
 UI_ONLY_CLASSES = {"MarkdownNote", "Note", "NotePlus"}

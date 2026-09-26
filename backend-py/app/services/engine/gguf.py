@@ -7,7 +7,7 @@ GGUF 容器**只是**「类型化的 KV 头 + 张量表 + 对齐数据区」✓ 
 Wan 2.6 GGUF 都是这一格式 ✗（此前 ``loader``/``inventory`` 对 ``.gguf`` 只能报
 「在/不在 + 大小」✗ ``quantScheme='gguf-unknown'`` ✗ —— 本模块把这层补齐 ✓）。
 
-## 头部格式（事实来源：``reference/ollama/fs/gguf/gguf.go`` ✓ 2026-09-20 读全 ✓）
+## 头部格式（事实来源：``ollama/fs/gguf/gguf.go`` ✓ 2026-09-20 读全 ✓）
 
 ::
 

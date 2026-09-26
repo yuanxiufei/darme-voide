@@ -1,6 +1,6 @@
 """S7 自检：**短剧提示词生产契约**（占位符解析 + 五段质感层 ✓ 零依赖 ✓ 2026-09-17）。
 
-移植自 ``reference/short-drama-agent``（``tagged-storyboard-format.md`` +
+移植自 ``short-drama-agent``（``tagged-storyboard-format.md`` +
 ``mx-shell-workflow-adapter.md`` ✓）。这两块是**本项目原来确实没有的** ✓：
 
 * 本项目只有 ``strip_video_prompt_tags``（**剥掉标签、留下裸编号** ``L1``/``R5`` ✗）——

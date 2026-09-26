@@ -1,7 +1,9 @@
 # ComfyUI 能力矩阵 —— 「功能全都要，形式由我们定」
 
-> 2026-09-17 定稿。判据来源：`reference/ComfyUI/server.py`（**后端全部 26 条公开路由**，
-> 逐条 grep 出来的，不是照文档猜 ✓）+ `reference/ComfyUI/api_server/routes/internal/`（桌面壳内部 5 条 ✓）。
+> 2026-09-17 定稿。判据来源：`ComfyUI/server.py`（**后端全部 26 条公开路由**，
+> 逐条 grep 出来的，不是照文档猜 ✓）+ `ComfyUI/api_server/routes/internal/`（桌面壳内部 5 条 ✓）。
+> ⚠️ 出处只写「上游项目 + 文件 + 符号」✓ —— 开发期副本放在脚手架目录 `reference/` 下，**项目完善后整目录删除** ✗
+> （用户 2026-09-26 口径 ✓）⇒ 正文**不许**再把那条路径当落点 ✗（删完就是悬空引用 ✗）。
 
 ## 一句话结论
 

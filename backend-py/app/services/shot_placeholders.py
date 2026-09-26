@@ -6,7 +6,7 @@
 于是 ``<location>L1</location>`` 变成裸的 ``L1`` ✗，``<role>R5</role>`` 变成 ``R5`` ✗。
 可扩散模型**不认识** ``L1``/``R5`` 这种内部编号 ✗ ⇒ 它们成了**无意义字符**（占注意力 ✓ 还可能被当成文字生成 ✗）。
 
-参考项目（``reference/short-drama-agent`` 的 ``tagged-storyboard-format.md``）给出的正解是 **解析**：
+参考项目（``short-drama-agent`` 的 ``tagged-storyboard-format.md``）给出的正解是 **解析**：
 先把 Location/Role/Prop/Clue 的**编号 → 具体描述**建表 ✓，再把占位符**替换成自然语言** ✓，
 并且**最终提示词里不留 XML 标签** ✓（除非目标接口明确要求 ✓）。
 

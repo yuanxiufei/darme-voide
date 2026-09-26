@@ -1,7 +1,8 @@
 /**
  * 画风选项（前端单一数据源）
  *
- * ⚠️ 必须与后端 `backend/src/shared/prompt-utils.ts` 的 ART_STYLE_CATALOG 保持一致：
+ * ⚠️ 必须与后端 `backend-py/app/services/prompt_utils.py` 的 ART_STYLE_CATALOG 保持一致
+ * （溯源：TS 时代在 `backend/src/shared/prompt-utils.ts`，已随 Node 后端删除）：
  * value 是落库值（dramas.style / characters.style / app_settings.art_style）。
  * 新增画风时后端还要同步补 DRAMA_ART_STYLE_MAP / EQUIP_ART_STYLE_MAP 的英文画风词，
  * 否则会出现「前端能选、模型不认」——画风后缀为空，退化成默认插画风。

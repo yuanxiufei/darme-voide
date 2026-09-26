@@ -18,7 +18,7 @@
 
 ## 事实来源（**语义对齐参考节点，源码一行没抄** ✓）
 
-``reference/ComfyUI`` 是 **GPL-3.0** ✗ ⇒ 只对齐**行为** ✓：参数名与语义按它的节点 schema 核过 ✓
+``ComfyUI`` 是 **GPL-3.0** ✗ ⇒ 只对齐**行为** ✓：参数名与语义按它的节点 schema 核过 ✓
 （``nodes.py`` 与 ``comfy_extras/nodes_{images,mask,compositing,morphology,canny,post_processing}.py`` ✓），
 **实现全部自研** ✓。
 

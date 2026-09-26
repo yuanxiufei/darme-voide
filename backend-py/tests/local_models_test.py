@@ -299,17 +299,66 @@ def main() -> int:  # noqa: C901
           "⇒ 应用自己也「看不见」其余安装里的模型 ✓）",
           {os.path.normcase(os.path.join(p, "models")) for p in fake_roots} <= roots_now, sorted(roots_now))
     # ⚠️ 静态守卫：**不许写死机器路径** ✗（模型可装任意目录 ✓、也能扫任意目录 ✓ 用户口径 ✓）
+    #    ⭐ 2026-09-26 用户口径（追加 ✓）：「**以后** 关于扫描路径**一律不写死**」✓ ⇒ 守卫作用域
+    #    从「2 个文件」扩到**整个 ``app/``** ✓（谁再写死一个盘符路径**当场红** ✗，不靠人记得 ✗）。
+    #    ⚠️ 只认「**引号紧跟盘符 + 斜杠**」✓ ⇒ ``"https://…"`` / ``"v:0"`` / ``"k:None"`` 都不误伤 ✓。
     drive_literal = re.compile(r"""["'][A-Za-z]:[\\/]""")
-    literals = {
-        name: drive_literal.findall(Path(path).read_text(encoding="utf-8"))
-        for name, path in (
-            ("local_model_scan.py", ls.__file__),
-            ("model_manager.py", os.path.join(os.path.dirname(ls.__file__), "..", "scripts",
-                                              "model_manager.py")),
-        )
+    #: 显式豁免表 ✓（**每条必须带理由** ✓ —— 不是「眼睛一闭加白名单」✗）：
+    exempt = {
+        "scripts/migrate_models.py":
+            "一次性迁移脚本 ✓（手工跑 ✓ **不进运行时** ✓ 文件头已声明 ✓）",
+        "scripts/sd_h3_pipeline.py":
+            "**标准安装位置**候选 ✓（CUDA / vswhere ✓ **不是本机专有** ✗）",
+        "services/ollama.py":
+            "**标准安装位置**候选 ✓（官方 per-user 安装 / ``Program Files`` ✓ **不是本机专有** ✗）"
+            "。⚠️ 2026-09-26：这条理由一度**名不副实** ✗ —— 当时表里还混着一条**本机自建目录**的候选 ✗，"
+            "靠豁免档着 ✗ ⇒ 已删那条候选 ✓、换成用户声明 ```OLLAMA_EXE``` ✓（这才对得上「标准位置」✓）",
     }
-    check("守卫: 扫描器与 ``model_manager`` **都没有写死的盘符路径** ✗（用户口径 ✓：不许写死 ✗）",
-          not any(literals.values()), literals)
+    app_root = Path(ls.__file__).resolve().parents[1]          # ⇒ ``app/``
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(app_root.rglob("*.py")):
+        rel = path.relative_to(app_root).as_posix()
+        if rel in exempt:
+            continue
+        hits = drive_literal.findall(path.read_text(encoding="utf-8"))
+        if hits:
+            offenders[rel] = hits
+    check("守卫: **整个 ``app/``** 都没有写死的盘符路径 ✗（只留 "
+          + str(len(exempt)) + " 条**显式带理由**的豁免 ✓：" + " / ".join(sorted(exempt)) + " ✓）",
+          not offenders, offenders)
+
+    # ⚠️ 静态守卫（2026-09-26 用户口径 ✓）：``reference/`` 是**开发期脚手架** ✗ ——
+    #    用户原话：「等项目完善了之后 …\reference 这里是要**删除**的」✗ ⇒ 谁都不许把它当
+    #    **长期落点**写进代码 ✗（删完就全成悬空引用 ✗✗）。
+    #    ⚠️ 只认「**引号紧跟** ``reference`` + 斜杠」✓ ⇒ ① 文档里用反引号写的 `` `reference/` ``
+    #    不误伤 ✓（那不是代码 ✗）；② 技能目录内的 ``skills/…/reference/…`` 也不误伤 ✓
+    #    （那是**另一个**同名目录 ✗ 与顶层那个不同物 ✗）；③ 领域词 ``"reference"``（帧类型 /
+    #    音色关系 / 评测基线 ✓）不误伤 ✓（后面不带斜杠 ✗）。
+    #    ⚠️ **前端也算代码** ✓（2026-09-26 补：``frontend/app/`` 里也抓到过同类出处 ✗ ⇒ 只扫后端会漏 ✗）——
+    #    作用域只取前端**源码**（``frontend/app/**`` + ``frontend/*.ts`` ✓ 合计约 40 文件 ✓），
+    #    不碰 ``node_modules`` / 构建产物 ✗（扫它慢且无意义 ✗）。
+    scaffold_literal = re.compile(r"""["']reference[\\/]""")
+    scaffold_offenders: dict[str, list[str]] = {}
+    tests_root = Path(__file__).resolve().parent
+    frontend_root = app_root.parents[1] / "frontend"
+
+    def _scan(root: Path, prefix: str, patterns: tuple[str, ...], recursive: bool = True) -> None:
+        if not root.is_dir():                                  # 前端不是本仓的必需件 ✓ 不在也不炸 ✓
+            return
+        for pattern in patterns:
+            for path in sorted(root.rglob(pattern) if recursive else root.glob(pattern)):
+                hits = scaffold_literal.findall(path.read_text(encoding="utf-8"))
+                if hits:
+                    scaffold_offenders[prefix + path.relative_to(root).as_posix()] = hits
+
+    _scan(app_root, "app/", ("*.py",))
+    _scan(tests_root, "tests/", ("*.py",))
+    _scan(frontend_root / "app", "frontend/app/", ("*.vue", "*.ts"))
+    _scan(frontend_root, "frontend/", ("*.ts",), recursive=False)
+    check("守卫: ``app/`` + ``tests/`` + ``frontend/app/`` 里**没有**任何代码把开发期脚手架 "
+          "``reference/`` 当落点 ✗（用户 2026-09-26 ✓：「等项目完善了之后 reference 这里是要删除的」"
+          "⇒ 写它 = 悬空引用 ✗）",
+          not scaffold_offenders, scaffold_offenders)
 
     # ================= 模型目录类别 + 「任意目录」声明（ComfyUI 口径 ✓ 自研 ✓）=================
     check("类别: **父目录名优先** ✓（ComfyUI 口径 ✓）—— checkpoints / vae / unet / t2i_adapter / clip 都认得",

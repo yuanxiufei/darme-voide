@@ -8,7 +8,7 @@
 
 ## 结构事实（逐条有出处，不猜 ✓）
 
-**两塔的数值**取自 `reference/ComfyUI/comfy/sd1_clip_config.json` / `clip_config_bigg.json`
+**两塔的数值**取自 `ComfyUI/comfy/sd1_clip_config.json` / `clip_config_bigg.json`
 （配置数值 = 模型接口 ✓，与 HF `openai/clip-vit-large-patch14` 一致 ✓），并已用**本机真权重头**复核 ✓：
 
 | | CLIP-L | OpenCLIP-bigG |
@@ -24,13 +24,13 @@
 | text_projection | **无** | 1280（**有** ✓） |
 | pad_token | 49407（= eos ✓） | **0** ✓ |
 
-**块结构**（出处 `reference/ComfyUI/comfy/clip_model.py` —— 只读事实，未抄代码 ✗）：
+**块结构**（出处 `ComfyUI/comfy/clip_model.py` —— 只读事实，未抄代码 ✗）：
 `layer_norm1 → self_attn(q/k/v/out_proj **全带偏置**) → 残差` + `layer_norm2 → mlp(fc1 → act → fc2) → 残差`；
 嵌入 = `token_embedding + position_embedding`（**无** scale ✓）；`final_layer_norm` 在全部层**之后** ✓；
 `pooled` = **EOS 位置**那一行 ✓（再过 `text_projection` 才是 SDXL 用的 pooled ✓）。
 
 ⚠️ **两塔的 pad 口径不一样** ✗：CLIP-L 用 `pad_with_end=True` ⇒ 补 **eos(49407)**；
-bigG 用 `pad_with_end=False` ⇒ 补 **0** ✓（出处 `reference/ComfyUI/comfy/sdxl_clip.py` ✓）。
+bigG 用 `pad_with_end=False` ⇒ 补 **0** ✓（出处 `ComfyUI/comfy/sdxl_clip.py` ✓）。
 
 **SDXL 的两塔用法**（出处同上 ✓）：
 * 两塔都取 **倒数第二层**（`layer_idx=-2` ✓）且**不做** `final_layer_norm`（`layer_norm_hidden_state=False` ✓）；
@@ -47,7 +47,7 @@ bigG 用 `pad_with_end=False` ⇒ 补 **0** ✓（出处 `reference/ComfyUI/comf
 * **bigG** 是 **OpenCLIP 命名** ✓：`conditioner.embedders.1.model.transformer.resblocks.N.attn.in_proj_weight`
   这类（390 键 ✓，另有 `model.logit_scale` ✓ —— 那是 CLIPModel 的对比学习标量，文本塔**不用** ✗）。
 
-⇒ 换算口径（出处 `reference/ComfyUI/comfy/supported_models.py` 的 SDXL 段 + `comfy/utils.py` ✓）：
+⇒ 换算口径（出处 `ComfyUI/comfy/supported_models.py` 的 SDXL 段 + `comfy/utils.py` ✓）：
 * L：只**剥前缀** ✓（本来就是 HF 命名 ✓）；
 * G：`attn.in_proj_weight/bias` **按 hidden_size 三等分成 q/k/v_proj** ✓（顺序 q,k,v ✓）、
   `ln_1→layer_norm1`、`ln_2→layer_norm2`、`mlp.c_fc→mlp.fc1`、`mlp.c_proj→mlp.fc2`、

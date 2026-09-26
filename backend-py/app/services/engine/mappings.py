@@ -104,7 +104,7 @@ PRESETS: dict[str, MappingPreset] = {
                       "attn.in_proj_weight", "已是融合名 ⇒ 只改名 ✓"),
         ),
     ),
-    # ⚠️ H3 专用预设（2026-09-20 抄自 `reference/ComfyUI` 的实测键名 ✓，出处逐条写在 note 里 ✓）：
+    # ⚠️ H3 专用预设（2026-09-20 抄自 `ComfyUI` 的实测键名 ✓，出处逐条写在 note 里 ✓）：
     #    与通用 `dit` 预设的**关键差别有两条**：
     #    ① **不做 q/k/v 合并** ✗ —— H3 本身就是融合权重 `attn.qkv_proj`（`model.py:133-515` ✓）；
     #    ② H3 的很多键**在本仓 DiT 里没有对应物** ✗（见 note ✓）⇒ 本预设只做"能安全改的"，
@@ -115,7 +115,7 @@ PRESETS: dict[str, MappingPreset] = {
               "`token_refiner.*`（2 层 refiner ✓）、`condition_proj.*`（5120→5376 ✓）、"
               "`rope.inv_freq`（3 轴 16→96 ✓）、`final_layer.video_out/audio_out`（**双输出** ✓✗）、"
               "`blocks.N.adaln_proj.linear`（expand=6×模态3=18 ✓ ✗）。"
-              "键名与结构出处：`reference/ComfyUI/comfy/model_detection.py:390-418`、"
+              "键名与结构出处：`ComfyUI/comfy/model_detection.py:390-418`、"
               "`comfy/ldm/minimax/model.py:474-481` ✓"),
         renames=(
             RenameRule(r"^model\.diffusion_model\.", "", "去 ComfyUI 外层前缀 ✓（`lora.py:384-388` ✓）"),

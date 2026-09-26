@@ -191,17 +191,25 @@ def main() -> int:  # noqa: C901
         release(999999)  # 不存在的 id
         check(f"{name}: 不存在的 id -> no-op（不抛）", hits == ["released"], hits)
 
-    # 接线守卫：**四处（image）/ 三处（video）释放点**必须都在源码里
+    # 接线守卫：**五处（image）/ 四处（video）释放点**必须都在源码里
     # （少一处就是「锁泄漏 ⇒ 后续所有本地请求永久排队」，所以用机械检查钉住）
+    # ⚠️ 2026-09-26：计数 **4→5 / 3→4** —— 是**补登记** ✓ 不是放宽 ✗：新多出的各一处是
+    #    两条「本机已有产物」收口自带的释放 ✓（`_handle_image_complete_local` /
+    #    `_handle_video_complete_local` ✓ 两处 docstring 都写明与既有收口**同一套收口语义** ✓
+    #    —— 一个对 `_handle_image_complete_base64`、一个对 `_handle_video_complete` ✓）。
+    #    ⚠️ **先证再改** ✓：那两条路径**真被接线**（调用点逐条实测 ✓）——
+    #    `image_generation.py` SDXL 真·文生图 ✓ / H3 抽首帧 ✓ 各一处、`video_generation.py`
+    #    引擎任务成功路径一处 ✓ ⇒ 是**多**释放 ✓（更安全 ✓）而非漏释放 ✗。
+    #    ⚠️ 计数**保持精确相等**（不改成 `>=`）✓：这样**将来**再加路径会立刻变红 ⇒ 逼人**显式登记** ✓。
     src_ig = Path(ig.__file__).read_text(encoding="utf-8")
     src_vg = Path(vg.__file__).read_text(encoding="utf-8")
-    check("image 接线: 重试前 / 末次失败 / 下载完成 / base64 完成 —— 四处都在",
-          src_ig.count("release_image_gpu_lease(image_id)") == 4
+    check("image 接线: 重试前 / 末次失败 / 下载完成 / 本机已有产物收口 / base64 完成 —— 五处都在",
+          src_ig.count("release_image_gpu_lease(image_id)") == 5
           and "if attempt > 0:" in src_ig
           and "_image_gpu_leases[image_id] = await gpu_manager.acquire(" in src_ig,
           src_ig.count("release_image_gpu_lease(image_id)"))
-    check("video 接线: 重试前 / 末次失败 / 完成 —— 三处都在",
-          src_vg.count("release_video_gpu_lease(video_id)") == 3
+    check("video 接线: 重试前 / 末次失败 / 完成 / 本机已有产物收口 —— 四处都在",
+          src_vg.count("release_video_gpu_lease(video_id)") == 4
           and "if attempt > 0:" in src_vg
           and "_video_gpu_leases[video_id] = await gpu_manager.acquire(" in src_vg,
           src_vg.count("release_video_gpu_lease(video_id)"))

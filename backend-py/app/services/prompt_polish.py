@@ -1,4 +1,4 @@
-"""**提示词质感层**（移植 ``reference/short-drama-agent`` 的 **Mx-Shell 五段式** ✓ 零依赖 ✓）。
+"""**提示词质感层**（移植 ``short-drama-agent`` 的 **Mx-Shell 五段式** ✓ 零依赖 ✓）。
 
 ## 它解决什么问题
 

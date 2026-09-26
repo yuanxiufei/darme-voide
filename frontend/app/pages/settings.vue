@@ -359,7 +359,8 @@ const artStyleLoading = ref(false)
 const artStyleSaving = ref(false)
 
 // 画风选项统一取自前端单一数据源 utils/artStyles.ts；
-// 新增画风需同步后端 backend/src/shared/prompt-utils.ts 的 ART_STYLE_CATALOG 与画风词表
+// 新增画风需同步后端 backend-py/app/services/prompt_utils.py 的 ART_STYLE_CATALOG 与画风词表
+//（溯源：TS 时代为 backend/src/shared/prompt-utils.ts，已随 Node 后端删除）
 const artStyleOptions = ART_STYLE_OPTIONS
 
 async function loadArtStyle() {

@@ -58,6 +58,18 @@ def render(report: dict[str, Any]) -> None:
     print(f"加载计划：fits={residency['fits']}　策略={residency['strategy']}　"
           f"峰值≈{residency['peakResidentGiB']:.2f} GiB / {residency['capacityGiB']:.0f} GiB　"
           f"缺 {residency['missing'] or '无 ✓'}")
+    # ⭐ 2026-09-27 加 ✓✗：**"在盘上、但不在 `models_dir`"** 的那些必须打印出来 ✗✗ ——
+    #    这些件**已经算进**上面那行 `已在盘` 与 `ready` ✓（引擎加载会直接用它们 ✓）；不打印 ⇒
+    #    人只看到"missingRequired 空 / 已在盘 39.55 GiB"也说得通 ✓，但一旦真的缺东西，
+    #    报告的观感会变成"盘上有却还说没下" ✓✗（用户当场指出过 ✓）。顺手把"想自持就收进去"说清 ✓。
+    elsewhere = ready.get("resolvedElsewhere") or {}
+    if elsewhere:
+        print(f"⚠️ 在盘上但**不在** models_dir：{len(elsewhere)} 件 ✓ ⇒ **不需要下载** ✗"
+              f"（引擎加载就在这些位置找 ✓；想让本仓**自持** ⇒ 收进 {ready['modelsDir']} ✓）")
+        for key, item in list(elsewhere.items())[:4]:
+            print(f"    {key} → {item.get('path')}")
+        if len(elsewhere) > 4:
+            print(f"    ……等 {len(elsewhere)} 件 ✓")
     # ⭐ 低精度权重**能不能自动还原** ✓（fp8/int8 ⇒ 按 scale 反量化 ✓）：三档分开说 ✗
     #    —— 尤其「**没下载 ⇒ 没查**」✗ 不许读成「通过」✓（本仓那条口径 ✓）。
     quant = report["quantPlan"]
@@ -116,11 +128,16 @@ def main() -> int:
     parser.add_argument("--stage", default="h3", help="阶段（默认 h3 ✓）")
     parser.add_argument("--capacity-gib", type=float, default=inv.DEFAULT_CAPACITY_GIB,
                         help=f"显存容量（默认 {inv.DEFAULT_CAPACITY_GIB} GiB = A5000 ✓）")
+    # ⚠️ 圈定搜索域用 ✓（不写死任何路径 ✓）：不给 ⇒ 清单落点 + 动态探测根 ✓（= 生产口径 ✓）；
+    #    给了 ⇒ **只认那个根** ✓（自检 / 想按别的目录对账时用 ✓）。
+    parser.add_argument("--models-dir", default=None,
+                        help="只按这个模型根体检（默认：清单落点 + 动态探测根 ✓）")
     parser.add_argument("--json", action="store_true", help="输出 JSON（给自动化用 ✓）")
     args = parser.parse_args()
 
     report = engine_readiness.collect(weights=args.weights, tokenizer=args.tokenizer,
-                                      stage=args.stage, capacity_gib=args.capacity_gib)
+                                      stage=args.stage, capacity_gib=args.capacity_gib,
+                                      root=args.models_dir)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

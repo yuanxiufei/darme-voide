@@ -22,7 +22,7 @@
 
 ⇒ 上采样路径每个 `output_blocks` 弹一次 skip ⇒ `len(input_blocks) == len(output_blocks)`（各 9）✓。
 
-**归一化 / 注意力 / 前馈口径**取自 `reference/ComfyUI`（只读事实，未抄代码 ✗）：
+**归一化 / 注意力 / 前馈口径**取自 `ComfyUI`（只读事实，未抄代码 ✗）：
 
 - `ResBlock`：`in_layers.0` GroupNorm → `.1` SiLU → `.2` Conv3x3；`emb_layers.0` SiLU →
   `.1` Linear(time_embed_dim → out)；`out_layers.0` GroupNorm → `.1` SiLU → `.2` Dropout → `.3` Conv3x3；
@@ -217,7 +217,7 @@ if _HAS_TORCH:
     def timestep_embedding(timesteps: "Tensor", dim: int, max_period: float = 10000.0) -> "Tensor":
         """正弦时间嵌入：**cos 在前、sin 在后** ✓（= diffusers 的 flip_sin_to_cos=True / freq_shift=0 ✓）。
 
-        出处：`reference/ComfyUI/comfy/ldm/modules/diffusionmodules/util.py`（`timestep_embedding`）✓。
+        出处：`ComfyUI/comfy/ldm/modules/diffusionmodules/util.py`（`timestep_embedding`）✓。
         奇数 dim 时末位补 0 ✓（同参考实现 ✓）。
         """
         if dim <= 0:
@@ -236,7 +236,7 @@ if _HAS_TORCH:
         """拼 SDXL 的 `adm` 条件向量：(B, 1280) 池化文本 ++ 6 × 256 的时间 id 嵌入 ⇒ (B, 2816) ✓。
 
         `time_ids` 顺序是 SDXL 官方口径：`[height, width, crop_top, crop_left, target_height, target_width]` ✓
-        —— 出处 `reference/ComfyUI/comfy/model_base.py`（`SDXL.encode_adm`：六个 id 各自过同一个嵌入器，
+        —— 出处 `ComfyUI/comfy/model_base.py`（`SDXL.encode_adm`：六个 id 各自过同一个嵌入器，
         再与池化文本拼在一起 ✓）。
         """
         if time_ids.ndim != 2 or time_ids.shape[1] != ADM_TIME_IDS:

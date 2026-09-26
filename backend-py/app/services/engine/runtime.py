@@ -205,6 +205,59 @@ def _release_torch_cache() -> bool:
         return False
 
 
+def _vram_facts() -> dict[str, Any] | None:
+    """显存台账（GiB ✓）—— **没有 torch / 没有卡 ⇒ ``None``** ✗（不编数字 ✗）。"""
+    try:
+        import torch  # noqa: PLC0415 —— 可选依赖 ✓
+    except Exception:
+        return None
+    try:
+        if not torch.cuda.is_available():
+            return None
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        return {
+            "allocatedGiB": round(torch.cuda.memory_allocated() / 2**30, 2),
+            "reservedGiB": round(torch.cuda.memory_reserved() / 2**30, 2),
+            "freeGiB": round(free_bytes / 2**30, 2),
+            "totalGiB": round(total_bytes / 2**30, 2),
+        }
+    except Exception:  # noqa: BLE001 —— 台账拿不到**不许**把主流程搞崩 ✗
+        return None
+
+
+def _reclaim_cuda_cache() -> dict[str, Any]:
+    """把**保留着但没在用**的显存块还给驱动 ✓ ⇒ 返回前后事实 ✓。
+
+    ⚠️ 只还"空着的" ✗：**在用的张量（权重 / 本步激活）一个不动** ✓（见自检的不变量 ✓）。
+
+    为什么非做不可 ✗（2026-09-26 实测 ✓，RTX A5000 22.49 GiB ✓，
+    本机 User 环境预设 ``PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024`` ✓）：
+
+    * 装完 SDXL 四件套：**真占用 6.73 GiB** ✓，而缓存**保留 13.88 GiB** ✗ ⇒ 驱动视角只剩 **7.37 GiB** ✗；
+    * 再采样一张 1024²：保留涨到 **15.76 GiB** ✗ ⇒ 驱动视角只剩 **5.47 GiB** ✗✗；
+    * 还一次：保留 **15.76 → 8.24 GiB** ✓、驱动视角 **5.47 → 12.98 GiB** ✓（**还回 7.52 GiB** ✓）
+      —— 而在用的 6.73 GiB **一点没少** ✓、同条件采样耗时**不变** ✓。
+
+    ⇒ 不还的后果是「**缓存看起来占了整卡**」✗：与同机 ComfyUI 抢卡时先撞的就是它 ✓✗，
+      也撞「不许逼近显存上限」的口径 ✗。还回去的代价 = 下次几块 ``cudaMalloc`` ✓（毫秒级 ✓）。
+    """
+    before = _vram_facts()
+    if before is None:
+        # 没有 torch / 没有卡 ⇒ 连 ``gc.collect`` 都不必跑 ✓（如实说"没得还" ✓）
+        return {"released": False, "reclaimedGiB": 0.0,
+                "note": "没有 torch / 没有 CUDA ⇒ 无缓存可还 ✓"}
+    _release_torch_cache()
+    after = _vram_facts() or {}
+    return {
+        "released": True,
+        "reclaimedGiB": round(float(before["reservedGiB"]) - float(after.get("reservedGiB", 0.0)), 2),
+        "reservedGiB": after.get("reservedGiB"),
+        "allocatedGiB": after.get("allocatedGiB"),
+        "freeGiB": after.get("freeGiB"),
+        "totalGiB": after.get("totalGiB"),
+    }
+
+
 class EngineRuntime:
     """进程内引擎的**唯一持有者** ✓（全局单例 :data:`engine_runtime` ✓）。
 
@@ -253,18 +306,37 @@ class EngineRuntime:
                 self._current = task_id
                 task.status = "loading"
                 task.startedAt = _now_ms()
+            # ⚠️ 先给个兜底 ✗：`_execute` 自己炸了也得有东西可封口 ✓（否则 finally 里取不到它 ✓✗）
+            outcome: tuple[str, str | None] = ("failed", "任务没给出结果 ✗（内部矛盾 ✓）")
             try:
-                self._execute(task)
+                outcome = self._execute(task)
             except BaseException as err:  # noqa: BLE001 —— worker **绝不允许**死掉 ✗✗
                 #  线程一死，后面所有任务永久 queued ✓✗ —— 那是最难查的静默故障 ✓
-                self._finish_failed(task, f"{type(err).__name__}: {err}")
+                outcome = ("failed", f"{type(err).__name__}: {err}")
             finally:
+                # ⚠️ 一张跑完就把**空着的**缓存还回去 ✗（采样同样会把碎片顶起来 ✓✗：实测一张 1024²
+                #    之后 reserved 15.76 GiB ⇒ 驱动视角只剩 5.47 GiB ✓✗ ⇒ 还完 12.98 GiB ✓）。
+                # ⚠️ 顺序要紧 ✗✗：**先还 → 记事件 → 最后封口状态 → 再唤醒** ✓。
+                #    只写"先还、后唤醒"**不够** ✗✗（2026-09-26 被实测证伪 ✓）：它只保证了
+                #    **被唤醒**的读者看得见 ✓ —— 而读者不止是被唤醒那种 ✗（`bridge.run_job` 是
+                #    **带超时轮询**的 ✓）⇒ 终结态一可见它当场收工走人 ✓ ⇒ 此刻事件里若还没有
+                #    "还了多少"，那条事实就**永远**漏掉 ✓✗。实测：同进程连跑两张，
+                #    **第 1 张的 `reclaimEvent` 为空、第 2 张有** ✓✗ —— 窗口就在这里 ✓。
+                reclaim = _reclaim_cuda_cache()
+                status, error = outcome
                 with self._wake:
+                    if reclaim.get("released"):
+                        task.events.append({"kind": "reclaim", **reclaim})
+                    self._settle(task, status, error)
                     self._current = None
                     self._wake.notify_all()
 
-    def _execute(self, task: EngineTask) -> None:
-        """装载（除非干跑 ✓）⇒ 跑管线 ⇒ 收口 ✓。**任何失败都变成任务里的 error** ✓ 不抛 ✗。"""
+    def _execute(self, task: EngineTask) -> tuple[str, str | None]:
+        """装载（除非干跑 ✓）⇒ 跑管线 ⇒ **返回"该怎么封口"**（``status`` / ``error``）✓ 不抛 ✗。
+
+        ⚠️ **自己不写终结态** ✗✗：封口是 :meth:`_settle` 的事 ✓，而且必须排在
+        "这一张还回多少显存"记完之后 ✓（理由见 :meth:`_worker_loop` 的 ``finally`` ✓）。
+        """
         dry = bool(task.assembly.get("dryRun"))
         # ⚠️ ``dryRun`` 是**运行时**的开关 ✗ ⇒ 不进 ``ensure_loaded`` ✓（否则 TypeError ✓✗）
         assembly = {key: value for key, value in task.assembly.items() if key != "dryRun"}
@@ -281,32 +353,31 @@ class EngineRuntime:
             except TorchBackendUnavailable as err:
                 task.events.append({"kind": "load", "loaded": False,
                                     "reason": getattr(err, "reason", ""), "error": str(err)})
-                self._finish_failed(task, f"装载失败：{err}")
-                return
+                return ("failed", f"装载失败：{err}")
             backend = self._backend
             if backend is None:             # 报告成功却没后端 = 内部矛盾 ⇒ 响亮报 ✗
-                self._finish_failed(task, "装载报告成功但运行时没有后端 ✗（内部状态不一致 ✓）")
-                return
+                return ("failed", "装载报告成功但运行时没有后端 ✗（内部状态不一致 ✓）")
         if task.cancelEvent.is_set():
-            task.status = "cancelled"
-            task.finishedAt = _now_ms()
-            return
+            return ("cancelled", None)
         task.status = "running"
         result = pipe.run_sync(task.request, backend, on_event=task.events.append,
                               cancel=task.cancelEvent.is_set)
         task.result = result.to_dict()
-        task.finishedAt = _now_ms()
         if result.cancelled:
-            task.status = "cancelled"
-        elif result.ok:
-            task.status = "done"
-        else:
-            task.status = "failed"
-            task.error = (result.error or {}).get("message") or "生成失败 ✓（看 result.error ✓）"
+            return ("cancelled", None)
+        if result.ok:
+            return ("done", None)
+        return ("failed", (result.error or {}).get("message") or "生成失败 ✓（看 result.error ✓）")
 
-    def _finish_failed(self, task: EngineTask, message: str) -> None:
-        task.status = "failed"
-        task.error = message
+    def _settle(self, task: EngineTask, status: str, error: str | None = None) -> None:
+        """**封口**：写终结态 ✓ —— ⚠️ **必须持 ``self._wake`` 调用** ✗✗（它与唤醒同属一段临界区 ✓）。
+
+        ⚠️ 为什么不许在 :meth:`_execute` 里随手写 ✗：``terminal`` 一旦为真，读者就可以走了 ✓
+        ⇒ 那些"跑完才知道"的事实（本张还回多少显存 ✓）会被整个漏掉 ✓✗
+        （2026-09-26 实测的窗口 ✓，见 :meth:`_worker_loop` ✓）。
+        """
+        task.status = status
+        task.error = error
         task.finishedAt = _now_ms()
 
     def submit(self, request: Any, *, assembly: dict[str, Any] | None = None,
@@ -351,7 +422,12 @@ class EngineRuntime:
         return self.get_task(task_id, events_limit=0)
 
     def wait(self, task_id: str, *, timeout: float | None = None) -> dict[str, Any] | None:
-        """等任务终结 ✓（``timeout`` 秒；到点还没完就返回**当前**状态 ✓ —— 不抛 ✗）。"""
+        """等任务终结 ✓（``timeout`` 秒；到点还没完就返回**当前**状态 ✓ —— 不抛 ✗）。
+
+        ⚠️ 一旦这里报 ``terminal`` ✓，**这一张的收尾事实就已经在事件里了** ✓（"还回多少显存" ✓）
+        —— 封口与那条 append 在同一段临界区 ✓，见 :meth:`_settle` ✓：
+        轮询式读者（``bridge.run_job`` ✓）一到终结就走人 ✗，顺序错了那条事实就永远漏掉 ✓✗。
+        """
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         with self._wake:
             while True:
@@ -400,6 +476,8 @@ class EngineRuntime:
         用主干 ``text_dim`` **自动配** ``output_dim`` ✓；VAE 只做**互核** ✓（``load_weights`` 与已挂
         的 VAE 彼此校验 ✓ ⇒ 先挂后装 / 先装后挂都对 ✓）。
         ⚠️ 显存排班（谁先谁后、谁能在下一步前释放 ✓）是**另一件事** ✗ —— 见 ``loader.residency_plan`` ✓。
+        ⚠️ 但"装完把**空着的**缓存还给驱动"是**这一件** ✓（装之前先 ``_release`` ✓ ⇒ 装完再
+        :func:`_reclaim_cuda_cache` ✓ —— 一头一尾都还 ✓，见报告里的 ``cache`` 事实 ✓）。
         """
         key = _load_key(stage=stage, dit_path=dit_path, tokenizer_path=tokenizer_path,
                         device=device, audio_latent_mode=audio_latent_mode,
@@ -407,6 +485,11 @@ class EngineRuntime:
         with self._lock:
             if self._backend is not None and key == self._loadKeyTuple:
                 return {**dict(self._loadReport or {}), "reused": True}
+
+        if str(stage or "").strip().lower() == pipe.IMAGE_STAGE:
+            # ⚠️ 出图是**另一套组件** ✗（SDXL 四件套 ✓ ≠ H3 DiT + 参考 TE/VAE ✓）⇒ 分开装配 ✓。
+            return self._ensure_image_loaded(key=key, dit_path=dit_path,
+                                             tokenizer_path=tokenizer_path, device=device)
 
         backend = TorchBackend(device=device, audio_latent_mode=audio_latent_mode)
         report: dict[str, Any] = {"stage": stage, "reused": False, "components": {},
@@ -445,6 +528,83 @@ class EngineRuntime:
         #: ⚠️ 与 `TorchBackend.write` 同一条诚实口径 ✓：文件是真的 ✓，画面来自未训练 VAE ✗
         report["note"] = ("DiT 主权重**是真的** ✓；参考 TE / VAE **未训练** ✗ ⇒ "
                           "产物是真文件 + 噪声画面 ✓（`synthetic` 保持 True ✓）")
+        #: ⚠️ 装完**还一次缓存** ✗（G 级权重是一件件塞进去的 ⇒ 缓存被碎片顶起来 ✓✗，见
+        #: :func:`_reclaim_cuda_cache` 的实测 ✓）—— 只还空着的块 ✓，在用的张量一个不动 ✓。
+        report["cache"] = _reclaim_cuda_cache()
+        with self._lock:
+            self._backend = backend
+            self._loadKeyTuple = key
+            self._loadReport = report
+        return report
+
+    def _ensure_image_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
+                             tokenizer_path: str | None,
+                             device: str | None) -> dict[str, Any]:
+        """装 **SDXL 出图后端** ✓（``stage="sdxl"`` ✓ ⇒ :class:`~.sdxl_backend.SdxlBackend` ✓）。
+
+        ⚠️ 与视频那条路**不是同一套组件** ✗✗：那边是 H3 DiT + 参考 TE/VAE ✓；
+        这边是 SDXL 的 **UNet + VAE + 双文本塔**四件套 ✓ —— 四件都在**同一份**主权重里 ✓，
+        由 :func:`~.sdxl_backend.load_sdxl_components` 按前缀切开 ✓（实测四个前缀**恰好完整划分** ✓）。
+        ⚠️ 四件**缺一不可** ✗：任一件不齐 ⇒ ``load_weights`` 当场报错 ✓（**不半装** ✗ ——
+        半装出来的图「有形状、有颜色、但语义全错」✓✗，本仓最忌这类 ✓）。
+        ⚠️ 词表**必须给** ✗：CLIP 词表是**权重的一部分** ✓，引擎不内置 ✗
+        （不给 ⇒ 报错 ✓，**不挂桩词表** ✗ —— 桩分词没有语义，出图会「看着像、完全不听话」✓✗；
+        这一点与视频那条路**刻意不同** ✓：那边没词表会挂桩且如实标注 ✓）。
+        ⚠️ 装完同样**还一次缓存** ✓（见报告里的 ``cache`` 事实 ✓ ⇒ 驱动视角不逼近上限 ✓）。
+        """
+        from .sdxl_backend import SdxlBackend  # 局部 import ✓：torch 可选 ✓（同视频那条路 ✓）
+        from .tokenizer_bpe import load_tokenizer
+
+        if not dit_path:
+            raise TorchBackendUnavailable(
+                "自研引擎出图缺 **SDXL 主权重** ✗：装配里没给 ``ditPath`` ✓。\n"
+                "  · 怎么修：在出图服务的 settings 里配 ``sdxlPath`` ✓，或按清单把权重放进 "
+                "``models_dir`` ✓\n"
+                "  · ⚠️ 这里**不猜路径** ✗：猜错会「装得进去、跑得出来、结果不对」✓✗",
+                reason="pending")
+        if not tokenizer_path:
+            raise TorchBackendUnavailable(
+                "自研引擎出图缺 **CLIP 词表** ✗：装配里没给 ``tokenizerPath`` ✓。\n"
+                "  · 词表是**权重的一部分** ✓（引擎不内置 ✗）；请指向含 ``tokenizer.json`` ✓ "
+                "或 ``vocab.json``+``merges.txt`` ✓ 的目录",
+                reason="pending")
+
+        # ⚠️ 装新的之前**先把旧的放掉** ✗✗：SDXL 四件套与 H3 DiT 都是 GB 级 ✓
+        #    两套同时在内存里 ⇒ 峰值翻倍 ⇒ OOM ✓（丢旧的可恢复：重装一次即可 ✓；
+        #    ⚠️ 代价是**装失败时旧的也没了** ✓ —— 这是刻意的取舍 ✓，不静默降级 ✓）。
+        with self._lock:
+            previous = self._backend
+            self._backend = None
+        del previous
+        _release_torch_cache()
+
+        backend = SdxlBackend(device=device)
+        report: dict[str, Any] = {"stage": pipe.IMAGE_STAGE, "reused": False,
+                                  "components": {}, "synthetic": True}
+        try:
+            report["weights"] = backend.load_weights(
+                path=dit_path, tokenizer=load_tokenizer(tokenizer_path))
+            # 报告里只留**事实** ✓（四件各自的张量数 ✓ —— 与事实表逐个可比 ✓）
+            for name, component in (report["weights"].get("components") or {}).items():
+                report["components"][name] = dict(component).get("keys") or True
+        except BaseException as err:  # noqa: BLE001
+            del backend
+            _release_torch_cache()
+            raise TorchBackendUnavailable(
+                f"SDXL 装配失败：{type(err).__name__}: {err}", reason="pending") from err
+
+        described = backend.describe()
+        report["device"] = described.get("device") or device or "cpu"
+        report["backend"] = described.get("name")
+        report["synthetic"] = bool(described.get("synthetic"))
+        report["facts"] = described.get("facts")
+        #: ⚠️ 与 `SdxlBackend.synthetic` 同一条诚实口径 ✓：**真权重**装齐 ⇒ False ✓
+        report["note"] = ("SDXL 四件套（UNet / VAE / CLIP-L / CLIP-G）**全是真权重** ✓ ⇒ "
+                          "`synthetic` 如实为 **False** ✓"
+                          "（与视频那条路的参考 TE/VAE 未训练 ⇒ 恒 True 不同 ✓）")
+        #: ⚠️ 这条**尤其**要还 ✗：SDXL 是 1680+248+197+390 件小张量 ✗ ⇒ 装机就把缓存顶到
+        #: **13.88 GiB（真占用只有 6.73 GiB）** ✓✗ ⇒ 不还就等于**白白占掉半张卡** ✗。
+        report["cache"] = _reclaim_cuda_cache()
         with self._lock:
             self._backend = backend
             self._loadKeyTuple = key
@@ -452,7 +612,11 @@ class EngineRuntime:
         return report
 
     def unload(self, *, force: bool = False) -> dict[str, Any]:
-        """**丢掉张量 + 清缓存** ✓ —— 这就是"不依赖外部"的卸载 ✓（不通知任何人 ✗）。"""
+        """**丢掉张量 + 清缓存** ✓ —— 这就是"不依赖外部"的卸载 ✓（不通知任何人 ✗）。
+
+        ⚠️ ``cacheCleared`` 只说"清缓存这步成没成" ✓；**到底还回多少**看 ``reclaimedGiB`` /
+        ``reservedGiB`` / ``freeGiB`` ✓（与装载报告里的 ``cache`` **同一套事实** ✓ 不另立口径 ✗）。
+        """
         with self._lock:
             if (self._current is not None or self._queue) and not force:
                 raise EngineBusy(f"引擎正忙（current={self._current}，queued={len(self._queue)}）✗ "
@@ -464,8 +628,9 @@ class EngineRuntime:
             self._loadKeyTuple = None
             self._loadReport = None
         del backend                          # 引用一断 ⇒ 大张量才真被回收 ✓（只置 None 不算 ✓✗）
-        cleared = _release_torch_cache()
-        return {"unloaded": had, "device": device, "cacheCleared": cleared}
+        reclaim = _reclaim_cuda_cache()
+        return {"unloaded": had, "device": device,
+                "cacheCleared": bool(reclaim.get("released")), **reclaim}
 
     # ── 自述 ✓ ───────────────────────────────────────────────────────────
     def status(self) -> dict[str, Any]:
