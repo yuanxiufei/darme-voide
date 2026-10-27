@@ -31,7 +31,7 @@
    （见 ``_merge_ollama`` ✓）。
 9. ⭐ **不许写死机器路径** ✗（2026-09-26 用户口径 ✓）：模型机可以装到**用户指定目录** ✓（``models_dir`` ✓）、
    也要能扫**电脑任意目录** ✓（``extra_roots`` ✓ + 盘符枚举 ``list_drives`` ✓，整盘扫也行 ✓）——
-   权威来源只有**配置 / 环境变量 / 盘符枚举** ✓，源码里**不出现** ``D:/…`` 这类字面量 ✗
+   权威来源只有**配置 / 环境变量 / 盘符枚举** ✓，源码与行文里都**不出现**任何**盘符字面量** ✗
    （静态守卫在同一套自检里 ✓：``local_models_test`` ✓）。
 """
 from __future__ import annotations
@@ -105,7 +105,7 @@ SYSTEM_DIRS = frozenset([
 ])
 
 #: ⭐ 2026-09-26 用户口径 ✓：**不许写死路径** ✗ —— 模型既可以装在**用户指定的任意目录** ✓，
-#: 也要能扫**电脑上任意目录**里已有的模型 ✓。所以这里**没有** ``D:/Comfy-Desktop/…`` 这类机器字面量 ✗，
+#: 也要能扫**电脑上任意目录**里已有的模型 ✓。所以这里**没有**任何**机器盘符字面量** ✗，
 #: 只有「**按名字动态探测 + 全盘枚举**」的口径 ✓：
 #:
 #: * **权威来源**（优先于探测）：环境变量 ``COMFYUI_PATH`` / ``model-paths.json`` 的 ``comfyui_root`` ✓、
@@ -114,7 +114,7 @@ SYSTEM_DIRS = frozenset([
 #: * **探测回退** = 家目录 + **各现存盘符**（``list_drives`` ✓）往下找「名字含关键词」的目录 ✓，
 #:   判定「像 ComfyUI 根」只看**目录下有没有 ``models/``** ✓（与旧口径一致 ✓ ⇒ 桌面端的**共享模型目录**
 #:   ``…/ComfyUI-Shared`` ✓ 也算一个根 ✓，本机那份 SDXL 正在它下面 ✓）；
-#: * ⚠️ 关键词是**产品名**不是机器路径 ✓：用户把 ComfyUI 装在 ``D:\AI\MyComfy`` 这类名字里照样命中 ✓
+#: * ⚠️ 关键词是**产品名**不是机器路径 ✓：用户把 ComfyUI 装在**任意盘、名字里带关键词**的目录里照样命中 ✓
 #:   （名字毫不相干的目录 = 不瞎猜 ✗，靠用户显式配 ``extra_roots`` / ``comfyui_root`` ✓）。
 COMFYUI_DIR_HINTS = ("comfyui", "comfy-desktop", "comfyui-desktop", "comfy")
 #: 探测深度（层）：**关键词目录**最深看到这里 ✓。
@@ -499,8 +499,8 @@ def get_default_roots() -> list[str]:
     for _, path in model_ecosystems.roots():
         add(path)
     # ⭐ 2026-09-26 修「只取第一个」✗：**每个** ComfyUI 类目录的 ``models/`` 都加 ✓
-    #    （本机三个：``ComfyUI-Installs/…/ComfyUI`` / ``ComfyUI-Shared`` / ``D:/code/ComfyUI/ComfyUI`` ✓
-    #     —— 旧实现只加第一个 ⇒ 共享目录里那份 SDXL 扫不到 ✗✗）
+    #    （本机三个：桌面端安装层里两个 ✓ + 自建检出一份 ✓ —— ⚠️ **盘符不复述** ✗；
+    #     旧实现只加第一个 ⇒ 共享目录里那份 SDXL 扫不到 ✗✗）
     for root in comfyui_roots:
         add(os.path.join(root, "models"))
     # ⚠️ **只有显式配的那个根**整体也加上 ✓（``COMFYUI_PATH`` / ``comfyui_root`` ✓）：

@@ -543,12 +543,22 @@ def main() -> int:
         case_wiring()
     failed = [name for name, ok, _ in _RESULTS if not ok]
     for name, ok, detail in _RESULTS:
-        print(("  OK  " if ok else "  RED ") + name + (f"   <{detail}>" if not ok else ""))
-    print(f"\nengine_h3_edit: {len(_RESULTS) - len(failed)}/{len(_RESULTS)} 项通过 ✓")
-    if _SKIPS:
-        print("跳过：" + "; ".join(_SKIPS))
+        print(("PASS  " if ok else "FAIL  ") + name + ("" if ok else f"   <<< {detail!r}"))
+    for reason in _SKIPS:
+        print("SKIP  " + reason)
+    print()
+    # ⚠️ 收尾**必须**是 ``SUMMARY: n/m passed`` 这一行 ✓（口径同 `engine_chain_test` ✓）：
+    #    `tests/run_all.py` 就是按这个前缀抽项数的 ✓ —— 本套原来印的是
+    #    ``engine_h3_edit: 61/61 项通过`` ✗ ⇒ 全量表里**这一套没有项数** ✗✗
+    #    （2026-09-26 全量实测抓到的 ✓：142 套有摘要 + 1 套常量守卫 ≠ 登记 144 套 ✓✗）。
+    #    同理逐条用 ``PASS  ``/``FAIL  `` 前缀 ✓：`run_all` 失败时按 ``FAIL`` 行捞详情 ✓。
+    print(f"SUMMARY: {len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed"
+          + (f"（skip {len(_SKIPS)}）" if _SKIPS else ""))
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
+    # ⚠️ Windows 上子进程 stdout 是**管道**时按本地代码页（GBK）输出 ✗ ⇒ 中文会
+    #    `UnicodeEncodeError` 崩掉 ✓（同族套件都自己兜这一下 ✓，别指望环境变量 ✓）。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

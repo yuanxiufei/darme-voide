@@ -63,7 +63,7 @@ def nvidia_smi() -> str | None:
     """``nvidia-smi`` 在哪 ✓ —— 优先显式 ``$NVIDIA_SMI`` ✓，再 ``PATH`` ✓，再 Windows 标准位置 ✓。
 
     ⚠️ 最后那条是**父进程早于驱动**（``PATH`` 还没刷到）时的兜底 ✓：``SystemRoot\\System32`` 是
-    **Windows 自身**的标准位置 ✓ —— **不是本机专有盘符** ✓（写 ``D:\\…`` 那种才是禁区 ✗）。
+    **Windows 自身**的标准位置 ✓ —— **不是本机专有盘符** ✓（写**本机自建目录**那种才是禁区 ✗）。
     """
     explicit = os.environ.get("NVIDIA_SMI")
     if explicit:

@@ -59,7 +59,7 @@ Paths = namedtuple("Paths", ["comfyui_root", "models_dir", "nodes_dir", "local_s
 # 权威来源（优先于探测）：命令行参数 > 环境变量 COMFYUI_PATH > configs/model-paths.json 的 comfyui_root
 # ⚠️ 与 ``app/services/local_model_scan.py`` 的 ``COMFYUI_DIR_HINTS`` / ``COMFYUI_PROBE_DEPTH`` /
 #    ``detect_comfyui_roots`` 是**同一套口径** ✓（脚本不 import ``app.*`` ⇒ 这里复制一份 ✗ 靠注释同步 ✓；
-#    改那边要回头改这里 ✓）。旧实现写死 ``D:/Comfy-Desktop/…`` 这类**机器字面量** ✗，且**只取第一个**命中
+#    改那边要回头改这里 ✓）。旧实现写死**安装那一层的机器字面量** ✗，且**只取第一个**命中
 #    ⇒ 多装几个 ComfyUI 时后面的**被遮住** ✗✗（共享模型目录 ``…/ComfyUI-Shared`` 就这么被漏掉 ✓）——
 #    2026-09-26 改成「家目录 + 各现存盘符 往下找**名字含关键词**且带 ``models/`` 的目录」✓。
 COMFYUI_DIR_HINTS = ("comfyui", "comfy-desktop", "comfyui-desktop", "comfy")
