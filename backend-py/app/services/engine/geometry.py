@@ -10,6 +10,11 @@
 * **分辨率步长**：同 schema 的 ``width/height`` 都是 ``step=32`` ✓。
 * **分辨率↔像素预算的换算**：用参考项目 README 的**实测输出**反推并验证 ✓ ——
   ``0.65MP @16:9 ⇒ 1088×608``、``0.98MP @16:9 ⇒ 1344×768``（见 ``tests/engine_core_test.py`` ✓）。
+  ⚠️ ComfyUI 侧 ``ResolutionSelector`` 的**权威**算法是另一套 ✓
+  （``comfy_extras/nodes_resolution.py`` 的 ``execute`` ✓，落点
+  ``app/local_services/h3/workflow.py`` 的 ``resolution_selector_size`` ✓ ——
+  那里能独立运行，本模块不依赖它 ✗）：两者在**这两个锚点重合** ✓、一般情形**发散** ✓
+  （``1.0MP@16:9`` ⇒ 那边 ``1376×768`` / 这里 ``1344×768`` ✓）⇒ **别把一个的数当另一个的** ✗。
 
 ## ⚠️ 明确**不猜**的部分
 
@@ -133,6 +138,11 @@ def size_for_megapixels(megapixels: float, ratio: str | float | None = "16:9",
     * 必须**向上**取整 —— 四舍五入会把 ``0.98MP`` 落成 ``1312×736`` ✗（参考实测是 ``1344×768`` ✓）；
     * 高**不能**用「像素 ÷ 宽」回算 —— 那会得到 ``736`` ✗（回算只保面积、不保画幅比 ✓）。
     校验两点：``0.65MP ⇒ 1088×608`` ✓、``0.98MP ⇒ 1344×768`` ✓（与参考 README 的实测输出一致 ✓）。
+
+    ⚠️ **别把它当"ComfyUI 会算出的尺寸"** ✗：那是 :func:`resolution_selector_size` ✓
+    （**权威源码** ✓）—— 两者只在上面两个锚点重合 ✓、一般情形发散 ✓（``1.0MP@16:9``
+    ⇒ 它 ``1344×768`` / 权威 ``1376×768`` ✓）。本函数留在**本仓自己的像素预算**口径上 ✓：
+    SDXL 训练预算那条路与**实测显存/耗时**绑死 ✓（见 ``tests/run_all.py`` ✓）⇒ 不替换 ✗。
     """
     pixels = max(1.0, float(megapixels or 0) * 1_000_000.0)
     aspect = parse_ratio(ratio)

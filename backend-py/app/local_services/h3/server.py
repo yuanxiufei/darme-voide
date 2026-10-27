@@ -15,6 +15,7 @@
   ``POST /v1/workflows/validate``   只校验：转换能不能过 / 缺哪个节点包 / 连线有没有悬空 ✓
   ``POST /v1/workflows/run``        **跑任意工作流**（UI 或 API 格式 ✓）→ 轮询 → 取产物 → URL ✓
   ``GET  /v1/workflows/task/{id}``  通用任务状态（与 H3 同一个任务表 ✓）
+  ``GET  /v1/workflows/templates``  **盘上所有 H3 模板的形态与注入点** ✓（全部**从图上读** ✓，见下）
   ``GET  /v1/catalog/nodes[/{cls}]``节点目录（默认只给类名 ✓，避免几 MB 全表 ✗）
   ``GET  /v1/catalog/models[/{f}]`` 模型类别 / 某类文件清单 ✓
   ``GET  /v1/catalog/folders``      各类模型的**磁盘路径** ✓
@@ -34,10 +35,16 @@
   UI→API 转换、参数注入、节点预检 ✓，比裸透出更难用错 ✓）。
 
 内部链路（**这就是「把 ComfyUI 的能力搬进来」的落点** ✓）：
-  body → 选模板（有首帧用 I2V ✓ 否则 T2V ✓）→ 注入（提示词/时长/画幅/种子/权重 ✓）
-       → 首尾帧上传 → `workflow.ui_to_api()`（**UI 图 → API 格式** ✓）→ 节点预检（缺哪个包直接点名 ✓）
+  body → 选模板（默认自家加速模板 ✓；有参考素材 ⇒ 换官方 R2V ✓；body ``template`` 优先 ✓）
+       → ``workflow.video_plan()`` **读图**定注入点（形态/提示词宿主/时长/画幅/首尾帧/参考槽 ✓）
+       → 注入（提示词/时长/画幅/种子/权重/参考图 ✓）→ 首尾帧 + **有槽位才传的**参考图上传
+       → `workflow.ui_to_api()`（**UI 图 → API 格式** ✓）→ 节点预检（缺哪个包直接点名 ✓）
        → `comfyui_client.queue_prompt()` → `wait()` 轮询 → `/view` 取片 → 落盘 → 回 URL
        → **`/free` 卸载模型释放显存**（24G 卡上这是必须的 ✓）
+
+⚠️ **注入点一律从图上判，不认标题也不认节点 id** ✓✗（2026-09-27 ✓）：三种模板三种标题 ✓、
+官方模板的 ``LoadImage`` **根本没标题** ✗、R2V 的 ``prompt`` 还是**连线端口**不是 widget ✗
+⇒ 「字段在哪个节点」这件事只能靠**连接关系**问图 ✓（``workflow.py::video_plan`` ✓）。
 
 启动：
   uvicorn server:app --host 0.0.0.0 --port 8765        或  python server.py
@@ -51,11 +58,19 @@
 ``H3_WORKFLOW_DIR``         工作流模板目录                  ``<本文件目录>/workflows``
 ``H3_T2V_WORKFLOW``         文生视频模板文件名              ``MiniMax_H3_Fast_T2V.json``
 ``H3_I2V_WORKFLOW``         图生视频模板文件名              ``MiniMax_H3_Fast_I2V.json``
+``H3_R2V_WORKFLOW``         参考素材（R2V）模板文件名        ``video_minimax_h3_r2v.json``
+``H3_TEMPLATE``             强制指定模板（空=按入参自动挑 ✓） 空（body ``template`` 优先 ✓）
+``H3_REF_IMAGE_LIMIT``      最多接几路参考图 ✓              ``3``（盘上 R2V 模板接了 ``ref_image_0..2`` ✓）
 ========  ============================================  ==============================
 
 ⚠️ 已知限制（**如实列出**，不假装支持 ✓）：
-* 这两个模板是 **FL2VA**（首帧/文生）形态 ⇒ 传了 ``checkpoint_map.ref2va`` 只会换权重名、**参考图/参考音频
-  不生效** ✗，此时任务里会带 ``warnings`` 说明 ✓（Ref2VA 需要另一套模板，属后续工作）。
+* **参考素材（Ref2VA）只有走 R2V 模板才真生效** ✗：传了参考图 + 自家那个 FL2VA/I2VA 模板 ⇒ 主节点上
+  压根没有 ``ref_images.*`` 槽位 ⇒ **响亮告警**说明被忽略 ✓、且**连上传都不做** ✓（别在 ComfyUI 的
+  ``input`` 目录里留垃圾 ✓）。传参考图时**没显式指定模板 ⇒ 自动换官方 R2V 模板** ✓。
+* 参考素材**只接图** ✓：节点**类**其实还支持 ``ref_videos`` / ``ref_video_audios`` / ``ref_audios``
+  （各 ≤3 ✓，出处 ``comfy_extras/nodes_minimax_h3.py`` ✓），但**盘上那个 R2V 模板一格都没接** ✗
+  ⇒ ``reference_audio*`` 一律**响亮告警 + 忽略** ✓。⚠️ 这条判据是**图上真有的端口** ✓✗
+  （``workflow.py::reference_slot_names`` ✓）⇒ 哪天模板把音频槽位接上，这里**不用改代码**就认 ✓。
 * 采样步数/分辨率档位沿用模板（10 步 / 0.65MP ✓）；``H3_QUALITY`` 可覆盖 megapixels ✓。
 * 模板里的 ``length`` 由模板自带的 ``ComfyMathExpression`` 按 **24fps + 17k+5 网格**算 ✓，
   这里只注入「秒」✓（并用同一套数学回一个 ``expected_frames`` 供对账 ✓）。
@@ -111,6 +126,12 @@ OUTPUT_DIR = Path(os.environ.get("H3_OUTPUT_DIR") or (Path(__file__).resolve().p
 PUBLIC_BASE_URL = (os.environ.get("H3_PUBLIC_BASE_URL") or f"http://127.0.0.1:{PORT}").rstrip("/")
 T2V_WORKFLOW = os.environ.get("H3_T2V_WORKFLOW") or "MiniMax_H3_Fast_T2V.json"
 I2V_WORKFLOW = os.environ.get("H3_I2V_WORKFLOW") or "MiniMax_H3_Fast_I2V.json"
+#: R2V（参考素材）模板：**官方**那份 ✓（主节点 ``MiniMaxH3ReferenceToVideo`` ✓，见该目录 README 出处表 ✓）
+R2V_WORKFLOW = os.environ.get("H3_R2V_WORKFLOW") or "video_minimax_h3_r2v.json"
+#: 显式指定模板（空 = 按入参自动挑 ✓）；请求体里的 ``template`` 优先于它 ✓
+TEMPLATE = os.environ.get("H3_TEMPLATE") or ""
+#: 参考图最多几路（官方 R2V 模板的槽位是 ``ref_images.ref_image_0..2`` ⇒ 3 ✓）
+REF_IMAGE_LIMIT = int(os.environ.get("H3_REF_IMAGE_LIMIT") or "3")
 #: 覆盖模板里的 megapixels（画质档位）；空 = 用模板值 ✓
 QUALITY = os.environ.get("H3_QUALITY") or ""
 #: 缺节点时给用户的安装指引（**不在推理路径里偷偷下载** ✗）
@@ -204,11 +225,116 @@ def _as_list(raw: Any) -> list[Any]:
     return []
 
 
-def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: str) -> str:
+def _reference_images(body: Dict[str, Any]) -> list[str]:
+    """参考图列表 ✓：``referenceImageUrls``（后端协议口径 ✓）与 ``subject_reference``（H3 契约口径 ✓）
+    **两套命名都收** ✓，按出现顺序去重 ✓。
+
+    ⚠️ 只认一套 ⇒ 另一套被当成「0 路」⇒ 参考素材**静默不生效** ✓✗（本仓反复踩的同义异名坑 ✓）。
+    """
+    out: list[str] = []
+    for raw in (body.get("referenceImageUrls"), body.get("subject_reference")):
+        for item in _media_texts(raw):
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _media_texts(raw: Any) -> list[str]:
+    """把媒体入参读成非空字符串列表 ✓（列表 ✓ / 单个字符串 ✓ / JSON 字符串列表 ✓ 都认 ✓）。"""
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        parsed = _as_list(text)
+        return [str(item).strip() for item in parsed if str(item).strip()] or [text]
+    return [str(item).strip() for item in _as_list(raw) if str(item).strip()]
+
+
+def _pick_template(task: Dict[str, Any], refs: list[str]) -> str:
+    """选模板 ✓：**显式指定 > 有参考素材 ⇒ R2V > 有首帧 ⇒ I2V > 纯文生 ⇒ T2V** ✓。
+
+    显式指定来自 body ``template`` ✓（优先）或 env ``H3_TEMPLATE`` ✓。
+
+    ⚠️ 有参考素材**必须**换 R2V 模板 ✗✗：A 批那两个模板的主节点是 ``MiniMaxH3ImageToVideo`` ✓，
+    **没有参考图槽位** ✗ ⇒ 参考素材只能被丢掉 ✓（旧行为：响告警 + 忽略 ✓）。
+    ⚠️ R2V 模板不在盘上 ⇒ **如实告警 + 退回** ✓（不假装支持 ✓；也不因为「可选素材」把整个任务判死 ✓）。
+    """
+    body = task.get("body") or {}
+    explicit = str(body.get("template") or TEMPLATE or "").strip()
+    if explicit:
+        return explicit
+    if refs:
+        if (WORKFLOW_DIR / R2V_WORKFLOW).exists():
+            return R2V_WORKFLOW
+        _warn(task, f"请求带了 {len(refs)} 路参考图，但 R2V 模板不在盘上（{R2V_WORKFLOW} ✗）"
+                    f"⇒ 本次**忽略它们** ✗（要用参考素材请把模板放回 {WORKFLOW_DIR} ✓）")
+    first_frame = str(body.get("first_frame_image") or "").strip()
+    return I2V_WORKFLOW if first_frame else T2V_WORKFLOW
+
+
+def _wire_reference_images(task: Dict[str, Any], api: Dict[str, Any], plan: Dict[str, Any],
+                           uploaded: list[str]) -> int:
+    """把上传好的参考图落到主节点的 ``ref_images.ref_image_k`` ✓ ⇒ **落地路数** ✓。
+
+    ⚠️ **没用的槽位必须摘掉** ✗✗：官方 R2V 模板里那几个 ``LoadImage`` 指着模板自带的示例图 ✓
+    （文件名在**我们的** input 目录里不存在 ✓）—— 而 ``LoadImage.image`` 是 **COMBO** ✓
+    ⇒ 只要它还在图里，ComfyUI 的提交前校验就会因为「文件名不在可选列表」**当场 400** ✓✗
+    （即使这个节点根本不参与出图 ✓）。所以：调用方给了几路，就只留几路 ✓，
+    多出来的槽位**连同它上游那个 LoadImage 一起删掉** ✓（该 LoadImage 无输入 ✓，不会牵连别的节点 ✓）。
+    """
+    main_id = plan.get("main_id")
+    slots = list(plan.get("ref_slot_names") or [])
+    wired = list(plan.get("ref_image_ids") or [])
+    landed = 0
+    for index, slot_name in enumerate(slots):
+        existing = wired[index] if index < len(wired) else None
+        if index >= len(uploaded):
+            if existing is not None:
+                (api.get(str(main_id)) or {}).get("inputs", {}).pop(slot_name, None)
+                if not _is_referenced(api, existing):
+                    api.pop(str(existing), None)
+            continue
+        if existing is not None:
+            wf.set_node_input(api, existing, "image", uploaded[index])
+            landed += 1
+            continue
+        new_id = f"voide_ref_image_{index + 1}"
+        api[new_id] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": uploaded[index]},
+            "_meta": {"title": f"REF IMAGE {index + 1} (voide)"},
+        }
+        wf.set_node_input(api, main_id, slot_name, [new_id, 0])
+        landed += 1
+    if landed < len(uploaded):
+        _warn(task, f"参考图只落地了 {landed} 路（模板槽位 {len(slots)} 个，请求 {len(uploaded)} 路 ✗）"
+                    f"⇒ 多出来的被丢掉 ✗")
+    return landed
+
+
+def _is_referenced(api: Dict[str, Any], node_id: Any) -> bool:
+    """图里还有没有别的输入指着 ``node_id`` ✓（删节点前先问一句 ✓）。"""
+    target = str(node_id)
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        for value in (node.get("inputs") or {}).values():
+            if isinstance(value, list) and value and str(value[0]) == target:
+                return True
+    return False
+
+
+def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: str, *,
+                     pictures: int | None = None) -> str:
     """提示词过 **H3 prompt 契约** ✓（提交前 ✓）：文本写法 → 标签、**核编号**、**该追加的声明必须追加** ✗。
 
     ⭐ 钉的就是那条实测坑 ✗✗：**只写 ``<Audio 1>`` 绑定句不算声明** ✓ —— 照标签跳过的话，
     自动声明被吞、模型**不复用参考音频**（实测相关性≈0 ✓✗）。所以这一段必须在**提交前**跑 ✓。
+
+    ⚠️ ``pictures``：**实际落地**的参考图路数 ✓ 优先于 body 里的 ``subject_reference`` ✗ ——
+    参考图有两种命名来源 ✓（``referenceImageUrls`` 与 ``subject_reference`` ✓），只数后者会在
+    前者形态下被判成 0 路 ✓✗ ⇒ ``<Picture n>`` 的编号与自动声明全按空的算 ✓✗（静默错 ✓）。
+    所以默认值只在**调用方没给**时才用 ✓。
 
     ⚠️ 编号错 ⇒ **当场拒** ✗（``ConditioningError`` 冒上去 ⇒ 任务带可行动文案失败 ✓）；
     ⚠️ 契约层没装上 ⇒ **如实告警「没跑」** ✗ 而不是当通过 ✓✗。
@@ -218,7 +344,8 @@ def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: st
         return prompt_text
     cond_mod = getattr(prompt_contract, "cond", None)
     audios = len(_as_list(body.get("reference_audio")))
-    pictures = len(_as_list(body.get("subject_reference")))
+    if pictures is None:
+        pictures = len(_as_list(body.get("subject_reference")))
     # 参考音频一律是**音色参考** ✓ ⇒ 协议关系 ``reference`` ✓（⚠️ 别用 ``fully_copy`` ✗ ——
     # 那是「逐字复制内容」的意思 ✓，会把参考音频的台词念出来 ✓✗）
     refs = [cond_mod.AudioReference(index=index + 1, relation="reference")
@@ -315,8 +442,12 @@ def _apply_accel_chain(client: "cc.ComfyUIClient", task: Dict[str, Any],
 
 
 def _pick_checkpoint(client: "cc.ComfyUIClient", task: Dict[str, Any], requested: str,
-                     checkpoint_map: Any) -> str | None:
+                     checkpoint_map: Any, main_class: str = "") -> str | None:
     """选 UNET 权重 ✓ ⇒ 文件名字符串（``None`` = 沿用模板默认 ✓）。
+
+    ``main_class``：模板**主节点类名**（来自 ``wf.video_plan`` ✓）—— 用来判「这个模板吃不吃参考素材」✓✗：
+    主节点是 ``MiniMaxH3ReferenceToVideo`` ⇒ 参考图**真能落地** ✓ ⇒ 「换了 Ref2VA 权重却白换」那条
+    告警**不该发** ✗（发出去就是假消息 ✓）。
 
     ⭐ **调用方给的 ``body.model`` 优先** ✗✗（2026-09-24 补 ✓）—— 后端已经按 H3 形态规则
     （有参考素材 ⇒ 只能 Ref2VA ✓）选过一次了 ✓；这里**再按场景猜一遍**就是「同一件事两处判断」✓✗，
@@ -350,8 +481,10 @@ def _pick_checkpoint(client: "cc.ComfyUIClient", task: Dict[str, Any], requested
         chosen = (checkpoint_map.get("ref2va") if scene and scene != "action" and scene != "silent"
                   else checkpoint_map.get("fl2va")) or checkpoint_map.get("fl2va")
     if chosen and isinstance(checkpoint_map, dict) and checkpoint_map.get("ref2va") \
-            and chosen == checkpoint_map.get("ref2va"):
-        _warn(task, "模板是 FL2VA 形态：已换 Ref2VA 权重名，但**参考图/参考音频不会生效** ✗")
+            and chosen == checkpoint_map.get("ref2va") \
+            and main_class != "MiniMaxH3ReferenceToVideo":
+        _warn(task, "模板是 FL2VA 形态：已换 Ref2VA 权重名，但**参考图/参考音频不会生效** ✗"
+                    f"（要参考素材请用 R2V 模板：{R2V_WORKFLOW} ✓ —— 那个模板里 ``ref2va`` 权重才对得上 ✓）")
     return chosen if isinstance(chosen, str) and chosen else None
 
 
@@ -366,27 +499,78 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
 
     first_frame = str(body.get("first_frame_image") or "").strip()
     last_frame = str(body.get("last_frame_image") or "").strip()
-    template_name = I2V_WORKFLOW if first_frame else T2V_WORKFLOW
+    all_refs = _reference_images(body)
+    refs = all_refs[:REF_IMAGE_LIMIT]
+    if len(all_refs) > len(refs):
+        _warn(task, f"参考图给多了（{len(all_refs)} 路 > 上限 {REF_IMAGE_LIMIT} 路 ✗）"
+                    f"⇒ 只落地前 {len(refs)} 路 ✗（上限口径见官方 R2V 模板的槽位数 ✓）")
+    template_name = _pick_template(task, refs)
     template_path = WORKFLOW_DIR / template_name
     if not template_path.exists():
-        raise ValueError(f"工作流模板不在盘上：{template_path}（检查 H3_WORKFLOW_DIR ✓）")
+        raise ValueError(f"工作流模板不在盘上：{template_path}（检查 H3_WORKFLOW_DIR / H3_TEMPLATE ✓）")
     import json
 
     graph = json.loads(template_path.read_text(encoding="utf-8"))
 
+    # ── 注入点**全靠图判据** ✓（不按标题 ✗、不按节点 id ✗）──
+    # ⚠️ 为什么不能按标题 ✗✗：实测同一件事在三种模板上三种标题 ✓ —— 时长是 ``DURATION (seconds)`` /
+    #    ``Float (duration)`` / ``Float (Duration)`` ✓（连大小写都不统一 ✗），
+    #    首帧的 ``LoadImage`` 在官方模板里**完全没标题** ✗；R2V 的 ``prompt`` 还被**拉着线** ✗
+    #    （往主节点上塞字面量会把连线覆盖掉 ✓✗）。图判据对三种模板用同一套 ✓。
+    plan = wf.video_plan(graph)
+    if plan["main_id"] is None:
+        raise ValueError(
+            f"模板 {template_name} 里没有**唯一**的 H3 主节点"
+            f"（{' / '.join(wf.MAIN_VIDEO_CLASSES)}）⇒ 不知道往哪儿注入 ✗"
+            f"（云端 api_* 那三个走 ComfyUI 云端节点 ✓ 不归本服务管 ✗；显式指定模板时请挑本地模板 ✓）")
+
     # 需要尾帧 ⇒ 把模板里**默认关掉**的可选尾帧通道打开（参考 I2V 模板的 [DISABLED] 节点 ✓）
+    # ⚠️ 这里**不发告警** ✗：激活不到通道时，下面「这一帧落不下去」那条会**统一**发 ✓
+    #    （两处各发一条 ⇒ 同一件事两条告警 ⇒ 读的人以为出了两个问题 ✓✗）。
     activated: list[str] = []
     if last_frame:
         activated = wf.activate_nodes(graph)
-        if not activated:
-            _warn(task, "模板里没有可激活的尾帧通道 ⇒ 尾帧将被忽略 ✗")
 
-    # 首帧/尾帧上传（ComfyUI 只认它自己 input 目录里的文件名 ✗ ⇒ 必须先 upload ✓）
+    # ⚠️⚠️ **参考图能不能落地，在上传之前就已经知道了** ✓✗：模板主节点上有没有 ``ref_images.*``
+    #    槽位是**图上的事实** ✓（``plan`` 已算出来 ✓）⇒ 没有槽位时这几路**注定落不下去** ✓
+    #    ⇒ 那就**一个都别传** ✗（传了只是往 ComfyUI 的 ``input`` 目录里留垃圾 ✓✗、
+    #    还白等几轮上传 ✓）。自检 ㉔′ 钉的就是这条 ✓。
+    ref_slot_names = list(plan["ref_slot_names"])
+    if refs and not ref_slot_names:
+        _warn(task, f"模板（{template_name}）的主节点**没有参考图槽位** ⇒ {len(refs)} 路参考图被忽略 ✗"
+                    f"（**一个都没上传** ✓，别在 ComfyUI 的 input 目录里留垃圾 ✓；要用参考素材请换 R2V "
+                    f"模板：{R2V_WORKFLOW} ✓，或 body ``template`` 显式指定 ✓）")
+
+    # ⚠️ 首尾帧**同一条纪律** ✓✗：模板里有没有对应的 ``LoadImage`` 也是**图上的事实** ✓（``plan`` 优先 ✓，
+    #    标题只当兜底 ✓ —— A 批模板的尾帧通道是「被 mute 的一整条支路」✓，用标题能一眼认出 ✓）
+    #    ⇒ 没有就不传 ✗。⚠️ 这条**不是理论** ✓：R2V 主节点**压根没有** ``first_frame``/``last_frame``
+    #    端口 ✗ ⇒ 「带参考图 + 带首帧」现在会自动走 R2V ✓ ⇒ 首帧注定落不下去 ✓（旧写法会白传一张 ✓✗）。
+    frame_nodes = {
+        "START FRAME": plan["first_frame_id"] or _find_load_image(graph, "START FRAME"),
+        "LAST FRAME": plan["last_frame_id"] or _find_load_image(graph, "LAST FRAME"),
+    }
+    for keyword, requested in (("START FRAME", first_frame), ("LAST FRAME", last_frame)):
+        if requested and not frame_nodes[keyword]:
+            _warn(task, f"给到了 {keyword}，但模板（{template_name}）里**没有**对应的 LoadImage 端口 "
+                        f"⇒ 该帧**不生效** ✗（**也没有上传** ✓：落不下去的东西不往 ComfyUI 的 input "
+                        f"目录里塞 ✓）"
+                        + ("；要首帧请挑 I2V 模板 ✓ 或 body ``template`` 显式指定 ✓"
+                           if keyword == "START FRAME" else
+                           "；要首尾帧得用官方的 flf2v 模板 ✓（官方 I2V 模板本来就没有尾帧槽位 ✗；"
+                           "本仓那两个的尾帧通道是**被 mute 的一整条支路** ✓）"))
+
+    # 首帧/尾帧/参考图上传（ComfyUI 只认它自己 input 目录里的文件名 ✗ ⇒ 必须先 upload ✓）
+    # ⚠️ 参考图那几路**以「有没有槽位」为准** ✗（不是以「请求里给没给」为准 ✗）——
+    #    这个列表后面还要拿去算 ``ref_uploads`` ✓，两处口径不同步就会在没槽位时炸 ``KeyError`` ✓✗
+    #    （自检实测踩到 ✓）。
+    wanted_refs = refs if ref_slot_names else []
     uploads: list[tuple[str, str, bytes]] = []
-    if first_frame:
+    if first_frame and frame_nodes["START FRAME"]:
         uploads.append(("START FRAME", "first_frame.png", _fetch_media(first_frame)))
-    if last_frame:
+    if last_frame and frame_nodes["LAST FRAME"]:
         uploads.append(("LAST FRAME", "last_frame.png", _fetch_media(last_frame)))
+    for index, url in enumerate(wanted_refs):
+        uploads.append((f"REF IMAGE {index + 1}", f"ref_image_{index + 1}.png", _fetch_media(url)))
 
     uploaded: dict[str, str] = {}
     for keyword, filename, payload in uploads:
@@ -394,6 +578,7 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
         name = result.get("name") or filename
         subfolder = result.get("subfolder") or ""
         uploaded[keyword] = f"{subfolder}/{name}" if subfolder else str(name)
+    ref_uploads = [uploaded[f"REF IMAGE {index + 1}"] for index in range(len(wanted_refs))]
 
     classes = wf.node_classes(graph)
     object_info: dict[str, Any] = {}
@@ -411,16 +596,27 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     api = wf.ui_to_api(graph, object_info, dropped_out=dropped)
 
     # ── 注入：提示词（**先过 H3 prompt 契约** ✓：文本写法→标签 / 核编号 / 该追加的声明必须追加 ✓）──
-    prompt_text = _contract_prompt(task, body, prompt_text)
-    changed = wf.set_input(api, "MiniMaxH3ImageToVideo", "prompt", prompt_text)
-    if not changed:
-        _warn(task, "没找到 MiniMaxH3ImageToVideo.prompt 注入点 ✗（模板结构变了？）")
+    # ⚠️ 契约里的 ``pictures`` 用**实际落地的参考图路数** ✓（不是只数 body 里那个键 ✗）——
+    #    而「实际落地」在提交前就唯一确定 ✓：``min(请求路数, 模板槽位数)`` ✓。
+    #    ⚠️ 模板没槽位时是 **0** ✓（不是请求路数 ✗）⇒ 提示词里若还引用 ``<Picture 1>`` 就会被
+    #    **当场拒** ✓✗（那是对的：它要的素材这单根本交不出去 ✓，比静默出一版「没有那张脸」的片好 ✓）。
+    prompt_text = _contract_prompt(task, body, prompt_text,
+                                   pictures=min(len(refs), len(ref_slot_names)) if refs else None)
+    owner = plan["prompt_owner"]
+    if owner is None:
+        _warn(task, "没找到提示词注入点 ✗（主节点的 ``prompt`` 既不是自身 widget ✓、"
+                    "上游也不是字符串节点 ✓）⇒ 这次提交的提示词是**模板里那串默认文案** ✗")
+    elif not wf.set_node_input(api, owner[0], owner[1], prompt_text):
+        _warn(task, f"提示词注入点 {owner[0]}.{owner[1]} 不在 API 图里 ✗（转换时被丢了？）")
 
-    # ── 注入：时长（秒 → 模板自带的 DURATION 节点；帧数由模板的表达式按 24fps/17k+5 算 ✓）──
+    # ── 注入：时长（秒 → **喂 ``length`` 的那个标量节点** ✓；帧数由模板表达式按 24fps/17k+5 算 ✓）──
     duration = float(body.get("duration") or 5)
     expected_frames = wf.frames_for_seconds(duration)
-    if not wf.set_input(api, "PrimitiveFloat", "value", duration, title_contains="DURATION"):
-        _warn(task, f"没找到 DURATION 节点 ⇒ 时长沿用模板默认值 ✗（请求的是 {duration}s）")
+    if plan["duration_id"] and wf.set_node_input(api, plan["duration_id"], "value", duration):
+        pass
+    else:
+        _warn(task, f"没找到时长注入点 ✗（喂 ``length`` 的唯一 ``PrimitiveFloat`` 读不出来 ✓）"
+                    f"⇒ 时长沿用模板默认值 ✗（请求的是 {duration}s）")
 
     # ── 注入：画幅（COMBO 必须按**选项表**换，否则会被校验拒 ✓）──
     ratio = str(body.get("aspect_ratio") or "").strip()
@@ -429,18 +625,27 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
         if not picked:
             _warn(task, f"画幅 {ratio!r} 没匹配到 ResolutionSelector 的选项 ⇒ 用模板默认值 ✗")
 
-    # ── 注入：画质档位（可选）──
-    if QUALITY:
-        wf.set_input(api, "PrimitiveFloat", "value", float(QUALITY), title_contains="QUALITY")
+    # ── 注入：画质档位（可选；官方模板里**没有**这个档位节点 ⇒ 如实告警 ✓ 不假装设上了 ✗）──
+    if QUALITY and not wf.set_input(api, "PrimitiveFloat", "value", float(QUALITY),
+                                    title_contains="QUALITY"):
+        _warn(task, f"H3_QUALITY={QUALITY} 但模板（{template_name}）里没有画质档位节点 "
+                    f"⇒ 画质按模板/画幅算出来的值 ✗")
 
     # ── 注入：权重（**调用方给的优先** ✓✗；模板是 FL2VA 形态 ⇒ ref2va 只换名字并告警 ✓）──
     settings = body.get("settings") or {}
     checkpoint_map = settings.get("checkpoint_map") if isinstance(settings, dict) else None
-    checkpoint = _pick_checkpoint(client, task, str(body.get("model") or "").strip(), checkpoint_map)
+    checkpoint = _pick_checkpoint(client, task, str(body.get("model") or "").strip(), checkpoint_map,
+                                  main_class=str(plan["main_class"] or ""))
     if checkpoint:
         wf.set_input(api, "UNETLoader", "unet_name", checkpoint)
-    if body.get("reference_audio_urls") or body.get("referenceImageUrls") or body.get("subject_reference"):
-        _warn(task, "当前模板不支持参考图/参考音频（Ref2VA）⇒ 这些入参被忽略 ✗")
+
+    # ── 注入：参考素材（图 ✓ / 音频 ✗）──
+    #    ⚠️ 「模板没槽位」那条告警**在上传前**就发过了 ✓（那时才决定传不传 ✓）⇒ 这里只管落槽 ✓
+    landed_refs = (_wire_reference_images(task, api, plan, ref_uploads)
+                   if refs and ref_slot_names else 0)
+    if body.get("reference_audio_urls") or body.get("reference_audio"):
+        _warn(task, "参考音频（Ref2VA 的音色参考）本地模板还没接上 ⇒ 被忽略 ✗"
+                    "（提示词里的 ``<Audio n>`` 也请一并去掉 ✗ 免得声明了却没有对应素材 ✓）")
 
     # ── 注入：加速链（配置驱动 ✓；没配就是空操作 ✓）──
     _apply_accel_chain(client, task, api)
@@ -451,34 +656,59 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
                  f"h3/{task.get('task_id') or 'task'}", required=False)
 
     # ── 首尾帧落到 LoadImage 上（API 里 LoadImage 的入参就是「文件名」✓）──
-    first_node_id = _find_load_image(graph, "START FRAME")
-    for keyword, node_id in (("START FRAME", first_node_id),
-                             ("LAST FRAME", _find_load_image(graph, "LAST FRAME"))):
+    # ⚠️ 节点**按图判据找** ✓（官方模板的 ``LoadImage`` 没有标题 ✗ ⇒ 按标题找恒找不到 ✓✗）；
+    #    标题只当**兜底** ✓（A 批模板的尾帧通道是「被 mute 的一整条支路」✓，用标题能一眼认出它 ✓）。
+    #    ⚠️ 节点表在上传前就算好了 ✓（``frame_nodes`` ✓）⇒ 这里**复用**、别重算 ✗（两处各算一次 ⇒
+    #    「传了但没找到」和「找到了但没传」这两种不一致迟早会出现 ✓✗）。
+    for keyword, node_id in frame_nodes.items():
         if keyword not in uploaded:
             continue
-        if not node_id or node_id not in api:
-            _warn(task, f"{keyword} 的上传成功但模板里没有对应 LoadImage 节点 ⇒ 该帧不生效 ✗")
+        if not node_id or str(node_id) not in api:
+            # 走到这儿说明「传之前是找得到的 ✓、传完却不在 API 图里 ✗」—— 只可能是转换/激活那步把它丢了 ✓
+            _warn(task, f"{keyword} 已上传，但那张 LoadImage 不在最终 API 图里（转换/激活把它丢了 ✗）"
+                        f"⇒ 该帧**不生效** ✗")
             continue
-        field = _widget_field(api[node_id], "image")
-        api[node_id]["inputs"][field] = uploaded[keyword]
+        field = _widget_field(api[str(node_id)], "image")
+        api[str(node_id)]["inputs"][field] = uploaded[keyword]
+        _update(task, **{f"{keyword.lower().replace(' ', '_')}_node": str(node_id)})
 
     # ── 尾帧通道**接回主节点**：首帧是模板接好的（first_frame ← 那条链的末端 ✓），
     #    尾帧通道刚被激活时是**没接线**的 ✗ ⇒ 这里镜像首帧的接法，把通道**末端**接上 ✓。
     #    「末端」用图判据找（没有任何同通道节点消费它 ✓），不写死节点 id ✗（模板换了也不怕 ✓）。
+    form = plan["form"]
     if last_frame and activated:
         referenced = {value[0] for node in api.values()
                       for value in (node.get("inputs") or {}).values()
                       if isinstance(value, list) and len(value) == 2}
         tails = [node_id for node_id in activated if node_id in api and node_id not in referenced]
-        if len(tails) == 1:
-            wf.set_input(api, "MiniMaxH3ImageToVideo", "last_frame", [tails[0], 0], required=False)
+        if len(tails) == 1 and wf.set_node_input(api, plan["main_id"], "last_frame", [tails[0], 0]):
             _update(task, last_frame_tail=tails[0])
+            # 尾帧真接上了 ⇒ 形态就是官方的 **FL2VA** ✓（图上原来是 I2VA 的接线状态 ✓）
+            form = "fl2va"
         else:
             _warn(task, f"尾帧通道末端不唯一（{tails}）⇒ 没自动接线，尾帧可能不生效 ✗")
 
-    _update(task, workflow=template_name, dropped_nodes=dropped,
+    # ── 预检：**COMBO 白名单** ✓（**只报不改** ✗）。ComfyUI 的 COMBO 是白名单 ✓ ⇒ 表外的串
+    #    会被 ``POST /prompt`` 400 拒单 ✗；而「表外的串」最常见的来源就是**抄了别人的展示标签** ✗
+    #    （``comfy-org/workflow_templates`` 的 ``mmh3/config.ts`` 写 ``"21:9 (Cinemascope)"`` ✗，
+    #    节点真枚举是 ``"21:9 (Ultrawide)"`` ✓ —— 见 ``comfy_extras/nodes_resolution.py`` ✓）。
+    #    ⚠️ 放在**所有注入之后** ✓：注入（``set_combo``/``set_input``）本身也可能塞进表外值 ✓。
+    for problem in wf.check_combo_choices(api, object_info):
+        _warn(task, f"{problem} ⇒ 提交会被 ComfyUI 校验拒 ✗（选项串与节点枚举不一致 ✓）")
+
+    # ── 预检：画幅定下来之后，把「**模板会算出多大**」记进任务 ✓（与 expected_frames 同一类对账口径 ✓；
+    #    读不出就 ``None`` ✗ 不猜 ✓）。H3 模板的 ``width``/``height`` 是 **ResolutionSelector 连线算出来的** ✗
+    #    ⇒ 节点自带的 ``widgets_values`` 是**旧值** ✗，拿它当时钟会错 ✓（见 ``wf.resolution_selector_size`` ✓）。
+    expected_size = wf.expected_resolution(api)
+    if expected_size:
+        _update(task, expected_width=expected_size[0], expected_height=expected_size[1])
+
+    _update(task, workflow=template_name, form=form, main_node=plan["main_id"],
+            dropped_nodes=dropped,
             expected_frames=expected_frames, expected_seconds=wf.seconds_for_frames(expected_frames),
-            uploaded=uploaded)
+            uploaded=uploaded, reference_images=landed_refs,
+            prompt_node=f"{owner[0]}.{owner[1]}" if owner else None,
+            duration_node=plan["duration_id"])
     return api, dropped
 
 
@@ -565,6 +795,18 @@ def poll_task(task_id: str) -> JSONResponse:
         "expected_frames": task.get("expected_frames"),
         "expected_seconds": task.get("expected_seconds"),
         "freed_vram": task.get("freed_vram"),
+        # ⭐ 「这一单走的是哪条路、落在图的哪几个节点上」也回给调用方 ✓✗ —— 模板从「只有本仓
+        #    自制那两个」扩到「官方那批也在盘上」之后 ✓，**只有服务端知道**它挑了哪个模板、
+        #    注入到了哪个节点 ✓ ⇒ 不交出去 ⇒ 出片不对时前端/后端只能猜 ✓✗（与下面两道关同理 ✓）。
+        "form": task.get("form"),
+        "main_node": task.get("main_node"),
+        "prompt_node": task.get("prompt_node"),
+        "duration_node": task.get("duration_node"),
+        "reference_images": task.get("reference_images"),
+        "dropped_nodes": task.get("dropped_nodes"),
+        "expected_width": task.get("expected_width"),
+        "expected_height": task.get("expected_height"),
+        "uploaded": task.get("uploaded"),
         # ⭐ 「提交前那两道关做了什么」也回给调用方 ✓✗ —— 判据要**响亮** ✗：
         #    只写在服务端内存/日志里，出片不对时前端/后端都查不出为什么 ✓✗
         "prompt_contract": task.get("prompt_contract"),
@@ -584,6 +826,62 @@ def get_file(name: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(path)
+
+
+@app.get("/v1/workflows/templates")
+def list_templates() -> JSONResponse:
+    """盘上**所有** H3 模板 + 每个模板的**形态 / 注入点** ✓（**全部从图上读** ✓ 不写死名单 ✗）。
+
+    ⚠️ 为什么要开这个口子 ✓：模板从「只有本仓自制那两个」变成「官方那批也在盘上」之后 ✗，
+    调用方就**没法知道**盘上有哪些、哪个吃首帧、哪个吃参考图 ✓✗ —— 只能去翻源码或者猜 ✗。
+    这里把「盘上有什么 / 各吃哪些入参」直接交出去 ✓，形态与槽位一律来自
+    :func:`workflow.video_plan` 的图判据 ✓（与真正注入时用的是**同一套**判据 ✓，不会两套说法 ✓）。
+
+    ⚠️ ``family`` 按**文件名前缀**分 ✓（事实口径：``video_*`` = 官方 ``comfy-org/workflow_templates``
+    的**本地推理**版 ✓、``api_*`` = 同仓库的**云端 API** 版 ✓、``MiniMax_H3_Fast_*`` = 本仓自制的
+    加速版 ✓ —— 出处见该目录 ``README.md`` ✓）。⚠️ ``runnable_locally=False`` 表示**本服务不做它的注入** ✗
+    （那三个用的是 ``MinimaxHailuo03*`` 云端节点 ✓，要 Comfy 账号/额度 ✓，归 ComfyUI 自己管 ✓）。
+    """
+    import json
+
+    items: list[Dict[str, Any]] = []
+    for path in sorted(WORKFLOW_DIR.glob("*.json")):
+        plan: Dict[str, Any] = {}
+        error: str | None = None
+        try:
+            plan = wf.video_plan(json.loads(path.read_text(encoding="utf-8")))
+        except Exception as err:  # noqa: BLE001 —— 单个模板坏掉不该让整个清单 500 ✗
+            error = f"{type(err).__name__}: {err}"
+        name = path.name
+        items.append({
+            "name": name,
+            "family": ("official-cloud-api" if name.startswith("api_")
+                       else "official-local" if name.startswith("video_")
+                       else "voide-fast" if name.startswith("MiniMax_H3_Fast_")
+                       else "unknown"),
+            "runnable_locally": bool(plan.get("main_id")),
+            "form": plan.get("form"),
+            "main_class": plan.get("main_class"),
+            "prompt_node": plan.get("prompt_owner"),
+            "aspect_ratio_node": plan.get("resolution_id"),
+            "duration_node": plan.get("duration_id"),
+            "first_frame_node": plan.get("first_frame_id"),
+            "last_frame_node": plan.get("last_frame_id"),
+            "reference_slots": plan.get("ref_slot_names") or [],
+            # ⚠️ 键名别叫 ``reference_images`` ✗ —— 任务那些响应里的同名字段是**落地路数（整数）** ✓✗
+            #    （一个清单里给「谁接在哪」✓、一个跑单里给「几路落上了」✓，同名字段含义不同最容易读错 ✓）。
+            "reference_image_nodes": plan.get("ref_image_ids") or [],
+            "error": error,
+        })
+    return JSONResponse({
+        "workflow_dir": str(WORKFLOW_DIR),
+        "templates": items,
+        "default_t2v": T2V_WORKFLOW,
+        "default_i2v": I2V_WORKFLOW,
+        "r2v": R2V_WORKFLOW,
+        "template_override": TEMPLATE or None,
+        "reference_image_limit": REF_IMAGE_LIMIT,
+    })
 
 
 def _client() -> "cc.ComfyUIClient":
@@ -773,7 +1071,13 @@ def system() -> Dict[str, Any]:
                     "stats": stats, "features": features},
         "service": {"output_dir": str(OUTPUT_DIR), "public_base_url": PUBLIC_BASE_URL,
                     "timeout_seconds": TIMEOUT, "install_hint": INSTALL_HINT},
-        "workflows": {name: (WORKFLOW_DIR / name).is_file() for name in (T2V_WORKFLOW, I2V_WORKFLOW)},
+        # ⚠️ 别只报那两个自制模板 ✗：盘上现在还有**官方那批** ✓（R2V 更是参考素材的**唯一**通路 ✓）
+        #    ⇒ 体检要能一眼看出「默认会挑哪个、在不在」✓（``H3_TEMPLATE`` 钉的那个也一并报 ✓）。
+        "workflows": {name: (WORKFLOW_DIR / name).is_file()
+                      for name in dict.fromkeys([T2V_WORKFLOW, I2V_WORKFLOW, R2V_WORKFLOW, TEMPLATE])
+                      if name},
+        "templates_dir": str(WORKFLOW_DIR),
+        "templates": sorted(p.name for p in WORKFLOW_DIR.glob("*.json")),
     }
 
 

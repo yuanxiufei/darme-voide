@@ -92,5 +92,17 @@ A 男+女 6s 男说一句；B 6s 女说一句；C 12s 男→女两镜头；D 24s
   （stub ComfyUI，**不需要 GPU / 不下载模型** ✓）。**真机只差**装模型与节点包后跑一轮 ✓
   （`model_manager.py download --category video` + `install-nodes` ✓；缺节点时任务会**点名**是哪个类 ✓）。
 - ✅ 参考音频两层语义：`getStoryboardReferenceAudioUrls` 取出场角色 `voiceSampleUrl`（≤3 条、声线样本非最终对白）→ `auto-pipeline` 对话类镜头填入 → `minimax-video` 以 `reference_audio` 发送（reference conditioning）。
+- ✅ 2026-09-27 补：**注入点全部改成「图判据」** ✓（`workflow.py::video_plan` ✓）—— 模板从「只有本仓自制那两个」
+  扩到「官方那批也在盘上」之后 ✗，标题与节点 id 都不可信 ✓✗（同一件事三种标题 ✓、官方模板的 `LoadImage`
+  **一个标题都没有** ✗、R2V 的 `prompt` 还是**被拉着线的端口** ✗：塞字面量会把线覆盖掉 ✓✗）⇒
+  形态 / 提示词落点 / 时长节点 / 画幅节点 / 首尾帧 / 参考槽位一律**按连接关系读** ✓。
+  同时**接通参考图（R2VA）这条路** ✓：带参考图且没显式指定模板 ⇒ **自动换**官方
+  `video_minimax_h3_r2v.json` ✓、参考图落 `ref_images.ref_image_0..2` ✓（用不满的槽位**连同上游示例
+  `LoadImage` 一起摘掉** ✗，否则 COMBO 校验当场 400 ✓✗）、契约里的 `<Picture n>` 按**实际落地路数**算 ✓、
+  「模板里落不下去的素材**连上传都不做**」 ✓（参考图**和首/尾帧**同为一条纪律 ✓ —— 别在 ComfyUI 的
+  `input` 目录里留垃圾 ✓；首帧 + 参考图同时给 ⇒ 自动走 R2V ✓，而 R2V **没有**首帧端口 ✗ ⇒ 响亮告警 ✓）；
+  新增 `GET /v1/workflows/templates`（盘上模板的形态与注入点 ✓，与真正注入时**同一套判据** ✓）。
+  自检 `tests/h3_stage2_test.py` 扩到 **50 项** ✓。
+  ⚠️ **参考音频**仍未接（R2V 主节点只有图槽位 ✗）⇒ 传了就告警忽略 ✓。
 - ✅ `LOCATION_ID` / `COSTUME_ID` / `STYLE_ID` 三键：`services/bible-ids.ts`（现 Python 侧 `backend-py/app/services/bible_ids.py`）`ensureLocationId/ensureCostumeId/ensureStyleId`，routes 落库。
 - ✅ QC 启发式：`services/qc-scoring.ts`（现 Python 侧 `backend-py/app/services/qc_scoring.py`）`lip_sync*0.4 + consistency*0.3 + continuity*0.3`，视频完成自动触发。⬜ 真实唇形/相似度 AI 检测未挂载。
