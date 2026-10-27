@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -221,14 +222,29 @@ def case_wiring_is_real() -> None:
 
 
 def main() -> int:
-    case_auto()
-    case_explicit_wins()
-    case_refusals()
-    case_env_plumbing()
-    case_apply_torch()
-    case_no_torch()
-    case_invariant_on_this_machine()
-    case_wiring_is_real()
+    # ⚠️⭐ **2026-10-27 实测抓到的假红，修法是隔离** ✓✗：本套所有「自动档」断言都**不带** ``env=`` ✓
+    #    ⇒ 它们读的是**本进程环境** ✓✗ —— 跑的人只要 shell 里设了 ``VOIDE_CPU_THREADS``（**合法值也算** ✗），
+    #    ①″ 那条就拿 ``cores=4`` 去算「自动」✓ 而产品按 env 给 8 ✗ ⇒ ``8 > 4`` ⇒ ``CpuBudgetError``
+    #    把整套**崩在第一条** ✗✗（stdout 一行都没印 ⇒ `run_all` 只落 ``FAIL  CPU 线程预算`` 且
+    #    **抓不到任何失败详情** ✗✗ —— 现场 `tmp/run_all_v3.log` 第 4 行 ✓、单跑复现命令
+    #    ``VOIDE_CPU_THREADS=8 python tests/cpu_budget_test.py`` ⇒ 同一句异常 ✓）。
+    #    ⇒ 「自动档」用例必须**看不见**用户设的 override ✓（它要测的就是「没人设时会怎样」✓）；
+    #    顺带救回 ⑦：8 核机器 + override 8 ⇒ ``threads == 核数`` ⇒ 那条「永远小于核数」当场红 ✗。
+    #    ⚠️ 只摘 ``VOIDE_CPU_THREADS`` 这一个键 ✓、且**跑完放回去** ✓（别把跑的人的 shell 也改了 ✗
+    #    —— 本仓那条「不许偷改 os.environ」说的是**产品** ✓，自检给自己划隔离区不算 ✗）。
+    saved_override = os.environ.pop(cb.ENV_OVERRIDE, None)
+    try:
+        case_auto()
+        case_explicit_wins()
+        case_refusals()
+        case_env_plumbing()
+        case_apply_torch()
+        case_no_torch()
+        case_invariant_on_this_machine()
+        case_wiring_is_real()
+    finally:
+        if saved_override is not None:
+            os.environ[cb.ENV_OVERRIDE] = saved_override
     failures = [(name, detail) for name, passed, detail in _RESULTS if not passed]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))
