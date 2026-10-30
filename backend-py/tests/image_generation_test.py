@@ -102,6 +102,18 @@ def main() -> int:  # noqa: C901
         (fs._ext_from_url("static/a.png"), fs._ext_from_url("https://x.com/a/b"),
          fs._ext_from_url("https://x.com/a/b.verylong")),
     )
+    check(
+        "ext: path 无扩展名时回落到 query 的 filename（ComfyUI /view?filename=a.png）",
+        fs._ext_from_url(
+            "http://127.0.0.1:8188/view?filename=a_00001_.png&subfolder=engine&type=output"
+        ) == ".png"
+        # query 里没有文件名参数 / 名字也没扩展名 ⇒ 仍 .bin
+        and fs._ext_from_url("https://x.com/view?type=output") == ".bin"
+        and fs._ext_from_url("https://x.com/view?filename=noext") == ".bin",
+        (fs._ext_from_url("http://127.0.0.1:8188/view?filename=a_00001_.png&type=output"),
+         fs._ext_from_url("https://x.com/view?type=output"),
+         fs._ext_from_url("https://x.com/view?filename=noext")),
+    )
 
     # ================= take 预算 =================
     with engine.begin() as conn:

@@ -702,6 +702,15 @@ async def _run_tool(
         try:
             output = await tool.run(args)
         except Exception as err:  # noqa: BLE001 —— 工具报错回灌给模型，不中断 run
+            # ⚠️ 2026-10-30：**先落日志再回灌**。只回灌不记录 ⇒ 工具静默失败：
+            # 实测 extract 的 ``save_dedup_characters`` 抛错后，日志里只有
+            # ``save-characters-begin`` 而**没有 complete**，模型以为存好了继续往下走，
+            # 角色从此永远缺失，报告里却只有「已完成」。模型侧行为保持不变（仍回灌
+            # error 让它自己纠正），但失败必须能被人在日志里看见。
+            log_task_error("Agent", "tool-failed", {
+                "tool": str(name),
+                "error": f"{type(err).__name__}: {err}",
+            })
             output = {"error": str(err)}
     rendered = normalize_tool_output(output)
     tool_calls_out.append({"toolName": name, "args": args})

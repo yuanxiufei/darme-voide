@@ -416,6 +416,20 @@ _ADAPTER_REGISTRIES = {
 _REGISTRY_BLOCK = re.compile(r"export const (\w+)\s*:[^=]*=\s*\{(.*?)\n\}", re.S)
 _REGISTRY_KEY = re.compile(r"^\s*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_$][\w$]*))\s*:", re.M)
 
+#: Python 侧**新增**的 provider（冻结快照里不可能有）。
+#: ⚠️ 这张表是**双向**判据，不是免检白名单：
+#:   ① 表里的 key 必须真的在 Python 注册表里（防止登记了却忘了注册）；
+#:   ② 表里的 key 必须**不在** TS 快照里（若 TS 真有，说明是漂移而不是新增，该按漂移报）。
+#: 于是「Python keys − 本表」仍要与 TS keys **逐字同序**，移植走形一样会被抓。
+_ADAPTER_PY_EXTRAS: dict[str, dict[str, str]] = {
+    "imageAdapters": {
+        "comfyui": "ComfyUI 渲染层接入（本机 19 件工作流的唯一出口；backend/ 冻结快照里没有这件接入点）",
+    },
+    "ttsAdapters": {
+        "local-tts": "本机 TTS 薄封装接入（app/local_services/tts；协议同 cosyvoice，引擎可换）",
+    },
+}
+
 #: 用户可见的报错文案（两边都必须逐条找得到）
 _ADAPTER_MESSAGES = [
     "No image URL or task_id in response",
@@ -521,8 +535,20 @@ def _adapters_drift() -> list[str]:
             g1 or g2 or g3 for g1, g2, g3 in _REGISTRY_KEY.findall(block)
         ]
         py_keys = list(getattr(adapter_registry, py_name))
-        if ts_keys != py_keys:
-            problems.append(f"{ts_name} 注册表漂移：TS={ts_keys} ／ Python={py_keys}")
+        extras = _ADAPTER_PY_EXTRAS.get(ts_name, {})
+        # 双向核：登记的新增项必须真注册、且 TS 侧确实没有（否则就是漂移被掩盖）
+        for extra in extras:
+            if extra not in py_keys:
+                problems.append(
+                    f"{ts_name} 的新增登记 {extra!r} 没在 Python 注册表里（登记烂掉了）")
+            if extra in ts_keys:
+                problems.append(
+                    f"{ts_name} 的新增登记 {extra!r} 其实 TS 侧就有 ⇒ 这是漂移，不是新增")
+        py_ported = [k for k in py_keys if k not in extras]
+        if ts_keys != py_ported:
+            problems.append(
+                f"{ts_name} 注册表漂移：TS={ts_keys} ／ Python(去掉新增)={py_ported} ／"
+                f" Python 全量={py_keys}")
 
     # ②③④ 文案 / 默认模型 / 路径
     for label, literals in (

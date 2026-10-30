@@ -59,7 +59,7 @@
   "limits": [
     "只做单机单卡；多卡仅预留接口，无性能承诺",
     "显存配额是预算控制，不是 GPU 硬隔离（外部分配接口外无法强制）",
-    "量化按**族**判，判不出就拒绝（不猜）：per-row/per-col/per-tensor/elementwise 由**形状**自证；nvfp4（U8 打包 + 128×4 块 scale + 二级 scale + AWQ）由**等式**判；mxfp4（E8M0 共享指数）与 int4 分组量化**未实现**，一律拒绝"
+    "量化按**族**判，判不出就拒绝（不猜）：per-row/per-col/per-tensor/elementwise 由**形状**自证；nvfp4（U8 打包 + 128×4 块 scale + 二级 scale + AWQ）由**等式**判；4bit 打包（`w4a4`/`int4`，每字节两个有符号 nibble）由**文件自述**判 —— 打包后的形状与 per-row int8 逐字相同，按形状猜必错；mxfp4（E8M0 共享指数）与带 `qzeros`/`g_idx` 的 int4 **分组量化**仍未实现，一律拒绝"
   ],
   "knownGaps": []
 }

@@ -23,6 +23,7 @@ from .url import join_provider_url
 
 __all__ = [
     "CosyVoiceTTSAdapter",
+    "LocalTTSAdapter",
     "MiniMaxTTSAdapter",
     "TTSResult",
 ]
@@ -235,3 +236,23 @@ class CosyVoiceTTSAdapter:
             "format": data.get("format") or "mp3",
             "channel": data.get("channel") or 1,
         }
+
+
+class LocalTTSAdapter(CosyVoiceTTSAdapter):
+    """本机 TTS 薄封装（``app/local_services/tts/server.py``）—— **协议与 CosyVoice 薄封装同构**。
+
+    只改三件事，其余（``/tts`` 的字段名、base64→hex、format 回传）全部继承 ✓：
+
+    1. ``provider`` 换成 ``local-tts``（配置里一眼能看出走的是本机，不是云端 CosyVoice）；
+    2. **情绪与语速都真的生效** ✓（封装层用 edge-tts 的 ``rate``/``pitch`` 近似表达，
+       而 CosyVoice 薄封装是明确忽略这两个字段的 ✗）⇒ 能力声明必须跟着改，
+       否则用户选的情绪会被当成 ``dropped`` 如实丢弃 ✓✗；
+    3. 区间按 edge-tts 的伸缩能力给出 ``0.5–2.0``（更快的档在服务端会被夹到 +100%）。
+    """
+
+    provider = "local-tts"
+
+    supports_emotion = True
+    supports_emotion_vector = False
+    supports_speed = True
+    speed_range = (0.5, 2.0)

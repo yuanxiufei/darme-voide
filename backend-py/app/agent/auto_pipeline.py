@@ -31,19 +31,22 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 from typing import Any, Callable, Coroutine
 
-from sqlalchemy import and_, asc, select, update
+from sqlalchemy import and_, asc, delete as sql_delete, func, select, update
 from sqlalchemy.engine import Connection
 
 from app.core.db import engine
 from app.core.models import (
+    characters,
     dramas,
     episode_characters,
     episode_scenes,
     episodes,
     image_generations,
+    scenes,
     storyboards,
     video_generations,
     video_merges,
@@ -64,7 +67,9 @@ from app.services.prompt_utils import (
     get_storyboard_reference_images,
     resolve_effective_art_style,
 )
+from app.services.scene_match import same_scene, script_scene_headings
 from app.services.shot_router import decide_shot_route
+from app.services.storyboard_helpers import clear_episode_storyboards
 from app.services.sse_hub import publish_pipeline_event
 from app.services.task_logger import (
     log_task_error,
@@ -178,6 +183,10 @@ def normalize_options(opts: dict[str, Any]) -> dict[str, Any]:
         "withVideos": bool(opts.get("withVideos")),
         "withCompose": bool(opts.get("withCompose")),
         "withMerge": bool(opts.get("withMerge")),
+        # 开跑前的服务门禁（见 service_blockers）：默认开。
+        # 只有「测试用桩 provider」或「服务稍后才起」的演练场景才关 —— 关掉不代表跳过报错，
+        # 只是把失败从「开跑前」推迟到「阶段里」（那时库里已经有半截数据了，需自己承担）。
+        "skipServiceCheck": bool(opts.get("skipServiceCheck")),
     }
 
 
@@ -191,6 +200,44 @@ def media_needs(opts: dict[str, Any]) -> dict[str, bool]:
         "needCompose": bool(opts.get("withCompose") or opts.get("withMerge")),
         "needMerge": bool(opts.get("withMerge")),
     }
+
+
+def service_blockers(opts: dict[str, Any], probe: Any = None) -> list[str]:
+    """开跑前确认「**本次真正要用到的**服务」都活着 ⇒ 未就绪原因列表 ✓。
+
+    为什么在这里拦（而不是等阶段里报错）：
+
+    :func:`run_auto_pipeline` 是「**先建 Drama/Episode 落库，再 spawn 后台任务**」✓ ——
+    服务没起时这段数据**已经落库** ✗，用户看到的只是一集 ``auto:failed``，
+    而真因（端口没人监听）埋在日志第五层 ✗✗。宁可**先问再建** ✓：
+    未就绪就直接抛 :class:`ValueError`（HTTP 400 + 可读原因），库里不留半截数据 ✓。
+
+    只探「本次开关真正会用到」的四类 ✓（纯文本管线不因图像离线被拦 ✗）；
+    ``compose`` 阶段会在 :mod:`app.services.ffmpeg_compose` 里合成配音 ⇒ 依赖 audio ✓。
+
+    ``probe`` 可注入一个 ``(name) -> check`` 的替身（测试用；默认走真实探活 ✓）。
+    """
+    from ..services import runtime_doctor
+
+    check_service = probe or runtime_doctor.check_service
+
+    needs = media_needs(opts)
+    required: list[str] = ["text"]  # 剧本/提取/分镜全走文本模型 ✓ 永远必需 ✓
+    if needs["needImage"]:
+        required.append("image")
+    if needs["needVideo"]:
+        required.append("video")
+    if needs["needCompose"]:
+        required.append("audio")
+
+    problems: list[str] = []
+    for name in required:
+        check = check_service(name)
+        if check.state in ("ok", "degraded"):
+            continue
+        tail = f"；修：{check.fix}" if check.fix else ""
+        problems.append(f"{check.label}：{check.note}{tail}")
+    return problems
 
 
 # ============================================================
@@ -259,24 +306,257 @@ def is_storyboard_blocked(conn: Connection, storyboard_id: int) -> bool:
 # Agent 阶段
 # ============================================================
 
+#: 单集剧本的**篇幅下限**（字符数）。低于它基本拆不出可拍的镜头表：
+#: 2026-10-30 实测，只给「改写为完整剧本」不带篇幅要求时，qwen3:14b 交回 461 字、
+#: 3 个场景标题的**概要**，下游只拆出 1 个 12 秒镜头（一集成片 12 秒）。
+#: 一集短剧成片 60–120 秒 ⇒ 正文至少 1200 字才够铺满场景、对白与动作。
+SCRIPT_MIN_CHARS = 1200
+
+
 async def run_script_stage(episode_id: int, drama_id: int) -> None:
+    base_message = (
+        "请读取本集的原始剧情内容（梗概/小说），将其改写为符合平台规范的完整短剧剧本"
+        "（含场景划分、对白、动作与心理描写），并保存到本集。"
+        "硬性要求：这是**一集要拍出来的剧本**，不是梗概 —— 正文不少于 "
+        f"{SCRIPT_MIN_CHARS} 字，5–8 个场景，每个场景都要有具体对白与动作描写，"
+        "禁止分点提纲、禁止只写场景标题。"
+    )
     with engine.begin() as conn:
-        await run_agent_with_retry(
-            conn, "script_rewriter", episode_id, drama_id,
-            "请读取本集的原始剧情内容（梗概/小说），将其改写为符合平台规范的完整短剧剧本"
-            "（含场景划分、对白、动作与心理描写），并保存到本集。",
-        )
+        await run_agent_with_retry(conn, "script_rewriter", episode_id, drama_id,
+                                   base_message)
         episode = _fetch_episode(conn, episode_id)
+
+    # 篇幅校验 + 一次点名补刀（与 extract / storyboard 的产出校验同一标准）
+    script_len = len((episode.script_content or "").strip()) if episode else 0
+    if episode is not None and script_len and script_len < SCRIPT_MIN_CHARS:
+        log_task_warn("AutoPipeline", "script-too-short", {
+            "episodeId": episode_id, "chars": script_len, "min": SCRIPT_MIN_CHARS,
+        })
+        with engine.begin() as conn:
+            await run_agent_with_retry(
+                conn, "script_rewriter", episode_id, drama_id,
+                f"本集剧本现在只有 {script_len} 字，低于可拍摄下限 {SCRIPT_MIN_CHARS} 字，"
+                "拆不出足够的镜头。请保留已写好的情节，把它**扩写**成完整剧本："
+                "补足每个场景的动作、对白与心理描写，然后重新保存到本集。",
+            )
+            episode = _fetch_episode(conn, episode_id)
+        script_len = len((episode.script_content or "").strip()) if episode else 0
+        log_task_progress("AutoPipeline", "script-expanded", {
+            "episodeId": episode_id, "chars": script_len,
+        })
+
     if episode is None or not (episode.script_content or "").strip():
         raise ValueError("script_rewriter 未产出剧本（script_content 为空）")
 
 
+def _extract_counts(conn: Connection, episode_id: int) -> dict[str, int]:
+    """本集已关联的角色/场景数量（extract 阶段的产出校验基准）。"""
+    return {
+        "角色": int(conn.execute(
+            select(func.count()).select_from(episode_characters)
+            .where(episode_characters.c.episode_id == episode_id)).scalar() or 0),
+        "场景": int(conn.execute(
+            select(func.count()).select_from(episode_scenes)
+            .where(episode_scenes.c.episode_id == episode_id)).scalar() or 0),
+    }
+
+
+#: 剧本里「角色名：台词」的行首说话人。旁白/画外音不是角色，别拿来催模型建条目。
+_SCRIPT_SPEAKER = re.compile(r"^\s*([^\s:：（(]{1,10})[:：]")
+_NON_CHARACTER_SPEAKERS = frozenset({"旁白", "画外音", "字幕", "解说", "OS", "VO", "内心"})
+
+def _script_speakers(script: str) -> list[str]:
+    """剧本里所有有台词的角色名（按出现顺序去重）。"""
+    names: list[str] = []
+    for line in (script or "").splitlines():
+        match = _SCRIPT_SPEAKER.match(line)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if not name or name in _NON_CHARACTER_SPEAKERS or name in names:
+            continue
+        names.append(name)
+    return names
+
+
+def _linked_character_names(conn: Connection, episode_id: int) -> list[str]:
+    rows = conn.execute(
+        select(characters.c.name)
+        .join(episode_characters, episode_characters.c.character_id == characters.c.id)
+        .where(episode_characters.c.episode_id == episode_id)
+    ).all()
+    return [row[0] for row in rows if row[0]]
+
+
+def _prune_stale_scene_links(conn: Connection, episode_id: int, script: str) -> int:
+    """摘掉「当前剧本里已经没有这个地点/时段」的本集场景关联。
+
+    2026-10-30 实测：一集重跑三次后本集挂着 8 个场景，其中 5 个是旧稿残留；分镜阶段
+    读到的场景表包含它们，镜头就绑到上一版剧本的场景上（剧本已是 S01/S02/S03，镜头却绑
+    场景 5/6）。清理**只在剧本小标题能读出地点、且至少有一个关联对得上**时才做 ——
+    剧本格式不认识时一律不动，宁可留着也不误删。
+
+    ⚠️ 地点对上还不够：同一地点的**旧时段**（街头@夜晚 vs 剧本的街头@黄昏）也是残留，
+    只比地点会把它们全留下，镜头照样可能绑到旧时段的那条。用 ``same_scene`` 连时段一起比。
+    """
+    headings = script_scene_headings(script)
+    if not headings:
+        return 0
+    rows = conn.execute(
+        select(episode_scenes.c.id, scenes.c.location, scenes.c.time)
+        .join(scenes, scenes.c.id == episode_scenes.c.scene_id)
+        .where(episode_scenes.c.episode_id == episode_id)
+    ).all()
+    # 逐行找它「属于哪个小标题」；找不到 = 旧稿残留
+    matched: dict[int, list[Any]] = {}
+    stale_ids: list[int] = []
+    for row in rows:
+        hit = next((idx for idx, heading in enumerate(headings)
+                    if same_scene(row[1], row[2], heading["location"], heading["time"])), None)
+        if hit is None:
+            stale_ids.append(row[0])
+        else:
+            matched.setdefault(hit, []).append(row)
+    # 同一个标题对上**多行**＝同义写法留下的重复行（实测：街头@夜晚 与 街头@深夜 都算
+    # S01），只留一行：时段字面出现在标题里的优先，其次地点字面，最后取小 id
+    for idx, group in matched.items():
+        if len(group) < 2:
+            continue
+        raw = headings[idx]["raw"]
+        best = min(group, key=lambda row: (
+            (row[2] or "").strip() not in raw,
+            (row[1] or "").strip() not in raw,
+            row[0],
+        ))
+        stale_ids.extend(row[0] for row in group if row[0] != best[0])
+
+    if not stale_ids or len(stale_ids) == len(rows):
+        return 0
+    conn.execute(sql_delete(episode_scenes).where(episode_scenes.c.id.in_(stale_ids)))
+    return len(stale_ids)
+
+
+def _missing_script_scenes(conn: Connection, episode_id: int,
+                           script: str) -> list[dict[str, str]]:
+    """剧本里有、但本集场景表里没有的（地点, 时段）组合。
+
+    2026-10-30 实测：剧本 S07/S08/S09 是「大厅 · 次日中午」，而场景表只到「次日清晨」
+    ⇒ 这几场镜头无场景可绑（``scene_id`` 只能留空或绑错）。
+    """
+    headings = script_scene_headings(script)
+    if not headings:
+        return []
+    rows = conn.execute(
+        select(scenes.c.location, scenes.c.time)
+        .join(episode_scenes, episode_scenes.c.scene_id == scenes.c.id)
+        .where(episode_scenes.c.episode_id == episode_id)
+    ).all()
+    missing: list[dict[str, str]] = []
+    for heading in headings:
+        if any(same_scene(row[0], row[1], heading["location"], heading["time"])
+               for row in rows):
+            continue
+        if any(same_scene(item["location"], item["time"],
+                          heading["location"], heading["time"]) for item in missing):
+            continue
+        missing.append(heading)
+    return missing
+
+
 async def run_extract_stage(episode_id: int, drama_id: int) -> None:
+    message = "请从本集剧本中提取去重后的角色与场景，并保存关联到本集。"
     with engine.begin() as conn:
-        await run_agent_with_retry(
-            conn, "extractor", episode_id, drama_id,
-            "请从本集剧本中提取去重后的角色与场景，并保存关联到本集。",
+        await run_agent_with_retry(conn, "extractor", episode_id, drama_id, message)
+        counts = _extract_counts(conn, episode_id)
+
+    # ⚠️ 2026-10-30 实测缺陷：这一阶段**从不校验产出** —— 模型只调四个 ``read_*``、
+    # 拿到空数组就直接收工（``protocolStatus=missing``），角色/场景全空，管线仍标记完成；
+    # 下游分镜因此拿不到人物表，``dialogue-warn unknownCharacter`` 安静地把对白清零。
+    # 这里补一次带**缺口清单**的补刀，再空就当场失败（与 script / storyboard 同一标准）。
+    missing = [name for name, count in counts.items() if count == 0]
+    if missing:
+        log_task_warn("AutoPipeline", "extract-missing", {
+            "episodeId": episode_id, "characters": counts["角色"], "scenes": counts["场景"],
+        })
+        retry_message = (
+            f"上一轮没有保存{'、'.join(missing)}：本集现在角色 {counts['角色']} 个、"
+            f"场景 {counts['场景']} 个。请立即调用保存工具把它们写进去，再结束本轮。"
         )
+        with engine.begin() as conn:
+            await run_agent_with_retry(conn, "extractor", episode_id, drama_id,
+                                       retry_message)
+            counts = _extract_counts(conn, episode_id)
+        missing = [name for name, count in counts.items() if count == 0]
+    if missing:
+        raise ValueError(
+            f"extractor 未产出{'、'.join(missing)}（角色 {counts['角色']}、"
+            f"场景 {counts['场景']}）")
+
+    # 角色覆盖：剧本里**有台词**的人一个都不能少。
+    # 2026-10-30 实测：模型只提了主角凌云，门卫/东家/黑影全漏 ⇒ 分镜只能把台词绑给凌云，
+    # TTS 也没音色可分。这里把缺席名单**点名回灌**（只补一次，避免无限补刀）。
+    with engine.connect() as conn:
+        script = (conn.execute(select(episodes.c.script_content)
+                               .where(episodes.c.id == episode_id)).scalar() or "")
+        linked = set(_linked_character_names(conn, episode_id))
+    missing_speakers = [name for name in _script_speakers(script) if name not in linked]
+    if missing_speakers:
+        log_task_warn("AutoPipeline", "extract-missing-speakers", {
+            "episodeId": episode_id, "names": "、".join(missing_speakers),
+            "linked": len(linked),
+        })
+        with engine.begin() as conn:
+            await run_agent_with_retry(
+                conn, "extractor", episode_id, drama_id,
+                "本集剧本里这些人物**有台词但还没有角色条目**：" +
+                "、".join(missing_speakers) +
+                "。请为每一个补一条角色（name 必填，尽量带上 role/appearance/clothing 等），"
+                "调用保存工具并按需关联到本集；若其中某个其实是已有人物的化名/别称，"
+                "就在说明里指出它对应哪个已有角色，不要再新建重复条目。",
+            )
+            linked_after = set(_linked_character_names(conn, episode_id))
+        still_missing = [name for name in missing_speakers if name not in linked_after]
+        if still_missing:
+            # 只告警不中断：化名/别称（"黑影" == 西装男子）是合理情况，中断会误伤整集
+            log_task_warn("AutoPipeline", "extract-speakers-still-missing", {
+                "episodeId": episode_id, "names": "、".join(still_missing),
+            })
+
+    # 场景关联清理：旧稿残留的场景会把分镜绑到已经不存在的场地上
+    with engine.begin() as conn:
+        pruned = _prune_stale_scene_links(conn, episode_id, script)
+        counts = _extract_counts(conn, episode_id)
+    if pruned:
+        log_task_progress("AutoPipeline", "extract-stale-scenes-pruned", {
+            "episodeId": episode_id, "pruned": pruned, "scenes": counts["场景"],
+        })
+
+    # 场景覆盖：剧本里出现的（地点, 时段）在场景表里必须有对应的一行，否则那几场镜头
+    # 无场景可绑。清理完再查一次，缺的就点名回灌（同样只补一次）。
+    with engine.connect() as conn:
+        missing_scenes = _missing_script_scenes(conn, episode_id, script)
+    if missing_scenes:
+        log_task_warn("AutoPipeline", "extract-missing-scenes", {
+            "episodeId": episode_id,
+            "names": "、".join(f"{item['location']}·{item['time']}" for item in missing_scenes),
+        })
+        with engine.begin() as conn:
+            await run_agent_with_retry(
+                conn, "extractor", episode_id, drama_id,
+                "本集剧本里这些**场景还没有对应条目**：" +
+                "；".join(f"{item['raw']}" for item in missing_scenes) +
+                "。请为每一场保存场景（location、time 必填，尽量带上 prompt 等画面信息），"
+                "并关联到本集；同地点同时段不要重复建条目。",
+            )
+            still_missing = _missing_script_scenes(conn, episode_id, script)
+            counts = _extract_counts(conn, episode_id)
+        if still_missing:
+            log_task_warn("AutoPipeline", "extract-scenes-still-missing", {
+                "episodeId": episode_id,
+                "names": "、".join(f"{item['location']}·{item['time']}"
+                                   for item in still_missing),
+                "scenes": counts["场景"],
+            })
 
 
 async def run_voice_stage(episode_id: int, drama_id: int) -> None:
@@ -287,16 +567,108 @@ async def run_voice_stage(episode_id: int, drama_id: int) -> None:
         )
 
 
+def _uncovered_scenes(conn: Connection, episode_id: int) -> list[dict[str, str]]:
+    """本集已关联、但**一个镜头都没绑**的场景。
+
+    2026-10-30 实测：10 镜只覆盖了 6 个（地点/时段）组合中的 5 个 —— 「后院·次日清晨」
+    整场没有镜头，那一场的戏就直接从成片里消失了。剧本是真源，场景没镜头 = 丢内容。
+    """
+    rows = conn.execute(
+        select(scenes.c.id, scenes.c.location, scenes.c.time)
+        .join(episode_scenes, episode_scenes.c.scene_id == scenes.c.id)
+        .where(episode_scenes.c.episode_id == episode_id)
+        .order_by(episode_scenes.c.id)
+    ).all()
+    covered = {
+        row[0] for row in conn.execute(
+            select(storyboards.c.scene_id)
+            .where(storyboards.c.episode_id == episode_id)
+        ).all() if row[0] is not None
+    }
+    return [{"label": f"{row[1]}·{row[2]}", "scene_id": str(row[0])}
+            for row in rows if row[0] not in covered]
+
+
 async def run_storyboard_stage(episode_id: int, drama_id: int) -> None:
+    # ⚠️ 2026-10-30 实测：一镜 30 个字段，把整集 9 镜塞进**一次** save_storyboards，
+    # JSON ≈ 4000+ token，正好顶破 maxOutputTokens(4096) ⇒ 模型干脆不调工具、直接在正文里
+    # 写分镜（``protocolStatus=missing``、outputTokens 卡 3695、一镜未存）。
+    # ⇒ 指令里明确**分批续写**（2–4 镜/次，首轮新建、之后 append），并要求覆盖每个场景。
+    #
+    # ⚠️ 另一个同样致命的坑：本阶段的语义是「整集重建」，而「重建」原本只靠模型第一轮不带
+    #    ``append`` 来触发。实测模型先读上下文、看到 ``existingStoryboards=10`` 就直接
+    #    ``append=true`` ⇒ 重跑时旧镜头全留着、新镜头又叠上去（15 镜、同一场戏两遍）。
+    #    ⇒ 由后端在阶段入口**先清空**（有产物则拒绝清理），模型读到的永远是 0 镜。
     with engine.begin() as conn:
-        await run_agent_with_retry(
-            conn, "storyboard_breaker", episode_id, drama_id,
-            "请将本集剧本按场景拆分为分镜，为每个分镜生成画面描述（image_prompt）与运镜提示"
-            "（video_prompt）及对白，并保存。",
+        reset = clear_episode_storyboards(conn, episode_id)
+    if reset["refused"]:
+        log_task_warn("AutoPipeline", "storyboard-reset-skipped", {
+            "episodeId": episode_id, "withMedia": reset["media"],
+            "reason": "已有成片产物，不重建；只为缺镜头的场景补齐",
+        })
+        with engine.connect() as conn:
+            uncovered = _uncovered_scenes(conn, episode_id)
+            kept = len(get_storyboards(conn, episode_id))
+        if not uncovered:
+            log_task_progress("AutoPipeline", "storyboard-kept", {
+                "episodeId": episode_id, "count": kept,
+            })
+            return
+        message = (
+            "本集已有带成片产物的镜头，**不要重建、不要删已有镜头**。这些场景目前一个镜头"
+            "都没有：" + "、".join(item["label"] for item in uncovered) +
+            "。请按剧本为它们补镜头（append=true 续写），scene_id 用："
+            + "、".join(f"{item['label']}={item['scene_id']}" for item in uncovered)
+            + "。每镜填 dialogue/action/image_prompt/video_prompt/duration。"
         )
+    else:
+        if reset["deleted"]:
+            log_task_progress("AutoPipeline", "storyboard-reset", {
+                "episodeId": episode_id, "deleted": reset["deleted"],
+            })
+        message = (
+            "请将本集剧本按场景拆分为分镜，为每个分镜生成画面描述（image_prompt）与运镜提示"
+            "（video_prompt）及对白并保存。要求：\n"
+            "1. 覆盖剧本里**每一个场景**，全集合计 8–14 镜，单镜 3–10 秒；\n"
+            "2. **分批保存**：每轮最多 3 镜调用一次 save_storyboards —— 第一轮不带 append"
+            "（整集新建），之后每轮都带 append=true 续写，直到全部镜头落库；\n"
+            "3. 每镜都要填台词(dialogue)、动作(action)、image_prompt、video_prompt 与时长"
+            "(duration)，不要留空。\n"
+            "全部保存完再用一句话说明一共拆了多少镜。"
+        )
+    with engine.begin() as conn:
+        await run_agent_with_retry(conn, "storyboard_breaker", episode_id, drama_id,
+                                   message)
         count = len(get_storyboards(conn, episode_id))
     if count == 0:
         raise ValueError("storyboard_breaker 未产出分镜（storyboards 为空）")
+
+    # 场景覆盖：有场景没镜头 = 那场戏从成片里消失（实测 10 镜漏掉「后院·次日清晨」整场）
+    with engine.connect() as conn:
+        uncovered = _uncovered_scenes(conn, episode_id)
+    if uncovered:
+        log_task_warn("AutoPipeline", "storyboard-uncovered-scenes", {
+            "episodeId": episode_id, "scenes": "、".join(item["label"] for item in uncovered),
+        })
+        with engine.begin() as conn:
+            await run_agent_with_retry(
+                conn, "storyboard_breaker", episode_id, drama_id,
+                "本集这些场景**一个镜头都没有**：" +
+                "、".join(item["label"] for item in uncovered) +
+                "。它们对应的戏不能丢。请按剧本为每一场补上镜头（用 append=true 续写，"
+                "**不要删掉已有镜头**），scene_id 用上面这些场景的 id："
+                + "、".join(f"{item['label']}={item['scene_id']}" for item in uncovered),
+            )
+            count = len(get_storyboards(conn, episode_id))
+            still_uncovered = _uncovered_scenes(conn, episode_id)
+        if still_uncovered:
+            log_task_warn("AutoPipeline", "storyboard-scenes-still-uncovered", {
+                "episodeId": episode_id, "count": count,
+                "scenes": "、".join(item["label"] for item in still_uncovered),
+            })
+        log_task_progress("AutoPipeline", "storyboard-coverage-filled", {
+            "episodeId": episode_id, "count": count,
+        })
 
 
 # ============================================================
@@ -830,6 +1202,14 @@ def run_auto_pipeline(opts: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_options(opts)
     if not (normalized.get("premise") or "").strip():
         raise ValueError("premise 不能为空")
+
+    # 先问再建：服务没起时**不落库**，直接带回可执行的修复原因（见 service_blockers ✓）
+    # 逃生门：``skipServiceCheck``（测试用桩 provider）或 ``DARME_SKIP_SERVICE_PREFLIGHT=1``
+    # （离线演练：明知服务稍后才起，接受失败推迟到阶段里）。
+    if not normalized.get("skipServiceCheck") and os.environ.get("DARME_SKIP_SERVICE_PREFLIGHT") != "1":
+        blockers = service_blockers(normalized)
+        if blockers:
+            raise ValueError("AI 服务未就绪，现在开跑会在中途失败：\n" + "\n".join(blockers))
 
     ts = now()
     premise = normalized["premise"].strip()

@@ -43,6 +43,7 @@ from app.services.prompt_utils import (  # noqa: F401  (下批保存工具的提
     build_prop_image_prompt,
     build_scene_image_prompt,
 )
+from app.services.scene_match import same_scene
 from app.services.task_logger import log_task_progress, log_task_success  # noqa: F401
 from app.services.text_slice import slice_long_text
 from app.agent.tool import Tool, array_of, json_string, object_schema
@@ -362,11 +363,14 @@ def create_extract_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
                 "scenes": ",".join(f"{s.get('location')}@{s.get('time') or ''}" for s in payload_scenes),
             })
             for scene in payload_scenes:
-                # 去重键：**地点 + 时间段**（同地点不同时段算新场景）
+                # 去重键：**地点 + 时间段**（同地点不同时段算新场景）。
+                # ⚠️ 2026-10-30：原本是**逐字相等**，模型每次重跑给的写法会漂
+                #    （街头/街道、东家大厅/东家商号大厅、夜晚/深夜）⇒ 一集重跑三次长出
+                #    8 个场景行。改用 ``same_scene``（地点同义 + 时段同桶）。
                 existing = next(
                     (row for row in _live_rows(conn, scenes)
-                     if row.location == scene.get("location")
-                     and row.time == (scene.get("time") or "")),
+                     if same_scene(row.location, row.time,
+                                   scene.get("location"), scene.get("time"))),
                     None,
                 )
                 fallback = build_scene_image_prompt({

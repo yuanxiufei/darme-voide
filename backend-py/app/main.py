@@ -70,6 +70,7 @@ from .routers.lora_train import router as lora_train_router
 from .routers.prompt_tools import router as prompt_tools_router
 from .routers.asset_gate import router as asset_gate_router
 from .routers.continuity import router as continuity_router
+from .routers.doctor import router as doctor_router  # 运行时体检（四类 AI 服务连通性）
 from .routers.preflight import router as preflight_router  # 开跑前体检（四块串成一次调用）  # 连续性表体检（事前）  # 资产验收门（付费生成前）  # 占位符解析 + 五段质感层  # 自研引擎体检（权重就绪/头部）
 from .routers.comfyui import router as comfyui_router
 from .routers.compose import router as compose_router
@@ -202,6 +203,7 @@ app.include_router(prompt_tools_router)
 app.include_router(asset_gate_router)
 app.include_router(continuity_router)
 app.include_router(preflight_router)
+app.include_router(doctor_router)
 app.include_router(comfyui_router)
 app.include_router(mcp_router)
 app.include_router(evaluation_router)

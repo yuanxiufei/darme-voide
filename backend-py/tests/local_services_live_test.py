@@ -185,19 +185,48 @@ def main() -> int:
     else:
         skip("h3-8765 未在跑 ⇒ H3 真 HTTP 闭环未验证（in-process 契约仍由 h3_chain_test.py 覆盖 ✓）")
 
-    # ── ④ CosyVoice 那条**未验证假设**：服务在跑就顺手验掉它（/tts 到底存不存在）
+    # ── ④ 9880 上的 TTS：**先看它自述是谁，再按实现选断言**（两种情况都真打一次，不只看 openapi）
+    #    同一端口可能跑两种实现，能力集不同，写死一套断言必然误判：
+    #    · 官方 CosyVoice（含克隆）→ 断言 /inference_zero_shot 与 /tts 都在；
+    #    · 本机薄封装 `app/local_services/tts`（``service == "local-tts"``，引擎 edge-tts / SAPI）
+    #      → 它**没有克隆能力**，断言改成「/tts 真能合成」＋「克隆口**缺得明明白白**」，
+    #      绝不因为缺克隆就判它坏、也绝不假装它有 ✓。
     if "cosyvoice" in live:
         try:
-            spec = json.loads(urllib.request.urlopen(  # noqa: S310
-                "http://127.0.0.1:9880/openapi.json", timeout=TIMEOUT).read())
-            paths = set(spec.get("paths") or {})
-            check("cosyvoice: 官方服务暴露 /inference_zero_shot（克隆路径可用）",
-                  any(p.startswith("/inference_zero_shot") for p in paths), sorted(paths)[:6])
-            check("cosyvoice: ⚠️ 适配器普通合成假设的 /tts **确实存在**"
-                  "（若失败：把普通合成改指 /inference_sft，或仿 h3/ 加薄封装）",
-                  any(p.startswith("/tts") for p in paths), sorted(paths)[:8])
-        except Exception as exc:  # noqa: BLE001
-            check("cosyvoice: 读取 openapi.json", False, f"{type(exc).__name__}"[:80])
+            root = httpx.get("http://127.0.0.1:9880/", timeout=TIMEOUT).json()
+        except Exception:  # noqa: BLE001
+            root = {}
+        if (root.get("service") or "").strip() == "local-tts":
+            resp = httpx.post(
+                "http://127.0.0.1:9880/tts",
+                json={"text": "活体接缝：剑在鞘中，人已到门口。", "voice_id": "zh-CN-YunxiNeural",
+                      "speed": 1.0, "emotion": "angry"},
+                timeout=90,
+            )
+            body = resp.json() if resp.status_code == 200 else {}
+            audio = str(body.get("audio") or "")
+            check("local-tts: /tts 真合成出音频（适配器普通合成的假设成立）",
+                  resp.status_code == 200 and len(audio) > 1000
+                  and float(body.get("audio_length") or 0) > 0.3,
+                  (resp.status_code, len(audio), body.get("audio_length")))
+            check("local-tts: 情绪/语速是**真送进引擎**的（不是收下就丢）",
+                  body.get("engine") in ("edge", "sapi") and bool(body.get("voice")),
+                  (body.get("engine"), body.get("voice")))
+            check("local-tts: 本机没有克隆能力 ⇒ 克隆口缺得明明白白（404，不假装成功）",
+                  httpx.post("http://127.0.0.1:9880/inference_zero_shot", json={},
+                             timeout=TIMEOUT).status_code == 404)
+        else:
+            try:
+                spec = json.loads(urllib.request.urlopen(  # noqa: S310
+                    "http://127.0.0.1:9880/openapi.json", timeout=TIMEOUT).read())
+                paths = set(spec.get("paths") or {})
+                check("cosyvoice: 官方服务暴露 /inference_zero_shot（克隆路径可用）",
+                      any(p.startswith("/inference_zero_shot") for p in paths), sorted(paths)[:6])
+                check("cosyvoice: ⚠️ 适配器普通合成假设的 /tts **确实存在**"
+                      "（若失败：把普通合成改指 /inference_sft，或仿 h3/ 加薄封装）",
+                      any(p.startswith("/tts") for p in paths), sorted(paths)[:8])
+            except Exception as exc:  # noqa: BLE001
+                check("cosyvoice: 读取 openapi.json", False, f"{type(exc).__name__}"[:80])
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

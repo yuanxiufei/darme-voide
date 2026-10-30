@@ -188,6 +188,55 @@ def main() -> int:  # noqa: C901
         ep2 = conn.execute(select(episodes).where(episodes.c.id == episode_id)).first()
     check("保存: 集时长随重建刷新（60s -> 1 分钟）", ep2.duration == 1, ep2.duration)
 
+    # 分批续写（append）：整集镜头一次吐不下时的唯一出路 —— 已存镜头**必须留着**，
+    # 且集时长要含之前几轮（否则越写越短）
+    appended = _call(tools, "save_storyboards", {"append": True, "storyboards": [
+        {"shot_number": 2, "title": "续写", "duration": 90, "scene_id": scene_id}]})
+    with engine.begin() as conn:
+        after_append = conn.execute(
+            select(storyboards.c.storyboard_number, storyboards.c.title, storyboards.c.duration)
+            .where(storyboards.c.episode_id == episode_id)
+            .order_by(storyboards.c.storyboard_number)).all()
+        ep3 = conn.execute(select(episodes).where(episodes.c.id == episode_id)).first()
+    check("保存: append=true **不删**已存镜头，两镜并存",
+          [(r[0], r[1]) for r in after_append] == [(1, "新开场"), (2, "续写")],
+          [tuple(r) for r in after_append])
+    check("保存: append 回执只报**本次**写入数", appended.get("count") == 1, str(appended)[:160])
+    check("保存: append 后集时长含前面几轮（60+90=150s -> 3 分钟）", ep3.duration == 3, ep3.duration)
+
+    # TEXT 列收到数组/对象：必须先压成字符串再入库。
+    # 2026-10-30 实测：模型把 `constraints` 写成数组 ⇒ sqlite3 报
+    # 「Error binding parameter N: type 'list' is not supported」⇒ 整条 save 失败 5 次、
+    # 最终 0 分镜。这条断言守住「脏类型不许打掉整集分镜」。
+    _call(tools, "save_storyboards", {"append": True, "storyboards": [{
+        "shot_number": 3, "duration": 5, "scene_id": scene_id,
+        "constraints": ["不许出现文字", "机位保持平视"],
+        "atmosphere": {"tone": "压抑"}}]})
+    with engine.begin() as conn:
+        dirty = conn.execute(
+            select(storyboards.c.constraints, storyboards.c.atmosphere)
+            .where(storyboards.c.storyboard_number == 3)).first()
+    check("保存: TEXT 列收到**数组**时压成字符串（不再打掉整条保存）",
+          dirty is not None and dirty[0] == "不许出现文字；机位保持平视", dirty)
+    # 紧凑分隔符：这列与 Node 侧共用，`JSON.stringify` 不带空格（守卫会查这一条）
+    check("保存: TEXT 列收到**对象**时压成 JSON 字符串（紧凑，同 JSON.stringify）",
+          dirty is not None and dirty[1] == '{"tone":"压抑"}', dirty)
+
+    # 续写时镜号必须**由后端接着往下排**。
+    # 2026-10-30 实测：已有镜 1–12 时模型又按自己的号存了 1–4 ⇒ 同一集出现两个「镜 11」，
+    # 剪辑与出图按镜号对齐，撞号即错位。
+    _call(tools, "save_storyboards", {"append": True, "storyboards": [
+        {"shot_number": 1, "duration": 5, "scene_id": scene_id, "title": "补A"},
+        {"shot_number": 1, "duration": 5, "scene_id": scene_id, "title": "补B"}]})
+    with engine.begin() as conn:
+        numbers = [(r[0], r[1]) for r in conn.execute(
+            select(storyboards.c.storyboard_number, storyboards.c.title)
+            .where(storyboards.c.episode_id == episode_id)
+            .order_by(storyboards.c.storyboard_number)).all()]
+    check("保存: append 时镜号自动接着排（模型乱写 1 也落成 4/5，不撞号）",
+          numbers == [(1, "新开场"), (2, "续写"), (3, None), (4, "补A"), (5, "补B")],
+          numbers)
+
     # 绑定校验
     err = ""
     try:

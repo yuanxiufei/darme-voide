@@ -660,6 +660,115 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
         and _raises(lambda: get_text_adapter("x"), UnknownProviderError)[1].startswith("Unknown text provider"),
     )
 
+    # ================= ComfyUI 渲染目标路由 =================
+    # 短剧线三类图各有一件工作流（角色定妆板 / 场景卡 / 分镜帧），且各档的
+    # steps / cfg / 尺寸原值都不同 ⇒ 目标该怎么选、档位该不该送，全在这里把关。
+    from app.services import comfyui_targets as ct  # noqa: PLC0415
+
+    cf = get_image_adapter("comfyui")
+    cf_config = {"baseUrl": "http://127.0.0.1:8188", "model": None}
+
+    def _cf_params(config, record):
+        return cf.build_generate_request(config, {"prompt": "p", **record})["body"]["params"]
+
+    check(
+        "comfyui: record.target 显式点名优先（压过配置与语义推断）",
+        "/renders/scene-card/run" in cf.build_generate_request(
+            cf_config, {"prompt": "p", "target": "scene-card", "characterId": 3}
+        )["url"],
+    )
+    check(
+        "comfyui: config.model 是目录里的 target ⇒ 钉死（不按板型推断）",
+        "/renders/scene-card-zimage/run" in cf.build_generate_request(
+            {"baseUrl": "http://x", "model": "scene-card-zimage"}, {"prompt": "p", "characterId": 1}
+        )["url"],
+    )
+    check(
+        "comfyui: 按板型 × 线推断（默认线 krea2）",
+        "/renders/character-sheet-krea2/run" in cf.build_generate_request(
+            cf_config, {"prompt": "p", "characterId": 1}
+        )["url"]
+        and "/renders/scene-card-krea2/run" in cf.build_generate_request(
+            cf_config, {"prompt": "p", "sceneId": 2}
+        )["url"]
+        and "/renders/storyboard-frame-krea2/run" in cf.build_generate_request(
+            cf_config, {"prompt": "p", "storyboardId": 9, "frameType": "first_frame"}
+        )["url"],
+    )
+    check(
+        "comfyui: 只有 frameType（没有 storyboardId）也判成分镜帧",
+        "/renders/storyboard-frame-krea2/run" in cf.build_generate_request(
+            cf_config, {"prompt": "p", "frameType": "keyframe"}
+        )["url"],
+    )
+    check(
+        "comfyui: settings.line 换线（qwen 档定妆板 = character-sheet）",
+        "/renders/character-sheet/run" in cf.build_generate_request(
+            {"baseUrl": "http://x", "model": None, "settings": {"line": "qwen"}},
+            {"prompt": "p", "characterId": 1},
+        )["url"],
+    )
+    raised, message = _raises(lambda: cf.build_generate_request(cf_config, {"prompt": "p"}))
+    check("comfyui: 判不出板型 ⇒ 抛错（绝不静默落到默认工作流）", raised, message)
+    raised, message = _raises(lambda: cf.build_generate_request(cf_config, {"prompt": "p", "propId": 5}))
+    check(
+        "comfyui: 道具板没有对应工作流 ⇒ 抛错并点名",
+        raised and message is not None and "道具板" in message,
+        message,
+    )
+    raised, message = _raises(lambda: cf.build_generate_request(
+        {"baseUrl": "http://x", "model": "no-such-target"}, {"prompt": "p"},
+    ))
+    check("comfyui: settings/model 写了不存在的 target ⇒ 抛错", raised, message)
+
+    # 负向口：只有 krea2 / 场景卡 / 分镜帧有；Qwen 档定妆板的 #6 是布局约束
+    check(
+        "comfyui: 负向只送给真有负向口的 target（krea2 定妆板送、Qwen 定妆板不送）",
+        _cf_params(cf_config, {"characterId": 1, "negativePrompt": "bad"})["negative"] == "bad"
+        and "negative" not in _cf_params(
+            {"baseUrl": "http://x", "model": None, "settings": {"line": "qwen"}},
+            {"characterId": 1, "negativePrompt": "bad"},
+        ),
+    )
+    check(
+        "comfyui: 不给 steps/cfg/seed/width/height ⇒ 一个都不送（档位属于工作流）",
+        set(_cf_params(cf_config, {"characterId": 1})) == {"prompt", "filename_prefix"},
+        _cf_params(cf_config, {"characterId": 1}),
+    )
+    check(
+        "comfyui: size 不映射成 width/height（跨厂商默认值会压坏工作流原尺寸）",
+        "width" not in _cf_params(cf_config, {"characterId": 1, "size": "1920x1080"}),
+    )
+    check(
+        "comfyui: 显式给出 steps/cfg/seed/width/height ⇒ 原样送",
+        _cf_params(cf_config, {
+            "characterId": 1, "steps": 30, "cfg": 5.5, "seed": 42, "width": 1024, "height": 768,
+        }) == {
+            "prompt": "p", "steps": 30, "cfg": 5.5, "seed": 42,
+            "width": 1024, "height": 768,
+            "filename_prefix": "engine/character-sheet-krea2",
+        },
+    )
+    check(
+        "comfyui: 参考图显式拒绝（list 与 JSON 字符串两种写法都拦住）",
+        _raises(lambda: cf.build_generate_request(cf_config, {
+            "prompt": "p", "characterId": 1, "referenceImages": ["data:image/png;base64,AAA"],
+        }))[0]
+        and _raises(lambda: cf.build_generate_request(cf_config, {
+            "prompt": "p", "characterId": 1, "referenceImages": '["http://x/a.png"]',
+        }))[0]
+        # ⚠️ "[]" 是「有值但空」——按 js_truthy 语义算无参考图，必须放行
+        and _raises(lambda: cf.build_generate_request(cf_config, {
+            "prompt": "p", "characterId": 1, "referenceImages": "[]",
+        }))[0] is False,
+    )
+    check(
+        "comfyui: 目录里每个 target 都有板型与线（防止手滑漏字段）",
+        all(meta.get("plate") in (ct.CHARACTER, ct.SCENE, ct.STORYBOARD) and meta.get("line") in ct.LINES
+            for meta in ct.TARGETS.values()),
+        [k for k, v in ct.TARGETS.items() if not v.get("plate") or not v.get("line")],
+    )
+
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

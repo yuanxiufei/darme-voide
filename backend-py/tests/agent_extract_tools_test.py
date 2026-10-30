@@ -132,6 +132,33 @@ def main() -> int:  # noqa: C901
     check("场景: **同地点不同时段算新场景**（这是去重键的核心规则）",
           new_time["created"] == 1, new_time)
 
+    # 同义写法必须合并（2026-10-30 实测：一集重跑三次，同一地点长出 3 行 ——
+    # 「民国上海街头 / 民国上海街道」、「夜晚 / 深夜」都是模型给法的漂移，不是不同场景）
+    drift = _call(tools, "save_dedup_scenes", {"scenes": [
+        {"location": "客栈大堂", "time": "深夜"}]})
+    check("场景: 同义地点 + 同时段桶（客栈 / 客栈大堂、夜晚 / 深夜）-> **复用**",
+          drift["reused"] == 1 and drift["created"] == 0, drift)
+
+    # 场景小标题解析（供 extract 阶段清理陈旧关联）
+    from app.services.scene_match import (  # noqa: PLC0415
+        locations_match, normalize_time, script_scene_headings, same_scene)
+    headings = script_scene_headings(
+        "## S01 | 外景 · 民国上海街道 | 黄昏\n## 场景2：东家大厅 夜\n正文\n")
+    check("场景表: 剧本小标题解析出地点/时段（竖线写法 + 冒号写法）",
+          [(h["location"], h["time"]) for h in headings]
+          == [("民国上海街道", "黄昏"), ("东家大厅", "夜")], headings)
+    check("场景表: 内景/外景前缀被剥掉",
+          not any(h["location"].startswith(("内景", "外景")) for h in headings), headings)
+    check("场景表: 地点同义判定（街头/街道 合并，大厅/书房 不合并）",
+          locations_match("民国上海街头", "民国上海街道")
+          and not locations_match("东家商号大厅", "东家商号书房"), "")
+    check("场景表: 时段同桶（深夜/夜晚 同桶，黄昏 不同桶）",
+          normalize_time("深夜") == normalize_time("夜晚") == "夜晚"
+          and normalize_time("黄昏") == "黄昏", normalize_time("深夜"))
+    check("场景表: same_scene 要求地点同义 **且** 时段同桶",
+          same_scene("客栈", "夜晚", "客栈大堂", "深夜")
+          and not same_scene("客栈", "夜晚", "客栈", "白天"), "")
+
     # ================= 物品 =================
     prop_first = _call(tools, "save_dedup_props", {"props": [{
         "name": "玉坠", "appearance": "羊脂白玉", "holder": "林昭"}]})

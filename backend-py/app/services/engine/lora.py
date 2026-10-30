@@ -343,13 +343,26 @@ def read_tensors(path: str | Path, *, torch_module: Any = None) -> dict[str, Any
 
     ⚠️ 逐张量读、按头部自述的字节数封顶 ✓ —— 拿错文件（比如 19 GiB 的整权重）会**当场拒绝** ✗
     而不是把机器拖死 ✗。
+
+    ⚠️ **自称训练产物**的文件（``format`` 以 ``training`` 开头）必须先过
+    :func:`checkpoint_meta.read_training_contract` ✓：缺 ``base_model`` / ``train_config`` /
+    ``version`` 任一 ⇒ 当场拒 ✗（E4.2：不补默认值 ✓✗）。校验放在 ``import torch`` **之前** ✓ ——
+    否则「元数据不全」这种事也得先装 torch 才能发现 ✓✗，零 torch 的自检就测不到 ✓。
     """
+    from . import checkpoint_meta as meta_mod  # noqa: PLC0415 —— 纯 stdlib ✓
+    from . import safetensors as st  # noqa: PLC0415 —— 纯 stdlib ✓
+
+    metadata, header = st.read_header(path)
+    if meta_mod.is_training_contract(metadata):
+        try:
+            meta_mod.read_training_contract(metadata)
+        except meta_mod.ContractError as err:
+            raise LoraError(
+                f"{Path(path).name} 自述是训练产物，但元数据不完整 ✗：{err}") from err
+
     import torch  # noqa: PLC0415 —— 模块级零依赖 ✓
 
     torch = torch_module or torch
-    from . import safetensors as st  # noqa: PLC0415 —— 纯 stdlib ✓
-
-    _metadata, header = st.read_header(path)
     tensors: dict[str, Any] = {}
     for name, raw in header.items():
         if name == "__metadata__":

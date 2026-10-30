@@ -25,6 +25,10 @@ from pathlib import Path
 
 os.environ.setdefault("DATA_ROOT", tempfile.mkdtemp(prefix="autopipe_"))
 os.environ.setdefault("PROXY_TO_NODE", "0")
+# 本套件关心的是**状态机**（阶段顺序/幂等/依赖补全），不是服务连通 —— 服务连通由
+# runtime_doctor 套件负责。开跑前的服务门禁在这里必然误判（桩 provider 没有真端口），
+# 所以显式走逃生门；门禁**语义本身**在下面用注入 probe 单独断言。
+os.environ.setdefault("DARME_SKIP_SERVICE_PREFLIGHT", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -32,11 +36,20 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.core.models import dramas, episodes, storyboards, video_generations  # noqa: E402
+from app.core.models import (  # noqa: E402
+    dramas,
+    episode_scenes,
+    episodes,
+    scenes,
+    storyboard_characters,
+    storyboards,
+    video_generations,
+)
 from app.core.response import now  # noqa: E402
 from app.routers import auto_pipeline as ap_route  # noqa: E402
 from app.agent import auto_pipeline as ap  # noqa: E402
 from app.services import sse_hub  # noqa: E402
+from app.services import storyboard_helpers as st  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -284,6 +297,47 @@ def main() -> int:  # noqa: C901
     check("run: premise 为空/空白 -> `premise 不能为空`", empty_error == "premise 不能为空",
           empty_error)
 
+    # ── 服务门禁（service_blockers）────────────────────────────────────────
+    # 目的：服务没起时**在落库之前**就抛，库里不留一集 `auto:failed` 的半截数据。
+    # 这里注入替身 probe（不真连端口），断言的只是门禁语义本身。
+    from app.services.runtime_doctor import ServiceCheck  # noqa: PLC0415
+
+    def _fake_probe(state_by_service: dict[str, str]):
+        def _probe(name: str) -> ServiceCheck:
+            state = state_by_service.get(name, "ok")
+            return ServiceCheck(service=name, label=f"{name}服务", state=state,
+                                note=f"{name}没起", fix=f"启动{name}")
+        return _probe
+
+    check(
+        "blockers: 全在线 -> 无阻断（纯文本管线）",
+        ap.service_blockers({"premise": "梗"}, probe=_fake_probe({})) == [],
+    )
+    blockers = ap.service_blockers({"premise": "梗", "withVideos": True},
+                                   probe=_fake_probe({"video": "offline"}))
+    check(
+        "blockers: 只探本次真用到的（勾 withVideos ⇒ text/image/video，含修复指引）",
+        len(blockers) == 1 and "video服务" in blockers[0] and "启动video" in blockers[0],
+        blockers,
+    )
+    check(
+        "blockers: 纯文本管线不因 image 离线被拦（只探 text）",
+        ap.service_blockers({"premise": "梗"},
+                            probe=_fake_probe({"image": "offline", "audio": "offline"})) == [],
+    )
+    check(
+        "blockers: degraded 算可用（渲染层在线但节点没加载不该拦）",
+        ap.service_blockers({"premise": "梗"}, probe=_fake_probe({"text": "degraded"})) == [],
+    )
+
+    # 逃生门：选项归一化必须认 skipServiceCheck（否则环境变量与选项两条路只剩一条）
+    check(
+        "options: skipServiceCheck 归一化为 bool（默认 False）",
+        ap.normalize_options({"premise": "梗"}).get("skipServiceCheck") is False
+        and ap.normalize_options({"premise": "梗", "skipServiceCheck": True})["skipServiceCheck"] is True,
+        ap.normalize_options({"premise": "梗", "skipServiceCheck": True}).get("skipServiceCheck"),
+    )
+
     # ⚠️ `_spawn` 用 `asyncio.ensure_future` ⇒ **必须在事件循环里调用**（生产是 async 路由里调用）。
     #    所以这一段的断言整体收进一次 `asyncio.run`，否则 fire-and-forget 任务会挂到已关闭的循环上。
     async def _run_and_resume() -> dict:
@@ -436,6 +490,122 @@ def main() -> int:  # noqa: C901
     sse_hub._channels.clear()  # noqa: SLF001
     check("内存: 事件总线在订阅者全部取消后**不留频道**（防泄漏）",
           sse_hub._channels == {})  # noqa: SLF001
+
+    # ================= 提取阶段：说话人补齐 + 陈旧场景关联清理 =================
+    # 2026-10-30 真跑第 2 集实测两处：① extract 只提了主角凌云，门卫/东家/黑影（都有台词）
+    # 全漏；② 每次重跑都新建场景行且旧行仍挂在本集上 —— 分镜阶段读到 8 个场景，镜头绑到
+    # 上一版剧本的场景（剧本已是 S01/S02/S03，镜头却绑场景 5/6）。
+    check("说话人: 只认行首「角色名：」、去重、旁白不算角色",
+          ap._script_speakers(  # noqa: SLF001
+              "## S01 | 内景 · 客栈 | 夜\n凌云：你终于来了。\n旁白：雨更大了。\n"
+              "门卫：什么人？（拔刀）\n凌云：别动。\n") == ["凌云", "门卫"],
+          ap._script_speakers(  # noqa: SLF001
+              "凌云：A\n旁白：B\n门卫：C\n凌云：D\n"))
+
+    prune_drama = _make_drama("清理剧")
+    prune_ep = _make_episode(prune_drama, ap.AUTO_STATUS["done"], number=2)
+    stamp = now()
+    with engine.begin() as conn:
+        keep_scene = conn.execute(scenes.insert().values(
+            drama_id=prune_drama, location="民国上海街道", time="黄昏", prompt="街道",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        stale_scene = conn.execute(scenes.insert().values(
+            drama_id=prune_drama, location="东家书房", time="清晨", prompt="书房",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        # 同地点**旧时段**（街头@深夜 vs 剧本的街头@黄昏）也是残留：只比地点会漏掉它
+        stale_time = conn.execute(scenes.insert().values(
+            drama_id=prune_drama, location="民国上海街道", time="深夜", prompt="街道夜",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        conn.execute(episode_scenes.insert(), [
+            {"episode_id": prune_ep, "scene_id": keep_scene, "created_at": stamp},
+            {"episode_id": prune_ep, "scene_id": stale_scene, "created_at": stamp},
+            {"episode_id": prune_ep, "scene_id": stale_time, "created_at": stamp},
+        ])
+        pruned = ap._prune_stale_scene_links(  # noqa: SLF001
+            conn, prune_ep, "## S01 | 外景 · 民国上海街道 | 黄昏\n凌云：走。\n")
+        left = [row[0] for row in conn.execute(
+            select(episode_scenes.c.scene_id)
+            .where(episode_scenes.c.episode_id == prune_ep)).all()]
+    check("清理: 剧本里没有的地点 + 同地点的旧时段 -> 摘掉本集关联，命中的留下",
+          pruned == 2 and left == [keep_scene], (pruned, left))
+    with engine.begin() as conn:
+        untouched = ap._prune_stale_scene_links(conn, prune_ep, "正文没有场景小标题")  # noqa: SLF001
+    check("清理: 剧本读不出场景小标题 -> **一个都不动**（宁可留着也不误删）",
+          untouched == 0 and left == [keep_scene], (untouched, left))
+
+    # 同一个小标题对上**多行**（同义写法留下来的重复行）只留一行
+    with engine.begin() as conn:
+        dup_scene = conn.execute(scenes.insert().values(
+            drama_id=prune_drama, location="民国上海街道", time="黄昏", prompt="街道2",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        conn.execute(episode_scenes.insert().values(
+            episode_id=prune_ep, scene_id=dup_scene, created_at=stamp))
+        deduped = ap._prune_stale_scene_links(  # noqa: SLF001
+            conn, prune_ep, "## S01 | 外景 · 民国上海街道 | 黄昏\n凌云：走。\n")
+        left2 = [row[0] for row in conn.execute(
+            select(episode_scenes.c.scene_id)
+            .where(episode_scenes.c.episode_id == prune_ep)).all()]
+    check("清理: 同一个场景标题对上两行 -> 只留一行（重复行摘掉）",
+          deduped == 1 and left2 == [keep_scene], (deduped, left2))
+
+    # 剧本里有、场景表里没有的（地点, 时段）：下游那几场镜头会无场景可绑
+    with engine.connect() as conn:
+        missing_scenes = ap._missing_script_scenes(  # noqa: SLF001
+            conn, prune_ep,
+            "## S01 | 外景 · 民国上海街道 | 黄昏\n## S02 | 内景 · 东家商号大厅 | 次日中午\n")
+    check("覆盖: 报出「剧本有、场景表没有」的场景（同地点不同时段也算缺）",
+          [item["location"] for item in missing_scenes] == ["东家商号大厅"],
+          missing_scenes)
+
+    # 场景覆盖：有场景没镜头 = 那场戏从成片里消失（实测 10 镜漏掉「后院·次日清晨」整场）
+    with engine.begin() as conn:
+        lonely_scene = conn.execute(scenes.insert().values(
+            drama_id=prune_drama, location="东家商号后院", time="深夜", prompt="后院",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        conn.execute(episode_scenes.insert().values(
+            episode_id=prune_ep, scene_id=lonely_scene, created_at=stamp))
+        conn.execute(storyboards.insert().values(
+            episode_id=prune_ep, storyboard_number=1, scene_id=keep_scene,
+            created_at=stamp, updated_at=stamp))
+        uncovered = ap._uncovered_scenes(conn, prune_ep)  # noqa: SLF001
+    check("覆盖: 报了「有场景但一个镜头都没有」的场景（已绑镜头的场景不算缺）",
+          [item["scene_id"] for item in uncovered] == [str(lonely_scene)],
+          uncovered)
+
+    # ================= 分镜阶段重跑 = 整集重建 =================
+    # 2026-10-30 实测：模型读到 existingStoryboards=10 就自己 append=true ⇒ 重跑叠成 15 镜、
+    # 同一场戏两遍。⇒ 阶段入口必须**先清空**（有成片产物则拒绝清理）。
+    with engine.begin() as conn:
+        first_reset = st.clear_episode_storyboards(conn, prune_ep)
+        left_rows = conn.execute(
+            select(storyboards.c.id).where(storyboards.c.episode_id == prune_ep)).all()
+        left_links = conn.execute(
+            select(storyboard_characters.c.storyboard_id)).all()
+    check("重建: 重跑前清空本集镜头（镜头 1 -> 0、关联也一起清掉）",
+          first_reset == {"deleted": 1, "refused": False, "media": 0}
+          and left_rows == [] and left_links == [],
+          (first_reset, left_rows, left_links))
+
+    # 带成片产物的镜头：**不许**为了重跑把产物扔掉，只能退化成「补缺场景」
+    with engine.begin() as conn:
+        shot_with_media = conn.execute(storyboards.insert().values(
+            episode_id=prune_ep, storyboard_number=1, scene_id=keep_scene,
+            first_frame_image="/media/first.png",
+            created_at=stamp, updated_at=stamp)).inserted_primary_key[0]
+        second_reset = st.clear_episode_storyboards(conn, prune_ep)
+        still_there = conn.execute(
+            select(storyboards.c.id).where(storyboards.c.episode_id == prune_ep)).all()
+    check("重建: 镜头已有成片产物 -> 拒绝清理（镜头还在，唯一产物不丢）",
+          second_reset == {"deleted": 0, "refused": True, "media": 1}
+          and [row[0] for row in still_there] == [shot_with_media],
+          (second_reset, still_there))
+
+    # 空集：没什么可清，也不算拒绝
+    with engine.begin() as conn:
+        conn.execute(storyboards.delete().where(storyboards.c.episode_id == prune_ep))
+        empty_reset = st.clear_episode_storyboards(conn, prune_ep)
+    check("重建: 本集没有镜头 -> deleted=0 且不算拒绝", 
+          empty_reset == {"deleted": 0, "refused": False, "media": 0}, empty_reset)
 
     # ================= 汇总 =================
     failed_items = [item for item in _RESULTS if not item[1]]

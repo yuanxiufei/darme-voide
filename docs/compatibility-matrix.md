@@ -38,9 +38,10 @@
 |---|---|---|
 | per-tensor / per-row / per-col / elementwise 布局 | **支持** ✓ | `quant.plan_dequant` 能给出反量化计划 |
 | `convrot`（带 Hadamard 反旋转的 per-row） | **支持** ✓ | `quant.convrot_group_of` ＋ `build_hadamard` ＋ 激活侧旋转搬运；两个 19.53 GiB 主 DiT 实测就是这个族 |
+| 4 bit **打包**（`w4a4` / `linear_dtype: int4`，每字节两个有符号 nibble） | **支持** ✓ | `quant.int4_stems_of` ＋ `unpack_int4`（低半字节=偶数列、nibble ≥ 8 减 16）＋ 逻辑列 ×2 后再判 `convrot`/布局；盘上 8 个 int4 文件实测全 `per-row+int4pack+convrot*`。⚠️ 打包形状与 per-row int8 **逐字相同** ⇒ 只有文件自述（`comfy_quant` / `_quantization_metadata`）能识破，判据**绝不许按形状猜** |
 | `nvfp4`（4 bit E2M1 打包 ＋ e4m3 块 scale[16] ＋ f32 二级 scale，AWQ 变体） | **支持** ✓ | `quant_nvfp4` 逐层还原（E2M1 高半字节在前、cuBLAS 128×4 tiled 块 scale、AWQ 折进权重列）；与 `reference` 的实现 `torch.equal` 逐位对拍；清单里 `te_nvfp4` 属这一族 |
 | `mxfp4` | **不支持** ✗ | `capabilities().quant.unsupportedFormats` 明确列出（E8M0 共享指数，解码表与 nvfp4 不同）⇒ 走 `E_UNSUPPORTED_QUANT` |
-| 块/分组量化（**上表已列各族以外**，如 int4 `group_size` 变体） | **不支持** ✗ | 一律拒绝，**不猜**（不按 per-row 糊过去、也不猜 group size） |
+| 块/分组量化（**上表已列各族以外**，如带 `qzeros` / `g_idx` 的 GPTQ 式 `group_size` 变体） | **不支持** ✗ | 一律拒绝，**不猜**（不按 per-row 糊过去、也不猜 group size）。⚠️ 别与上一行的 4 bit **打包**混淆：`convrot_w4a4` 里的 `quant_group_size` 是 Hadamard **旋转分组**，不是量化分组 ⇒ 那一族**支持** |
 
 E0.4 已裁定并落地（`docs/adr/0002-quant-families.md`，**已接受 · A 路**）：`nvfp4` 从「未实现」转为**已实现** ✓。
 ⚠️ 但「能还原权重」不等于「H3 能跑」✗：本仓 32B Qwen3-VL 文本编码器**尚无模型骨架** ⇒ 还原出的权重暂时没有

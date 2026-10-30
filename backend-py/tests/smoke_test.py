@@ -1393,13 +1393,19 @@ with TestClient(app) as client:
     r = client.get("/api/v1/traces")
     dump("GET /api/v1/traces", r)
     metas = r.json().get("data") or []
-    check("traces list: 2 files listed", len(metas) == 2, str([m["traceId"] for m in metas]))
-    t1_meta = next(m for m in metas if m["traceId"] == "t1")
+    # ⚠️ 这里**不能断言「目录里正好 2 个文件」**：``DATA_ROOT`` 指向的是**真实** data 目录，
+    # 而真实跑过 Agent 之后 ``traces/SMOKE/*.jsonl`` 里就有真 trace（2026-10-30 实测：多出一个
+    # ``0098f3d7`` ⇒ 契约冒烟假红）。本用例只对**自己写的**两个文件负责，其余条目留给其他用例/真人数据。
+    own = [m for m in metas if m["traceId"] in ("t1", "t2")]
+    check("traces list: 本用例写的 2 个 trace 都在", len(own) == 2,
+          str([m["traceId"] for m in metas]))
+    t1_meta = next(m for m in own if m["traceId"] == "t1")
     check("traces list: meta shape + count",
           t1_meta["scope"] == "SMOKE" and t1_meta["count"] == 2, str(t1_meta)[:250])
     check("traces list: firstTs/lastTs from records",
           t1_meta["firstTs"] == "2026-01-01T00:00:00.000Z", str(t1_meta))
-    check("traces list: sorted by mtime desc (newest first)", metas[0]["traceId"] == "t2",
+    check("traces list: sorted by mtime desc (newest first)",
+          [m["traceId"] for m in own] == ["t2", "t1"],
           str([m["traceId"] for m in metas]))
 
     r = client.get("/api/v1/traces/SMOKE/t1")

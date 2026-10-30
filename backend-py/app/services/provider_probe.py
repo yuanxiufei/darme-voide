@@ -193,6 +193,18 @@ def build_probe(
             "body": None,
         }
 
+    if p == "comfyui":
+        # 判活要看**渲染层**就绪没有（不只是 ComfyUI 进程活着）：
+        # `/comfy-studio/renders` 由 comfy_studio 插件提供，它才是真正提交工作流的那一层，
+        # 而 `/system_stats` 只证明核心起来了 —— 插件没加载时前者 404、后者照常 200。
+        # 404 ⇒ runtime_doctor 判「在线但接口未就绪」（degraded 级提示），不会误报服务没起。
+        return {
+            "method": "GET",
+            "url": join_provider_url(base_url, "", "/comfy-studio/renders"),
+            "headers": {},
+            "body": None,
+        }
+
     if p == "cosyvoice":
         return {"method": "GET", "url": join_provider_url(base_url, "", "/"), "headers": {}, "body": None}
 

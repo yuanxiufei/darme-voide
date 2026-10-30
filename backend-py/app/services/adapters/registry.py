@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 
 from .image_adapters import (
     AliImageAdapter,
+    ComfyUIImageAdapter,
     GeminiImageAdapter,
     LocalSDImageAdapter,
     MiniMaxImageAdapter,
@@ -17,7 +18,7 @@ from .image_adapters import (
     VolcEngineImageAdapter,
 )
 from .text_adapters import GeminiTextAdapter, OllamaTextAdapter, OpenAICompatibleTextAdapter
-from .tts_adapters import CosyVoiceTTSAdapter, MiniMaxTTSAdapter
+from .tts_adapters import CosyVoiceTTSAdapter, LocalTTSAdapter, MiniMaxTTSAdapter
 from .video_adapters import (
     AliVideoAdapter,
     MiniMaxVideoAdapter,
@@ -53,6 +54,8 @@ image_adapters: dict[str, Any] = {
     "chatfire": OpenAIImageAdapter(),
     # 本地 SD WebUI
     "local-sd": LocalSDImageAdapter(),
+    # 本地 ComfyUI 渲染目标（model 字段＝target id，盘上 Krea2/Qwen-Image/Z-Image 都在这条路上）
+    "comfyui": ComfyUIImageAdapter(),
 }
 
 # 视频 Adapter 注册表
@@ -68,6 +71,8 @@ video_adapters: dict[str, Any] = {
 tts_adapters: dict[str, Any] = {
     "minimax": MiniMaxTTSAdapter(),
     "cosyvoice": CosyVoiceTTSAdapter(),
+    # 本机薄封装（app/local_services/tts）：协议同 cosyvoice，引擎可以是 edge-tts 或 SAPI
+    "local-tts": LocalTTSAdapter(),
 }
 
 # 文本 Adapter 注册表

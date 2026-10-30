@@ -33,11 +33,13 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import re
+from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import and_, delete as sql_delete, select, update
+from sqlalchemy import and_, delete as sql_delete, func, select, update
 
 from app.core.db import engine
 from app.services import continuity_store
@@ -53,6 +55,7 @@ from app.core.models import (
     prop_templates,
     scenes,
     storyboard_characters,
+    storyboard_props,
     storyboards,
 )
 from app.core.response import now
@@ -74,6 +77,36 @@ _SPEAKER_PREFIX = re.compile(r"^\s*([^\n:：]{1,12}?)[:：]")
 
 #: 对白一致性扫描：角色名（≤10 字）+ 冒号 + **至少 8 字**台词
 _DIALOGUE_LINE = re.compile(r"([^\n:：]{1,10}?)[:：]([^:：\n]{8,})")
+
+#: 分镜里所有 **TEXT 列**（其余是数字/关联数组）。模型偶尔会把它们写成数组/对象，
+#: 而 sqlite3 只会说「``Error binding parameter N: type 'list' is not supported``」——
+#: 2026-10-30 实测：qwen3:14b 把 ``constraints`` 写成数组 ⇒ 整条 save_storyboards 全灭，
+#: 连存 5 次全失败、最后 `storyboards 为空` 才报错。入库前统一压成字符串。
+_STORYBOARD_TEXT_FIELDS = (
+    "title", "shot_type", "angle", "movement", "location", "time", "action",
+    "dialogue", "description", "result", "atmosphere", "image_prompt",
+    "first_frame_prompt", "last_frame_prompt", "video_prompt", "negative_prompt",
+    "bgm_prompt", "sound_effect", "scene_type", "speaker_id", "start_state",
+    "end_state", "constraints", "transition_motive", "keyframe_prompt",
+)
+
+
+def _as_text(value: Any) -> Any:
+    """把模型给的值压成 **TEXT 列能存的字符串**（``None`` 保持 ``None``）。"""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        # 紧凑分隔符：这列与 Node 侧共用，`JSON.stringify` 不带空格
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, Iterable):
+        return "；".join(_as_text(item) for item in value)
+    return str(value)
+
+
+def _coerce_storyboard_fields(shot: dict[str, Any]) -> dict[str, Any]:
+    """逐镜把 :data:`_STORYBOARD_TEXT_FIELDS` 压成字符串（不改其他字段的类型语义）。"""
+    return {key: (_as_text(value) if key in _STORYBOARD_TEXT_FIELDS else value)
+            for key, value in shot.items()}
 
 #: 旁白/画外音不算"角色"（不绑定、也不参与一致性校验）
 _NARRATOR_NAMES = re.compile(r"^(旁白|画外音|narrator)$", re.IGNORECASE)
@@ -369,27 +402,56 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
 
     async def save_storyboards(arguments: dict[str, Any]) -> dict[str, Any]:
         payload_storyboards = arguments.get("storyboards") or []
+        # ⚠️ 2026-10-30：默认仍「整集重建」，但支持 ``append=True`` 分批续写。
+        #    原因：一镜 30 个字段，9 镜一次吐 ≈ 4000+ token，正好顶破 maxOutputTokens(4096)；
+        #    实测模型干脆不调工具、直接在正文里写分镜 ⇒ ``protocolStatus=missing``、一镜未存。
+        #    分批（每轮 2–4 镜）是唯一能同时守住「字段不缩水」和「输出窗口不炸」的做法。
+        append = bool(arguments.get("append"))
         ts = now()
         log_task_progress("StoryboardTool", "save-begin", {
             "episodeId": episode_id, "dramaId": drama_id,
-            "count": len(payload_storyboards),
+            "count": len(payload_storyboards), "append": append,
             "shotNumbers": ",".join(str(sb.get("shot_number")) for sb in payload_storyboards),
         })
 
         total_duration = 0
         dialogue_issue_count = 0
         with engine.begin() as conn:
-            # 整集重建：先删光旧分镜的**角色关联**，再删分镜本身（⚠️ 物品关联不删）
-            existing_ids = [
+            # 整集重建：先把**挂在旧镜头上的一切**删干净，再删分镜本身
+            # 续写模式（append）不动已存的镜头 ✓
+            #
+            # ⚠️ 2026-10-30 修：原来只删角色关联（注释还写着「物品关联不删」）⇒ 旧镜头被删后
+            #    ``storyboard_props`` 与镜头级 ``continuity_states`` 全成了指向不存在镜头的孤儿行：
+            #    前者让道具绑定读数虚高，后者更糟 —— 跨镜状态机按 storyboard_id 读到的
+            #    「上一镜手上是什么」会命中幽灵镜头（值是真的、镜头已经没了）。
+            #    场景级状态（只看 scene_id、scene_id 非空）**不删**：场景本身还在。
+            existing_ids = [] if append else [
                 row[0] for row in conn.execute(
                     select(storyboards.c.id).where(storyboards.c.episode_id == episode_id)
                 ).all()
             ]
-            for storyboard_id in existing_ids:
+            if existing_ids:
                 conn.execute(sql_delete(storyboard_characters).where(
-                    storyboard_characters.c.storyboard_id == storyboard_id
-                ))
-            conn.execute(sql_delete(storyboards).where(storyboards.c.episode_id == episode_id))
+                    storyboard_characters.c.storyboard_id.in_(existing_ids)))
+                conn.execute(sql_delete(storyboard_props).where(
+                    storyboard_props.c.storyboard_id.in_(existing_ids)))
+                conn.execute(sql_delete(continuity_states).where(
+                    continuity_states.c.storyboard_id.in_(existing_ids)))
+            if not append:
+                conn.execute(sql_delete(storyboards).where(
+                    storyboards.c.episode_id == episode_id))
+
+            # 续写模式：镜号**由后端接着往下排**。
+            # 2026-10-30 实测：模型续写时自己从 1 开始编号（已有 1–12，又存了 1–4），
+            # 结果同一集出现两个「镜 11 / 镜 12」—— 剪辑与出图按镜号对齐，撞号即错位。
+            if append:
+                offset = int(conn.execute(
+                    select(func.coalesce(func.max(storyboards.c.storyboard_number), 0))
+                    .where(storyboards.c.episode_id == episode_id)
+                ).scalar() or 0)
+                for extra, raw in enumerate(payload_storyboards, start=1):
+                    if isinstance(raw, dict):
+                        raw["shot_number"] = offset + extra
 
             # 本集角色名单 + 「角色名 → speaker_id」映射
             episode_char_names: set[str] = set()
@@ -409,7 +471,9 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
                     if char.speaker_id:
                         name_to_speaker[char.name] = char.speaker_id
 
-            for shot in payload_storyboards:
+            for raw_shot in payload_storyboards:
+                shot = _coerce_storyboard_fields(raw_shot) if isinstance(raw_shot, dict) \
+                    else raw_shot
                 validate_storyboard_bindings(
                     conn, episode_id, shot.get("scene_id"), shot.get("character_ids")
                 )
@@ -492,6 +556,13 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
                 sync_storyboard_props(conn, storyboard_id, shot.get("prop_ids") or [])
                 total_duration += duration
 
+            # 续写模式下「本集总时长」必须含**之前几轮**已存的镜头，否则集时长会越写越短
+            if append:
+                total_duration = int(conn.execute(
+                    select(func.coalesce(func.sum(storyboards.c.duration), 0))
+                    .where(storyboards.c.episode_id == episode_id)
+                ).scalar() or 0)
+
             # 集时长：向上取整到分钟（`Math.ceil(total/60)`）
             conn.execute(episodes.update().where(episodes.c.id == episode_id).values(
                 duration=math.ceil(total_duration / 60), updated_at=ts
@@ -522,6 +593,9 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
     async def update_storyboard(arguments: dict[str, Any]) -> dict[str, Any]:
         storyboard_id = arguments.get("storyboard_id")
         fields = {key: value for key, value in arguments.items() if key != "storyboard_id"}
+        # 与 save 同一条防线：TEXT 列收到数组/对象时先压成字符串，别让 sqlite3 报
+        # 「type 'list' is not supported」把一次单镜修正整条打掉
+        fields = _coerce_storyboard_fields(fields)
 
         with engine.begin() as conn:
             storyboard = conn.execute(
@@ -642,9 +716,15 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
         "save_storyboards": Tool(
             id="save_storyboards",
             description=(
-                "Save generated storyboards. Replaces all existing storyboards for this episode."
+                "Save generated storyboards. Replaces all existing storyboards for this episode. "
+                "Pass append=true to add shots onto the ones already saved (use it when the "
+                "episode is too long to fit in one call: save 2-4 shots per call)."
             ),
-            input_schema=object_schema({"storyboards": array_of(storyboard_item)}),
+            input_schema=object_schema(
+                {"storyboards": array_of(storyboard_item),
+                 "append": {"type": "boolean"}},
+                required=["storyboards"],
+            ),
             execute=save_storyboards,
         ),
         "update_storyboard": Tool(

@@ -167,12 +167,88 @@ def case_unsupported_family() -> None:
           and quant_mod.supported_format({"format": "int8_tensorwise", "convrot": True}) is None)
 
 
+def case_training_contract() -> None:
+    """⑤⁷ 训练产物三字段（E4.2 ✓ 2026-10-30）：**缺任一就拒** ✓、**不补默认值** ✓。
+
+    ⚠️ 三个字段都不是「有键就算」✗：``""`` / ``{}`` / ``True`` / 字符串 JSON 一律按缺处理 ✓
+    （与 ``truthy`` / ``integers`` 同一条纪律 ✓）。另外两条边界值得单钉：
+
+    * **没有**内嵌契约 ⇒ 也**拒** ✗ —— 与 :func:`read_contract` 的「没有 ⇒ ``None``」**故意不同** ✓：
+      对训练产物来说「没自述」和「自述不全」一样不可用 ✓（补默认值＝替产物编历史 ✗）；
+    * **放大器契约不许被误伤** ✗：``h3-latent-upscaler-v1`` 也带 ``base_config``/``config`` ✓，
+      但它不是训练产物 ✓ ⇒ 判据只认 ``format`` 前缀 ``training`` ✓，不认「有没有 base_model 键」✗。
+    """
+    good = {"format": "training-v1",
+            "base_model": "minimax_h3_fl2va_pruned_int8.safetensors",
+            "train_config": {"rank": 128, "lr": 1e-4, "steps": 12000},
+            "version": "1.0.0",
+            "future_field": "产物多写字段不该把读取方弄崩 ✓"}
+    got = meta_mod.read_training_contract(_outer(good))
+    check("⑤⁷ 三字段齐 ⇒ 正常返回 ✓（额外键原样保留 ✓）",
+          got.get("base_model") == good["base_model"]
+          and got.get("train_config") == good["train_config"]
+          and got.get("future_field") == good["future_field"], got)
+
+    check("⑤⁷′ 与 `read_contract` **故意不同** ✓：没有内嵌契约时它给 ``None``、训练契约**直接拒** ✗",
+          meta_mod.read_contract({}) is None
+          and _raises(lambda: meta_mod.read_training_contract({}), "训练产物必须自述") is not None
+          and _raises(lambda: meta_mod.read_training_contract(None), "不补默认值") is not None)
+
+    missing_base = dict(good)
+    missing_base.pop("base_model")
+    check("⑤⁷″ 缺 ``base_model`` ⇒ 拒且**点名** ✓（并说出整段缺哪几个 ✓）",
+          (_m := _raises(lambda: meta_mod.read_training_contract(_outer(missing_base)),
+                         "base_model")) is not None and "整段缺" in _m, _m)
+
+    blanks = {
+        "空字符串": {**good, "base_model": "   "},
+        "空对象当配置": {**good, "train_config": {}},
+        "字符串 JSON 当配置": {**good, "train_config": json.dumps({"rank": 128})},
+        "空版本号": {**good, "version": ""},
+        "布尔当版本号": {**good, "version": True},
+        "负数版本号": {**good, "version": -1},
+    }
+    bad = {label: _raises(lambda c=case: meta_mod.read_training_contract(_outer(c)), "version"
+                          if "版本" in label else ("train_config" if "配置" in label
+                                                   else "base_model"))
+           for label, case in blanks.items()}
+    check("⑤⁷‴ 有键 ≠ 有值 ≠ 对类型 ✓：空串/空对象/字符串 JSON/True/负数一律拒 ✗",
+          all(value is not None for value in bad.values()), bad)
+    check("⑤⁷⁴ 版本号允许**非负整数** ✓（``0`` 也收 ✓ —— 拒的是类型与负数，不是取值 ✓）",
+          meta_mod.read_training_contract(_outer({**good, "version": 0}))["version"] == 0
+          and meta_mod.read_training_contract(_outer({**good, "version": 3}))["version"] == 3)
+
+    all_missing = {"format": "training-v1"}
+    msg = _raises(lambda: meta_mod.read_training_contract(_outer(all_missing)), "不完整")
+    check("⑤⁷⁵ 三个全缺 ⇒ **一次列全** ✓（报错只提第一个＝下一个人修三轮 ✗）",
+          msg is not None
+          and all(key in msg for key in meta_mod.TRAINING_FIELDS)
+          and "整段缺" in msg, msg)
+
+    upscaler = {"format": "h3-latent-upscaler-v1", "strict_latent_only": True,
+                "base_config": {"channels": 24}, "config": {"blocks": 4}, "step": 12000}
+    check("⑤⁷⁶ 放大器契约**不许被误伤** ✗：它不是训练产物 ⇒ 三字段要求不适用 ✓（且 `is_training_contract` 判否 ✓）",
+          meta_mod.is_training_contract(_outer(upscaler)) is False
+          and _raises(lambda: meta_mod.read_training_contract(_outer(upscaler)),
+                      "不是训练产物") is not None)
+    check("⑤⁷⁷ `is_training_contract` 正向对照 ✓（``training-v1`` 判是；无契约判否 ✓ —— 不是「永远 False」✗）",
+          meta_mod.is_training_contract(_outer(good)) is True
+          and meta_mod.is_training_contract({}) is False
+          and meta_mod.is_training_contract(None) is False)
+
+    check("⑤⁷⁸ 两处判据同源 ✓：``training_field_problems`` 空 ⇔ ``read_training_contract`` 不抛 ✓"
+          "（各写一份必然漂 ✓✗）",
+          meta_mod.training_field_problems(good) == []
+          and all(meta_mod.training_field_problems(case) for case in blanks.values()))
+
+
 def main() -> int:
     case_contract_ok()
     case_contract_absent()
     case_contract_broken()
     case_contract_strict()
     case_unsupported_family()
+    case_training_contract()
     failures = [(name, detail) for name, passed, detail in _RESULTS if not passed]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

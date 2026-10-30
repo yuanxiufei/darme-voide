@@ -26,6 +26,7 @@ import json
 from typing import Any
 
 from ...core.response import js_number, js_truthy
+from ..comfyui_targets import resolve_target, supports_negative
 from ..file_storage import parse_data_url
 from .jscompat import (
     add_query_param,
@@ -43,6 +44,7 @@ from .url import join_provider_url
 
 __all__ = [
     "AliImageAdapter",
+    "ComfyUIImageAdapter",
     "GeminiImageAdapter",
     "LocalSDImageAdapter",
     "MiniMaxImageAdapter",
@@ -638,3 +640,107 @@ class LocalSDImageAdapter:
         if not b64 or not isinstance(b64, str):
             return None
         return {"data": b64, "mimeType": "image/png"}
+
+
+class ComfyUIImageAdapter:
+    """本机 ComfyUI 的**渲染目标** —— 盘上模型真正的执行层（2026-10-30 实测接入）。
+
+    ``POST {baseUrl}/comfy-studio/renders/{target}/run`` ⇒ **同步**返回
+    （服务端一直等到出图才回；实测 Krea2 8 步 2048×1536 = **59.0 秒**），
+    产物是 ``/view?filename=…`` 的 **URL** 而不是 base64
+    ⇒ :meth:`parse_generate_response` 回 ``imageUrl``，由 ``image_generation`` 里
+    ``not is_async and image_url`` 那条分支去下载（那条路本来就存在）。
+
+    ``config["model"]`` 在这里是**渲染目标 id**（``GET /comfy-studio/renders`` 的 19 个之一：
+    ``character-sheet-krea2`` / ``scene-card`` / ``storyboard-frame-krea2`` …）
+    ⇒ 「换模型」＝换一个 model 字段，天然可插拔，不必改代码。
+
+    ⚠️ **参考图暂不支持**：ComfyUI 的参考图要先落到它的 ``input/`` 目录，而本层是
+    「只构建请求、不发 HTTP」的纯函数层 ⇒ 真带 ``referenceImages`` 时**显式报错**，
+    不静默降级成文生图（Krea2 定妆板的 ``image_reference_switch`` 本就是 False，
+    纯文生图是当前合格路径）。
+    """
+
+    provider = "comfyui"
+
+    _RENDERS = "/comfy-studio/renders"
+
+    def build_generate_request(self, config: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        # 目标选择走 comfyui_targets（单一真源）：记录显式 > 配置钉死 > 按板型×线推断
+        target = resolve_target(config, record)
+
+        raw_refs = record.get("referenceImages")
+        if isinstance(raw_refs, str):
+            parsed_refs = _json_array_or_none(raw_refs)
+            has_refs = bool(parsed_refs) if isinstance(parsed_refs, list) else bool(raw_refs.strip())
+        else:
+            has_refs = bool(raw_refs)
+        if has_refs:
+            raise ValueError(
+                "comfyui：暂不支持参考图 —— ComfyUI 需要先把它上传到 input/ 再引用；"
+                "请改用不接受参考图的渲染目标，或先把参考图落到模型目录"
+            )
+
+        # ⚠️ steps / cfg / seed / width / height **只在显式给出时才送**：
+        #    这几个参数在工作流里都是「不传就用图上原值」，而各档的原值不同
+        #    （Qwen 定妆板 30 步 / cfg 5.5、Krea2 定妆板 8 步 / cfg 2.0、分镜帧 720×1280）。
+        #    适配器自己拍一个默认值送上去 = 把设计师调好的档位压坏。
+        #    ``record["size"]``（"1920x1080" 这类通用字段，且有跨厂商默认值）在这里**故意不读**。
+        params: dict[str, Any] = {"prompt": record.get("prompt") or ""}
+
+        width = js_number(record.get("width"))
+        height = js_number(record.get("height"))
+        if width:
+            params["width"] = int(width)
+        if height:
+            params["height"] = int(height)
+
+        steps = js_number(record.get("steps"))
+        if steps:
+            params["steps"] = int(steps)
+        cfg = js_number(record.get("cfg"))
+        if cfg:
+            params["cfg"] = float(cfg)
+        seed = js_number(record.get("seed"))
+        if seed is not None:
+            params["seed"] = int(seed)
+
+        # 负向只送给**真有负向口**的 target：Qwen 档定妆板的 #6 是「三视图布局约束」，
+        # 往它送负向会整段冲掉工作流自带的 6 条负向（见 comfyui_targets 模块头）。
+        negative = record.get("negativePrompt")
+        if negative and supports_negative(target):
+            params["negative"] = negative
+
+        params["filename_prefix"] = record.get("filenamePrefix") or f"engine/{target}"
+
+        return {
+            "url": join_provider_url(config.get("baseUrl"), "", f"{self._RENDERS}/{target}/run"),
+            "method": "POST",
+            "headers": {"Content-Type": _JSON_MIME},
+            "body": {"params": params},
+        }
+
+    def parse_generate_response(self, result: Any) -> dict[str, Any]:
+        images = dig(result, "images")
+        if not js_truthy(images) or js_length(images) == 0:
+            raise ValueError("ComfyUI 未返回图片（渲染目标可能没有保存节点）")
+        url = dig(images, 0, "url")
+        if not url:
+            raise ValueError("ComfyUI 返回的图片缺 url 字段")
+        # 同步完成 + 给 URL ⇒ 调用方走 `not is_async and image_url` 分支去下载
+        return {"isAsync": False, "imageUrl": url}
+
+    def build_poll_request(self, config: dict[str, Any], task_id: str) -> dict[str, Any]:
+        raise ValueError("ComfyUI 同步返回，无需轮询")
+
+    def parse_poll_response(self, result: Any) -> dict[str, Any]:
+        raise ValueError("ComfyUI 同步返回，无需轮询")
+
+    def extract_image_url(self, result: Any) -> str | None:
+        url = dig(result, "images", 0, "url")
+        return url if isinstance(url, str) and url else None
+
+    def extract_image_base64(self, result: Any) -> dict[str, str] | None:
+        # ComfyUI 给的是 /view URL，不是 base64
+        return None
+

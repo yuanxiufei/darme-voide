@@ -133,6 +133,16 @@ def convrot_of(reader: Any) -> tuple[int | dict[str, int] | None, str | None]:
        能装、能跑、画面全是噪声 ✓✗（这正是本仓最怕的「像是成功」的失败 ✓）。
     ⇒ 这里读**全部** `*.comfy_quant`（实测 350 层 × ~60 B ≈ 21 KB ✓）**并且**读文件级 metadata ✓。
     """
+    return quant_mod.convrot_group_of(quant_specs_of_reader(reader))
+
+
+def quant_specs_of_reader(reader: Any) -> dict[str, dict[str, Any]]:
+    """``{层名: 说明}`` ✓ —— 读**全部** `*.comfy_quant` + 文件级 `_quantization_metadata` ✓。
+
+    ⚠️ 抽成独立函数是为了**一份证词被两处读** ✗✗（2026-10-30）：convrot 与「4bit 打包」
+    （`:func:`quant.int4_packed_of` ✓）必须看**同一批**说明 ✓ —— 各读各的就会分叉成
+    「convrot 按 256 判 ✓、int4 没认出来 ⇒ 按 int8 乘」✓✗（那正是本轮修掉的假绿 ✓）。
+    """
     specs: dict[str, dict[str, Any]] = {}
     suffix = quant_mod.QUANT_META_SUFFIX
     for name in reader.entries:
@@ -151,7 +161,7 @@ def convrot_of(reader: Any) -> tuple[int | dict[str, int] | None, str | None]:
     # 文件级说明（StarNodes 那一族 ✓）：张量里的逐层说明优先 ✓，这边只补空位 ✓
     for stem, spec in quant_mod.specs_from_metadata(getattr(reader, "metadata", None)).items():
         specs.setdefault(stem, spec)
-    return quant_mod.convrot_group_of(specs)
+    return specs
 
 
 #: nvfp4 层除 ``weight`` 之外必须一起读走的三类伙伴 ✓（它们**不是模型参数** ✗ —— 模型里只有 weight ✓）
@@ -410,10 +420,15 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
 
     # ②.5 convrot：低精度 int8 还可能是**分组 Hadamard 旋转**过的 ✓（写在 `*.comfy_quant` 里 ✓）
     #      ⚠️ 必判 ✗：漏这一步 = 少做一次反旋转 ⇒ 数值全错、形状全对 ✓✗（不报错、出片全是噪声 ✗）
-    convrot, convrot_gap = convrot_of(reader)
+    layer_specs = quant_specs_of_reader(reader)
+    convrot, convrot_gap = quant_mod.convrot_group_of(layer_specs)
     if convrot_gap:
         report.error = f"convrot 说明自相矛盾 ✗ ⇒ 已**中止装载**（不按猜的 group 算 ✗）：{convrot_gap}"
         return report
+    #: ⚠️ 4bit **打包**（`w4a4`/`int4` ✓）：不在这里认出来 ⇒ 预检与逐层反量化都会把它当
+    #: per-row **int8** 乘 ✓✗ —— 形状全对、数值全错、不报错 ✓✗（2026-10-30 实测：
+    #: `krea2_v1.5_anime_int4_w4a4` 一度被判「可自动还原」✓）。同一批说明证词 ✓，不许各读各的 ✓。
+    int4 = quant_mod.int4_stems_of(layer_specs)
 
     # ③ 预检：**只读 scale**（几十字节~几 KB ✓）⇒ 不合格时模型**零污染** ✓
     #    ⚠️ 这一步不能省 ✗：逐张量装载一旦在第 30 层才发现「scale 有 0」✗，
@@ -445,11 +460,16 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     #: 报成「找不到配套 scale」✓✗（本次实测：`engine_weights_streaming_test` ⑥/⑧ 当场变红 ✓）。
     pre_meta = {key: value for key, value in meta.items()
                 if key not in packed and key.rsplit(".", 1)[0] in own_stems}
-    pre = quant_mod.precheck_dequant(pre_meta, scales, convrot=convrot)
+    pre = quant_mod.precheck_dequant(pre_meta, scales, convrot=convrot, int4=int4)
     report.dequant = pre.to_dict()
     if convrot is not None:
         #: 报告里必须**看得出**多了一步反旋转 ✓（否则「为什么比普通 int8 慢」无从解释 ✓）
         report.dequant["convrot"] = convrot
+    if int4:
+        #: 同理：**多一步 4bit 解包**也得写在报告里 ✓（`int4PackCount` 是**真的解了几层** ✓，
+        #: 这里是「文件自称几层是打包的」✓ —— 两个数不相等就说明有层没解 ✓✗）
+        report.dequant["int4Packed"] = sorted(int4)[:6]
+        report.dequant["int4PackedCount"] = len(int4)
     #: nvfp4：**写第一个字节之前**把每一层都验一遍 ✓ ⇒ 不合格时模型**零污染** ✓
     #: （同 ③ 的理由 ✓：逐层装载到第 300 层才发现「块 scale 少一截」✗，前 299 层已经写进去了 ✓✗）
     nv_layers: dict[str, dict[str, Any]] = {}
@@ -571,8 +591,10 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
                 # ⚠️ **反量化必须在 cast 之前** ✗（2026-09-22 ✓）：fp8 直接 `to(bf16)` 是把尺度丢掉 ✗，
                 #   `copy_` 照单全收 ⇒ 不报错 ✗✗，症状要到出片才发现「画面是噪声」✓✗
                 scale_name = pre.converted[logical]["scale"]
+                #: ⚠️ `int4` 必须**逐层传下去** ✗：预检认出了打包 ✓、逐层却没解包 ✓✗
+                #: ⇒ 又是一次「报告说解了、实际没解」✓✗（`report.dequant["int4PackCount"]` 会露馅 ✓）
                 single = quant_mod.dequantize_state(
-                    {logical: tensor, scale_name: scales[scale_name]}, convrot=convrot)
+                    {logical: tensor, scale_name: scales[scale_name]}, convrot=convrot, int4=int4)
                 if not single.ok:        # pragma: no cover - 上面预检应当已拦下 ✓
                     report.error = (f"`{logical}` 反量化失败 ✗（预检没拦住 ⇒ 已写入 {written}/"
                                     f"{len(plan)} 个键 ⇒ **半装** ✗）："

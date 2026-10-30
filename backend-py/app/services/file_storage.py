@@ -113,6 +113,18 @@ def _ext_from_url(url: str) -> str:
     ext = os.path.splitext(parsed.path)[1]
     if ext and len(ext) <= 5:
         return ext
+    # ⚠️ ComfyUI 一类「下载口不带扩展名」的服务把真名放在 query 里
+    #    （``/view?filename=a.png&subfolder=engine&type=output``）：只看 path 会一律落成
+    #    ``.bin`` —— 内容虽是合法 PNG（头 89504e47），但静态服务的 MIME 与前端 ``<img>``
+    #    都按扩展名走，且剪辑侧按后缀分派。**只在 path 无扩展名时才看 query**，
+    #    路径型 URL 的既有行为（含 ``?v=1`` → ``.bin``）一个字节都不变。
+    for key in ("filename", "file", "name"):
+        value = urllib.parse.parse_qs(parsed.query).get(key, [""])[0]
+        if not value:
+            continue
+        ext = os.path.splitext(value)[1]
+        if ext and len(ext) <= 5:
+            return ext
     return ".bin"
 
 

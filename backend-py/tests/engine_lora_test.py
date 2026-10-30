@@ -532,6 +532,65 @@ def case_reuse_gate() -> None:
     check("复用门: 把 LoRA **摘掉** ⇒ 不复用（摘掉也是换模型 ✓✗）", removed is not None, removed)
 
 
+def _error_of(call: Any) -> BaseException | None:
+    """把异常对象本身拿出来 ✓（``_raises`` 只给文本 ✓，这里要比**类型** ✓）。"""
+    try:
+        call()
+    except BaseException as err:  # noqa: BLE001 —— 就是来看它抛什么的 ✓
+        return err
+    return None
+
+
+def _write_safetensors(path: Path, metadata: dict[str, str] | None) -> None:
+    """造一个**最小** safetensors ✓（一个 F32、4 字节 ✓）—— 只为喂 ``read_tensors`` 的契约校验 ✓。"""
+    header: dict[str, Any] = {"x": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    raw = json.dumps(header, ensure_ascii=False).encode("utf-8")
+    path.write_bytes(len(raw).to_bytes(8, "little") + raw + b"\x00\x00\x00\x00")
+
+
+def case_training_gate() -> None:
+    """训练产物契约门（E4.2 ✓ 2026-10-30 ✓）：**自称**训练产物的文件，元数据不全 ⇒ 读取时拒 ✓。
+
+    ⚠️ 盯的三件事，缺一条这条判据就成摆设 ✓✗：
+
+    * **真拦**：``format=training-v1`` 但缺 ``train_config``/``version`` ⇒ 抛 ``LoraError`` ✓
+      （只报不拦＝把坏权重挂上去，画面只表现为"效果不对" ✓✗）；
+    * **排位对**：校验必须在 ``import torch`` **之前** ✓ —— 不然"元数据不全"这种纯 stdlib 能判的事
+      要先装几 GB 的 torch 才发现 ✓✗，而本仓自检大多零 torch ⇒ 这条根本测不到 ✓✗；
+    * **不误伤**：普通 LoRA（``__metadata__`` 里没有 ``metadata`` 契约键 ✓）与三字段齐全的训练产物
+      都必须**照旧放行** ✓✗（误伤的症状是「装不上」，比不拦更难查 ✓✗）。
+    """
+    import tempfile  # noqa: PLC0415 —— 只在造夹具时用 ✓
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        bad = root / "bad.safetensors"
+        _write_safetensors(bad, {"metadata": json.dumps(
+            {"format": "training-v1", "base_model": "minimax_h3_fl2va_pruned_int8.safetensors"})})
+        err = _error_of(lambda: lora_mod.read_tensors(bad))
+        check("契约门: 自称训练产物却缺 train_config/version ⇒ 当场拒 ✓（不补默认值 ✓✗）",
+              isinstance(err, lora_mod.LoraError) and "元数据不完整" in str(err), err)
+        check("契约门: 拒绝发生在碰 torch **之前** ✓（否则零 torch 自检测不到这条 ✗✗）",
+              isinstance(err, lora_mod.LoraError) and "train_config" in str(err), err)
+
+        good = root / "good.safetensors"
+        _write_safetensors(good, {"metadata": json.dumps({
+            "format": "training-v1", "base_model": "minimax_h3_fl2va_pruned_int8.safetensors",
+            "train_config": {"rank": 128, "lr": 1e-4}, "version": "1.0.0"})})
+        got = _error_of(lambda: lora_mod.read_tensors(good))
+        check("契约门: 三字段齐 ⇒ 契约层**放行** ✓（后续若无 torch 只会是 ImportError ✗ 不是元数据错 ✗）",
+              not (isinstance(got, lora_mod.LoraError) and "元数据" in str(got)), got)
+
+        plain = root / "plain.safetensors"
+        _write_safetensors(plain, {"format": "pt", "ss_network_dim": "128"})
+        got_plain = _error_of(lambda: lora_mod.read_tensors(plain))
+        check("契约门: 普通 LoRA（无 ``metadata`` 契约键）**照旧放行** ✓✗ —— 三字段要求不适用 ✓",
+              not (isinstance(got_plain, lora_mod.LoraError) and "训练产物" in str(got_plain)), got_plain)
+
+
 def case_torch_ops_optional() -> None:
     try:
         import torch  # noqa: F401,PLC0415
@@ -556,6 +615,7 @@ def main() -> int:
                         ("装配", case_apply_model), ("真文件", case_real_file),
                         ("接线", case_wiring), ("口径", case_coerce_spec),
                         ("复用门", case_reuse_gate),
+                        ("契约门", case_training_gate),
                         ("torch", case_torch_ops_optional)):
         try:
             case()

@@ -228,9 +228,14 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
     #       「可自动还原」✓✗（假绿 ✓：形状与 per-row 逐字相同，`layout_of` 无处可疑 ✓）。
     layer_specs = quant_specs_of(path, info)
     convrot, convrot_gap = quant_mod.convrot_group_of(layer_specs)
+    # ⚠️ 4bit **打包**（`w4a4`/`int4` ✓）必须在这一步就认出来 ✗✗：打包后的形状与普通 per-row
+    #    int8 **逐字相同**（`(6144,3072)` + `(6144,)` ✓）⇒ 每一处形状判据都说「对得上」✓✗，
+    #    唯一识破它的是**文件自述** ✓（`:func:`quant.int4_packed_of` ✓）。
+    int4 = quant_mod.int4_stems_of(layer_specs)
     # ⭐ 反量化**能不能自动做**：由 :func:`dequant_plan_of` 按**形状**判 ✓
     #    （与装载时**同一套判据** ✗ —— 那个函数是**唯一口径** ✓，`facade.inspect_weights` 也走它 ✓）
-    plan.dequantPlan, dequant_problems = dequant_plan_of(info, formats, convrot=convrot)
+    plan.dequantPlan, dequant_problems = dequant_plan_of(info, formats, convrot=convrot,
+                                                         int4=int4)
     plan.problems.extend(dequant_problems)
     if convrot is not None:
         #: 报告里必须**看得出**它比普通 int8 多一步旋转 ✓（否则人无从解释「为什么慢一点」✓）
@@ -283,6 +288,13 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
         plan.problems.append(
             f"{plan.dequantPlan['groupedCount']} 个低精度权重带 `zeros`/`g_idx` ✗ ⇒ 分组量化 ✓"
             f"（例如 {plan.dequantPlan['grouped']} ✓）⇒ 且文件没给 group size ✓ 本仓不猜 ✗")
+    if plan.dequantPlan.get("int4ProblemCount"):
+        #: ⚠️ 4bit 打包的坏法**单独报** ✗：并进上面「形状与 convrot 冲突」那条会给出**错的原因** ✓✗
+        #: （真因是「自称 int4 却不是单字节整型 / 层名对不上」✓，与 convrot 无关 ✓）
+        plan.problems.append(
+            f"{plan.dequantPlan['int4ProblemCount']} 处 4bit 打包声明**用不了** ✗"
+            f"（{plan.dequantPlan.get('int4Problems')} ✓）⇒ 自动反量化会**中止装载** ✓"
+            f"（绝不把打包字节按 int8 乘 ✗ —— 那会静默装出一份数值全错的权重 ✓✗）")
     if plan.dequantPlan["supported"]:
         plan.warnings.append(
             f"低精度权重可**自动反量化** ✓（布局：{plan.dequantPlan['layouts']} ✓"
@@ -361,7 +373,8 @@ def quant_formats_of(path: Path, info: st.SafetensorsInfo) -> list[dict[str, Any
 
 
 def dequant_plan_of(info: st.SafetensorsInfo, formats: Any = (),
-                    *, convrot: Any = None) -> tuple[dict[str, Any], list[str]]:
+                    *, convrot: Any = None,
+                    int4: Any = None) -> tuple[dict[str, Any], list[str]]:
     """整份文件的**反量化计划** ⇒ ``(可塞进 plan.dequantPlan 的 dict, 阻断问题)`` ✓ —— **唯一口径** ✓。
 
     ``convrot`` 允许 ``None`` / ``int``（整文件同组 ✓）/ ``{层名: group}``（**逐层不同** ✓）——
@@ -393,12 +406,18 @@ def dequant_plan_of(info: st.SafetensorsInfo, formats: Any = (),
         if covered and str(name).rsplit(".", 1)[0] in covered:
             continue
         meta[name] = (tensor.dtype, tensor.shape)
-    plan = quant_mod.plan_dequant(meta, convrot=convrot)
+    plan = quant_mod.plan_dequant(meta, convrot=convrot, int4=int4)
+    if int4:
+        #: 报告里必须**看得出**「文件自称几层打包」✓（真解了几层在 `DequantResult.int4PackCount`
+        #: ✓ —— 两个数不等就说明有层没解 ✓✗）。放在这里而不是各调用方 ✓：单一真源 ✓。
+        plan["int4Packed"] = sorted(int4)[:6]
+        plan["int4PackedCount"] = len(int4)
     problems: list[str] = []
     if not nv.get("declared"):
         return plan, problems
     plan[nvfp4_mod.FORMAT] = nv
-    rest_ok = not (plan["unresolvedCount"] or plan["unpairedCount"] or plan["groupedCount"])
+    rest_ok = not (plan["unresolvedCount"] or plan["unpairedCount"] or plan["groupedCount"]
+                   or plan.get("int4ProblemCount"))
     if nv["supported"]:
         layers = int(nv["layers"])
         plan["weights"] = int(plan["weights"]) + layers

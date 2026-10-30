@@ -229,6 +229,13 @@ async def generate_image(conn: Connection, params: dict[str, Any]) -> int:
             model=params.get("model") or config.get("model"),
             provider=config.get("provider"),
             size=params.get("size") or "1920x1080",
+            # 工作流出图参数口：**不传就留空**（``None`` ⇒ 适配器不送 ⇒ 用工作流原值）。
+            # 别在这里补默认值 —— Qwen 定妆板 30 步 / Krea2 8 步，补一个就会压坏另一档。
+            width=params.get("width"),
+            height=params.get("height"),
+            steps=params.get("steps"),
+            cfg_scale=params.get("cfg"),
+            seed=params.get("seed"),
             frame_type=params.get("frameType"),
             # `params.referenceImages ? JSON.stringify(...) : null`：空数组在 JS 是**真值**
             # ⇒ 传 `[]` 也会落成 `"[]"`（不是 null）
@@ -372,6 +379,20 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
                 "negativePrompt": _col(record, "negative_prompt"),
                 "size": _col(record, "size"),
                 "frameType": _col(record, "frame_type"),
+                # ⚠️ 板型上下文（哪一类图）：ComfyUI 靠它选工作流 —— 角色定妆板 / 场景卡 /
+                #    分镜帧是**三件不同的工作流**，缺了这些字段就只能报错，不能猜。
+                "characterId": _col(record, "character_id"),
+                "sceneId": _col(record, "scene_id"),
+                "storyboardId": _col(record, "storyboard_id"),
+                "propId": _col(record, "prop_id"),
+                # ⚠️ 下列五个是「工作流出图参数口」（steps/cfg/seed/width/height）。
+                #    对 ComfyUI 这类**档位属于工作流**的 provider，``None`` 表示不送、
+                #    用工作流原值；对按 ``size`` 走的厂商它们不参与（各自只读 size）。
+                "width": _col(record, "width"),
+                "height": _col(record, "height"),
+                "steps": _col(record, "steps"),
+                "cfg": _col(record, "cfg_scale"),
+                "seed": _col(record, "seed"),
                 # ⚠️ `resolved ? JSON.stringify(...) : null`：**空数组也是真值** ⇒ 无参考图时
                 #    传的是 `"[]"` 而非 null。这会连带影响 Ali 是否加 seed，必须保真。
                 "referenceImages": _stringify(resolved_reference_images)

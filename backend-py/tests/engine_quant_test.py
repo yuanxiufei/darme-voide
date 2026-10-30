@@ -37,6 +37,9 @@ _SKIPPED: list[str] = []
 #: 真实文件（盘上未必有 ⇒ 找不到就**单列 SKIP** ✓ 不混进 PASS ✗ —— 混进去就是假绿 ✓）
 REAL_KREA2_W4A4 = Path(r"D:\Comfy-Desktop\ComfyUI-Shared\models\diffusion_models\Krea2"
                        r"\krea2_v1.5_anime_int4_w4a4.safetensors")
+#: 同源 **int8** 版（12.57 GiB）—— 「解包约定对不对」只有它能当尺子 ✓（同一批量化出来的 ✓）
+REAL_KREA2_INT8 = Path(r"D:\Comfy-Desktop\ComfyUI-Shared\models\diffusion_models\Krea2"
+                       r"\krea2_v1.5_anime_int8_convrot.safetensors")
 REAL_KREA2_MOODY = Path(r"D:\Comfy-Desktop\ComfyUI-Shared\models\diffusion_models\Krea2"
                         r"\Krea2-Moody-Mix-premium_int4_convrot.safetensors")
 #: ⚠️ **全量**版（31.7 GiB）—— 它的 convrot 分组**逐层不同**（64 与 256 并存 ✓）
@@ -302,57 +305,62 @@ def case_real_files() -> None:
 
     from app.services.engine import facade as facade_mod  # noqa: PLC0415
 
-    #: ① **假绿的那一份**（2026-10-30 实测）：224 层说明**全在 `*.comfy_quant`** 里 ✓ 且
-    #:    格式串是 ``convrot_w4a4``（**没有** `convrot` 布尔 ✗）⇒ 只看布尔 ⇒ 少一步反旋转却报
-    #:    「可自动还原」✓✗；落盘的 `weight` 是 **int8 值域 + per-row scale**（不是 4bit 打包 ✗）
-    #:    ⇒ 缺的只有反旋转 ✓。
+    #: ① **两处假绿叠在同一份文件上**（2026-10-30 实测）：224 层说明**全在 `*.comfy_quant`** 里 ✓
+    #:    且格式串是 ``convrot_w4a4``（**没有** `convrot` 布尔 ✗）⇒ 只看布尔 ⇒ 少一步反旋转却报
+    #:    「可自动还原」✓✗；同一轮又挖出第二层：`weight` 是 **4bit 打包**（6144×3072 字节装
+    #:    6144×6144 个有符号 4bit ✓）而它的形状与普通 per-row int8 **逐字相同** ✓ ⇒ 又一次没被问 ✓✗。
+    #:    ⚠️ 旧断言写的是「落盘的 `weight` 是 int8 值域（**不是** 4bit 打包 ✗）」—— **那句本身是错的** ✗；
+    #:    本轮靠同源 int8 版（`krea2_v1.5_anime_int8_convrot` ✓）逐层比对才把解包约定钉死 ✓。
     real = _real(REAL_KREA2_W4A4)
     if real is None:
-        skip("④ Krea2 `convrot_w4a4` 真文件（224 层逐层说明 ⇒ 同组 256 + 反旋转在布局名里）",
+        skip("④ Krea2 `convrot_w4a4` 真文件（224 层 ⇒ 同组 256 + **4bit 打包** + 反旋转全在布局名里）",
              f"不在盘上：{REAL_KREA2_W4A4.name}")
     else:
         info, specs, (convrot, gap) = real
         report = facade_mod.inspect_weights(REAL_KREA2_W4A4)
         quant = report["quant"]
-        check("④ ⭐ 真文件 `convrot_w4a4`（224 层逐层说明）⇒ **判出 convrot=256** ✓ 且布局名带 "
-              "`+convrot256` ✓（只认 `convrot` 布尔 ⇒ 这里 `convrot` 会是 None ✓✗、布局退化成 "
-              "`per-row` ⇒ 少一步反旋转、画面全错却报「可还原」✓✗）",
+        check("④ ⭐ 真文件 `convrot_w4a4`（224 层逐层说明）⇒ **三件事都得出场**：convrot=256 ✓、"
+              "**4bit 打包**（`+int4pack` ✓）、布局 `per-row+int4pack+convrot256` ✓ —— 漏 convrot ⇒ "
+              "少一步反旋转 ✓、漏 int4pack ⇒ 把打包字节按 int8 乘 ✓，两处都**形状全对、数值全错、"
+              "不报错** ✓✗",
               len(specs) == 224
               and Counter(str(spec.get("format")) for spec in specs.values()) == {"convrot_w4a4": 224}
               and convrot == 256 and gap is None
               and quant["supported"] is True and quant["weights"] == 224
-              and quant["layouts"] == {"per-row+convrot256": 224} and not quant["unresolved"],
-              (len(specs), convrot, gap, quant["supported"], quant["layouts"], info.tensor_count))
+              and quant["layouts"] == {"per-row+int4pack+convrot256": 224}
+              and quant["int4PackedCount"] == 224 and not quant["int4Problems"]
+              and not quant["unresolved"],
+              (len(specs), convrot, gap, quant["supported"], quant["layouts"],
+               quant["int4PackedCount"], quant["unresolved"]))
 
     #: ② **说明只写在 metadata 里**的那一份（文件里 `*.comfy_quant` 数 = **0** ✓）——
     #:    不读 `_quantization_metadata` 就等于「没看见旋转」✓✗。
-    #:    同时它又是「**诚实拒绝**」的样本：4 层 `mlp.down` 形状 (2560, 3456)、3456 不整除 256 ✓
-    #:    ⇒ 与文件声明矛盾 ⇒ `supported=False` ✓（不是靠猜放行 ✗）。
+    #:    ⚠️ 旧版这里断言的是「4 层 `mlp.down`（打包列 3456）不整除 256 ⇒ 诚实拒绝」✗：
+    #:    那条**表面**正确、**理由**错了 —— 不整除的是**打包列**（3456），**逻辑列**是 6912 ✓
+    #:    且 6912 % 256 = 0 ✓ ⇒ 那 4 层本来是好的 ✓，旧版的「诚实拒绝」其实是**假拒绝** ✓✗。
+    #:    ⇒ 现在：256 层全 `per-row+int4pack+convrot256`、`supported=True` ✓。
     real = _real(REAL_KREA2_MOODY)
     if real is None:
-        skip("④′ Krea2 Moody（metadata 里的逐层说明 + 4 层不整除 ⇒ 诚实拒绝）",
+        skip("④′ Krea2 Moody（metadata 里的逐层说明 + 256 层 4bit 打包）",
              f"不在盘上：{REAL_KREA2_MOODY.name}")
     else:
         info, specs, (convrot, gap) = real
         comfy_quant = [name for name in info.tensors if name.endswith(".comfy_quant")]
         report = facade_mod.inspect_weights(REAL_KREA2_MOODY)
         quant = report["quant"]
-        unresolved = list(quant["unresolved"])
-        #: 未还原清单里是**层名**（不带 `.weight` ✓）⇒ 查头部时两种写法都试 ✓（别让键名差异
-        #: 把「不整除」这个证据悄悄变成空列表 ✗ —— 第一版就踩了：`gaps == []` 让断言恒假 ✓✗）
-        gaps = [int(info.tensors[name if name in info.tensors else f"{name}.weight"].shape[-1]) % 256
-                for name in unresolved
-                if (name in info.tensors or f"{name}.weight" in info.tensors)]
         check("④′ ⭐ 说明**只在 metadata `_quantization_metadata`** 里（`*.comfy_quant` 张量数 = 0 ✓）"
               "⇒ 仍判出 convrot=256 ✓ + 256 层逐层说明 ✓（读不到 metadata ⇒ `convrot` 是 None ✓✗）",
               comfy_quant == [] and len(specs) == 256 and convrot == 256 and gap is None,
               (len(comfy_quant), len(specs), convrot, gap))
-        check("④″ ⭐ 4 层 `mlp.down`（3456 不整除 256 ✓）⇒ **诚实拒绝** ✓（`supported=False` + 逐层点名 ✓"
-              " —— 不许静默跳过旋转或猜一个 group ✗）",
-              quant["supported"] is False and len(unresolved) == 4
-              and all(name.endswith("mlp.down") for name in unresolved)
-              and all(gap_item != 0 for gap_item in gaps) and len(gaps) == 4,
-              (quant["supported"], unresolved, gaps))
+        check("④″ ⭐⭐ **打包列 ≠ 逻辑列**的活证据：`blocks.0.mlp.down` 存的是 `(6144, 8192)` 字节 ✓、"
+              "逻辑是 `(6144, 16384)` ✓ ⇒ 整除判据必须按**逻辑列** ✓。旧版拿打包列算 ⇒ 把"
+              "「打包列 3456 不整除 256」当成「与文件声明矛盾」⇒ 4 层 `mlp.down` 被整份拒 ✓✗"
+              "（**假拒绝** ✓，而拒绝不掩盖错、却让一份好权重永远装不上 ✓✗）",
+              quant["supported"] is True and not quant["unresolved"]
+              and quant["int4PackedCount"] == 256
+              and quant["layouts"] == {"per-row+int4pack+convrot256": 256},
+              (quant["supported"], quant["unresolved"], quant["int4PackedCount"],
+               quant["layouts"]))
 
     #: ③ **全量版被整份拒掉**的那一份：同一文件里 64 与 256 **并存** ✓✗ ⇒ 族级「必须同组」
     #:    的判法会把它（31.7 GiB 的正品 ✓）判成「说明自相矛盾」⇒ 拒绝 ✓✗。拒绝**不是**安全 ✗。
@@ -708,6 +716,202 @@ def case_qkv_scales() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 # ② 判不出来 ⇒ **拒绝**（宁可报错也不按猜的布局算 ✗）
 # ══════════════════════════════════════════════════════════════════════════
+def case_int4() -> None:
+    """4bit **打包**（`w4a4` / `int4` ✓）：每字节两个**有符号** 4bit ✓。
+
+    ## 这一族差点被「形状全对」骗过去（2026-10-30 ✓）
+
+    打包后的 ``(6144, 3072)`` 与普通 **per-row int8** 的 ``(6144, 3072)`` **逐字相同** ✓、
+    ``weight_scale`` 都是 ``(6144,)`` ✓ ⇒ :func:`quant.layout_of` 判 `per-row` ✓、
+    `convrot` 的整除判据也过 ✓、`paired` 也加一 ✓ —— **每一处形状判据都说「对得上」** ✓✗。
+    唯一能识破它的是**文件自己写的 `w4a4`** ✓（:func:`quant.int4_packed_of` ✓）。
+    """
+    torch = _torch()
+
+    #: ① 解包约定：**低半字节 = 偶数列** ✓、**有符号**（nibble ≥ 8 ⇒ −16 ✓）
+    packed = torch.tensor([[0x12, 0x8F]], dtype=torch.uint8)
+    unpacked = quant_mod.unpack_int4(packed)
+    check("① ⭐ 4bit 解包 `0x12` ⇒ 偶数列 **2**、奇数列 **1**；`0x8F` ⇒ **−1** 与 **−8** ✓"
+          "（低半字节在前 ✓ ＋ 有符号 ✓ —— 这两条不是猜的 ✓：同源 int8 版实测，余弦 "
+          "0.9946/0.9927/0.9911 ✓，另三种组合全部崩到 ±0.65 以内 ✓ 见 `unpack_int4` docstring ✓）",
+          tuple(int(unpacked[0, index]) for index in range(4)) == (2, 1, -1, 8 - 16)
+          and tuple(int(dim) for dim in unpacked.shape) == (1, 4),
+          unpacked.tolist())
+
+    #: ② 判据**只认文件自述** ✓：`format` / `linear_dtype` 里出现 `w4a4` 或 `int4` ✓
+    check("② ⭐ 「是不是 4bit 打包」**只有文件自述一种证词** ✓（`format=convrot_w4a4` ✓ / "
+          "`linear_dtype=int4` ✓ / 文件级 `int4_convrot` ✓）；`int8_tensorwise` **不许**误伤 ✓"
+          "（与 `int4` 只差一个字符 ✓✗）、`nvfp4` 也不许 ✓",
+          quant_mod.int4_packed_of({"format": "convrot_w4a4", "convrot_groupsize": 256,
+                                    "linear_dtype": "int4"})
+          and quant_mod.int4_packed_of({"format": "int4_convrot"})
+          and quant_mod.int4_packed_of({"linear_dtype": "INT4"})
+          and not quant_mod.int4_packed_of({"format": "int8_tensorwise"})
+          and not quant_mod.int4_packed_of({"format": "nvfp4"})
+          and not quant_mod.int4_packed_of(None),
+          [quant_mod.int4_packed_of(spec) for spec in
+           ({"format": "convrot_w4a4"}, {"format": "int8_tensorwise"},
+            {"format": "nvfp4"}, None)])
+
+    #: ③ 逻辑形状：打包 ⇒ 最后一维 ×2 ✓；1D（norm / bias ✓）不动 ✓
+    check("③ 逻辑形状：打包的 2D ⇒ 列 ×2 ✓；1D **不翻倍** ✓（norm / bias 没有打包形态 ✓）",
+          quant_mod.logical_weight_shape((2560, 3456), packed=True) == (2560, 6912)
+          and quant_mod.logical_weight_shape((2560, 3456), packed=False) == (2560, 3456)
+          and quant_mod.logical_weight_shape((3456,), packed=True) == (3456,),
+          [quant_mod.logical_weight_shape(shape, packed=True)
+           for shape in ((2560, 3456), (3456,))])
+
+    #: ④ ⭐⭐ 反向证据：**同一份字节**，认了 int4 ⇒ 放行；没认 ⇒ 判「与声明矛盾」
+    meta = {"a.proj.weight": ("I8", (2560, 3456)),
+            "a.proj.weight_scale": ("F32", (2560,))}
+    packed_plan = quant_mod.plan_dequant(meta, convrot=256, int4={"a.proj"})
+    blind_plan = quant_mod.plan_dequant(meta, convrot=256)
+    check("④ ⭐⭐ **同一份字节**：认了 `int4` ⇒ 逻辑列 6912 整除 256 ✓ 放行；**没认** ⇒ 拿打包列 "
+          "3456 算 ⇒ 判「与声明矛盾」✓ —— 这就是旧行为 ✓✗（把打包层当「坏的」✓，真因是"
+          "**没人解包** ✓）；盘上 4 层 `mlp.down` 曾被这样整份误拒 ✓✗",
+          packed_plan["supported"] and packed_plan["layouts"] == {"per-row+int4pack+convrot256": 1}
+          and not blind_plan["supported"] and blind_plan["unresolved"] == ["a.proj"],
+          (packed_plan["layouts"], packed_plan["supported"],
+           blind_plan["unresolved"], blind_plan["supported"]))
+
+    #: ⑤ 坏法一：自称 int4 但存储不是单字节整型 ⇒ 拒（不按猜的打包方式解 ✗）
+    bad_dtype = quant_mod.plan_dequant(
+        {"a.proj.weight": ("BF16", (2560, 3456)), "a.proj.weight_scale": ("F32", (2560,))},
+        convrot=256, int4={"a.proj"})
+    check("⑤ ⭐ 自称 int4 却存成 `BF16` ⇒ **拒** ✓ 且点名理由 ✓（`int4Problems` 非空 ⇒ "
+          "`supported` 必须假 ✗；不许「照 per-row 乘一下看看」✗）",
+          not bad_dtype["supported"] and bad_dtype["int4ProblemCount"] == 1,
+          (bad_dtype["int4Problems"], bad_dtype["supported"]))
+
+    #: ⑥ 坏法二：自称 int4 但**层名对不上** ⇒ 解包不会发生 ⇒ 拒
+    stray = quant_mod.plan_dequant(
+        {"a.proj.weight": ("I8", (2560, 3456)), "a.proj.weight_scale": ("F32", (2560,))},
+        convrot=256, int4={"model.diffusion_model.a.proj"})
+    check("⑥ ⭐ 层名对不上（`model.diffusion_model.` 这种前缀差 ✓）⇒ 解包**根本不会发生** ⇒ 必须拒 ✓"
+          "（否则安静退回「按 int8 乘」✓✗ —— 形状全对、数值全错、不报错 ✓✗）",
+          not stray["supported"] and stray["int4ProblemCount"] == 1,
+          (stray["int4Problems"], stray["supported"]))
+
+    #: ⑦ 真装：`dequantize_state` 必须**先解包再乘 scale** ✓（顺序反 ⇒ 给两个值乘一次 ✗）
+    weight = torch.tensor([[0x21]], dtype=torch.int8)      # 0x21 ⇒ 偶列 1、奇列 2
+    scale = torch.tensor([3.0], dtype=torch.float32)
+    restored = quant_mod.dequantize_state(
+        {"a.proj.weight": weight, "a.proj.weight_scale": scale}, int4={"a.proj"})
+    value = restored.tensors["a.proj.weight"]
+    check("⑦ ⭐ 真装一层：`0x21` ⇒ `[1, 2]` ✓ 再 × scale 3 ⇒ `[3, 6]` ✓（**先解包再乘** ✓ —— "
+          "顺序反了等于给两个值乘一次 ✓✗）；形状列 ×2 ✓、布局带 `+int4pack` ✓、"
+          "`int4PackCount=1` ✓（**真的解了几层** ✓ 不是记账 ✓）",
+          restored.ok and restored.int4PackCount == 1
+          and tuple(int(dim) for dim in value.shape) == (1, 2)
+          and [float(item) for item in value.tolist()[0]] == [3.0, 6.0]
+          and "+int4pack" in restored.converted["a.proj.weight"]["layout"]
+          and restored.converted["a.proj.weight"]["from"] == "torch.int8",
+          (value.tolist(), restored.converted["a.proj.weight"], restored.int4PackCount))
+
+    #: ⑧ 坏法三：`dequantize_state` 收到「自称 int4 却是 1D / 非单字节」⇒ 报问题、不产出
+    broken = quant_mod.dequantize_state(
+        {"a.proj.weight": torch.ones(8, dtype=torch.bfloat16),
+         "a.proj.weight_scale": torch.tensor([1.0])}, int4={"a.proj"})
+    check("⑧ ⭐ 自称 int4 但存成 `BF16` ⇒ `dequantize_state` **报问题并且不产出** ✓"
+          "（`converted` 里不许多出这一层 ✗ —— 半成品权重比没有更危险 ✓✗）",
+          not broken.ok and "a.proj.weight" not in broken.converted
+          and broken.int4PackCount == 0,
+          (broken.problems, sorted(broken.converted)))
+
+
+def _wrong_order_unpack(packed: Any) -> Any:
+    """**故意错**的解包（高半字节当偶数列 ✓）—— 只作反向判据的对照 ✗，绝不进生产路径 ✗。"""
+    torch = _torch()
+    raw = packed.to(torch.uint8)
+    high = ((raw >> 4) & 0x0F).to(torch.int8)
+    low = (raw & 0x0F).to(torch.int8)
+    high = torch.where(high >= 8, high - 16, high)
+    low = torch.where(low >= 8, low - 16, low)
+    return torch.stack((high, low), dim=-1).reshape(int(packed.shape[0]), int(packed.shape[1]) * 2)
+
+
+def case_int4_numbers() -> None:
+    """④⁗ **真文件数值对账** ✓：解包约定、符号、反旋转三件事全走**生产代码** ✓，拿同源 int8 版当尺子 ✓。
+
+    ## 为什么小样本那 8 条还不够（2026-10-30 ✓）
+
+    ① 那小样本只证明「`0x12` ⇒ `(2, 1)`」这条**我的**约定自洽 ✓✗ —— 若真实文件用的是
+    高半字节在前，自洽的测试仍然全绿 ✓，而真权重会全错 ✓✗；
+    ② 真正的证词只有一个：**同源 int8 版**（`krea2_v1.5_anime_int8_convrot` ✓ 12.57 GiB ✓）——
+    同一次量化的 int8 与 int4 反量化之后**必须几乎重合** ✓（4bit 步长是 int8 的 16 倍 ✓ ⇒
+    余弦 ~0.99、L2 相对误差 ~0.17 ✓ 属量化噪声 ✓，不是约定错 ✗）；
+    ③ 还要一条**反向**判据 ✓✗：把 nibble 顺序换掉 ⇒ 余弦必须**塌下去** ✓（否则「怎么解都 0.99」
+    就说明这条比对根本没分辨力 ✓✗）。
+    """
+    from app.services.engine import safetensors as st  # noqa: PLC0415
+
+    torch = _torch()
+    if not (REAL_KREA2_W4A4.is_file() and REAL_KREA2_INT8.is_file()):
+        skip("④⁗ 真文件数值对账（int4 解包 ⇒ 与同源 int8 余弦 ≥ 0.98 ✓）",
+             f"缺 {REAL_KREA2_W4A4.name} 或 {REAL_KREA2_INT8.name}")
+        return
+    real4 = _real(REAL_KREA2_W4A4)
+    real8 = _real(REAL_KREA2_INT8)
+    if real4 is None or real8 is None:
+        skip("④⁗ 真文件数值对账", "逐层说明读不出来")
+        return
+    conv4 = real4[2][0]
+    conv8 = real8[2][0]
+    reader4 = st.TensorReader(REAL_KREA2_W4A4)
+    reader8 = st.TensorReader(REAL_KREA2_INT8)
+    scores: list[tuple[str, float, float]] = []
+    problems: list[str] = []
+    try:
+        meta4 = reader4.meta()
+        meta8 = reader8.meta()
+        #: 只挑**文件自述为 4bit 打包**的层 ✓（`img_in` 一类 bf16 的 2D 权重没有 scale ✓，
+        #: 挑到它们只会白 `continue` 一次 ⇒ 断言拿到空表 ✓✗）
+        stems = [stem for stem in quant_mod.int4_stems_of(real4[1])
+                 if f"{stem}.weight" in meta4 and f"{stem}.weight" in meta8]
+        #: 挑**最小**的两层（大层光是 fp32 中间量就要几百 MB ✓ 与判据无关 ✓）
+        stems = sorted(stems, key=lambda item: meta4[f"{item}.weight"][1][0]
+                       * meta4[f"{item}.weight"][1][1])[:2]
+        for stem in stems:
+            name = f"{stem}.weight"
+            found4 = quant_mod._scale_for(stem, meta4)
+            found8 = quant_mod._scale_for(stem, meta8)
+            if found4 is None or found8 is None or name not in meta8:
+                continue
+            state4 = {name: weights_mod._read_named(reader4, name),
+                      found4[0]: weights_mod._read_named(reader4, found4[0])}
+            state8 = {name: weights_mod._read_named(reader8, name),
+                      found8[0]: weights_mod._read_named(reader8, found8[0])}
+            got4 = quant_mod.dequantize_state(state4, convrot=conv4, int4={stem})
+            got8 = quant_mod.dequantize_state(state8, convrot=conv8)
+            if got4.problems or got8.problems:
+                problems.extend(got4.problems + got8.problems)
+                continue
+            right = got4.tensors[name].reshape(-1)
+            base = got8.tensors[name].reshape(-1)
+            cos = float(torch.dot(right, base) / (right.norm() * base.norm()))
+            #: 反向判据：把 nibble 顺序换掉（高半字节当偶数列 ✓）⇒ 余弦必须塌
+            original = quant_mod.unpack_int4
+            quant_mod.unpack_int4 = _wrong_order_unpack
+            try:
+                wrong = quant_mod.dequantize_state(state4, convrot=conv4, int4={stem})
+            finally:
+                quant_mod.unpack_int4 = original
+            swapped = wrong.tensors[name].reshape(-1)
+            bad = float(torch.dot(swapped, base) / (swapped.norm() * base.norm()))
+            scores.append((stem, abs(cos), abs(bad)))
+    finally:
+        reader4.close()
+        reader8.close()
+    best_right = min((round(right, 4) for _stem, right, _bad in scores), default=0.0)
+    worst_wrong = max((round(bad, 4) for _stem, _right, bad in scores), default=0.0)
+    check("④⁗ ⭐ 真文件数值对账：int4 解包 → 乘 scale → 反旋转之后，与**同源 int8 版**余弦 ≥ 0.98 ✓"
+          "（剩下那点差就是 4bit 量化噪声 ✓）；同时把 nibble 顺序换掉 ⇒ 余弦**塌到 0.9 以下** ✓"
+          "（没有这条反向判据，「怎么解都 0.99」会说明这条比对根本没分辨力 ✓✗）",
+          bool(scores) and not problems and best_right >= 0.98 and worst_wrong < 0.9,
+          (scores, problems))
+
+
+# ══════════════════════════════════════════════════════════════════════════
 def case_refusals() -> None:
     torch = _torch()
     fp8 = torch.ones(8, 4).to(torch.float8_e4m3fn)
@@ -848,6 +1052,8 @@ def main() -> int:
             case_convrot()
             case_fp8()
             case_qkv_scales()
+            case_int4()
+            case_int4_numbers()
             case_refusals()
             case_load(root)
             case_real_files()

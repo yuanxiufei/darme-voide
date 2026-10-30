@@ -41,11 +41,13 @@ __all__ = ["CAST_ONLY_DTYPES", "COMPANION_SUFFIXES", "DequantResult", "INPUT_SCA
            "SCALE_SUFFIXES", "SUPPORTED_FORMATS", "UNSUPPORTED_FAMILIES", "UNSUPPORTED_FORMATS",
            "build_hadamard", "convrot_group_of", "convrot_of_spec", "dequantize_state",
            "dequantize_weight_rotated", "format_family", "group_for", "is_cast_only",
-           "FORMAT_ALIASES", "format_alias", "GENERIC_SCALE_SUFFIXES", "is_input_scale",
-           "is_low_precision", "is_scaled_fp8_marker", "layout_of", "orphan_scales",
-           "parse_format_spec", "plan_dequant", "precheck_dequant", "quant_report",
-           "rotate_activations", "rotate_weight", "scale_stem", "specs_from_metadata",
-           "supported_format", "unsupported_family", "WEIGHT_SCALE_SUFFIXES"]
+           "FORMAT_ALIASES", "format_alias", "GENERIC_SCALE_SUFFIXES", "INT4_PACK_TOKENS",
+           "INT4_STORAGE_DTYPES", "int4_packed_of", "int4_shape_problem", "int4_stems_of",
+           "is_input_scale", "is_int4_storage", "is_low_precision", "is_scaled_fp8_marker",
+           "layout_of", "logical_weight_shape", "orphan_scales", "parse_format_spec",
+           "plan_dequant", "precheck_dequant", "quant_report", "rotate_activations",
+           "rotate_weight", "scale_stem", "specs_from_metadata", "supported_format",
+           "unpack_int4", "unsupported_family", "WEIGHT_SCALE_SUFFIXES"]
 
 #: 需要反量化才能计算的 dtype ✓（**只有这些** ✗ —— bf16/fp16/fp32 本来就是可算精度 ✓）
 #: ⚠️ 含**两套写法** ✓：torch 的 `float8_e4m3fn` ✓ 与 safetensors 头部的 `F8_E4M3` ✓（见 `is_low_precision` ✓）。
@@ -167,6 +169,9 @@ class DequantResult:
     #: 被吃掉的配套张量（它们**不进模型** ✓ —— 模型里没有这些键 ✓）
     companions: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    #: 有多少层走了 **4bit 解包** ✓（`w4a4`/`int4` ✓）—— 这是**一步真的计算** ✗ 不是记账 ✓：
+    #: 不数它的话，「装了 224 层」与「装了 224 层且每层都真的解了包」在报告里长得一样 ✓✗
+    int4PackCount: int = 0
 
     @property
     def ok(self) -> bool:
@@ -174,7 +179,8 @@ class DequantResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "count": len(self.converted), "converted": dict(self.converted),
-                "companions": list(self.companions), "problems": list(self.problems)}
+                "companions": list(self.companions), "problems": list(self.problems),
+                "int4PackCount": int(self.int4PackCount)}
 
 
 def _squeeze_scale_shape(scale_shape: Any) -> tuple[int, ...]:
@@ -194,6 +200,113 @@ def _squeeze_scale_shape(scale_shape: Any) -> tuple[int, ...]:
     if len(flat) > 1 and all(dim == 1 for dim in flat[:-1]):
         return (flat[-1],)
     return flat
+
+
+# ── 4bit **打包**权重（`w4a4` / `int4` ✓）：每字节两个**有符号** 4bit ─────────────────────────
+#: 声明「权重是 4bit」的 token ✓ —— 出处**只有一个**：文件自己写的 `comfy_quant`（或文件级
+#: `_quantization_metadata` ✓），字段是 ``format`` 或 ``linear_dtype`` ✓。
+#: ⚠️ **不能按形状猜** ✗✗：打包后的 ``(6144, 3072)`` + ``weight_scale (6144,)`` 与普通 per-row
+#: int8 **逐字相同** ✓（这正是 2026-10-30 抓到的假绿：`:func:`layout_of` 照 per-row 判、装载照
+#: int8 乘 ⇒ 数值全错却报「可自动还原」✓✗）。
+INT4_PACK_TOKENS: tuple[str, ...] = ("w4a4", "int4")
+
+#: 4bit 打包的**存储** dtype ✓：每元素 1 字节 ⇒ 逻辑维是声明维的 **2 倍** ✓
+INT4_STORAGE_DTYPES: tuple[str, ...] = ("i8", "u8", "int8", "uint8", "i4", "u4")
+
+
+def is_int4_storage(dtype: Any) -> bool:
+    """这个 dtype 能不能装「每字节两个 4bit」✓（两套命名都认 ✓：`I8` 与 `torch.int8` ✓）。"""
+    return str(dtype).replace("torch.", "").strip().lower() in INT4_STORAGE_DTYPES
+
+
+def int4_packed_of(spec: Any) -> bool:
+    """这一层的说明是否自称**4bit 打包**权重 ✓（``format=convrot_w4a4`` / ``linear_dtype=int4`` ✓）。
+
+    实测的四种写法（盘上 6 个 int4 文件全中 ✓）：``{"format": "convrot_w4a4", "convrot_groupsize":
+    256, "linear_dtype": "int4"}`` / ``{"format": "convrot_w4a4", "convrot_groupsize": 256,
+    "quant_group_size": 64}`` / ``{"convrot_groupsize": 256, "format": "convrot_w4a4"}`` /
+    文件级 ``{"format": "int4_convrot", "layers": {…}}`` ✓ —— 都含 `w4a4` 或 `int4` ✓。
+    ``format=int8_tensorwise`` **不含**这两个 token ⇒ 不误伤 ✓。
+    """
+    if not isinstance(spec, MappingABC):
+        return False
+    for field in ("linear_dtype", "format"):
+        text = str(spec.get(field) or "").strip().lower()
+        if any(token in text for token in INT4_PACK_TOKENS):
+            return True
+    return False
+
+
+def int4_stems_of(specs: Any) -> frozenset[str]:
+    """``{层名: 说明}`` ⇒ 自称 4bit 打包的**层名集合** ✓（判据只在 :func:`int4_packed_of` 一处 ✓）。"""
+    if not isinstance(specs, MappingABC):
+        return frozenset()
+    return frozenset(str(stem) for stem, spec in specs.items() if int4_packed_of(spec))
+
+
+def logical_weight_shape(shape: Any, *, packed: bool) -> tuple[int, ...]:
+    """**逻辑**权重形状 ✓（4bit 打包 ⇒ 最后一维 ×2 ✓；否则原样 ✓）。
+
+    ⚠️ 只对 2D 生效 ✗：打包只发生在 ``Linear`` 权重上 ✓，1D（norm/bias ✓）没有打包形态 ✓。
+    """
+    dims = tuple(int(dim) for dim in shape)
+    if not packed or len(dims) != 2:
+        return dims
+    return (dims[0], dims[1] * 2)
+
+
+def int4_shape_problem(name: str, dtype: Any, shape: Any) -> str | None:
+    """声明了 4bit 打包、但**存不了**打包 ⇒ 拒绝 ✗（不静默当 int8 乘 ✗）。"""
+    dims = tuple(int(dim) for dim in shape)
+    if len(dims) != 2:
+        return (f"`{name}` 自称 4bit 打包（`w4a4`/`int4` ✓）但形状 {dims} 不是 2D ✗"
+                f"⇒ 解包无从下手（拒绝反量化 ✓）")
+    if not is_int4_storage(dtype):
+        return (f"`{name}` 自称 4bit 打包（`w4a4`/`int4` ✓）但存储 dtype 是 "
+                f"`{str(dtype).replace('torch.', '')}` ✗ 不是单字节整型 ✓ ⇒ 拒绝反量化 ✓"
+                f"（不按猜的打包方式解 ✗）")
+    return None
+
+
+def unpack_int4(packed: Any) -> Any:
+    """把**每字节两个有符号 4bit** 的打包权重解成整型权重 ✓ ⇒ ``(rows, 2*cols)``。
+
+    ## 约定是**实测**出来的，不是猜的（2026-10-30 ✓）
+
+    两种候选 × 两种符号约定共 4 种组合，用**同源 int8 版**做基准逐层比对：
+    `krea2_v1.5_anime_int4_w4a4` 对 `krea2_v1.5_anime_int8_convrot`、
+    `krea2_turbo_int4_convrot` 对 `krea2_turbo_int8_convrot`（取 `blocks.0.attn.wq`，6144×6144）：
+
+    ======================  ============  ==========
+    解包约定                 余弦相似度     L2 相对误差
+    ======================  ============  ==========
+    **低半字节=偶数列, 有符号**  **0.9946 / 0.9949**  **0.165 / 0.166**
+    低半字节=偶数列, 偏移 8     -0.652        4.56
+    高半字节=偶数列, 有符号      -0.007        1.43
+    高半字节=偶数列, 偏移 8      0.005        3.97
+    ======================  ============  ==========
+
+    ⇒ ① **低半字节在前** ✓（`b & 0x0F` ⇒ 偶数列 ✓）；② **有符号**（nibble ≥ 8 ⇒ −16 ✓）；
+    ③ 剩下 16.5% 的 L2 误差正是 4bit 对 bf16 的量化误差量级 ✓（4bit 步长是 int8 的 16 倍 ✓）。
+    两个**不同模型**给出几乎逐位相同的结论 ✓ ⇒ 不是单文件巧合 ✓。
+
+    ⚠️ 顺带回答「为什么以前没发现」✗：打包后的形状 ``(6144, 3072)`` 与普通 per-row int8
+    **完全一样** ✓，而 ``weight_scale`` 是 ``(6144,)`` = 行数 ✓ ⇒ 每一处形状判据都说「对得上」✓✗。
+    唯一能识破它的是**文件自己写的 `w4a4`** ✓。
+    """
+    torch = _torch()
+    if int(packed.dim()) != 2:
+        raise ValueError(f"int4 打包只作用于 2D 权重，收到 {tuple(packed.shape)} ✗")
+    if not is_int4_storage(packed.dtype):
+        raise ValueError(f"int4 打包的存储 dtype 必须是单字节整型，收到 {packed.dtype} ✗")
+    raw = packed.to(torch.uint8)
+    low = (raw & 0x0F).to(torch.int8)
+    high = ((raw >> 4) & 0x0F).to(torch.int8)
+    #: 有符号 4bit：0..7 原样、8..15 ⇒ −8..−1 ✓（实测见 docstring ✓）
+    low = torch.where(low >= 8, low - 16, low)
+    high = torch.where(high >= 8, high - 16, high)
+    #: 低半字节是**偶数列** ⇒ 先 low 后 high ✓
+    return torch.stack((low, high), dim=-1).reshape(int(packed.shape[0]), int(packed.shape[1]) * 2)
 
 
 def layout_of(weight_shape: Any, scale_shape: Any) -> str | None:
@@ -221,7 +334,8 @@ def layout_of(weight_shape: Any, scale_shape: Any) -> str | None:
     return None
 
 
-def plan_dequant(tensors: Mapping[str, Any], *, convrot: Any = None) -> dict[str, Any]:
+def plan_dequant(tensors: Mapping[str, Any], *, convrot: Any = None,
+                 int4: Any = None) -> dict[str, Any]:
     """**体检阶段**就能说的结论 ✓（零依赖 ✓ 不需要 torch ✓）：这份检查点的低精度权重**能不能自动还原** ✓。
 
     入参 ``tensors``：``{名字: (dtype 字符串, 形状)}`` ✓ —— ⚠️ **两项都要** ✗：
@@ -240,18 +354,33 @@ def plan_dequant(tensors: Mapping[str, Any], *, convrot: Any = None) -> dict[str
     布局名会带 ``+convrot256`` 后缀 ✓；形状不符的进 ``unresolved`` ✓（**绝不静默当普通 per-row** ✗）。
     """
     names = list(tensors)
+    packed_stems = frozenset(int4 or ())
     count = 0
     paired = 0
     layouts: dict[str, int] = {}
     unresolved: list[str] = []
     unpaired: list[str] = []
     grouped: list[str] = []
+    int4_problems: list[str] = []
     for name in sorted(name for name in names if name.endswith((".weight", ".weight_orig"))):
         dtype, shape = tensors[name]
+        stem = name[: -len(".weight")] if name.endswith(".weight") else name[: -len(".weight_orig")]
+        #: 4bit **打包**（`w4a4`/`int4` ✓）：逻辑列是声明列的 **2 倍** ✓ ⇒ 后续每一处形状判据
+        #: （convrot 整除 ✓ / `layout_of` ✓）都必须拿**逻辑**形状 ✓，否则 6144 被当 3072 ✓✗
+        #: ⚠️ 这一段**必须在低精度筛之前** ✗✗：自称 int4 却存成 bf16 时，先被
+        #: :func:`is_low_precision` 跳过 ⇒ 报告里连一句「它自相矛盾」都没有 ✓✗
+        #: （2026-10-30 抓到：体检说 `supported=True`、装载照 bf16 原样装 ✓）。
+        packed = stem in packed_stems
+        if packed:
+            bad = int4_shape_problem(stem, dtype, shape)
+            if bad is not None:
+                int4_problems.append(bad)
+                unresolved.append(stem)
+                continue
+            shape = logical_weight_shape(shape, packed=True)
         if not is_low_precision(dtype):
             continue
         count += 1
-        stem = name[: -len(".weight")] if name.endswith(".weight") else name[: -len(".weight_orig")]
         if any(other.startswith(stem) and other.endswith(_GROUP_SUFFIXES) for other in names):
             grouped.append(stem)
             continue
@@ -275,17 +404,29 @@ def plan_dequant(tensors: Mapping[str, Any], *, convrot: Any = None) -> dict[str
         if layout is None:
             unresolved.append(stem)
         else:
-            named = _with_convrot(layout, group)
+            #: `+int4pack` 让**体检结论自己说出**「还得多一步解包」✓ —— 布局名里没有这一步，
+            #: 读报告的人会以为 `per-row` 就是全部工作量 ✓✗（2026-10-30 之前正是这样 ✓）
+            base = f"{layout}+int4pack" if packed else layout
+            named = _with_convrot(base, group)
             layouts[named] = layouts.get(named, 0) + 1
     #: 反过来的那一半 ✓（见 :func:`orphan_scales`）：**没人要的 scale** —— 融合 QKV 被拆成
     #: 分片 scale 时正是这种形态 ✓；它**不进** `supported` ✗（理由在那边写着 ✓）
     orphans = orphan_scales(tensors)
+    #: ⚠️ 声明了 4bit 打包、但一份张量都对不上号 ⇒ **解包根本不会发生** ✓✗（层名前缀不一致的常见
+    #: 后果 ✓：`model.diffusion_model.` 有没有带 ✓）—— 那就会退回「按 int8 乘」的静默错 ✓，必须报 ✓
+    matched_stems = {name[: -len(".weight")] if name.endswith(".weight") else name[: -len(".weight_orig")]
+                     for name in names if name.endswith((".weight", ".weight_orig"))}
+    int4_problems.extend(
+        f"`{stem}` 自称 4bit 打包（`w4a4`/`int4` ✓）但文件里没有同名的 `.weight`/`.weight_orig` ✗"
+        f" ⇒ 解包不会发生，反量化会退回「按 int8 乘」（数量级/结构全错 ✗）"
+        for stem in sorted(packed_stems - matched_stems))
     return {"weights": count, "paired": paired, "layouts": layouts,
             "unresolved": unresolved[:6], "unresolvedCount": len(unresolved),
             "unpaired": unpaired[:6], "unpairedCount": len(unpaired),
             "grouped": grouped[:6], "groupedCount": len(grouped),
             "orphanScales": orphans[:6], "orphanScaleCount": len(orphans),
-            "supported": count > 0 and not (unresolved or unpaired or grouped)}
+            "int4Problems": int4_problems[:6], "int4ProblemCount": len(int4_problems),
+            "supported": count > 0 and not (unresolved or unpaired or grouped or int4_problems)}
 
 
 def _compose(weight: Any, scale: Any, *, inverse: bool) -> Any:
@@ -623,7 +764,8 @@ def _apply_scale(weight: Any, scale: Any, *, inverse: bool, name: str,
 
 def precheck_dequant(meta: Mapping[str, tuple[Any, Any]],
                      scales: Mapping[str, Any], *,
-                     convrot: Any = None) -> DequantResult:
+                     convrot: Any = None,
+                     int4: Any = None) -> DequantResult:
     """**不读大权重**就能判「这份检查点装不装得上」✓（读头部 + 只读 scale 小张量 ✓）。
 
     ``meta``：``{名字: (dtype, 形状)}`` ✓ —— dtype 可以是 torch dtype ✓ 也可以是
@@ -645,13 +787,25 @@ def precheck_dequant(meta: Mapping[str, tuple[Any, Any]],
     """
     result = DequantResult()
     names = list(meta)
+    packed_stems = frozenset(int4 or ())
     for name in sorted(names):
         if not name.endswith((".weight", ".weight_orig")):
             continue
         dtype, shape = meta[name]
+        stem = name[: -len(".weight")] if name.endswith(".weight") else name[: -len(".weight_orig")]
+        #: 4bit 打包 ⇒ **逻辑**形状（列 ×2 ✓）—— 见 :func:`unpack_int4`：布局与 convrot 整除
+        #: 都要按逻辑维判 ✓，否则 6144 被当 3072 ✓✗
+        #: ⚠️ 与 :func:`plan_dequant` 同一处口径：**先判自述再筛低精度** ✗（不然自称 int4
+        #: 却存成 bf16 的层会被静默跳过 ✓✗）
+        packed = stem in packed_stems
+        if packed:
+            bad = int4_shape_problem(stem, dtype, shape)
+            if bad is not None:
+                result.problems.append(bad)
+                continue
+            shape = logical_weight_shape(shape, packed=True)
         if not is_low_precision(dtype):
             continue
-        stem = name[: -len(".weight")] if name.endswith(".weight") else name[: -len(".weight_orig")]
         group = [other for other in names
                  if other.startswith(stem) and other.endswith(_GROUP_SUFFIXES)]
         if group:
@@ -693,7 +847,8 @@ def precheck_dequant(meta: Mapping[str, tuple[Any, Any]],
             if bool((scale.to(torch.float32) == 0).any()):
                 result.problems.append(_zero_scale_problem(scale_name))
                 continue
-        result.converted[name] = {"layout": _with_convrot(layout, group), "scale": scale_name,
+        base = f"{layout}+int4pack" if packed else layout
+        result.converted[name] = {"layout": _with_convrot(base, group), "scale": scale_name,
                                   "inverse": str(inverse), "from": str(dtype)}
         result.companions.append(scale_name)
     _note_fp8_aux(result, meta)
@@ -718,7 +873,7 @@ def _note_fp8_aux(result: DequantResult, present: Mapping[str, Any]) -> None:
 
 
 def dequantize_state(state: Mapping[str, Any], *, target_dtype: Any = None,
-                     convrot: Any = None) -> DequantResult:
+                     convrot: Any = None, int4: Any = None) -> DequantResult:
     """把一份 ``state_dict`` 里的低精度权重反量化 ✓（**纯函数** ✓ 不改入参 ✓）。
 
     ⚠️ 只在**真需要**时才动 ✗：整份 bf16 的权重**原样返回** ✓（多一步 cast 只会白花时间 ✓）。
@@ -733,17 +888,34 @@ def dequantize_state(state: Mapping[str, Any], *, target_dtype: Any = None,
     """
     result = DequantResult()
     converted = dict(state)
+    packed_stems = frozenset(int4 or ())
     for key, tensor in list(state.items()):
-        if not key.endswith((".weight", ".weight_orig")) or not is_low_precision(
-                getattr(tensor, "dtype", None)):
+        if not key.endswith((".weight", ".weight_orig")):
             continue
         stem = key[: -len(".weight")] if key.endswith(".weight") else key[: -len(".weight_orig")]
+        #: 4bit 打包自述 ⇒ **先验**「它到底存得下打包吗」✗ —— 必须在低精度筛之前 ✓
+        #: （自称 int4 却存成 bf16 的层，若先被跳过就什么都不会报 ✓✗；见 :func:`plan_dequant`）
+        packed = stem in packed_stems
+        if packed:
+            bad = int4_shape_problem(stem, getattr(tensor, "dtype", None),
+                                     getattr(tensor, "shape", ()))
+            if bad is not None:
+                result.problems.append(bad)
+                continue
+        if not is_low_precision(getattr(tensor, "dtype", None)):
+            continue
         group = [name for name in state if name.startswith(stem) and name.endswith(_GROUP_SUFFIXES)]
         if group:
             result.problems.append(
                 f"`{stem}` 带 {group[:2]} ✗ ⇒ 这是**分组量化**（int4 一类 ✓）⇒ 组大小在随附 json 里 ✓ "
                 f"本仓**不猜** ✗（拒绝反量化 ✓ 不装 ✓）")
             continue
+        #: 4bit 打包 ⇒ 先**解包**再乘 scale ✓（顺序不能反 ✗：scale 是给**逻辑**列上的每个值配的 ✓，
+        #: 打包字节是两个值挤在一起 ✓ —— 先乘 scale 等于给两个值乘一次 ✓✗）
+        source_dtype = str(getattr(tensor, "dtype", "?"))
+        if packed:
+            tensor = unpack_int4(tensor)
+            result.int4PackCount += 1
         found = _scale_for(stem, state)
         if found is None and is_cast_only(getattr(tensor, "dtype", None)):
             #: fp8 没有 scale ⇒ **直接 cast** ✓（与 :func:`precheck_dequant` 同一条判据 ✓）
@@ -771,6 +943,8 @@ def dequantize_state(state: Mapping[str, Any], *, target_dtype: Any = None,
         if scaled is None:
             continue
         value, layout = scaled
+        if packed:
+            layout = f"{layout}+int4pack"
         if group is not None:
             rotated = _derotate(value, group, key, result.problems)
             if rotated is None:
@@ -781,7 +955,7 @@ def dequantize_state(state: Mapping[str, Any], *, target_dtype: Any = None,
             value = value.to(target_dtype)
         converted[key] = value
         result.converted[key] = {"layout": layout, "scale": scale_name,
-                                 "inverse": str(inverse), "from": str(getattr(tensor, "dtype", "?"))}
+                                 "inverse": str(inverse), "from": source_dtype}
         result.companions.append(scale_name)
     _note_fp8_aux(result, state)
     # 配套张量**不进模型** ✓（模型里没有 `.scale` 这类键 ✓ ⇒ 留着只会变成 unexpected ✓）
@@ -852,15 +1026,16 @@ UNSUPPORTED_FORMATS: dict[str, str] = {
 SUPPORTED_FORMATS: dict[str, str] = {
     "nvfp4": "NVFP4（4 bit E2M1 打包 + e4m3 块 scale[每 16 元素] + f32 二级 scale ✓）"
              "⇒ 由 :mod:`quant_nvfp4` 逐层还原 ✓（`w = fp4 × (块 scale × 二级 scale)` ✓）",
-    # ⚠️ 2026-10-30 实测：这族的 ``weight`` **不是** 4 bit 打包 ✗ —— 逐元素取证
-    #    `blocks.0.attn.wk.weight` ⇒ dtype=``int8`` / shape=``(1536, 3072)``（逻辑形状 ✓）/
-    #    min=``-112`` / max=``127`` / 222 个不同值 ⇒ 是 **int8 值域**，4 bit 装不下这些数 ✓；
-    #    ``weight_scale`` 是 ``(1536,)`` per-row ✓。名字里的 `w4a4` 说的是**训练/导出时**的位宽 ✓，
-    #    落盘已被转换成「int8 存储 + per-row scale」✓ ⇒ 缺的只有**反旋转**一步 ✓。
-    #    ⚠️ 反过来"顺手"加 4 bit 解包会**解错** ✓✗（把 int8 当打包 nibble 拆 ⇒ 形状与数值双错 ✓）。
-    "convrot_w4a4": "convrot_w4a4（4 bit 训练的**旋转**量化 ✓）—— 落盘 weight 实测为 int8 值域 + "
-                    "per-row scale ✓ ⇒ 由 :func:`dequantize_state` 的 convrot 反旋转还原 ✓"
-                    "（**不做** 4 bit 解包 ✗）",
+    # ⚠️ 2026-10-30 **两轮实测，前一版结论是错的** ✗✗：先记成「这族的 weight **不是** 4 bit 打包」
+    #    （凭 `blocks.0.attn.wk.weight` 的 dtype=int8 / min=-112 / max=127 / 222 个不同值 ✓）——
+    #    那些数只能说明「字节是 int8 容器」✗，**说明不了字节里装的是 8 bit 还是两个 4 bit** ✓✗
+    #    （打包后的 `(6144, 3072)` 与普通 per-row int8 **逐字相同** ✓）。真证词是同源 int8 版：
+    #    按「低半字节=偶数列、nibble ≥ 8 减 16、有符号」解包再乘 scale、再反旋转 ⇒ 与
+    #    `krea2_v1.5_anime_int8_convrot` 余弦 **0.9878** ✓（换 nibble 顺序 ⇒ 0.0001 ✓）⇒
+    #    这族**必须**解包 ✓；不解包就是把两个值挤成一团再乘一次 scale ✓✗。
+    "convrot_w4a4": "convrot_w4a4（4 bit 训练的**旋转**量化 ✓）—— 落盘 weight 是**每字节两个有符号 "
+                    "4 bit** ✓ ＋ per-row scale ✓ ⇒ 由 :func:`dequantize_state` **先解包**"
+                    "（:func:`unpack_int4` ✓）**再**乘 scale、**再** convrot 反旋转 ✓",
     # ⚠️ 2026-10-30 实测这一族的**两种写法都有** ✓✗：
     #    ① `qwen3vl_4b_fp8_scaled` 带 `*.comfy_quant`，写 `{"format": "float8_e4m3fn"}` ✓；
     #    ② `wan2.2_i2v_high_noise_14B_fp8_scaled` / `umt5_xxl_fp8_e4m3fn_scaled` **一个都没有** ✗ ⇒

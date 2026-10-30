@@ -190,7 +190,9 @@ def capabilities() -> dict[str, Any]:
             "显存配额是预算控制，不是 GPU 硬隔离（外部分配接口外无法强制）",
             "量化按**族**判，判不出就拒绝（不猜）：per-row/per-col/per-tensor/elementwise 由**形状**自证；"
             "nvfp4（U8 打包 + 128×4 块 scale + 二级 scale + AWQ）由**等式**判；"
-            "mxfp4（E8M0 共享指数）与 int4 分组量化**未实现**，一律拒绝",
+            "4bit 打包（`w4a4`/`int4`，每字节两个有符号 nibble）由**文件自述**判 —— 打包后的形状与 "
+            "per-row int8 逐字相同，按形状猜必错；"
+            "mxfp4（E8M0 共享指数）与带 `qzeros`/`g_idx` 的 int4 **分组量化**仍未实现，一律拒绝",
         ],
         #: ⭐ **环境既知缺口**（E0.1 判据要求的字段）：与 `unverified`（**能力**未验收）不同 ——
         #: 这里说的是「**这台机器上**当前不满足的前提」✓。空数组 = 没有既知缺口（**不等于**已验收 ✗）。
@@ -377,12 +379,17 @@ def inspect_weights(path: str | Path) -> dict[str, Any]:
     #: ① H3 全量版同文件里 64 与 256 并存 ⇒ 「整文件必须同组」会把正品整个拒掉 ✓；
     #: ② Krea2 int4 那族一个 `*.comfy_quant` 都没有、说明全在 metadata `_quantization_metadata`
     #:    里 ⇒ 只看张量名等于没看见旋转 ⇒ 少一步反旋转却报「可自动还原」✓✗（假绿 ✓）。
-    convrot, convrot_gap = quant_mod.convrot_group_of(
-        loader_mod.quant_specs_of(target, info))
+    layer_specs = loader_mod.quant_specs_of(target, info)
+    convrot, convrot_gap = quant_mod.convrot_group_of(layer_specs)
+    #: ⚠️ **4bit 打包**（`w4a4`/`int4` ✓）也必须在这里认出来 ✗✗：打包后的形状与普通 per-row
+    #: int8 **逐字相同**（`(6144,3072)` + `(6144,)` ✓）⇒ 形状判据全都验不出来 ✓✗，
+    #: 唯一证词是文件自己写的 `w4a4` ✓（2026-10-30 实测：一度报成「可自动还原」✓）。
+    int4 = quant_mod.int4_stems_of(layer_specs)
     #: ⚠️ 走 `loader.dequant_plan_of` 而**不是**自己拼 `plan_dequant` ✗（2026-10-30）：那才是
     #: 「nvfp4 摘层 + 合并」的唯一口径 ✓ —— 自己拼一份 ⇒ 同一个文件在 `片场 inspect` 里说
     #: 「判不出布局 ✗」、在 `plan_stage` 里说「能还原 ✓」，两处**互相打脸** ✓✗。
-    dequant, dequant_problems = loader_mod.dequant_plan_of(info, formats, convrot=convrot)
+    dequant, dequant_problems = loader_mod.dequant_plan_of(info, formats, convrot=convrot,
+                                                          int4=int4)
     family: dict[str, Any] | None = None
     for spec in formats:
         hit = quant_mod.format_family(spec)
@@ -414,6 +421,11 @@ def inspect_weights(path: str | Path) -> dict[str, Any]:
             #: 只报**不拦** ✗：真会算错的形态（融合权重自己缺 scale ✓）已经落在 `unpaired` 里 ✓
             #: （理由写在 `quant.orphan_scales` 的 docstring 里 ✓）。
             "orphanScales": dequant.get("orphanScales") or [],
+            #: ⚠️ **自称 4bit 打包却用不了** ✓（层名对不上 / 不是单字节存储 ✓）—— 这类文件
+            #: 必须**整份拒** ✓：解包不发生 ⇒ 按 int8 乘 ⇒ 数值全错但形状全对 ✓✗（假绿 ✓）
+            "int4Problems": dequant.get("int4Problems") or [],
+            "int4Packed": dequant.get("int4Packed") or [],
+            "int4PackedCount": dequant.get("int4PackedCount", 0),
             "convrot": convrot,
             #: nvfp4 的逐层体检 ✓（不是这一族时为 ``None`` ✓）—— 报告里要**看得出**它是
             #: 靠 `quant_nvfp4` 的布局等式判的 ✓，不是「形状看着像就放行」✓✗

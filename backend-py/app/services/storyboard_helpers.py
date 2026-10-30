@@ -27,10 +27,14 @@ from sqlalchemy.engine import Connection
 
 from ..core.models import (
     characters as characters_table,
+    continuity_states,
     episode_characters,
     episode_scenes,
+    image_generations,
     storyboard_characters,
     storyboard_props,
+    storyboards as storyboards_table,
+    video_generations,
 )
 from .character_match import match_character_by_speaker_name
 
@@ -166,6 +170,53 @@ def validate_storyboard_bindings(
     invalid = [cid for cid in (character_ids or []) if cid not in episode_character_ids]
     if invalid:
         raise ValueError("character_ids 必须来自当前集已关联角色")
+
+
+#: 分镜上「已经出过东西」的列 —— 只要有一列非空，这条分镜就带着成片产物，
+#: 重跑分镜阶段**不许**为了重建把它删掉（删了等于把已花钱的图/视频扔了）。
+_MEDIA_COLUMNS = (
+    "composed_image", "first_frame_image", "last_frame_image", "tail_frame_image",
+    "keyframe_image", "video_url", "tts_audio_url", "composed_video_url",
+)
+
+
+def clear_episode_storyboards(conn: Connection, episode_id: Any) -> dict[str, Any]:
+    """清空一集的全部镜头（连同角色/道具关联、镜头级连续性状态、出图/出视频记录）。
+
+    **为什么需要它**：``save_storyboards`` 的「整集重建」只在模型**第一轮不带 append**
+    时才生效。而实测（2026-10-30，qwen3:14b）模型先调 ``read_storyboard_context``，
+    看到 ``existingStoryboards=10`` 就自作主张 ``append=true`` ⇒ 重跑分镜阶段**叠出两套镜头**
+    （旧 10 + 新 5 = 15 镜、同一场戏出现两遍）。⇒ 由后端在阶段入口先清空，
+    模型再读上下文时是 0 镜，自然走「整集新建」。
+
+    返回 ``{"deleted": 删掉的镜数, "refused": 是否因已出片而拒绝, "media": 带产物的镜数}``。
+    """
+    rows = conn.execute(
+        select(*[storyboards_table.c.id, *[storyboards_table.c[name] for name in _MEDIA_COLUMNS]])
+        .where(storyboards_table.c.episode_id == episode_id)
+    ).all()
+    ids = [row[0] for row in rows]
+    if not ids:
+        return {"deleted": 0, "refused": False, "media": 0}
+
+    with_media = [row[0] for row in rows
+                  if any((value or "").strip() for value in row[1:])]
+    if with_media:
+        # 有产物就不重建：宁可「只补缺场景」，也不静默丢掉成片
+        return {"deleted": 0, "refused": True, "media": len(with_media)}
+
+    conn.execute(delete(storyboard_characters).where(
+        storyboard_characters.c.storyboard_id.in_(ids)))
+    conn.execute(delete(storyboard_props).where(
+        storyboard_props.c.storyboard_id.in_(ids)))
+    conn.execute(delete(continuity_states).where(
+        continuity_states.c.storyboard_id.in_(ids)))
+    conn.execute(delete(image_generations).where(
+        image_generations.c.storyboard_id.in_(ids)))
+    conn.execute(delete(video_generations).where(
+        video_generations.c.storyboard_id.in_(ids)))
+    conn.execute(delete(storyboards_table).where(storyboards_table.c.id.in_(ids)))
+    return {"deleted": len(ids), "refused": False, "media": 0}
 
 
 # ---------------------------------------------------------------------------
