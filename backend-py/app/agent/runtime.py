@@ -21,7 +21,11 @@
 形状与文本链路一致），再往 body 里注入 ``tools``，自己跑「工具调用 → 结果回灌」的循环
 （``maxSteps`` 上限、``modelSettings`` 的 ``maxOutputTokens``/``temperature`` 都要**显式下发**，
 否则 DB 里的这两项是死配置 —— 原 TS 的注释专门写了这个坑）。
-**Gemini 的函数调用循环尚未支持**（``:generateContent`` 的 parts 形状不同）⇒ 显式报错，不静默降级。
+⭐ **Ollama 原生**（``/api/chat``）的工具循环自 2026-10-28 起已支持 ✓ —— 本机默认文本配置就是
+``provider=ollama``，此前 ``/api/v1/agent/{type}/chat`` 恒 400「尚未移植」✗。它的
+``message.tool_calls`` 与 OpenAI **同形**，只有两处差异：``function.arguments`` 是**对象**（不是 JSON
+字符串）、工具结果用 ``{"role":"tool","tool_name":…}`` 回灌（没有 ``tool_call_id``）。
+**Gemini 仍未支持**（``:generateContent`` 的 parts 形状不同）⇒ 显式报错，不静默降级。
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ from sqlalchemy.engine import Connection
 
 from app.core.models import agent_configs, dramas
 from app.services.adapters.registry import get_text_adapter
+from app.services.adapters.text_adapters import ollama_num_ctx
 from app.services.agent_prompts import get_default_instructions
 from app.services.agent_registry import (
     AGENT_SPECS,
@@ -119,6 +124,10 @@ def classify_llm_error(err: BaseException) -> str:
     限流/过载/配额/超时/网络抖动 ⇒ transient。⚠️ **默认 transient**（宁重试，
     避免分类不全误伤可用模型）—— 与原 TS 一致。
     """
+    # ⚠️ 上下文超窗是**确定性**失败：重试、退避、换模型都不会变好（同一份消息）
+    # ⇒ 必须打 fatal，否则要白等 8 轮退避再报同一个错。用类型判而不是靠字符串匹配。
+    if isinstance(err, context_budget.ContextOverflowError):
+        return "fatal"
     message = f"{getattr(err, 'message', '') or getattr(err, 'args', [''])[0] or ''} " \
               f"{getattr(err, 'name', '') or ''} {getattr(err, 'code', '') or ''}".lower()
     status = (getattr(err, "status", None)
@@ -557,6 +566,161 @@ def get_agent_defaults() -> list[dict[str, Any]]:
 # ===========================================================================
 
 
+def _transport_retry(config: dict[str, Any]) -> tuple[int, int]:
+    """本机服务的超时/重试口径（与 Node 的 ``isLocal`` 分支一致）。"""
+    is_local = is_local_config(config.get("baseUrl") or "", str(config.get("provider") or ""))
+    return (180_000 if is_local else 60_000, 1 if is_local else 3)
+
+
+def _parse_tool_args(raw: Any) -> dict[str, Any]:
+    """工具入参归一：OpenAI 回**字符串**、Ollama 回**对象**，两种都要吃得下。"""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _ollama_context_budget(
+    config: dict[str, Any], model_settings: dict[str, Any]
+) -> context_budget.Budget:
+    """Ollama 的**输入侧**预算 ＝ ``num_ctx`` − 输出预留（``num_predict``）。
+
+    ⚠️ 为什么必须扣（2026-10-28 实测）：Ollama 的 ``num_ctx`` 是 **prompt + 输出共用一个窗口**，
+    而本项目的 ``maxOutputTokens`` 默认 4096 与 Ollama 的默认窗口 4096 同值 ⇒ 提示词被压到
+    只剩 ~2048（实测 ``prompt_eval_count`` 2050）且**丢开头**＝丢 system instructions，不报错。
+    窗口已由适配器显式下发（``OLLAMA_DEFAULT_NUM_CTX``），这里把预算阈值也对齐同一个数，
+    否则 ``context_budget`` 仍按 24000 估算 ⇒ 算出来的数与本机窗口无关，压缩层形同虚设。
+
+    默认 32768 ⇒ 预算 28672（最能吃的 ``storyboard_breaker`` 固定开销 16276，余 12396）。
+    """
+    num_ctx = ollama_num_ctx(config)
+    try:
+        reserved = int(model_settings.get("maxOutputTokens") or 0)
+    except (TypeError, ValueError):
+        reserved = 0
+    reserved = reserved if reserved > 0 else DEFAULT_MAX_OUTPUT_TOKENS
+    return context_budget.Budget(limit_tokens=max(1_000, num_ctx - reserved))
+
+
+def _apply_context_budget(
+    messages: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    budget: context_budget.Budget | None = None,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """上下文预算的**机械层**（两条工具循环共用；零 LLM 调用、消息条数不变）。
+
+    ⚠️ **超预算必须留痕**（2026-09-25 修）：此前只在「有老 tool 输出可压」时才记 step ✗，
+    于是「机械层压不动」这种情况（``needsSummarize`` —— 中间没有可压的 tool 输出 /
+    最近 ``keep_recent`` 条一律不动）在运行记录里**完全查不到** ✗，
+    外部只表现为「模型毫无征兆地开始丢前文」✗。
+    本循环仍**刻意不**擅自调模型做摘要（成本 + 失真，见 ``context_budget`` 模块文档）。
+
+    ``strict=True`` 时（Ollama 路径）：机械层压完仍超 ⇒ 抛
+    :class:`~app.agent.context_budget.ContextOverflowError`，**不再照发**。
+    理由见该异常类的注释：Ollama 超窗是 HTTP 200 + 静默丢开头，
+    「发出去拿到一份错的稿」比「当场报错」代价大得多。OpenAI 兼容路径保持只 warn
+    （云端窗口通常 ≥32k，且改成本地这种硬失败会误伤）。
+    """
+    settings = budget or context_budget.Budget()
+    budget_plan = context_budget.plan_compression(messages, settings)
+    if budget_plan.elide:
+        messages = context_budget.apply_plan(messages, budget_plan)
+    if budget_plan.overBudget:
+        steps.append({"contextBudget": budget_plan.to_dict()})
+        if budget_plan.needsSummarize:
+            log_task_warn("Agent", "context-over-budget", {
+                "estimatedTokens": round(budget_plan.tokensAfter),
+                "limitTokens": settings.limit_tokens,
+                "messageCount": len(messages),
+                "strict": strict,
+            })
+            if strict:
+                raise context_budget.ContextOverflowError(budget_plan, settings.limit_tokens)
+    return messages
+
+
+#: 只读工具前缀 —— 与前端 ``useAgent.ts`` 的 ``READ_ONLY_PREFIXES`` 同一口径。
+_READ_ONLY_PREFIXES = ("read_", "list_", "get_")
+
+#: 「读了就收工」时补发的催促（整个 run 只发一次）
+_NUDGE_TEXT = (
+    "你还没有完成任务：上一轮只读取了数据，没有调用任何保存工具，数据库没有发生任何变化。"
+    "请立刻按工作流程继续，调用保存类工具（save_* 等）把结果写入；"
+    "不要只输出分析、点评或建议，也不要询问用户是否需要继续。"
+    "注意：保存时的数组不能传空（characters 至少要覆盖剧本里所有有名有姓的人物），"
+    "空数组会被工具拒绝并返回错误。"
+)
+
+
+def _called_tools(tool_calls_out: list[dict[str, Any]]) -> list[str]:
+    return [str(call.get("toolName") or "") for call in tool_calls_out if call.get("toolName")]
+
+
+def _need_write_nudge(
+    tool_calls_out: list[dict[str, Any]],
+    text: str,
+    already_nudged: bool,
+    tools: "ToolRegistry",
+) -> bool:
+    """模型「读完数据就收工」时，是否需要补一句话催它去保存。
+
+    ⚠️ 为什么需要（2026-10-28 实测）：本机文本服务是 ``qwen3:14b``（本地 Ollama），
+    ``extractor`` 只调了 ``read_script_for_extraction`` 就返回一篇「故事亮点分析」，
+    一个 ``save_dedup_*`` 都没调 ⇒ 库里一行没变，而接口仍返回 200。
+    小模型的 agent 自觉性靠不住，这里由运行时补一轮明确的催促（**不依赖提示词自觉**）。
+
+    只有同时满足才催：有工具可调、确实调过工具、调的全是只读、并且模型已经说了话。
+    —— 纯问答（一个工具都没调）不催；已经落过库的不催；同一个 run 催过一次就不再催。
+    """
+    if already_nudged or not tools.tools or not (text or "").strip():
+        return False
+    names = _called_tools(tool_calls_out)
+    if not names:
+        return False
+    return all(name.startswith(_READ_ONLY_PREFIXES) for name in names)
+
+
+async def _run_tool(
+    tools: ToolRegistry,
+    name: Any,
+    args: dict[str, Any],
+    tool_calls_out: list[dict[str, Any]],
+    tool_results_out: list[dict[str, Any]],
+) -> str:
+    """跑一个工具并把结果序列化（工具报错**回灌给模型**，不中断 run）。"""
+    tool = tools.get(str(name)) if name else None
+    if tool is None:
+        output: Any = {"error": f"Unknown tool: {name}"}
+    else:
+        try:
+            output = await tool.run(args)
+        except Exception as err:  # noqa: BLE001 —— 工具报错回灌给模型，不中断 run
+            output = {"error": str(err)}
+    rendered = normalize_tool_output(output)
+    tool_calls_out.append({"toolName": name, "args": args})
+    tool_results_out.append({"toolName": name, "result": rendered})
+    return rendered
+
+
+def _ollama_usage(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Ollama 用量（``prompt_eval_count``/``eval_count``）→ ``extract_token_usage`` 的形状。"""
+    prompt_eval = data.get("prompt_eval_count")
+    eval_count = data.get("eval_count")
+    if not isinstance(prompt_eval, int) and not isinstance(eval_count, int):
+        return None
+    input_tokens = prompt_eval if isinstance(prompt_eval, int) else 0
+    output_tokens = eval_count if isinstance(eval_count, int) else 0
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens}
+
+
 async def default_generate(
     *,
     config: dict[str, Any],
@@ -567,21 +731,50 @@ async def default_generate(
     max_steps: int,
     model_settings: dict[str, Any],
 ) -> dict[str, Any]:
-    """OpenAI 兼容的**工具调用循环**（自建传输；见模块 docstring）。
+    """工具调用循环的**入口**（自建传输；见模块 docstring）。
 
     返回 ``{text, tool_calls, tool_results, steps}``，``steps[].usage`` 供
     ``extract_token_usage`` 累加（与 Mastra 的 ``result.steps`` 同形）。
+
+    ⭐ 2026-10-28：**Ollama 原生**（``/api/chat``）也走这条路 —— 此前只认 OpenAI 兼容，
+    而本机默认文本配置正是 ``provider=ollama`` ⇒ ``/agent/{type}/chat`` 恒 400。
+    其余原生适配器（Gemini）仍**显式报错**，不静默降级。
     """
     adapter = get_text_adapter(str(config.get("provider") or ""))
-    if getattr(adapter, "provider", "") != "openai-compatible":
-        raise ValueError(
-            f"Agent runtime: provider '{config.get('provider')}' 使用 "
-            f"{type(adapter).__name__}，其函数调用循环尚未移植（仅支持 OpenAI 兼容）"
-        )
+    provider = getattr(adapter, "provider", "")
+    loop_kwargs: dict[str, Any] = {
+        "adapter": adapter,
+        "config": config,
+        "model": model,
+        "instructions": instructions,
+        "tools": tools,
+        "message": message,
+        "max_steps": max_steps,
+        "model_settings": model_settings,
+    }
+    if provider == "ollama":
+        return await _run_ollama_tool_loop(**loop_kwargs)
+    if provider == "openai-compatible":
+        return await _run_openai_tool_loop(**loop_kwargs)
+    raise ValueError(
+        f"Agent runtime: provider '{config.get('provider')}' 使用 "
+        f"{type(adapter).__name__}，其函数调用循环尚未移植（支持 OpenAI 兼容 / Ollama 原生）"
+    )
 
-    is_local = is_local_config(config)
-    timeout_ms = 180_000 if is_local else 60_000
-    max_retries = 1 if is_local else 3
+
+async def _run_openai_tool_loop(
+    *,
+    adapter: Any,
+    config: dict[str, Any],
+    model: str,
+    instructions: str,
+    tools: ToolRegistry,
+    message: str,
+    max_steps: int,
+    model_settings: dict[str, Any],
+) -> dict[str, Any]:
+    """OpenAI 兼容（``/chat/completions``）的工具调用循环。"""
+    timeout_ms, max_retries = _transport_retry(config)
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": instructions},
@@ -591,6 +784,7 @@ async def default_generate(
     tool_results_out: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
     text = ""
+    nudged = False
 
     for _ in range(max(1, int(max_steps))):
         # ⚠️ **上下文预算**（移植自 Mini-Agent 的思路 ✓）：
@@ -599,23 +793,7 @@ async def default_generate(
         #    **消息条数不变** ✓ ⇒ tool 往返的成对关系不会被破坏 ✓（破坏它会直接 400 ✗）。
         #    机械层不够时会带出 ``needsSummarize`` ✓（**要不要花那次摘要调用由上层决定** ✗ —— 
         #    本循环不擅自调模型 ✓）。
-        budget_plan = context_budget.plan_compression(messages)
-        if budget_plan.elide:
-            messages = context_budget.apply_plan(messages, budget_plan)
-        if budget_plan.overBudget:
-            # ⚠️ **超预算必须留痕**（2026-09-25 修）：此前只在「有老 tool 输出可压」时才记 step ✗，
-            #    于是「机械层压不动」这种情况（``needsSummarize`` ✓ —— 中间没有可压的 tool 输出 /
-            #    最近 ``keep_recent`` 条一律不动 ✓）在运行记录里**完全查不到** ✗，
-            #    外部只表现为「模型毫无征兆地开始丢前文」✗。
-            #    本循环仍**刻意不**擅自调模型做摘要 ✓（成本 + 失真，见 ``context_budget`` 模块文档 ✓），
-            #    但把「已经超了」这个事实落进 steps 与控制台日志 ✓。
-            steps.append({"contextBudget": budget_plan.to_dict()})
-            if budget_plan.needsSummarize:
-                log_task_warn("Agent", "context-over-budget", {
-                    "estimatedTokens": round(budget_plan.tokensAfter),
-                    "limitTokens": context_budget.Budget().limit_tokens,
-                    "messageCount": len(messages),
-                })
+        messages = _apply_context_budget(messages, steps)
         request = adapter.build_request(config, {
             "model": model,
             "messages": messages,
@@ -652,6 +830,14 @@ async def default_generate(
         text = assistant.get("content") or ""
         calls = assistant.get("tool_calls") or []
         if not calls:
+            if _need_write_nudge(tool_calls_out, text, nudged, tools):
+                nudged = True
+                steps.append({"nudge": "missing-write"})
+                log_task_warn("Agent", "missing-write-nudge", {
+                    "calledTools": _called_tools(tool_calls_out), "textChars": len(text),
+                })
+                messages.append({"role": "user", "content": _NUDGE_TEXT})
+                continue
             break
 
         messages.append({"role": "assistant", "content": assistant.get("content"),
@@ -659,23 +845,114 @@ async def default_generate(
         for call in calls:
             function = call.get("function") or {}
             name = function.get("name")
-            raw_args = function.get("arguments")
-            try:
-                args = json.loads(raw_args) if raw_args else {}
-            except (ValueError, TypeError):
-                args = {}
-            tool = tools.get(str(name)) if name else None
-            if tool is None:
-                output: Any = {"error": f"Unknown tool: {name}"}
-            else:
-                try:
-                    output = await tool.run(args if isinstance(args, dict) else {})
-                except Exception as err:  # noqa: BLE001 —— 工具报错回灌给模型，不中断 run
-                    output = {"error": str(err)}
-            rendered = normalize_tool_output(output)
-            tool_calls_out.append({"toolName": name, "args": args})
-            tool_results_out.append({"toolName": name, "result": rendered})
+            args = _parse_tool_args(function.get("arguments"))
+            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
             messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": rendered})
+
+    return {"text": text, "tool_calls": tool_calls_out, "tool_results": tool_results_out,
+            "steps": steps}
+
+
+async def _run_ollama_tool_loop(
+    *,
+    adapter: Any,
+    config: dict[str, Any],
+    model: str,
+    instructions: str,
+    tools: ToolRegistry,
+    message: str,
+    max_steps: int,
+    model_settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Ollama **原生**（``/api/chat``）的工具调用循环。
+
+    与 OpenAI 兼容那条**只有三处**不同（其余逐行同构）：
+    1. 响应读 ``message.content`` / ``message.tool_calls``（不是 ``choices[0].message``）；
+    2. ``tool_calls[].function.arguments`` 是**对象**（OpenAI 是 JSON 字符串）⇒ ``_parse_tool_args``；
+    3. 回灌用 ``{"role":"tool","tool_name":…,"content":…}``（**没有** ``tool_call_id``），
+       用量字段是 ``prompt_eval_count``/``eval_count``（不是 ``usage``）。
+    """
+    timeout_ms, max_retries = _transport_retry(config)
+    # ⚠️ 预算阈值必须跟着**实际**窗口走（num_ctx − 输出预留），见 _ollama_context_budget
+    budget = _ollama_context_budget(config, model_settings)
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": message},
+    ]
+    tool_calls_out: list[dict[str, Any]] = []
+    tool_results_out: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    text = ""
+    nudged = False
+
+    for _ in range(max(1, int(max_steps))):
+        # ⚠️ 上下文预算同 OpenAI 兼容那条（每步重发整份 messages，多步工具链会一路撑大）
+        # strict：超窗就当场失败，不交给 Ollama 去静默截断（它 HTTP 200 且丢掉 system 开头）
+        messages = _apply_context_budget(messages, steps, budget, strict=True)
+        request = adapter.build_request(config, {
+            "model": model,
+            "messages": messages,
+            "temperature": model_settings.get("temperature"),
+            "maxTokens": model_settings.get("maxOutputTokens"),
+        })
+        if tools.tools:
+            # Ollama 的 ``tools`` 就是 OpenAI 的 function 形状（同一份声明，无需转换）
+            request["body"]["tools"] = tools.as_openai_tools()
+
+        response = await fetch_with_retry(
+            request["url"],
+            {
+                "method": request["method"],
+                "headers": request["headers"],
+                # 发给厂商的请求体：紧凑 JSON（与文本链路一致）
+                "body": json.dumps(request["body"], ensure_ascii=False, separators=(",", ":"))
+                if request.get("body") is not None else None,
+            },
+            "text",
+            timeout_ms=timeout_ms,
+            max_retries=max_retries,
+        )
+        if not response.is_success:
+            raise ValueError(
+                format_vendor_http_error(response.status_code, response.text, "text")
+            )
+
+        data = response.json()
+        # ⚠️ Ollama 有一部分失败是 **HTTP 200 + {"error": …}**（如显存不够装下这个 num_ctx）
+        # 而不是 4xx/5xx。此前直接取 ``message`` ⇒ 拿到空文本当作"模型什么都没说"收工，
+        # 库里一行没变、接口却回 200。这里必须显式抛错。
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, str) and error.strip():
+                raise ValueError(f"Ollama 返回错误（HTTP {response.status_code}）：{error.strip()}")
+        usage = _ollama_usage(data)
+        if usage is not None:
+            steps.append({"usage": usage})
+
+        assistant = data.get("message") if isinstance(data.get("message"), dict) else {}
+        text = assistant.get("content") or ""
+        calls = assistant.get("tool_calls") or []
+        if not calls:
+            if _need_write_nudge(tool_calls_out, text, nudged, tools):
+                nudged = True
+                steps.append({"nudge": "missing-write"})
+                log_task_warn("Agent", "missing-write-nudge", {
+                    "calledTools": _called_tools(tool_calls_out), "textChars": len(text),
+                })
+                messages.append({"role": "user", "content": _NUDGE_TEXT})
+                continue
+            break
+
+        # ⚠️ assistant 这轮的消息（含 tool_calls）必须原样回灌，否则下一轮模型看不到自己调过什么
+        messages.append({"role": "assistant", "content": assistant.get("content") or "",
+                         "tool_calls": calls})
+        for call in calls:
+            function = call.get("function") or {}
+            name = function.get("name")
+            args = _parse_tool_args(function.get("arguments"))
+            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
+            messages.append({"role": "tool", "tool_name": name, "content": rendered})
 
     return {"text": text, "tool_calls": tool_calls_out, "tool_results": tool_results_out,
             "steps": steps}

@@ -314,6 +314,35 @@ class ComfyUIClient:
                                       extra={"overwrite": "true" if overwrite else "false"},
                                       content_type=content_type)
 
+    def upload_audio(self, filename: str, data: bytes, *, subfolder: str = "",
+                     overwrite: bool = True, content_type: str | None = None) -> dict[str, Any]:
+        """上传参考音频 ✓ —— **走的是同一个端点** ``/upload/image`` ✓✗。
+
+        ⚠️ 别以为叫 image 就只能传图 ✗：ComfyUI 那个 handler（``server.py::image_upload`` ✓）**不看
+        Content-Type、也不解码** ✓，只把字节按 ``name`` 写进 ``input`` 目录 ✓；表单字段名硬编码是
+        ``image`` ✓（读的是 ``post.get("image")`` ✓）⇒ 换字段名就收不到 ✓✗。
+        ⇒ 音频「上传」与图**完全同一条路** ✓，区别只在**文件名后缀**（``LoadAudio`` 的 COMBO 按
+        mimetypes 现算选项 ✓，见 ``server.py::_audio_filename`` ✓）。
+        """
+        return self._upload_multipart("/upload/image", "image", filename, data,
+                                      subfolder=subfolder,
+                                      extra={"overwrite": "true" if overwrite else "false"},
+                                      content_type=content_type)
+
+    def upload_video(self, filename: str, data: bytes, *, subfolder: str = "",
+                     overwrite: bool = True, content_type: str | None = None) -> dict[str, Any]:
+        """上传参考**视频** ✓ —— 与图/音**同一个端点** ``/upload/image`` ✓✗（同 :meth:`upload_audio`）。
+
+        ⚠️ 视频这边**后缀更硬** ✗✗：读视频的那个加载器把文件格声明成 COMBO ✓，选项表由
+        ``folder_paths.filter_files_content_types(os.listdir(input), ["video"])`` 现算 ✓
+        ⇒ 存成 ``.bin`` / ``.png`` 就是「上传成功、节点里根本选不出来」⇒ 提交 400 ✓✗。
+        ⇒ 文件名后缀由 ``server.py::_video_filename`` 按 URL 问 mimetypes 得出 ✓。
+        """
+        return self._upload_multipart("/upload/image", "image", filename, data,
+                                      subfolder=subfolder,
+                                      extra={"overwrite": "true" if overwrite else "false"},
+                                      content_type=content_type)
+
     # ══════════════════════════════════════════════════════════════════
     # 目录 / 清单类（对齐 ComfyUI 的读端点 ✓ —— 2026-09-17 补齐到全覆盖）
     # ══════════════════════════════════════════════════════════════════

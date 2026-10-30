@@ -61,16 +61,36 @@
 ``H3_R2V_WORKFLOW``         参考素材（R2V）模板文件名        ``video_minimax_h3_r2v.json``
 ``H3_TEMPLATE``             强制指定模板（空=按入参自动挑 ✓） 空（body ``template`` 优先 ✓）
 ``H3_REF_IMAGE_LIMIT``      最多接几路参考图 ✓              ``3``（盘上 R2V 模板接了 ``ref_image_0..2`` ✓）
+``H3_REF_AUDIO_LIMIT``      最多接几路参考音频 ✓            ``3``（模板只声明 1 格 ⇒ 实际落 1 ✓）
+``H3_REF_VIDEO_LIMIT``      最多接几路参考视频 ✓            ``3``（模板声明 1 格帧串 + 1 格音轨 ✓）
+``H3_REF_VIDEO_NODES``      读视频的节点类候选（逗号分隔）   ``LoadVideo,VHS_LoadVideo``（问引擎取第一个可用的 ✓）
 ========  ============================================  ==============================
 
 ⚠️ 已知限制（**如实列出**，不假装支持 ✓）：
-* **参考素材（Ref2VA）只有走 R2V 模板才真生效** ✗：传了参考图 + 自家那个 FL2VA/I2VA 模板 ⇒ 主节点上
-  压根没有 ``ref_images.*`` 槽位 ⇒ **响亮告警**说明被忽略 ✓、且**连上传都不做** ✓（别在 ComfyUI 的
-  ``input`` 目录里留垃圾 ✓）。传参考图时**没显式指定模板 ⇒ 自动换官方 R2V 模板** ✓。
-* 参考素材**只接图** ✓：节点**类**其实还支持 ``ref_videos`` / ``ref_video_audios`` / ``ref_audios``
-  （各 ≤3 ✓，出处 ``comfy_extras/nodes_minimax_h3.py`` ✓），但**盘上那个 R2V 模板一格都没接** ✗
-  ⇒ ``reference_audio*`` 一律**响亮告警 + 忽略** ✓。⚠️ 这条判据是**图上真有的端口** ✓✗
-  （``workflow.py::reference_slot_names`` ✓）⇒ 哪天模板把音频槽位接上，这里**不用改代码**就认 ✓。
+* **参考素材（Ref2VA）只有走 R2V 模板才真生效** ✗：传了参考素材 + 自家那个 FL2VA/I2VA 模板 ⇒ 主节点上
+  压根没有 ``ref_images.*`` / ``ref_audios.*`` 槽位 ⇒ **响亮告警**说明被忽略 ✓、且**连上传都不做** ✓
+  （别在 ComfyUI 的 ``input`` 目录里留垃圾 ✓）。传参考素材时**没显式指定模板 ⇒ 自动换官方 R2V 模板** ✓。
+* 参考素材**图与音都接** ✓（音频是 2026-10-27 补的 ✓）：图落 ``ref_images.ref_image_k`` ✓、
+  音落 ``ref_audios.ref_audio_k`` ✓（上游是现建的 ``LoadAudio`` ✓）。===两路各算各的=== ✗✗：
+  ``<Picture n>`` 与 ``<Audio n>`` 是**两条独立的下标序列** ✓，混着用会让两边编号都错 ✓。
+  ⚠️ 判据一律是**图上真有的端口** ✓（``workflow.py::reference_slot_names`` /
+  ``reference_audio_slot_names`` ✓）⇒ 模板加/减槽位都不用改代码 ✓。盘上 R2V 模板：图 3 格（2 格接好、
+  1 格空插座）、音 **1** 格（空插座）✓。
+* 参考视频 ``ref_videos`` / ``ref_video_audios`` **已接** ✓（2026-10-27 补齐 R2V 第三类素材 ✓✗；
+  旧口径写的是「仍不接 ✗（产品侧没有参考视频来源）」✓✗ —— 那是**当时**的事实 ✓，不是判据 ✗：
+    模板上**一直就声明着**这两种端口 ✓，缺的只是产品侧这条路 ✓）。
+  ⚠️ 它与图/音有一个结构差异 ✓✗：端口类型是 ``IMAGE``（=一串帧 ✓），上游必须是**读视频的加载器** ✓，
+  而那个类**不在模板里**（空插座 ✓）⇒ 只能**问引擎**现建 ✓（``_video_loader`` ✓：类名/文件格/
+  ``IMAGE``、``AUDIO`` 各在第几槽都从 ``/object_info`` 读 ✓，一个候选都用不了就如实告警且**不上传** ✗）。
+  上游候选由 ``H3_REF_VIDEO_NODES`` 覆盖（默认 ``LoadVideo,VHS_LoadVideo`` ✓）。
+  ⚠️⚠️ 而且**多半是两跳** ✓✗（2026-10-27 照抄 ``reference/comfy-org`` 后端口径 ✓）：现版核心
+  ``LoadVideo`` 只吐 **``VIDEO``** ✗，而 ``ref_videos.ref_video_k`` 要的是 **``IMAGE``** 帧串 ✗
+  ⇒ 中间必须再有一个 ``GetVideoComponents``（``VIDEO`` → ``images``/``audio`` ✓，候选由
+  ``H3_REF_VIDEO_COMPONENT_NODES`` 覆盖 ✓）。生态节点（``VHS_LoadVideo`` ✓）自带 ``IMAGE``/``AUDIO``
+  ⇒ 一跳即可 ✓，故仍优先用一跳 ✓。
+* 参考视频的**音轨**会先占掉 ``<Audio j>`` 的编号 ✓✗（后端：每路视频先 append 音轨、
+  再 append 视频 ✓；独立音频排在全部视频之后 ✓）⇒ 独立音频编号从 ``声轨数+1`` 起 ✓，
+  声轨本身在视频块里声明、且**紧贴它那段视频之前** ✓。
 * 采样步数/分辨率档位沿用模板（10 步 / 0.65MP ✓）；``H3_QUALITY`` 可覆盖 megapixels ✓。
 * 模板里的 ``length`` 由模板自带的 ``ComfyMathExpression`` 按 **24fps + 17k+5 网格**算 ✓，
   这里只注入「秒」✓（并用同一套数学回一个 ``expected_frames`` 供对账 ✓）。
@@ -130,10 +150,54 @@ I2V_WORKFLOW = os.environ.get("H3_I2V_WORKFLOW") or "MiniMax_H3_Fast_I2V.json"
 R2V_WORKFLOW = os.environ.get("H3_R2V_WORKFLOW") or "video_minimax_h3_r2v.json"
 #: 显式指定模板（空 = 按入参自动挑 ✓）；请求体里的 ``template`` 优先于它 ✓
 TEMPLATE = os.environ.get("H3_TEMPLATE") or ""
-#: 参考图最多几路（官方 R2V 模板的槽位是 ``ref_images.ref_image_0..2`` ⇒ 3 ✓）
-REF_IMAGE_LIMIT = int(os.environ.get("H3_REF_IMAGE_LIMIT") or "3")
+#: 参考图最多几路。
+#:
+#: ⚠️ 默认值**不是**盘上模板的槽位数（那份是 ``ref_images.ref_image_0..2`` ⇒ 3 ✓）✗ ——
+#: 取的是**后端节点的真上限** ✓：``nodes_minimax_h3.py`` 里
+#: ``io.Autogrow.TemplatePrefix(input=io.Image.Input("ref_image", ...), prefix="ref_image_", min=0, max=9)``
+#: ⇒ 9 ✓（旧值 3 会把「模板槽位比盘上那份多」的机器白截断 ✓✗；真正落地几路由模板槽位决定 ✓）。
+REF_IMAGE_LIMIT = int(os.environ.get("H3_REF_IMAGE_LIMIT") or "9")
+#: 参考音频最多几路（节点 schema ``io.Autogrow.Input("ref_audios", min=0, max=3)`` ⇒ 3 ✓；
+#: ⚠️ 盘上 R2V 模板只声明了 **1** 格 ⇒ 真正落地几路仍由**模板槽位数**决定 ✓✗，这个上限只是「别白传」✓）
+REF_AUDIO_LIMIT = int(os.environ.get("H3_REF_AUDIO_LIMIT") or "3")
+#: 参考**视频**最多几路（节点 schema ``io.Autogrow.Input("ref_videos", min=0, max=3)`` ⇒ 3 ✓；
+#: 口径与音频一致：上限只负责「别白传」✓，真正落地几路由**模板槽位数**决定 ✓。
+REF_VIDEO_LIMIT = int(os.environ.get("H3_REF_VIDEO_LIMIT") or "3")
+#: 读视频的加载器**候选类名**（按顺序问引擎的 ``/object_info`` ✓，谁真装了用谁 ✓）。
+#:
+#: ⚠️⚠️ 这里**只能给候选、不能写死** ✗✗：ref_videos 的槽位在模板里是**空插座** ✓ ⇒ 上游节点得
+#: 现建 ✓，而「读视频」这类节点不是 H3 自带的核心类 ✗ —— 核心有 ``LoadVideo`` ✓、生态里还有
+#: ``VHS_LoadVideo`` ✓，widget 名也各不相同（``file`` / ``video`` / ``filename`` ✓）。
+#: 写死一个类名 = 换台机器就静默落不了（旧病：见「模板声明了端口但产品侧不接」✓✗）。
+#: ⇒ 一律**问引擎**：类在不在、文件格叫什么、``IMAGE``/``AUDIO`` 在第几槽 ✓（见 :func:`_video_loader`）。
+REF_VIDEO_LOADERS: tuple[str, ...] = tuple(
+    item.strip() for item in (os.environ.get("H3_REF_VIDEO_NODES")
+                              or "LoadVideo,VHS_LoadVideo").split(",") if item.strip())
 #: 覆盖模板里的 megapixels（画质档位）；空 = 用模板值 ✓
 QUALITY = os.environ.get("H3_QUALITY") or ""
+#: 参考图缩放档位 ✓ —— 逐字抄后端 ``MiniMaxH3ReferenceToVideo`` 的
+#: ``io.Combo.Input("ref_image_size", options=["match", "max"], default="match", ...)`` ✓：
+#:
+#: * ``match``（默认 ✓）：把参考图缩到**本次出图的像素量** ✓ ⇒ 最快 ✓；
+#: * ``max``：缩到**2048 短边**（只缩不放 ✓，docstring：「the best identity fidelity」✓）
+#:   ⇒ ⚠️ 每一步采样都带着这些 token ⇒ **可能慢几倍** ✓✗，且要更多显存 ✓。
+#:
+#: ⚠️ 这是**后端真行为**（不是我们的偏好 ✓）；模板里那格是普通 widget（盘上 R2V 写死 ``"match"`` ✓）
+#: ⇒ 想换档必须**显式改图** ✓（见 :func:`_api_widget_owner` ✓），光在提示词里写 ✗ 不管用 ✓。
+REF_IMAGE_SIZES: tuple[str, ...] = ("match", "max")
+#: 不指定时用后端默认值 ✓（= 模板里的默认 ✓，两边一致 ✓）
+REF_IMAGE_SIZE_DEFAULT = "match"
+#: 把「视频」拆成「帧串 + 音轨」的那类节点 ✓（候选，按顺序问引擎 ✓）。
+#:
+#: ⚠️⚠️ 为什么需要**第二跳**（2026-10-27 照抄 ``reference/comfy-org`` 后端口径 ✓✗）：
+#: 现版核心 ``LoadVideo``（``comfy_extras/nodes_video.py`` ✓）的输出**只有一个 ``VIDEO``** ★ ——
+#: 而 ``ref_videos.ref_video_k`` 要的是 **``IMAGE``**（帧串 ✓，见 ``nodes_minimax_h3.py`` 的
+#: ``io.Image.Input("ref_video", tooltip="Reference video frames at 24 fps (2-15s)")`` ✓）。
+#: ⇒ 两跳：``LoadVideo`` → **``GetVideoComponents``**（``VIDEO`` → ``images``/``audio`` ✓）。
+#: 生态节点（``VHS_LoadVideo`` ✓）自带 ``IMAGE``/``AUDIO`` 输出 ⇒ **一跳就够** ✓，仍优先用一跳 ✓。
+REF_VIDEO_COMPONENTS: tuple[str, ...] = tuple(
+    item.strip() for item in (os.environ.get("H3_REF_VIDEO_COMPONENT_NODES")
+                              or "GetVideoComponents").split(",") if item.strip())
 #: 缺节点时给用户的安装指引（**不在推理路径里偷偷下载** ✗）
 INSTALL_HINT = ("python backend-py/app/scripts/model_manager.py install-nodes "
                 "（清单在 configs/models.json 的 nodes[]）")
@@ -181,6 +245,18 @@ def _fetch_media(url: str, timeout: float = 60) -> bytes:
     if path.exists():
         return path.read_bytes()
     raise ValueError(f"参考媒体既不是 URL 也不是存在的本地文件：{text[:120]}")
+
+
+def _landed_upload(result: Dict[str, Any], filename: str) -> str:
+    """把上传回执拼成**节点 widget 要的名字** ✓ ⇒ ``subfolder/name`` 或 ``name`` ✓。
+
+    ⚠️ 上传可能被 ComfyUI 改名 ✓（重名加后缀、``subfolder`` 非空 ✓）⇒ **一律用回执里的名字** ✗✗，
+    拿本地文件名当真名会指向一个不存在的文件 ✓（症状：提交 400 或加载到上一单的素材 ✓✗）。
+    回执缺 ``name`` ⇒ 退回本地名 ✓（至少不让这里变成第二个未知数 ✓）。
+    """
+    name = str(result.get("name") or filename)
+    subfolder = str(result.get("subfolder") or "")
+    return f"{subfolder}/{name}" if subfolder else name
 
 
 def _find_load_image(graph: dict[str, Any], keyword: str) -> str | None:
@@ -239,6 +315,144 @@ def _reference_images(body: Dict[str, Any]) -> list[str]:
     return out
 
 
+def _reference_audios(body: Dict[str, Any]) -> list[str]:
+    """参考**音频**列表 ✓：``referenceAudioUrls``（后端协议口径 ✓）、``reference_audio_urls`` ✓ 与
+    ``reference_audio``（H3 契约口径 ✓）**三套命名都收** ✓，按出现顺序去重 ✓。
+
+    ⚠️ 只认一套 ⇒ 别的被当成「0 路」⇒ 声线参考**静默不生效** ✓✗。这不是假设 ✓：修之前
+    ``_contract_prompt`` 只数 ``reference_audio`` ✓，而后端 ``routers/videos.py`` 发的是
+    ``referenceAudioUrls`` ✓ ⇒ 契约层一直按「0 路音频」算 ✓✗（连 ``<Audio 1>`` 的声明都不追加 ✓）。
+    """
+    out: list[str] = []
+    for key in ("referenceAudioUrls", "reference_audio_urls", "reference_audio"):
+        for item in _media_texts(body.get(key)):
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _reference_videos(body: Dict[str, Any]) -> list[str]:
+    """参考**视频**列表 ✓：``referenceVideoUrls``（后端协议口径 ✓）、``reference_video_urls`` ✓ 与
+    ``reference_video``（H3 契约口径 ✓）**三套命名都收** ✓，按出现顺序去重 ✓。
+
+    ⚠️ 与图/音**各算各的** ✓✗：这是**第三条**下标序列（提示词里 ``<Video n>`` ✓），
+    混进图或音那条 ⇒ 三边编号全错 ✓（同一形状的坑在音频那半边刚踩过一次 ✓）。
+    """
+    out: list[str] = []
+    for key in ("referenceVideoUrls", "reference_video_urls", "reference_video"):
+        for item in _media_texts(body.get(key)):
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _reference_image_size(body: Dict[str, Any]) -> str:
+    """参考图缩放档位 ✓：``referenceImageSize``（协议口径 ✓）/ ``reference_image_size`` / ``ref_image_size``。
+
+    取值只认后端那两个（:data:`REF_IMAGE_SIZES` ✓），**大小写不敏感**（``MAX`` ⇒ ``max`` ✓）；
+    空 ⇒ :data:`REF_IMAGE_SIZE_DEFAULT` ✓。**非法值不在这里报错 ✗** —— 交给调用方告警后回落 ✓
+    （一个可选画质档位写错，不该把整单判死 ✗）。
+    """
+    for key in ("referenceImageSize", "reference_image_size", "ref_image_size"):
+        text = str(body.get(key) or "").strip().lower()
+        if text:
+            return text
+    return REF_IMAGE_SIZE_DEFAULT
+
+
+def _api_widget_owner(api: Dict[str, Any], node_id: Any, field: str) -> tuple[str, str] | None:
+    """API 图里某个 widget **该往哪儿写** ✓ ⇒ ``(节点id, 字段)``；这图里没有该 widget ⇒ ``None`` ✗。
+
+    ⚠️ 为什么在 **API 图**上判、而不是在 UI 图上判 ✗✗：UI 图的 widget 值只是 ``widgets_values``
+    **一串没有名字的数组** ✓，字段名要靠 ``/object_info`` 的 ``INPUT_TYPES()`` **按序**对 ✓
+    （见 :func:`workflow.ui_to_api` ✓）—— 也就是说「这个模板有没有 ``ref_image_size``」这件事，
+    **只有转完之后才知道** ✓。转完的 API 图里它就是一个**有名字**的输入 ✓ ⇒ 在这判既准又不用额外问引擎 ✓。
+
+    两种合法落点：
+    * **字面量**（模板里写死 ``"match"`` ✓）⇒ 写本节点 ✓；
+    * **被上游牵着线**（接到 ``PrimitiveString`` ✓）⇒ 写**上游那个**节点 ✓ —— 往本节点写会被连线覆盖 ✗
+      （ComfyUI 里连线优先 ✓，写了也不生效，最难查的那种 ✓✗）。
+    """
+    node = api.get(str(node_id))
+    if not isinstance(node, dict):
+        return None
+    inputs = node.get("inputs") or {}
+    if field not in inputs:
+        return None
+    value = inputs[field]
+    if isinstance(value, list) and len(value) == 2:  # 连线 ⇒ 找一个唯一的上游原始值节点 ✓
+        upstream = api.get(str(value[0])) or {}
+        if str(upstream.get("class_type") or "").startswith("PrimitiveString"):
+            return (str(value[0]), "value")
+        return None
+    return (str(node_id), field)
+
+
+def _wire_reference_image_size(task: Dict[str, Any], api: Dict[str, Any], plan: Dict[str, Any],
+                               body: Dict[str, Any], landed: int) -> str | None:
+    """把参考图缩放档位落到图上 ✓ ⇒ **实际生效的档位**（落不下去 ⇒ ``None`` ✗）。
+
+    ⚠️ 三件必须如实说的事 ✓：
+    ① **没有参考图就不用改** ✗（``landed == 0`` ⇒ 直接返回 ``None`` ✓ —— 那格对纯文生毫无意义 ✓）；
+    ② 模板**没有** ``ref_image_size`` 这格 ⇒ 请求了别的档位就**告警**（不假装改成功 ✗）；请求的就是
+       默认值 ⇒ 静默放过 ✓（引擎默认就是它 ✓，报 ``None`` 让调用方知道「没显式设过」✓）；
+    ③ 值不在后端选项里 ⇒ 告警 + 回落默认值 ✓（不把整单判死 ✗）。
+    """
+    if not landed:
+        return None
+    wanted = _reference_image_size(body)
+    if wanted not in REF_IMAGE_SIZES:
+        _warn(task, f"``referenceImageSize``={wanted!r} 不是后端认的档位 ✗"
+                    f"（只有 {' / '.join(REF_IMAGE_SIZES)} ✓）⇒ 本次改用 {REF_IMAGE_SIZE_DEFAULT} ✓")
+        wanted = REF_IMAGE_SIZE_DEFAULT
+    owner = _api_widget_owner(api, plan.get("main_id"), "ref_image_size")
+    if owner and wf.set_node_input(api, owner[0], owner[1], wanted):
+        return wanted
+    if wanted != REF_IMAGE_SIZE_DEFAULT:
+        _warn(task, f"模板主节点上没有 ``ref_image_size`` 这一格 ✗ ⇒ 请求的 **{wanted}** 落不下去 ✓"
+                    f"（参考图沿用引擎默认缩放 ✓；要这个档位得换一份带该输入的模板 ✓）")
+    return None
+
+
+def _audio_filename(index: int, url: str) -> str:
+    """给要上传到 ComfyUI ``input`` 目录的音频起名 ⇒ ``ref_audio_<k>.<ext>`` ✓。
+
+    ⚠️ 扩展名**必须能过 ``LoadAudio`` 的 COMBO** ✗✗：那个 ``audio`` 是 COMBO ✓，选项表由
+    ``folder_paths.filter_files_content_types(os.listdir(input), ["audio","video"])`` **按
+    mimetypes 现算** ✓（出处 ``comfy_extras/nodes_audio.py::LoadAudio.define_schema`` ✓）
+    ⇒ 存成 ``.bin`` 就是「上传成功、节点里根本选不出来」，提交时 400 且报「文件名不在列表里」✓✗。
+    解法：**拿 URL 后缀去问 mimetypes** ✓（与 ComfyUI 同一判据 ✓），认成 ``audio/*`` 就保留 ✓；
+    否则（``data:`` 内联、无后缀的地址）回落 ``.wav`` ✓ —— 解码那头 ``load()`` 走的是 av，
+    **按内容嗅探** ✓（同文件 344 行 ``af.decode`` ✓）⇒ 容器实际是 mp3 也能解 ✓，扩展名只负责「能选出来」✓。
+    """
+    import mimetypes
+
+    path = str(url or "").split("?")[0].split("#")[0]
+    suffix = Path(path).suffix.lower()
+    guess = mimetypes.guess_type(f"probe{suffix}", strict=False)[0] if suffix else None
+    if not str(guess or "").startswith("audio/"):
+        suffix = ".wav"
+    return f"ref_audio_{index + 1}{suffix}"
+
+
+def _video_filename(index: int, url: str) -> str:
+    """给要上传到 ComfyUI ``input`` 目录的参考视频起名 ⇒ ``ref_video_<k>.<ext>`` ✓。
+
+    判据与 :func:`_audio_filename` **逐字同形** ✓：拿 URL 后缀去问 ``mimetypes`` ✓，
+    认成 ``video/*`` 才保留 ✓；否则（``data:`` 内联、无后缀）回落 ``.mp4`` ✓。
+    ⚠️ 别共用 ``.wav`` / ``.png`` ✗：读视频的加载器那格 COMBO 只列**视频**文件 ✓
+    ⇒ 后缀不对 = 「传上去了但节点里选不出来」⇒ 提交 400 ✓✗。
+    """
+    import mimetypes
+
+    path = str(url or "").split("?")[0].split("#")[0]
+    suffix = Path(path).suffix.lower()
+    guess = mimetypes.guess_type(f"probe{suffix}", strict=False)[0] if suffix else None
+    if not str(guess or "").startswith("video/"):
+        suffix = ".mp4"
+    return f"ref_video_{index + 1}{suffix}"
+
+
 def _media_texts(raw: Any) -> list[str]:
     """把媒体入参读成非空字符串列表 ✓（列表 ✓ / 单个字符串 ✓ / JSON 字符串列表 ✓ 都认 ✓）。"""
     if isinstance(raw, str):
@@ -250,24 +464,33 @@ def _media_texts(raw: Any) -> list[str]:
     return [str(item).strip() for item in _as_list(raw) if str(item).strip()]
 
 
-def _pick_template(task: Dict[str, Any], refs: list[str]) -> str:
-    """选模板 ✓：**显式指定 > 有参考素材 ⇒ R2V > 有首帧 ⇒ I2V > 纯文生 ⇒ T2V** ✓。
+def _pick_template(task: Dict[str, Any], refs: list[str], audios: list[str] | None = None,
+                   videos: list[str] | None = None) -> str:
+    """选模板 ✓：**显式指定 > 有参考素材（图/音/**视频**）⇒ R2V > 有首帧 ⇒ I2V > 纯文生 ⇒ T2V** ✓。
 
     显式指定来自 body ``template`` ✓（优先）或 env ``H3_TEMPLATE`` ✓。
 
     ⚠️ 有参考素材**必须**换 R2V 模板 ✗✗：A 批那两个模板的主节点是 ``MiniMaxH3ImageToVideo`` ✓，
-    **没有参考图槽位** ✗ ⇒ 参考素材只能被丢掉 ✓（旧行为：响告警 + 忽略 ✓）。
+    **没有参考图/参考音频槽位** ✗ ⇒ 参考素材只能被丢掉 ✓（旧行为：响告警 + 忽略 ✓）。
+    ⚠️⚠️ **只有参考音频也算参考素材** ✓✗（2026-10-27 改）：旧写法只数图 ``refs`` ✓ ⇒ 「只给声线样本、
+    不给图」的请求被塞进 I2V/T2V 模板 ✓ ⇒ 主节点连 ``ref_audios.*`` 都没有 ⇒ 音频被静默丢掉 ✓✗
+    （那种请求的产品含义很明确：**学这个音色说话** ✓，不是「没有参考」✗）。
+    ⚠️ **参考视频同理** ✓（2026-10-27 一并算）：只有参考视频的请求也必须换 R2V ✓✗。
     ⚠️ R2V 模板不在盘上 ⇒ **如实告警 + 退回** ✓（不假装支持 ✓；也不因为「可选素材」把整个任务判死 ✓）。
     """
+    audios = audios or []
+    videos = videos or []
     body = task.get("body") or {}
     explicit = str(body.get("template") or TEMPLATE or "").strip()
     if explicit:
         return explicit
-    if refs:
+    if refs or audios or videos:
         if (WORKFLOW_DIR / R2V_WORKFLOW).exists():
             return R2V_WORKFLOW
-        _warn(task, f"请求带了 {len(refs)} 路参考图，但 R2V 模板不在盘上（{R2V_WORKFLOW} ✗）"
-                    f"⇒ 本次**忽略它们** ✗（要用参考素材请把模板放回 {WORKFLOW_DIR} ✓）")
+        _warn(task, f"请求带了 {len(refs)} 路参考图 / {len(audios)} 路参考音频 / "
+                    f"{len(videos)} 路参考视频，但 R2V 模板不在盘上"
+                    f"（{R2V_WORKFLOW} ✗）⇒ 本次**忽略它们** ✗"
+                    f"（要用参考素材请把模板放回 {WORKFLOW_DIR} ✓）")
     first_frame = str(body.get("first_frame_image") or "").strip()
     return I2V_WORKFLOW if first_frame else T2V_WORKFLOW
 
@@ -312,6 +535,306 @@ def _wire_reference_images(task: Dict[str, Any], api: Dict[str, Any], plan: Dict
     return landed
 
 
+def _wire_reference_audios(task: Dict[str, Any], api: Dict[str, Any], plan: Dict[str, Any],
+                           uploaded: list[str]) -> int:
+    """把上传好的参考音频落到主节点的 ``ref_audios.ref_audio_k`` ✓ ⇒ **落地路数** ✓。
+
+    与图那条**同一形状** ✓✗，只有两处不同：
+    * 上游节点类名是 ``LoadAudio`` ✓、入参字段是 ``audio`` ✓（就是 ``input`` 目录里的文件名 ✓）；
+    * 盘上 R2V 模板声明了 **1 格音频槽位但没有上游节点** ✓（图那边是模板自带 3 个 ``LoadImage`` ✓）
+      ⇒ 绝大多数时候走「空槽 ⇒ **现建一个** ``LoadAudio``」那条 ✓。
+
+    ⚠️ 多出来的槽位**必须摘连线** ✗✗：空着不收钱 ✓，但若模板哪天自带 ``LoadAudio`` 且不摘，
+    它指着的是上一单的文件名 ✓ ⇒ 空槽会去加载别人的声线 ✓✗（比图那边更隐蔽：图是 400 报错，
+    音是**照常出片、只是声音不是这一个** ✓✗）。没别的引用的上游节点连同删掉 ✓。
+    """
+    main_id = plan.get("main_id")
+    slots = list(plan.get("ref_audio_slot_names") or [])
+    wired = list(plan.get("ref_audio_ids") or [])
+    landed = 0
+    for index, slot_name in enumerate(slots):
+        existing = wired[index] if index < len(wired) else None
+        if index >= len(uploaded):
+            if existing is not None:
+                (api.get(str(main_id)) or {}).get("inputs", {}).pop(slot_name, None)
+                if not _is_referenced(api, existing):
+                    api.pop(str(existing), None)
+            continue
+        if existing is not None:
+            wf.set_node_input(api, existing, "audio", uploaded[index])
+            landed += 1
+            continue
+        new_id = f"voide_ref_audio_{index + 1}"
+        api[new_id] = {
+            "class_type": "LoadAudio",
+            "inputs": {"audio": uploaded[index]},
+            "_meta": {"title": f"REF AUDIO {index + 1} (voide)"},
+        }
+        wf.set_node_input(api, main_id, slot_name, [new_id, 0])
+        landed += 1
+    if landed < len(uploaded):
+        _warn(task, f"参考音频只落地了 {landed} 路（模板槽位 {len(slots)} 个，请求 {len(uploaded)} 路 ✗）"
+                    f"⇒ 多出来的被丢掉 ✗（要更多音频槽位得改模板 ✓）")
+    return landed
+
+
+#: 读视频加载器的探测结果缓存 ✓（键＝类名 ✓）—— 一次进程只问引擎一次 ✓，免得每单都多打一轮。
+#:
+#: ⚠️ **只缓存「探到了」✓，不缓存「没探到」** ✗✗（2026-10-27 改）：本服务是长驻进程 ✓，
+#: 而引擎那边**装个节点、重启一下**就能从「没有」变「有」✓ —— 把否定结论也缓存住 ⇒ 用户装完节点
+#: 必须连我们这层一起重启才生效 ✓✗（他会以为「装了没用」✓）。否定答案每次现问 ✓（一单多 2~3 个
+#: ``GET /object_info/<类>``，只在真带参考视频时才发生 ✓）。
+_VIDEO_LOADER_CACHE: Dict[str, Dict[str, Any]] = {}
+#: 「视频 → 帧串/音轨」那个拆解节点的探测结果缓存 ✓（键＝类名 ✓；同样只存肯定 ✓）
+_VIDEO_SPLITTER_CACHE: Dict[str, Dict[str, Any]] = {}
+#: 文件格**可能**叫什么 ✓（候选顺序＝优先级 ✓）：核心 ``LoadVideo`` 是 ``file`` ✓，
+#: 生态里还有 ``video`` / ``filename`` 之类的变体 ✓。
+_VIDEO_FILE_FIELDS = ("file", "video", "filename", "path")
+
+
+def _node_spec(client: Any, class_type: str) -> Dict[str, Any]:
+    """问引擎要一个类的 schema ✓（探能力失败**不当成错** ✓ —— 拿空 spec 继续试下一个候选 ✓）。"""
+    try:
+        info = client.object_info(class_type) or {}
+    except Exception:  # noqa: BLE001 —— 探能力失败不该把整单判死 ✓
+        return {}
+    return info.get(class_type) or {}
+
+
+def _node_inputs(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """``required`` + ``optional`` 合起来看 ✓（读视频那格未必是必填 ✓）。"""
+    inputs = spec.get("input") or {}
+    merged: Dict[str, Any] = {}
+    merged.update(inputs.get("required") or {})
+    merged.update(inputs.get("optional") or {})
+    return merged
+
+
+def _node_outputs(spec: Dict[str, Any]) -> list[str]:
+    return [str(item) for item in spec.get("output") or []]
+
+
+def _pick_file_field(inputs: Dict[str, Any]) -> str | None:
+    """哪个入参是「要读的文件名」✓（先按常见名 ✓，再退到第一个 ``COMBO``/``STRING`` ✓）。"""
+    field = next((name for name in _VIDEO_FILE_FIELDS if name in inputs), None)
+    if field:
+        return field
+    for name, spec in inputs.items():
+        kind = str((spec or [None])[0]) if isinstance(spec, (list, tuple)) else ""
+        if kind in ("COMBO", "STRING"):
+            return str(name)
+    return None
+
+
+def _video_splitter(client: Any) -> Dict[str, Any] | None:
+    """``VIDEO`` → ``IMAGE``(+``AUDIO``) 的那个拆解节点 ✓ ⇒ ``{"class", "video_field", "image_slot", "audio_slot"}``。
+
+    ⚠️ 为什么需要它 ✗✗（**照抄后端** ✓，不是我们发明的 ✓）：现版核心 ``LoadVideo`` 的输出只有一个
+    ``VIDEO`` ★（``comfy_extras/nodes_video.py``：``inputs=[io.Combo.Input("file", ..., upload=io.UploadType.video)]``、
+    ``outputs=[io.Video.Output()]`` ✓），而 ``ref_videos.ref_video_k`` 要的是 **``IMAGE``** 帧串
+    （``io.Image.Input("ref_video", tooltip="Reference video frames at 24 fps (2-15s)")`` ✓）
+    ⇒ 必须经 ``GetVideoComponents``（``inputs=[io.Video.Input("video")]``、
+    ``outputs=[images(IMAGE), audio(AUDIO), fps, bit_depth, color_space]`` ✓）拆一道 ✓。
+    """
+    for candidate in REF_VIDEO_COMPONENTS:
+        cached = _VIDEO_SPLITTER_CACHE.get(candidate)
+        if cached:
+            return cached
+        spec = _node_spec(client, candidate)
+        inputs = _node_inputs(spec)
+        outputs = _node_outputs(spec)
+        video_field = next((name for name, item in inputs.items()
+                            if str((item or [None])[0]).upper() == "VIDEO"), None)
+        if video_field and "IMAGE" in outputs:
+            found = {
+                "class": candidate,
+                "video_field": str(video_field),
+                "image_slot": outputs.index("IMAGE"),
+                "audio_slot": outputs.index("AUDIO") if "AUDIO" in outputs else None,
+            }
+            _VIDEO_SPLITTER_CACHE[candidate] = found
+            return found
+    return None
+
+
+def _video_loader(client: Any) -> tuple[Dict[str, Any] | None, str]:
+    """问引擎「哪个类能读视频、文件格叫什么、``IMAGE``/``AUDIO`` 在第几槽」✓ ⇒ ``(loader, 原因)``。
+
+    返回 ``{"class", "field", "image_slot", "audio_slot", "video_slot", "components"}`` ✓：
+
+    * ``video_slot`` 是**加载器自己**吐 ``VIDEO`` 的槽 ✓（``None`` = 它直接吐帧 ✓，不用第二跳 ✓）；
+    * ``components`` 是第二跳的拆解节点 ✓（``None`` = 加载器自带 ``IMAGE`` 输出 ✓）；
+    * ``image_slot`` / ``audio_slot`` 一律按**接主节点的那个节点**算 ✓ —— 有两跳时指拆解节点的槽 ✓✗
+      （这是最容易写错的一处：照加载器的槽接 ⇒ 帧串接上一条 ``VIDEO`` 线 ✓，ComfyUI 提交时类型不符 ✓✗）。
+
+    一个候选都用不了 ⇒ ``(None, 原因)`` ✗（**不猜**、也不临时造一个类名 ✗）。
+    原因字符串必须说清是**哪一步**缺的 ✓✗（「引擎里没 LoadVideo」与「LoadVideo 在、但拆解节点没有」
+    是两种完全不同的处境：前者要装读视频节点 ✓，后者要装 ``GetVideoComponents`` ✓）。
+
+    ⚠️⚠️ 为什么必须**问引擎**而不是写死 ✗✗：``ref_videos.ref_video_0`` 在盘上模板里是**空插座** ✓
+    ⇒ 上游节点要现建 ✓，而「读视频」不是 H3 自带类 ✗（核心 ``LoadVideo`` ✓、生态 ``VHS_LoadVideo`` ✓，
+    widget 名还各不相同 ✓）。写死一个 ⇒ 换台机器就「上传成功、图里那个节点提交 400」✓✗，
+    而且**报错落在 ComfyUI 侧、看不出是我们的假设错** ✓✗（本仓反复记的那类静默错 ✓）。
+    """
+    notes: list[str] = []
+    for candidate in REF_VIDEO_LOADERS:
+        cached = _VIDEO_LOADER_CACHE.get(candidate)
+        if cached:
+            return cached, ""
+        spec = _node_spec(client, candidate)
+        if not spec:
+            notes.append(f"{candidate}：引擎里没有这个类")
+            continue
+        inputs = _node_inputs(spec)
+        outputs = _node_outputs(spec)
+        field = _pick_file_field(inputs)
+        if not field:
+            notes.append(f"{candidate}：类在，但找不到「要读的文件」那一格")
+            continue
+        if "IMAGE" in outputs:  # 生态节点：一跳就够 ✓（VHS_LoadVideo 这类 ✓）
+            found = {
+                "class": candidate, "field": field,
+                "image_slot": outputs.index("IMAGE"),
+                "audio_slot": outputs.index("AUDIO") if "AUDIO" in outputs else None,
+                "video_slot": None, "components": None,
+            }
+            _VIDEO_LOADER_CACHE[candidate] = found
+            return found, ""
+        if "VIDEO" in outputs:  # 核心 LoadVideo：要第二跳 ✓
+            splitter = _video_splitter(client)
+            if splitter:
+                found = {
+                    "class": candidate, "field": field,
+                    "image_slot": splitter["image_slot"],
+                    "audio_slot": splitter["audio_slot"],
+                    "video_slot": outputs.index("VIDEO"),
+                    "components": splitter,
+                }
+                _VIDEO_LOADER_CACHE[candidate] = found
+                return found, ""
+            notes.append(f"{candidate}：只吐 {outputs}（没有 IMAGE ✗），而把视频拆成帧串的节点"
+                         f"（候选 {'/'.join(REF_VIDEO_COMPONENTS)}）引擎里没有")
+            continue
+        notes.append(f"{candidate}：输出是 {outputs}，既没有 IMAGE 也没有 VIDEO")
+    return None, "；".join(notes) or f"候选表是空的（H3_REF_VIDEO_NODES={','.join(REF_VIDEO_LOADERS)}）"
+
+
+def _node_wired_from(api: Dict[str, Any], class_type: str, source: list[Any]) -> str | None:
+    """图里有没有某个类节点**正接着** ``source`` ✓ ⇒ 节点 id（没有 ⇒ ``None`` ✓）。
+
+    用在一路视频的第二跳上 ✓：重跑/复用同一张图时不该再建一个 ``GetVideoComponents`` ✗
+    （两个 ⇒ 同一段视频解码两遍 ✓✗，还白占一份显存 ✓）。
+    """
+    for node_id, node in api.items():
+        if not isinstance(node, dict) or node.get("class_type") != class_type:
+            continue
+        for value in (node.get("inputs") or {}).values():
+            if isinstance(value, list) and len(value) == 2 and list(value) == list(source):
+                return str(node_id)
+    return None
+
+
+def _video_source(api: Dict[str, Any], index: int, filename: str, loader: Dict[str, Any],
+                  existing: Any = None) -> tuple[list[Any], list[Any] | None]:
+    """建/复用**一路**参考视频的上游 ✓ ⇒ ``(帧串引用, 音轨引用或 None)`` ✓。
+
+    两种形状（由 :func:`_video_loader` 问出来的 ``components`` 决定 ✓）：
+    * **一跳**（``VHS_LoadVideo`` 这类 ✓）：加载器自己就有 ``IMAGE``/``AUDIO`` 输出 ⇒ 两个引用同一个节点 ✓；
+    * **两跳**（核心 ``LoadVideo`` ✓ → ``GetVideoComponents`` ✓）：加载器只吐 ``VIDEO`` ⇒ 再建一个拆解
+      节点（``video`` 入参接加载器的 ``VIDEO`` 槽 ✓），帧串/音轨都从**拆解节点**取 ✓✗。
+
+    ⚠️ 一路视频只解码一遍 ✓（两跳也只建一个拆解节点 ✓）；引用一律 ``[节点id, 槽位]`` ✓。
+    """
+    node_class = str(loader["class"])
+    node_id = str(existing) if existing is not None else f"voide_ref_video_{index + 1}"
+    if existing is None:
+        api[node_id] = {
+            "class_type": node_class,
+            "inputs": {str(loader["field"]): filename},
+            "_meta": {"title": f"REF VIDEO {index + 1} (voide)"},
+        }
+    else:
+        wf.set_node_input(api, node_id, str(loader["field"]), filename)
+    components = loader.get("components")
+    if not components:
+        return ([node_id, int(loader["image_slot"])],
+                [node_id, int(loader["audio_slot"])] if loader.get("audio_slot") is not None else None)
+    source = [node_id, int(loader["video_slot"])]
+    splitter_id = (_node_wired_from(api, str(components["class"]), source)
+                   or f"voide_ref_video_split_{index + 1}")
+    if splitter_id not in api:
+        api[splitter_id] = {
+            "class_type": str(components["class"]),
+            "inputs": {str(components["video_field"]): source},
+            "_meta": {"title": f"REF VIDEO {index + 1} → 帧串/音轨 (voide)"},
+        }
+    return ([splitter_id, int(components["image_slot"])],
+            [splitter_id, int(components["audio_slot"])] if components.get("audio_slot") is not None else None)
+
+
+def _drop_video_source(api: Dict[str, Any], node_id: Any) -> None:
+    """删掉一路参考视频的上游 ✓（连带它后面那个拆解节点 ✓ —— 只删加载器会让图里留下一条断线 ✗）。"""
+    target = str(node_id)
+    for candidate_id, node in list(api.items()):
+        if not isinstance(node, dict):
+            continue
+        if any(isinstance(value, list) and value and str(value[0]) == target
+               for value in (node.get("inputs") or {}).values()):
+            api.pop(str(candidate_id), None)
+    api.pop(target, None)
+
+
+def _wire_reference_videos(task: Dict[str, Any], api: Dict[str, Any], plan: Dict[str, Any],
+                           landed_files: list[str], loader: Dict[str, Any]) -> int:
+    """把上传好的参考视频落到主节点 ⇒ **落地路数** ✓。
+
+    一路视频要接**两根线** ✓✗（这是它和图的唯一结构差异）：
+    ``ref_videos.ref_video_k`` ← 帧串（``IMAGE`` ✓）、``ref_video_audios.ref_video_audio_k`` ← 它的音轨
+    （``AUDIO`` ✓）。⚠️ 两根线**不一定同源** ✗✗：核心 ``LoadVideo`` → ``GetVideoComponents`` 两跳时，
+    帧串是拆解节点的 ``images`` 槽、音轨是它的 ``audio`` 槽 ✓（见 :func:`_video_source` ✓）。
+
+    ⚠️ 三件必须如实说的事 ✓：
+    ① 上游没有 ``AUDIO`` 输出（拆解节点也没有 ✓）⇒ 音轨槽**空着**并告警 ✓（不假装接上了 ✗）；
+    ② 模板没有 ``ref_video_audios.*`` 槽 ⇒ 同上 ✓；
+    ③ 多出来的槽位摘连线、无引用的上游连同删掉 ✓（同图/音那条纪律 ✓）。
+    """
+    main_id = plan.get("main_id")
+    slots = list(plan.get("ref_video_slot_names") or [])
+    audio_slots = list(plan.get("ref_video_audio_slot_names") or [])
+    wired = list(plan.get("ref_video_ids") or [])
+    landed = 0
+    for index, slot_name in enumerate(slots):
+        existing = wired[index] if index < len(wired) else None
+        if index >= len(landed_files):
+            if existing is not None:
+                (api.get(str(main_id)) or {}).get("inputs", {}).pop(slot_name, None)
+                audio_name = audio_slots[index] if index < len(audio_slots) else None
+                if audio_name:
+                    (api.get(str(main_id)) or {}).get("inputs", {}).pop(audio_name, None)
+                _drop_video_source(api, existing)
+            continue
+        image_ref, audio_ref = _video_source(api, index, landed_files[index], loader, existing)
+        wf.set_node_input(api, main_id, slot_name, image_ref)
+        landed += 1
+        # 音轨：**下标对齐** ✓（后端就是 ``ref_video_audios["ref_video_audio_" + k]`` ✓，见
+        # ``nodes_minimax_h3.py`` 的 ``soundtrack = ref_video_audios.get(...)`` ✓）—— 第 k 路视频的音轨落第 k 格 ✓。
+        audio_slot_name = audio_slots[index] if index < len(audio_slots) else None
+        if audio_slot_name and audio_ref is not None:
+            wf.set_node_input(api, main_id, audio_slot_name, audio_ref)
+        elif audio_slot_name:
+            _warn(task, f"参考视频第 {index + 1} 路的**音轨没接** ✗：上游 {loader['class']}"
+                        + (f" → {loader['components']['class']}" if loader.get("components") else "")
+                        + f" 没有 ``AUDIO`` 输出 ⇒ ``{audio_slot_name}`` 空着 ✓"
+                        f"（想连音轨得换一个能拆出音轨的读视频节点 ✓）")
+    if audio_slots and len(audio_slots) < len(slots):
+        _warn(task, f"参考视频帧串落了 {len(slots)} 格，但模板只有 {len(audio_slots)} 格音轨槽 "
+                    f"⇒ 后面那几路的**音轨被丢掉** ✗")
+    if landed < len(landed_files):
+        _warn(task, f"参考视频只落地了 {landed} 路（模板槽位 {len(slots)} 个，请求 {len(landed_files)} 路 ✗）"
+                    f"⇒ 多出来的被丢掉 ✗（要更多视频槽位得改模板 ✓）")
+    return landed
+
+
 def _is_referenced(api: Dict[str, Any], node_id: Any) -> bool:
     """图里还有没有别的输入指着 ``node_id`` ✓（删节点前先问一句 ✓）。"""
     target = str(node_id)
@@ -325,7 +848,8 @@ def _is_referenced(api: Dict[str, Any], node_id: Any) -> bool:
 
 
 def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: str, *,
-                     pictures: int | None = None) -> str:
+                     pictures: int | None = None, audios: int | None = None,
+                     videos: int | None = None, video_soundtracks: int = 0) -> str:
     """提示词过 **H3 prompt 契约** ✓（提交前 ✓）：文本写法 → 标签、**核编号**、**该追加的声明必须追加** ✗。
 
     ⭐ 钉的就是那条实测坑 ✗✗：**只写 ``<Audio 1>`` 绑定句不算声明** ✓ —— 照标签跳过的话，
@@ -336,6 +860,11 @@ def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: st
     前者形态下被判成 0 路 ✓✗ ⇒ ``<Picture n>`` 的编号与自动声明全按空的算 ✓✗（静默错 ✓）。
     所以默认值只在**调用方没给**时才用 ✓。
 
+    ⚠️ ``audios``：口径与 ``pictures`` **逐字相同** ✓✗ —— 给「实际落地」的音频路数 ✓
+    （``min(请求路数, 模板槽位数)`` ✓）。修之前这里**硬按 body 的 ``reference_audio`` 数** ✗ ⇒
+    两处会错：① 后端发 ``referenceAudioUrls`` ⇒ 恒判 0 路 ✓✗；② 模板没有音频槽位、音频一路都没落地
+    ⇒ 照样按请求路数声明 ✓✗（声明了不存在的素材 ⇒ 模型去「复用」一段根本不存在的音色 ✓）。
+
     ⚠️ 编号错 ⇒ **当场拒** ✗（``ConditioningError`` 冒上去 ⇒ 任务带可行动文案失败 ✓）；
     ⚠️ 契约层没装上 ⇒ **如实告警「没跑」** ✗ 而不是当通过 ✓✗。
     """
@@ -343,20 +872,38 @@ def _contract_prompt(task: Dict[str, Any], body: Dict[str, Any], prompt_text: st
         _warn(task, f"H3 提示词契约层没装上（{CONTRACT_ERROR}）⇒ **提交前那道关没跑** ✗（没查不是通过 ✓✗）")
         return prompt_text
     cond_mod = getattr(prompt_contract, "cond", None)
-    audios = len(_as_list(body.get("reference_audio")))
+    if audios is None:
+        audios = len(_reference_audios(body))
     if pictures is None:
-        pictures = len(_as_list(body.get("subject_reference")))
+        pictures = len(_reference_images(body))
+    # ⚠️ ``videos`` 与那两个**逐字同口径** ✓✗：给「实际落地」的参考视频路数 ✓ ——
+    #    按 body 请求数算的话，槽位不够时会声明出**不存在的** ``<Video k>`` ✓✗
+    #    （音频那半边正是这么错的，见上面那段 ✓）。
+    if videos is None:
+        videos = len(_reference_videos(body))
+    # ⚠️ 声轨数必须**夹在**视频路数里 ✓✗（调用方算出来是「真接上音轨的视频」✓；这里再夹一道，
+    #    免得 ``<Audio k>`` 的编号跑出 ``<Video k>`` 的范围 ✓）
+    soundtracks = max(0, min(int(video_soundtracks or 0), int(videos)))
     # 参考音频一律是**音色参考** ✓ ⇒ 协议关系 ``reference`` ✓（⚠️ 别用 ``fully_copy`` ✗ ——
     # 那是「逐字复制内容」的意思 ✓，会把参考音频的台词念出来 ✓✗）
-    refs = [cond_mod.AudioReference(index=index + 1, relation="reference")
+    # ⚠️ 编号要**从声轨后面起** ✓✗：后端把「视频声轨」与「独立音频」放进同一个 ``<Audio j>`` 序列 ✓
+    # （声轨在前 ✓），照 1 起编号 ⇒ 与声轨撞号 ✓✗（模型把音乐当音色参考 ✓）。
+    refs = [cond_mod.AudioReference(index=soundtracks + index + 1, relation="reference")
             for index in range(audios)] if cond_mod is not None else []
     settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
     result = prompt_contract.build_prompt(
-        prompt_text, pictures=pictures, audios=audios, videos=0, audio_refs=refs,
-        video_count=0, global_prompt=str((settings or {}).get("global_prompt") or ""),
+        prompt_text, pictures=pictures, audios=audios, videos=videos, audio_refs=refs,
+        # ``videos`` 与 ``video_count`` **必须同值** ✓✗：前者是「编号校验的可用数」✓、
+        # 后者是「声明要不要追加」✓ ⇒ 只给一个 ⇒ 要么核不过、要么声明被吞 ✓✗（两条都静默）。
+        video_count=videos,
+        video_soundtracks=soundtracks,
+        global_prompt=str((settings or {}).get("global_prompt") or ""),
     )
     _update(task, prompt_contract=result["plan"], prompt_markup=result["markup"],
-            prompt_prefixed=result["prefixed"])
+            prompt_prefixed=result["prefixed"],
+            # 声轨占掉的 ``<Audio j>`` 编号也报出来 ✓✗：调用方看到 ``<Audio 1>`` 却以为那是自己的
+            # 独立音频时，一眼就能靠这一格分辨 ✓。
+            reference_video_soundtracks=soundtracks)
     return str(result["prompt"])
 
 
@@ -504,7 +1051,21 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     if len(all_refs) > len(refs):
         _warn(task, f"参考图给多了（{len(all_refs)} 路 > 上限 {REF_IMAGE_LIMIT} 路 ✗）"
                     f"⇒ 只落地前 {len(refs)} 路 ✗（上限口径见官方 R2V 模板的槽位数 ✓）")
-    template_name = _pick_template(task, refs)
+    # ⚠️ 音频**同一套纪律** ✓✗：先按节点 schema 的 max 截断 ✓（``REF_AUDIO_LIMIT`` = 3 ✓），
+    #    真正落地几路仍由**模板槽位数**决定 ✓（盘上 R2V 只声明 1 格 ✓ ⇒ 第 2、3 路会被丢掉并告警 ✓）。
+    all_audios = _reference_audios(body)
+    audios = all_audios[:REF_AUDIO_LIMIT]
+    if len(all_audios) > len(audios):
+        _warn(task, f"参考音频给多了（{len(all_audios)} 路 > 上限 {REF_AUDIO_LIMIT} 路 ✗）"
+                    f"⇒ 只落地前 {len(audios)} 路 ✗（H3 节点 schema 的 ``ref_audios`` max=3 ✓；"
+                    f"而盘上 R2V 模板只声明了 1 格 ⇒ 实际只落 1 路 ✓）")
+    # ⚠️ 参考视频**同一套纪律** ✓✗（第三条独立序列 ⇒ ``<Video n>`` ✓）
+    all_videos = _reference_videos(body)
+    videos = all_videos[:REF_VIDEO_LIMIT]
+    if len(all_videos) > len(videos):
+        _warn(task, f"参考视频给多了（{len(all_videos)} 路 > 上限 {REF_VIDEO_LIMIT} 路 ✗）"
+                    f"⇒ 只落地前 {len(videos)} 路 ✗（H3 节点 schema 的 ``ref_videos`` max=3 ✓）")
+    template_name = _pick_template(task, refs, audios, videos)
     template_path = WORKFLOW_DIR / template_name
     if not template_path.exists():
         raise ValueError(f"工作流模板不在盘上：{template_path}（检查 H3_WORKFLOW_DIR / H3_TEMPLATE ✓）")
@@ -541,6 +1102,53 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
                     f"（**一个都没上传** ✓，别在 ComfyUI 的 input 目录里留垃圾 ✓；要用参考素材请换 R2V "
                     f"模板：{R2V_WORKFLOW} ✓，或 body ``template`` 显式指定 ✓）")
 
+    # ⚠️ 音频槽位**同样在上传之前确定** ✓✗（同一个道理：落不下去的东西一个都别传 ✓）。
+    audio_slot_names = list(plan["ref_audio_slot_names"])
+    if audios and not audio_slot_names:
+        _warn(task, f"模板（{template_name}）的主节点**没有参考音频槽位** ⇒ {len(audios)} 路参考音频被忽略 ✗"
+                    f"（**一个都没上传** ✓；要用音色参考请换 R2V 模板：{R2V_WORKFLOW} ✓，"
+                    f"或 body ``template`` 显式指定 ✓）")
+    # ⚠️⚠️ 槽位比请求少 ⇒ **在传之前就截断** ✓✗（同一条纪律：落不下去的那几路一个都别传 ✓）——
+    #    盘上 R2V 模板只声明 **1 格**音频槽位 ✓ ⇒ 请求 2 路时第 2 路**本来就落不下** ✓；
+    #    旧写法照样把它传上去 ✓ ⇒ ComfyUI 的 ``input`` 目录里留一个没人引用的音频 ✓✗
+    #    （而且它还是别人的声线样本 —— 白占盘、还误导事后排查 ✓）。告警必须**响亮** ✓：
+    #    少落一路声线 = 成片说话的音色跟给的样本对不上 ✓✗。
+    if len(audios) > len(audio_slot_names):
+        _warn(task, f"参考音频只落地了 {len(audio_slot_names)} 路（模板 {template_name} 只有 "
+                    f"{len(audio_slot_names)} 个音频槽位，请求 {len(audios)} 路 ✗）"
+                    f"⇒ 多出来的**没有上传** ✓、也不会被声明 ✓（要更多音频槽位得改模板 ✓）")
+        audios = audios[:len(audio_slot_names)]
+
+    # ⚠️⚠️ 参考视频**两道闸都在上传之前** ✓✗（视频比图/音多一道：还要先问引擎「有没有读视频的类」✓）。
+    #    ① 模板没有 ``ref_videos.*`` 槽 ⇒ 注定落不下去 ⇒ 一个都别传 ✓；
+    #    ② 有槽、但引擎里**没有任何可用的读视频节点** ⇒ 同样别传 ✓（传上去只会让现建的那个节点
+    #       在提交时 400 ✓✗、而且报错指向「类不存在」而不是「我们挑错了类」✓）；
+    #    ③ 槽位比请求少 ⇒ 截断（同音频那条 ✓）。
+    video_slot_names = list(plan["ref_video_slot_names"])
+    video_audio_slot_names = list(plan["ref_video_audio_slot_names"])
+    video_loader: Dict[str, Any] | None = None
+    if videos and not video_slot_names:
+        _warn(task, f"模板（{template_name}）的主节点**没有参考视频槽位** ⇒ {len(videos)} 路参考视频被忽略 ✗"
+                    f"（**一个都没上传** ✓；要用视频参考请换 R2V 模板：{R2V_WORKFLOW} ✓，"
+                    f"或 body ``template`` 显式指定 ✓）")
+    elif videos:
+        video_loader, loader_why = _video_loader(client)
+        if video_loader is None:
+            _warn(task, f"模板有参考视频槽位，但引擎里**找不到能读视频的节点** ✗"
+                        f"（逐个问过引擎：{loader_why} ✓）"
+                        f"⇒ {len(videos)} 路参考视频**被忽略** ✗、也**没有上传** ✓"
+                        f"（装一个读视频的自定义节点 ✓，或用 env ``H3_REF_VIDEO_NODES=类名`` 指到现成的那个 ✓；"
+                        f"核心 ``LoadVideo`` 只吐 ``VIDEO`` ⇒ 还要 ``GetVideoComponents`` 才能在模板里当帧串用 ✓，"
+                        f"缺哪个装哪个 ✓）")
+            # ⚠️ 必须**清空** ✓✗：不清空 ⇒ 下面契约按「落地路数」算时仍会声明 ``<Video k>`` ✓
+            #    ⇒ 模型去复刻一段根本没进去的视频 ✓✗（正是音频那半边刚修过的错 ✓）。
+            videos = []
+    if videos and video_loader is not None and len(videos) > len(video_slot_names):
+        _warn(task, f"参考视频只落地了 {len(video_slot_names)} 路（模板 {template_name} 只有 "
+                    f"{len(video_slot_names)} 个视频槽位，请求 {len(videos)} 路 ✗）"
+                    f"⇒ 多出来的**没有上传** ✓、也不会被声明 ✓（要更多视频槽位得改模板 ✓）")
+        videos = videos[:len(video_slot_names)]
+
     # ⚠️ 首尾帧**同一条纪律** ✓✗：模板里有没有对应的 ``LoadImage`` 也是**图上的事实** ✓（``plan`` 优先 ✓，
     #    标题只当兜底 ✓ —— A 批模板的尾帧通道是「被 mute 的一整条支路」✓，用标题能一眼认出 ✓）
     #    ⇒ 没有就不传 ✗。⚠️ 这条**不是理论** ✓：R2V 主节点**压根没有** ``first_frame``/``last_frame``
@@ -564,21 +1172,38 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     #    这个列表后面还要拿去算 ``ref_uploads`` ✓，两处口径不同步就会在没槽位时炸 ``KeyError`` ✓✗
     #    （自检实测踩到 ✓）。
     wanted_refs = refs if ref_slot_names else []
+    wanted_audios = audios if audio_slot_names else []
+    # ⚠️ 视频是**三条件** ✓✗：有槽位 ✓ **且** 引擎里有可用的读视频节点 ✓（``video_loader`` 为空 = 落不下去 ✓）
+    wanted_videos = videos if (video_slot_names and video_loader) else []
     uploads: list[tuple[str, str, bytes]] = []
+    audio_uploads: list[tuple[str, str, bytes]] = []
+    video_uploads: list[tuple[str, str, bytes]] = []
     if first_frame and frame_nodes["START FRAME"]:
         uploads.append(("START FRAME", "first_frame.png", _fetch_media(first_frame)))
     if last_frame and frame_nodes["LAST FRAME"]:
         uploads.append(("LAST FRAME", "last_frame.png", _fetch_media(last_frame)))
     for index, url in enumerate(wanted_refs):
         uploads.append((f"REF IMAGE {index + 1}", f"ref_image_{index + 1}.png", _fetch_media(url)))
+    # ⚠️ 音频单独一列 ✓✗：文件名后缀要按**这一路**的地址算 ✓（``_audio_filename`` ✓），
+    #    不能跟图共用 ``.png`` ✗ —— 后缀不对 ⇒ ``LoadAudio`` 的 COMBO 里根本没有它 ⇒ 提交 400 ✓✗。
+    for index, url in enumerate(wanted_audios):
+        audio_uploads.append((f"REF AUDIO {index + 1}", _audio_filename(index, url),
+                              _fetch_media(url)))
+    # 参考视频**再开一列** ✓✗：后缀必须是视频后缀 ✓（读视频那格 COMBO 只列视频文件 ✓）。
+    for index, url in enumerate(wanted_videos):
+        video_uploads.append((f"REF VIDEO {index + 1}", _video_filename(index, url),
+                              _fetch_media(url)))
 
     uploaded: dict[str, str] = {}
     for keyword, filename, payload in uploads:
-        result = client.upload_image(filename, payload)
-        name = result.get("name") or filename
-        subfolder = result.get("subfolder") or ""
-        uploaded[keyword] = f"{subfolder}/{name}" if subfolder else str(name)
+        uploaded[keyword] = _landed_upload(client.upload_image(filename, payload), filename)
+    for keyword, filename, payload in audio_uploads:
+        uploaded[keyword] = _landed_upload(client.upload_audio(filename, payload), filename)
+    for keyword, filename, payload in video_uploads:
+        uploaded[keyword] = _landed_upload(client.upload_video(filename, payload), filename)
     ref_uploads = [uploaded[f"REF IMAGE {index + 1}"] for index in range(len(wanted_refs))]
+    ref_audio_uploads = [uploaded[f"REF AUDIO {index + 1}"] for index in range(len(wanted_audios))]
+    ref_video_uploads = [uploaded[f"REF VIDEO {index + 1}"] for index in range(len(wanted_videos))]
 
     classes = wf.node_classes(graph)
     object_info: dict[str, Any] = {}
@@ -600,8 +1225,24 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     #    而「实际落地」在提交前就唯一确定 ✓：``min(请求路数, 模板槽位数)`` ✓。
     #    ⚠️ 模板没槽位时是 **0** ✓（不是请求路数 ✗）⇒ 提示词里若还引用 ``<Picture 1>`` 就会被
     #    **当场拒** ✓✗（那是对的：它要的素材这单根本交不出去 ✓，比静默出一版「没有那张脸」的片好 ✓）。
+    #    ⚠️ ``audios`` **同一口径** ✓✗：也用「实际落地」= ``min(请求路数, 模板音频槽位数)`` ✓
+    #    （盘上 R2V 模板 1 格 ⇒ 得 1 ✓；请求带 2 路 ⇒ 契约只声明 ``<Audio 1>`` ✓，与真落地一致 ✓）。
+    #    ⚠️⚠️ 三个值**一律显式传** ✓✗ —— 别再写 ``... if refs else None`` ✗✗：``None`` 会让
+    #    :func:`_contract_prompt` 回落到「数 body 里的请求路数」✓ ⇒ 一旦某个素材**被拦在前面**
+    #    （视频找不到读它的类 ⇒ ``videos`` 清空 ✓）就会按 body 又声明一遍 ✓✗（= 声明了没进去的素材 ✓）。
+    #    ⚠️ ``video_soundtracks``（2026-10-27 照抄后端口径 ✓✗）：**带音轨的参考视频会先占掉
+    #    ``<Audio j>`` 的编号** ✓ —— ``nodes_minimax_h3.py`` 里对每路视频先 ``ref_items.append({"type": "audio"})``
+    #    再 append 视频 ✓（注释原文：「the soundtrack gets its own ``<Audio j>`` label, emitted before
+    #    ``<Video k>``」✓），独立音频 ``ref_audios`` 排在**全部视频之后** ✓。
+    #    ⇒ 声轨数 = 真能接上音轨的视频路数 ✓（模板有音轨槽 ✓ **且** 上游能拆出 ``AUDIO`` ✓），
+    #    独立音频的编号从它后面起 ✓✗（不算 ⇒ 两边都用 ``<Audio 1>`` ⇒ 模型把音乐当音色参考 ✓✗）。
+    video_soundtracks = min(len(videos), len(video_slot_names), len(video_audio_slot_names)) \
+        if (videos and video_loader and video_loader.get("audio_slot") is not None) else 0
     prompt_text = _contract_prompt(task, body, prompt_text,
-                                   pictures=min(len(refs), len(ref_slot_names)) if refs else None)
+                                   pictures=min(len(refs), len(ref_slot_names)),
+                                   audios=min(len(audios), len(audio_slot_names)),
+                                   videos=min(len(videos), len(video_slot_names)),
+                                   video_soundtracks=video_soundtracks)
     owner = plan["prompt_owner"]
     if owner is None:
         _warn(task, "没找到提示词注入点 ✗（主节点的 ``prompt`` 既不是自身 widget ✓、"
@@ -610,13 +1251,34 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
         _warn(task, f"提示词注入点 {owner[0]}.{owner[1]} 不在 API 图里 ✗（转换时被丢了？）")
 
     # ── 注入：时长（秒 → **喂 ``length`` 的那个标量节点** ✓；帧数由模板表达式按 24fps/17k+5 算 ✓）──
+    #    ⚠️ 两道**后端硬口径**在这里收口 ✓✗（2026-10-27 照抄 ``nodes_minimax_h3.py`` ✓）：
+    #    ① ``length`` 的 ``max=3600`` ★ —— 超了引擎 ``validate_inputs`` **直接拒单** ✗（不会替我们截 ✓）；
+    #    ② tooltip 声明的训练区间 ``~124-362`` 帧 ✓ —— 出了区间**不报错** ✓，只降稳定性 ✓ ⇒ 只告警 ✓。
     duration = float(body.get("duration") or 5)
     expected_frames = wf.frames_for_seconds(duration)
+    if expected_frames > wf.H3_MAX_FRAMES:
+        capped = wf.cap_frames(expected_frames)
+        _warn(task, f"时长 {duration:g}s ⇒ {expected_frames} 帧，超过后端 ``length`` 的硬上限 "
+                    f"{wf.H3_MAX_FRAMES} 帧（{wf.seconds_for_frames(wf.H3_MAX_FRAMES)}s）✗ "
+                    f"⇒ 按**上限内最大的合法帧数** {capped} 帧"
+                    f"（{wf.seconds_for_frames(capped)}s）出 ✓"
+                    f"（再长只能拆成多单接 ✓；不夹住的话这一单会被引擎拒 ✗）")
+        expected_frames = capped
+        duration = capped / float(wf.H3_FPS)
+    #    ⚠️ 下限那格（schema 的 ``min=5``）**不需要**在这里判 ✓✗：:func:`wf.frames_for_seconds`
+    #       本身就是 ``raw = max(min_frames, ...)`` ✓ ⇒ ``expected_frames`` **恒 ≥ 5** ✓，
+    #       写一个 ``< H3_MIN_FRAMES`` 的分支是**永远进不去**的死代码 ✗（还会让人误以为这里验过下限 ✓✗）。
+    low, high = wf.H3_TRAINED_FRAMES
+    if not low <= expected_frames <= high:
+        _warn(task, f"{expected_frames} 帧（{wf.seconds_for_frames(expected_frames)}s）落在后端声明的"
+                    f"**训练区间 {low}–{high} 帧"
+                    f"（{wf.seconds_for_frames(low)}–{wf.seconds_for_frames(high)}s）**之外 ⇒ 照做 ✓，"
+                    f"但画质／音画稳定性没有保证 ✓（这不是错误 ✓）")
     if plan["duration_id"] and wf.set_node_input(api, plan["duration_id"], "value", duration):
         pass
     else:
         _warn(task, f"没找到时长注入点 ✗（喂 ``length`` 的唯一 ``PrimitiveFloat`` 读不出来 ✓）"
-                    f"⇒ 时长沿用模板默认值 ✗（请求的是 {duration}s）")
+                    f"⇒ 时长沿用模板默认值 ✗（请求的是 {duration:g}s）")
 
     # ── 注入：画幅（COMBO 必须按**选项表**换，否则会被校验拒 ✓）──
     ratio = str(body.get("aspect_ratio") or "").strip()
@@ -639,13 +1301,21 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     if checkpoint:
         wf.set_input(api, "UNETLoader", "unet_name", checkpoint)
 
-    # ── 注入：参考素材（图 ✓ / 音频 ✗）──
-    #    ⚠️ 「模板没槽位」那条告警**在上传前**就发过了 ✓（那时才决定传不传 ✓）⇒ 这里只管落槽 ✓
+    # ── 注入：参考素材（图 ✓ / 音频 ✓ / 视频 ✓ —— 2026-10-27 起三类全接）──
+    #    ⚠️ 「模板没槽位」那两条告警**在上传前**就发过了 ✓（那时才决定传不传 ✓）⇒ 这里只管落槽 ✓
+    #    ⚠️ 两路**各落各的槽位表** ✓✗（图看 ``ref_images.*``、音看 ``ref_audios.*`` ✓）；
+    #    旧代码到这一步就一句「参考音频本地模板还没接上 ⇒ 被忽略」✗ —— 而盘上模板**有**音频槽位 ✓，
+    #    于是那句话本身就是假话 ✓✗（即 ⑬ 记的那条：文档/注释与盘上模板不一致 ✓）。
     landed_refs = (_wire_reference_images(task, api, plan, ref_uploads)
                    if refs and ref_slot_names else 0)
-    if body.get("reference_audio_urls") or body.get("reference_audio"):
-        _warn(task, "参考音频（Ref2VA 的音色参考）本地模板还没接上 ⇒ 被忽略 ✗"
-                    "（提示词里的 ``<Audio n>`` 也请一并去掉 ✗ 免得声明了却没有对应素材 ✓）")
+    landed_audios = (_wire_reference_audios(task, api, plan, ref_audio_uploads)
+                     if audios and audio_slot_names else 0)
+    # ⚠️ 视频**额外要 loader** ✓✗：没问出可用的读视频节点 ⇒ 连节点都不该建 ✓（否则提交时才 400 ✓）。
+    landed_videos = (_wire_reference_videos(task, api, plan, ref_video_uploads, video_loader)
+                     if wanted_videos and video_loader else 0)
+    # ⚠️ 参考图缩放档位**必须等图真落了再改** ✓✗：一路图都没进去 ⇒ 那格对本次出图毫无作用 ✓
+    #    （改了只会让「回执说 max」与「实际没参考图」互相打脸 ✓）。
+    applied_image_size = _wire_reference_image_size(task, api, plan, body, landed_refs)
 
     # ── 注入：加速链（配置驱动 ✓；没配就是空操作 ✓）──
     _apply_accel_chain(client, task, api)
@@ -706,7 +1376,11 @@ def _build_api_prompt(client: "cc.ComfyUIClient", task: Dict[str, Any]
     _update(task, workflow=template_name, form=form, main_node=plan["main_id"],
             dropped_nodes=dropped,
             expected_frames=expected_frames, expected_seconds=wf.seconds_for_frames(expected_frames),
-            uploaded=uploaded, reference_images=landed_refs,
+            uploaded=uploaded, reference_images=landed_refs, reference_audios=landed_audios,
+            reference_videos=landed_videos,
+            video_loader=(video_loader or {}).get("class"),
+            # 参考图缩放档位：``None`` = 没显式设过（没有参考图 ⇒ 不需要 ✓ / 模板没这格 ⇒ 落不下去 ✓）
+            reference_image_size=applied_image_size,
             prompt_node=f"{owner[0]}.{owner[1]}" if owner else None,
             duration_node=plan["duration_id"])
     return api, dropped
@@ -803,6 +1477,22 @@ def poll_task(task_id: str) -> JSONResponse:
         "prompt_node": task.get("prompt_node"),
         "duration_node": task.get("duration_node"),
         "reference_images": task.get("reference_images"),
+        # ⚠️ **音频单独一格** ✓✗（2026-10-27）：图那格只报图 ✓ —— 只报图 ⇒ 调用方看不出「声线样本到底
+        #    落上没有」✓✗（旧行为就是「落不上也不说」✓），而这两条路是**各落各的槽位表** ✓（见
+        #    ``_wire_reference_images`` / ``_wire_reference_audios`` ✓）。值都是**落地路数（整数）** ✓，
+        #    不是文件名列表 ✗（别和模板清单里的 ``reference_audio_slots`` 混 ✓）。
+        "reference_audios": task.get("reference_audios"),
+        # ⚠️ **视频也单独一格** ✓✗（同音频那条理由 ✓）：它比图/音多一个坑 —— 「帧串进去了、音轨没进去」
+        #    或「模板有槽但引擎里没读视频的节点」都只能靠这一格看出来 ✓。
+        "reference_videos": task.get("reference_videos"),
+        #: 真用的读视频节点类名 ✓（``None`` = 没问出可用的 ✓；与 ``reference_videos`` 一起读才完整 ✓）
+        "video_loader": task.get("video_loader"),
+        #: 参考图缩放档位**实际生效值** ✓（``match``/``max`` ✓；``None`` = 没显式设过 ——
+        #: 没有参考图 ✓，或模板没有那格 ✓ ⇒ 此时别把这格读成「引擎用了默认值以外的东西」✗）。
+        "reference_image_size": task.get("reference_image_size"),
+        #: 声轨数 ✓（带音轨的参考视频路数 ✓）—— 它占掉 ``<Audio j>`` 的**前几位** ✓✗：
+        #: 调用方写 ``<Audio 1>`` 时，看到这一格非 0 就知道那指的是**视频声轨**、不是独立音频 ✓。
+        "reference_video_soundtracks": task.get("reference_video_soundtracks"),
         "dropped_nodes": task.get("dropped_nodes"),
         "expected_width": task.get("expected_width"),
         "expected_height": task.get("expected_height"),
@@ -871,6 +1561,17 @@ def list_templates() -> JSONResponse:
             # ⚠️ 键名别叫 ``reference_images`` ✗ —— 任务那些响应里的同名字段是**落地路数（整数）** ✓✗
             #    （一个清单里给「谁接在哪」✓、一个跑单里给「几路落上了」✓，同名字段含义不同最容易读错 ✓）。
             "reference_image_nodes": plan.get("ref_image_ids") or [],
+            # ⚠️ 音频**单列** ✓✗（2026-10-27）：调用方拿这个清单挑模板 ✓，只报图槽位 ⇒ 它会挑一个
+            #    「有语音样本、没音频槽位」的模板 ✓✗（正是本条要防的错 ✓）。
+            "reference_audio_slots": plan.get("ref_audio_slot_names") or [],
+            "reference_audio_nodes": plan.get("ref_audio_ids") or [],
+            # ⚠️ 视频**再单列** ✓✗（2026-10-27 补齐 R2V 的第三类素材 ✓）——尤其要把
+            #    ``reference_video_audio_slots`` 报出来 ✗：模板可能只给帧串槽、不给音轨槽 ✓，
+            #    调用方据此才知道「这条视频的声音进不进得去」✓。
+            "reference_video_slots": plan.get("ref_video_slot_names") or [],
+            "reference_video_nodes": plan.get("ref_video_ids") or [],
+            "reference_video_audio_slots": plan.get("ref_video_audio_slot_names") or [],
+            "reference_video_audio_nodes": plan.get("ref_video_audio_ids") or [],
             "error": error,
         })
     return JSONResponse({
@@ -881,6 +1582,34 @@ def list_templates() -> JSONResponse:
         "r2v": R2V_WORKFLOW,
         "template_override": TEMPLATE or None,
         "reference_image_limit": REF_IMAGE_LIMIT,
+        #: 参考图缩放档位 ✓（后端 ``ref_image_size`` 的两个选项 ✓）——``match`` 快 ✓、``max`` 身份最保真 ✓。
+        #: ⚠️ **哪份模板有这一格**这里不报 ✗：模板里它是普通 widget（UI 图上没有字段名 ✓，
+        #: 只有转成 API 图后才认得出来 ✓）⇒ 由提交回执的 ``reference_image_size`` 如实回答 ✓
+        #: （落不下去时那一格是 ``None`` ✓ 且带告警 ✓）。
+        "reference_image_size_options": list(REF_IMAGE_SIZES),
+        "reference_image_size_default": REF_IMAGE_SIZE_DEFAULT,
+        "reference_audio_limit": REF_AUDIO_LIMIT,
+        "reference_video_limit": REF_VIDEO_LIMIT,
+        #: 「要读视频，引擎里得有个什么类」也一并公开 ✓✗ —— 它是**运行时探测**的结论 ✓（见
+        #: ``_video_loader`` ✓）：调用方据此判断这台机器能不能用参考视频 ✓，不用去猜 ✗。
+        "reference_video_loader_candidates": list(REF_VIDEO_LOADERS),
+        #: 「视频 → 帧串/音轨」的拆解节点候选 ✓（核心 ``GetVideoComponents`` ✓）—— 现版核心
+        #: ``LoadVideo`` 只吐 ``VIDEO`` ⇒ 缺它就没法把参考视频喂进 ``ref_videos`` ✓✗
+        "reference_video_component_nodes": list(REF_VIDEO_COMPONENTS),
+        #: 参考视频的**后端硬口径** ✓ —— 逐条抄自 ``comfy_extras/nodes_minimax_h3.py`` ✓：
+        #: ``io.Image.Input("ref_video", tooltip="Reference video frames at 24 fps (2-15s)")`` ✓、
+        #: 执行期 ``frames < 5`` 直接抛错（"at least 5 frames (~0.2s at 24 fps)"）✓、
+        #: 超长截到 ``frame_count`` ✓、再裁到 ``n % 17 == 5`` ✓、音轨按**同名下标**配对 ✓。
+        #: ⚠️ 帧数/时长我们**在本地核不了** ✗（解码在引擎侧 ✓）⇒ 只公开口径、不假装能验 ✓✗。
+        "reference_video_rules": {
+            "min_frames": 5,
+            "fps": 24,
+            "seconds": [2, 15],
+            "frame_grid": "17k+5",
+            "truncated_to_target": True,
+            "soundtrack_pairing": "index",
+            "audio_order": "soundtracks_then_ref_audios",
+        },
     })
 
 

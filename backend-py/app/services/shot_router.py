@@ -91,7 +91,7 @@ def decide_shot_route(conn: Connection, input_data: dict[str, Any]) -> dict[str,
        ``first_frame_to_video``** 以其起帧（I2V，保证镜头间像素级连续）；
     3. ``first_last_frame``：有尾帧目标（FL2VA 锁定结束画面）；
     4. ``reference_to_video``：对话/多人场景 + 多参考提供商 + 有参考图；
-       4b. **H3 Ref2VA**：provider 是 minimax 且有参考音频；
+       4b. **H3 Ref2VA**：provider 是 minimax 且有参考音频**或参考视频**；
     5. ``keyframe_to_video``：有中段关键帧图；
     6. ``first_frame_to_video``：默认（首帧图生视频）。
     """
@@ -104,6 +104,10 @@ def decide_shot_route(conn: Connection, input_data: dict[str, Any]) -> dict[str,
     can_multi_ref = input_data.get("canMultiRef")
     reference_images = input_data.get("referenceImages") or []
     reference_audio_urls = input_data.get("referenceAudioUrls") or []
+    # ⚠️ 参考**视频**也算参考素材 ✓✗（2026-10-27 补）：H3 的 ``ref_videos`` 与参考图/音频
+    #    平级 ✓ ⇒ 只挂一段参考视频的镜头同样只能走 Ref2VA ✓（漏算 ⇒ 路由写「纯文生 /
+    #    首帧图生」，与适配器实际挑的形态自相矛盾 ✓✗）。
+    reference_video_urls = input_data.get("referenceVideoUrls") or []
 
     # 1. 资产门禁阻断
     if input_data.get("blocked"):
@@ -158,14 +162,20 @@ def decide_shot_route(conn: Connection, input_data: dict[str, Any]) -> dict[str,
         persist_route(conn, storyboard_id, decision)
         return decision
 
-    # 4b. H3 Ref2VA：有参考音频（出场角色声线样本）
-    if provider == "minimax" and len(reference_audio_urls) > 0:
+    # 4b. H3 Ref2VA：有参考音频（出场角色声线样本）**或**参考视频（运镜/动作样本）
+    if provider == "minimax" and (len(reference_audio_urls) > 0 or len(reference_video_urls) > 0):
+        what: list[str] = []
+        counts: list[str] = []
+        if reference_audio_urls:
+            what.append("参考音频")
+            counts.append(f"{len(reference_audio_urls)} 条声线样本")
+        if reference_video_urls:
+            what.append("参考视频")
+            counts.append(f"{len(reference_video_urls)} 段参考视频")
         decision = {
             "route": "reference_to_video",
-            "reason": (
-                f"提供商 minimax 带参考音频（Ref2VA，{len(reference_audio_urls)} 条声线样本），"
-                "采用 R2V 音视频联合生成"
-            ),
+            "reason": (f"提供商 minimax 带{' + '.join(what)}（Ref2VA，"
+                       f"{' + '.join(counts)}），采用 R2V 音视频联合生成"),
             "referenceMode": "multiple" if len(reference_images) else "single",
         }
         persist_route(conn, storyboard_id, decision)
@@ -218,4 +228,5 @@ def recompute_episode_routes(conn: Connection, episode_id: int) -> None:
             "canMultiRef": False,
             "referenceImages": [],
             "referenceAudioUrls": [],
+            "referenceVideoUrls": [],
         })

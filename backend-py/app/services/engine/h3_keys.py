@@ -432,6 +432,22 @@ def infer_h3_trunk_config(tensors: Mapping[str, Sequence[int] | None], *,
     else:
         put("time_hidden", config["hidden"], "回落 hidden ✗（无 `time_embedder` 可读 ✓）")
 
+    # ── 时间嵌入**变体** ✓（2026-10-29：漏了这条 ⇒ 曲线检查点被按标准建 ⇒ 缺 4 键 + 多 1 键 ✗）
+    #    曲线变体的时间**不过 MLP** ✓，走 `adaln_t_table` 查表 ✓；两种在参考实现里是 if/else ✓。
+    is_curve = audit.variant == "curve"
+    put("use_adaln_curves", is_curve,
+        "权重：有 `adaln_t_table`、无 `time_embedder.*` ✓" if is_curve
+        else "权重：有 `time_embedder.proj_in.weight` ✓")
+    curve = _shape(tensors.get("adaln_t_table"))
+    if is_curve:
+        if curve is not None and len(curve) == 2:
+            put("adaln_curve_grid", int(curve[0]), "权重：`adaln_t_table` 行数 ✓（格点数）")
+        else:
+            problems.append("`adaln_t_table` 不是 2 维 ⇒ 曲线格点数推不出 ✗")
+            put("adaln_curve_grid", int(H3_TRUNK_DEFAULTS["adaln_curve_grid"]), "默认回落 ✗")
+    else:
+        put("adaln_curve_grid", int(H3_TRUNK_DEFAULTS["adaln_curve_grid"]), "不适用 ✓（标准变体）")
+
     # ── adaLN 路数：行数 = 6 × hidden × modalities ✓ ⇒ modalities 可推 ✓（H3 = 3 ✓）
     rows = _pick(tensors, "blocks.0.adaln_proj.linear.weight", 0)
     span = 6 * dims["hidden"]

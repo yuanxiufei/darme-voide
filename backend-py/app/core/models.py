@@ -444,6 +444,12 @@ video_generations = Table(
     _txt("character_ids"),
     _txt("scene_type"),
     _txt("reference_audio_urls"),
+    # ⚠️ 参考**视频**与参考图缩放档位（2026-10-27 补 ✓）：H3 后端两样都吃 ✓
+    #    （``ref_videos`` ≤3 路 ✓、``ref_image_size`` ∈ {match, max} ✓），而这两列原来**没有** ✗
+    #    ⇒ 请求里带了也存不下来、重跑/复用判据都看不见它们 ✓✗。两列都**可空** ✓
+    #    （老库用 ``python -m app.core.db --plan`` 补列 ✓，见 :func:`plan_schema_upgrade`）。
+    _txt("reference_video_urls"),
+    _txt("reference_image_size"),
     _txt("block_reason"),
     _txt("route"),
     _txt("route_reason"),

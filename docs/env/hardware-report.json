@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 3,
+  "apiVersion": "1.0.0",
+  "engine": "darme-engine (in-process)",
+  "python": "3.12.10",
+  "stages": [
+    "audio",
+    "h3",
+    "image",
+    "text"
+  ],
+  "operations": [
+    "capabilities",
+    "plan",
+    "readiness",
+    "inspect_weights",
+    "manifest",
+    "status"
+  ],
+  "unverified": [
+    "generate（进程内推理缺性能基线与 60 分钟稳定性验收）",
+    "training（本仓未实现训练闭环）"
+  ],
+  "backend": {
+    "available": true,
+    "reason": "依赖齐备 ✓",
+    "missingRequired": [],
+    "optionalMissing": [],
+    "installRequired": []
+  },
+  "quant": {
+    "supportedLayouts": [
+      "per-tensor",
+      "per-row",
+      "per-col",
+      "elementwise"
+    ],
+    "scaleSuffixes": [
+      ".weight_scale_inv",
+      ".weight_scale",
+      ".scales",
+      ".scale",
+      ".scale_inv"
+    ],
+    "supportedFormats": [
+      "nvfp4"
+    ],
+    "unsupportedFamilies": [],
+    "unsupportedFormats": [
+      "mxfp4"
+    ]
+  },
+  "catalog": {
+    "path": "D:\\code\\voide\\darme-voide\\configs\\models.json",
+    "models": 16,
+    "error": null,
+    "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models"
+  },
+  "limits": [
+    "只做单机单卡；多卡仅预留接口，无性能承诺",
+    "显存配额是预算控制，不是 GPU 硬隔离（外部分配接口外无法强制）",
+    "量化按**族**判，判不出就拒绝（不猜）：per-row/per-col/per-tensor/elementwise 由**形状**自证；nvfp4（U8 打包 + 128×4 块 scale + 二级 scale + AWQ）由**等式**判；mxfp4（E8M0 共享指数）与 int4 分组量化**未实现**，一律拒绝"
+  ],
+  "knownGaps": []
+}

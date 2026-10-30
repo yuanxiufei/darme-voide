@@ -27,6 +27,7 @@ from app.services.adapters import (  # noqa: E402
     get_video_adapter,
     join_provider_url,
 )
+from app.services.adapters.video_adapters import plan_h3_form  # noqa: E402
 from app.services.adapters.tts_adapters import map_emotion as _map_emotion  # noqa: E402
 from app.services.voice_contract import EMOTION_ORDER as _EMOTION_ORDER  # noqa: E402
 
@@ -349,6 +350,40 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
         )
         == 3,
     )
+    # ⚠️ 参考视频走 ``reference_video``（H3 契约口径 ✓）⇒ 上限 3 路（后端 ``ref_videos`` 的 ``max=3`` ✓）。
+    check(
+        "minimax vid: 参考视频截断到 3 条",
+        len(
+            minimax_vid.build_generate_request(
+                {"apiKey": "k"},
+                {"prompt": "p", "referenceVideoUrls": '["v1","v2","v3","v4"]'},
+            )["body"]["reference_video"]
+        )
+        == 3,
+    )
+    # ⚠️ 档位只在**是真档位**时才写 ✗（写非法值过去只会让 H3 侧告警回落 ✓，多一条噪音 ✓✗）。
+    check(
+        "minimax vid: 参考图档位 `` MAX `` ⇒ max ✓；``huge``/缺省 ⇒ **不写**该键 ✓",
+        (lambda b1, b2, b3: b1.get("reference_image_size") == "max"
+            and "reference_image_size" not in b2 and "reference_image_size" not in b3)(
+            minimax_vid.build_generate_request(
+                {"apiKey": "k"}, {"prompt": "p", "referenceImageSize": " MAX "})["body"],
+            minimax_vid.build_generate_request(
+                {"apiKey": "k"}, {"prompt": "p", "referenceImageSize": "huge"})["body"],
+            minimax_vid.build_generate_request({"apiKey": "k"}, {"prompt": "p"})["body"],
+        ),
+    )
+    # ⚠️⭐ 只挂参考**视频**也算「有参考素材」✓✗：漏算 ⇒ ``action`` 场景挑到 FL2VA ✓ ⇒ 素材静默失效 ✓✗
+    #     （引擎 ``select_h3_task`` 那条硬约束就形同虚设 ✓）。
+    check(
+        "minimax vid: 只挂参考视频也算素材 ⇒ ``action`` 场景仍走 Ref2VA ✓（不是 FL2VA ✗）",
+        plan_h3_form(cfg_h3, {"prompt": "p", "sceneType": "action",
+                              "referenceVideoUrls": '["v1"]'})["kind"] == "ref2va"
+        and plan_h3_form(cfg_h3, {"prompt": "p", "sceneType": "action"})["kind"] == "fl2va",
+        (plan_h3_form(cfg_h3, {"prompt": "p", "sceneType": "action",
+                               "referenceVideoUrls": '["v1"]'}),
+         plan_h3_form(cfg_h3, {"prompt": "p", "sceneType": "action"})),
+    )
     check(
         "minimax vid: first_last 模式下两帧各就各位",
         (lambda b: b["first_frame_image"] == "f" and b["last_frame_image"] == "l")(
@@ -538,7 +573,20 @@ def main() -> int:  # noqa: C901  —— 自检脚本，平铺更直观
           ollama_req["url"] == "http://x.com/api/chat", ollama_req["url"])
     check("text: ollama 关思考 + 上限字段名是 num_predict + temperature 保留 0",
           ollama_req["body"].get("think") is False and ollama_req["body"].get("stream") is False
-          and ollama_req["body"]["options"] == {"temperature": 0, "num_predict": 8}, ollama_req["body"])
+          and ollama_req["body"]["options"] == {"temperature": 0, "num_predict": 8, "num_ctx": 32768},
+          ollama_req["body"])
+    # ⚠️ Ollama 默认窗口只有 4096，长 prompt 会被**静默截断**且丢掉开头＝instructions。
+    #    默认取 32768：storyboard_breaker 的固定开销（system 14883 + tools 1393 + 输出 4096）
+    #    本身就 20372，16384 下必爆。
+    check("text: ollama 显式下发 num_ctx（默认 32768，不是 Ollama 的 4096）",
+          ollama_req["body"]["options"]["num_ctx"] == 32768, ollama_req["body"]["options"])
+    check("text: num_ctx 可由 settings.numCtx 覆盖（0/非法值回落默认）",
+          ollama_text.build_request(
+              {"provider": "ollama", "settings": {"numCtx": 65536}},
+              {"model": "m", "messages": []})["body"]["options"]["num_ctx"] == 65536
+          and ollama_text.build_request(
+              {"provider": "ollama", "settings": {"numCtx": 0}},
+              {"model": "m", "messages": []})["body"]["options"]["num_ctx"] == 32768)
     check("text: ollama 解析原生 message.content",
           ollama_text.parse_response({"message": {"role": "assistant", "content": "收到"}}) == "收到")
     check(

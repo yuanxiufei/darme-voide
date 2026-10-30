@@ -151,6 +151,12 @@ class GenerationRequest:
     #: `bridge` 按它拼装配 ✓、`image_generation` 按它选产物路径 ✓。
     #: ⚠️ 放在**末尾** ✗ 不是随手 ✗：插在中间会移动位置参数 ✓✗。
     stage: str = "h3"
+    #: 图生视频的**尾帧** ✓（fl2v ✓）—— 与 ``first_frame`` 同一套 ``cond`` 段机制 ✓，
+    #: 区别只是关键帧下标取 **``frames − 1``** 而不是 ``0`` ✓（见 `torch_backend._dual_keyframes` ✓）。
+    #: ⚠️ 只对**双流**后端有意义 ✓：单流只有 ``condition_first_frame``（掩码混第 0 潜帧 ✓）⇒
+    #: 给单流后端尾帧会**明确失败** ✗，不静默忽略 ✓（忽略 = 产出与尾帧无关的画面且看不出来 ✗）。
+    #: ⚠️ 也**追加在末尾** ✓（同 ``stage`` 的理由 ✓）。
+    last_frame: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -569,6 +575,38 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
         result.stageMs["condition"] = int((time.perf_counter() - started) * 1000)
         emit(result.event("condition", note="首帧 → `cond` 段 ✓（H3 形态 ✓）"))
 
+    if dual and request.last_frame:
+        # 尾帧（fl2v ✓）走**同一套** `cond` 机制 ✓，下标 = `frames − 1` ✓。
+        # ⚠️ 同样**先看后端自述** ✗：没声明却照跑 = 尾帧被静默丢掉 ⇒ 产物末端根本不像尾帧 ✓✗
+        state = getattr(backend, "dualStream", None) or {}
+        if not state.get("lastFrame"):
+            return _fail(result, "condition", conditioning_mod.ConditioningError(
+                "双流后端**没有自述支持尾帧条件** ✗ ⇒ 不静默丢掉尾帧 ✗"
+                "（要么后端把尾帧 `cond` 段接上 ✓，要么这次别给 lastFrame ✓）"))
+        last_index = max(int(plan.frames) - 1, 0)
+        started = time.perf_counter()
+        info = dict(result.conditioning or {})
+        info.update({
+            "applied": True,
+            "mode": info.get("mode") or "h3-keyframe-cond",
+            "lastImagePath": request.last_frame,
+            "lastFrameIndex": last_index,
+            "viaLast": f"init_dual_latents（尾帧在第 {last_index} 帧编成 `cond` 段 ✓）",
+        })
+        info.setdefault("imagePath", request.last_frame)
+        result.conditioning = info
+        result.stageMs["condition"] = (int(result.stageMs.get("condition", 0))
+                                       + int((time.perf_counter() - started) * 1000))
+        emit(result.event("condition", note=f"尾帧 → 第 {last_index} 帧 `cond` 段 ✓"))
+
+    if request.last_frame and not dual:
+        # 单流的 `condition_first_frame` 只会把掩码混到**第 0 潜帧** ✓ ⇒ 做不了尾帧 ✗。
+        # 硬做（比如硬塞成首帧）会让产物**开头**是尾帧 ✓✗ —— 比报错难查得多 ✓。
+        return _fail(result, "condition", conditioning_mod.ConditioningError(
+            f"后端 {getattr(backend, 'name', type(backend).__name__)} 未实现尾帧条件 ✗"
+            f"（单流只有 conditioning_first_frame ⇒ 掩码只能混第 0 潜帧 ✓）"
+            f"；刻意报错，不静默忽略尾帧 ✗"))
+
     if request.first_frame and not dual:
         started = time.perf_counter()
         try:
@@ -780,7 +818,19 @@ def _branches(condition: Any) -> tuple[Any, Any]:
 
 def _fail(result: PipelineResult, stage: str, err: BaseException,
           *, step: int | None = None) -> PipelineResult:
-    """把异常归一成结果 ✓ —— 取消**不是失败** ✗（前端要分开显示 ✓）。"""
+    """把异常归一成结果 ✓ —— 取消**不是失败** ✗（前端要分开显示 ✓）。
+
+    ⚠️ ``OutOfMemoryError`` **单独点名** ✗✗（2026-10-29 加 ✓）：显存不够是本仓**唯一**一个
+    「仓库自己知道答案、而原生报错里一个字都不提」的失败 ✓✗ —— ``CUDA out of memory. Tried to
+    allocate 2.00 GiB`` 只说明分配失败 ✓，**不会**告诉你「720×1280 只有 ``int8_offload``
+    这一档装得下」✓✗，而那句话就写在本仓 ``h3_form.place_module`` 与
+    ``TorchBackend.__init__`` 的注释里 ✓（= 三处实测：int8 全在卡上只剩 2.87 GiB 给激活 ✓）。
+    ⇒ 这里把三条**可行动**的路补进 message ✓，并把 ``vramExhausted`` 写进结构化字段 ✓
+    （前端要能**直接判**、而不是解析中文 ✓ —— 与「取消」那条同一个口径 ✓）。
+
+    ⚠️ 判据用**类名**、不解析英文报错 ✗：原生文案一改（torch 大版本升级就会改 ✓）映射就失效 ✓✗
+    —— 与 ``facade._friendly`` 里 ``name == "EngineBusy"`` 的做法一致 ✓。
+    """
     if isinstance(err, GenerationCancelled):
         result.cancelled = True
         # ⚠️ 步号必须**进结构化字段**（不能只写在文案里 ✓）：自检 ㉗ 抓到初版只把「第 3 步」
@@ -789,7 +839,26 @@ def _fail(result: PipelineResult, stage: str, err: BaseException,
         return result
     stage_error = err if isinstance(err, StageError) else StageError(
         stage, f"{type(err).__name__}: {err}"[:300], step=step, cause=err)
+    message = str(stage_error)
+    # ⚠️ 用 ``in`` 不用 ``==`` ✓：真类是 ``torch.cuda.OutOfMemoryError`` ✓（名字恰好等于
+    #    ``OutOfMemoryError`` ✓），但将来若出现子类（``CudaOutOfMemoryError`` 之类 ✓）也要认 ✓✗。
+    vram = "OutOfMemory" in type(err).__name__
+    if vram:
+        # ⚠️ 这是**给用户看的**文案 ⇒ 不带 ✓✗ 记号 ✓（那是本仓注释里的写法 ✗ ——
+        #    `facade.CODES` 的每一条都是干净中文 ✓，这里对齐 ✓）。
+        message += (
+            "\n  · 这是显存不够（不是权重坏，也不是实现缺）。按代价从低到高有三条路："
+            "\n    ① 开 int8Offload: true（装配键 int8_offload）：int8 常驻权重钉在 CPU 锁页内存、"
+            "前向逐层搬上卡，显存立省 17.94 GiB（本仓 dit_fl2va_int8 的实测值，别的量化档按它自己的"
+            "体积算；代价：每步多一趟 PCIe）。在本仓实测的 22.49 GiB（A5000、ECC 开启）上，"
+            "720×1280 只有这一档装得下；先看 status 里的 int8Offload 是不是本来就没开。"
+            "\n    ② 降这一次的分辨率 / 帧数（megapixels、ratio、seconds）—— 激活是按它们长的。"
+            "\n    ③ 换更大的卡（22.49 GiB 的 A5000 在 720×1280 上就是这么紧）。"
+            "\n  · 已经开着 int8Offload 还是爆，就只剩 ②③：offload 已经把权重那份省掉了，"
+            "剩下的就是激活，它跟分辨率走。")
     result.error = {"stage": stage_error.stage, "step": stage_error.step,
-                    "message": str(stage_error),
+                    "message": message,
                     "type": type(err).__name__}
+    if vram:
+        result.error["vramExhausted"] = True
     return result

@@ -24,6 +24,8 @@ __pycache__/
 # Python 后端（backend-py）虚拟环境：只提交 requirements.txt，不入库 site-packages
 .venv/
 venv/
+# 旧 CPU 环境备份（切换 CUDA 前的 .venv，留作回滚，不入库）
+.venv-cpu-backup/
 
 # OS
 .DS_Store
@@ -37,6 +39,8 @@ data/drama.db-wal
 data/drama.db-shm
 data/public.sql
 data/*.bak*
+# 数据库整目录备份（如 data/_backup_20261027-203105/）：机器数据，不入库
+data/_backup_*/
 data/static/
 data/storage/
 data/traces/

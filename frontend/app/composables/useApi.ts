@@ -172,6 +172,49 @@ export const generationsAPI = {
     return api.get<GenerationRecord[]>(`/generations${query.size ? `?${query.toString()}` : ''}`)
   },
 }
+/** 视觉图谱里的一个术语节点（数据契约在 `backend-py/app/services/visual_graph.py::VISUAL_GRAPH`） */
+export interface VisualTerm {
+  /** 中文别名，**第一个是主名**；匹配时长短要区分（「中景」不能吃掉「中近景」） */
+  zh: string[]
+  /** 英文电影术语 —— 会直接进 image/video prompt */
+  en: string
+  /** 使用场景说明 */
+  usage: string
+  /** 常搭配的英文术语（部分节点没有） */
+  pairsWith?: string[]
+}
+export type VisualCategory = 'shot_size' | 'composition' | 'movement' | 'lighting'
+export interface VisualGraphResponse {
+  graph: Partial<Record<VisualCategory, VisualTerm[]>>
+  categories: VisualCategory[]
+}
+
+export const visualGraphAPI = {
+  /** 图谱全量（传 category 只取一类；非法值后端会**退回全部**，不会报错） */
+  graph: (category?: VisualCategory) =>
+    api.get<VisualGraphResponse>(`/visual-graph${category ? `?category=${category}` : ''}`),
+  /** 中文术语 → 英文电影术语；没命中时 `en` 为 null（不是抛错） */
+  resolve: (text: string) => api.get<{ zh: string; en: string | null }>(`/visual-graph/resolve?text=${encodeURIComponent(text)}`),
+  /** 某类的全部主名（不含别名） */
+  terms: (category: VisualCategory) => api.get<{ category: string; terms: string[] }>(`/visual-graph/terms?category=${category}`),
+  /**
+   * 按剧类型/风格取「拆镜引导」**纯文本**。
+   *
+   * ⚠️ 这个端点回的是 `text/plain`，走不了 `api.get` —— 那个封装第一句就是 `resp.json()`，
+   * 对非 JSON 会直接抛解析错误（错误信息还会长得像网络问题，极难查 ✓✗）。
+   * 另外：`drama_id` 不存在时后端是 **404**，这里要把它变成能看懂的话。
+   */
+  guidance: async (dramaId?: number): Promise<string> => {
+    const resp = await fetch(`${BASE}/visual-graph/guidance${dramaId ? `?drama_id=${dramaId}` : ''}`)
+    if (!resp.ok) {
+      const json = await resp.json().catch(() => null)
+      const msg = json?.message || (resp.status === 404 ? '剧集不存在（可能已删除）' : `引导文本获取失败 (HTTP ${resp.status})`)
+      throw new Error(msg)
+    }
+    return resp.text()
+  },
+}
+
 export const gridAPI = {
   prompt: (d: any) => api.post('/grid/prompt', d),
   generate: (d: any) => api.post('/grid/generate', d),

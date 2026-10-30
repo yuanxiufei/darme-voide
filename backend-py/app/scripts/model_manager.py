@@ -220,13 +220,85 @@ def ollama_installed():
         return set()
 
 
+# ---- 引擎可见性：本仓目录之外，同一个权重还在哪 ----
+#: `detect_comfyui_roots()` 的结果缓存 —— `list` 要对登记项逐条查，重跑几十遍纯浪费（每遍扫各盘）
+_COMFYUI_ROOTS_CACHE = None
+
+
+def _detect_comfyui_roots_cached():
+    global _COMFYUI_ROOTS_CACHE
+    if _COMFYUI_ROOTS_CACHE is None:
+        _COMFYUI_ROOTS_CACHE = detect_comfyui_roots()
+    return _COMFYUI_ROOTS_CACHE
+
+
+def weight_roots(paths):
+    """所有可能放着权重的 ComfyUI 类根：显式配置的那个 + 本机探测到的全部（含共享池）。"""
+    out, seen = [], set()
+    for root in [paths.comfyui_root] + list(_detect_comfyui_roots_cached()):
+        if not root:
+            continue
+        key = os.path.normcase(os.path.abspath(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
+
+def find_elsewhere(m, paths):
+    """在**本仓模型目录之外**找同一个权重的真实落点；找不到返回 None。
+
+    `configs/models.json` 的 comfyui 条目描述的是「引擎加载得到什么」，而权重常见落在
+    `…\\ComfyUI-Shared\\models`（由 ComfyUI 的 `extra_model_paths.yaml` 挂给引擎）。
+    只查 `paths.models_dir` 会把**就在盘上**的权重报成 MISS，`download` 于是往本仓重下
+    一份（2026-10-28 实测 EP001 那批 7 个 ≈ 87 GB）。两处判定共用本函数 ⇒ 口径不分裂。
+    """
+    kind, name = m.get("kind") or "", m.get("filename") or ""
+    if not kind or not name:
+        return None
+    for root in weight_roots(paths):
+        # 两种拼法：根是 ComfyUI 根（下面有 models/），或根本身已经是 models 目录
+        for base in (os.path.join(root, "models"), root):
+            candidate = os.path.join(base, kind, name)
+            try:
+                if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                    return candidate
+            except OSError:
+                continue
+    return None
+
+
+def in_repo_models(path, paths):
+    """这条路径是否落在本仓模型目录里（区分「本仓有副本」与「只是引擎可见」）。"""
+    if not path or not paths.models_dir:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(path)).startswith(
+            os.path.normcase(os.path.abspath(paths.models_dir)) + os.sep
+        )
+    except OSError:
+        return False
+
+
 def model_status(m, paths):
-    """返回 (状态, 详情路径)。状态：installed/missing/manual/unknown。"""
+    """返回 (状态, 详情路径)。状态：installed/missing/manual/unknown。
+
+    comfyui 类**先看本仓 `data/models`**（存储自主化：那是我们自己的目录，下载与删除都只认它），
+    未命中再找引擎同样加载得到的同一份权重（共享池 / 别的 ComfyUI 安装）。两者都算 installed
+    —— 否则这台机器上「引擎能出图、CLI 说没有」，中间还夹着一次 87 GB 的无谓下载。
+    想知道到底是哪一种，看返回的详情路径是否落在本仓（:func:`in_repo_models`）。
+    """
     runtime = m.get("runtime")
     if runtime == "comfyui":
         path = os.path.join(paths.models_dir or "", m.get("kind", ""), m.get("filename", ""))
         ok = bool(paths.models_dir) and os.path.isfile(path) and os.path.getsize(path) > 0
-        return ("installed" if ok else "missing", path)
+        if ok:
+            return ("installed", path)
+        found = find_elsewhere(m, paths)
+        if found:
+            return ("installed", found)
+        return ("missing", path)
     if runtime == "ollama":
         ref = m.get("ref", "")
         installed = ref in ollama_installed()
@@ -364,6 +436,14 @@ def download_url(url, dest, force=False, timeout=120, size_gib=None):
 
 def install_comfyui_model(m, paths, force=False, source="hf"):
     path = os.path.join(paths.models_dir, m.get("kind", ""), m.get("filename", ""))
+    # 引擎已经加载得到就不下第二份：本仓目录之外的可见副本（共享池 / 别的安装）同样算数。
+    # 想在本仓 data/models 留一份自己的副本才加 --force —— 否则这里会白下几十 GB（2026-10-28 实测 7 个 ≈ 87 GB）。
+    if not force:
+        found = find_elsewhere(m, paths)
+        if found:
+            print(f"    引擎已可见（跳过下载）: {found}")
+            print(f"    要往本仓 {paths.models_dir} 留一份副本，加 --force")
+            return True
     url = resolve_download_url(m, source)
     if not url:
         print("    [跳过] 无可用下载地址（缺 url 或 repo/file_path）")
@@ -435,6 +515,12 @@ def remove_model_files(m, paths):
             print(f"    已删除: {path}")
             return True
         print(f"    不存在: {path}")
+        # 本仓没有副本但引擎在别处可见 ⇒ 说清「那份不归本工具删」，否则用户会以为命令没生效。
+        # 只提示、不伸手：共享池里的权重可能正被引擎或别的项目用着（删了是灾难）。
+        elsewhere = find_elsewhere(m, paths)
+        if elsewhere:
+            print(f"    但引擎在别处可见: {elsewhere}")
+            print("    那份不在本仓、本命令不动它；确实要删请自己确认后手动处理")
         return False
     if runtime == "ollama":
         ref = m["ref"]
@@ -510,7 +596,11 @@ def main():
     p_dl.add_argument("--category", help="按类别批量安装")
     p_dl.add_argument("--required", action="store_true", help="安装全部 required 模型")
     p_dl.add_argument("--all", action="store_true", help="安装全部可自动安装的模型")
-    p_dl.add_argument("--force", action="store_true", help="强制重新下载")
+    p_dl.add_argument(
+        "--force",
+        action="store_true",
+        help="强制重新下载；也用于「引擎已在别处可见时仍要在本仓留一份副本」",
+    )
     p_dl.add_argument("--source", choices=["hf", "hf_mirror", "modelscope"], default="hf",
                       help="comfyui 权重下载来源：hf / hf_mirror / modelscope（默认 hf）")
 
@@ -566,12 +656,21 @@ def main():
     if args.cmd == "list":
         print(f"模型清单（共 {len(models)} 个）")
         print(f"{'状态':<5} {'key':<28} {'类别':<8} {'方式':<9} {'大小':<11} {'必需':<5} 名称")
+        elsewhere = []
         for m in models:
             if args.category and m.get("category") != args.category:
                 continue
             if args.runtime and m.get("runtime") != args.runtime:
                 continue
             status, detail = model_status(m, paths)
+            # 只有 comfyui 类存在「本仓有副本 / 引擎在别处加载得到」之分：ollama 权重本来就归
+            # ollama 自己管（`ollama:` 前缀），列进来会让这句提示对着它说胡话。
+            if (
+                status == "installed"
+                and m.get("runtime") == "comfyui"
+                and not in_repo_models(detail, paths)
+            ):
+                elsewhere.append((m["key"], detail))
             if args.missing and status == "installed":
                 continue
             flag = "*" if m.get("required") else ""
@@ -579,6 +678,12 @@ def main():
                 f"{_status_mark(status):<5} {m['key']:<28} {m.get('category', '-'):<8} "
                 f"{m.get('runtime', '-'):<9} {_human_gib(m.get('size_gib')):<11} {flag:<5} {m.get('name', '')}"
             )
+        if elsewhere and not args.missing:
+            print(f"\n其中 {len(elsewhere)} 个的权重在本仓模型目录之外（共享池 / 别的 ComfyUI 安装）：")
+            for key, detail in elsewhere:
+                print(f"  - {key:<24} {detail}")
+            print(f"  引擎加载得到、download 会跳过它们；要往本仓留副本（{paths.models_dir}）请加 --force")
+            print("  更全的可见性（含 extra_model_paths.yaml 与 HF·ModelScope 缓存）用模型页的「扫描本地模型」。")
         if args.missing or not args.category:
             print(f"\n节点清单（共 {len(nodes)} 个）")
             for n in nodes:

@@ -32,6 +32,7 @@ os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
 from app.services.engine import inventory as inv  # noqa: E402
+from app.services.engine import loader as ld  # noqa: E402
 from app.services.engine import safetensors as st  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -48,8 +49,13 @@ def write_safetensors(path: Path, tensors: dict[str, tuple[str, list[int]]], *,
                       metadata: dict[str, str] | None = None,
                       truncate_bytes: int = 0,
                       trailing_garbage: int = 0,
-                      break_offset: bool = False) -> None:
-    """写出一个（默认合法的）safetensors ✓；三个参数用来故意造坏文件 ✓。"""
+                      break_offset: bool = False,
+                      payloads: dict[str, bytes] | None = None) -> None:
+    """写出一个（默认合法的）safetensors ✓；三个参数用来故意造坏文件 ✓。
+
+    ``payloads`` 用来给某个张量塞**真字节** ✓（默认全零 ✗）—— 造 ``*.comfy_quant`` 这类
+    「内容本身就是结论」的小张量时必须用它 ✓：只写零字节，解析出来是空 ⇒ 判据在验空气 ✓✗。
+    """
     header: dict[str, Any] = {}
     if metadata:
         header["__metadata__"] = metadata
@@ -64,7 +70,12 @@ def write_safetensors(path: Path, tensors: dict[str, tuple[str, list[int]]], *,
         if break_offset:  # 头部自述比真实大 ⇒ 触发「超出数据区 / 自相矛盾」✓
             end = offset + size + 8
         header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, end]}
-        blobs.append(bytes(size))
+        blob = (payloads or {}).get(name)
+        if blob is not None and len(blob) != size:
+            # 长度对不上就别写了 ✓：那会造出「头部说 N 字节、实际 M 字节」的坏文件，
+            # 于是判据红在**造数据的错**上，而不是被测行为 ✓✗
+            raise AssertionError(f"payloads[{name!r}] 长度 {len(blob)} ≠ 形状算出的 {size} ✓✗")
+        blobs.append(blob if blob is not None else bytes(size))
         offset = end
     payload = json.dumps(header).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,7 +382,8 @@ def case_probe_root(root: Path) -> None:
     可体检 / 加载计划**只看 `models_dir`** ✗✗ ⇒ 报告说「缺 `dit_fl2va_int8` ✗、还要下 39.55 GiB」✓✗
     —— 而盘上那份**明明在** ✓、引擎加载也真会用它 ✓ ⇒ **同一件事两个说法**（本仓最忌那个 ✓）。
 
-    这里把探测根换成**自造的**（`candidate_roots` 打桩 ✓）⇒ 结论与本机装没装**无关** ✓：
+    这里把**探测根**和 **`models_dir`** 都换成**自造的**（两个都打桩 ✓ —— 只桩探测根**不够** ✗，
+    理由见下面那段 ⚠️⚠️）⇒ 结论与本机装没装**无关** ✓：
     必需件铺在 ``<探测根>/<kind>/<文件名>`` ✓ ⇒ 必须算**在盘上** ✓（`ready=True` ✓、
     `resolvedElsewhere` 如实点名 ✓），而且**加载口**（`vae_h3` ✓ / `torch_backend._default_dit_path` ✓）
     必须看得见**同一份** ✗ —— 三条路只能是同一条解析 ✓。
@@ -394,7 +406,17 @@ def case_probe_root(root: Path) -> None:
             write_safetensors(where, {"weight": ("F16", [4, 4])})
 
     original = inv.candidate_roots
+    original_models_dir = inv.models_dir
+    # ⚠️⚠️ **两个桩一起打** ✗✗（2026-10-29 实测补 ✓）：只桩 `candidate_roots` **不够** ✓✗ ——
+    #    `resolve_component` 是「**清单落点优先** → 探测根」✓，而本机 `models_dir` 就是
+    #    `D:\Comfy-Desktop\ComfyUI-Shared\models`（**真权重齐全** ✓）⇒ 声明的落点**先命中** ✓，
+    #    三条路一起返回真文件、`resolvedElsewhere` 永远空 ✓✗ ⇒ 这一组就成了
+    #    「结论随本机装没装而变」✓✗（正是它自己声称要避免的那个 ✗）。
+    #    ⇒ 把 `models_dir` 指向**空的临时目录** ✓：声明的落点**不存在** ✓ ⇒ 域里只剩探测根 ✓，
+    #    而 `expectedPath` 仍是「清单会写哪儿」✓（非空、且 ≠ 实际找到的那份 ✓）。
+    repo_models = root / "repo_models"             # 假装是"本仓自己的 models_dir"（空 ✓）
     inv.candidate_roots = lambda: [(shared, "动态探测根（自检合成 ✓）")]  # type: ignore[assignment]
+    inv.models_dir = lambda: repo_models  # type: ignore[assignment]
     try:
         report = inv.readiness("h3")               # ⚠️ 不给 root ⇒ 默认域（清单落点 + 探测根 ✓）
         plan = loader_mod.plan_stage("h3")
@@ -403,6 +425,7 @@ def case_probe_root(root: Path) -> None:
         default_dit = tb.TorchBackend.__new__(tb.TorchBackend)._default_dit_path()  # noqa: SLF001
     finally:
         inv.candidate_roots = original  # type: ignore[assignment]
+        inv.models_dir = original_models_dir  # type: ignore[assignment]
 
     keys = {str(item["key"]): item for item in report["components"]}
     present_bytes = sum(int(item["bytes"]) for item in report["components"] if item["present"])
@@ -412,8 +435,10 @@ def case_probe_root(root: Path) -> None:
           report["ready"] is True and report["missingRequired"] == [] and present_bytes > 0,
           (report["missingRequired"], report["requiredWeightsGiB"], present_bytes))
     check("⭐㉛′ 「不在 `models_dir`」**分开报** ✓：`expectedPath`（清单落点）≠ `path`（实际找到 ✓），"
-          "且 `resolvedElsewhere` 逐件点名 ✓（=「想让本仓自持就收进去」的依据 ✓）",
-          all(keys[str(item["key"])]["path"] != keys[str(item["key"])]["expectedPath"]
+          "且 `resolvedElsewhere` 逐件点名 ✓（=「想让本仓自持就收进去」的依据 ✓）"
+          "⚠️ `expectedPath` 必须**非空**（空就成「None ≠ 路径」的套套逻辑了 ✗）",
+          all(keys[str(item["key"])]["expectedPath"]
+              and keys[str(item["key"])]["path"] != keys[str(item["key"])]["expectedPath"]
               for item in required)
           and set(report["resolvedElsewhere"]) == {str(item["key"]) for item in required},
           (report["resolvedElsewhere"], keys[str(required[0]["key"])]["expectedPath"]))
@@ -428,12 +453,113 @@ def case_probe_root(root: Path) -> None:
           inv.readiness("h3", root=root / "empty")["missingRequired"])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑤ 量化方案归类：**文件自己写的 `comfy_quant` 说了算** ✓（2026-10-30 实测抓到的自相矛盾 ✓✗）
+# ══════════════════════════════════════════════════════════════════════════
+def case_quant_scheme(root: Path) -> None:
+    """⭐ nvfp4 必须**既报对族名、又真的判成「能还原」** ✓✗（2026-10-30 起 A 路已落地 ✓）。
+
+    实测（盘上 `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`，14.61 GiB ✓）：
+    `weight` 是 **U8 打包 4 bit**、`weight_scale` 是 **F8_E4M3 每 16 元素一个** ✓、
+    还有 `weight_scale_2` 二级 scale ✓，`comfy_quant` 明写 ``{"format": "nvfp4"}`` ✓。
+
+    这一格钉**两条历史上都真出过事的口径**：
+    ① `_quant_of` 只按 dtype 猜 ⇒ 看见 F8_E4M3 就报 ``fp8 + scales`` ✓✗（那 F8 是**scale**、
+       不是权重 ✗）⇒ 报告会**劝人按 fp8 去解** U8 的 4 bit 打包，数值全错且不报错 ✓✗；
+    ② `dequantPlan` 把 nvfp4 层当「scale 形状对不上任何布局」⇒ 与 `quant_nvfp4` 的结论打脸 ✓✗。
+    ⇒ 现在两处都必须与 :func:`quant_nvfp4.plan` **同一口径** ✓（`dequant_plan_of` 是唯一入口 ✓）。
+    """
+    nvfp4_spec = json.dumps({"format": "nvfp4", "full_precision_matrix_mult": True}).encode("utf-8")
+    layer = "model.layers.0.mlp.down_proj"
+    fake = root / "text_encoders" / "fake_nvfp4.safetensors"
+    write_safetensors(fake, {
+        #: 打包 [8, 8] ⇒ 逻辑 [8, 16] ✓（K=16 ⇒ 每行 1 个块 ✓）；
+        #: 块 scale 元素数 = roundup(8,128) × roundup(16/16,4) = 128×4 = 512 ✓
+        #: ⇒ 形状 [8, 64] 正是 512 个 ✓（写成 [8,1] 会被判「元素数不符」✓✗ —— 那条判据在下面单测 ✓）
+        f"{layer}.weight": ("U8", [8, 8]),
+        f"{layer}.weight_scale": ("F8_E4M3", [8, 64]),
+        f"{layer}.weight_scale_2": ("F32", [1]),        # nvfp4 的二级 scale ✓
+        f"{layer}.comfy_quant": ("U8", [len(nvfp4_spec)]),
+    }, payloads={f"{layer}.comfy_quant": nvfp4_spec})
+    plan = ld.plan_component({"key": "fake_nvfp4", "name": "合成 nvfp4 层 ✓",
+                              "kind": "text_encoders", "category": "video",
+                              "filename": fake.name}, root=root)
+    detail = plan.dequantPlan or {}
+    nv = detail.get("nvfp4") or {}
+
+    check("⑤ 合成 nvfp4 文件本身合法 ✓（判据不建在一个坏文件上 ✓）",
+          plan.present and plan.verified, {"present": plan.present, "problems": plan.problems})
+    check("⑤ `comfy_quant` 明写 nvfp4 ⇒ `quantScheme` 必须是 **nvfp4** ✓✗（报成 `fp8` 会劝人按 fp8 解 ✓）",
+          plan.quantScheme == "nvfp4", plan.quantScheme)
+    check("⑤ `computeDtype` 必须说得出**怎么还原** ✓、且不许出现 `fp8` ✗（那是 scale 的 dtype、不是权重的 ✓）",
+          "nvfp4" in plan.computeDtype and "还原" in plan.computeDtype
+          and "fp8" not in plan.computeDtype and "未实现" not in plan.computeDtype,
+          plan.computeDtype)
+    check("⑤ 逐层体检认下这一层 ✓（`declared` / `layers` / 带 AWQ 与否 ✓）",
+          nv.get("declared") is True and nv.get("layers") == 1,
+          {k: nv.get(k) for k in ("declared", "layers", "awqLayers", "problems")})
+    check("⑤ 合并后 `supported` 必须是 **True** ✓✗（同一份报告里既说能还原又说判不出布局＝自相矛盾 ✓）",
+          detail.get("supported") is True and not detail.get("family")
+          and detail.get("unresolvedCount") == 0,
+          {"supported": detail.get("supported"), "unresolvedCount": detail.get("unresolvedCount"),
+           "problems": plan.problems})
+    check("⑤ nvfp4 的层数记在 `layouts[\"nvfp4\"]` ✓（不是凭空多出来的数 ✓：sum(layouts) 仍 == paired ✓）",
+          (detail.get("layouts") or {}).get("nvfp4") == 1
+          and sum((detail.get("layouts") or {}).values()) == detail.get("paired"),
+          {"layouts": detail.get("layouts"), "paired": detail.get("paired")})
+
+    # ⑤⁻ 反向：块 scale **元素数不符**必须当场判不支持 ✓（多一截会静默错位 ✓✗ —— 这才是最该拦的）
+    broken = root / "text_encoders" / "fake_nvfp4_bad_scale.safetensors"
+    write_safetensors(broken, {
+        f"{layer}.weight": ("U8", [8, 8]),
+        f"{layer}.weight_scale": ("F8_E4M3", [8, 32]),   # 256 个 ≠ 512 ✓✗
+        f"{layer}.weight_scale_2": ("F32", [1]),
+        f"{layer}.comfy_quant": ("U8", [len(nvfp4_spec)]),
+    }, payloads={f"{layer}.comfy_quant": nvfp4_spec})
+    bad_plan = ld.plan_component({"key": "fake_nvfp4_bad_scale", "name": "块 scale 少一截 ✓",
+                                  "kind": "text_encoders", "category": "video",
+                                  "filename": broken.name}, root=root)
+    bad_detail = bad_plan.dequantPlan or {}
+    check("⑤ 块 scale 元素数不符 ⇒ `supported` **False** ✓✗，且问题里说清「多少个 ≠ 应当多少个」✓",
+          bad_detail.get("supported") is False
+          and any("weight_scale" in item and "元素" in item for item in bad_plan.problems),
+          {"supported": bad_detail.get("supported"), "problems": bad_plan.problems[:2]})
+
+    # ① 对照：**真 fp8** 不许被顺手划进「未实现族」✓✗（只修 bug 别修出新 bug ✓）
+    fp8_spec = json.dumps({"format": "float8_e4m3fn"}).encode("utf-8")
+    real = root / "text_encoders" / "fake_fp8.safetensors"
+    write_safetensors(real, {
+        f"{layer}.weight": ("F8_E4M3", [8, 8]),
+        f"{layer}.weight_scale": ("F32", [8]),
+        f"{layer}.comfy_quant": ("U8", [len(fp8_spec)]),
+    }, payloads={f"{layer}.comfy_quant": fp8_spec})
+    fp8_plan = ld.plan_component({"key": "fake_fp8", "name": "合成 fp8 层 ✓",
+                                  "kind": "text_encoders", "category": "video",
+                                  "filename": real.name}, root=root)
+    check("⑤ 对照：真 fp8（`comfy_quant` 写 `float8_e4m3fn`）仍报 **fp8**、且不说未实现 ✓✗"
+          "（把「本来就支持的」也划成不支持，等于把能跑的说成不能跑 ✓✗）",
+          fp8_plan.quantScheme == "fp8" and "未实现" not in fp8_plan.computeDtype
+          and not ((fp8_plan.dequantPlan or {}).get("family")),
+          {"quantScheme": fp8_plan.quantScheme, "computeDtype": fp8_plan.computeDtype})
+
+    # ② 定不了族时**退回猜测**这条能力不能被顺手砍掉 ✓（无 comfy_quant 的老文件全靠它 ✓）
+    bare = root / "text_encoders" / "fake_bare_fp8.safetensors"
+    write_safetensors(bare, {f"{layer}.weight": ("F8_E4M3", [8, 8]),
+                             f"{layer}.weight_scale": ("F32", [8])})
+    bare_plan = ld.plan_component({"key": "fake_bare_fp8", "name": "无 comfy_quant ✓",
+                                   "kind": "text_encoders", "category": "video",
+                                   "filename": bare.name}, root=root)
+    check("⑤ 没有 `comfy_quant` 的老文件仍能靠 dtype 猜出 fp8 ✓（猜测是兜底、不是被删掉 ✓）",
+          bare_plan.quantScheme == "fp8", bare_plan.computeDtype)
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engineinv_files_"))
     case_safetensors(root)
     case_readiness(root)
     case_api(root)
     case_probe_root(root)
+    case_quant_scheme(root)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

@@ -245,6 +245,21 @@ def create_extract_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
     async def save_dedup_characters(arguments: dict[str, Any]) -> dict[str, Any]:
         ts = now()
         payload_chars = arguments.get("characters") or []
+        if not payload_chars:
+            # 空提交 = 什么都没做，但日志会写「save-characters-complete created=0」，
+            # 界面看起来像成功了。2026-10-28 实测 qwen3:14b 被催着「去保存」时正是这样交差，
+            # 所以这里回灌一条**可执行**的错误，逼它带着实际内容重来。
+            log_task_progress("ExtractTool", "save-characters-empty", {
+                "episodeId": episode_id, "dramaId": drama_id,
+            })
+            return {
+                "ok": False,
+                "error": (
+                    "characters 是空数组，本次没有保存任何角色。"
+                    "请从剧本正文中提取所有有名有姓的人物（含配角、以及只被提及名字的角色），"
+                    "每个元素至少包含 name 字段，然后重新调用本工具。"
+                ),
+            }
         created = 0
         merged_count = 0
         with engine.begin() as conn:
@@ -326,6 +341,19 @@ def create_extract_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
     async def save_dedup_scenes(arguments: dict[str, Any]) -> dict[str, Any]:
         ts = now()
         payload_scenes = arguments.get("scenes") or []
+        if not payload_scenes:
+            # 同 characters：空提交不是「本集没有场景」，而是没干活（剧本一定有地点）
+            log_task_progress("ExtractTool", "save-scenes-empty", {
+                "episodeId": episode_id, "dramaId": drama_id,
+            })
+            return {
+                "ok": False,
+                "error": (
+                    "scenes 是空数组，本次没有保存任何场景。"
+                    "请按 location / time / description 提取本集出现的每个地点（同一地点不同时段算两个场景），"
+                    "然后重新调用本工具。"
+                ),
+            }
         created = 0
         reused = 0
         with engine.begin() as conn:

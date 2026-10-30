@@ -109,6 +109,25 @@ def _stringify(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _json_list(value: Any) -> str | None:
+    """数组型字段落 TEXT 列的**唯一**入口 ✓✗：``list`` ⇒ 紧凑 JSON ✓；**已是字符串就原样** ✓；
+
+    ``None`` / ``""`` / ``[]`` ⇒ ``NULL`` ✓（库里不留 "[]" 这种第二形态的空 ✓）。
+
+    ⚠️⚠️ 不许再写成 ``_stringify(x) if js_truthy(x) else None`` ✗✗ —— ``regenerate`` 那条路的
+    ``referenceImageUrls`` / ``referenceAudioUrls`` / ``referenceVideoUrls`` 是**从 DB 行复制**的
+    JSON **字符串**（``'["a.png"]'``）✓：再过一次 ``json.dumps`` 就变成 ``'"[\"a.png\"]"'`` ✓✗
+    （落库成了「一个字符串」而不是「一个数组」⇒ 前端 ``parseUrlList`` 解出来是字符串、指纹
+    ``_refs_map`` 解出来是空 ✓ ⇒ 重跑出来的记录参考素材**静默消失**，谁都不报错 ✓✗）。
+    与 ``routers/videos.py::_json_text`` **同口径** ✓（那处已按这个判据写）。
+    """
+    if value is None or value == "" or value == []:
+        return None
+    if isinstance(value, str):
+        return value
+    return _stringify(value)
+
+
 # ===========================================================================
 # 入队
 # ===========================================================================
@@ -137,6 +156,11 @@ _FINGERPRINT_FIELDS: tuple[tuple[str, ...], ...] = (
     ("duration",), ("aspectRatio", "aspect_ratio"),
     ("referenceImageUrls", "reference_image_urls"),
     ("referenceAudioUrls", "reference_audio_urls"),
+    # ⚠️ 参考**视频**与参考图档位也得进指纹 ✓✗（2026-10-27 补）：漏了它们 ⇒
+    #    「换了一段参考视频再重跑」会被判成**同段输入没变** ⇒ 直接复用旧成片 ✓✗✗
+    #    （用户以为换了素材，其实拿到的是上一段素材的片子 ✓）。
+    ("referenceVideoUrls", "reference_video_urls"),
+    ("referenceImageSize", "reference_image_size"),
 )
 
 
@@ -166,10 +190,16 @@ def references_fingerprint(source: Any) -> str:
     payload = [_fingerprint_field(source, *names) for names in _FINGERPRINT_FIELDS]
     refs: dict[str, Any] = {}
     fields = [str(item) for item in payload]
-    for name, value in (("ref_images", payload[5]), ("ref_audios", payload[6])):
+    # ⚠️⚠️ 光把字段加进 ``_FINGERPRINT_FIELDS`` **不算数** ✗✗：这里还必须把它们**真的喂进**
+    #    两个摘要 ✓ —— 只加表不接线 = 字段进了 payload 却没人读 ✓ ⇒ 指纹照旧**看不见**它 ✓✗
+    #    （本仓 2026-10-27 就是这么踩过一次 ✓：表里加了、算的时候还在用 ``payload[5]``/``[6]`` ✓）。
+    for name, value in (("ref_images", payload[5]), ("ref_audios", payload[6]),
+                        ("ref_videos", payload[7])):
         refs[name] = _refs_map(value)
     refs_digest = cache_key.refs_fingerprint(refs)
-    config_digest = hashlib.sha256("|".join(fields[:5]).encode("utf-8")).hexdigest()[:16]
+    # 标量那半边：``payload[8]`` 是参考图缩放档位 ✓（``match``/``max`` 是两种画质配方 ✓）
+    config_fields = [fields[index] for index in (0, 1, 2, 3, 4, 8)]
+    config_digest = hashlib.sha256("|".join(config_fields).encode("utf-8")).hexdigest()[:16]
     return hashlib.sha256(f"{refs_digest}|{config_digest}".encode("utf-8")).hexdigest()[:32]
 
 
@@ -239,7 +269,8 @@ async def generate_video(conn: Connection, params: dict[str, Any]) -> int:
 
     ``params`` 见原 ``GenerateVideoParams``（storyboardId / dramaId / prompt / referenceMode /
     imageUrl / firstFrameUrl / lastFrameUrl / referenceImageUrls / sceneType /
-    referenceAudioUrls / duration / aspectRatio / route / routeReason / force / configId）。
+    referenceAudioUrls / referenceVideoUrls / referenceImageSize / duration / aspectRatio /
+    route / routeReason / force / configId）。
     """
     ts = now()
     config = (
@@ -298,6 +329,8 @@ async def generate_video(conn: Connection, params: dict[str, Any]) -> int:
         negative_prompt = config.get("negativePrompt")
     reference_image_urls = params.get("referenceImageUrls")
     reference_audio_urls = params.get("referenceAudioUrls")
+    reference_video_urls = params.get("referenceVideoUrls")
+    reference_image_size = params.get("referenceImageSize")
 
     result = conn.execute(
         video_generations.insert().values(
@@ -312,14 +345,18 @@ async def generate_video(conn: Connection, params: dict[str, Any]) -> int:
             image_url=params.get("imageUrl"),
             first_frame_url=params.get("firstFrameUrl"),
             last_frame_url=params.get("lastFrameUrl"),
-            reference_image_urls=_stringify(reference_image_urls) if js_truthy(reference_image_urls) else None,
+            reference_image_urls=_json_list(reference_image_urls),
             # `params.sceneType || null`：空串也落 null（truthy 判断）
             scene_type=params.get("sceneType") or None,
-            # ⚠️ 参考音频判的是 **`.length`**（非空数组）—— 空数组在 JS 是真值，
-            #    所以不能用 `js_truthy`，否则 `[]` 会被落成 "[]"（与 TS 不一致）
-            reference_audio_urls=_stringify(reference_audio_urls)
-            if reference_audio_urls and len(reference_audio_urls) > 0
-            else None,
+            # ⚠️ 参考音频 / 参考视频与参考图**同一口径**（``_json_list`` 认「空 ⇒ NULL」、
+            #    「已是 JSON 串 ⇒ 原样」✓）：原来这里写的是 `_stringify(x) if x and len(x)>0` ✗
+            #    ⇒ regenerate 复制过来的**字符串**被二次转义（见 `_json_list` 的注释 ✓✗）。
+            reference_audio_urls=_json_list(reference_audio_urls),
+            reference_video_urls=_json_list(reference_video_urls),
+            reference_image_size=reference_image_size or None,
+            # 角色关联（前端编辑器勾的「本镜出场角色」）：原来这一列**没有任何写入点** ✗
+            # ⇒ 前端发上来、白名单也认，但 `generate_video` 的插入列表里没它 ⇒ **静默丢弃** ✓✗
+            character_ids=_json_list(params.get("characterIds")),
             route=params.get("route") or None,
             route_reason=params.get("routeReason") or None,
             # `params.duration || 5`：0 也回落 5（truthy）
@@ -470,6 +507,9 @@ async def _process_video_generation(video_id: int, config: dict[str, Any]) -> No
                 else None,
                 "sceneType": _col(record, "scene_type"),
                 "referenceAudioUrls": _col(record, "reference_audio_urls"),
+                # ⚠️ 不带给适配器 ⇒ 服务层那两格永远收不到 ✓✗（H3 的 Ref2VA 就退回纯文生 ✓）
+                "referenceVideoUrls": _col(record, "reference_video_urls"),
+                "referenceImageSize": _col(record, "reference_image_size"),
                 "duration": _col(record, "duration"),
                 "aspectRatio": _col(record, "aspect_ratio"),
             })
@@ -845,9 +885,9 @@ async def _run_video_with_engine(
         "note": "进程内自研引擎 ✓（**不依赖** ComfyUI / MiniMax 云 ✓）",
     })
     if urls.get("lastFrameUrl"):
-        log_task_warn("VideoTask", "engine-last-frame-ignored", {
+        log_task_progress("VideoTask", "engine-last-frame", {
             "id": video_id,
-            "note": "引擎请求暂**没有**尾帧这个位置 ✗ ⇒ 本次**只按首帧**生成 ✓（不假装用了尾帧 ✗）",
+            "note": "尾帧走 H3 的 `cond` 段 ✓（下标 = frames − 1 ✓）—— 与首帧同一套机制 ✓",
         })
 
     assembly = bridge.assembly_from_config(config)
@@ -859,8 +899,13 @@ async def _run_video_with_engine(
             "aspectRatio": _col(record, "aspect_ratio") or _col(record, "resolution"),
             # 条件素材：引擎只吃**本机文件** ✓ ⇒ 桥负责把 data URL 落盘 ✓（远程 URL 记 warn 跳过 ✓）
             "firstFrame": urls.get("firstFrameUrl") or urls.get("imageUrl"),
+            # 尾帧 ✓：桥把它落盘成 ``last_frame`` ✓（见 ``bridge._materialize_extras`` ✓）
+            "lastFrame": urls.get("lastFrameUrl"),
             "referenceImages": urls.get("referenceImageUrls"),
             "referenceAudios": _col(record, "reference_audio_urls"),
+            # 桥**已经**会把它落盘成 ``reference_videos`` ✓（见 ``bridge`` 的 refs-video/）
+            # ⇒ 这里不传就等于让引擎那条路永远收不到参考视频 ✓✗
+            "referenceVideos": _col(record, "reference_video_urls"),
         },
         outputs_dir=outputs_dir,
         settings=settings,

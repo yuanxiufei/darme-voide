@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -38,7 +39,9 @@ from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.core.models import agent_configs, dramas, episodes, style_profiles  # noqa: E402
 from app.core.response import now  # noqa: E402
+from app.agent import context_budget as cb  # noqa: E402
 from app.agent import runtime as rt  # noqa: E402
+from app.agent.tool import Tool, ToolRegistry, json_string, object_schema  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -417,6 +420,150 @@ def main() -> int:  # noqa: C901
     check("retry 入口: 传的是 DB base instructions（skill/契约由内层统一组装）",
           retry_driver.calls[0]["instructions"].startswith("自定义系统提示"),
           retry_driver.calls[0]["instructions"][:24])
+
+    # ================= ⭐ Ollama 原生工具循环（2026-10-28 新增） =================
+    # 缺陷背景：本机默认文本配置就是 `provider=ollama`，而运行时原先只认 OpenAI 兼容 ⇒
+    # `POST /api/v1/agent/{type}/chat` 恒 400「provider 'ollama' … 尚未移植」。
+    # 这里咬住**原生 `/api/chat` 的工具往返**：tools 真的下发、入参是**对象**也能吃、
+    # 结果用 `tool_name` 回灌（没有 `tool_call_id`）、用量从 `prompt_eval_count/eval_count` 折算。
+    seen_args: list[dict] = []
+
+    async def _echo(args: dict) -> dict:
+        seen_args.append(args)
+        return {"voices": ["少女音"]}
+
+    echo_tools = ToolRegistry({"echo_voice": Tool(
+        id="echo_voice", description="回显音色",
+        input_schema=object_schema({"gender": json_string("性别")}),
+        execute=_echo,
+    )})
+
+    sent: list[dict] = []
+
+    class _Resp:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.is_success = True
+            self.status_code = 200
+            self.text = "{}"
+
+        def json(self) -> dict:
+            return self._payload
+
+    async def _fake_fetch(url: str, init: dict, kind: str, **kwargs) -> _Resp:
+        sent.append({"url": url, "body": json.loads(init["body"]), "kind": kind})
+        if len(sent) == 1:
+            return _Resp({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "echo_voice", "arguments": {"gender": "female"}}},
+                ]},
+                "prompt_eval_count": 30, "eval_count": 7,
+            })
+        return _Resp({"message": {"role": "assistant", "content": "已经分配好了"},
+                      "prompt_eval_count": 40, "eval_count": 5})
+
+    real_fetch = rt.fetch_with_retry
+    rt.fetch_with_retry = _fake_fetch  # type: ignore[assignment]
+    try:
+        ollama_result = asyncio.run(rt.default_generate(
+            config={"provider": "ollama", "baseUrl": "http://localhost:11434"},
+            model="qwen3:14b", instructions="你是配音导演", tools=echo_tools,
+            message="给角色分配音色", max_steps=4,
+            model_settings={"maxOutputTokens": 512, "temperature": 0.2},
+        ))
+    finally:
+        rt.fetch_with_retry = real_fetch  # type: ignore[assignment]
+
+    check("ollama: 走**原生 /api/chat**，tools 以 OpenAI function 形状下发（不再 400）",
+          sent and sent[0]["url"].endswith("/api/chat")
+          and sent[0]["body"]["tools"][0]["function"]["name"] == "echo_voice",
+          sent[0]["url"] if sent else "no-call")
+    check("ollama: `arguments` 是**对象**也能解析（OpenAI 那条是 JSON 字符串）",
+          seen_args == [{"gender": "female"}], seen_args)
+    check("ollama: 工具结果用 `role=tool` + `tool_name` 回灌（**没有** tool_call_id）",
+          any(m.get("role") == "tool" and m.get("tool_name") == "echo_voice"
+              and "tool_call_id" not in m for m in sent[1]["body"]["messages"]),
+          sent[1]["body"]["messages"][-1] if len(sent) > 1 else "no-second-call")
+    check("ollama: 第二轮仍带着 assistant 的 tool_calls（模型看得到自己调过什么）",
+          any(m.get("role") == "assistant" and m.get("tool_calls")
+              for m in sent[1]["body"]["messages"]), len(sent))
+    check("ollama: 用量折算自 prompt_eval_count/eval_count（30+7+40+5=82）",
+          rt.extract_token_usage(ollama_result).total_tokens == 82, ollama_result["steps"])
+    check("ollama: 最终文本 / tool_calls / tool_results 都齐",
+          ollama_result["text"] == "已经分配好了"
+          and ollama_result["tool_calls"] == [
+              {"toolName": "echo_voice", "args": {"gender": "female"}}]
+          and "少女音" in ollama_result["tool_results"][0]["result"],
+          ollama_result["tool_results"])
+    # ⚠️ 窗口检查（2026-10-28 实测的静默截断）：Ollama 默认 num_ctx=4096 且与 num_predict 共用，
+    #    长 prompt 会被截到 ~2050 token 并**丢掉开头的 instructions**，接口毫无反应。
+    #    默认 32768 的理由：storyboard_breaker 的固定开销自带 20372（> 16384）。
+    check("ollama: 每轮请求都显式下发 num_ctx（默认 32768，不是 4096）",
+          all(call["body"]["options"]["num_ctx"] == 32768 for call in sent),
+          [call["body"]["options"] for call in sent])
+    check("ollama: 反馈预算按 num_ctx − 输出预留算（32768−512=32256）",
+          rt._ollama_context_budget(
+              {"provider": "ollama"}, {"maxOutputTokens": 512}).limit_tokens == 32256,
+          rt._ollama_context_budget({"provider": "ollama"}, {"maxOutputTokens": 512}))
+    check("ollama: 预算跟随 settings.numCtx 覆盖 + 输出缺省回落 4096（32768−4096=28672）",
+          rt._ollama_context_budget({"provider": "ollama", "settings": {"numCtx": 65536}},
+                                    {}).limit_tokens == 61440
+          and rt._ollama_context_budget({"provider": "ollama"}, {}).limit_tokens == 28672)
+
+    # ================= 超预算：本地必须**当场失败**，不许静默截断 =================
+    # ⚠️ 2026-10-28 实测：Ollama 超窗是 HTTP 200 + 从开头截断（system 被丢），接口无任何反应。
+    #    机械层压不动（没有老 tool 输出可压）时，照发就是"安静地出一份错的稿"。
+    over_messages = [{"role": "system", "content": "指令" * 300},
+                     {"role": "user", "content": "剧本" * 300}]
+    strict_raised = ""
+    try:
+        rt._apply_context_budget(over_messages, [], cb.Budget(limit_tokens=200), strict=True)
+    except cb.ContextOverflowError as err:
+        strict_raised = str(err)
+    check("预算: strict=True（本地）超窗 -> 抛 ContextOverflowError（不照发）",
+          "超出模型窗口" in strict_raised and "numCtx" in strict_raised, strict_raised)
+    loose_steps: list = []
+    loose = rt._apply_context_budget(over_messages, loose_steps, cb.Budget(limit_tokens=200))
+    check("预算: strict=False（云端）超窗 -> 只留痕不中断（长度不变）",
+          len(loose) == 2 and any("contextBudget" in s for s in loose_steps), loose_steps)
+    plan = cb.CompressionPlan(overBudget=True, tokensBefore=900.0, tokensAfter=900.0,
+                              needsSummarize=True)
+    overflow_err = cb.ContextOverflowError(plan, 200)
+    check("分类: ContextOverflowError -> fatal（重试/换模型都不会变好）",
+          rt.classify_llm_error(overflow_err) == "fatal"
+          and abs(overflow_err.overflow_tokens - 700.0) < 1e-6,
+          (rt.classify_llm_error(overflow_err), overflow_err.overflow_tokens))
+
+    # ================= Ollama HTTP 200 + {"error"} 不是成功 =================
+    # ⚠️ 真实症状（显存不够装下 num_ctx 时）：body 里只有 error，没有 message ⇒
+    #    旧代码取到空文本就 break，库一行没改，接口回 200。
+    class _ErrResp:
+        is_success = True
+        status_code = 200
+        text = '{"error":"model requires more system memory"}'
+
+        def json(self) -> dict:
+            return {"error": "model requires more system memory"}
+
+    async def _err_fetch(url: str, init: dict, kind: str, **kwargs) -> _ErrResp:
+        return _ErrResp()
+
+    real_fetch2 = rt.fetch_with_retry
+    rt.fetch_with_retry = _err_fetch  # type: ignore[assignment]
+    ollama_body_error = ""
+    try:
+        asyncio.run(rt.default_generate(
+            config={"provider": "ollama", "baseUrl": "http://localhost:11434"},
+            model="qwen3:14b", instructions="你是配音导演", tools=echo_tools,
+            message="给角色分配音色", max_steps=2,
+            model_settings={"maxOutputTokens": 512},
+        ))
+    except ValueError as err:
+        ollama_body_error = str(err)
+    finally:
+        rt.fetch_with_retry = real_fetch2  # type: ignore[assignment]
+    check("ollama: 200 + {error} -> 抛错（不再当成空文本的空成功）",
+          "model requires more system memory" in ollama_body_error, ollama_body_error)
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

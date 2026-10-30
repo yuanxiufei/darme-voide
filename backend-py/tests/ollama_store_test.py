@@ -318,7 +318,11 @@ def main() -> int:  # noqa: C901
     # ================= blob 定位 =================
     check("blob: `sha256:xxx` ⇒ 落盘名是**短横** `sha256-xxx`（API 里是冒号，容易抄错）",
           store.blob_path(f"sha256:{LAYER_A}", STORE) is not None
-          and store.blob_path(LAYER_A, STORE) is None)
+          and os.path.basename(store.blob_path(f"sha256:{LAYER_A}", STORE) or "") == f"sha256-{LAYER_A}")
+    check("blob: 裸 64 hex 也认（宽容 ✓ 只放行 hex ⇒ 拼不出 `..` ✓）；有路径成分一律 None ✗",
+          store.blob_path(LAYER_A, STORE) is not None
+          and store.blob_path(f"sha256:../{LAYER_A}", STORE) is None
+          and store.blob_path(f"sha256:{LAYER_A}/../x", STORE) is None)
     check("blob: 缺失/空摘要 ⇒ None（不抛错）",
           store.blob_path(f"sha256:{MISSING}", STORE) is None
           and store.blob_path("", STORE) is None and store.blob_path(None, STORE) is None)
@@ -369,6 +373,181 @@ def main() -> int:  # noqa: C901
     empty_root = tempfile.mkdtemp(prefix="ollamastore_empty_")
     check("边界: manifests 在但里面没清单 ⇒ 空列表", store.list_models(empty_root) == [])
     shutil.rmtree(empty_root, ignore_errors=True)
+
+    # ================= 清单 ↔ blob 的 sha256 核对（2026-10-29 补 ✓）=================
+    # ⚠️ 上面那份假库的 blob 内容全是 ``b"\0"*size`` ✗ —— 摘要与内容**故意不对应** ✓，
+    # 所以校验只能 `mismatch` ✓。要验「真内容寻址成立」，得造一份**文件名 = 内容 sha256** 的库 ✓。
+    import hashlib as _hashlib
+
+    def _write_blob(root: str, payload: bytes, *, as_name: str | None = None) -> str:
+        """写一个内容寻址 blob ✓（名字 = 内容 sha256 ✓；``as_name`` ⇒ 故意让名字与内容不符 ✗）。"""
+        digest = _hashlib.sha256(payload).hexdigest()
+        path = os.path.join(root, "blobs", f"sha256-{as_name or digest}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        return digest
+
+    def _write_manifest(root: str, rel: str, layers: list[dict],
+                        config: dict | None) -> str:
+        path = os.path.join(root, "manifests", *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        body = {"schemaVersion": 2,
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "config": config, "layers": layers}
+        with open(path, "wb") as handle:
+            handle.write(json.dumps(body).encode("utf-8"))
+        return path
+
+    STORE2 = tempfile.mkdtemp(prefix="ollamastore_hash_")
+    try:
+        model_payload = b"GGUF" + bytes(range(256)) * 40          # 10 240 B ✓ 假权重
+        template_payload = b"{{ .System }}\n{{ .Prompt }}\n"        # 26 B ✓
+        config_payload = b'{"model_format":"gguf"}'                # 24 B ✓
+        model_sha = _write_blob(STORE2, model_payload)
+        template_sha = _write_blob(STORE2, template_payload)
+        config_sha = _write_blob(STORE2, config_payload)
+
+        good = _write_manifest(STORE2, "registry.ollama.ai/library/alpha/1",
+                               [layer(model_sha, len(model_payload)),
+                                layer(template_sha, len(template_payload),
+                                      "application/vnd.ollama.image.template")],
+                               {"mediaType": "application/vnd.docker.container.image.v1+json",
+                                "digest": f"sha256:{config_sha}", "size": len(config_payload)})
+
+        # ⚠️ 截断/篡改：**大小一字不变** ⇒ 上一版的 `list_models` 完全看不出来 ✗✗（本用例的存在理由 ✓）
+        # ⚠️ 必须用**另一份**内容：内容寻址只有一份 ``sha256-<摘要>`` ✗ ——
+        #    拿 model_sha 的名字写坏内容会顺手把 alpha:1 也弄坏 ✗（假绿/假红都是假的 ✗）
+        tampered_payload = b"GGUF-tampered" + bytes(range(200)) * 7
+        tampered_sha = _hashlib.sha256(tampered_payload).hexdigest()
+        broken_content = bytearray(tampered_payload)
+        broken_content[0] ^= 0xFF
+        _write_blob(STORE2, bytes(broken_content), as_name=tampered_sha)
+        _write_manifest(STORE2, "registry.ollama.ai/library/tampered/1",
+                        [layer(tampered_sha, len(tampered_payload))],
+                        {"digest": f"sha256:{config_sha}", "size": len(config_payload)})
+
+        # 恶意/坏清单：摘要是路径穿越形状 ⇒ 必须**拒绝**，而不是拼出 blobs 之外的文件 ✗✗
+        _write_manifest(STORE2, "registry.ollama.ai/library/evil/1",
+                        [layer("../../../../windows/win.ini", 16)], None)
+
+        # config 层缺失 ⇒ 模型照样加载不了，但它是 **config 不是 layer** ⇒ 旧口径看不见 ✗
+        _write_manifest(STORE2, "registry.ollama.ai/library/noconfig/1",
+                        [layer(template_sha, len(template_payload))],
+                        {"digest": f"sha256:{'f' * 64}", "size": 99})
+
+        # 大 blob（真内容、真摘要）⇒ 用它验「预算跳过**不算通过**」✓
+        big_payload = bytes(2 << 20)
+        big_sha = _write_blob(STORE2, big_payload)
+        _write_manifest(STORE2, "registry.ollama.ai/library/big/1",
+                        [layer(big_sha, len(big_payload))], None)
+
+        # ---- 名字 → 清单：反查三种写法（含注册表主机与 library 前缀）✓
+        check("清单: `qwen3:8b` / `library/qwen3:8b` / `registry.ollama.ai/library/qwen3:8b` 反查到**同一个文件**",
+              len({os.path.normcase(store.find_manifest(name, STORE) or "")
+                   for name in ("qwen3:8b", "library/qwen3:8b",
+                                "registry.ollama.ai/library/qwen3:8b")}) == 1
+              and store.find_manifest("qwen3:8b", STORE) is not None,
+              [store.find_manifest(name, STORE) for name in ("qwen3:8b", "library/qwen3:8b")])
+        check("清单: 非默认命名空间的名字带 `myorg/`，反查得到 ✓；不存在的名字 ⇒ None 不抛错",
+              store.find_manifest("myorg/custom:v2", STORE) is not None
+              and store.find_manifest("nope:1", STORE) is None
+              and store.find_manifest("", STORE) is None)
+        check("清单: **坏清单**（不是 JSON）⇒ None（不能抛错，也不能假装读到 ✓）",
+              store.read_manifest("bad:1", STORE) is None)
+
+        detail = store.read_manifest("alpha:1", STORE2)
+        with open(good, "rb") as handle:
+            manifest_sha = _hashlib.sha256(handle.read()).hexdigest()
+        check("清单: `sha256` = **清单文件自身**的 sha256（与 /api/tags 的 digest 同口径 ✓）",
+              isinstance(detail, dict) and detail["sha256"] == f"sha256:{manifest_sha}",
+              (detail or {}).get("sha256"))
+        check("清单: 层带 `role`（mediaType 末段）+ 盘上路径 + 真实字节 ✓",
+              [item["role"] for item in detail["layers"]] == ["model", "template"]
+              and detail["layers"][0]["size"] == len(model_payload)
+              and detail["layers"][0]["path"] == os.path.join(STORE2, "blobs", f"sha256-{model_sha}"),
+              [(i["role"], i["size"]) for i in detail["layers"]])
+        check("清单: `totalSize` **不含 config**（与 /api/tags 口径一致 ✓）",
+              detail["totalSize"] == len(model_payload) + len(template_payload),
+              detail["totalSize"])
+        check("清单: 自述 size 与盘上不一致 ⇒ 进 `sizeMismatch`（别静默取一个 ✗）",
+              store.read_manifest("myorg/custom:v2", STORE)["sizeMismatch"] == [f"sha256:{LAYER_B}"],
+              store.read_manifest("myorg/custom:v2", STORE)["sizeMismatch"])
+        check("清单: **非默认命名空间不许省**（`custom:v2` 不是 `myorg/custom:v2` ⇒ None ✓）",
+              store.find_manifest("custom:v2", STORE) is None)
+        check("清单: 缺失的 layer 进 `missing`，缺失的 config 进 `missingConfig`（两者分得开 ✓）",
+              store.read_manifest("broken:1", STORE)["missing"] == [f"sha256:{MISSING}"]
+              and store.read_manifest("broken:1", STORE)["missingConfig"] is False
+              and store.read_manifest("noconfig:1", STORE2)["missingConfig"] is True,
+              store.read_manifest("noconfig:1", STORE2)["missingConfig"])
+
+        # ---- list_models 的口径变化：config 缺了要算「缺」
+        noconfig_row = {item["name"]: item for item in store.list_models(STORE2)}["noconfig:1"]
+        check("列模型: **config 缺失**也计入 `missingBlobs` 并标 `missingConfig`（旧口径看不见 ✗）",
+              noconfig_row["missingBlobs"] == 1 and noconfig_row["missingConfig"] is True
+              and noconfig_row["size"] == len(template_payload),   # ⚠️ size 仍不含 config ✓
+              noconfig_row)
+        check("列模型: config 齐全 ⇒ `missingConfig=False`、`missingBlobs` 不变 ✓",
+              {item["name"]: item for item in store.list_models(STORE2)}["alpha:1"]["missingConfig"]
+              is False)
+
+        # ---- 内容 sha256：内容寻址的**唯一**自证
+        ok_report = store.verify_blob(f"sha256:{model_sha}", STORE2)
+        check("校验: 内容 == 文件名摘要 ⇒ `ok`（真算 sha256，不是看大小 ✓）",
+              ok_report["status"] == "ok" and ok_report["ok"] is True
+              and ok_report["actual"] == f"sha256:{model_sha}", ok_report)
+        tampered_report = store.verify_blob(f"sha256:{tampered_sha}", STORE2)
+        check("校验: **大小一字不差的篡改** ⇒ `mismatch`（旧的只 stat 大小 ⇒ 必假绿 ✗✗）",
+              tampered_report["size"] == len(tampered_payload)
+              and tampered_report["status"] == "mismatch", tampered_report)
+        check("校验: 缺失 ⇒ `missing`；摘要形状不合法 ⇒ `invalid-digest`（两者不能混 ✗）",
+              store.verify_blob(f"sha256:{MISSING}", STORE)["status"] == "missing"
+              and store.verify_blob("sha256:../../win.ini", STORE)["status"] == "invalid-digest",
+              store.verify_blob("sha256:../../win.ini", STORE))
+
+        check("安全: 摘要不合法 ⇒ `blob_path` 给 None（**不许**拼出 blobs 之外的文件 ✗✗）",
+              store.blob_path("sha256:../../../../windows/win.ini", STORE) is None
+              and store.blob_path("sha256:" + "../" * 8, STORE) is None
+              and store.read_manifest("evil:1", STORE2)["invalidDigest"] == ["sha256:../../../../windows/win.ini"],
+              store.read_manifest("evil:1", STORE2)["invalidDigest"])
+
+        good_report = store.verify_model("alpha:1", STORE2)
+        check("整模型: 三个 blob 全查过、`ok` 且 `complete`（没有跳过 ⇒ 才敢说全对 ✓）",
+              good_report["ok"] is True and good_report["complete"] is True
+              and len(good_report["checked"]) == 3 and good_report["status"] == "ok",
+              {k: good_report[k] for k in ("ok", "complete", "status")})
+        skipped_report = store.verify_model("big:1", STORE2, max_blob_bytes=1 << 20)
+        check("整模型: 超预算的 blob ⇒ `skipped` + `complete=False`（⚠️ 跳过**不算通过** ✗✗）",
+              len(skipped_report["skipped"]) == 1 and skipped_report["complete"] is False
+              and skipped_report["ok"] is True and skipped_report["status"] == "partial",
+              {k: skipped_report[k] for k in ("ok", "complete", "status")})
+        check("整模型: 找不到清单 ⇒ `no-manifest` 且不抛错",
+              store.verify_model("nope:1", STORE2)["status"] == "no-manifest")
+        check("整库: 汇总每份报告；有坏 blob ⇒ `ok=False` 并点名（不静默 ✓）",
+              store.verify_store(STORE2, max_blob_bytes=1 << 20)["failed"]
+              and "tampered:1" in store.verify_store(STORE2)["failed"]
+              and "evil:1" in store.verify_store(STORE2)["failed"],
+              store.verify_store(STORE2, max_blob_bytes=1 << 20)["failed"])
+
+        # ---- 真机库抽检（有真库才跑 ✓）：小 blob 真算 sha256；大权重按预算跳过 ⇒ **明说跳过** ✓
+        real_root = os.environ.get("OLLAMA_MODELS") or next(
+            (p for p in store.models_root_candidates() if store.is_available(p)), "")
+        if real_root and os.path.isdir(real_root) and os.path.abspath(real_root) != STORE:
+            report = store.verify_store(real_root, max_blob_bytes=1 << 20)
+            checked = [item for item in report["models"] for item in item["checked"]]
+            verified = [item for item in checked if item["status"] == "ok"]
+            mismatched = [item for item in checked if item["status"] == "mismatch"]
+            print(f"INFO  真机库 {real_root}：{report['count']} 个模型 / 已验 {len(verified)} 个 blob / "
+                  f"跳过 {report['skippedBlobs']} 个大权重 / 不符 {len(mismatched)}")
+            check(f"真机库: 预算内的 blob 内容 sha256 **全部等于**文件名摘要（验了 {len(verified)} 个 ✓）",
+                  bool(verified) and not mismatched
+                  and all(item["status"] == "ok" for item in checked
+                          if item["status"] not in ("skipped", "missing")),
+                  mismatched[:2])
+        else:
+            print("SKIP  本机没找到真 Ollama 库 ⇒ 真机抽检不判（≠ 通过 ✓）")
+    finally:
+        shutil.rmtree(STORE2, ignore_errors=True)
 
     # ================= 路由回落（本套核心 ✓）=================
     client = TestClient(app)

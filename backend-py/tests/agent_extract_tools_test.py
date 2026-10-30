@@ -175,10 +175,26 @@ def main() -> int:  # noqa: C901
     check("幂等: 重复保存**不产生重复关联**（角色/物品各 1 条）",
           len(char_links) == 1 and len(prop_links2) == 1,
           (len(char_links), len(prop_links2)))
-    check("幂等: 空数组入参 -> 0/0（不报错）",
-          _call(tools, "save_dedup_characters", {"characters": []})["created"] == 0
-          and _call(tools, "save_dedup_scenes", {"scenes": []})["reused"] == 0
-          and _call(tools, "save_dedup_props", {"props": []})["created"] == 0)
+    # ⚠️ 2026-10-28 改契约：角色的**空提交**曾被当成「成功 created=0」记进日志（界面看着像做完了），
+    #    而 qwen3:14b 被催「去保存」时正是这样交差 ⇒ 角色/场景改成回灌 ok=False + 可执行错误，
+    #    逼模型带实际内容重来。物品暂无此防护（旧契约），两者分开断言，别让一条摆动拖死另一条。
+    empty_chars = _call(tools, "save_dedup_characters", {"characters": []})
+    empty_scenes = _call(tools, "save_dedup_scenes", {"scenes": []})
+    empty_props = _call(tools, "save_dedup_props", {"props": []})
+    check("空提交: 角色/场景空数组 -> ok=False + 可执行错误（不再假装成功）",
+          empty_chars.get("ok") is False and "空数组" in (empty_chars.get("error") or "")
+          and empty_scenes.get("ok") is False and "空数组" in (empty_scenes.get("error") or ""),
+          (empty_chars, empty_scenes))
+    check("空提交: 物品空数组 -> 0/0（未加防护，仍是旧契约）",
+          empty_props.get("created") == 0, empty_props)
+    with engine.begin() as conn:
+        char_links_after = conn.execute(select(episode_characters.c.character_id)
+                                        .where(episode_characters.c.episode_id == episode_id)).all()
+        scene_links_after = conn.execute(select(episode_scenes.c.scene_id)
+                                        .where(episode_scenes.c.episode_id == episode_id)).all()
+    check("空提交: **一行都没落库**（关联数不变）",
+          len(char_links_after) == len(char_links) and len(scene_links_after) >= 1,
+          (len(char_links), len(char_links_after), len(scene_links_after)))
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

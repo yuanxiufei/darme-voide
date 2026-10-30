@@ -134,6 +134,9 @@ def build_project_ledger(
                     "referenceImages": sb.reference_images,
                     # 取**最后一条**视频记录的参考音频（原 TS 用 videos[length-1]）
                     "referenceAudioUrls": videos[-1].reference_audio_urls if videos else None,
+                    # 参考**视频**同口径 ✓（H3 的 ``ref_videos`` 与参考图/音频平级 ✓；
+                    # 台账里「输入资产」少列它 ⇒ 读账的人以为这一镜没吃参考视频 ✓✗）
+                    "referenceVideoUrls": videos[-1].reference_video_urls if videos else None,
                     "imageGenerations": [
                         {
                             "id": g.id,
@@ -334,6 +337,8 @@ def build_project_ledger_markdown(
                 assets.append(f"参考图 `{ref}`")
             for ref in _safe_json_array(shot["referenceAudioUrls"]):
                 assets.append(f"参考音频 `{ref}`")
+            for ref in _safe_json_array(shot["referenceVideoUrls"]):
+                assets.append(f"参考视频 `{ref}`")
             if assets:
                 lines.append("- **输入资产**：")
                 for asset in assets:

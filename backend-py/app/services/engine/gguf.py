@@ -32,15 +32,22 @@ Wan 2.6 GGUF 都是这一格式 ✗（此前 ``loader``/``inventory`` 对 ``.ggu
 GGUF 元数据 ``general.file_type``（0=F32、15=**Q4_K_M** ✓ …）是**打包命名**的权威 ✓
 （张量表里只有 Q4_K/Q6_K 这类**块类型**，"M/S/L" 混合方案名只在 file_type 里 ✓）。
 
-## ⚠️ 本模块**不做反量化/不提权重** ✗（那需要 llama.cpp/ComfyUI-GGUF ✓）
-—— 与 :mod:`.safetensors` 同界：只给「清单 + 形状 + 字节 + 方案名」✓。
+## 边界
+
+* 本模块**只给清单**（头 + 张量表 + 形状 + 字节 + 方案名 ✓），**不反量化** ✗
+  —— 与 :mod:`.safetensors` 同界 ✓。
+* 反量化在 :mod:`.gguf_dequant` ✓（**自家 numpy 实现** ✓，不依赖 llama.cpp / ComfyUI-GGUF ✓）。
+  已覆盖 F32 / F16 / BF16 / Q8_0 / Q4_K / Q6_K ✓；Q2_K / Q3_K / Q5_K 仍具名拒绝 ✗。
+* ⚠️ 块类型（``TENSOR_TYPES`` ✓）与**打包方案名**（``FILE_TYPES`` ✓）是两回事 ✗：
+  一个 ``Q4_K_M`` 文件里可能同时有 Q4_K 与 Q6_K ✓（也可能全是 Q4_K ✓，取决于量化器
+  按张量挑类型的名单能否命中该架构命名 ✓）—— 判据只能读``dtype_counts`` ✓。
 """
 from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Iterable
 
 __all__ = [
     "FILE_TYPES",
@@ -49,7 +56,9 @@ __all__ = [
     "GgufInfo",
     "GgufTensor",
     "inspect",
+    "looks_like_gguf",
     "quant_scheme_of",
+    "read_arrays",
     "tensor_nbytes",
 ]
 
@@ -120,7 +129,8 @@ class GgufTensor:
     name: str
     type_id: int
     type_name: str
-    shape: list[int]
+    shape: list[int]       # ggml 的 ne[] 原序 ✓：``ne[0]`` 是**最内维、变化最快** ✗（不是 numpy 序 ✗）
+                           # ⇒ 摆成 numpy 形状要用 ``reversed(shape)`` ✓（见 ``gguf_to_llm.numpy_shape``）
     offset: int            # 相对数据区起点的偏移 ✓
     nbytes: int            # 按块布局算出的字节数 ✓（未知块布局 ⇒ ``-1`` ✗）
 
@@ -257,6 +267,78 @@ def _read_kv_value(cursor: _Cursor, value_type: int) -> Any:
         value = cursor._unpack(fmt)[0]
         return bool(value) if value_type == 7 else value
     raise GgufError(f"KV 值类型 {value_type} 不认识 ✗")
+
+
+def looks_like_gguf(path: str | Path) -> bool:
+    """按**内容**判是不是 GGUF ✓（2026-10-29 补 ✓）—— ⚠️ **不能看后缀** ✗✗。
+
+    Ollama 的模型文件是 ``blobs\\sha256-<hash>`` ✓：**一个后缀都没有** ✗ ⇒
+    ``Path(x).suffix == ""`` ✗，任何「后缀是 .gguf 才当 GGUF」的分派都会把它当 HF 词表目录 ✗✗
+    （实测：真机 8B 权重装了 2 分钟、最后在词表这步报「没有可识别的词表」✗）。
+    只读 4 字节 ⟶ 无成本 ✓。
+    """
+    target = Path(path)
+    try:
+        if not target.is_file():
+            return False
+        with target.open("rb") as handle:
+            return handle.read(4) in (MAGIC_LITTLE, MAGIC_BIG)
+    except OSError:
+        return False
+
+
+def read_arrays(path: str | Path, keys: Iterable[str]) -> dict[str, Any]:
+    """按名读**完整**数组 ✓（2026-10-29 补 ✓）—— ``inspect`` 的元数据对数组**只存前 16 项**
+    （``{"__array__": …, "len": N, "head": [...]}`` ✗）⇒ 词表（十万级字符串 ✓）、merges
+    （十几万条 ✓）、``token_type``（十万级整数 ✓）都拿不到正文 ✗✗。词表装载**必须**读全文 ✓。
+
+    只读 ``keys`` 里点名的数组 ✓（其余 KV 照样走位但只做摘要 ✗ ⇒ 依旧不背大块进内存 ✓）；
+    没找到的 key 不出现在返回值里 ✓（不是给个空列表 ✗ —— 调用方要能分清「空」与「没有」✓）。
+    标量 / 字符串键也照返 ✓（省一次 ``inspect`` ✓）。
+    """
+    wanted = {str(key) for key in keys}
+    found: dict[str, Any] = {}
+    target = Path(path)
+    with target.open("rb") as handle:
+        magic = handle.read(4)
+        if magic not in (MAGIC_LITTLE, MAGIC_BIG):
+            raise GgufError(f"magic {magic!r} 不是 GGUF/FUGG ⇒ 不是 GGUF 文件 ✗")
+        cursor = _Cursor(handle, big=(magic == MAGIC_BIG), version=0)
+        cursor.offset = 4          # ⚠️ 与 ``_inspect_into`` 同款：magic 已直接读过 ✓
+        cursor.version = cursor.u32()
+        if cursor.version < 1:
+            raise GgufError(f"版本号 {cursor.version} < 1 ⇒ 文件损坏 ✗")
+        cursor.u64()               # 张量个数：本函数不读张量表 ✓
+        kv_count = cursor.u64()
+        if kv_count > MAX_KV_COUNT:
+            raise GgufError(f"KV 个数 {kv_count} 超上限 ⇒ 文件损坏 ✗")
+        for _ in range(kv_count):
+            key = cursor.string()
+            value_type = cursor.u32()
+            if key in wanted and value_type == _KV_ARRAY:
+                found[key] = _read_full_array(cursor)
+            else:
+                value = _read_kv_value(cursor, value_type)
+                if key in wanted:
+                    found[key] = value
+    return found
+
+
+def _read_full_array(cursor: _Cursor) -> list[Any]:
+    """读一整条数组 ✓（**不截断** ✗ —— 与 :func:`_read_kv_value` 的摘要形态正好相反 ✓）。"""
+    element_type = cursor.u32()
+    count = cursor.u64()
+    if count > MAX_ARRAY_ITEMS:
+        raise GgufError(f"数组元素数 {count} 超上限 {MAX_ARRAY_ITEMS} ⇒ 文件损坏 ✗")
+    if element_type == _KV_STRING:
+        return [cursor.string() for _ in range(count)]
+    if element_type not in _KV_SCALARS:
+        raise GgufError(f"数组的元素类型 {element_type} 不认识 ✗")
+    fmt, size = _KV_SCALARS[element_type]
+    if not count:
+        return []
+    blob = cursor.raw(int(count) * size)
+    return list(struct.unpack(f"{cursor.prefix}{int(count)}{fmt}", blob))
 
 
 def tensor_nbytes(type_id: int, shape: list[int]) -> int:

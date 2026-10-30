@@ -77,7 +77,13 @@ EXTRACTOR = f"""你是制片助理，擅长从剧本中提取角色和场景信�
 
 {IMAGE_PROMPT_TEMPLATE_CHARACTER}
 
-{IMAGE_PROMPT_TEMPLATE_SCENE}"""
+{IMAGE_PROMPT_TEMPLATE_SCENE}
+
+完成标准（硬性，不满足等于没做）：
+- 必须真正调用 save_dedup_characters、save_dedup_scenes、save_dedup_props 落库；只要一个保存工具都没调用，这一轮就是失败的
+- 禁止输出剧情分析、故事点评、观后感或「后续发展方向建议」——用户要的是落库的资产，不是读后感
+- 不要在正文里罗列提取结果来代替保存；正文只写一句极简确认（如「已保存 N 个角色 / N 个场景 / N 个物品」）
+- 不要反问用户是否继续，也不要等用户确认：读完就接着保存，直到三个 save_dedup_* 都调用过"""
 
 STORYBOARD_BREAKER = """你是资深影视分镜师，擅长将剧本拆解为分镜方案。
 

@@ -5,8 +5,11 @@
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
 
-⭐⭐ **最近一次全量实测见本文件**最后一条 ⚠️（2026-09-27 ✓ **145 套全通过 / 项 4914 / `FAIL` 0** ✓）——
-   下面这条是**上上次**的账 ✓（保留是为了看清数字怎么变的 ✓）：
+⭐⭐ **最近一次全量实测见本文件**最后一条 ⚠️（**㉒ · 2026-10-28 ✓ 148 套 / OK 134 / FAIL 14**
+   （实录 `tmp/run_all_fp.log`）✓ —— 14 条红里 **1 条是本轮的（请求体守卫逮到新端点里的
+   `isinstance` 死代码，已删 ✓ 单跑 10/10）**、**11 条是「本机 `.venv` 没装 torch」的既有崩溃** ＋
+   **1 条 ollama 活体未启动** ＋ **1 条既有提示词漂移**，见 ㉒② ⚠️）——
+   以下两条是**上上次/上次**的账 ✓（保留是为了看清数字怎么变的 ✓）：
 
 ⭐⭐ **上一次全量实测（2026-09-26 白天 ✓ 同一台 A5000 目标机 ✓ 一次跑完 ✓）**：
 登记 **136 套** ✓（**数出来的** ✓ = `len(TESTS)` ✓，不靠上面的账 ✗）⇒
@@ -517,7 +520,8 @@ ModelScope / LM Studio / GPT4All / Jan / llama.cpp 里躺着的模型**扫不到
 ① 新建 `engine/llm.py` ✓ —— 自研 decoder-only transformer（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样 ✓），
 Qwen3/Llama 这类 LLM 的架构 ✓；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗）；缩小版走同一条前向 ✓。
 ② 新建 `engine/gguf_dequant.py` ✓ —— GGUF 权重**反量化**（F32/F16/BF16/Q8_0/Q4_K ✓ 公式照 llama.cpp ggml-quants.c ✓ MIT ✓；
-Q4_K 的 6-bit 解包逐字节核过 ✓）；⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗ 未实现 ✓。
+Q4_K 的 6-bit 解包逐字节核过 ✓）；⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗ 未实现 ✓
+（⟶ 现状见 ㉕/㉖：Q6_K 已补 ✓、Q4_K/Q6_K 均已向量化 ✓；仍拒绝的是 Q2_K/Q3_K/Q5_K/Q8_K ✓）。
 ③ 新建 `engine/gguf_to_llm.py` ✓ —— GGUF 权重 → LlmModel 的**装载**（ggml 命名映射 ✓ + 线性层转置 ✓ + tie embeddings ✓ +
 `infer_llm_config` 从 GGUF 元数据读架构 ✓）；⭐⭐ 往返恒等验证：state_dict → GGUF → 映射回 ⇒ 逐张量相等 ✓。
 ④ 新建 `engine/llm_backend.py` ✓ —— 自研文本后端（`describe` 如实报缺 / `load` 装载 / `generate` encode→生成→decode ✓；
@@ -804,7 +808,803 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
    ⑤ ⚠️ **对账的影响**：本轮**没有产品改动** ✓（只有测试隔离 + 注释/行文 + 守卫正则 ✓）⇒ 套数 **145 不变** ✓、
       项数 **4935 不变** ✓（⑫ 的账继续有效 ✓）。⚠️「0 红」的**成立方式要写清** ✓✗：本份日志是 **1 红**（③ 那条 ✓），
       归零靠的是 **同环境复测 34/34** + **项数与 ⑫ 一分不差** 这两条 ✓ —— 不拿「看着像假红」当结论 ✗。
-"""
+  ⑭ ⭐⭐ **H3 参考素材链路对齐后端（2026-10-27 本机 ✓ 全量实录）**。
+   ① **本轮改动**（4 个产品文件 ✓）：`local_services/h3/server.py`（参考视频两跳链、声轨编号、`ref_image_size`
+      档位、`length` 硬上限）、`local_services/h3/workflow.py`（`H3_MAX_FRAMES`/`H3_TRAINED_FRAMES`/`cap_frames`）、
+      `services/comfyui.py`（H3 分支**原样透传**参考素材 —— 修前**一个都不传** ✗⇒素材在服务层被静默丢掉 ✓✗）、
+      `services/adapters/video_adapters.py`（`reference_video` / `reference_image_size`；⭐ 并把**参考视频**计入
+      `has_references` ✗→✓ —— 漏算它时「只挂参考视频 + `sceneType=action`」会挑到 FL2VA ⇒ 素材静默失效 ✓✗）。
+   ② **自检新增**：`h3_stage2_test` ㉞/㉞′/㉞″/㉞‴/㉞⁗/㉞⁵（档位落地 ✓、无参考图 ⇒ `None` 不改 ✓、非法值
+      告警回落 ✓、模板没有那格 ⇒ 告警 ✓、那格被 `PrimitiveString` 牵着线 ⇒ 写**上游** ✓）、㉟/㉟′/㉟″
+      （`length` 硬上限夹到 **3592** ✓ / 网格内最大值 ✓ / 训练区间**只告警不改** ✓）；`adapters_test` 3 条
+      （视频截 3 路 ✓、档位只在真档位时才写 ✓、⭐ 只挂参考视频也算素材 ⇒ Ref2VA ✓）；`comfyui_runs_test` 2 条
+      （参考素材原样过服务层 ✓、空素材**不写进 body** ✓）。
+   ③ ⭐⭐ **自检当场抓出一条真错** ✓✗：`wf.cap_frames` 原写法 `limit - ((limit - min) % grid)` **不看入参**
+      ⇒ `cap_frames(124)` 也返回 **3592** ✓✗（123 帧的镜头会被拉成两分半 ✓）；修为先 `min(frames, limit)`
+      再对齐 ✓（`cap_frames(124)=124` ✓、`cap_frames(3600)=3592` ✓）。生产路径当时只在「超上限」时调用它 ✓
+      ⇒ 没真出事 ✓，但这是一颗**随时会踩**的雷 ✓。
+   ④ **全量实录**：日志 **`backend-py/tmp/run_all_v4.log`** ✓（`tmp/` 已 gitignore ✓）。机械核账（按 **UTF-8**
+      逐行数 ✓）：`OK` 行 **145** ✓、`FAIL` 行 **0** ✓、`SUMMARY:` 行 **144** ✓（差的那 1 套 = `路径 + 常量守卫`
+      印 `OK: 镜像常量漂移 0 条` ✓）、项合计 **4965 / 4965** ✓、末行「145 个测试全部通过」✓、**回执 `exit=0`**
+      （本轮是前台跑 + 重定向落盘 ✓ ⇒ 不再走 ⑨/⑫ 那两条「等价判据」✓）。
+      ⚠️ 与 ⑫ 的 **4935** 差 **+30 项** ✓，逐套指得回 ✓：`h3_stage2_test` 50 → **75** ✓（+25，其中**上游那批**
+      视频两跳链用例 17 ✓ + **本轮 8** ✓）、`adapters_test` → **108** ✓（本轮 +3 ✓）、`comfyui_runs_test`
+      → **19** ✓（本轮 +2 ✓）⇒ 17 + 8 + 3 + 2 = **30** ✓ 与总差**一分不差** ✓；其余各套两跑**一致** ✓。
+  ⑮ ⭐⭐ **补真实库两列 · 冒烟由红转绿（2026-10-27 本机 ✓ 全量实录）**。
+   ① **为什么红**：⑭ 在**代码侧**给 `video_generations` 加了 `reference_video_urls` / `reference_image_size`
+      （模型 ＋ 路由 ＋ 适配器 ＋ H3 全链 ✓），但**真实库** `data/drama.db` 还是旧表 ✓✗ ⇒ 冒烟那条
+      `schema: no extra column in models` 红 ✓（`tmp/run_all_v5.log` 末行逐字「结论：1 项未通过 -> 契约冒烟」✓）。
+      这不是断言写错 ✓ 也不是产品 bug ✗ —— 是**盘上的库落后于模型** ✓。
+   ② **补列走人工授权** ✓（`apply_schema_upgrade` 的 docstring 明写「只应由人决定」✓，我不擅自动用户的库 ✗）：
+      创作者点头「备份后补列并复跑」⇒ ⓐ 备份 `data/_backup_20261027-203105/drama.db`（**233472 字节** ✓
+      sha256 与原库**一致** ✓；备份时盘上**无** `-wal`/`-shm` 旁文件 ⇒ 直接复制即完整 ✓）；
+      ⓑ `python -m app.scripts.db_upgrade --apply` ⇒ 「**已补 2 列**」✓（脚本自己也留了一份
+      `data/drama.db.bak-20261027-203110` ✓）；ⓒ 复验：干跑「**待补 0 列**」✓、
+      `PRAGMA table_info(video_generations)` 里两列俱在 ✓。
+   ③ **冒烟转绿**（同一套、同一项数 ⇒ 是那条守卫由红转绿 ✓ 不是删改断言 ✗）：`smoke_test.py`
+      **477/477** ✓、`exit=0` ✓、`FAIL` 行 **0** ✓ —— 与 ⑭（v4）的 **477** 同数 ✓。
+   ④ **全量实录**：日志 **`backend-py/tmp/run_all_v6.log`** ✓。机械核账（只 ASCII 部分机械 ✓，理由见 ⑤）：
+      `OK` 行 **145** ✓、`FAIL` 行 **0** ✓、`SUMMARY:` 行 **144** ✓（差 1 套 = 不打 SUMMARY 的那套 ✓，同 ⑭）、
+      项合计 **4974 / 4974** ✓、末行落在「**全部通过**」分支 ✓（`-> 名单` 那支才带箭头 ✓，本份**无箭头** ✓）。
+   ⑤ ⚠️ **本份日志是 UTF-16LE** ✗（PowerShell `>` 重定向的默认编码 ✓）⇒ 中文落盘成替换字符 ✓，
+      只能机械核 ASCII 那几列 ✓；下次重定向**必须**先 `$OutputEncoding`/`Out-File -Encoding utf8` ✓。
+      ⚠️ 另记两件踩坑：ⓐ **v5 那份日志不能用来对位** ✗ —— 它是在**改测试的过程中**跑的 ✓（第 1 条
+      `SUMMARY:` 是 **34/34** ✓，索引与 v4/v6 错位 ✓）⇒ 对账只用**两次都完整收尾**的跑次（v4 / v6）✓；
+      ⓑ `data/` 下的 `drama.db-wal`/`-shm` 是**补列之后**连接库才生成的 ✓ ⇒ 日后手工备份**只拷 `.db`
+      会丢 WAL 里未 checkpoint 的页** ✓✗，要么连三个文件一起拷、要么走 `sqlite3` 的 `backup()` ✓
+      （本轮首批备份时 wal 还不存在 ✓ 故 `Copy-Item` 与 backup 等价 ✓）。
+   ⑥ **与 ⑭ 的 4965 差 +9 项，逐套指得回** ✓：`video_generation_test` **59 → 64**（+5 ✓）、
+      `videos_route_test` **43 → 47**（+4 ✓）⇒ 5 + 4 = **9** ✓ 与总差**一分不差** ✓；其余各套两跑**一致** ✓。
+   ⑦ ⚠️ **前端仍没有这两项的输入口** ✗（`frontend/app` 里 `referenceVideoUrls` / `referenceImageSize`
+      各 **0 处** ✓）⇒ 「后端这条链接通了 ✓、UI 没开口 ✗」—— 要不要给用户暴露「参考视频」「参考图档位」
+      是**产品判断** ✓，本轮**没动** ✗。
+  ⑯ ⭐⭐ **前端开口（参考视频 / 参考图档位）＋ `PUT` 白名单补四件（2026-10-27 ✓ 全量实录）**。
+   ① **起因**：⑮ 收尾时记的那条「后端通、UI 没开口」⇒ 创作者一句「你要实现对应功能」✓ ⇒
+      本轮把入口做到界面里 ✓。
+   ② **前端 `components/VideoEditor.vue`**（+202 行）：
+      ⓐ 新增「**参考图档位**」下拉（`''`=自动 / `match` / `max`）—— 真源是**核心节点**
+      `comfy_extras/nodes_minimax_h3.py` 的 `ref_image_size` 枚举 ✓、H3 wrapper
+      `app/local_services/h3/server.py::_reference_image_size` **非法值静默回落 match** ✓✗
+      ⇒ 注释里明写「选错**不会报错**、只会静默变 match」✓（前人不写这句，下一个人就会以为生效 ✓✗）；
+      ⓑ 新增「**参考视频**」列表（≤ `REF_VIDEO_LIMIT`=3，镜像 `h3/server.py::REF_VIDEO_LIMIT`
+      与 adapter 的 `[:3]` 截断 ✓）：`+ 添加`空行 / **上传**（走 `uploadAPI.video`，
+      **不走**首尾帧那条会 `setFrame` 改分镜的抽帧路 ✓✗）/ `移除` / `用上镜成片`
+      （取 `neighbors.prev.video_url` ✓）；ⓒ **三处提交全带上** ✓：`update` / `regenerate` / `generate`。
+   ③ ⚠️ **顺手修掉一个老 bug** ✓✗：`form.referenceImageUrls = vr.referenceImageUrls` —— 后端 JSON 列
+      返回的是**字符串**（`row_to_camel` **不解析** ✓），下游 `Array.isArray()` **恒 false** ✗
+      ⇒ 「多参考图模式回传已有参考图」**从来没发出去过** ✓✗（界面看着有、提交变 `undefined`、
+      后端改用自动注入 —— 三方都不报错 ✓）。新增 `parseUrlList()`（数组 / JSON 串 / 裸 URL / 空 四形态）✓。
+   ④ **后端 `routers/videos.py`**：`_UPDATE_FIELD_MAP` 补**四件**（`reference_image_urls` /
+      `reference_audio_urls` / `reference_video_urls` / `reference_image_size`）—— 原来**一项都没有** ✗
+      ⇒ 「更新已有记录」这条路上改参考素材 = **静默丢弃** ✓✗（回读不变 / 不报错 / 界面写「已保存」）。
+      ⓐ 数组型入参**必须序列化**（`_JSON_LIST_FIELDS` ＋ `_json_text`）：把 `list` 直接绑进 sqlite 抛
+      `InterfaceError` ⇒ 400 ✓；`character_ids` 同属这类（原白名单有它、却没序列化 ⇒ **传数组必炸** ✗）；
+      ⓑ **标量空串 ⇒ NULL**（`''` 与 `NULL` 两种「空」并存 ⇒ 判空写不一处、读账漏 ✓）；
+      ⓒ `regenerate` 用 `_pick`（**显式给了就用、没给才回落** ✓）替掉 `or`：`[]` 是 falsy ⇒
+      用户把参考视频删光后一重跑，**旧素材又回来了** ✓✗。
+   ⑤ **自检 +5**（`videos_route_test` **47 → 52**）：`PUT` 三件能落库（数组存紧凑 JSON）✓ /
+      显式置空 ⇒ NULL ✓ / 已序列化字符串**不二次转义** ✓ / 档位空串 ⇒ NULL ✓ /
+      `_pick` 的「清空 vs 未给」语义 ✓。
+   ⑥ **前端侧验证**：`npx vue-tsc --noEmit` **0 error** ✓；`npm run build` 成功 ✓ —— **但 build 把
+      `.output/public/index.html` 删了** ✗（SSR 产物只有 `_nuxt/`）⇒ `dockerfile_contract_test` 那条
+      「前端构建产物存在」**当场红** ✓✗，跑 `npm run generate` 才恢复 ✓（本仓要的是**静态生成**产物，
+      `frontend/dist` 是指向 `.output/public` 的**目录联接** ✓）。
+      ⚠️ **教训**：本仓改完前端要跑 **`generate`**、不是 `build` ✓✗（build 只验「能编译」，
+      顺手还会砸掉别人的静态产物）。
+   ⑦ **全量实录**：`tmp/run_all_v8.log` ✓（**`Out-File -Encoding utf8`** ✓，避开 ⑮ 那条 UTF-16 坑）：
+      `OK` **145** ✓ / `FAIL` **0** ✓ / `SUMMARY` **144** ✓ / 项 **4979 / 4979** ✓ /
+      末行「结论：145 项自检全部通过」✓（**无** `->` 名单箭头 ✓）。
+      ⚠️ **`tmp/run_all_v7.log` 作废** ✗✗：那次我**边跑边改代码**（前半旧代码、后半新代码 ✓），
+      又并发跑了 `npm run build` 把 index.html 删掉 ⇒ 一条红「前端构建产物存在」✓，
+      **不是代码问题** ✗ ⇒ 终账只认 v8 ✓（且 v7 中途进程就没了、没落结论行 ✓）。
+   ⑧ 与 ⑮ 的 **4974** 差 **+5** ✓，全在 `videos_route_test`（**47 → 52**）✓ **一分不差**；
+      `video_generation_test` **64** 与冒烟 **477** 两跑**一致** ✓。
+  ⑰ ⭐⭐ **参考音频开口（UI）＋ 两处「显式 `[]` = 清空」补认（2026-10-27 ✓ 全量实录）**。
+   ① **起因**：⑯ 收尾留的那条产品判断「`reference_audio_urls` 后端已通、UI 没开口」⇒ 创作者「继续」✓。
+   ② **前端 `components/VideoEditor.vue`**：新增「**参考音频**」列表（≤ `REF_AUDIO_LIMIT`=3，镜像 H3
+      主节点 `io.Autogrow.Input("ref_audios", …, max=3)` ＋ `workflow.py::REF_AUDIO_PORT_PREFIX` 的
+      「按模板真有的槽位读」＋ adapter 的 `[:3]` ✓）：`+ 添加` / **上传**（`uploadAPI.audio`）/ `移除`；
+      回填走 `parseUrlList`（JSON 串 ✓）；`update` / `regenerate` / `generate` **三处全带** ✓。
+   ③ ⚠️⚠️ **不能像参考视频那样「一律发数组」** ✗✗：后端对**未给**该字段的**对话镜头**会按 Ref2VA
+      自动带出场角色声线样本（`routers/videos.py` → `get_storyboard_reference_audio_urls`）✓ ——
+      一律发 `[]` 等于把这条自动注入**永久关掉** ✓✗（新镜头还没有 video 记录 ⇒ 列表本来就空 ⇒
+      声线样本再也不来，且三方都不报错 ✗）。故新增 `refAudioTouched`：未动 ⇒ **不发送**；动过 ⇒
+      连 `[]` 一起发（空数组 = 明确不要 ✓）。
+   ④ **后端 `routers/videos.py` 两处 falsy 陷阱**（同一类病，音频这边此前没治 ✓✗）：
+      ⓐ `POST` 的**自动注入**原判 `if not (urls and len>0)` ⇒ 显式 `[]` 被当成「没给」⇒ 删光的声线
+      **又注回来** ✓✗；改判「请求**有没有这个 key**」（`audio_given` / `image_given`，参考图那条同样
+      收紧 ✓ —— 参考图也有自动注入 ✓）；ⓑ `regenerate` 的 `reference_audio_urls` 原用 `or` 回落分镜
+      自动收集 ⇒ 显式 `[]` 同样被吞 ✓✗；改 `_pick`（未给才回落原记录 → 再回落自动收集，保住旧的
+      「重跑补声线」行为 ✓）；同处的 `reference_image_urls` 一并改 `_pick`（原也是 `or` ✓）。
+   ⑤ **自检 +4**（`videos_route_test` **52 → 56**）：`PUT` 参考音频数组存紧凑 JSON ✓ / `POST` 未给 ⇒
+      自动注入声线样本（**原有行为保住** ✓）/ `POST` 显式 `[]` ⇒ **不**注入 ✓ / `regenerate` 显式 `[]`
+      ⇒ 新记录也不带 ✓（用带 `voice_sample_url` 的独立角色 ＋ `take_budget=10` 的独立分镜，不挤别条）。
+   ⑥ **前端验证**：`npm run typecheck`（`vue-tsc --noEmit`）**0 error** ✓；`npm run generate` 成功 ✓
+      （**不跑 build** —— ⑯ 那条坑：build 会删 `.output/public/index.html` ⇒ docker 契约测试红 ✗）。
+   ⑦ **全量实录**：`tmp/run_all_v9.log` ✓（`Out-File -Encoding utf8` ✓）：`OK` **145** ✓ / `FAIL` **0** ✓ /
+      `SUMMARY` **144** ✓ / 项 **4983 / 4983** ✓ / 末行「结论：145 项自检全部通过」✓（无 `->` 箭头 ✓）。
+   ⑧ 与 ⑯ 的 **4979** 差 **+4** ✓，全在 `videos_route_test`（**52 → 56**）✓ **一分不差**；
+      `video_generation_test` **64** / 冒烟 **477** 两跑**一致** ✓。
+  ⑱ ⭐⭐ **同病根扫全仓：`character_ids` 三处没人管 ＋ 参考素材「二次转义」（2026-10-27 ✓ 全量实录）**。
+   ① **为什么这轮会有它**：⑯⑰ 修的是「TEXT 列存 JSON 串 ⇒ 前端 `Array.isArray` 恒 false」这个病根 ✓✗，
+      但每轮只治了当时手上那一条（⑯ 参考图、⑰ 参考音频）✓ —— 顺手把**同源副本**扫了一遍 ✓✗，
+      又逮出两处（记忆里那条教训：「一句话手抄多份，会在修它的那一轮再犯一次」✓）。
+   ② **`character_ids` 三处都没人管** ✗✗：ⓐ 前端回填 `existingIds.split(',')` 拿到的其实是
+      `'[1,2]'.split(',')` ⇒ `['[1','2]']` ⇒ `map(Number)` ⇒ **`[NaN,NaN]`** ⇒ 角色多选**回填全空**、
+      提交再经 JSON 变 `[null,null]` 落库 ✓✗；ⓑ `POST /videos` **一个字都不读** `character_ids` ✓✗；
+      ⓒ `generate_video` 的插入列表里**没有这一列** ✗（白名单认它、库列也有它，就是没人写 ✓）；
+      ⓓ `regenerate` 不复制 ⇒ 重跑出来的新记录**丢了出场角色** ✓。
+      修：前端新增 `parseIdList()`（数组 / JSON 串 / 逗号串 / 单数字 / 空 五形态）＋ 提交前
+      `filter(Number.isFinite && >0)`；后端 POST 读并转发 `characterIds`、`regenerate` 用 `_pick`
+      沿用原记录、`generate_video` 落 `character_ids=_json_list(...)`。
+   ③ ⚠️⚠️ **`regenerate` 复制参考素材被二次转义**（本轮新发现，⑯⑰ 都没治）✗✗：`regenerate` 传下去的
+      `referenceImageUrls` 等是**DB 里的 JSON 字符串**（`'["a.png"]'`），而 `generate_video` 写的是
+      `_stringify(x) if x and len(x)>0` ⇒ `json.dumps('["a.png"]')` ⇒ `'"[\"a.png\"]"'` ✓✗ ⇒ 落库成了
+      「一个字符串」而不是「一个数组」（前端 `parseUrlList` 解出字符串、指纹 `_refs_map` 解出空 ✓
+      ⇒ 重跑出来的记录参考素材**静默消失**，三方都不报错）。修：`video_generation` 新增单一入口
+      `_json_list()`（`list` ⇒ 紧凑 JSON ✓／**已是字符串原样** ✓／`None`·`""`·`[]` ⇒ `NULL` ✓），
+      图 / 音频 / 视频 / `character_ids` 四处全走它 ✓，与 `routers/videos.py::_json_text` **同口径** ✓。
+   ④ **有意收敛的一条语义**（**改了一条既有断言** ✓✗，不是绕过红）：空了半年的「两种空」——
+      参考图原来走 truthy 判据 ⇒ `[]` 落 `"[]"`、参考音频走 `.length` 判据 ⇒ `[]` 落 NULL ✓✗。
+      `video_generation_test` 那条「`referenceImageUrls=[]` -> 落 `"[]"`（truthy 判据：空数组是真值）」
+      是照抄 TS `JSON.stringify([])` 的旧行为 ✗，本轮改成「都落 NULL」并在测试里写明缘由 ✓
+      （依据：⑯ 已在 `PUT` 侧锁了「置空 ⇒ NULL 而不是 `"[]"`」，两处不能各说各话 ✓）。
+      ⇒ 该套 **64 → 63**（两条 check 合成一条 ✓）。
+   ⑤ **自检 +2**（`videos_route_test` **56 → 59** ✓ / `video_generation_test` **64 → 63** ✓）：
+      `POST` 的 `character_ids` 落库（原来恒 NULL）✓ / `regenerate` 未给 ⇒ 沿用原记录的角色关联 ✓ /
+      `regenerate` 复制的参考图 JSON 串**不被二次转义**（`json.loads` 仍是两条）✓。
+      后两条修前**必红**（第二条修前会拿到 `'"[\"x1\",\"x2\"]"'` ✓）。
+   ⑥ **前端验证**：`npm run typecheck` 0 error ✓；`npm run generate` 成功 ✓（仍不跑 `build` ✗）。
+   ⑦ **全量实录**：`tmp/run_all_v10.log` ✓（`Out-File -Encoding utf8` ✓）：`OK` **145** ✓ / `FAIL` **0** ✓ /
+      `SUMMARY` **144** ✓ / 项 **4985 / 4985** ✓ / 末行「结论：145 项自检全部通过」✓。
+   ⑧ 与 ⑰ 的 **4983** 差 **+2** ✓ = `videos_route_test` **+3** ＋ `video_generation_test` **−1** ✓
+      **一分不差**；冒烟 **477** 两跑**一致** ✓。
+  ⑲ **新增 `ollama_native_test`（+1 套 / **56** 项）**：`app/services/ollama_native/` 是把
+     `reference/ollama`（Go）里**可对等**的原生能力移植过来的包（模板引擎 / harmony 流协议 /
+     `OLLAMA_*` 环境变量 / 人类可读单位与进度速率 / OpenAI 与 Anthropic 两个兼容层的纯转换）。
+     这套自检守的**不是「能 import」**，而是上游那些容易照抄错的语义：Go `text/template` 的
+     `and/or` 返回操作数本身、`range` over map 按 key 排序、Jinja 认族靠 Levenshtein、
+     harmony 分片不吐半截标记、`Var()` 剥引号、`HumanBytes` 十进制 vs `HumanBytes2` 二进制、
+     进度速率「停止后切全程平均」、OpenAI 的 `temperature/top_p` 缺省 **1.0**、
+     Anthropic 的 `input_tokens = total − cached` 与 user 轮 `tool_result` **前置**。
+     ⚠️ 写自检时踩到两处**测试假设错**（不是产品错，已按真语义改断言而非改产品）：
+     ① `Bar.set` 的桶节流判据是 `now − last > 1.0`（**严格大于**）⇒ 采样间隔必须 > 1 秒才开新桶；
+     ② `modelfile.parse()` 返回 `Modelfile` 对象（`FROM` 归一成指令名 `"model"`）、
+        `manifest.new_layer()` 返回 `Layer` 而**不是** dict、`params.format_params()` 要吃
+        `{参数名: [字符串值, …]}`（对齐上游 `map[string][]string`）。
+     ⚠️ 全程**临时目录 + 纯函数**，不碰真机模型库、不打网络（`manifest.models_root` 在测试内被临时替换）。
+     ★ **接入层还真接上了一处**（不是只躺在包里）：`services/ollama.py` 新增 `resolve_ollama_url()`，
+     `try_start_ollama` 的两处探测从写死的 `DEFAULT_OLLAMA_URL` 改成它 ⇒ 跟着 `OLLAMA_HOST` 走
+     （含去引号、按 scheme 补 80/443、`0.0.0.0`/`::` 换回环）。修前：用户改端口 ⇒ 探测必失败 ⇒
+     误报「未启动」并**白拉一个 serve**（真进程一直好好的）。未设 `OLLAMA_HOST` 时**一字不变** ✓
+     （仍回 `DEFAULT_OLLAMA_URL`，`normalize_ollama_url()` 的兜底口径故意不动 —— 那是**用户配置**
+     的兜底，改它会把「空配置」的含义也换掉 ✗）。这 5 条断言（默认不变／改端口／通配／带引号+443／
+     显式优先+去尾斜杠）就在本套件里 ✓。
+  ⑳ **本轮全量实录（2026-10-28 ✓ `tmp/run_all_native.log` ✓）：146 套 / OK 134 / FAIL 12 / 项 4254–4258**。
+     三类红，逐条有根因；其中**只有一类是本轮的**（已修 ✓）：
+     ① **（本轮·已修）`路径 + 常量守卫` 的 8 条漂移**：全在本轮新写的 `openai.py` / `anthropic.py` /
+        `gotemplate.py` 的 `json.dumps` 上 —— 缺紧凑分隔符，而 Node 的 `JSON.stringify` 不带空格 ✓✗。
+        已逐个补 `separators=(",", ":")`（`arguments` / `partial_json` 那两处本身就是**线上格式**，
+        必须紧凑 ✓；`EstimateInputTokens` 那几处是字符计数，口径跟着线上格式走才不会高估 ✓）。
+        复跑该桶 **0 条** ✓、`ollama_native_test` **56/56** ✓。
+        ⚠️ `TS 源码快照反漂移` 的 `10/11` 是它在冻结模式下重跑**同一个**守卫 ⇒ 修前那 8 条在这里
+        **又被算了一次**（同一条红两个套件）✓ —— 别当成两处独立问题。
+     ② **11 套崩在「本机 `.venv` 没装 torch」**（`./.venv/Scripts/python.exe -c "import torch"` ⇒
+        `ModuleNotFoundError` ✓）：`engine_sdxl_vae` / `engine_readiness_script` / `engine_dit` /
+        `engine_gguf_dequant` / `engine_gguf_to_llm` / `engine_llm` / `engine_chat`(骨架) /
+        `engine_h3_edit` / `engine_runtime` / `engine_bridge` ＋ ①里的 `TS 源码快照反漂移`。
+        ⚠️ 那是**既有缺陷**：`sdxl_vae.py` 的 no-torch 兜底写 `nn = object` ⇒
+        `class _ResnetBlock(nn.Module)` 在 import 期
+        `AttributeError: type object 'object' has no attribute 'Module'` ✓，与它自己 docstring
+        写的「无 torch 的环境要能 import 本模块」**直接相反** ✓✗；对照 sibling `sdxl.py` 是把类定义
+        包进 `if _HAS_TORCH:` ✓。「**崩**」≠「**跳过**」—— 正是「没跑 ≠ 绿」的反面 ✓。
+     ③ **`DEFAULT_PROMPTS.extractor` 逐字漂移（1 条）**：Python `agent_prompts.EXTRACTOR` 尾部多出
+        一段「完成标准（硬性…）」273 字，冻结快照里的 Node 源（`backend/src/agents/index.ts`）没有
+        ⇒ 是**工作区里未提交的产品改动**没同步镜像 ✓✗，与本轮无关（本轮只碰 `ollama_native/` +
+        两个测试文件 + `ollama_store.py` 一行）。⚠️ **没动它**（不改守卫、不删提示词尾段、不伪造
+        快照）—— 等创作者裁定「有意新增 ⇒ 镜像口径改成 Python 为准」还是「误改 ⇒ 回退」。
+  ㉑ **新增 `ollama_integration_test`（+1 套 / **51** 项，套数 146 → 147）**：把 Ollama 从
+     「能拉/能删/能发一句 chat」补成**完整集成**，四个新模块 ＋ 6 个新端点：
+     * `services/ollama_native/capabilities.py` —— 能力面判定，移植上游 `server/images.go` 的
+       `configCapabilities` / `projectorCapabilities` / `parserCapabilities` / `modelFamilyCapabilities` /
+       `goTemplateCapabilities` / `filterUnsupportedCapabilities`。**六路信号里落了五路**
+       （config 自述 / projector 层 / Go 模板 / parser 名 / 模型族），两条**有意不移植**并
+       在抬头写清：`ggufCapabilities`（要解几 GB blob 的 GGUF 头）与 `thinking.InferTags`
+       （降级成标签字面量匹配，宁可漏报 ✓）。每条能力都带 `sources`，前端可解释「凭什么」✓。
+     * `services/ollama_client.py` —— `/api/*` 唯一出口（tags/show/ps/copy/delete/pull/create/
+       chat/embed/version），统一超时、NDJSON 坏行跳过、错误体透传。**地址只从
+       `ollama.resolve_ollama_url` 拿**，不再写第二份默认值 ✓。
+     * `services/ollama_catalog.py` —— 在线（`/api/show` 权威）＋ 离线（清单+config+模板）
+       **同一形状**；`video_readers()` 按 `vision` 判（**不按名字猜** ✗）；`plugin_summary()`
+       汇总权重之外的附加层并标出哪些会改能力面；`video_generation_models()` 老实说明
+       「生成类不在 Ollama，去 ComfyUI/H3」✓。
+     * `services/ollama_video.py` —— **视频识别**：ffmpeg 抽 N 帧（逐帧 seek，不是全片解码）→
+       `messages[i].images` 喂视觉模型 → 结构化描述。抬头写死三条硬约束：图片必须挂消息上
+       （放顶层会被**静默忽略** ✗）、必须挑 `vision` 模型、必须限帧数/限宽。
+     * 端点：`POST /ollama/{catalog,show,ps,copy,embed,video/analyze}`。⚠️ 老的
+       `status|start|pull|delete` **一条不动**（前端既有页面依赖，改口径要单独回归）。
+     ⚠️ 本轮抓到的两个真坑（都由自检当场逮住、已修 ✓）：① 清单的 config 在**顶层 `config`
+     描述符**、不在 `layers` 里 —— 只扫 layers 的实现会**永远读不到能力自述**（全判空）；
+     ② 只有 projector 没有 config 自述时，能力面会漏掉 `completion`（判据该是「没有 embedding
+     也没有 completion」，不是「一个能力都没有」）。
+     ⚠️ **本轮尚未复跑全量**（用户中途让后台跑、未取回结果）：上一份完整实录仍是 ⑳ 的
+     146 套 / 12 红（两红均为既有缺陷）；`ollama_integration_test` 单跑 **51/51** ✓。
+     复跑命令：`./.venv/Scripts/python.exe -X utf8 tests/run_all.py`（期望 147 套，红数应与
+     ⑳ 持平或更好 —— **多出来的红一定是本轮引入的**）。
+     ㉒ **新增 `model_fingerprint_test`（+1 套 / **135** 项，套数 147 → 148）：把「模型是什么」从
+     **文件名启发式**升级成**读权重本体** ✓。**真能力**，不是引用 ——
+     * `services/model_fingerprint.py`：只读文件头（safetensors：`u64 头长 + JSON`；GGUF：kv 表 +
+       **tensor info**），拿张量名与形状判架构/模态/变体。判据移植自 `reference/comfy-org/ComfyUI`
+       的 `model_detection.py`，但**逐条在本机 52 份权重上核过**：实测 26 份视频权重全对、耗时
+       **0.12 秒 / 52 个（~2ms 一个）** ⇒ 可以扫全盘，不是玩具 ✗；
+     * ⭐ 抓到的真错（**改名/量化标签写错的实例，只有读权重才能发现**）：`Krea2/krea2_turbo-Q4_K_M.gguf`
+       的 `general.architecture` 自报 **`qwen_image`**，张量里却是 `txtfusion.projector.weight` ⇒
+       真身是 Krea2。所以 GGUF **必须读 tensor info**，自报标签只作 fallback 且置信度标 `declared`；
+     * 真机踩出来的三条子类型判据：Wan2.2 `i2v` **没有 `img_emb`**（只能看
+       `patch_embedding.weight` 入通道 **36=i2v / 16=t2v**）；Wan-Animate 2 靠
+       `blocks.0.cross_attn.k_img` 认（否则退化成普通 i2v）；`minimax_h3` 的 `fl2va`/`ref2va`
+       **张量 key 完全一致（1035 个、差集为空）⇒ 子类型只能是 `unknown`，不许拿文件名补** ✗；
+     * 接线：`local_model_scan` 每份模型带 `weight` 明细（`weightVerified`），**指纹够硬时以权重为准
+       改写按名字判错的 kind**（真机：`SEEDVR2/*.gguf` 原本落到 `gguf-llm` 被当成**文本模型**，
+       `Krea2/*.gguf` 同上；改后分别成 video/restore 与 image），改写时 `runtime` 固定 `comfyui`
+       —— 这些权重**不能**据此注册一个假 H3/Ollama 服务 ✗；扫描结果顶层多一个 `weightSummary`
+       （按架构聚合，「这台机器能拍什么」）；`kinds` 过滤按**改写后**的 kind 走；
+     * 端点：`GET/POST /api/v1/local-models/fingerprint`（自研，Node 侧没有；已登记
+       `route_parity_test` 的 `_EXTRA_ALLOWLIST`）。`GET` 单个文件、`POST` 支持 `{paths:[…]}`
+       点名批探（上限 2000）与 `{roots:[…]}` 扫描批探两种用法；
+     * ⭐⭐ 同日二轮：**量化账 ＋ 完整性 ＋ 文件名对账**（同一份头里的坐标就能算，仍是毫秒级）——
+     这三件也**只有读权重本体**才可能做到，且真机当场抓到货：
+     - `quantization()`：safetensors 按 `元素数×dtype 字节`、GGUF 按 **块**（Q4_K＝256 元素 144 字节，
+       不是 0.5 B/元素 ✗）算 `weightsBytes`，给 `scheme`＋各类型**字节占比**；dtype/ggml type
+       不在已知表的（各代 `IQ*`）→ `exact=False`＋`unknownTensors`，**不许拿近似值冒充总量** ✗；
+     - `integrity()`：拿**头里自带的坐标**对账文件大小 —— safetensors 用规范强制的
+       `data_offsets`、GGUF 用 tensor info 的 `offset`＋`general.alignment` ⇒ 判出
+       `exact / padded / truncated / trailing`。**真机 154 份权重全部 `exact`（0 截断）**，
+       而两个含 F32 范数的 GGUF 一开始被我算成 `unknown` —— 病因是 `int(x or -1)`
+       把 **ggml type 0（F32）吞成 -1** ✗，改后 7/7 精确对账（含 Q4_K/Q5_K/Q6_K/Q8_0/F16/F32 六种 type）；
+     - `name_audit()`：文件名自称的量化 vs 本体称出来的，逐条 `verified / refuted / unverifiable`。
+       **真机 154 份共 84 条自称：70 verified、13 unverifiable（`int4/w4a8/w4a4/nvfp4` —— 4bit
+       是按 U8 打包存的，dtype 只看得见容器，诚实判不了）、1 条 `refuted`**：
+       `SEEDVR2/seedvr2_ema_7b-Q8_K_M.gguf` 名字写 Q8_K，本体 288 个 **Q8_0**＋840 个 F16，**没有
+       一个 Q8_K** ⇒ 唯一能证明"名字在撒谎"的办法就是读 tensor info ✓；
+     - 接线：模型多 `weightBroken`（截断/多余才算坏，`unknown` 与 `padded` 不算，避免与"架构认不出"
+       混为一谈），`weightSummary` 多 `broken / quantizations / weightsBytes / nameRefuted`
+       —— 真机 `diffusion_models` 48 份＝**534.30 GiB**、26 视频、broken 0、nameRefuted 1；
+     * 本套**不依赖本机任何真实权重**：safetensors / GGUF 全部在 tempfile 里按真格式现造字节
+      （含 `data_offsets` 与 tensor `offset` 的真实坐标、按 32 字节对齐的数据区），
+      坏文件覆盖「头长度异常 / 被截断 / 非法 JSON / 头非对象 / magic 不对 / 版本不支持 / kv 超限 /
+      tensor info 截断 / 数据区少 N 字节 / 尾部多 1KB / 尾部多 200KB」十一种 —— 一律**报错但不抛**
+      （`_read_exact` 把 `struct.error` 收口成 `FingerprintError`：改前一个坏 GGUF 就能让整轮扫描崩掉 ✗，
+      这条是自检当场逮出来的）。另有两条零字节陷阱断言：tensor_count 写大时读指针会吃进数据区的
+      `\x00`、解出「空名字 + 0 维」的**假条目**，必须判损坏而不是"读成功" ✗。
+      ⚠️ 全量实录（`tmp/run_all_fp.log`）：**148 套 / OK 134 / FAIL 14**。14 红里 **1 条是本轮的** ——
+      `请求体守卫` 用 AST 逮到新端点里 `if not isinstance(body, dict)` 是**死代码**（`read_json`
+      已保证 dict），已删、单跑 10/10 ✓；其余 13 条全是既有（11 条 torch 未装 ＋ ollama 活体未启动
+      ＋ `DEFAULT_PROMPTS.extractor` 漂移，见 ⑳②③）⇒ 红数与 ⑳/㉑ 持平，**没有新增红灯** ✓。
+      * ⭐⭐ 同日三轮：**参数量 ＋ 「同一模型的哪几份只是精度不同」**（同样只读头，零额外 I/O）——
+      * `parameters()`：元素总数，**只由形状决定**，与 dtype/量化无关 ⇒ 精确值 ✓。语义边界必须讲清：
+      4bit 权重在盘上是按 **U8 打包**存的，这类文件的元素数 ≈ 真实参数**一半**（真机实证：
+      `seedvr2_3b_int4` 1.87B / `seedvr2_3b_int8` 3.39B、`qwen3vl_4b_int4` 2.42B / `qwen3vl_4b_int8`
+      4.44B）⇒ 只报「存了多少个元素」，**不替调用方换算参数量** ✗；
+      * `base_name()`：剥掉**量化标记**后的基名（`seedvr2_ema_7b_fp8_e4m3fn` → `seedvr2_ema_7b`，
+      长词先剥，否则 `fp8` 先吃掉 `fp8_e4m3fn` 留下一截 `e4m3fn` 残渣 ✗）。剥离表只收确指精度/打包
+      的词；`sharp`/`pruned`/`turbo`/`distill` **刻意不在表里** —— 真机 `seedvr2_ema_7b` 与
+      `seedvr2_ema_7b_sharp` 是两份不同权重，必须分成两个基名 ✓；
+      * `shape_digest()`：`(张量名, 形状)` 的 16 位指纹；**只覆盖名字+形状，不含 dtype、不含数据** ⇒
+      认「同布局」可靠，认「内容相同」不可靠 ✗；
+      * ⭐ 变体分组（`weightSummary.variantGroups`）要**两个条件同时成立**：① `shapeDigest` 相同、
+      ② `base_name` 相同。只用①会当场造假警报（真机实测三组全是假的）：`Qwen-Image-Edit-2509-*`
+      那 5 份是**不同的 LoRA**（angles/fusion/relight/…）、`minimax_h3` 那 4 份是
+      **4step/8step × fl2v/ref2v**、`*_VAE` 那 4 份是 **Qwen 与 Wan 两家不同的 VAE** ——
+      形状一模一样、权重毫不相干 ✗。加上②后真机成 **3 组、零假阳性**：`seedvr2_ema_7b`(3 份：fp8
+      7.67 GiB / fp8-mixed-block35 7.88 GiB / fp16 15.35 GiB)、`seedvr2_ema_7b_sharp`(3)、
+      `seedvr2_ema_3b`(2)；组内**小份在前**（"跑得动的那份"排第一）、给 `count/bytes/parameters`；
+      * 接线：`weightSummary` 多 `models`（去重后的模型数＝唯一形状指纹数）与 `variantGroups`（12 组封顶、
+      每组 8 条封顶，免得扫描响应被清单撑爆）—— 真机 `diffusion_models` **48 份文件其实只有 32 个
+      模型**、3 组真变体 ✓；
+      * `name_audit()` 多一个维度 `dimension="parameters"`：`_14B_`/`_7b_`/`_4b_` 这类规模自称拿元素数比。
+      判据是「同一档」不是「相等」（真机：`7B` 实际 8.24B、`3B` 3.39B、`4B` 4.44B、`14B` 14.29B、
+      `32b` 25.76B —— 名字里的 B 指**底模档位**，本体常多出视觉塔/文本塔）。三条**一律不判**的边界
+      （真机各有一例，判了就是假警报 ✗）：① 名字带 `int4/w4a8/nvfp4` 的（元素数只有一半）；
+      ② 比值 <0.5 或 >2 的（`lightx2v_I2V_14B_…_rank64` 实际 0.37B，那是 **LoRA**，14B 指它要挂的
+      底模）；③ 0.5–0.75 / 1.25–2 的只标 `unverifiable` 并写明实际值。真机 154 份共 **30 条参数自称：
+      30 全 verified、0 假警报** ✓；
+      * 本套现 **135 项**（+20）：`parameters` 精确与非法形状不炸、`base_name` 三条（长词先剥 /
+      GGUF `-Q4_K_M` 大小写不敏感 / `sharp` 不剥）、`shape_digest` 顺序无关与改名改形状必变、
+      `14b` 同名同档 verified、**14B 的 rank64 LoRA 一个字都不说**、裁剪版 `unverifiable`＋`found=5.00B`、
+      `int4` 打包不作文参数量核对、`fp16` 里的 16 不被当参数自称、变体组只并「基名+形状」双同、
+      组内小份在前、组给合计字节、`models` 等于唯一布局数、`_make_model` 把 `parameters` 透传；
+      为造「14B 元素」的样本，`write_safetensors` 加了 `omit_data=True`（只写头不写数据区 ——
+      真写 28GB 会爆盘，而参数量只由头里的形状决定 ✓）。
+      ⚠️ 本轮复跑：`model_fingerprint_test` **135/135**、`local_models_test` 105/105、
+      `read_json_guard_test` 10/10；本轮三轮只改 `model_fingerprint.py` ＋自检（**未动路由、未动扫描器**）。
+
+      * ㉔ **同日·外部服务去依赖第 1 块：H3 工作流 → 进程内（LoRA 那一刀）** —— 按 `Fast_T2V`
+      模板的 20 类节点逐条对账后，真正缺的只有 **LoRA 装配**（原引擎一处都没有 ✗，其余条件注入 /
+      AV 潜变量 / 双流采样 / VAE 都已实现 ✓）。新增 `engine/lora.py` ＋ `engine_lora_test.py`：
+      * 三条路**各自说清理由** ✓（语义从 `reference/ComfyUI-MiniMax-H3-Turbo` 抄 ✓）：`bypass`
+      （默认，量化底模上 merge 会被四舍五入/反量化吃掉）、`merge`（int8 融合的 `mlp.fc2` ——
+      融合 kernel 直接吃 `linear.weight`、绕过 forward ⇒ **bypass 钩子触发 0 次**）、`runtime`
+      （`adaln_proj`：pruned 底模把 `silu(t_emb)` 的 2688 维塌成曲线表 ⇒ 折不进也钩不到）；
+      * **真文件实测**（`minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16`，读头部不读数据）：
+      624 键 → **208 模块 / 0 孤儿 / 0 adaln**，qkv rank=384、其余 128，fc2 52 层；
+      ⭐ 208 个模块名**全部**是真底模（`minimax_h3_fl2va_pruned_int8_convrot`）里的参数名 ——
+      `diffusion_model.` 前缀一剥就对上 ⇒ **不需要 key_map** ✓（`h3_form` 的模块路径与检查点逐字一致）；
+      * 零 torch 可验 ✓：张量运算走注入的 `TensorOps`，自检用带 `.shape` 的假张量 + 三重循环把
+      `W+up@down·scale` 与 `base+up(down(x))·scale` **另写一遍**对拍，并钉「两条路在同一输入下
+      必须落到同一个数」✓；`read_tensors` 用自家 `engine/safetensors.py`（不装 safetensors 包 ✓），
+      逐张量按头部字节封顶 ⇒ 拿错 19 GiB 整权重会**当场拒** ✗；
+      * 接线（四处）：`bridge.lora_specs_from_settings` **单一真源**（相对路径按 `models_dir`／
+      `modelsDir` 拼；`is_file()` 不是 `exists()`；**不存在当场报** ✗）← 两个调用方共用：
+      `bridge.assembly_from_config`（config 那条路 ✓）与
+      `routers/engine._assembly_from`（HTTP `load`／`generate` ✓，2026-10-29 才收 ✓）⇒
+      ⚠️ 写法与 `strength` 口径再**下沉一层**到 `lora.coerce_spec`（第三个真源 ✗✗）：缺省／`None`
+      ⇒ 1.0、**显式 `0` 就是 0.0** —— 以前三处各写一遍且口径不同，其中 `float(… or 1.0)` 把 `0`
+      抬成 1.0 而装载键按 0.0 记 ⇒ 「键说 0.0、实际按 1.0 挂」（换强度不重装、报告也假）✓✗；
+      `runtime.ensure_loaded(loras=…)` ⇒ `TorchBackend.load_weights(loras=…)` 在**权重装齐之后**挂 ✓；
+      ⚠️ 装配里必须放 **dict**（`bridge.lora_assembly` ✓）不是 `LoraSpec` ✗✗ —— 装配会随
+      `/tasks` 回显、而 `success()` 走 `JSONResponse`（裸 `json.dumps` ✓ 不过 `jsonable_encoder` ✗）
+      ⇒ 塞一个 dataclass 就是 `TypeError` ⇒ **500**；这也是 2026-10-29 查出并一并修掉的既有隐患 ✓
+      （config 那条路一直在塞 `LoraSpec` ✓✗，只是此前没人配过 LoRA 才没炸 ✓）；
+      ⚠️ 该函数**不许**"简化"成 `[spec.to_dict() for spec in specs]` ✗✗ —— `LoraSpec.to_dict()`
+      把 strength 抹到 4 位小数 ✓，装载键比的却是原值 ✓ ⇒ 回显与键两侧算出**两个数**、每换一次
+      强度白装一遍 ✓✗；这条以前**一条判据都没有** ✓✗，2026-10-29 补四条（条目是 dict 且键名
+      归一／strength 原值不取整／`_lora_key(装配)==_lora_key([spec])`／裸 `json.dumps` 能出去）✓，
+      反向验证：改成 `to_dict()` 恰红两条（`0.123456789`→`0.1235`），其余保持绿 ✓；
+      ⚠️ 两个调用方**不许各抄一份归一** ✗✗ —— 抄了就是「同一个 `loras` 在两条路上装出不同的东西」；
+      ⚠️ `_lora_key(loras)` **必须进装载键** ✗✗ —— 不进就会出现「换了 turbo LoRA 却复用上一套
+      模型」，而且一声不响（画面上只表现为"不是那个档"）；排序 ⇒ 顺序无关 ✓；
+      ⚠️ 但"键算对了"**不等于**"键真的参与比较" ✗✗ —— 以前只有 `case_wiring` 数
+      `loras=_lora_key(loras)` 出现两次（静态文字 ✓），算完不塞进 `_loadKeyTuple` 也照样绿 ✓✗。
+      2026-10-29 补 `engine_lora_test::case_reuse_gate`：拿**真** `EngineRuntime` 验行为 ✓
+      （`_backend` 塞占位对象、`_current` 置忙 ⇒ 零 torch ✓，因复用判据排在忙检查**之前** ✓）——
+      正例 `reused: True`（**忙也不拒** ✓：本来就不用重装）、负例必抛 `EngineBusy` ⇒ 换强度／
+      换文件／**把 LoRA 摘掉**／`strength_model` 写法四个入口都钉住 ✓；反向验证：把 `_lora_key`
+      打成恒返回 `()` ⇒ 恰红 5 条（新增 3 条负例 + 既有 `_lora_key` 2 条），正例仍绿 ✓；
+      它**也**走 `lora.coerce_spec` ✓（2026-10-29 ✓）—— 自己解析时只认 `strength`、不认
+      `strength_model` 别名（实测 `key=(('/a',1.0),)` 而 `apply=0.5`）⇒ 直调 `ensure_loaded`
+      的调用方会被记错强度、静默复用；⚠️ 但现行两条路都先经 `lora_assembly`（键名已归一成
+      `strength` 且不取整 ✓）⇒ 那是**潜在**缺口、**不是**已发生的线上错误 ✓（如实记 ✓）；
+      ⚠️ 装不上必须炸 ✗：adaln 装不了 / 一层都没生效（拿错文件）/ 出图侧（SDXL）还不支持 LoRA
+      三处都 `TorchBackendUnavailable`，**不许静默跳过** ✗；
+      ⚠️ 本轮**撤销**一处重复实现：参考那个 4 步双时钟采样器，自家 `h3_form.sample_dual_stream`
+      早就按视频 shift 12 / 音频 shift 3 分头换算且有 `denoise_mask`／`pin` ✓ ⇒ 不再加第二份 ✓
+      （`sample.py`/`schedules.py` 已复原，`engine_core_test` 34/34 复跑确认一字未坏 ✓）。
+      * ㉔b **同日·尾帧（fl2v）接进引擎** —— 原状：`GenerationRequest` 只有 `first_frame`，
+      `bridge._materialize_extras` 不认尾帧，service 层在拿到 `lastFrameUrl` 时只能打一条
+      `engine-last-frame-ignored` 警告 ⇒ FL2VA 路线（`shot_router` 的 `first_last_frame` ✓）
+      走引擎时**产物末端与尾帧无关**，而且**看不出来** ✓✗。现补：
+      `request.last_frame` ✓、`_materialize_extras` 落盘 ✓、`TorchBackend.dualStream["lastFrame"]`
+      自述 ✓、`_dual_keyframes` 支持**多关键帧**（首帧=第 0 帧、尾帧=第 `frames−1` 帧 ✓ 同一套
+      `cond` 段 ✓ 只换下标 ✓）、管线双流侧如实记 `lastImagePath`／`lastFrameIndex` ✓；
+      ⚠️ 三条**不静默**的边界：单流后端给尾帧 ⇒ `stage=condition` 明确失败（单流掩码只能混第 0
+      潜帧 ✓ 硬做会把尾帧放到**开头** ✓✗）／`frames<2` 时给尾帧 ⇒ 报「首尾同一位置」✗／
+      后端没自述 `lastFrame` ⇒ 拒 ✓。`/api/v1/engine/backends` 的能力自述补 `supportsLastFrame`
+      ＋ `lastFrameBackends` ✓。下标数学抽成**纯函数** `engine/keyframes.py::plan_keyframes`
+      （零依赖 ✓ 无 GPU 也能验 ✓ —— 下标算错**不报错**，只会让「开头变成尾帧」✗✗）。
+      回归：`engine_pipeline_test` **115/115**（+1 单流拒尾帧、+3 关键帧下标纯函数）；
+      `engine_dual_stream_test` 9/9（新增 ㉜″/㉜‴/㉜⁗ 三条在 torch 机器上才跑 ✓ 本环境 skip ✓）。
+      本套 **49/49**（skip 1：本环境无 torch）；受影响回归：`engine_pipeline_test` 111/111、
+      `engine_cache_key_test` 14/14、`engine_hybrid_load_test` 32/32、`engine_h3_form_test` 5/5、
+      `engine_dual_stream_test` 9/9；`engine_runtime_test` 10/12 与 `engine_bridge_test` 65/66
+      **改动前基线相同**（已 stash 对拍确认：缺 torch 依赖 / 临时清单根 vs 真模型目录，均既有 ✓）。
+     * ㉕ **同日·补 Q6_K 反量化（「对话改进程内」的最后一跳）** —— 原状：`gguf_dequant`
+     只认 {F32, F16, BF16, Q8_0, Q4_K}，其余 k-quant **具名拒绝** ✗。而 **Q4_K_M 不是纯 Q4_K** ✓✗：
+     量化器按张量挑类型，`attn_v`／部分 `ffn_down` 会挑成 **Q6_K** ✓ ⇒ 只差这一种，
+     **Ollama 上最常见的 Q4_K_M 权重就整份装不进** ✗（报错只在读到那几张量时才冒 ⇒
+     症状是「前面几十个张量都对、突然具名拒绝」✓✗）。现补 `_dequant_q6_k` ✓。
+     ⚠️ 三处**与 Q4_K 相反**的细节（本类实现最容易踩的）：①`d` 在**块尾**（offset 208 ✓）
+     不是块头 ✗；②**没有 `dmin`** ✓（只有 scale ✓，Q4_K/Q5_K 才有 min ✗）；③块 210 字节 =
+     ql[128]+qh[64]+scales[16]+d[2] ✓。
+     实证（**盘上真文件**，非自造期望值 ✓）：
+     ⓐ `qwen3-vl-4b-heretic-Q4_K_M.gguf` = **398 张量**（F32 145 / Q4_K 216 / **Q6_K 37** ✓，
+     37 张全是 `blk.N.attn_v.weight` 与 `blk.N.ffn_down.weight` ✓）⇒ 补完 **类型覆盖率 100%** ✓；
+     ⓑ **跨量化对拍**：`seedvr2_ema_3b-Q4_K_M.gguf`（纯 Q4_K 210 张 ✓ —— 反证「M 后缀**不保证**
+     含 Q6_K」✗，判据只能读 `dtype_counts` ✓）vs `seedvr2_ema_3b-Q6_K_M.gguf`（Q6_K 210 张 ✓）
+     的同名 2560×2560 张量：**corr = 0.996990 / 0.996752 / 0.997329** ✓、std 差 < 0.1% ✓
+     （解错位哪怕一个 bit 的移位 ⇒ corr 崩 ✗✗ —— 这是唯一不靠「我算的 == 我写的期望」的证据 ✓）。
+     ⚠️ 环境事实（本轮**实测**，别再信旧账 ✗）：本机 `.venv` **原本连 numpy 都没装** ✗
+     ⇒ `engine_gguf_dequant_test` / `engine_gguf_to_llm_test` / `engine_llm_backend_test` /
+     `engine_chat_template_test` **四套一直处于「import 崩」** ✓✗（不是 skip ✗，跑出去只有 traceback ✗）
+     —— 旧账本里那套 133/4265 是**A5000 目标机**（有 torch）的数 ✓，本机照抄会得到假绿 ✗。
+     本轮装上 `numpy 2.5.4` ＋ `jinja2` 后：`engine_gguf_dequant_test` **20/20** ✓（原 9/9 全部因缺
+     numpy 从未在此机跑过 ✓；同日向量化后 23/23 ✓ 见 ㉖）；`engine_chat_template_test` 仍缺 **torch** ⇒ 照崩 ✗；
+     `engine_gguf_to_llm_test`／`engine_llm_backend_test` 同样缺 torch ✗（**装 torch 是解锁
+     「对话真跑」的唯一前提** ✓，约 200MB(CPU)/2.5GB(CUDA) ⇒ 留给创作者点头 ✗ 本轮不自作主张装 ✗）。
+     * ㉖ **同日·反量化提速（Q4_K 向量化）** —— Q6_K 补上后自检全绿 ✓，但**真装权重还是跑不动** ✗：
+     原实现是「per-block Python 循环 + 每段两次切片赋值」✓✗，真张量实测 **11.5 M 元素/秒**
+     ⇒ 4B 权重（盘上 3138 M 元素）**单是反量化就 273 秒** ✗。现改为**整张量向量化**
+     （预计算 256 列的字节下标/半字节/段号三张表 ✓，`numpy` 一次算完整块 ✓，按 4096 块分块控峰值内存 ✓）：
+     真文件实测 `blk.27.attn_output.weight`（10.5 M 元素）**100.6 M 元素/秒**、`blk.0.ffn_down.weight`
+     （24.9 M 元素、Q6_K）**157.2 M 元素/秒** ⇒ **8.7× / 30.8×**，4B 整份估算 **273 秒 → ≈31 秒** ✓。
+     ⭐ 正确性**不靠我写的期望值** ✓：新增「**随机字节 × 两版对拍**」两条 —— ⓐ 6-bit scale/min
+     的向量化版 vs 逐元素参考版（4096 组随机字节）；ⓑ Q4_K/Q6_K 的**整张量向量化版 vs 逐块参考版**
+     （4097 块随机字节 ⇒ **跨 chunk 边界** ✓，分块循环写错只在第二个 chunk 才露 ✓✗）——
+     两侧**逐位相等**（最大偏差 0.000e+00 ✓）。手造块只覆盖「我想到的组合」✗，随机对拍才是兜底 ✓。
+     ⚠️ 对拍能成立的前提是**结合顺序也一致** ✓：参考是 llama.cpp 的 `d*sc*q` ✓，向量化若写成
+     `q*sc*d` 就差 1 ulp ✗（已把 Q6_K 改成 `q*(d*sc)` ✓）；参考里用 Python `float` 会把整式
+     抬成 float64 ✗（已改 `np.float32` ✓）。本套现 **23/23** ✓。
+     * ㉗ **同日·Ollama 模型仓「清单 ↔ blob」的 sha256 核对** —— `ollama_store` 原来只有「列模型」✓：
+     读清单拿 ``digest``/``size``、:func:`blob_path` 定位 blob ✓✗。两个真缺口：ⓐ **只 stat 大小** ✗
+     ⇒ 内容被篡改但**字节数不变**的 blob 完全看不出来 ✗✗（下载中断/磁盘错/手工拷贝都会留下这种 ✓）；
+     ⓑ **config 层缺失不算缺** ✗ —— config 装着参数与模板元数据 ✓，没了模型照样加载不了 ✗，
+     而 ``missingBlobs`` 只数 ``layers`` ✗ ⇒ 报「0 缺失」✗✗。现补：`verify_blob`（真算 sha256 ✓、
+     四态 ``ok/mismatch/missing/invalid-digest`` ✓）、`verify_model`/`verify_store`（``max_blob_bytes``
+     超预算 ⇒ ``skipped`` ＋ ``complete=False`` ✓，**跳过不许说成通过** ✗✗）、`read_manifest`
+     （清单视图：层 ``role`` ✓ / 盘上实况 ✓ / ``sizeMismatch`` ✓ / ``totalSize`` **不含 config** ✓ 与
+     ``/api/tags`` 同口径 ✓）、`find_manifest`（**按名反查真实文件** ✓，不自己拼路径 ✗）、
+     ``missingBlobs`` 计入 config ＋ ``missingConfig`` 布尔 ✓（``size`` 口径不变 ✓）。
+     ⭐ 顺带补一处形状校验：摘要要**拼成文件名** ✗ ⇒ :data:`DIGEST_RE` 只放行 64 位 hex ✓
+     （``sha256:``/``-`` 可省 ✓），否则非法摘要会被当成「缺点文件」✗，path 里也能塞进 ``../`` ✓✗。
+     ✅ 实测：`ollama_store_test` **42 → 63/63** ✓；**真机库抽检**（`D:\\app\\LLM\\models\\ollama\\models`，
+     4 个模型）**14 个预算内 blob 的 sha256 全部等于文件名摘要** ✓、跳过 5 个大权重 ✓、不符 0 ✓
+     （274 MB 的 nomic 权重 153 ms ≈ 1.8 GB/s 热缓存 ✓）。⭐ 反向验证（真做了一次 ✓）：把 `_sha256_file`
+     换成「拿文件名当摘要」⇒ 同一份**改了一个字节的同尺寸** blob 从 ``mismatch`` 变 ``ok`` ✓✗
+     ⇒ 这条断言**不是恒真** ✓；旧写法 ``digest.replace(":","-")`` 对 ``sha256:../../x`` 会拼出
+     ``blobs/sha256-../../x`` ✓（能不能跳出去看中间目录在不在 ✓ 所以别赌 ✗），新写法直接 ``None`` ✓。
+     ⚠️ 未做：没有新开 HTTP 端点（校验是**主动**动作 ✓，进请求链路会按次真读 GB 级文件 ✗）。
+     * ㉖′ **同日·缺 torch 不再让整片看不到** —— 原样：三套（`engine_gguf_to_llm_test` /
+     `engine_chat_template_test` / `engine_llm_backend_test`）**整份**崩在 ``import torch`` ✗
+     （更阴的一处：``llm.py`` 的 ``generate_llm`` 是**懒导出** ✓，连「取属性做 stub」都会触发 ``_build()`` ✗），
+     于是**根本不需要 torch** 的纯逻辑（命名映射 / config 推导 / jinja2 渲染 / describe / 接线）
+     也跟着一条都跑不了 ✗✗ —— 「缺依赖」被读成了「整套坏」✗。现按需切口：需要 torch 的段
+     **显式打印 SKIP** ✓（``SUMMARY`` 分母里没有它 ✓ 所以「跳过」不会被念成「通过」✗），
+     能跑的照跑 ✓。缺 torch 时 `engine_gguf_to_llm_test` **10/10 + 2 SKIP** ✓、`engine_chat_template_test`
+     **15/15 + 1 SKIP** ✓、`engine_llm_backend_test` **5/5 + 1 SKIP** ✓（另一处更隐蔽的 SKIP：
+     借不到 `fastapi` 的解释器上 `case_wiring` 会崩在 `core.response` ✗ ⇒ 同样显式打印 ✓）。
+     ✅ **torch 已落到本项目 venv**：`torch 2.15.0+cpu`（`--index-url https://download.pytorch.org/whl/cpu`
+     ＋ `sympy/networkx/filelock/fsspec` ✓ 共 ~200 MB ✗ CUDA 版 2.5 GB 没碰 ✓）。同解释器复跑三套：
+     `engine_gguf_to_llm_test` **12/12** ✓（含**往返恒等逐张量相等** ＋ **tie embeddings** ✓）、
+     `engine_chat_template_test` **18/18** ✓（含 ⑤ 后端接线 ✓）、`engine_llm_backend_test` **8/8** ✓
+     （含 ③ 生成链路 ＋ ④ 接线 ✓）。
+     ⚠️ **端到端真推理仍跑不了**，缺口已定位（不是 torch ✗）：`tokenizer_hub`/`tokenizer_own` 只认
+     **HF 词表文件**（`tokenizer.json` 或 `vocab.json`+`merges.txt` ✓），而 Ollama 库里的模型**只有 GGUF**
+     ✗ —— 词表在 `tokenizer.ggml.tokens`/`merges` 元数据里（真机 qwen3-vl-4b 实测：151936 tokens ＋
+     151387 merges ＋ `pre='qwen2'` ✓）。所以 `LlmBackend.load()` 必然报「词表未就绪 ✗」✗。
+     ⇒ 下一步要补 **GGUF 词表装载** ✓，且**不能直接套 GPT-2 预分词** ✗：`:func:tokenizer_bpe.pretokenize`
+     是 GPT-2 规则（` ?\p{N}+` 连续数字成段 ✓、换行归 `\s+` ✓），Qwen2 是 `\p{N}` **单个**数字 ＋
+     `\s*[\r\n]+` 独立分支 ✗ ⇒ 硬套会**静默编出错 id** ✗✗（数字串、换行、标点前缀三处必错 ✓）。
+     * ㉖″ **同日·拿真机 Ollama 的 qwen3 GGUF 去试，撞出 3 个真 bug**（自造元数据的用例一个都没照出来 ✗✗）：
+     ⓐ `gguf_to_llm` 的拒绝分支直接用 `GgufDequantError` 却没导入 ✗ ⇒ 一进拒绝就是 **NameError** ✗
+     （「理由清楚」退化成「名字都没了」✗）；ⓑ `infer_llm_config` 把 `{arch}.vocab_size` 当**必需** ✗，
+     可 llama.cpp 的 GGUF **根本不写这个键** ✗ —— 词表大小就是 `tokenizer.ggml.tokens` 的元素个数 ✓
+     （`gguf.inspect` 对数组是**截断保存** ✓：`{"__array__","len","head"}` ⇒ 写 `len(tokens)` 会拿到
+     **3**（三个键）而不是 151936 ✗✗，这个坑当场踩了一次 ✓）；ⓒ `head_dim` 只读 `attention.head_dim` ✗，
+     实际键是 `attention.key_length` ✓（GQA 时它与 `hidden/heads` 不等 ✗ 所以不能倒过来 ✓）。
+     修后在真机 3 个模型上验：`qwen3:8b` vocab 151936 / hidden 4096 / depth 36 / 32÷8 / hd 128 / ffn 12288，
+     `qwen3:14b` 5120 / 40 / 40÷8 / 13824 ✓ 与官方一致 ✓。
+     ⓓ 更硬的一条：**Qwen3 的 per-head QK-norm**（`blk.N.attn_q_norm.weight` / `attn_k_norm.weight`，
+     形状 `(head_dim,)` ✓）`LlmModel` **压根没有这两个参数** ✗ ⇒ 8B 有 **72** 个、14B 有 **80** 个张量
+     无处安放 ✗✗（`strict=True` 必报 missing ✗）⇒ 已补 `LlmConfig.qk_norm` ＋ `GQAAttention.q_norm/k_norm`
+     （**proj → reshape → QK-norm → RoPE** ✓ 照 llama.cpp 的 `build_qwen3` 顺序 ✗✗ —— 先 RoPE 后 norm
+     shape 一样对 ✓ ⇒ 错了不报错、只让效果变差 ✗）、`_QK_NORM_PATTERNS` **单开关**（并进主表会让
+     `qk_norm=False` 的模型多出 key ⇒ strict 报 unexpected ✗）、`load_llm_from_gguf` **按张量表自动检测** ✓
+     （GGUF 没有任何 metadata 键声明它 ✗ ⇒ 看文件不是在猜 ✓）。`engine_gguf_to_llm_test` **19/19** ✓，
+     其中 ③⁗′ 是**能失败**的：把 `blocks[0].attn.q_norm.weight` 乘 2 ⇒ **logits 必须变** ✓（只存不用 ⇒ 红 ✗✗）。
+     ⚠️ 仍未闭环：**GGUF-only 模型没有 tokenizer** ✗（见上条）⇒ 8B 能「装载 + 前向」，还不能「出文本」✗。
+    * ㉖‴ **同日·CPU / GPU 双设备（创作者要求「两种环境都能正常跑且结果一致」）** —— 落法：内核
+      （`llm.py` / `gguf_to_llm.py`）**只认显式 device** ✓（默认 `cpu` ✗ 不择优 ✗），「有卡用卡」这种择优
+      **只许**发生在配置层（`LlmBackend` 的 `device="auto"` ✓）—— 否则全部老测试会静默跑到卡上 ✗、
+      CPU 口径的失败也没人发现 ✗✗。三条硬口径：ⓐ 显式点名**用不了**的设备 ⇒ **具名拒绝**（报错里列出本机
+      可用设备）✗ 不静默回落 ✗；ⓑ 精度随设备（CPU·fp32 ✓／CUDA·bf16 ✓：8B 的 fp32 是 32 GB ✗ 装不进
+      24 GB 卡 ⇒ 默认 fp32 等于「GPU 模式」一上来就 OOM ✗），要跨设备**逐位对齐**就显式 `dtype="float32"` ✓；
+      ⓒ `describe()` 把 `device`（实际，`load()` 后才有）与 `deviceRequested`（请求）**分两栏** ✓，
+      且设备/精度要进后端缓存键 ✓（只按路径缓存 ⇒ 改了 device 仍拿到旧设备的后端 ✗✗）。
+      低精度四处**必须先堵**（实测：fp32 的因果掩码加到 bf16 的 scores 上 ⇒ 提成 fp32 ⇒
+      `attn @ v` 报 `expected scalar type Float but found BFloat16` ✗；bf16 的 q 乘 fp32 的 cos 同一条崩 ✗）：
+      掩码用 `scores.dtype` ✓、cos/sin 降到输入精度 ✓、RMSNorm 升 fp32 再降回（HF 同口径）✓、采样统一 fp32 ✓。
+      新自检 `engine_llm_device_test` 在本机（RTX A5000 / torch 2.13.0+cu130）**34/34** ✓；无卡机器上 GPU
+      那几条**显式 SKIP**（不计入分母 ✓ SKIP ≠ 通过 ✓）。每条判据都配**反验** ✓：把卡上首个参数 `+0.05`
+      ⇒ fp32 的 2e-3 判据与 bf16 的 2% 判据**都必须报** ✓（判据太松 = 假绿 ✗✗）。
+      参考（**只参考行为、未复制代码**）：llama.cpp（MIT，同一张 ggml 图跑 CPU/CUDA 后端）、
+      huggingface/transformers（Apache-2.0，低精度 RMSNorm 内部升 fp32）、PyTorch（BSD-3，
+      `Module.to` / `set_default_dtype` 语义）。
+    * ㉖⁗ **同日·真机 qwen3:8b 全程乱码的根因：GGUF 数组摆法（形状对 ≠ 摆法对）** ✗✗ ——
+      `gguf_to_llm` 原来按 **dims 正序** `reshape(ne0, ne1)` 再 `.T`，配一张 `_TRANSPOSE_SUFFIXES`。
+      两条错互相抵消掉**形状差**（`flatten().reshape(4096,151936).T` 与正确摆法
+      `flatten().reshape(151936,4096)` 都是 `(151936,4096)` ✗），于是装载不报错、自造往返用例也过 ✗✗，
+      但**元素被整张重排** ⇒ 权重成了「同量级随机矩阵」。真机症状：`1+1=` 的下一 token 熵 **6.9 bits**、
+      embedding 行间余弦 **0.014**、`blk.0.attn_norm` 均值 0.0114；而逐层数值「看着健康」（无 nan、方差正常）
+      ⇒ **数值体检抓不住它** ✗，只有语义/真值对照能抓 ✓。
+      事实：`ggml` 的 `ne[0]` 是**最内维（变化最快）**，numpy C 序是**最后一维**变化最快
+      ⇒ `numpy_shape = tuple(reversed(dims))` ✓，摆好**就是 PyTorch 布局**、**一个转置都不需要** ✓。
+      修法：新增 `gguf_to_llm.numpy_shape(dims)` ＋ `_read_tensor` 用它 reshape、删掉 `_TRANSPOSE_SUFFIXES`
+      与三处 `.T`；`gguf_state_dict` 的入参改成 `{名: (dims, 一维流)}` ✓（形状信息**不能**从数组自己反推 ✗）。
+      用例 ②′ 改成**逐格判**：只给 ggml 事实（`dims=(4,6)` ＋ `flat=0..23`）断言 `embed == flat.reshape(6,4)`，
+      并加 ②‴ 反证「旧错法算出的矩阵形状相同但元素不同」✓（否则这条用例没有分辨力 ✗）。
+      真机复验（`qwen3:8b` q4_k_m，greedy 6 token）：
+      CPU·fp32 `load 82.9s` → `1+1=`＝`2, 2+2`／`中国的首都是北`＝`平，对吗？`／
+      `…低头思故`＝`里。这是李白的《`；GPU·bf16 `load 96.3s` → 三条**逐 token 完全相同**
+      （`greedy 跨设备逐 token 相同: True` ✓，生成 5.2s → 0.7s ✓）。与 ollama 自身（`2, 2+2=4`）一致 ✓。
+    * ㉖⁗′ **同轮·端到端对话路径上再接出两个真 bug**（权重修好后才露头 ✓✗ —— 都在 `LlmBackend` 层 ✗）：
+      ⓐ **Qwen3 骨架首行是 `{%- if tools %}`** ✓，而本层用 `StrictUndefined` ✓ 且 `render()` 只传
+      `messages`/`add_generation_prompt`/`bos_token`/`eos_token` ✗ ⇒ `UndefinedError: 'tools' is undefined`
+      ⇒ 整条对话路径**当场拒** ✗✗（权重装了 95 秒才炸在渲染 ✗）。修：`render()` 增
+      `tools: Any = None` / `documents: Any = None` / `extra: Mapping | None = None` ✓ ——
+      **对齐** HF `apply_chat_template` 的签名（那两个参数本来就默认 `None` ⇒ `{% if None %}` 为假 ✓），
+      **不是**放宽判据 ✗（把 `StrictUndefined` 换回 `Undefined` 会让「模板要一个本层没给的变量」
+      静默渲染成空串 ✗✗ = 正是本仓最忌的「格式悄悄不对」）。`LlmBackend` 增 `enable_thinking`
+      （`None` = **不定义**该变量 ⇒ 骨架自己决定 ✓ 与 HF 同口径；`False` ⇒ 不生成思考过程 ✓，
+      `describe()["chatTemplate"]["enableThinking"]` 如实报 ✓）。
+      ⓑ **`generate()` 把「prompt＋续写」整条 decode** ✗✗（`self._hub.decode(out[0].tolist(), …)` ✗）
+      ⇒ 调用方看到自己刚发的那句：真机实测 `OUT>>user\n你好，用一句话介绍你自己。\nassistant\n\n好的…`✗。
+      修：按 **token 数**裁（`out[0][len(ids):]` ✓，不按文本找 ⇒ 不受空白/特殊 token 解码差异影响 ✓）。
+      新用例 `engine_llm_backend_test` ③‴（prompt 比 `max_new_tokens` 长 ⇒ 「整条解」必超、只解新的必不超 ✓）、
+      ③⁵ 系列（骨架引用 `tools` 不炸 ✓／真给了 `tools` 照用 ✓／`extra` 透传 ✓／不给就不定义 ✓）；
+      `engine_chat_template_test` ④ 的判据变量从 `tools` 换成**本层不提供**的 `custom_var` ✓
+      （继续验证 `StrictUndefined` 还在 ✗ —— 换宽松就是静默空串 ✗✗）。真机复验（qwen3:8b / cuda:0·bf16）：
+      `enable_thinking=False` ⇒ `你好，我是通义千问，一个由通义实验室研发的超大规模语言模型，能够帮助你回答…`
+      （`load 94.6s` + `gen 1.6s` ✓，只含回答、不含提问 ✓）。
+    * ㉗ **2026-10-29 落地／10-30 复测·E3.4 装配量计 ＋ 判据从零重建**（⚠️ 本轮**真写坏过一次** ✓，
+      逐条可核 ✓；教训见 ⓕ ✓✗）：
+      ⓐ `status().cache = {hits, misses, evictions, since, recent, scope, note}` ✓。口径**改了**：方案文档原写
+      「取 `cache_guard`／`latent_container` 的命中/淘汰计数」**落不了地** ✗ —— 那两个是**纯函数模块**、
+      一个计数器都没有 ✓ ⇒ 硬凑只能编出两个假计数 ✗✗ ⇒ 口径定为**装配复用门** ✓；边界写进 `scope`
+      （不含 torch allocator／hybrid 合并缓存 ✓）、易误解处写进 `note`（**进程级**、重启归零 ⇒ 读到 0 只说明
+      这一程没复用 ✓✗）。
+      ⓑ 记账四点：命中复用 ⇒ `hit`／**忙到拒装不记**（什么都没发生 ✓；记成 miss 会把「排队等」与「真装一遍」
+      混成一件事 ✗）／决定真装 ⇒ `miss` ＋ 丢旧 ⇒ `eviction`（**必须记在动手卸之前** ✓ —— 换装配是先放旧的再装，
+      装失败旧的也真没了 ✓✗，由 `engine_runtime_test` 的 `case_replace_order` 钉住 `_backend` 的卸下时刻 ✓）／
+      显式 `unload` ⇒ `eviction`、本来没装则不记 ✓。
+      ⓒ **自查出一条假账**：`ensure_loaded(force=True)` 且键**相同**时，`_ensure_loaded_internal` 一进门就
+      同键短路 ⇒ 实际是「当场复用一次」，若按 `miss`＋`eviction` 记就是两条假账 ✗✗（既没真装、旧的也没丢 ✗）
+      ⇒ 已改记 `hit` ✓；并记明 `force` **对同键不生效** ✓✗（真要重装得改装配键或先 `unload`，代价 H3 主干
+      17.94 GiB ≈ 100 秒）—— 属**待创作者裁定**的行为缺口，本轮不动行为 ✓。
+      ⓓ `SCHEMA_VERSION` **1→2** ✓（**顶层加键就是破坏性变更** ✓✗：按「字段集合相等」校验的老调用方会红 ✓，
+      `engine_router_contract_test` ⑧⑨ 正是这么用的 ✓）＋ `docs/engine-api.schema.json` 同步
+      （status.top 增 `cache`、status.nested 增 `cache` 七键 ✓）。快照不改会红 ⇒ 先升版本再改快照 ✓。
+      ⓔ 判据：`engine_runtime_test` **53/53** ✓（新增 `case_cache_meter` 14 条 ＋ `case_replace_order` 2 条 ＋
+      取消三值 6 条 ＋ 原有 31 条）；`engine_router_contract_test` **19/19** ✓。反向验证 **4 次**
+      （miss 记账挪到装成功之后 ⇒ 红／命中不计数 ⇒ 红／去掉环形缓冲上限 ⇒ 红／`force` 同键按真装记 ⇒ 白盒判据红），
+      复原后全绿 ✓、`REVERSE-CHECK` 残留为空 ✓。
+      ⓕ ⚠️ **本轮踩的真实事故（记下来，别再犯）**：用 PowerShell `Get-Content -Raw` ＋ `[IO.File]::WriteAllText`
+      批量替换含**中文**的测试文件 ⇒ 读入按 cp936 解码 UTF-8 ⇒ **809 字节丢失／155 行受损** ✗✗
+      （写回的是 `0x3F` 与 U+FFFD，**无法逐字还原** ✗）。`.bak`／IDE 本地历史／卷影副本／`git fsck` 的悬挂提交
+      （`c896efa`、`5723948`，均为 HEAD 版）**全都没救** ✗；最后靠 `__pycache__` 的 pyc 用 `marshal` dump 出字符串
+      常量，才把 `case_replace_order` 与 `case_cache_meter` 逐字重建回来 ✓（先 `git checkout` 回 HEAD 286 行再补 ✓）。
+      **纪律：批量替换只走 `replace_in_file`，或用 `-Encoding utf8` 显式指定编码** ✓✗。
+      ⓖ 全量复测（日志 `backend-py/tmp/run_all_e3.log`，已 gitignore ✓）：**仅 1 套红** ——
+      「本地服务活体接缝（ollama 真推理）」5/9，根因是本机 ollama `/api/tags` 返回 `[]`（`qwen3:14b` 未拉取 ✓
+      环境缺口 ✓ **不是回归** ✓✗；解法同 ㉕′：`ollama pull qwen3:14b` 后重跑）。引擎侧四套全绿：
+      在机运行时 53/53 ✓、业务桥 74/74 ✓、LoRA 70/70 ✓、整链 45/45 ✓。
+    * ㉘ **2026-10-30·E2.5 LoRA 内容账本（内容哈希 ＋ 引用计数 ＋ 释放事实）** —— 方案文档 E2.5 原写
+      「`engine/lora.py` 补哈希＋引用计数＋释放后显存事实」✓，落地时**没往 `lora.py` 里塞状态** ✗✗：
+      那个模块是**纯算法** ✓（`apply_specs` 拿路径就读盘），塞进账本会让「同一份 LoRA」的生命周期
+      散在两处 ✓ ⇒ 新建零依赖 `engine/lora_cache.py` ✓，`lora.py` 一行未动 ✓。
+      ⓐ **内容身份不是路径** ✓✗：`digest_file` 分块 1 MiB 算 sha256 ✓；`(path, size, mtime_ns)` 只是
+      「省一次 sha256」的快路 ✓ —— 换个文件名的同内容 LoRA 现在**摘要相同** ✓，账本里只有 1 个条目
+      （E2.5 之前按路径认 ⇒ 第二份张量、显存与 RSS 双翻倍、**而且没有任何地方看得出来** ✗✗）。
+      换路径命中会记 `deduped` ＋ `aliases` 留痕 ✓（「只占一份」得有凭据 ✓）。
+      ⓑ **借/还**：`acquire(path, reader=...)` 命中就 `refCount += 1` 并回**同一份张量对象** ✓；
+      `release` 减到 0 才真删并记 `freed`/`freedBytes` ✓；**还多了／还个没借过的摘要 ⇒ 具名报错** ✗✗
+      （静默把别人的那份还掉 = 后面那次前向读到已释放内存 ✓）。
+      ⚠️ **读盘必须在锁外** ✓：真 LoRA 是 GB 级 ✓，锁里读盘会把整个引擎卡成串行 ⇒ 锁外读 ＋ 回来后
+      **二次检查**去重 ✓（`case_reentrant` 钉住：读盘途中 alias 抢先 ⇒ 条目仍 1、自己刚读的那份丢掉、
+      返回内存里那份 ✓）。
+      ⓒ **`tensorBytes` 按 `numel × element_size`** ✓，算不出就 `None` ＋ `tensorBytesUnknown` 计数 ✓✗
+      —— **不许拿文件大小顶替** ✗（文件字节恒大于张量字节 ⇒ 报出来的数一定偏大 ✓）；
+      `note` 明写「总数偏小」✓。
+      ⓓ **接线到位** ✓：`torch_backend._apply_loras` 现在把 `cache.acquire` 包成 `reader` 闭包递给
+      `apply_specs` ✓（读盘口只剩一个 ✓）；换装配开工前先 `self.release_loras()` ✓；**失败两条路径**
+      （异常／`result.error` 或 `applied == 0`）都 `_release_leases` ✓（挂炸了不许吊着 ✓）；
+      `runtime.unload` **先** `backend.release_loras()` **再** `lora_cache.release_all()` ✓✗ ——
+      顺序反了模型都拆完了账本还报 `outstanding > 0`，那个字段就成**假泄漏** ✓✗；
+      `status().lora` 读 `shared().facts()` ✓（账本只有一处真源 ✓）；`_SHARED` 进程级单例
+      （挂后端实例上 ⇒ 换装配就丢一次 ✓✗）。
+      ⓔ `status().lora = {entries, entryCount, refTotal, tensorBytes, tensorBytesUnknown, hits, misses,
+      deduped, freed, freedBytes, since, recent, scope, note}` ✓；`recent` 环形只留 **8** 条 ✓；
+      `scope` 明写「**不含主干装配复用门**」✓（与 ㉗ 的 `cache` 是两件事：那边记**次数**、这边记**字节**
+      —— 混着看会得出「复用越多占越多」✗✗）。`SCHEMA_VERSION` **2→3** ✓ ＋ `docs/engine-api.schema.json`
+      同步（`status.top` 增 `lora`、`status.nested.lora` 14 键 ✓）。
+      ⓕ 判据：新 `engine_lora_cache_test` **43/43** ✓（假张量只实现 `numel`/`element_size` ⇒ **零 torch** ✓）；
+      回归 `engine_lora_test` 70/70 ✓、`engine_runtime_test` 53/53 ✓、`engine_router_contract_test` 19/19 ✓。
+      ⓖ ⚠️ **接线判据踩了两个坑（记下来）**：① `ast.walk` 是**广度优先** ✓ ⇒ 拿遍历下标比「谁在前面」
+      会随机绿/红 ✗✗ ⇒ 改成抽 `(lineno, 点号名)`、按 **`lineno`** 判序 ✓（`_call_sites` + `_first_line`）；
+      ② 想匹配 `lora_cache.shared().facts()` 得知道 `ast` 把它拆成**两个** Call 节点
+      （外层 `facts`、内层 `lora_cache.shared`）✓ ⇒ 断言要写成「两个名字都在」而不是找整串 ✗。
+    * ㉙ **2026-10-30·E2.1/E2.2 阶段注册表 ＋ 装载前兼容性闸门** —— 新增零依赖 `engine/registry.py`
+      （`StageSpec` / `STAGES` / `check_compat` / `ensure_compat` ＋ `VRAM_HINT` 单一真源 ✓）。
+      ⓐ **组件名册不抄一份** ✓✗：E2.1 原文写「阶段 → 必需组件 / 可选组件」，落地时**没**照着
+      抄一份 key 清单 ✗✗ —— 必需与否的真源是 `configs/models.json` 的 `required` ✓、按 `category`
+      筛选是 `inventory.STAGE_FILTERS` ✓ ⇒ 注册表只声明「分类 / 能力 / 依赖 / 版本下限」✓，
+      组件由 `inventory.readiness` **算** ✓。判据：**AST 字面量**里不许出现任何清单 key ✓
+      （注释里点名实测件当证据是允许的 ✓ ⇒ 不能拿原文 grep 判，会误伤注释 ✓）。
+      ⓑ **双向相等** ✓✗：清单有而注册表没有 ⇒ 那个阶段没有兼容性判据 ✓；注册表有而清单没有 ⇒
+      匹配 0 个组件、`ready=True` 是**空就绪** ✓。两个方向都报 ✓。本轮顺带查出**真缺口**：
+      清单里 TTS 组件的 `category` 是 `tts` ✗，而阶段 `audio` 筛的是 `audio` ⇒ **一件都匹配不到**
+      ✓✗（`readiness("audio")` 空就绪）⇒ 不自行改数据 ✗，落成 `unclaimed_categories()`
+      （实测 `{"tts": 1}`）＋ 判据「unclaimed == 清单分类 − 已认领分类」✓（不写死 0 条，
+      否则将来补上 tts 阶段反而变红 ✓）。
+      ⓒ **四类判据各自的码** ✓：`deps`→`E_ENGINE_UNAVAILABLE`（缺件 ＋ **版本下限** ✓）、
+      `weights`→`E_WEIGHT_MISSING`/`E_WEIGHT_CORRUPT`（缺件与坏件分开：一个该下载、一个该重下 ✓）、
+      `quant`→`E_UNSUPPORTED_QUANT`、`vram`→`E_VRAM_EXHAUSTED` ✓。**门面 `_friendly` 新加
+      「自带 `code` 的异常原样翻」一支** ✓ —— 必须排在 `ValueError` 那支**前面** ✗✗：
+      `RegistryError` 是 `ValueError` 子类 ✓ ⇒ 以前会一律翻成 `E_BAD_CONFIG`，「这张卡装不下」
+      变成「参数非法」✗。
+      ⓓ ⚠️ **本轮自己造的两处假阳性（记下来）**：
+      ① **`supported=False` ≠ 「不支持的族」** ✗✗ —— `quant.plan_dequant` 对**全精度**文件也回
+      `supported=False`（`weights=0` ⇒ 没有要反解的 ✓）⇒ 只盯 `supported` 把 `sdxl_base`
+      报成"未实现的族" ✓✗；修＝入口闸改成 **`weights>0`**（有低精度张量才谈得上支持与否 ✓）。
+      ② **必需件 vs 可选件** ✗ —— `loader.plan_component` 的组件计划**不带** `required` ✓，
+      少了「清单 key → required」这张映射，实测 h3 的 `te_nvfp4`（nvfp4 本仓未实现 ✗ 但清单标必需 ✓）
+      会被判成硬阻断 ⇒ **把本来能出片的 h3 拦在门外** ✓✗。
+      ③ 由 ② 得出**闸门口径**：`Engine.load(check=True)` 默认只硬拦 `deps`/`weights`
+      （与「装哪几件」无关的两类 ✓）；`quant`/`vram` 一律进报告但**软**（它们依赖装配：量化族要先知道
+      吃不吃这件、显存估算按"权重全精度常驻"算而 `int8_offload` 与分辨率这时还没定 ✓✗）；
+      要严就 `require=("deps","weights","quant","vram")` 或直接看 `facade.compat()` ✓。
+      ⓔ **「没查」≠「通过」** ✓✗：注入 `{}` ＝这一类没查 ⇒ 进 `unchecked`（不影响 `ok` ✓，
+      但必须带出去 ✓）；**体检自己炸了 ⇒ 出阻断** ✓✗（读不了头部/清单坏了也是结论 ✓，
+      静默放行＝把"我不知道"读成"可以装" ✓）。体检崩溃的码按层分：safetensors 层 ⇒
+      `E_WEIGHT_CORRUPT`（用户该重下 ✓）、其他 ⇒ `E_ENGINE_UNAVAILABLE`（不该把用户送去查磁盘 ✓）。
+      ⓕ **显存提示收敛成一处** ✓✗：门面 OOM 分支原来自己写了一段三条路 ✓，注册表 `vram` 类又要一段
+      ⇒ 抽成 `registry.VRAM_HINT` ✓，门面 OOM 分支改为引用 ✓（判据：`17.94 GiB` 在 facade 里 0 次、
+      在 registry 里 1 次 ✓；`engine_queue_backpressure_test` 钉的「hint 点名 `int8Offload`」照旧绿 ✓）。
+      ⓖ 判据：新 `engine_registry_test` **37/37** ✓（全程零 torch ✓）；回归 `engine_router_contract_test`
+      19/19 ✓（⑤ 扫 `E_*` 字面量全在 `facade.CODES` ✓）、`engine_lora_cache_test` 43/43 ✓、
+      `engine_lora_test` 70/70 ✓、`engine_runtime_test` 53/53 ✓、`engine_chain_test` 45/45 ✓、
+      `engine_queue_backpressure_test` 24/24 ✓、`engine_independence_test` 18/18 ✓、
+      `engine_inventory_test` 43/43 ✓、`engine_tiers_test` 18/18 ✓、`engine_readiness_script_test` 20/20 ✓。
+    * ㉚ **2026-10-30·E2.6 不半装（判据补齐，行为不动）** —— `runtime._ensure_loaded_internal` 的失败分支
+      本来就是逐项的（`_backend = None` → `del backend` → 放租约 → `_release_torch_cache` → 抛）✓，
+      缺的是**判据**：`case_replace_order` 只钉「新后端构造那一刻旧的就断了」，那一支失败发生在
+      **挂任何组件之前** ✗。新 `case_half_load` 钉更靠后的一支：DiT 与 TE 已挂、第三个组件（VAE）才坏 ✓。
+      ⓐ 假后端必须把 `_model`/`_textEncoder`/`_vae`/`_audioVae` 真挂上去 ✗✗ —— `status().loaded` 读的就是
+      这四个属性 ✓（`_loaded_flags`），不挂的话「逐项相同」会因为「真后端也报 False」而**永远绿** ✓✗（第一版
+      就这么假绿过 ✓）。同因：成功分支的 `_attach_video_vae` 假实现要**顺手挂属性** ✓，且两个 attach
+      都得在 `finally` 里复原 ✗✗（第一版只复原了 video 那个，后面的「真跑」四条全红在
+      `H3FormTrunk.forward() missing 3 required positional arguments` ✓）。
+      ⓑ **weakref 判据的两个前提，都实测踩过**：① 异常还绑在 `except` 的名字上时，回溯帧的**待调用参数元组**
+      （`(半装实例, trunk 字典)`）会把它吊住 ⇒ 必须出了 `except` 再判 ✓✗；② 光出 `except` 也不够 ——
+      那帧随回溯一起死，**把 `del backend` 改回留个局部变量照样 PASS** ✓✗（反向验证过 ✗）；
+      把异常留在手上再判，又变成「改不改 `del backend` 都红」✓✗ —— 那是 CPython 回溯钉的，
+      **不是运行时能控制的** ✗。⇒ 口径定为「**运行时自己不留**」✓：只问放开异常后取不取得到 ✓，
+      并反向验证「把 `self._backend = backend` 挪进失败分支即红」✓（实测 57/59 ✓）。
+      ⓒ 原文「`status()` 前后 diff 为空」**做不到也不该做** ✗：换装配是先放旧的再装（装失败旧的也真没了 ✓✗，
+      见 ㉗ 的 `eviction` 口径）⇒ 有旧装配时 diff 必然非空 ⇒ 只比「装了什么」四项
+      （`loaded`/`backend`/`loadReport`/`deviceSource`）✓，量计/任务史/LoRA 账本按设计就会变 ✓✗。
+      ⓓ 判据：`engine_runtime_test` **53 → 59/59** ✓；回归 `engine_registry_test` 37/37、
+      `engine_lora_cache_test` 43/43、`engine_router_contract_test` 19/19、`engine_chain_test` 45/45、
+      `engine_queue_backpressure_test` 24/24、`engine_independence_test` 18/18、`engine_inventory_test` 43/43。
+      ⓔ **E2.3 复核结论（未落地数据，只记缺口）**：`manifest_of` 的 `license`/`licenseNote` 与两档
+      `hashScope` 早已就绪、⑯⑰ 已钉 ✓；但 `configs/models.json` **一条 `license` 都没写** ⇒ 每个组件都报
+      「未声明」✓✗。填这列要逐件核上游 LICENSE（H3 各仓、Comfy-Org 镜像的中转条款、SDXL 的 OpenRAIL++ 变体
+      各不相同），**不许按印象编** ✗ ⇒ 留待创作者/上游确认 ✓。
+    * ㉛ **E2.1/E2.2 的**已知缺口（留给下一轮，不是本轮没做完 ✗）：① `audio` 阶段与清单 `tts`
+      分类对不上（见 ㉙ⓑ）；② 注册表只在 `Engine.load` 与 `facade.compat` 上生效，**HTTP 路由还没开**
+      `compat` 口（要不要开属产品决定 ✓，开了要连带升 `SCHEMA_VERSION` 与 schema 文件 ✓）。
+    * ㉜ **2026-10-30·E0.6 许可审计 ＋ E0.1/E0.2 环境落盘事实（两份新文档 ＋ 两套新判据）** ——
+      这轮没写引擎代码 ✓，全是「把已经存在的事实钉死」✓，且**当场抓到两处真错** ✓✗：
+      ⓐ **E0.1 的 `hardware-report.json` 早已过期**：停在 `schemaVersion: 1`、把 `transformers` 记成
+      「可选缺失」（实际 5.21.0 装着 ✓）、把 `convrot` 记成「未实现」（`quant.convrot_group_of` ＋
+      `build_hadamard` 早在，两个 19.53 GiB 主 DiT 就是这个族 ✓）、`modelsDir` 还指向 `data/models`
+      （真值是 `D:\Comfy-Desktop\ComfyUI-Shared\models` ✓）。成因很朴素：**这两份文件没有任何读者**
+      （代码里 0 处引用 ✓✗），没判据的文档一定会烂 ✓。修＝用 `facade.capabilities()` 现场重生成 ✓，
+      并补 `docs/env/runtime-versions.json`（E0.1 缺的就是它：python/torch/CUDA/cuDNN/驱动/GPU/
+      依赖版本/`pipCheck`/`knownGaps` ✓）。
+      ⓑ **这台机器根本不是"CPU 轮子"**：`torch 2.14.1+cu130`、`cuda.is_available()=True`、
+      `RTX A5000 sm_86`、cuDNN 9.24.0、驱动 610.88、`pip check` 无冲突 ✓ —— 旧记录里
+      「torch.cudaVersion 为 null ⇒ 写 knownGaps」那条口径今天不适用 ✓；但 `sm_86 < sm_89` ⇒
+      fp8 仍只能 emulated（写进 `knownGaps` ✓，别把它当提速 ✓）。
+      ⓒ **E0.6 交付 `THIRD_PARTY_NOTICES.md`**：权重 16 条**许可全空** ⇒ 一律写「未声明」✓✗，
+      **不按印象编** ✓（H3 各仓 / Comfy-Org 镜像 / fp8·GGUF 再分发 / SDXL 官方仓条款各不相同；
+      填个通用 `Apache-2.0` 会让下游当商用依据 ✓✗，比留空危害大得多 ✓）；Python 依赖的许可取**包元数据**
+      （`License-Expression` → `License` → `License ::` 分类器**三级回落** ✗✗：`safetensors` 的
+      `License` 字段是空串，只读它会把 Apache-2.0 的包记成未声明 ✓✗；`torch`/`numpy` 是 PEP 639
+      多许可表达式，**照抄不简化** ✓✗）。
+      ⓓ 判据：`engine_licenses_test` **13/13**、`engine_env_docs_test` **18/18** ✓（2026-10-30 又补一条，
+      见 ⓖ）；反向验证四处（许可列手写 `Apache-2.0` ⇒ ②③ 双红；把 `fastapi` 版本改旧 ⇒ ④ 红；
+      `schemaVersion` 改回 1 与 `python` 改旧 ⇒ ① ② 双红；`已作废` 标去掉 ⇒ ④ 红 ✓），复原后全绿 ✓。
+      ⓔ 口径修正两处记档：①「E0.1 两份文件由 `doctor --json` 直接产出」**做不到全** ✗ ——
+      `doctor` 不报 torch / CUDA / 驱动版本（它只报 python 与清单）⇒ `runtime-versions.json` 的
+      版本段由本机 `torch` 直采补，`generatedBy` 字段里写明了这条拼接 ✓；②文档里允许保留旧结论，
+      但必须标「已作废」（判据④**先滤掉带"作废"的行**再扫词 ✓✗ —— 否则要么误杀正确的"已作废"说明、
+      要么放过真·过期的断言 ✓）。
+      ⓕ 仍未落（属创作者/硬件账）：E0.3 torch 轮子 ADR（**2026-10-30 已立**，见 ⓖ）、
+      E0.4 量化族 ADR（`convrot` 已实现 ✓、`nvfp4` 亦已实现 ✓ —— 裁定与落地见 ㉞）、
+      E5.2 性能基线与 E3.5 60 分钟稳定性（要真在 A5000 上跑装载与生成，本轮未做 ✓✗）。
+      ⓖ **E0.3 关闭条件已由实测满足 ＋ 抓出一处「同一处自相矛盾」** —— ① 立 `docs/adr/0001-torch-wheel.md`
+      （此前**根本没有这个文件** ✓✗，方案里却当交付物引用了它 ✓）：`torch 2.14.1+cu130`、
+      `cuda.is_available()=True` ⇒ 原文前提「装进来的是 CPU 轮子」**不成立** ✓✗，退出条件①**本就已满足** ✓；
+      真正待裁的换成两点 —— `sm_86` 无 fp8 硬件加速（emulated：装得下不提速）与 **24 GiB 装不下 H3**
+      （`readiness("h3").vram` 实测 `estimated 49.44 GiB > capacity 24`、`headroom −25.44`，**换轮子不解决** ✗）。
+      ② `facade.capabilities().limits` 的量化那句已过期（「块/分组量化未实现的一律拒绝」—— nvfp4 正是
+      块量化且已实现 ✓✗）⇒ 改成「per-row/per-col/per-tensor/elementwise 由形状自证；nvfp4 由等式判；
+      mxfp4 与 int4 分组量化未实现」，`hardware-report.json` 现场重生成（`limits` 是逐字对账项 ✓）。
+      ③ ⭐ 抓到手写栏与机器报告**打架**：`runtime-versions.json` 的 `knownGaps` 写着「mxfp4 / nvfp4 未实现」，
+      而同一份 env 的 `hardware-report.quant.supportedFormats` 已是 `[nvfp4]` ✓✗（这一栏**不是**
+      `capabilities()` 的产物、纯手写 ⇒ 没判据就一定烂 ✓）。修＝改写成「mxfp4 未实现；nvfp4 已实现」＋
+      **新增判据 ③′**：`knownGaps` ↔ `quant` 报告**双向**对账（已支持的不许被说成未实现 ✗；未支持的必须点名 ✓）。
+      ⚠️ 第一版按**整条** summary 匹配 ⇒ 一条讲两个族时把「mxfp4 的未实现」算到 nvfp4 头上 ⇒ **当场误报** ✓✗，
+      改按**子句**（`；;。` 切）判 ✓。反向验证：往 `knownGaps` 注入「nvfp4 未实现」⇒ **17/18**、退出 1，
+      复原后 **18/18** ✓（文件字节级还原已核 ✓）。
+    * ㉝ **2026-10-30·`quantScheme` 误报 nvfp4 为 fp8（真错，已修）＋ ADR 0002 草案** ——
+      顺着「h3 为什么装不起来」往下查，撞到一处**会把人带沟里**的报告错误 ✓✗：
+      ⓐ 盘上 `te_nvfp4`（`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`，14.61 GiB）的
+      `weight` 是 **U8 打包 4 bit**、`weight_scale` 是 **F8_E4M3**（每 16 元素一个）、
+      `weight_scale_2` 是标量、`pre_quant_scale` 是 AWQ 平滑因子、`comfy_quant` 明写
+      `{"format": "nvfp4"}` ✓ —— 可 `loader._quant_of` **只按 dtype 分布猜** ✗：看见 F8_E4M3
+      就报 `quantScheme="fp8"` / `computeDtype="fp8 + scales"` ✓✗（那 F8 是 **scale、不是权重** ✗）。
+      危害不是"报错"而是"劝错"：同一份 plan 的 `dequantPlan.family` 已经写着「属未实现的族 ⇒
+      中止装载」✓，两句话互相打脸 ✓✗；读的人只会信「计算精度」那一栏，然后按 fp8 去解 U8 的
+      4 bit 打包 ⇒ **数值全错且不报错** ✓✗。
+      ⓑ 修：`_quant_of(info, formats)` **先问 `comfy_quant`**（`quant.format_family` ✓ 与
+      `dequantPlan.family` 同一真源）✓，dtype 分布降为兜底 ✓；调用点移到 `formats` 算出来之后 ✗
+      （原来在算 `formats` 之前，想读也读不到 ✓）。
+      ⓒ 判据：`engine_inventory_test` 新增 `case_quant_scheme` **6 条**（合成文件用
+      `write_safetensors` 的新 `payloads` 参数塞 `comfy_quant` 真字节 ✗✗ —— 只写零字节的话
+      解析出来是空、判据在验空气 ✓）：① 合成 nvfp4 文件本身合法；② `quantScheme == "nvfp4"`；
+      ③ `computeDtype` 含「未实现」且**不含 `fp8`**；④ 与 `dequantPlan.family` 同源；
+      ⑤ 对照：真 fp8（`comfy_quant` 写 `float8_e4m3fn`）仍报 `fp8`、不被划进未实现族 ✓✗；
+      ⑥ 对照：**没有** `comfy_quant` 的老文件仍能靠 dtype 猜出 fp8（兜底没被砍掉 ✓）。
+      反向验证：临时把 `for spec in formats` 改成空 ⇒ ②③④ 三红、报文正是 `'fp8 + scales'` ✓；
+      复原后 49/49 ✓。回归：independence 18/18、registry 37/37、readiness_script 20/20、
+      tiers 18/18、runtime 59/59 ✓。
+      ⓓ **ADR 0002 草案**（`docs/adr/0002-quant-families.md`；创作者已裁定 **A（实现解码）** ✓，
+      **落地见 ㉞** ✓ —— 下面这段「三条路」保留作裁定依据 ✓）：
+      `readiness("h3").ready=False` 的**唯一**原因是 `te_nvfp4` 缺解码能力（文件已在盘、已校验 ✓；
+      DiT 与两个 VAE 都就绪 ✓）⇒ 生成 / 性能基线 / 60 分钟稳定性**全部卡在这** ✓✗。
+      规格实测：2054 张量、351 个 `comfy_quant`（**350 nvfp4 ＋ 1 int8_tensorwise**（`embed_tokens`））、
+      group=16、e4m3 块 scale、f32 标量二级 scale、AWQ `pre_quant_scale`。三条路 ＋ 成本风险：
+      A 实现解码（**本机 `comfy-studio/ComfyUI/comfy/float.py` 有现成实现可照抄 ⇒ 打包顺序不是猜**，
+      逐层还原（单层 ≈ 250 MiB）而非整份解（32B ⇒ ~64 GiB 装不下））、B 换 32B fp8 权重（要下载
+      32 GiB，须创作者点头）、C 明确不支持（E5.2/E3.5 全作废）。⚠️ 清单里**没有**第二选择：
+      `te_qwen3_4b` 是**另一个模型**（4B vs 32B），换它等于换条件编码器 ⇒ 掉质量，不许当省事方案 ✓✗。
+    * ㉞ **2026-10-30·NVFP4 解码落地（A 路，已实现）** —— 创作者裁定「按 `.reference` 的代码实现」✓，
+      于是照 `reference/lora/musubi-tuner/.../nvfp4_utils.py`（抬头写明已对齐 MiniMax-H3 的
+      Qwen3-VL 文本编码器 BF16 参考 ✓）＋ `comfy-studio/ComfyUI/comfy/float.py`（**写文件那一方** ✓）
+      把 nvfp4 真正解出来 ✓：
+      ⓐ 新模块 ``quant_nvfp4``：E2M1 值表（`0,.5,1,1.5,2,3,4,6` × 符号 ✓）、**高半字节在前** ✓、
+      `BLOCK_SIZE=16` ✓、cuBLAS **128×4 tiled** 块 scale 布局（`to_blocked`/`from_blocked` ✓，
+      元素数 = `roundup(rows,128) × roundup(in_features/16,4)` —— **两个 roundup 一个都不能省** ✗✗）、
+      f32 二级 scale ✓、AWQ `pre_quant_scale` **折进权重列** ✓（等价式 `Σ(xₖ·sₖ)·Wₖ = Σxₖ·(Wₖ·sₖ)` ✓）。
+      `torch` **顶层不 import** ✓（纯 Python 体检走小文件检查，只有真解数值才拉 torch ✓）。
+      ⓑ 判据 **35 条**（`engine_quant_nvfp4_test` ✓）四层真源，**不靠"看着像"** ✓✗：
+      ① 公开规格手推字节（`0x50 0xC6 …` ⇒ `1.0, .5, 6.0, 4.0 …`）；② 与参考实现 `torch.equal` **逐位对拍**
+      （`ast` 抽原文函数执行，不 import 整包 ✓；三种 padding 情形 ＋ `to_blocked` 逐位 ✓）；
+      ③ 跑**别人盘上那份** `comfy.float::to_blocked` 做 `from_blocked` 往返（含 `(2560,160)` 真实形状 ✓）。
+      ⓒ 真权重实测（`te_nvfp4`，14.61 GiB）：**350 层 nvfp4 / 0 问题 / `awqLayers>0`** ✓，单层
+      `down_proj` 反量化后 std 落在 1e-3~1e-1 ✓；**反证**：故意不解 swizzle ⇒ 相对差 > 0.1 ✓✗
+      （不是"随便怎么排都差不多" ✓）。另有一处**主动加**的前置拒绝：块 scale 元素数不符当场 `ValueError`
+      ✓ —— 少一截 `from_blocked` 会 reshape 失败（好查 ✓），**多**一截会**静默错位**（最坏 ✓✗）。
+      ⓓ 接线（本轮真正的"能用了"）：`quant` 立 **两张表** ✓ —— `SUPPORTED_FORMATS`（nvfp4 ⇒ 归
+      `quant_nvfp4` ✓）与 `UNSUPPORTED_FORMATS`（只剩 mxfp4 ✓）；`supported_format()` 与
+      `format_family()` **成对** ✓（先问能不能做、再问为什么不能 ✓），`_quant_of` 两层都问 ✓；
+      `loader.dequant_plan_of()` 做**唯一口径** ✓ —— 先按 `quant_nvfp4.plan` 的 `names` 把 nvfp4 层从
+      `plan_dequant` 的输入里**摘掉** ✗✗（不摘的话同一份报告会同时说「350 层可还原 ✓」与「350 个
+      scale 形状对不上 ⇒ 中止装载 ✗」，读的人只能二选一猜 ✓✗），再把层数记回
+      `layouts["nvfp4"]` ✓ 保住 `sum(layouts) == paired` 的不变式 ✓；`plan_component` 与
+      `facade.inspect_weights` **都走它** ✓（此前两处各拼一份 ✓✗）。
+      ⓔ 反向验证：把 LUT 两半字节顺序对调 ⇒ **21/26**（①、②×3、④ 变红 ✓）；把 `dequantize` 里的
+      `from_blocked` 换成「直接按行主序截断」⇒ **31/35**（②×3 与「不还原 swizzle 就该不一样」那条反证
+      同时变红 ✓）；两次复原后 **35/35** ✓。
+      ⓕ 装载接线（第二轮补齐 ✓）：`weights` 新增 `nvfp4_layers_of()`（**全部** `*.comfy_quant` 逐层认 ✓，
+      不是只看前 8 个 ✗ —— 族级判断看几条够 ✓，逐层路由漏一层就是那一层不还原 ✓✗）＋
+      `_load_streaming` 里三处：① 打包形状 `(N, K/2)` 是**唯一**允许「与目标形状不同」的情形 ✓（判据
+      三条：自称 nvfp4 ＋ dtype U8 ＋ 列数**恰好**一半 ✓，缺一条就按形状不符拒 ✗）；② 三个伙伴
+      （`weight_scale` / `weight_scale_2` / `pre_quant_scale`）记进新计数 `consumedNvfp4` ✓（实测这份
+      文件 800 个 ✓ —— 不吞的话 903 条 `unexpected` 会把真问题淹掉 ✓✗）；③ **写第一个字节之前**逐层跑
+      `quant_nvfp4.layer_plan` ✓，任何一层不合格就整份中止 ✓（半装最难查 ✓✗）。数值一律在 **float32**
+      算完再降到参数 dtype ✓。另修一处**既有隐患**：`precheck_dequant` 的输入原来喂的是**整份文件**的
+      键 ✗ ⇒ 从 350 层里只装 1 层时，另外 349 层的 scale 形状问题会把这次装载拦下来，且报错指向一个
+      **根本不会被写**的键 ✓✗；现在只喂 `own` 里的键 ✓。判据新增 9 条（⑤ 合成文件端到端 ×6、⑥ 真权重
+      端到端 ×3 ✓）：合成的「块 scale 存成 e4m3 后再算期望值」与「不 swizzle ⇒ 装载照样成功但值不同」
+      都是实测踩出来的 ✓（前者曾把期望值写差 3.15e-05 ✓✗，后者是这族最典型的坏法 ✓）。
+      ⓕ′ 修上面那处隐患时**自己又踩了一脚** ✓✗：第一版把 `pre_meta` 滤成「只留 `own` 里的键」✗ ——
+      可 `precheck_dequant` 是靠 **`meta` 里的键**去找 `weight_scale` / `.qweight` 这些**同模块**伙伴的 ✓
+      ⇒ 伙伴被一并滤掉 ⇒ 报成「找不到配套 scale」✓✗；`engine_weights_streaming_test` ⑥/⑧ 与
+      `engine_quant_test` 一条当场变红（13/13 → 11/13、26/26 → 25/26 ✓）。改成滤**模块**（键的父级 ✓）
+      后全绿 ✓。★教训：**裁剪键之前要想「谁还要靠这些键找同伴」** ✓ —— 判据读的是「键与键的关系」时，
+      只按「我要写哪些键」裁剪，必然连带删掉那些关系 ✗。
+      ⓖ 回归（全部 `.venv` py3.12.10 实跑 ✓）：nvfp4 **35/35**、quant 26/26、inventory **52/52**（+3）、
+      loader 32/32、weights_streaming 13/13、independence 18/18、registry 37/37、readiness_script 20/20、
+      tiers 18/18、runtime 59/59、hybrid_load 32/32、int8_resident 17/17、checkpoint_guards 21/21、
+      env_docs **18/18**（+1，见 ㉜ ⓖ）✓；真权重 `inspect`：**351 个权重可自动还原=True**（`nvfp4×350` ＋ `per-row×1`）、
+      `readiness h3` 的量化族阻断**已清零**（`可装=是`）✓。
+      ⓗ ⚠️ **仍未落**：把 nvfp4 真正喂进某个模块的**前向** ✗ —— 本仓的文本编码器是玩具实现 ✓✗，
+      盘上那 32B 的 Qwen3-VL 还没有对应模型骨架 ⇒ 现在能做的到「逐层还原出正确 fp32 权」为止 ✓，
+      挂载点等模型落地再补 ✓（不许为了"看起来接通"去写无人调用的假接线 ✓✗）。
+    """
+
 from __future__ import annotations
 
 import os
@@ -866,7 +1666,13 @@ TESTS = [
     ("SSE 总线 + 尾帧提取", "sse_hub_frames_test.py"),
     ("全自动管线 + SSE 端点", "auto_pipeline_test.py"),
     ("本地模型扫描 + 11 端点", "local_models_test.py"),
-    ("本机 Ollama 模型库**离线**读取（服务没起也列得出；零外部依赖）", "ollama_store_test.py"),
+    ("**真实权重指纹**（读 safetensors/GGUF 头判架构；合成字节 + 扫描接入 + 2 端点）",
+     "model_fingerprint_test.py"),
+    ("本机 Ollama 模型库**离线**读取（服务没起也列得出；零外部依赖；清单↔blob 的 sha256 核对）",
+     "ollama_store_test.py"),
+    ("ollama 原生能力层（模板/harmony/envconfig/format/progress/openai/anthropic）",
+     "ollama_native_test.py"),
+    ("**Ollama 完整集成**（能力面/目录/客户端/视频识别/6 端点）", "ollama_integration_test.py"),
     ("**世界各大模型**生态落点（HF/ModelScope/LM Studio/GPT4All/Jan/llama.cpp…；离线 + 缓存≠能推理）",
      "model_ecosystems_test.py"),
     ("角色生成链路 8 端点", "characters_generate_test.py"),
@@ -953,6 +1759,25 @@ TESTS = [
     ("自研引擎·H3 键名核对器（键全集/形状关系/PDD 头库/curve 变体；零依赖 torch-free）", "engine_h3_keys_test.py"),
     ("自研引擎·BPE 分词器（真词表 tokenizer.json/vocab+merges；往返恒等；零依赖离线）", "engine_tokenizer_test.py"),
     ("自研引擎·反量化（fp8/int8 × 四种布局 × 两种 scale 方向；判不出来就拒绝；接进装载）", "engine_quant_test.py"),
+    ("自研引擎·NVFP4（E2M1 高半字节打包 / cuBLAS 128×4 swizzled 块 scale / f32 二级 scale / AWQ 折列；"
+     "与参考实现 `torch.equal` 逐位对拍 + 跑 ComfyUI 自己的 `to_blocked` 做往返 + 真 350 层权重实测与错解反证；"
+     "并接到 `weights.load_module_weights` 端到端 —— 合成文件与真权重两层都是 `torch.equal`，"
+     "缺伙伴时写前即拒、模型零污染）",
+     "engine_quant_nvfp4_test.py"),
+   ("自研引擎·流式装载（逐张量读/峰值≈单张量/失败零污染/与整份读逐位相同）",
+    "engine_weights_streaming_test.py"),
+    ("自研引擎·int8 常驻（convrot 搬边数值对齐 / 装载不许 cast / scale 不降精度 / 元数据不算多键 / "
+     "`int8_offload` 只钉 int8 且峰值不随层数增长（4 层 vs 12 层对照）/ 账目自洽且**漏装即拒** / "
+     "开关只认显式 True；无 torch 或无卡逐条显式 SKIP）", "engine_int8_resident_test.py"),
+    ("自研引擎·独立性契约（AST 禁 Web 层依赖/门面无 torch 可算/坏权重必拦/CLI 退出码/两处判据不漂）",
+     "engine_independence_test.py"),
+    ("自研引擎·入口契约（HTTP 唯一入口走门面/错误码单一真源/六接口字段快照/"
+     "**装配白名单盖住 `ensure_loaded` 签名·零豁免**（少抄一项＝开关静默失效）/开关严格解析"
+     "（`\"false\"` 不许读成 True）/`loras` 走与 config **同一份**归一（相对路径按 `modelsDir` ✓、"
+     "不存在当场 400 ✓、装配能 JSON 出去 ✓））",
+     "engine_router_contract_test.py"),
+    ("自研引擎·队列背压（排不下当场拒且不留记录/限额可观测/历史只裁已终结）",
+     "engine_queue_backpressure_test.py"),
     ("自研引擎·分词器总入口（形态嗅探/自研优先/参考回退/批量+LRU/离线开关；互校）", "engine_tokenizer_hub_test.py"),
     ("自研引擎·自研 Unigram/WordPiece/Metaspace（Viterbi/fuse_unk/整词 UNK；与参考逐例同 id）",
      "engine_tokenizer_own_test.py"),
@@ -967,16 +1792,45 @@ TESTS = [
      "engine_h3_form_test.py"),
     ("自研引擎·音频 VAE（32 kHz 立体声 ⇄ 潜变量；**真写 wav + 标准库读回核对** ✓）",
      "engine_audio_vae_test.py"),
+    ("自研引擎·H3 真视频 VAE（`kind=h3-real` 报告 + `decode` 不再自称合成 / 时间几何 "
+     "`5+17k` 严格互逆 / 发现不到权重**当场拒**不回落 / 真权重档要 `DARME_H3_VAE_LIVE=1`）",
+     "engine_vae_h3_test.py"),
     ("自研引擎·decoder-only LLM（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样；缩小版 CPU 可验）",
      "engine_llm_test.py"),
-    ("自研引擎·GGUF 权重反量化（F32/F16/BF16/Q8_0/Q4_K 精确字节布局 + 6-bit 解包；未实现具名拒绝）",
+    ("自研引擎·GGUF 权重反量化（F32/F16/BF16/Q8_0/Q4_K/Q6_K 精确字节布局 + 2/4/6-bit 解包；"
+     "真文件核类型覆盖率与跨量化对拍；未实现具名拒绝）",
      "engine_gguf_dequant_test.py"),
     ("自研引擎·GGUF → LlmModel 装载（ggml 命名映射 + 线性层转置；往返恒等；tie embeddings）",
      "engine_gguf_to_llm_test.py"),
+    ("自研引擎·GGUF 自带词表（**全量读**（inspect 只存前 16 项 ✗）/ 判 GGUF 看正文不看后缀 / "
+     "Qwen2 预分词（`\\p{N}` 单数字）不许串 GPT-2 / 控制符整体 / 不加 BOS·EOS / 四条具名拒绝）",
+     "engine_tokenizer_gguf_test.py"),
     ("自研引擎·文本后端（describe 如实报缺 / 未装载拒生成 / encode→生成→decode 链路；缩小版 CPU 可验）",
      "engine_llm_backend_test.py"),
+    ("自研引擎·CPU/GPU 双设备（**auto 才择优**、显式要不到的卡**具名拒绝**不回落 / 同权重 fp32 跨设备 "
+     "logits·greedy·KV-cache 一致 / bf16 与 fp32 的容差 / 装载器跨设备 copy_ / 后端实际设备与缓存键；"
+     "无卡显式 SKIP，且每条判据都有「加 0.05 必须报」的反验）",
+     "engine_llm_device_test.py"),
     ("自研引擎·对话骨架（**骨架从权重元数据取** ✓ 不内置 ✗ / 逐字渲染 / 「没有」与「坏了」两回事 / "
      "坏了当场拒；缩小版 CPU 可验）", "engine_chat_template_test.py"),
+    ("自研引擎·LoRA 装配（语义从参考实现抄：bypass / merge / runtime 三条路**各自给理由** ✓；"
+     "int8 融合 fc2 必须 merge（bypass 钩子不触发 ✗）/ adaln 只能运行时注入 / 孤儿与 rank 不一致"
+     "不静默；零 torch 也能验算法）", "engine_lora_test.py"),
+    ("自研引擎·LoRA 内容账本（**换名字不是第二份** ✓ 同内容只留一份张量、读盘只一次 / 释放要真少"
+     "（`freedBytes` 不许假释放）/ 算不出的字节数报 None 不编数 / **接线静态守卫**：`_apply_loras` 经账本借、"
+     "失败两条路径都还、`unload` 先还租约再清账本（按行号判序，不比 ast.walk 下标）；零依赖）",
+     "engine_lora_cache_test.py"),
+    ("自研引擎·**阶段注册表 ＋ 装载前兼容性闸门**（E2.1/E2.2 ✓ 阶段集合**双向相等** / 未注册 ⇒ "
+     "`E_BAD_CONFIG` 不回落 / 四类各一条故障注入（依赖·权重·量化族·显存）都在**装载前**出码 / "
+     "「没查 ≠ 通过」进 `unchecked` / 组件 key 不许在注册表里手抄一份；零 torch）",
+     "engine_registry_test.py"),
+    ("第三方许可审计（E0.6 ✓ 权重表条目与清单**双向**相等 / 许可列**只能来自清单**、清单没有就是"
+     "「未声明」/ 许可列不许出现任何具体许可名 / 依赖版本与包元数据实测一致（升级即红）)",
+     "engine_licenses_test.py"),
+    ("环境与兼容性落盘事实（E0.1/E0.2 ✓ `docs/env/*.json` 与现场 `capabilities()` 逐项对账 / "
+     "版本与显卡事实 == 本机实测 / 矩阵里的版本字面量 == 实测 / GPU 可用时不许还当着事实说 CPU-only / "
+     "手写的 `knownGaps` 与 `quant` 报告**双向**对账 —— 已支持的族不许写成「未实现」、未支持的必须点名）",
+     "engine_env_docs_test.py"),
     ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；参考块四类入口 ✓ / 能力自述逐条报缺 / "
      "取整口径必填 / 当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
     ("自研引擎·H3 续拍/重拍（网格窗口与钉长的口径 + 冻结区掩码 + 潜变量接棒："
@@ -990,7 +1844,8 @@ TESTS = [
     ("自研引擎·多段成片（**超单段上限就分段**：拼接守恒 / 链式规范化**真拉小漂移** / 逐段产物各归其位 / "
      "失败·取消·缺帧都不静默 + **接线静态守卫**：runtime 走链子、pipeline 真调交棒回调）",
      "engine_chain_test.py"),
-    ("自研引擎·在机运行时（**装/排队/取消/卸** + 真出 mp4/wav；串行有证据 + 设备口径逐入口）",
+    ("自研引擎·在机运行时（**装/排队/取消/卸** + 真出 mp4/wav；串行有证据 + 设备口径逐入口；"
+     "**不半装**：装到第三个组件才坏 ⇒ 运行时不留半装的那份 ＋ `status()` 装了什么逐项不变 ＋ 随后还能装成功）",
      "engine_runtime_test.py"),
     ("自研引擎·业务桥（`provider=engine` 那条路：装配键集与运行时**逐键对账** / 缺 DiT 就报 / "
      "取整口径必填 / 产物口径 / **真跑出真 mp4+首帧真 PNG** / 把 httpx 打死照样跑完）",

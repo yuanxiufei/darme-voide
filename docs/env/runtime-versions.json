@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "collectedAt": "2026-10-30",
+  "generatedBy": "python -m app.services.engine doctor --json（能力/清单段）＋ 本机 torch 直采（版本/显卡段）",
+  "python": "3.12.10",
+  "implementation": "CPython",
+  "packages": {
+    "torch": "2.14.1+cu130",
+    "numpy": "2.5.4",
+    "safetensors": "0.8.0",
+    "pillow": "13.0.0",
+    "transformers": "5.21.0"
+  },
+  "torch": {
+    "version": "2.14.1+cu130",
+    "cudaVersion": "13.0",
+    "cudaAvailable": true,
+    "cudnn": "92400"
+  },
+  "device": {
+    "name": "NVIDIA RTX A5000",
+    "capability": "8.6",
+    "memoryTotalMiB": 23028,
+    "driverVersion": "610.88"
+  },
+  "catalog": {
+    "path": "D:\\code\\voide\\darme-voide\\configs\\models.json",
+    "models": 16,
+    "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models"
+  },
+  "pipCheck": "No broken requirements found.",
+  "knownGaps": [
+    {
+      "id": "fp8-no-hw",
+      "severity": "info",
+      "summary": "sm86 < sm89 ⇒ 无 fp8 硬件加速，fp8 走 emulated（能装下、不提速）",
+      "fix": "属硬件边界，不改"
+    },
+    {
+      "id": "mxfp4",
+      "severity": "info",
+      "summary": "mxfp4（E8M0 共享指数）未实现 ⇒ 该族权重稳定拒绝；nvfp4 已于 2026-10-30 实现（见 hardware-report.quant.supportedFormats）",
+      "fix": "要吃得先实现该格式反量化（nvfp4 不需要）"
+    },
+    {
+      "id": "no-baseline",
+      "severity": "warn",
+      "summary": "generate 仍未验收（缺 E5.2 性能基线 ＋ E3.5 60 分钟稳定性）",
+      "fix": "在 A5000 机上跑基线后回填 docs/benchmarks/"
+    }
+  ]
+}

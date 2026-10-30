@@ -443,10 +443,71 @@ def case_weights() -> None:
           (mapped_report.complete, mapped_report.renamed))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ④ 装载只建**一次**模型 ✓✗ —— 老写法「先建一个验一下、再建一个真装」✗
+# ══════════════════════════════════════════════════════════════════════════
+def case_build_once() -> None:
+    """⚠️ ``TorchBackend.load_weights`` 的 DiT 分支原本**建两次** ✗：
+    「先 ``build_dit`` 装一遍验 ``complete`` ✓、再 ``build_dit`` 建一份真的装第二遍」✗ ——
+    而 :func:`weights.load_module_weights` 的 ``device`` **不参与读取** ✓（字节总是先进 CPU ✓，
+    再由 ``copy_`` 落到 **param 自己所在**的 device ✓）⇒ 那个"验一下"的模型从没 ``.to()`` ✓✗
+    ⇒ 整份权重被装进一份**马上要丢弃的 CPU 模型** ✓✗：白读一遍盘 ✓、峰值多压一份模型 ✓
+    （19.53 GiB 的权重上，这一份就是装不装得下的差别 ✓；与 :func:`_prepare_h3_module` 记的
+    是**同一个病根** ✓✗ —— 那边已修 ✓、这边漏着 ✗）。
+
+    所以判据架在 ``dit.build_dit`` 的**调用次数**上 ✓：装一次 DiT 必须只有 **1** 次 ✓。
+    ⚠️ 只看"装成功了没有"抓不到 ✗ —— 两次都成功 ✓✗，只是慢一倍、内存翻一倍 ✓。
+    """
+    if not _have_torch():
+        skip("torch 未安装 ⇒ 「装载只建一次」跳过 ✓")
+        return
+
+    from app.services.engine import torch_backend as tb  # noqa: PLC0415
+
+    root = Path(tempfile.mkdtemp(prefix="dit_once_"))
+    path = weights_mod.save_module_weights(
+        dit_mod.build_dit(CONFIG), root / "once.safetensors", metadata={})
+
+    calls: list[str] = []
+    real = dit_mod.build_dit
+
+    def _counting(config: Any) -> Any:
+        calls.append("build")
+        return real(config)
+
+    dit_mod.build_dit = _counting            # type: ignore[assignment]
+    try:
+        backend = tb.TorchBackend(device="cpu")
+        # 传 config ⇒ 不依赖 ``__metadata__`` ✓（本条的靶子是**构建次数** ✗ 不是结构解析 ✓）
+        loaded = backend.load_weights(path=str(path), config=CONFIG)
+    finally:
+        dit_mod.build_dit = real             # type: ignore[assignment]
+
+    check("④ ⭐ 装一次 DiT 只 ``build_dit`` **一次** ✓✗（老写法两次 ⇒ 白读一遍盘 + 峰值多压一份模型 ✓✗；"
+          "⚠️ 两次都能装成功 ⇒ **任何\"装成功\"的判据都看不见这个错** ✗）",
+          len(calls) == 1, len(calls))
+    check("④′ 合并后装载仍 ``complete=True`` ✓ 且模型真挂上了 ✓"
+          "（省掉那一遍**不许**顺带把校验也省了 ✗）",
+          bool(loaded.get("complete")) and backend._model is not None,  # noqa: SLF001
+          loaded)
+
+    # ⭐ 第四个静默缺口：`int8_offload` 只认 H3 形态 ✓ ⇒ DiT 这条路必须**如实说"没生效"** ✗✗
+    #    （不说的话用户会以为省了 18 GiB ✓✗，然后在 720×1280 上照样 OOM 且找不到原因 ✗✗）
+    off_backend = tb.TorchBackend(device="cpu", int8_offload=True)
+    residency = (off_backend.load_weights(path=str(path), config=CONFIG)
+                 or {}).get("int8Residency") or {}
+    check("④″ ⭐ DiT 形态开 `int8_offload` ⇒ 报告里**如实写 applied=False** 并说清「只对 H3 有意义」✓✗"
+          "（老代码**一个字都不写** ✗ ⇒ 与前两条「建两次」「CPU 后端」同属"
+          "「不生效可以 ✓、不说不行 ✗」）",
+          residency.get("applied") is False and "Int8Linear" in str(residency.get("note")),
+          residency)
+
+
 def main() -> int:
     case_config()
     case_forward()
     case_weights()
+    case_build_once()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

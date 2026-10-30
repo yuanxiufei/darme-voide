@@ -54,8 +54,17 @@ def created(data: Any = None) -> JSONResponse:
     return JSONResponse(status_code=_CREATED, content={"code": _CREATED, "data": data, "message": "created"})
 
 
-def bad_request(message: str = "bad request") -> JSONResponse:
-    return JSONResponse(status_code=_BAD_REQUEST, content={"code": _BAD_REQUEST, "message": message})
+def bad_request(message: str = "bad request", *, engine_code: str | None = None) -> JSONResponse:
+    """400 + 可选**引擎错误码**。
+
+    ⚠️ ``engineCode`` 与信封里的 ``code`` **不是一回事** ✗：后者是 HTTP 状态码（前端按它判失败 ✓），
+    前者是引擎的机器可判错误码（``facade.CODES`` 的键 ✓ —— 前端/脚本据此分流「该装包 / 该重下 /
+    该换导出」✓）。不给就**不写这个字段** ✓ ⇒ 既有调用与旧前端完全不受影响 ✓。
+    """
+    content: dict[str, Any] = {"code": _BAD_REQUEST, "message": message}
+    if engine_code:
+        content["engineCode"] = engine_code
+    return JSONResponse(status_code=_BAD_REQUEST, content=content)
 
 
 def not_found(message: str = "not found") -> JSONResponse:

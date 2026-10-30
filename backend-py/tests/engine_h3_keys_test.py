@@ -232,6 +232,17 @@ def case_infer() -> None:
           and "curve" in curve.sources["time_input_dim"],
           (curve.sources.get("time_input_dim"), curve.sources.get("time_hidden")))
 
+    check("㉖′ ⭐ **时间嵌入变体也从键名推**（2026-10-29 补 ✓ —— 真权重 `minimax_h3_*_int8_convrot`"
+          " 上漏判过 ✗）：curve 键表 ⇒ `use_adaln_curves=True` ✓ 且格点数 = 表行数 ✓；"
+          "standard 键表 ⇒ `False` ✓、格点数回落默认 ✓。⚠️ 漏了这条 ⇒ 曲线检查点被按标准建 "
+          "⇒ 缺 4 键 + 多 1 键 ⇒ `complete=False` ⇒ 整份被判「不是完整模型」✗✗",
+          inferred.config["use_adaln_curves"] is False
+          and curve.config["use_adaln_curves"] is True
+          and curve.config["adaln_curve_grid"] == 6
+          and inferred.config["adaln_curve_grid"] == H3_TRUNK_DEFAULTS["adaln_curve_grid"],
+          (inferred.config["use_adaln_curves"], curve.config["use_adaln_curves"],
+           curve.config["adaln_curve_grid"]))
+
     bad_patch = h3_keys.infer_h3_trunk_config(h3_tensor_shapes(), patch_size=(1, 3, 3))
     check("㉗ `video_patch_proj` 列数不是 patch 乘积整数倍 ⇒ 报错 ✓（不猜 latents_dim ✗）",
           not bad_patch.ok and any("整数倍" in p for p in bad_patch.problems), bad_patch.problems)
@@ -246,6 +257,8 @@ def case_infer() -> None:
     #     50 层 × 5376 维 ≈ 80 GB 参数 ⇒ 进程**当场访问越界崩掉** ✓✗（exit 0xC0000005 ✓）。
     #     键表侧的出厂全尺寸核对已由 ⑦ 覆盖 ✓ ⇒ 这里只要「同一条链在缩小版上通」✓。
     try:
+        import torch  # noqa: PLC0415
+
         from app.services.engine import h3_form  # noqa: PLC0415
         built = h3_form.H3FormTrunk(**inferred.config)
         state = built.state_dict()
@@ -259,6 +272,23 @@ def case_infer() -> None:
         check("㉙ ⭐⭐ **推导出的 config 真能建出模块** ✓ 且参数**名字 + 形状**与期望键表逐键一致 ✓"
               "（这条才是「插上就装」的整链判据 ✓ —— 只对名字不够 ✗）",
               not missing and not wrong, (missing[:6], wrong[:3]))
+
+        # ⭐⭐ curve 变体走同一道判据（**双向** ✓）：`strict=True` 装载 —— 缺键/多键/形状不符
+        #    任何一种都会抛 ✗ ⇒ 它同时钉住「`adaln_t_table` 是顶层 buffer」与「没有 time_embedder」✓。
+        curved_built = h3_form.H3FormTrunk(**curve.config)
+        curved_shapes = h3_tensor_shapes(variant="curve")
+        curved_state = {key: torch.zeros(shape) for key, shape in curved_shapes.items()}
+        strict_error = None
+        try:
+            curved_built.load_state_dict(curved_state)
+        except RuntimeError as err:                      # strict 装载的唯一失败形态 ✓
+            strict_error = err
+        check("㉙′ ⭐⭐ **curve config 建出来的模块能与 curve 键表 `strict=True` 互装** ✓"
+              "（`adaln_t_table` 在顶层 ✓、`time_embedder.*` 一把都没有 ✓、形状逐个对 ✓）",
+              strict_error is None
+              and bool(curved_built.use_adaln_curves)
+              and tuple(curved_built.adaln_t_table.shape) == curved_shapes["adaln_t_table"],
+              str(strict_error))
     except ImportError:
         check("㉙ 装了 torch 才验构造 ✓（本机无 torch ⇒ 跳过 ✓ 不是失败 ✗）", True, "skipped")
 

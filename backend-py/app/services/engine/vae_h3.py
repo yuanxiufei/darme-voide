@@ -462,11 +462,27 @@ def _build() -> _Impl:
             except StopIteration:  # pragma: no cover - 本结构不可能没有参数 ✓
                 return torch.device("cpu")
 
+        @property
+        def weight_dtype(self) -> Any:
+            """参数所在 dtype ✓ —— ⚠️ **必须**对齐 ✗（真权重是 **fp16** ✓，喂 fp32 进去直接炸 ✓✗）。"""
+            try:
+                return next(self.parameters()).dtype
+            except StopIteration:  # pragma: no cover - 本结构不可能没有参数 ✓
+                return torch.float32
+
         # ── 像素归一化（ImageNet ✓）与潜变量归一化（mean/std ✓）是**两件事** ✗ 别混 ✓
 
         def _normalize_pixels(self, x: Any) -> Any:
-            """``[-1,1]`` 像素 ⇒ ImageNet 归一化 ✓（编码器**只认**这一路 ✓）。"""
-            return x.add(1.0).mul_(0.5).sub_(self.pixel_mean.to(x)).div_(self.pixel_std.to(x))
+            """``[-1,1]`` 像素 ⇒ ImageNet 归一化 ✓（编码器**只认**这一路 ✓）。
+
+            ⚠️ **在 fp32 里归一化、算完再落回参数 dtype** ✓（2026-10-29 实测补 ✗）：真实装机后
+            ``conv3d`` 报 ``Input type (float) and bias type (Half)`` ✓✗ —— 症状只在**真权重**上现形 ✓，
+            此前全部在 CPU fp32 上验 ⇒ 这个坑一直没露头 ✓（也说明"键全对上"不等于"跑得动" ✗）。
+            """
+            base = x if x.dtype == torch.float32 else x.to(dtype=torch.float32)
+            out = base.add(1.0).mul_(0.5).sub_(self.pixel_mean.to(base)).div_(
+                self.pixel_std.to(base))
+            return out.to(self.weight_dtype)
 
         def _finalize_pixels(self, part: Any) -> Any:
             """解码器原始输出 ⇒ **fp32 / [0,1]** 像素 ✓（出片侧要的就是这个 ✓）。"""
@@ -725,10 +741,15 @@ def _build() -> _Impl:
             return (mean - latents_mean) / latents_std
 
         def decode(self, z: Any) -> Any:
-            """**归一化**潜变量 ⇒ fp32 像素 ``[B,3,T,H,W]``（**[0,1]** ✓ 落在 ``output_device`` ✓）。"""
-            z = z.to(self.weight_device)
+            """**归一化**潜变量 ⇒ fp32 像素 ``[B,3,T,H,W]``（**[0,1]** ✓ 落在 ``output_device`` ✓）。
+
+            ⚠️ 反归一化同样**在 fp32 里算、算完落回参数 dtype** ✓（同一处实测坑 ✓）：
+            潜变量本来就窄（fp16 够用 ✓），但 ``mean/std`` 是 ckpt 抄来的 fp16 精确常量 ✓ ——
+            在 fp32 里做这一步**一位不多占**（``[1,24,1,1,1]`` ✓），却省掉"两个 dtype 相撞" ✗ 的可能 ✓。
+            """
+            z = z.to(device=self.weight_device, dtype=torch.float32)
             latents_mean, latents_std = self._latents_stats(z)
-            z = z * latents_std + latents_mean
+            z = (z * latents_std + latents_mean).to(self.weight_dtype)
             if z.shape[2] == 1:
                 return self._finalize_pixels(self._adaptive_decode(z)[:, :, -1:, :, :])
             return self.decode_temporal(z)

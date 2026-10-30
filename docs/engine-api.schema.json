@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "引擎门面输出契约（E1.6）。**字段名集合就是契约**：增、删、改名都算破坏性变更。",
+    "改这个文件之前，先改代码里的 SCHEMA_VERSION / API_VERSION，再同步这里 —— 否则",
+    "tests/engine_router_contract_test.py ④ 会红（这是故意的：红一次才证明快照有效）。",
+    "只登记**顶层**与**关键嵌套**（不是全字段树）：全树会随内部实现抖动，顶层才是对外承诺。"
+  ],
+  "apiVersion": "1.0.0",
+  "schemaVersion": 3,
+  "interfaces": {
+    "capabilities": {
+      "top": ["apiVersion", "backend", "catalog", "engine", "knownGaps", "limits",
+              "operations", "python", "quant", "schemaVersion", "stages", "unverified"],
+      "nested": {
+        "backend": ["available", "installRequired", "missingRequired", "optionalMissing", "reason"]
+      }
+    },
+    "plan": {
+      "top": ["apiVersion", "components", "modelsDir", "ready", "residency", "schemaVersion", "stage"],
+      "nested": {
+        "components[]": ["blockCount", "blockHead", "computeDtype", "dequantPlan", "dtypeClasses",
+                         "gib", "key", "loadMode", "name", "path", "present", "problems",
+                         "quantScheme", "readSecondsEstimate", "role", "tensorCount", "verified",
+                         "warnings"],
+        "residency": ["capacityGiB", "fits", "missing", "note", "peakResidentGiB", "steps", "strategy"]
+      }
+    },
+    "readiness": {
+      "top": ["apiVersion", "blockers", "components", "problems", "ready", "schemaVersion", "stage",
+              "tiers", "unchecked", "unsupportedQuant", "vram", "weights"],
+      "nested": {
+        "vram": ["activationGiB", "capacityGiB", "disclaimer", "estimatedGiB", "fits", "headroomGiB",
+                 "safety", "weightsGiB"]
+      }
+    },
+    "status": {
+      "top": ["apiVersion", "available", "backend", "busy", "cache", "current", "dependencies",
+              "device", "deviceSource", "externalDependencies", "loadReport", "loaded", "lora",
+              "name", "note", "pendingParts", "queued", "queueLimit", "reason", "schemaVersion",
+              "synthetic", "taskHistoryLimit", "tasks"],
+      "nested": {
+        "loaded": ["audioVae", "dit", "textEncoder", "vae"],
+        "cache": ["evictions", "hits", "misses", "note", "recent", "scope", "since"],
+        "lora": ["deduped", "entries", "entryCount", "freed", "freedBytes", "hits", "misses",
+                 "note", "recent", "refTotal", "scope", "since", "tensorBytes", "tensorBytesUnknown"]
+      }
+    },
+    "inspect_weights": {
+      "top": ["apiVersion", "dtypeCounts", "family", "fileBytes", "formats", "gib", "headerBytes",
+              "metadata", "ok", "path", "problems", "quant", "schemaVersion", "tensorCount",
+              "totalTensorBytes"],
+      "nested": {}
+    },
+    "manifest_of": {
+      "top": ["apiVersion", "bytes", "dtypeCounts", "format", "gib", "hashScope", "headSha256",
+              "kind", "license", "licenseNote", "name", "path", "schemaVersion", "sha256", "source",
+              "tensorCount", "version"],
+      "nested": {
+        "source": ["catalogKey", "repo", "url"]
+      }
+    }
+  }
+}

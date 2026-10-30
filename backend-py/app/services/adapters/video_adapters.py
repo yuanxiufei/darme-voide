@@ -109,6 +109,21 @@ class MiniMaxVideoAdapter:
             if isinstance(audios, list) and len(audios) > 0:
                 body["reference_audio"] = [str(x) for x in audios][:3]
 
+        # 参考视频（Ref2VA 的第三条素材路 ✓）：H3 侧落成「帧串 + 它自己的音轨」两根线 ✓，
+        # 端口上限 3 路（后端 ``ref_videos`` 的 ``max=3`` ✓）。
+        # ⚠️ 字段名 ``reference_video`` 与上面 ``reference_audio`` 同一套写法 ✓（本地 H3 服务认这个名 ✓，
+        # 云端 MiniMax 不支持时会忽略该字段 ✓ 与音频同理）。
+        if record.get("referenceVideoUrls"):
+            videos = _json_or_none(record["referenceVideoUrls"])
+            if isinstance(videos, list) and len(videos) > 0:
+                body["reference_video"] = [str(x) for x in videos][:3]
+
+        # 参考图缩放档位（后端 ``ref_image_size`` ✓：``match`` 快 / ``max`` 身份最保真但每步采样都更贵 ✓）。
+        # ⚠️ 只在**是真档位**时才写 ✗：写个非法值过去，H3 侧会告警后回落默认 ✓（多一条噪音无益 ✓）。
+        image_size = str(record.get("referenceImageSize") or "").strip().lower()
+        if image_size in ("match", "max"):
+            body["reference_image_size"] = image_size
+
         return {
             "url": join_provider_url(config.get("baseUrl"), "/v1", "/video_generation"),
             "method": "POST",
@@ -194,8 +209,12 @@ def plan_h3_form(config: dict[str, Any], record: dict[str, Any]) -> dict[str, An
     base = record.get("model") or config.get("model")
     # ⭐ 判据只看**参考素材与首尾帧两条诉求** ✓（不拿「有没有首帧图」当首帧诉求 ✗✗ ——
     #    每张 I2V 都有首帧图 ⇒ 那样会把所有 I2V 都判成「必须 FL2VA」✓✗）
+    # ⚠️ 参考**视频**必须也算素材 ✓✗（2026-10-27 补）：漏了它 ⇒ 「只挂参考视频」的那一单会被判成
+    #    「没有参考素材」✓ ⇒ ``sceneType=action`` 时挑到 FL2VA ✓ ⇒ 视频素材**静默失效** ✓✗
+    #    （引擎那条硬约束「有参考素材 ⇒ 只能 Ref2VA ✓」就白写了 ✓）。
     has_references = _present(record.get("referenceImageUrls")) or \
-        _present(record.get("referenceAudioUrls")) or record.get("referenceMode") == "multiple"
+        _present(record.get("referenceAudioUrls")) or \
+        _present(record.get("referenceVideoUrls")) or record.get("referenceMode") == "multiple"
     has_first_frame = record.get("referenceMode") == "first_last"
     prefer_fl2va = _FL2VA_SCENE_RE.search(str(record.get("sceneType") or "").lower()) is not None
 

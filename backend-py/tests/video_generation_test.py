@@ -243,24 +243,42 @@ def main() -> int:  # noqa: C901
         r2.prompt.count("[background_audio]") == 1, repr(r2.prompt),
     )
 
-    # 空数组待遇不同：图片参考图是 truthy 判据、参考音频是 length 判据
+    # 空数组待遇**已收敛为一致** ✓✗（2026-10-27）：原来参考图走 truthy 判据 ⇒ `[]` 落 `"[]"`、
+    # 参考音频走 `.length` 判据 ⇒ `[]` 落 NULL ✓✗（同一张表两种「空」并存 ⇒ 判空写不一处、
+    # 读账漏 ✓）。现在三样（图/音频/视频）都走 `video_generation._json_list`，
+    # 与 `routers/videos.py::_json_text`（PUT 侧已锁「置空 ⇒ NULL 而不是 "[]"」）**同口径** ✓。
+    # ⚠️ 这条断言**故意改过**（原断言 `== "[]"` 是照抄 TS `JSON.stringify([])` 的旧行为 ✗）。
     with engine.begin() as conn:
         mixed = run(vg.generate_video(conn, {
             **base, "referenceImageUrls": [], "referenceAudioUrls": [],
         }))
         r3 = conn.execute(select(video_generations).where(video_generations.c.id == mixed)).first()
     check(
-        "enqueue: referenceImageUrls=[] -> 落 \"[]\"（truthy 判据：空数组是真值）",
-        r3.reference_image_urls == "[]", repr(r3.reference_image_urls),
-    )
-    check(
-        "enqueue: referenceAudioUrls=[] -> 落 NULL（判的是 .length）—— 两者**不同**",
-        r3.reference_audio_urls is None, repr(r3.reference_audio_urls),
+        "enqueue: referenceImageUrls=[] / referenceAudioUrls=[] -> 都落 NULL（空数组 = 空，不留 \"[]\"）",
+        r3.reference_image_urls is None and r3.reference_audio_urls is None,
+        repr((r3.reference_image_urls, r3.reference_audio_urls)),
     )
     with engine.begin() as conn:
         audio = run(vg.generate_video(conn, {**base, "referenceAudioUrls": ["a.mp3"]}))
         r4 = conn.execute(select(video_generations).where(video_generations.c.id == audio)).first()
     check("enqueue: 非空参考音频落紧凑 JSON", r4.reference_audio_urls == '["a.mp3"]', repr(r4.reference_audio_urls))
+    # ⚠️ 参考**视频**与参考图档位（2026-10-27 补 ✓）：这两样后端 H3 都吃 ✓，而库表与
+    #    服务层原来**一样都没有** ✗ ⇒ 路由带上来了也存不下、重跑看不见它们 ✓✗。
+    with engine.begin() as conn:
+        vref = run(vg.generate_video(conn, {
+            **base, "referenceVideoUrls": ["v.mp4"], "referenceImageSize": "max"}))
+        r4b = conn.execute(select(video_generations).where(video_generations.c.id == vref)).first()
+    check("enqueue: 参考视频落紧凑 JSON ✓、参考图档位落原值 ✓",
+          r4b.reference_video_urls == '["v.mp4"]' and r4b.reference_image_size == "max",
+          (r4b.reference_video_urls, r4b.reference_image_size))
+    with engine.begin() as conn:
+        vref_empty = run(vg.generate_video(conn, {
+            **base, "referenceVideoUrls": [], "referenceImageSize": ""}))
+        r4c = conn.execute(select(video_generations)
+                           .where(video_generations.c.id == vref_empty)).first()
+    check("enqueue: 参考视频 ``[]`` / 档位空串 ⇒ 都落 NULL ✓（不留「声明了但没内容」那种值 ✗）",
+          r4c.reference_video_urls is None and r4c.reference_image_size is None,
+          (r4c.reference_video_urls, r4c.reference_image_size))
 
     # sceneType 空串 -> null；referenceMode 空串 -> 'none'
     with engine.begin() as conn:
@@ -289,6 +307,14 @@ def main() -> int:  # noqa: C901
           fp_params != vg.references_fingerprint({"prompt": "p", "referenceImageUrls": '["b.png"]'}))
     check("指纹: 换**提示词** ⇒ 也变 ✓（只比参考素材是不够的 ✓ —— 换个提示词就是另一段 ✓）",
           fp_params != vg.references_fingerprint({"prompt": "q", "referenceImageUrls": '["a.png"]'}))
+    # ⚠️ 参考**视频**与档位漏出指纹 = 最坏的一种「静默复用」✗✗：用户换了素材点重跑 ✓，
+    #    系统判「输入没变」⇒ 直接把**上一段素材的成片**递回来 ✓✗（看起来完全正常 ✓）。
+    check("指纹: 换**参考视频** ⇒ 指纹必须变 ✗✗（否则换了素材还复用旧成片 ✓✗✗）",
+          vg.references_fingerprint({"prompt": "p", "referenceVideoUrls": '["v1.mp4"]'})
+          != vg.references_fingerprint({"prompt": "p", "referenceVideoUrls": '["v2.mp4"]'}))
+    check("指纹: 换**参考图档位** ⇒ 也变 ✓（``match`` / ``max`` 是两种画质配方 ✓）",
+          vg.references_fingerprint({"prompt": "p", "referenceImageSize": "match"})
+          != vg.references_fingerprint({"prompt": "p", "referenceImageSize": "max"}))
 
     product_rel = "static/videos/reusable.mp4"
     # ⚠️ 必须落在**真数据根**上 ✗（`DATA_ROOT` 只是环境变量 ✓ —— 数据根还有 `.data-root`/
@@ -329,6 +355,8 @@ def main() -> int:  # noqa: C901
               vg.find_reusable_video(conn, {**same, "referenceImageUrls": '["b.png"]'}) is None)
         check("复用: 换了提示词 ⇒ 不复用 ✓",
               vg.find_reusable_video(conn, {**same, "prompt": "changed"}) is None)
+        check("复用: 换了参考**视频** ⇒ 不复用 ✓（这一条是「换素材拿到旧成片」的直接反验 ✓✗）",
+              vg.find_reusable_video(conn, {**same, "referenceVideoUrls": '["v9.mp4"]'}) is None)
     product_abs.unlink()
     with engine.begin() as conn:
         check("复用: ⭐ **产物文件没了 ⇒ 不复用** ✗✗（否则用户拿到的是个死链 ✓✗）",

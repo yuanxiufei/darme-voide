@@ -165,6 +165,8 @@ async def submit_run(conn: Connection, params: dict[str, Any]) -> int:
       * ``workflow`` / ``workflowPath``：UI 或 API 格式的工作流（``kind=workflow`` 时必填 ✓）
       * ``prompt`` / ``duration`` / ``aspectRatio`` / ``firstFrameImage`` / ``lastFrameImage``：
         传给上游（H3 用 ✓；workflow 也可带，由上游决定要不要用 ✓）
+      * ``referenceImageUrls`` / ``referenceAudioUrls`` / ``referenceVideoUrls`` / ``referenceImageSize``：
+        H3 的参考素材与参考图缩放档位 ✓（原样转给上游 ✓，见 :func:`_build_upstream_body` ✓）
       * ``inject``：显式参数注入清单（``[{class_type, field, value, title?}]`` ✓）
       * ``settings``：交给上游的额外设置（如 ``checkpoint_map`` ✓）
     """
@@ -216,6 +218,19 @@ def _build_upstream_body(kind: str, params: dict[str, Any]) -> dict[str, Any]:
                            ("last_frame_image", params.get("lastFrameImage")),
                            ("scene_type", params.get("sceneType"))):
             if value is not None:
+                body[key] = value
+        # ⚠️⚠️ 参考素材**必须原样带过去** ✓✗（2026-10-27 补）：上游 8765 认 ``referenceImageUrls`` /
+        #    ``referenceAudioUrls`` / ``referenceVideoUrls`` / ``referenceImageSize``
+        #    （见 ``local_services/h3/server.py`` 的 ``_reference_images`` / ``_reference_audios`` /
+        #    ``_reference_videos`` / ``_reference_image_size`` ✓），而这里**原来一个都不传** ✗
+        #    ⇒ 产品侧带参考素材跑 H3 时，素材**在服务层就被丢掉** ✓✗：收端按纯文生跑完，
+        #    回执里 ``reference_*`` 全是 0 ✓，几乎看不出是被谁丢的 ✓（本仓反复记的那类静默错 ✓）。
+        #    ⚠️ 键名用 ``camelCase`` ✓：那是上游 body 的**协议口径** ✓（不是我们另起一套 ✗）。
+        for key, value in (("referenceImageUrls", params.get("referenceImageUrls")),
+                           ("referenceAudioUrls", params.get("referenceAudioUrls")),
+                           ("referenceVideoUrls", params.get("referenceVideoUrls")),
+                           ("referenceImageSize", params.get("referenceImageSize"))):
+            if value not in (None, "", [], {}):
                 body[key] = value
         if params.get("settings"):
             body["settings"] = params["settings"]

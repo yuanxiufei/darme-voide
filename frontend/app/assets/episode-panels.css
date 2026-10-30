@@ -1,0 +1,210 @@
+/* 剧集生产面板的视觉骨架：镜头卡片网格（`.prod-*`）与配套小件。
+ *
+ * 为什么在全局、不在剧集页的 `<style scoped>` 里：
+ *   这些类被「视频 / 合成」等多个面板共用，而面板正在拆成独立组件
+ *   （`components/ShotMediaPanel.vue`）。Vue 的 scoped 样式只作用到子组件的
+ *   **根元素**，组件内部的 `.prod-card`、`.prod-cover` 一律拿不到 —— 拆完的表现是
+ *   「样式全丢、但构建和类型检查都不报错」。提到全局层后，页面与组件共用同一份。
+ *
+ * ⚠️ 加载顺序：全局化后 `.prod-card` 的特异性从 `(0,2,0)`（scoped 会追加
+ *   `[data-v-*]`）降到 `(0,1,0)`，与 `studio.css` 的 `.card` 打平 —— 靠**先后**取胜。
+ *   所以 `app.vue` 里必须先 `@import studio.css`、再 `@import` 本文件，顺序不可调换。
+ *
+ * 从剧集页搬来时是逐字复制，没有合并/精简：这些值都是调过的（卡片 20px 圆角、
+ * 封面 16:9、徽标压在角落），改动会直接反映到几十张卡片的观感上。
+ */
+
+/* 生成前成本提示：贴在批量按钮那一行，弱化处理（辅助信息，不抢主按钮的视觉） */
+.cost-est {
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  border: 1px solid rgba(13, 148, 136, 0.18);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+
+/* ===== 面板容器 ===== */
+.prod-content { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+.prod-section-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ===== 状态点（图/视频/配音/合成 的达成标记）===== */
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-3); flex-shrink: 0; }
+.dot.ok { background: var(--success); }
+.dot.pending {
+  background: var(--accent-dark);
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14);
+}
+
+/* ===== 可点开放的图片（点开走全屏查看器）===== */
+.previewable-image { cursor: zoom-in; transition: transform 0.18s var(--ease-out), filter 0.18s var(--ease-out); }
+.previewable-image:hover { transform: scale(1.015); filter: saturate(1.04); }
+
+/* ===== 镜头卡片网格 ===== */
+.prod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.prod-card {
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58));
+}
+.prod-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
+.prod-cover { position: relative; aspect-ratio: 16/9; background: var(--bg-2); overflow: hidden; }
+.prod-cover img { width: 100%; height: 100%; object-fit: cover; }
+.prod-video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
+.prod-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.prod-idx {
+  position: absolute; top: 5px; left: 5px; font-size: 10px; font-weight: 700;
+  font-family: var(--font-mono); background: rgba(0,0,0,0.5); color: #fff; padding: 1px 5px; border-radius: 3px;
+}
+.prod-overlay-badge {
+  position: absolute; bottom: 5px; right: 5px; font-size: 10px; font-weight: 600;
+  background: var(--success); color: #fff; padding: 1px 5px; border-radius: 3px;
+}
+.prod-info { padding: 10px 12px 8px; }
+.prod-desc { font-size: 12px; line-height: 1.4; }
+.prod-meta-line { margin-top: 5px; font-size: 10px; color: var(--text-3); }
+.prod-dots { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--text-3); }
+.prod-error {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--error);
+}
+.prod-error-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.prod-error-link:hover { text-decoration: underline; }
+.prod-actions { display: flex; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
+.prod-actions .btn { flex: 1; justify-content: center; }
+
+/* ===== 资产卡片（角色形象 / 场景图片，由 AssetCardGrid.vue 渲染）===== */
+/* 卡片比镜头卡宽一倍：上半是图、下半是「名字·类型·模型·操作」四行，380px 才放得下不折行 */
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
+.asset-card {
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
+}
+.asset-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
+.asset-card.clickable { cursor: pointer; }
+.asset-card.clickable:hover { border-color: rgba(13,148,136,0.3); }
+.asset-cover { position: relative; aspect-ratio: 1; background: var(--bg-2); overflow: hidden; }
+.asset-cover.wide { aspect-ratio: 16/9; }
+.asset-cover img { width: 100%; height: 100%; object-fit: cover; }
+.asset-cover-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(7,11,21,0.58);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+.asset-cover-badge.is-ready {
+  background: rgba(36, 125, 72, 0.92);
+}
+.asset-cover-badge.is-pending {
+  background: rgba(19, 51, 121, 0.92);
+}
+.asset-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.asset-body { padding: 10px 12px; }
+.asset-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.asset-name-row .asset-name { flex: 1; min-width: 0; }
+.asset-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.asset-meta { font-size: 11px; }
+.asset-foot { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-top: 1px solid var(--border); gap: 8px; }
+.foot-left { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.foot-status { font-size: 11px; white-space: nowrap; }
+.foot-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* 原来写在页面 scoped 里是 `:deep(.model-selector)`；全局层不能再有 :deep，直接写后代选择器 */
+.foot-right .model-selector { width: 100px !important; }
+
+/* 下拉：工具条里的画风/配置选择与卡片里的角色画风共用同一套外观 */
+.config-select {
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(100,120,180,0.18);
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: border-color .15s;
+}
+.config-select:hover { border-color: rgba(13,148,136,0.4); }
+.config-select:focus { border-color: rgba(13,148,136,0.5); box-shadow: 0 0 0 2px rgba(13,148,136,0.1); }
+.char-style-select { width: 76px; flex-shrink: 0; }
+
+.btn-edit {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-2); padding: 4px 8px;
+  display: inline-flex; align-items: center; gap: 3px;
+  border-radius: 6px; cursor: pointer; font-size: 11px;
+  transition: all .15s; white-space: nowrap;
+}
+.btn-edit:hover { background: var(--accent-bg); border-color: rgba(13,148,136,0.35); color: var(--accent-text); }
+
+/* ===== 配音列表（由 DubbingPanel.vue 渲染）===== */
+.dub-grid { display: flex; flex-direction: column; gap: 10px; }
+.dub-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 20px; background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58)); }
+.dub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.dub-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.dub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dub-desc { font-size: 13px; line-height: 1.6; color: var(--text-1); }
+.dub-lines { display: flex; flex-direction: column; gap: 6px; }
+.dub-line-item { display: flex; gap: 6px; align-items: baseline; font-size: 13px; line-height: 1.6; }
+.dub-line-speaker { font-weight: 600; color: var(--accent); white-space: nowrap; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--accent-bg); flex-shrink: 0; }
+.dub-line-text { color: var(--text-1); word-break: break-all; }
+.dub-sub-card { border-left: 3px solid var(--accent); }
+.dub-sub-card .dub-title { margin-bottom: 2px; }
+.dub-match-tag { font-size: 10px; padding: 0 6px; border-radius: 10px; white-space: nowrap; flex-shrink: 0; line-height: 18px; font-weight: 500; }
+.match-dot-ok { background: #dcfce7; color: #166534; }
+.match-dot-warn { background: #fef3c7; color: #92400e; }
+.match-dot-err { background: #fee2e2; color: #991b1b; }
+.dub-validation-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; margin-bottom: 8px;
+  border-radius: 10px; background: #fef3c7; color: #92400e;
+  font-size: 13px; font-weight: 500;
+  border: 1px solid #fde68a;
+  grid-column: 1 / -1;
+}
+.dub-stale-banner { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
+.dub-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11px; }
+.dub-foot { display: flex; align-items: center; gap: 10px; padding-top: 8px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
+.dub-audio { flex: 1; min-width: 0; height: 30px; }
+
+/* 镜头号/说话人徽标：配音卡与分镜行共用，所以与 .dub-* 一起放在全局层 */
+.frame-num {
+  font-size: 13px; font-family: var(--font-mono); font-weight: 800;
+  color: var(--accent);
+}
+.frame-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--accent-bg); color: var(--accent);
+  border: 1px solid var(--accent-glow);
+  white-space: nowrap;
+}
+
+/* 窄屏单列（原在剧集页的 860px 断点里，与 .extract-grid/.voice-grid 同组） */
+@media (max-width: 860px) {
+  .prod-grid,
+  .asset-grid { grid-template-columns: 1fr; }
+}

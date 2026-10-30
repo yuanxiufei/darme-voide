@@ -69,6 +69,8 @@ __all__ = [
     "extract_still",
     "extract_still_to_storage",
     "is_engine_provider",
+    "lora_assembly",
+    "lora_specs_from_settings",
     "materialize_reference",
     "materialize_references",
     "normalize_settings",
@@ -330,7 +332,97 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
         assembly["attach_video_vae"] = False
     if settings.get("attach_audio_vae") is False:
         assembly["attach_audio_vae"] = False
+
+    # ⚠️ 真视频 VAE（2026-10-29 ✓）：**只认显式开启** ✗ —— 默认仍走参考族 ✓。
+    #    发现不到权重时**当场拒** ✓（`runtime._attach_video_vae` ✓ 里那三条路 ✓），
+    #    这里**不做**"找不到就换回参考"的兜底 ✗✗（那正是"以为在出真画面"的来路 ✓✗）。
+    if settings.get("real_video_vae") is True:
+        assembly["real_video_vae"] = True
+    vae_weights = str(settings.get("video_vae_weights") or "").strip()
+    if vae_weights:
+        assembly["video_vae_weights"] = vae_weights
+        assembly["real_video_vae"] = True   # ⚠️ 给了权重就是"要真的" ✓，不许悄悄只记路径 ✗
+    vae_device = str(settings.get("video_vae_device") or "").strip()
+    if vae_device:
+        assembly["video_vae_device"] = vae_device
+
+    # ⚠️ int8 驻留，**只认显式开启** ✗（2026-10-29 ✓）：默认 int8 全在卡上 ✓ ——
+    #    17.94 GiB 常驻之后只剩 2.87 GiB 给激活 ✓，720×1280 那种长度**必然 OOM** ✓✗，
+    #    那一档才需要把 int8 钉回 CPU ✓（代价是每步一趟 PCIe ✓）。
+    #    ⚠️ **不给"显存不够就自动切"的自动挡** ✗✗：自动切会让"这次为什么慢"变成猜的 ✓✗；
+    #    显存账是 `describe()` / 装载报告里的 `int8Residency` 说了算 ✓。
+    if settings.get("int8_offload") is True:
+        assembly["int8_offload"] = True
+
+    specs = lora_specs_from_settings(settings)
+    if specs:
+        assembly["loras"] = lora_assembly(specs)
     return assembly
+
+
+def lora_assembly(specs: Sequence[Any]) -> list[dict[str, Any]]:
+    """``LoraSpec`` ⇒ **JSON 安全**的装配条目 ✓（``{"path", "strength", "name"}`` ✓）。
+
+    ⚠️ 装配是要**回显**的 ✗✗ —— 它会进 ``Task.assembly`` ✓、随 ``/tasks`` 出门 ✓，而
+    ``core.response.success`` 用的是 ``JSONResponse``（**裸 ``json.dumps``** ✓，**不过**
+    ``jsonable_encoder`` ✗）⇒ 里面放一个 :class:`engine.lora.LoraSpec` 就是
+    **``TypeError: Object of type LoraSpec is not JSON serializable`` ⇒ 500** ✓✗。
+    （2026-10-29 发现的**既有隐患** ✓：config 那条路一直是塞 ``LoraSpec`` ✓✗ —— 只是没人
+    配过 LoRA 才没炸 ✓。开 HTTP 这条门正好会天天踩 ✓，所以两条路一起改成 dict ✓。）
+
+    ⚠️ 这里**不取整** ✓：``LoraSpec.to_dict()`` 会把 strength 抹到 4 位小数 ✓，而装载键
+    （``runtime._lora_key`` ✓）比的是原值 ✓✗ —— 取整会让"同一个 LoRA"算出两个键、白装一遍 ✓✗。
+    不用 ``to_dict()`` 只此一个理由 ✓。
+    """
+    return [{"path": str(spec.path), "strength": float(spec.strength),
+             "name": str(spec.name or "")} for spec in specs]
+
+
+def lora_specs_from_settings(settings: Mapping[str, Any]) -> list[Any]:
+    """settings 里的 LoRA 清单 ⇒ :class:`engine.lora.LoraSpec` 列表 ✓（没有就空 ✓）。
+
+    认三种写法 ✓：``"loras": ["<绝对路径>", …]`` ✓ / ``"loras": [{"path": …, "strength": …}]`` ✓ /
+    单条 ``"lora": …`` ✓。相对路径按 ``models_dir`` 拼 ✓（不给就按当前目录 ✓）。
+
+    ⚠️ **文件不存在当场报** ✗：LoRA 是模型的一部分 ✓，静默跳过 = 「跑得动、出得来、不是那个档」✓✗
+    （4 步 turbo 尤其 —— LoRA 就是那 4 步的全部依据 ✓）。
+
+    ⚠️ **两个调用方共用这一份** ✗✗（2026-10-29 ✓）：``assembly_from_config``（config 那条路 ✓）
+    与 ``routers/engine._assembly_from``（HTTP ``/load`` / ``/generate`` ✓）。以前只有前者 ✓、
+    后者**点名拒收** ✗；现在两条路都通 ✓ ⇒ **不许在任何一边手抄一份** ✗✗：
+    抄了就会出现「同一个 ``loras`` 在两条路上装出不同的东西」✓✗（``int8_offload`` 已经这么漏过一次 ✓）。
+    """
+    from . import lora as lora_mod  # noqa: PLC0415 —— 桥不在 import 期拖引擎层 ✓
+
+    raw = settings.get("loras")
+    if raw in (None, "", [], {}):
+        single = settings.get("lora")
+        raw = [single] if single else []
+    if isinstance(raw, (str, Mapping)):
+        raw = [raw]
+
+    #: ⚠️ 两种拼写都收 ✓ —— HTTP 那边 body 是 camelCase（``modelsDir`` ✓），config 那边是
+    #:    snake_case（``models_dir`` ✓）；只认一个 ⇒ 另一条路上相对路径**静默按 cwd 解析** ✓✗。
+    base = str(settings.get("models_dir") or settings.get("modelsDir") or "").strip()
+    specs: list[Any] = []
+    for item in raw:
+        #: ⚠️ **写法与 ``strength`` 口径交给 `lora.coerce_spec`** ✓（单一真源 ✓）—— 这里只做
+        #:    桥该做的两件事：相对路径按 ``modelsDir`` 拼 ✓、文件在不在 ✓。
+        #:    以前这段自己解析 ✓✗，于是 ``strength`` 的口径在桥 / 装载键 / torch 后端**各写一遍** ✓✗。
+        spec = lora_mod.coerce_spec(item)
+        target = Path(spec.path).expanduser()
+        if not target.is_absolute() and base:
+            target = Path(base).expanduser() / target
+        #: ⚠️ ``is_file()`` **不是** ``exists()`` ✗（2026-10-29 修 ✓）：传进来一个**目录**时
+        #:    ``exists()`` 会放行 ✓✗，然后在装载深处炸成一句与 LoRA 无关的话 ✓✗。
+        if not target.is_file():
+            raise ValueError(
+                f"LoRA 文件不存在 ✗：{target} ✓\n"
+                f"  · 请给**绝对路径**（相对路径换个工作目录就指到别处 ✓✗）；"
+                f"或配 ``modelsDir`` 让它相对解析 ✓。")
+        specs.append(lora_mod.LoraSpec(path=str(target), strength=spec.strength,
+                                       name=spec.name))
+    return specs
 
 
 def outputs_dir_for(kind: str, record_id: Any) -> Path:
@@ -443,6 +535,16 @@ def _materialize_extras(record: Mapping[str, Any], settings: Mapping[str, Any]) 
                 break
     if first_frame is not None:
         extras["first_frame"] = first_frame
+
+    # 尾帧（fl2v ✓）—— 与首帧**同一套**落盘口径 ✓（data URL / 远程 URL / 本机路径 ✓）
+    last_frame = materialize_reference(record.get("lastFrame"))
+    if last_frame is None:
+        for key in ("lastFramePath", "lastFrameUrl"):
+            last_frame = materialize_reference(record.get(key))
+            if last_frame is not None:
+                break
+    if last_frame is not None:
+        extras["last_frame"] = last_frame
 
     frames = materialize_references(record.get("referenceImages"))
     if frames:

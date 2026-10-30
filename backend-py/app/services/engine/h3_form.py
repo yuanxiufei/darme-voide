@@ -28,8 +28,9 @@ __all__ = [
     "denoise_step", "mask_row_values", "mod_segments_for", "pack_audio", "patchify_video",
     "sample_dual_stream", "t_vals_for", "unpack_audio", "unpatchify_video",
     "audio_grid", "packed_layout", "ref_time_span", "video_grid", "video_t_spans",
-    "assemble_blocks", "pdd_head",
+    "assemble_blocks", "pdd_head", "curve_t_emb",
     "H3_VIDEO_OUT_KEY", "video_patch_dim", "head_banks_from_shape",
+    "Int8Linear",
 ]
 
 #: ✅ 本文件**已经有**的东西（每条都**能独立自检** ✓）
@@ -126,6 +127,12 @@ H3_TRUNK_DEFAULTS: dict[str, Any] = {
     "text_dim": 5120, "latents_dim": 24, "audio_latents_dim": 32, "patch_size": (1, 2, 2),
     "time_input_dim": 256, "time_hidden": 5376, "time_dim": 2688, "inv_freq_len": 16,
     "refiner_layers": 2, "norm_eps": 1e-5, "qk_norm_eps": 1e-5, "final_norm_eps": 1e-5,
+    #: ⚠️ **时间嵌入的两种变体** ✓（参考实现里是互斥的两支 ✓，见 `h3_keys` 的 `variant` ✓）：
+    #: ``False`` = 标准（`time_embedder.proj_in/proj_out` 两层 MLP ✓）；
+    #: ``True`` = **曲线**（`adaln_t_table` 查表 ✓）—— 厂商真权重 `minimax_h3_*_int8_convrot`
+    #: 就是这一支 ✓（2026-10-29 实测：按标准建 ⇒ 缺 4 个 `time_embedder.*` 键 ✗ + 多一个
+    #: `adaln_t_table` ✓✗ ⇒ `complete=False` ⇒ 装载被判「不是完整模型」✗）。
+    "use_adaln_curves": False, "adaln_curve_grid": 1025,
 }
 
 #: 采样侧的 shift ✓（不在主干构造参数里 ✗ —— 所以单独列 ✓）
@@ -157,6 +164,12 @@ def head_banks_from_shape(shape: Any, single_dim: int) -> int:
             f"`video_out` 行数 {rows} 不是单头宽度 {single_dim} 的整数倍 ✗ ⇒ 推断不了头库大小 ✓"
             f"（不猜 ✗ —— 猜错就是「装上了但头库用错」✓✗）")
     return max(1, rows // int(single_dim))
+
+
+#: 积木缓存 ✓（见 :func:`_parts` ✓ —— 没有它，每次 `h3_form.H3FormTrunk` 都是**新类** ✗）
+_PARTS_CACHE: dict[str, Any] | None = None
+#: :mod:`quant` 的延迟缓存 ✓（本模块要能「没有 torch 也导入」✓）
+_QUANT_CACHE: Any = None
 
 
 def _build_torch_parts() -> dict[str, Any]:
@@ -252,11 +265,16 @@ def _build_torch_parts() -> dict[str, Any]:
             rotated, tail = x[..., :rot_dim], x[..., rot_dim:]
             half = rot_dim // 2
             pair = rotated.reshape(*rotated.shape[:-1], half, 2)
-            cos = torch.cos(angles[:, :half]).reshape(angles.shape[0], 1, half)
-            sin = torch.sin(angles[:, :half]).reshape(angles.shape[0], 1, half)
+            # ⚠️ 三角函数在 **fp32** 里算 ✓ 再降到 `x.dtype` ✗ —— `angles` 恒 fp32 ✓（见
+            #    :func:`rope_angles` ✓），而主干可能是 **bf16** ✓（真权重装载后 ✓）：不降的话
+            #    `bf16 × fp32` 会把结果 promote 回 fp32 ✗ ⇒ 下一层线性立刻报
+            #    「mat1 and mat2 must have the same dtype, but got Float and BFloat16」✓✗
+            #    （报错位置在**下一层** ✓，指不到这里 ✓）。
+            cos = torch.cos(angles[:, :half]).reshape(angles.shape[0], 1, half).to(x.dtype)
+            sin = torch.sin(angles[:, :half]).reshape(angles.shape[0], 1, half).to(x.dtype)
             first, second = pair[..., 0], pair[..., 1]
             out = torch.stack([first * cos - second * sin, first * sin + second * cos], dim=-1)
-            return torch.cat([out.reshape(*rotated.shape[:-1], rot_dim), tail], dim=-1)
+            return torch.cat([out.reshape(*rotated.shape[:-1], rot_dim), tail], dim=-1).to(x.dtype)
 
         def forward(self, x: Any, rope_angles: Any = None, rot_dim: int = 0) -> Any:
             count = x.shape[0]
@@ -899,7 +917,9 @@ def _build_torch_parts() -> dict[str, Any]:
                      norm_eps: float = H3_DEFAULTS["norm_eps"],
                      qk_norm_eps: float = H3_DEFAULTS["qk_norm_eps"],
                      final_norm_eps: float = H3_DEFAULTS["final_norm_eps"],
-            modalities: int = 3, head_banks: int = 1) -> None:
+            modalities: int = 3, head_banks: int = 1,
+                    use_adaln_curves: bool = False,
+                    adaln_curve_grid: int = 1025) -> None:
             super().__init__()
             #: ⚠️ PDD 头库大小 ✓（``> 1`` 才走 `pdd_head` ✓）—— **默认 1 = 普通头** ✓
             #: ⚠️ 真权重里它是几 **还没核到** ✗ ⇒ 先显式给、由调用方决定 ✓（不猜 ✓）
@@ -916,7 +936,18 @@ def _build_torch_parts() -> dict[str, Any]:
             self.audio_patch_proj = nn.Linear(self.audio_latents_dim, hidden, bias=True,
                                               dtype=torch.float32)
             self.condition_proj = nn.Linear(text_dim, hidden, bias=True)
-            self.time_embedder = TimeEmbedder(time_input_dim, time_hidden, time_dim)
+            #: ⚠️ 两种时间嵌入**互斥** ✓（参考实现就是 if/else ✓）：曲线检查点里**没有**
+            #: `time_embedder.*` 那四把权重 ✗，改由 `adaln_t_table` 查表 ✓ ⇒ 按标准建就会
+            #: 「缺 4 键 + 多 1 键」✗✓。表和 `rope.inv_freq` 同类 ✓：都是**顶层 buffer** ✓、
+            #: 都是 **fp32** ✓（`_prepare_h3_module` 的 fp32 岛扳回逻辑覆盖 buffers ✓）。
+            self.use_adaln_curves = bool(use_adaln_curves)
+            if self.use_adaln_curves:
+                self.register_buffer("adaln_t_table",
+                                     torch.empty(int(adaln_curve_grid), int(time_dim),
+                                                 dtype=torch.float32))
+                self.time_embedder = None            # type: ignore[assignment]
+            else:
+                self.time_embedder = TimeEmbedder(time_input_dim, time_hidden, time_dim)
             # ⚠️ `inv_freq` 是**权重里的缓冲区** ✓（H3 默认 16 ✓）—— 本项目**不自己算**它 ✗
             self.rope = nn.Module()
             self.rope.register_buffer("inv_freq", torch.ones(inv_freq_len))
@@ -1007,7 +1038,16 @@ def _build_torch_parts() -> dict[str, Any]:
             #    "Expected all tensors to be on the same device ... mat1 is on cpu, different
             #    from other tensors on cuda:0" ✗✗（**CPU 上一切正常** ✓✗ ⇒ 此前挡不住 ✓✗）。
             #    以 `h`（已在计算设备上 ✓）为准 ✓：时间戳表是派生物 ✓，跟随计算设备 ✓。
-            t_emb = self.time_embedder(t_vals.to(device=h.device)).to(h.dtype)
+            #    ⚠️ **dtype 也要对齐** ✗（2026-10-29 ✓）：`t_vals` 恒 fp32 ✓，而 `time_embedder`
+            #    在真权重装载后是 **bf16** ✓ ⇒ 只对齐 device 不对齐 dtype 会在 `proj_in` 报
+            #    「mat1 and mat2 must have the same dtype」✗✗。走"喂给它的那层的 dtype"✓
+            #    （不是写死 bf16 ✗：synthetic 主干是 fp32 ✓，写死就把那条路弄坏 ✓✗）。
+            if self.use_adaln_curves:
+                t_emb = curve_t_emb(self.adaln_t_table, t_vals.to(device=h.device)).to(h.dtype)
+            else:
+                time_dtype = next(self.time_embedder.parameters()).dtype
+                t_emb = self.time_embedder(t_vals.to(device=h.device,
+                                                     dtype=time_dtype)).to(h.dtype)
             for block in self.blocks:
                 h = block(h, t_emb, mod_segments, angles, self.rot_dim)
 
@@ -1051,6 +1091,27 @@ def _build_torch_parts() -> dict[str, Any]:
         view = rows.reshape(frames, height, width, channels, patch_t, patch_h, patch_w)
         view = view.permute(3, 0, 4, 1, 5, 2, 6)
         return view.reshape(channels, frames * patch_t, height * patch_h, width * patch_w)
+
+    def curve_t_emb(table: Any, t_vals: Any) -> Any:
+        """**曲线变体**的时间嵌入 ✓：`adaln_t_table` 查表 + **线性插值** ✓。
+
+        口径**逐字**照参考实现 ✓（``comfy/ldm/minimax/model.py`` ✓ 2026-10-29 读全 ✓）::
+
+            pos = clamp(t, 0, 1) * (grid - 1)          # 落在 [0, grid-1] 的**分数**格点 ✓
+            i0  = floor(pos).clamp(max=grid - 2)       # t=1.0 时不许把 i0+1 读出去 ✓
+            row = lerp(table[i0], table[i0+1], pos-i0) # 两行按小数部分**混** ✓
+
+        ⚠️⚠️ 必须**线性插值** ✗ 不许四舍五入到最近格 ✓：曲线在相邻格之间是连续的 ✓，
+        取整会让**同一个 σ 在不同步数下落到不同行** ✓✗（症状＝相邻帧亮度跳变、成片闪烁 ✓）；
+        而且取整后「两个不同 σ ⇒ 同一行」在数值上是**静默**的 ✗✗（不报错、只是画质掉 ✓）。
+
+        ⚠️ `t` 的语义是 **σ 归一化到 [0,1]** ✓（不是步序号 ✗）—— 由 :func:`t_vals_for` 产出 ✓。
+        """
+        grid = int(table.shape[0])
+        pos = t_vals.to(dtype=torch.float32).clamp(0.0, 1.0) * (grid - 1)
+        low = pos.floor().long().clamp(max=grid - 2)
+        return torch.lerp(table[low], table[low + 1],
+                          (pos - low).unsqueeze(1).to(table.dtype))
 
     def pack_audio(latent: Any) -> Any:
         """``[C, ch, T]`` → ``[ch·T, C]`` ✓ **channel-major** ✓（``ch0`` 的 T 帧在前 ✓ 再 ``ch1`` ✓）。
@@ -1299,6 +1360,76 @@ def _build_torch_parts() -> dict[str, Any]:
                 "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas,
                 "masked": denoise_mask is not None, "pinned": pin is not None}
 
+    class Int8Linear(nn.Module):  # noqa: D101 —— 公开名见 __all__ ✓
+        """**int8 权重常驻**的线性层 ✓ —— **前向时**才反量化 ✓（2026-10-29 加 ✓）。
+
+        ## 为什么不能「先整份反量化再装」✗✗
+
+        主 DiT 的 int8 权重是 **17.94 GiB** ✓；整份反量化成 bf16 = **35.9 GiB** ✗ ⇒
+        A5000 可用显存 22.49 GiB 连**装**都装不进去 ✗（还没算激活 ✓）——旧路径必然 OOM ✓，
+        这不是「跑得慢」而是「根本起不来」✓✗（`loader.residency_plan` 早就点过这一条 ✓）。
+
+        ## 做法 ✓
+
+        * ``weight`` 参数**就是 int8** ✓（17.94 GiB 原样 ✓，PyTorch 的 ``.to(dtype)`` **不会**
+          把非浮点张量降精度 ✓ ⇒ 后面把整个模块 ``.to(bf16)`` 也不会动它 ✓）；
+        * ``weight_scale`` 是文件里的 per-row 尺度 ✓（几 KB/层 ✓，**必须 fp32** ✓ ——
+          降成 bf16 会丢掉 0.4% 的尺度精度 ✓✗，比 int8 本身的量化误差还大 ✗）；
+        * 每次 ``forward`` **只反量化本层** ✓ ⇒ 瞬时 ≈ 单层 bf16 权重（最大 294 MiB ✓）。
+
+        ## convrot 的旋转搬到**激活侧** ✓
+
+        推导见 :func:`quant.dequantize_weight_rotated` ✓：权重侧反旋转要 **4.9 TMAC/步** ✗，
+        激活侧只要 **0.32 GMAC/步** ✓（差 15 倍 ✓）。两者**必须成对** ✓ —— 本类把这一对
+        锁在同一个 ``forward`` 里 ✓，从外面看不出有两个可错配的开关 ✓。
+        """
+
+        def __init__(self, in_features: int, out_features: int, *, bias: bool = True,
+                     scale_shape: Any = (1,), convrot: int | None = None,
+                     dtype: Any = None, device: Any = None) -> None:
+            super().__init__()
+            self.in_features = int(in_features)
+            self.out_features = int(out_features)
+            self.convrot = None if convrot is None else int(convrot)
+            self.weight = nn.Parameter(
+                torch.empty((self.out_features, self.in_features), dtype=torch.int8,
+                            device=device), requires_grad=False)
+            #: ⚠️ 形状**照文件**建 ✓（`[N]` 与 `[N,1]` 两种写法都有 ✓ —— 自己写死会被装载闸口按
+            #: 「形状不符」拦下 ✓，而模板是 `loader` 那份「不猜」的口径 ✓）。
+            self.register_buffer(
+                "weight_scale",
+                torch.ones(tuple(int(d) for d in scale_shape), dtype=torch.float32, device=device))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(self.out_features,
+                                                     dtype=dtype or torch.float32, device=device),
+                                         requires_grad=False)
+            else:
+                self.register_parameter("bias", None)
+
+        def extra_repr(self) -> str:
+            rot = "" if self.convrot is None else f", convrot={self.convrot}"
+            return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                    f"bias={self.bias is not None}, int8{rot}")
+
+        def forward(self, x: Any) -> Any:
+            quant = _quant_mod()
+            weight = self.weight
+            scale = self.weight_scale
+            # ⚠️ 权重**驻 CPU** 那条路（`place_module(..., park_int8_on=...)` ✓）：
+            #    本层**现搬** ✓ —— 上一层算完它的副本就释放了 ✓，所以峰值是「单层 int8 + 单层 bf16」✓，
+            #    不是整份 17.94 GiB ✗（这是 A5000 上唯一跑得起来的排法 ✓）。
+            #    ⚠️ 只在**设备不同**时才搬 ✗：常驻显卡时这里一次拷贝都不发生 ✓（老路一字未变 ✓）。
+            if weight.device != x.device:
+                weight = weight.to(x.device, non_blocking=weight.is_pinned())
+            if scale.device != x.device:
+                scale = scale.to(x.device, non_blocking=scale.is_pinned())
+            weight = quant.dequantize_weight_rotated(weight, scale, dtype=x.dtype)
+            if self.convrot is not None:
+                x = quant.rotate_activations(x, self.convrot)
+            bias = (None if self.bias is None
+                    else self.bias.to(device=x.device, dtype=x.dtype))
+            return nn.functional.linear(x, weight, bias)
+
     return {
         "torch": torch, "nn": nn, "RMSNorm": RMSNorm, "TimeEmbedder": TimeEmbedder,
         "SwiGLU": SwiGLU, "Attention": Attention, "AdalnProj": AdalnProj,
@@ -1317,9 +1448,126 @@ def _build_torch_parts() -> dict[str, Any]:
         "denoise_step": denoise_step, "audio_scale": audio_scale,
         "sample_dual_stream": sample_dual_stream,
         "mask_row_values": mask_row_values, "pack_audio": pack_audio,
+        "curve_t_emb": curve_t_emb,
         "patchify_video": patchify_video, "unpack_audio": unpack_audio,
         "unpatchify_video": unpatchify_video,
+        "Int8Linear": Int8Linear,
     }
+
+
+def _quant_mod() -> Any:
+    """延迟拿到 :mod:`quant` ✓（**不**在模块顶部 import ✗ —— 本模块要能「没有 torch 也导入」✓）。"""
+    global _QUANT_CACHE
+    if _QUANT_CACHE is None:
+        from app.services.engine import quant as module  # noqa: PLC0415
+        _QUANT_CACHE = module
+    return _QUANT_CACHE
+
+
+def _parts() -> dict[str, Any]:
+    """**缓存**建好的积木 ✓。
+
+    ⚠️ 为什么要缓存 ✗：老写法每次 `h3_form.H3FormTrunk` 触发的 `__getattr__` 都**重新定义一遍
+    全部类** ✓✗ ⇒ 同一次装载里拿 3 次就是 **3 个不同的类** ✓✗（`isinstance` 跨调用失效 ✓，
+    `upgrade_linear_to_int8` 换上去的层与调用方手里的类不是同一个 ✓）。缓存后 identity 稳定 ✓。
+    """
+    global _PARTS_CACHE
+    if _PARTS_CACHE is None:
+        _PARTS_CACHE = _build_torch_parts()
+    return _PARTS_CACHE
+
+
+def upgrade_linear_to_int8(module: Any, int8_scales: dict[str, Any], *,
+                           convrot: Any = None) -> list[str]:
+    """把 ``int8_scales`` 点名的 ``nn.Linear`` **原地**换成 :class:`Int8Linear` ✓（返回换掉的名单 ✓）。
+
+    ``int8_scales``：``{"blocks.0.mlp.fc1": (28672,), ...}`` ✓ —— 值是该权重**配套 scale 在文件里的
+    形状** ✓。⚠️ 形状**不能**自己写死 ✗：``[N]`` / ``[N,1]`` / ``[1]`` 三种写法在文件里都真实存在 ✓，
+    装错形状会被装载闸口按「形状不符」整份中止 ✓（那是好事 ✓，好过静默广播 ✓）。
+
+    ⚠️ **调用时机只有一处合法** ✗：必须在「模块已经 ``.to(dtype)`` 成计算精度」之后、
+    「开始装载」之前 ✓ —— 反过来会出两个错：① 先 upgrade 再 ``.to(bf16)`` ⇒ 把 ``weight_scale``
+    从 fp32 降成 bf16 ✓✗（尺度精度比 int8 的量化误差还大 ✗）；② 装载后再 upgrade ⇒ 换上去的
+    层权重是全 0 ✓✗（`torch.empty` 没填 ✓，不报错、出片全黑 ✓）。
+
+    ``convrot`` **逐层解析** ✓：整文件同组给 ``256`` ✓，逐层不同给 ``{层名: group}`` ✓
+    （实测 H3 全量版同文件里 64 与 256 并存 ✓）—— 一律经 :func:`quant.group_for` 取本层那一个 ✓，
+    查不到的层 ⇒ 不旋转（不拿别层的 group 顶上 ✗）。
+    """
+    import torch  # noqa: PLC0415
+    from torch import nn  # noqa: PLC0415
+
+    cls = _parts()["Int8Linear"]
+    swapped: list[str] = []
+    for name, scale_shape in int8_scales.items():
+        parent_path, _, leaf = str(name).rpartition(".")
+        parent = module.get_submodule(parent_path) if parent_path else module
+        old = getattr(parent, leaf, None)
+        if not isinstance(old, nn.Linear):
+            raise TypeError(f"`{name}` 不是 nn.Linear（收到 {type(old).__name__} ✗）"
+                            f"⇒ 不能换成 int8 常驻层 ✗")
+        new = cls(old.in_features, old.out_features, bias=old.bias is not None,
+                  scale_shape=tuple(int(d) for d in scale_shape),
+                  convrot=_quant_mod().group_for(str(name), convrot),
+                  dtype=old.weight.dtype, device=old.weight.device)
+        new.train(old.training)
+        setattr(parent, leaf, new)
+        swapped.append(str(name))
+    return swapped
+
+
+def place_module(module: Any, device: Any, *, park_int8_on: Any = None) -> dict[str, Any]:
+    """把模块状态搬到 ``device`` ✓ —— 但 **int8 常驻权重可以留在别处** ✓（``park_int8_on`` ✓）。
+
+    ## 为什么不能直接 ``module.to(device)`` ✗
+
+    整份 int8 是 **17.94 GiB** ✓，22.49 GiB 的 A5000 上「全塞进显存」之后只剩 **2.87 GiB**
+    给激活 ✓✗ —— 而 720×1280×5s 那种长度的激活要十几 GiB ✓✗（2026-10-29 实测扫过三档 ✓：
+    128 行 1.16 GiB ✓ / 5120 行 1.37 GiB ✓ / 20736 行**跑 30 分钟没完** ✗）。
+    ⇒ 唯一走得通的排法是「int8 **钉在 CPU** ✓ + 前向逐层搬 ✓」—— 峰值降到 **单层** ✓
+    （最大那层 147 MiB int8 + 294 MiB bf16 ✓），代价是每步多一趟 PCIe ✓。
+
+    ## 它**不是** ``.to()`` 的替代品 ✓✗
+
+    * **不改 dtype** ✗（dtype 是 :func:`_prepare_h3_module` 的事 ✓，这里只管"在哪个设备"✓）；
+    * **只管参数与缓冲区** ✓（那就是模块的全部状态 ✓ —— 没有第三种东西 ✓）；
+    * ``park_int8_on=None`` 时等价于「只搬设备」✓（本仓默认路径仍用 ``module.to()`` ✓，
+      这里给"驻 CPU"那条路用 ✓）。
+
+    返回的字典是**报告**（不猜 ✗）：``parked`` 层数 ✓、``parkedBytes`` 字节 ✓（17.94 GiB 那件事
+    要能对上号 ✓）、``pinned`` 是否真的锁页 ✓（异步 H2D 的前提 ✓；锁不上**不算错** ✓，只是慢 ✓）。
+    """
+    import torch  # noqa: PLC0415
+
+    target = torch.device(device) if not isinstance(device, torch.device) else device
+    park = None if park_int8_on is None else (
+        torch.device(park_int8_on) if not isinstance(park_int8_on, torch.device)
+        else park_int8_on)
+    moved = parked = 0
+    parked_bytes = 0
+    pinned = True
+    for tensor in [*module.parameters(), *module.buffers()]:
+        if tensor is None:  # pragma: no cover - 参数表里不会有 None ✓（`register_parameter(None)` 不会进表 ✓）
+            continue
+        keep = park is not None and tensor.dtype == torch.int8
+        want = park if keep else target
+        current = tensor.data if tensor.data.device != want else None
+        if current is not None:
+            tensor.data = current.to(want, non_blocking=True)
+        if keep:
+            parked += 1
+            parked_bytes += tensor.numel() * tensor.element_size()
+            # ⚠️ 锁页**只对 CPU 有意义** ✓：异步 H2D 要它才真异步 ✓（不锁也行 ✓，只是退化成同步 ✓）
+            if want.type == "cpu" and not tensor.data.is_pinned():
+                try:
+                    tensor.data = tensor.data.pin_memory()
+                except RuntimeError:       # pragma: no cover - 无 CUDA / 锁页配额满 ✓
+                    pinned = False
+        elif current is not None:
+            moved += 1
+    return {"device": str(target), "parkedOn": None if park is None else str(park),
+            "applied": park is not None, "moved": moved, "parked": parked,
+            "parkedBytes": parked_bytes, "pinned": pinned}
 
 
 def __getattr__(name: str) -> Any:
@@ -1332,4 +1580,4 @@ def __getattr__(name: str) -> Any:
     """
     if name.startswith("_") or name not in __all__:
         raise AttributeError(f"h3_form 没有 {name} ✓")
-    return _build_torch_parts()[name]
+    return _parts()[name]

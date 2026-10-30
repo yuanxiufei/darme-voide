@@ -116,7 +116,10 @@ _EXTRA_ALLOWLIST = {("GET", "/api/v1/health"), ("GET", "/api/v1/ai-providers"),
                     # 2026-09-24 自研接线 ✓：导演稿分段工具 ✓、超清计划 ✓、混合加载 ✓（Node 侧从来没有 ✓）
                     ("POST", "/api/v1/prompts/segments"),
                     ("POST", "/api/v1/engine/upscale-plan"),
-                    ("POST", "/api/v1/engine/hybrid-merge")}
+                    ("POST", "/api/v1/engine/hybrid-merge"),
+                    # 2026-10-28 自研接线 ✓：读权重文件头判真架构（Node 侧从来没有 ✓）
+                    ("GET", "/api/v1/local-models/fingerprint"),
+                    ("POST", "/api/v1/local-models/fingerprint")}
 
 
 def _node_path(prefix: str, ts_path: str) -> str:
@@ -629,6 +632,18 @@ _JSON_DUMPS_ALLOW = {
     "workflow.py",
 }
 
+#: 按**相对路径**登记（上面那张是按文件名的 ✓ —— 一旦别处同名就会误放行 ✗）：
+#:
+#: * ``services/engine/__main__.py`` —— 自研引擎的 **CLI 入口** ✓：`--json` 是给人看的诊断输出、
+#:   还会把报告写成盘上的 `*.json`（`indent` 有意 ✓）。**没有 Node 对应物** ✗、既不进共用 DB 列、
+#:   也不发给厂商、也不当 HTTP 响应体 ⇒ 不承担「镜像紧凑性」义务 ✓（与 `dryrun.py` 同一类 ✓）。
+#: * ``services/engine/loader.py`` —— 那一处是**同一条装配 spec 的去重键** ✓
+#:   （`json.dumps(spec, sort_keys=True)` 只在本进程内存里活一次 ✓，从不落盘、从不外出 ✓）。
+_JSON_DUMPS_ALLOW_PATHS = {
+    "services/engine/__main__.py",
+    "services/engine/loader.py",
+}
+
 
 def _json_dumps_drift() -> list[str]:
     """用 **AST** 找缺紧凑分隔符的 ``json.dumps``。
@@ -651,12 +666,14 @@ def _json_dumps_drift() -> list[str]:
             continue
         if path.name in _JSON_DUMPS_ALLOW:
             continue
+        relative = path.relative_to(app_dir).as_posix()
+        if relative in _JSON_DUMPS_ALLOW_PATHS:
+            continue
         source = path.read_text(encoding="utf-8")
         try:
             tree = ast.parse(source)
         except SyntaxError:  # pragma: no cover
             continue
-        relative = path.relative_to(app_dir).as_posix()
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -856,6 +873,29 @@ def _agent_types_drift() -> list[str]:
 #: ``DEFAULT_PROMPTS[].instructions`` 从 TS 的**模板字面量**里抽出来，把 ``${...}``
 #: 按 ``prompt_blocks`` 的同名常量做替换后，与 ``agent_prompts.DEFAULT_INSTRUCTIONS``
 #: **逐字**比对 —— 提示词是行为本身，差一个标点都会让 Agent 的表现漂移。
+#:
+#: ⚠️ **唯一的例外**：Python 侧**在尾巴上多出一段** ✓ —— 逐字登记在下面这张表里 ✓。
+#:    这不是"放宽比对" ✗：前缀仍要**一字不差** ✓，尾段也**逐字**钉死 ✓（改一个字就报 ✓）。
+_PROMPT_TAIL_ALLOW = {
+    # 2026-10-29 ✓：`extractor` 补了「完成标准（硬性…）」那一段 —— 起因是实测里它**抽完不落库** ✓✗
+    # （`save_*` 工具一次没调，链路却在报告"已完成" ✓）。⚠️ Node 那边的源码**已退役** ✓：
+    # 现在只剩 `tests/frozen_ts/agents/index.ts` 这份**快照** ✓ ⇒ 镜像不过去 ✓，
+    # 于是把这 273 字**逐字**登记在这里 ✓：它既证明"多出来的就是这段 ✓"，也保证
+    # "再多出一段别的 ✗"照样报错 ✓（`python_value == ts_value + tail` 是**等式** ✓）。
+    "extractor": (
+        "\n\n完成标准（硬性，不满足等于没做）：\n"
+        "- 必须真正调用 save_dedup_characters、save_dedup_scenes、save_dedup_props 落库；"
+        "只要一个保存工具都没调用，这一轮就是失败的\n"
+        "- 禁止输出剧情分析、故事点评、观后感或「后续发展方向建议」"
+        "——用户要的是落库的资产，不是读后感\n"
+        "- 不要在正文里罗列提取结果来代替保存；正文只写一句极简确认"
+        "（如「已保存 N 个角色 / N 个场景 / N 个物品」）\n"
+        "- 不要反问用户是否继续，也不要等用户确认：读完就接着保存，"
+        "直到三个 save_dedup_* 都调用过"
+    ),
+}
+
+
 def _agent_prompts_drift() -> list[str]:
     from app.services import agent_prompts, prompt_blocks
 
@@ -884,6 +924,9 @@ def _agent_prompts_drift() -> list[str]:
             raw.group(1),
         )
         if ts_value != python_value:
+            tail = _PROMPT_TAIL_ALLOW.get(key)
+            if tail is not None and python_value == ts_value + tail:
+                continue
             offset = next(
                 (i for i, (a, b) in enumerate(zip(ts_value, python_value)) if a != b),
                 min(len(ts_value), len(python_value)),

@@ -24,11 +24,15 @@ __all__ = ["build_prompt"]
 
 def build_prompt(text: str, *, pictures: int = 0, audios: int = 0, videos: int = 0,
                  audio_refs: Sequence[cond.AudioReference] = (), video_count: int = 0,
-                 global_prompt: str = "") -> dict[str, Any]:
+                 video_soundtracks: int = 0, global_prompt: str = "") -> dict[str, Any]:
     """一段文案 ⇒ **该提交给 H3 的 prompt** ✓ + 一份「做了什么」的计划 ✓。
 
     返回键 ✓：``prompt``（最终文本 ✓）、``markup``（转换后出现的标签编号 ✓）、
     ``plan``（声明计划 ✓）、``prefixed``（有没有拼全局提示词 ✓）。
+
+    ⚠️ ``video_soundtracks``（带音轨的参考视频路数 ✓）只往下传给声明渲染 ✓，**同时**撑大
+    ``<Audio N>`` 的可用数 ✓✗：后端的 ``<Audio j>`` 序列是「视频声轨 + 独立音频」共用一条 ✓
+    （声轨在前 ✓），声轨那几个号**也是合法标签** ✓ —— 不算进来 ⇒ 用户写 ``<Audio 1>`` 指声轨时被误判越界 ✓✗。
     """
     head = str(global_prompt or "").strip()
     body = str(text or "").strip()
@@ -41,9 +45,11 @@ def build_prompt(text: str, *, pictures: int = 0, audios: int = 0, videos: int =
     #    若可用数仍按「只是音频素材」算，就会把**自己上次写的声明**判成越界 ✓✗
     #    （2026-09-24 本套第一次跑就栽在这上面 ✓）。
     #    ⇒ 参考素材本身就是那几路标签的**合法来源** ✓（一路参考音频 = 一个 ``<Audio N>`` ✓）。
-    usable_audios = max(int(audios), len(audio_refs))
+    soundtracks = max(0, min(int(video_soundtracks or 0), int(video_count)))
+    usable_audios = max(int(audios) + soundtracks, len(audio_refs))
     usable_videos = max(int(videos), int(video_count))
     cond.validate_markup(marked, pictures=int(pictures), audios=usable_audios, videos=usable_videos)
-    final, plan = cond.apply_declarations(marked, audio_refs=audio_refs, video_count=video_count)
+    final, plan = cond.apply_declarations(marked, audio_refs=audio_refs, video_count=video_count,
+                                          video_soundtracks=soundtracks)
     return {"prompt": final, "markup": cond.markup_references(marked), "plan": plan.to_dict(),
             "prefixed": bool(head and body)}

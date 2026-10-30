@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -76,7 +77,48 @@ _UPDATE_FIELD_MAP: dict[str, str] = {
     "image_url": "image_url",
     "first_frame_url": "first_frame_url",
     "last_frame_url": "last_frame_url",
+    # ⚠️⚠️ 参考素材四件（2026-10-27 补 ✓✗）：白名单原来**一项都没有** ✗ ⇒ ``PUT /{id}``
+    #    收到它们既不报错、也不写库 ✓（**静默丢弃** ✓）⇒ 编辑器里改参考图 / 参考视频 /
+    #    参考图档位，只要点的是「更新已有记录」那条路 ✗，改完回读**一字未变** ✓✗，
+    #    而界面还显示「已保存」✓✗——最难查的一类：前端有值、库里有旧值、没人报错。
+    "reference_image_urls": "reference_image_urls",
+    "reference_audio_urls": "reference_audio_urls",
+    "reference_video_urls": "reference_video_urls",
+    "reference_image_size": "reference_image_size",
 }
+
+#: 白名单里**数组型**（落 TEXT 列存 JSON）的入参 ✓✗：不序列化直接把 ``list`` 绑进
+#: sqlite 会抛 ``InterfaceError``（那至少是个 400 报错 ✓）；这里统一走紧凑 JSON ✓，
+#: 与 ``video_generation._stringify`` 同口径（``ensure_ascii=False`` ＋ 无空格 ✓）。
+#: ⚠️ ``character_ids`` 同属这一类（原白名单里就有它、但没序列化 ⇒ 传数组必炸 ✗）。
+_JSON_LIST_FIELDS: frozenset[str] = frozenset({
+    "reference_image_urls",
+    "reference_audio_urls",
+    "reference_video_urls",
+    "character_ids",
+})
+
+
+def _json_text(value: Any) -> Any:
+    """数组型入参 → TEXT 列值 ✓：``None``／``""``／``[]`` ⇒ ``NULL``（与 POST 的落库口径一致 ✓）。
+
+    字符串**原样**放行 ✓（前端若已自己 ``JSON.stringify`` 过，再包一层就变成双重转义 ✗）。
+    """
+    if value is None or value == "" or value == []:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _pick(body: dict[str, Any], key: str, fallback: Any) -> Any:
+    """**显式给了就用，没给才回落** ✓✗。
+
+    ⚠️⚠️ 别用 ``body.get(key) or fallback`` ✗：``[]`` / ``""`` 是 falsy ⇒ 被当成「没给」✓✗
+    ⇒ 用户把参考视频**删光**、界面也显示空了，一重跑，**旧素材又回来了** ✓✗（本轮前端
+    已支持「清空」语义，后端必须同口径 ✓）。
+    """
+    return body[key] if key in body else fallback
 
 #: 支持多参考图的视频厂商（`canMultiRef` 判据之一）
 _MULTI_REF_PROVIDERS = ("volcengine", "vidu", "minimax")
@@ -102,6 +144,19 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
         reference_image_urls = body.get("reference_image_urls")
         scene_type = body.get("scene_type")
         reference_audio_urls = body.get("reference_audio_urls")
+        # ⚠️ 参考**视频**与参考图缩放档位（2026-10-27 补 ✓）：后端 H3 两样都吃 ✓，
+        #    但这里原来**只读图与音** ✗ ⇒ 前端带上来的 ``reference_video_urls`` /
+        #    ``reference_image_size`` 会被路由层直接丢掉 ✓✗（下游一句告警都没有 ✓）。
+        reference_video_urls = body.get("reference_video_urls")
+        reference_image_size = body.get("reference_image_size")
+        # 角色关联（编辑器里勾的「本镜出场角色」）—— 原来 POST **一个字都不读** ✗
+        # ⇒ 前端发了、适配器/库列都备好了，这里不转发 = 静默丢弃 ✓✗（重开编辑器勾选全空）。
+        character_ids = body.get("character_ids")
+        # ⚠️⚠️ 「显式给了空数组」≠「压根没提这件事」✓✗：下面有两处**自动注入**（分镜参考图 /
+        #    对话镜头声线样本），判据都是 falsy ✓ ⇒ 用户在编辑器里把参考素材**删光**（前端发 `[]`）、
+        #    后端又按分镜 auto 注回旧的 ✓✗（删了等于没删，界面也显示空了 ✓）。故先记「给没给」。
+        audio_given = "reference_audio_urls" in body
+        image_given = "reference_image_urls" in body
         # 分镜行：上下文注入与逐镜路由共用同一次查询，保证「决策输入」与「请求输入」同源
         sb_row = None
         # 画风收口：视频统一解析链（剧集 → 全局 → realistic），供提示词与负面词共用
@@ -144,7 +199,8 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
 
                     # 自动添加参考图（角色立绘 + 场景图 + 道具图，与 auto-pipeline 批量路径同源，
                     # 保证手动/批量两种触发方式收到同一套跨集一致性参考；首帧已由前端传）
-                    if not (reference_image_urls and len(reference_image_urls) > 0):
+                    # ⚠️ 只在「请求压根没提参考图」时注入 ✓✗：显式 `[]` = 用户要**不用**参考图 ✓
+                    if not image_given:
                         sb_refs = get_storyboard_reference_images(conn, sb_id)
                         if sb_refs:
                             reference_image_urls = sb_refs
@@ -152,7 +208,8 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
                 if not scene_type and sb_row.scene_type:
                     scene_type = sb_row.scene_type
                 # H3 音视频联合生成：对话类镜头自动带出场角色声线样本作为参考音频（Ref2VA）
-                if not (reference_audio_urls and len(reference_audio_urls) > 0) and (
+                # ⚠️ 同上：显式 `[]` = 用户把声线样本删光 ✓ ⇒ 不许 auto 注回（否则「清空」失效 ✗）
+                if not audio_given and (
                     VIDEO_ROUTE_DIALOGUE_PATTERN.search(sb_row.scene_type or "")
                 ):
                     reference_audio_urls = get_storyboard_reference_audio_urls(conn, sb_id)
@@ -196,6 +253,7 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
                 "canMultiRef": can_multi_ref,
                 "referenceImages": reference_image_urls or [],
                 "referenceAudioUrls": reference_audio_urls or [],
+                "referenceVideoUrls": reference_video_urls or [],
                 # 同场景顺接：body 给了 image_url 但没给首帧时，把它当上一镜尾帧
                 "prevTail": body.get("image_url") if (body.get("image_url") and not body.get("first_frame_url")) else None,
             })
@@ -236,6 +294,9 @@ async def create_video(request: Request, conn: Connection = Depends(get_tx)):
             "referenceImageUrls": reference_image_urls,
             "sceneType": scene_type,
             "referenceAudioUrls": reference_audio_urls,
+            "referenceVideoUrls": reference_video_urls,
+            "referenceImageSize": reference_image_size,
+            "characterIds": character_ids,
             "duration": body.get("duration"),
             "aspectRatio": body.get("aspect_ratio"),
             "configId": config_id,
@@ -325,7 +386,15 @@ async def update_video(video_id: str, request: Request, conn: Connection = Depen
         values: dict[str, Any] = {}
         for api_key, column in _UPDATE_FIELD_MAP.items():
             if api_key in body:
-                values[column] = body[api_key]
+                raw = body[api_key]
+                if api_key in _JSON_LIST_FIELDS:
+                    values[column] = _json_text(raw)
+                elif isinstance(raw, str) and not raw.strip():
+                    # 标量空串 ⇒ NULL ✓：前端「清空档位」就是发 ``''`` ✓；存空串会让库里
+                    # 多出「NULL」与「''」两种空 ✓✗（读账时判空写不一处，容易漏 ✓）
+                    values[column] = None
+                else:
+                    values[column] = raw
         if not values:
             return bad_request("No fields to update")
 
@@ -386,10 +455,25 @@ async def regenerate_video(video_id: str, request: Request, conn: Connection = D
             "imageUrl": body.get("image_url") or row.image_url,
             "firstFrameUrl": body.get("first_frame_url") or row.first_frame_url,
             "lastFrameUrl": body.get("last_frame_url") or row.last_frame_url,
-            "referenceImageUrls": body.get("reference_image_urls") or row.reference_image_urls,
+            # ⚠️ 参考图 / 参考音频同样要认「显式 ``[]`` = 清空」✓✗（原来都是 ``or`` ⇒ 空数组被
+            #    当「没给」⇒ 删光后一重跑旧素材又回来了 ✓）。未给时才回落到原记录，再落到分镜
+            #    自动收集（保留旧的「重跑补声线」行为 ✓）。
+            "referenceImageUrls": _pick(body, "reference_image_urls", row.reference_image_urls),
             "sceneType": body.get("scene_type") or row.scene_type or None,
-            "referenceAudioUrls": body.get("reference_audio_urls")
-            or (get_storyboard_reference_audio_urls(conn, row.storyboard_id) if row.storyboard_id else None),
+            "referenceAudioUrls": _pick(
+                body,
+                "reference_audio_urls",
+                row.reference_audio_urls
+                or (get_storyboard_reference_audio_urls(conn, row.storyboard_id)
+                    if row.storyboard_id else None),
+            ),
+            # 重跑要**原样复现**上一次的参考素材 ✓✗（少了它们 ⇒「重跑」出来的其实是另一种素材 ✓）
+            # ⚠️ 用 ``_pick`` 而非 ``or``：显式 ``[]`` 是「清空」✓，不能被 falsy 当「没给」吞掉 ✗
+            "referenceVideoUrls": _pick(body, "reference_video_urls", row.reference_video_urls),
+            "referenceImageSize": _pick(body, "reference_image_size", row.reference_image_size),
+            # 角色关联同样要「未给才回落原记录」✓✗：不复制 ⇒ 重跑出来的新记录**丢了出场角色** ✓
+            # （自动注入的角色立绘、声线样本按分镜算，但记录本身读不出角色 ⇒ 编辑器勾选全空 ✓）。
+            "characterIds": _pick(body, "character_ids", row.character_ids),
             "duration": body.get("duration") or row.duration,
             "aspectRatio": body.get("aspect_ratio") or row.aspect_ratio,
             "configId": config_id,

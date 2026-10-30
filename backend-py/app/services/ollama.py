@@ -28,6 +28,31 @@ def normalize_ollama_url(base_url: str | None = None) -> str:
     return re.sub(r"/+$", "", str(base_url or DEFAULT_OLLAMA_URL))
 
 
+def resolve_ollama_url(configured: str | None = None) -> str:
+    """本次**要连**的 Ollama 地址：显式配置 → ``OLLAMA_HOST`` → 本仓默认。
+
+    ⚠️ 为什么不能只看 ``DEFAULT_OLLAMA_URL``：官方安装包与桌面端都用 ``OLLAMA_HOST``
+    改监听地址（``127.0.0.1:11435``、``0.0.0.0:11434`` …）。写死 ``localhost:11434`` 时，
+    用户一改端口 ⇒ 探测必然失败 ⇒ 我们会**再拉起一个 serve**，而真正在跑的那个进程
+    一直好好的 —— 这类「明明开着却说没开」是最难查的一类报障。
+
+    解析交给 ``ollama_native.envconfig.ConnectableHost()``（上游 ``envconfig`` 的对等
+    实现，别再写第二套）：它负责去引号、按 scheme 补默认端口（http→80 / https→443）、
+    并把 ``0.0.0.0`` / ``::`` 这类**绑定**地址换回回环地址 —— Windows 不接受把通配
+    地址当目的地，照抄 ``OLLAMA_HOST=0.0.0.0:11434`` 去连必然 ECONNREFUSED。
+    """
+    if configured and str(configured).strip():
+        return re.sub(r"/+$", "", str(configured).strip())
+    try:
+        from .ollama_native.envconfig import ConnectableHost, Var
+
+        if Var("OLLAMA_HOST"):        # 未设 ⇒ 保持本仓既有默认，行为一字不变
+            return re.sub(r"/+$", "", ConnectableHost().base_url)
+    except Exception:                 # noqa: BLE001 - 解析失败退回默认，不让探测整条挂掉
+        pass
+    return DEFAULT_OLLAMA_URL
+
+
 def format_bytes(size: int | None = None) -> str:
     """字节数 → 人类可读（``toFixed(1)`` ⇒ 恒一位小数）。"""
     if not size or size <= 0:
@@ -96,8 +121,14 @@ async def is_ollama_reachable(base_url: str) -> bool:
 
 
 async def try_start_ollama() -> dict[str, Any]:
-    """尝试启动本地 Ollama 服务并等待就绪（最坏轮询 20 秒）。"""
-    if await is_ollama_reachable(DEFAULT_OLLAMA_URL):
+    """尝试启动本地 Ollama 服务并等待就绪（最坏轮询 20 秒）。
+
+    ⚠️ 探测地址走 :func:`resolve_ollama_url`（跟着 ``OLLAMA_HOST`` 走），**不是**
+    ``DEFAULT_OLLAMA_URL``：用户改了端口/绑了通配地址时，写死默认值会把「已在运行」
+    误判成「没启动」，于是白拉一个 serve。
+    """
+    target = resolve_ollama_url()
+    if await is_ollama_reachable(target):
         return {"started": False, "message": "Ollama 已在运行", "exe": find_ollama_exe()}
 
     exe = find_ollama_exe()
@@ -121,7 +152,7 @@ async def try_start_ollama() -> dict[str, Any]:
 
     for _ in range(40):
         await asyncio.sleep(0.5)
-        if await is_ollama_reachable(DEFAULT_OLLAMA_URL):
+        if await is_ollama_reachable(target):
             return {"started": True, "message": "Ollama 已启动并就绪", "exe": exe}
 
     return {

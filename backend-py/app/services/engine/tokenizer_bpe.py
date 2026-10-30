@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import unicodedata
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 __all__ = ["BpeTokenizer", "bytes_to_unicode", "load_tokenizer", "pretokenize"]
 
@@ -149,9 +149,17 @@ class BpeTokenizer:
     def __init__(self, vocab: dict[str, int], merges: Iterable[Sequence[str]], *,
                  added_tokens: dict[str, int] | None = None,
                  bos_ids: Sequence[int] = (), eos_ids: Sequence[int] = (),
-                 notes: Sequence[str] = ()) -> None:
+                 notes: Sequence[str] = (),
+                 splitter: Callable[[str], list[str]] | None = None,
+                 pre_tokenizer_name: str = "gpt2") -> None:
         if not vocab:
             raise ValueError("词表是空的 ✗")
+        # ⚠️ 预分词规则**可注入**（2026-10-29 补 ✓）：GPT-2 与 Qwen2 的字面规则**不一样** ✗
+        # （Qwen2 的 ``\p{N}`` 是**单个数字** ✓、还有独立的 ``\s*[\r\n]+`` 分支 ✓）——
+        # 硬套 GPT-2 规则会**静默编出错 id** ✗✗（不报错、只是 id 全错 ✓）。默认仍走 GPT-2 ✓
+        # （SDXL 那套 CLIP 词表就是它 ✓，行为一字不变 ✓）。
+        self._splitter = splitter or pretokenize
+        self.pre_tokenizer_name = str(pre_tokenizer_name)
         self.vocab: dict[str, int] = {str(token): int(index) for token, index in vocab.items()}
         self._byte_encoder = bytes_to_unicode()
         self._byte_decoder = {char: byte for byte, char in self._byte_encoder.items()}
@@ -191,6 +199,7 @@ class BpeTokenizer:
         """自述 ✓（词表从哪来、多少 token、多少条 merge、有什么保留说明 ✓）。"""
         return {"name": self.name, "vocabSize": self.vocab_size, "merges": self.merge_count,
                 "addedTokens": len(self._added), "byteLevel": True,
+                "preTokenizer": self.pre_tokenizer_name,
                 "bosIds": list(self._bos), "eosIds": list(self._eos), "notes": list(self.notes)}
 
     # ── 结构对比 ✓（自检/装载报告要用它回答「换词表了吗」✓）
@@ -265,7 +274,7 @@ class BpeTokenizer:
             if kind == "special":
                 ids.append(self._added[chunk])
                 continue
-            for piece in pretokenize(chunk):
+            for piece in self._splitter(chunk):
                 ids.extend(self.vocab[token] for token in self._bpe(piece))
         if add_special_tokens:
             ids.extend(self._eos)

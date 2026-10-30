@@ -210,6 +210,35 @@ async def case_failure_and_h3() -> None:
           and str(result2.get("localPath") or "").startswith("static/comfyui/"),
           (result2.get("status"), result2.get("localPath")))
 
+    # ⚠️⚠️ 参考素材必须**原样过服务层** ✓✗（2026-10-27 补）：修前这一层**一个都不传** ✗
+    #    ⇒ 产品侧挂着参考图/音频/视频跑 H3 时，素材在**服务层**就被静默丢掉 ✓✗
+    #    （收端按纯文生跑完 ✓、回执里 ``reference_*`` 全是 0 ✓，从日志完全看不出是被谁丢的 ✓）。
+    h3_before2 = SEEN["h3_runs"]
+    with engine.begin() as conn:
+        run_id3 = await svc.submit_run(conn, {
+            "kind": "h3", "prompt": "H3 参考素材用例", "duration": 4, "workflowName": "h3",
+            "referenceImageUrls": ["https://x/a.png"], "referenceAudioUrls": ["https://x/b.mp3"],
+            "referenceVideoUrls": ["https://x/c.mp4"], "referenceImageSize": "max",
+        })
+    await wait_terminal(run_id3)
+    body3 = json.loads(SEEN.get("h3_body") or "{}")
+    check("⑫′ H3 的参考图/音频/视频/缩放档位**原样过服务层** ✓（用后端协议键、camelCase ✓）",
+          SEEN["h3_runs"] == h3_before2 + 1
+          and body3.get("referenceImageUrls") == ["https://x/a.png"]
+          and body3.get("referenceAudioUrls") == ["https://x/b.mp3"]
+          and body3.get("referenceVideoUrls") == ["https://x/c.mp4"]
+          and body3.get("referenceImageSize") == "max",
+          body3)
+    # ⚠️ 空列表**不写进 body** ✓✗：``referenceImageUrls: []`` 会被收端读成「声明了但没内容」✓，
+    #    与「压根没提这件事」不是一回事 ✓（收端要据此决定走 T2V 还是 R2V ✓）。
+    empty_body = svc._build_upstream_body(
+        "h3", {"prompt": "p", "referenceImageUrls": [], "referenceAudioUrls": "",
+               "referenceVideoUrls": None, "referenceImageSize": ""})
+    check("⑫″ 参考素材为空 ⇒ 这几个键**根本不出现** ✓（不是塞空数组/空串 ✗）",
+          "referenceImageUrls" not in empty_body and "referenceAudioUrls" not in empty_body
+          and "referenceVideoUrls" not in empty_body and "referenceImageSize" not in empty_body,
+          empty_body)
+
 
 async def case_recovery() -> None:
     """④ 崩溃恢复：在途运行**绝不重提交**，只收尾并说明 ✓。"""

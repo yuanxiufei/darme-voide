@@ -84,11 +84,18 @@ def case_basics() -> None:
 # ② plan_component：合成权重文件
 # ══════════════════════════════════════════════════════════════════════════
 def _quantized(root: Path, *, blocks: int = 3, drop_scale_for: int | None = None,
-               block_indices: list[int] | None = None) -> Path:
-    """造一份"像量化 DiT"的权重 ✓（可注入两种坏法：缺 scale / 层号有洞 ✓）。"""
+               block_indices: list[int] | None = None,
+               weight_dtype: str = "F8_E4M3") -> Path:
+    """造一份"像量化 DiT"的权重 ✓（可注入两种坏法：缺 scale / 层号有洞 ✓）。
+
+    ⚠️ `weight_dtype` 默认 **fp8** ✗：「缺 scale」那种坏法**不能**用 fp8 造 ✓✗ ——
+    fp8 没有 scale 是**合法**的「直接 cast」✓（`quant.is_cast_only` ✓，盘上 seedvr2 301 个权重
+    全这样 ✓），拿它当坏法样本 ⇒ 用例测的是「不该报的报了」✗，而真正的坏法（int8 缺 scale
+    ⇒ 数量级全错 ✓）反而没人管 ✓。2026-10-30 因此把坏法一样本换成 `I8` ✓。
+    """
     tensors: dict[str, tuple[str, list[int]]] = {"embed.weight": ("BF16", [8, 8])}
     for index in (block_indices if block_indices is not None else list(range(blocks))):
-        tensors[f"blocks.{index}.attn.wq.weight"] = ("F8_E4M3", [8, 8])
+        tensors[f"blocks.{index}.attn.wq.weight"] = (weight_dtype, [8, 8])
         if drop_scale_for != index:
             tensors[f"blocks.{index}.attn.wq.scale"] = ("F32", [8, 8])
     # ⚠️ 落点必须拼成 `<根>/<kind>/<文件名>` ✓（`component_path` 的口径 ✓，也是**安装器**的口径 ✓）
@@ -112,11 +119,21 @@ def case_component(root: Path) -> None:
     check("⑥ 读盘耗时是**估算**（按假定吞吐算，字段名就写明 ✓）",
           plan.readSecondsEstimate >= 0, plan.readSecondsEstimate)
 
-    # ⚠️ 坏法一：缺 scale ⇒ 必须在**加载前**发现
-    _quantized(root / "bad_scale", drop_scale_for=1)
+    # ⚠️ 坏法一：缺 scale ⇒ 必须在**加载前**发现（样本**用 int8** ✗ —— fp8 无 scale 是合法 cast ✓）
+    _quantized(root / "bad_scale", drop_scale_for=1, weight_dtype="I8")
     bad_scale = ld.plan_component(entry, root=root / "bad_scale")
-    check("⑦ ⭐ 量化权重**缺 scale** ⇒ 加载前就报（否则反量化时才炸 ✗）",
+    check("⑦ ⭐ 量化权重（**int8**）**缺 scale** ⇒ 加载前就报（否则反量化时数量级全错 ✗）",
           any("scale" in item for item in bad_scale.problems), bad_scale.problems)
+
+    # ⭐ 同一形态换成 fp8 ⇒ **不许**报：fp8 每个值都能被 bf16 精确表示 ✓ ⇒ 无 scale 就是直接 cast ✓
+    _quantized(root / "fp8_cast", drop_scale_for=1)
+    fp8_cast = ld.plan_component(entry, root=root / "fp8_cast")
+    check("⑦′ ⭐ fp8 **无** scale ⇒ **不报**「缺配套」✓（旧判据把它报成「反量化时会炸」✗ = 假拒绝 ✗；"
+          "盘上 `seedvr2_ema_3b_fp8_e4m3fn` 301 个权重全无 scale ✓ 整族曾因此被拒 ✗）；"
+          "体检的 `dequantPlan` 同时把它记成 `cast` 布局 ✓（不是悄悄跳过 ✓）",
+          fp8_cast.problems == []
+          and fp8_cast.dequantPlan["layouts"] == {"elementwise": 2, "cast": 1},
+          (fp8_cast.problems, fp8_cast.dequantPlan))
 
     # ⚠️ 坏法二：层号有洞 ⇒ 典型是文件被截断/拼错
     _quantized(root / "gap", block_indices=[0, 1, 3])
@@ -285,6 +302,17 @@ def case_api(root: Path) -> None:
           (data.get("residency") or {}).get("note"))
     check("㉘ 未知阶段 ⇒ 400 ✓",
           client.get("/api/v1/engine/load-plan", params={"stage": "nope"}).status_code == 400)
+
+    #: ⚠️ `loras` 写错 ⇒ **400**（不是 500 ✗✗）—— 这条要**真 HTTP 栈** ✓：单测
+    #:    （`engine_router_contract_test` ⑪⁶）只验到 `_assembly_from` 抛 `StageError` ✓，
+    #:    而决定前端能不能分流的其实是**错误码映射** ✓（`ValueError` 漏出去就是 500 ⇒
+    #:    前端只能报"服务器错误"、拿不到"哪个文件不存在" ✗）。
+    #:    ⚠️ 只打**拒收**这条 ✓：给一条**存在**的 LoRA 会真的去装 19.53 GiB 权重 ✗。
+    bad = client.post("/api/v1/engine/load",
+                      json={"loras": ["/nonexistent/nope.safetensors"]})
+    check("㉚ `loras` 指向不存在的文件 ⇒ 400 且点名那个文件 ✓（不是 500 ✗，更不是静默忽略 ✗）",
+          bad.status_code == 400 and "nope.safetensors" in bad.text,
+          (bad.status_code, bad.text[:200]))
 
 
 def main() -> int:

@@ -270,6 +270,8 @@
 
 <script setup>
 import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
+// 配置下拉显示名的唯一实现（本页没选配置时留空白，剧集页那边要「未配置」提醒）
+import { configLabel as sharedConfigLabel } from '~/utils/storyboard'
 
 // 画风下拉选项统一取自 utils/artStyles.ts（前端单一数据源）
 const artStyleOptions = ART_STYLE_OPTIONS
@@ -324,11 +326,9 @@ const renameEpisodeTitle = ref('')
 
 function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
 
+// 空值留白：本页的下拉在「还没选」时不该显示「未配置」（那里是新建剧集表单）
 function configLabel(config) {
-  if (!config) return ''
-  let modelName = ''
-  try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
-  return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
+  return sharedConfigLabel(config, '')
 }
 
 const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))

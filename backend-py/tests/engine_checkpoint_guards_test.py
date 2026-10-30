@@ -114,25 +114,57 @@ def case_contract_strict() -> None:
 
 
 def case_unsupported_family() -> None:
-    """⑤ ⭐ 未实现的布局族要**具名拒绝** ✓（撞上 ``convrot`` 时别只说「判不出布局」✗）。"""
-    msg = quant_mod.unsupported_family(
-        source="minimax_h3_ref2va_pruned_int8_convrot.safetensors")
-    check("⑤ 文件名带 ``convrot`` ⇒ 返回理由 ✓ 且**点名族名** ✓、说清「要旋转参数」✓、"
-          "并强调**不猜** ✓",
-          msg is not None and "convrot" in msg and "旋转参数" in msg and "不猜" in msg, msg)
-    # ⚠️⚠️ 这里**不能**写「不许出现『判不出布局』这个词」✗ —— 文案为澄清而**提到**了它 ✓✗
-    #    （本套第一次就栽在这上面 ✓；`engine_dual_stream_test` 的 55″ 同款 ✓）。
-    #    ⇒ 只断言**语义**：必须说清「不是那个 ✓」+「是本仓没实现 ✓」✓。
-    check("⑤′ ⭐ 且必须把话**说透** ✓：这是「不是文件坏了 ✓、是本仓没实现 ✓」"
-          "（⚠️ 只断言「某个词不出现」会被**为澄清而提到它**的文案打碎 ✗✗）",
-          msg is not None and "不是文件坏了" in msg and "没实现" in msg, msg)
-    check("⑤″ 干净的模型名 ⇒ ``None`` ✓（正向对照：上面的命中不是「永远命中」的套套逻辑 ✓）",
-          quant_mod.unsupported_family(source="minimax_h3_fl2va_int8.safetensors") is None
-          and quant_mod.unsupported_family() is None)
-    check("⑤‴ 张量名里出现也算命中 ✓（大小写不敏感 ✓）",
-          quant_mod.unsupported_family(tensor_names=["x.weight_CONVROT_scale"]) is not None)
-    check("⑤⁴ ``UNSUPPORTED_FAMILIES`` 是**公开**的 ✓（别让人只能看报错才知道有哪些族 ✗）",
-          "convrot" in quant_mod.UNSUPPORTED_FAMILIES)
+    """⑤ ⭐ 未实现的布局族要**具名拒绝** ✓（撞上某某族时别只说「判不出布局」✗）。
+
+    ⚠️ **2026-10-29 起这一组翻面** ✓✗：``convrot`` 已**实现** ✓（Hadamard 旋转参数就在
+    ``*.comfy_quant`` 里 ✓，见 :func:`quant.convrot_group_of` ✓）⇒ 它**不再是**拒绝理由 ✓。
+    于是本组改成**两半** ✓：
+
+    * 前半钉**新事实** ✓：文件名带 ``convrot`` 必须**放行** ✓（表里也**不许**再有这个键 ✗——
+      加回去就会把已经跑得通的真权重拦在门外 ✓✗，而症状是"装不上"而不是"报错"✗）；
+    * 后半钉**机制本身** ✓：往表里临时塞一个假族，验证"具名 / 说透 / 大小写不敏感 / 张量名也算"✓
+      —— 否则表一旦空了 ✓，这几条就成了"永远 None"的套套逻辑 ✓✗。
+    """
+    check("⑤ ``convrot`` 已实现 ⇒ **不再拒绝**（文件名带它也必须放行 ✓；拦下就是真权重装不上 ✗）",
+          quant_mod.unsupported_family(
+              source="minimax_h3_ref2va_pruned_int8_convrot.safetensors") is None
+          and "convrot" not in quant_mod.UNSUPPORTED_FAMILIES,
+          sorted(quant_mod.UNSUPPORTED_FAMILIES))
+
+    quant_mod.UNSUPPORTED_FAMILIES["_selftest_family"] = "自检用的假族（**只在本次调用期间存在** ✓）"
+    try:
+        msg = quant_mod.unsupported_family(source="model_selftest_FAMILY.safetensors")
+        check("⑤′ 具名拒绝 ✓：**点名族名** ✓ + 说清「不是文件坏了 / 是本仓没实现」✓ + **给两条出路** ✓",
+              msg is not None and "_selftest_family" in msg and "不是文件坏了" in msg
+              and "没实现" in msg and "要么" in msg and "要么" in msg[msg.index("要么") + 1:], msg)
+        # ⚠️⚠️ 这里**不能**写「不许出现『判不出布局』这个词」✗ —— 文案为澄清而**提到**了它 ✓✗
+        #    （本套第一次就栽在这上面 ✓；`engine_dual_stream_test` 的 55″ 同款 ✓）。
+        check("⑤″ 干净的名字 ⇒ ``None`` ✓（正向对照：上面的命中不是「永远命中」✓）",
+              quant_mod.unsupported_family(source="minimax_h3_fl2va_int8.safetensors") is None
+              and quant_mod.unsupported_family() is None)
+        check("⑤‴ 张量名里出现也算命中 ✓（大小写不敏感 ✓）",
+              quant_mod.unsupported_family(
+                  tensor_names=["x.weight_SELFTEST_FAMILY_scale"]) is not None)
+    finally:
+        quant_mod.UNSUPPORTED_FAMILIES.pop("_selftest_family", None)
+    check("⑤⁴ 自检**收干净** ✓（临时族不许漏在表里 ✗ —— 漏了会让下一个用例莫名其妙被拦 ✓✗）",
+          "_selftest_family" not in quant_mod.UNSUPPORTED_FAMILIES)
+
+    # ⚠️ 未实现族现在的**真落点**是 `comfy_quant` 自带的 `format` ✓（比名字硬 ✓）——
+    #    这条以前没有断言 ✗：那族盘上**真有**（本机模型清单里就有）✓✗。
+    #    ⚠️ 2026-10-30 起 `nvfp4` **已实现** ✓（`quant_nvfp4`）⇒ 「具名拒绝」的样本必须换成
+    #    `mxfp4` ✗，并**另加一条**守住 nvfp4 走的是「支持」那条路 ✓（否则两族会被混成一句话 ✓✗）。
+    fam = quant_mod.format_family({"format": "mxfp4"})
+    check("⑤⁵ `comfy_quant` 明写 ``format=mxfp4`` ⇒ 具名拒绝 ✓（并有理由 ✓）",
+          fam is not None and fam[0] == "mxfp4" and len(fam[1]) > 20, fam)
+    done = quant_mod.supported_format({"format": "nvfp4"})
+    check("⑤⁵′ 同一份 `comfy_quant` 写 ``format=nvfp4`` ⇒ 落**支持**栏 ✓✗（两栏不许同时命中 ✓）",
+          quant_mod.format_family({"format": "nvfp4"}) is None
+          and done is not None and done[0] == "nvfp4" and len(done[1]) > 20, done)
+    check("⑤⁶ 正常格式（``int8_tensorwise``）⇒ **不拒** ✓（convrot 就长这样 ✓ 一拒就装不上 ✗）"
+          "，且两栏都不认领它 ✓（由 `convrot_group_of` 另行处理 ✓）",
+          quant_mod.format_family({"format": "int8_tensorwise", "convrot": True}) is None
+          and quant_mod.supported_format({"format": "int8_tensorwise", "convrot": True}) is None)
 
 
 def main() -> int:

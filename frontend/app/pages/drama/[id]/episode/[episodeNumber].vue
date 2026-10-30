@@ -13,7 +13,7 @@
           <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
-            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/11</span>
+            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/{{ pipelineTotal }}</span>
             <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 镜头</span>
           </div>
         </div>
@@ -21,7 +21,7 @@
 
       <div class="studio-topbar-side">
         <div class="studio-actions">
-          <button class="btn" @click="refresh">
+          <button class="btn" @click="refresh()">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             刷新
           </button>
@@ -55,7 +55,6 @@
             </span>
             <span class="pipe-copy">
               <span class="pipe-label">{{ item.label }}</span>
-              <span v-if="item.desc" class="pipe-sub">{{ item.desc }}</span>
             </span>
           </button>
         </div>
@@ -66,10 +65,10 @@
         <div class="progress-wrap">
           <div class="progress-head">
             <span class="progress-label">制作进度</span>
-            <span class="progress-val">{{ pipelineProgress }}/11</span>
+            <span class="progress-val">{{ pipelineProgress }}/{{ pipelineTotal }}</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" :style="{ width: (pipelineProgress / 11 * 100) + '%' }"></div>
+            <div class="progress-fill" :style="{ width: pipelinePercent + '%' }"></div>
           </div>
         </div>
         <div class="sidebar-jumper" v-if="sidebarJumpSteps.length">
@@ -81,7 +80,7 @@
             :title="step.label"
           ></button>
         </div>
-        <button class="refresh-btn" @click="refresh">
+        <button class="refresh-btn" @click="refresh()">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           刷新数据
         </button>
@@ -562,6 +561,17 @@
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 {{ sbs.length ? '重新拆解' : 'AI 拆解分镜' }}
               </button>
+              <!-- 拆镜前先对着词表写：新标签打开，不打断本页未保存的编辑 -->
+              <NuxtLink
+                :to="`/visual-graph?drama_id=${dramaId}`"
+                target="_blank"
+                rel="noopener"
+                class="btn btn-sm"
+                title="景别/构图/运镜/灯光词表 + 本剧拆镜引导（新标签打开）"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                词表
+              </NuxtLink>
             </div>
           </div>
 
@@ -587,9 +597,9 @@
                     <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
-                      <div v-if="sb.imageUrl || sb.composedImage || sb.firstFrameImage" class="shot-dot has-img" title="已生成图片"></div>
+                      <div v-if="hasImg(sb)" class="shot-dot has-img" title="已生成图片"></div>
                       <div v-if="sb.asset_status === 'needs_regeneration' || sb.assetStatus === 'needs_regeneration'" class="shot-dot has-asset-warn" title="资产需重新生成"></div>
-                      <div v-if="sb.videoUrl || sb.composedVideoUrl" class="shot-dot has-video" title="已生成视频"></div>
+                      <div v-if="hasVid(sb)" class="shot-dot has-video" title="已生成视频"></div>
                       <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
                     </div>
                   </div>
@@ -1071,6 +1081,61 @@
                 <span v-if="t.badge" class="prod-tab-badge">{{ t.badge }}</span>
               </button>
             </div>
+            <div class="toolbar-right">
+              <!-- 参数摘要：点开才占地方，收起时只是一个「生成参数」小字。
+                   内容全部现算（模型配置来自本集锁定值），不另存一份副本 ✓
+                   ⚠️ 面板必须 `position: fixed` 挂在 body 视口坐标上：`.content-panel` 是
+                   `overflow: hidden`，相对定位的下拉会被这块面板直接裁掉（点了像没反应）✓✗ -->
+              <div class="param-digest">
+                <button class="param-toggle" :class="{ open: paramsOpen }" @click="toggleParams($event)">生成参数</button>
+                <div v-if="paramsOpen" class="param-shade" @click="paramsOpen = false" />
+                <div v-if="paramsOpen" class="param-body" :style="paramsPos">
+                  <div class="param-row"><span>图片模型</span><b>{{ lockedImageConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>视频模型</span><b>{{ lockedVideoConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>配音</span><b>{{ lockedAudioConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>画风</span><b>{{ dramaStyleValue || '未设置' }}</b></div>
+                  <div class="param-row"><span>本集镜头</span><b>{{ sbs.length }} 个 · {{ totalDuration }} 秒</b></div>
+                  <div class="param-row"><span>当前镜头参考</span><b>{{ selectedSbRefStrategy }}</b></div>
+                  <div v-if="selectedSbPrompt" class="param-prompt">
+                    <div class="param-prompt-head">
+                      <span>当前镜头提示词</span>
+                      <button class="param-more" @click="promptExpanded = !promptExpanded">{{ promptExpanded ? '收起' : '展开' }}</button>
+                    </div>
+                    <pre :class="{ expanded: promptExpanded }">{{ selectedSbPrompt }}</pre>
+                  </div>
+                  <!-- 预设：一季十几集重复选同样三个下拉，选漏就是那集用错模型出图 -->
+                  <div class="param-preset">
+                    <div class="param-prompt-head">
+                      <span>本集生成预设</span>
+                      <span class="dim" style="font-size:10.5px">{{ presetBusy ? '处理中…' : (genPresets.length ? `${genPresets.length} 个` : '还没有') }}</span>
+                    </div>
+                    <div v-if="genPresets.length" class="preset-list">
+                      <div v-for="p in genPresets" :key="p.id" class="preset-row">
+                        <span class="preset-name" :title="p.name">{{ p.name }}</span>
+                        <button class="preset-btn" @click="applyGenPreset(p)">套用</button>
+                        <button class="preset-btn ghost" @click="removeGenPreset(p)">删除</button>
+                      </div>
+                    </div>
+                    <div class="preset-save">
+                      <input
+                        v-model="presetName"
+                        class="preset-input"
+                        placeholder="存成预设，如「Krea2 首尾帧」"
+                        maxlength="24"
+                        @keyup.enter="saveGenPreset"
+                      />
+                      <button class="preset-btn" :disabled="!presetName.trim() || presetBusy" @click="saveGenPreset">保存</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- 一键跑剩余步骤。差的步数直接写在按钮上，点开先看清单再决定跑不跑 ✓ -->
+              <button class="btn btn-chain" :class="{ running: chainRunning }" @click="chainOpen = true">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                {{ chainRunning ? '流水线进行中' : '继续到成片' }}
+                <span v-if="chainTodoSteps.length && !chainRunning" class="chain-count">{{ chainTodoSteps.length }}</span>
+              </button>
+            </div>
           </div>
 
           <!-- 镜头时间线总览 -->
@@ -1118,46 +1183,32 @@
                 </button>
               </div>
             </div>
-            <div class="asset-grid">
-              <div v-for="c in visualChars" :key="c.id" class="card asset-card clickable" @click="$router.push(`/drama/${dramaId}/character/${c.id}`)">
-                <div class="asset-cover">
-                  <img
-                    v-if="c.image_url || c.imageUrl"
-                    :src="'/' + (c.image_url || c.imageUrl)"
-                    class="previewable-image"
-                    @click.stop="openImageViewer('/' + (c.image_url || c.imageUrl), `${c.name} 角色形象`)"
-                  />
-                  <div v-else class="asset-cover-empty">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                  </div>
-                  <span class="asset-cover-badge" :class="(c.image_url || c.imageUrl) ? 'is-ready' : (isPendingCharImage(c.id) ? 'is-pending' : '')">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
-                </div>
-                <div class="asset-body">
-                  <div class="asset-name-row">
-                    <div class="asset-name">{{ c.name }}</div>
-                    <select class="config-select char-style-select" :value="c.style || ''" title="角色画风（留空跟随剧集）" @click.stop @change="switchCharStyle(c, ($event.target as HTMLSelectElement).value)">
-                      <option value="">随剧集</option>
-                      <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
-                    </select>
-                  </div>
-                  <div class="asset-meta dim">{{ c.role || '角色' }}</div>
-                </div>
-                <div class="asset-foot">
-                  <div class="foot-left">
-                    <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
-                    <span class="dim foot-status">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
-                  </div>
-                  <div class="foot-right">
-                    <ModelSelector :model-value="charImageModels[c.id] || ''" service-type="image" placeholder="默认模型" @update:model-value="(v: string) => charImageModels[c.id] = v" @click.stop />
-                    <button class="btn btn-sm btn-edit" title="编辑角色详情" @click.stop="openCharEditor(c)">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                      编辑
-                    </button>
-                    <button class="btn btn-sm btn-primary" :disabled="isPendingCharImage(c.id)" @click.stop="genCharImgWithModel(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <AssetCardGrid
+              :items="charCards"
+              :model-value-of="c => charImageModels[c.id] || ''"
+              edit-title="编辑角色详情"
+              @open="c => $router.push(`/drama/${dramaId}/character/${c.id}`)"
+              @preview="openImageViewer"
+              @edit="c => openCharEditor(c.raw)"
+              @generate="c => genCharImg(c.id)"
+              @update:model="(c, v) => charImageModels[c.id] = v"
+            >
+              <template #name-extra="{ item }">
+                <select
+                  class="config-select char-style-select"
+                  :value="item.raw.style || ''"
+                  title="角色画风（留空跟随剧集）"
+                  @click.stop
+                  @change="switchCharStyle(item.raw, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">随剧集</option>
+                  <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
+                </select>
+              </template>
+              <template #empty-icon>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              </template>
+            </AssetCardGrid>
           </div>
 
           <!-- Sub: Scenes -->
@@ -1174,40 +1225,21 @@
                 </button>
               </div>
             </div>
-            <div class="asset-grid">
-              <div v-for="s in scenes" :key="s.id" class="card asset-card clickable" @click="$router.push(`/drama/${dramaId}/scene/${s.id}`)">
-                <div class="asset-cover wide">
-                  <img
-                    v-if="s.image_url || s.imageUrl"
-                    :src="'/' + (s.image_url || s.imageUrl)"
-                    class="previewable-image"
-                    @click.stop="openImageViewer('/' + (s.image_url || s.imageUrl), `${s.location} 场景图`)"
-                  />
-                  <div v-else class="asset-cover-empty">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                  </div>
-                  <span class="asset-cover-badge" :class="(s.image_url || s.imageUrl) ? 'is-ready' : (isPendingSceneImage(s.id) ? 'is-pending' : '')">{{ (s.image_url || s.imageUrl) ? '已生成' : (isPendingSceneImage(s.id) ? '生成中' : '待生成') }}</span>
-                </div>
-                <div class="asset-body">
-                  <div class="asset-name">{{ s.location }}</div>
-                  <div class="asset-meta dim">{{ s.time || '—' }}</div>
-                </div>
-                <div class="asset-foot">
-                  <div class="foot-left">
-                    <span :class="['dot', (s.image_url || s.imageUrl) && 'ok', isPendingSceneImage(s.id) && 'pending']" />
-                    <span class="dim foot-status">{{ (s.image_url || s.imageUrl) ? '已生成' : (isPendingSceneImage(s.id) ? '生成中' : '待生成') }}</span>
-                  </div>
-                  <div class="foot-right">
-                    <ModelSelector :model-value="sceneImageModels[s.id] || ''" service-type="image" placeholder="默认模型" @update:model-value="(v: string) => sceneImageModels[s.id] = v" @click.stop />
-                    <button class="btn btn-sm btn-edit" title="编辑场景详情" @click.stop="openSceneEditor(s)">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                      编辑
-                    </button>
-                    <button class="btn btn-sm btn-primary" :disabled="isPendingSceneImage(s.id)" @click.stop="genSceneImgWithModel(s.id)">{{ isPendingSceneImage(s.id) ? '生成中' : '生成' }}</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <AssetCardGrid
+              :items="sceneCards"
+              wide
+              :model-value-of="s => sceneImageModels[s.id] || ''"
+              edit-title="编辑场景详情"
+              @open="s => $router.push(`/drama/${dramaId}/scene/${s.id}`)"
+              @preview="openImageViewer"
+              @edit="s => openSceneEditor(s.raw)"
+              @generate="s => genSceneImg(s.id)"
+              @update:model="(s, v) => sceneImageModels[s.id] = v"
+            >
+              <template #empty-icon>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+              </template>
+            </AssetCardGrid>
           </div>
 
           <!-- Sub: Dubbing -->
@@ -1215,6 +1247,12 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条可生成配音</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已生成</span>
+              <!-- 成本可见：原来只有模型页能看到钱，生成按钮旁没有（竞品都贴在按钮边） -->
+              <span
+                v-if="costEstimate && costEstimate.total_cost != null"
+                class="tag mono cost-est"
+                :title="estimateTitle"
+              >本集待生成 ≈ ¥{{ Number(costEstimate.total_cost).toFixed(2) }}</span>
               <select class="config-select" :value="lockedAudioConfigId" @change="switchEpisodeConfig('audio', Number(($event.target as HTMLSelectElement).value))">
                 <option v-for="c in audioConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
               </select>
@@ -1234,69 +1272,13 @@
               <div class="empty-desc">先在分镜里填写“角色名：台词”或“旁白：文案”，这里就会出现待生成的语音镜头。</div>
             </div>
 
-            <div v-else class="dub-grid">
-                <!-- 验证摘要横幅 -->
-                <div v-if="dubIssueCount > 0" class="dub-validation-banner">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                  <span>{{ dubIssueCount }} 个角色存在音色匹配问题，生成配音将使用默认音色</span>
-                </div>
-                <!-- TTS 过期横幅 -->
-                <div v-if="dubStaleCount > 0" class="dub-validation-banner dub-stale-banner">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  <span>{{ dubStaleCount }} 个配音音色已过期（角色音色配置已变更），建议重新生成配音</span>
-                </div>
-                <!-- 单人对话：原有卡片格式 -->
-                <template v-for="(sb, i) in sbs.filter(hasDialogue)" :key="sb.id">
-                  <!-- 多人对话：拆成多行（无论是否已生成TTS） -->
-                  <template v-if="getDialogueLines(sb).length > 1">
-                    <div v-for="(dl, ti) in getDialogueLines(sb)" :key="`${sb.id}-${ti}`" class="card dub-card dub-sub-card" :style="{ borderLeftColor: getDLMatchStatusColor(sb.id, dl) }">
-                      <div class="dub-head">
-                        <div class="dub-copy">
-                          <div class="dub-title" v-if="ti === 0">
-                            <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
-                            <span class="frame-badge">{{ getDialogueSpeaker(sb) }}</span>
-                            <span class="tag tag-info" style="font-size:10px;padding:1px 6px">{{ getDialogueLines(sb).length }}人</span>
-                          </div>
-                          <div class="dub-line-item" style="margin-top:4px">
-                            <span class="dub-line-speaker">{{ dl.speaker }}</span>
-                            <span class="dub-line-text">{{ dl.text }}</span>
-                            <span v-if="getMatchStatusLabel(getDLMatchStatus(sb.id, dl))" class="dub-match-tag" :class="getMatchStatusDot(getDLMatchStatus(sb.id, dl))">{{ getMatchStatusLabel(getDLMatchStatus(sb.id, dl)) }}</span>
-                          </div>
-                        </div>
-                        <span class="tag" :class="getDLHasTTS(sb.id, dl) ? 'tag-success' : ''">{{ getDLHasTTS(sb.id, dl) ? '已生成' : '待生成' }}</span>
-                      </div>
-                      <div class="dub-foot">
-                        <audio v-if="getDLAudioUrl(sb.id, dl)" :src="'/' + getDLAudioUrl(sb.id, dl)" controls preload="none" class="dub-audio" />
-                        <button class="btn btn-sm ml-auto" @click="genShotTTS(sb)">生成配音</button>
-                      </div>
-                    </div>
-                  </template>
-                  <!-- 单人对话：原有格式 -->
-                  <div v-else class="card dub-card">
-                    <div class="dub-head">
-                      <div class="dub-copy">
-                      <div class="dub-title">
-                        <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
-                        <span class="frame-badge">{{ getDialogueSpeaker(sb) }}</span>
-                        <span v-if="getDubMatchStatusLabel(sb)" class="dub-match-tag" :class="getDubMatchDotClass(sb)">{{ getDubMatchStatusLabel(sb) }}</span>
-                      </div>
-                      <div class="dub-desc">{{ getDialogueText(sb) || '未填写文本' }}</div>
-                      </div>
-                      <span class="tag" :class="hasTTS(sb) ? 'tag-success' : ''">{{ hasTTS(sb) ? '已生成' : '待生成' }}</span>
-                    </div>
-                <div class="dub-meta">
-                  <span class="dim">{{ sb.shot_type || sb.shotType || '未设景别' }}</span>
-                  <span class="dim">{{ sb.duration || 10 }}s</span>
-                  <span class="dim">{{ sb.location || '未设地点' }}</span>
-                </div>
-                <div class="dub-foot">
-                  <audio v-if="hasTTS(sb)" :src="'/' + getTTSUrl(sb)" controls preload="none" class="dub-audio" />
-                  <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
-                  <button class="btn btn-sm ml-auto" @click="genShotTTS(sb)">生成配音</button>
-                </div>
-              </div>
-                </template>
-            </div>
+            <DubbingPanel
+              v-else
+              :rows="dubRows"
+              :issue-count="dubIssueCount"
+              :stale-count="dubStaleCount"
+              @generate="row => genShotTTS(row.sb)"
+            />
           </div>
 
           <!-- Sub: Shots -->
@@ -1645,128 +1627,63 @@
           </div>
 
           <!-- Sub: Videos -->
-          <div v-else-if="prodTab === 'videos'" class="prod-content">
-            <div class="prod-section-bar">
-              <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
-              <span class="tag mono">{{ shotVidCount }}/{{ sbs.length }} 已生成</span>
-              <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="openPlaylist">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                  连播预览
-                </button>
-                <button class="btn btn-sm" @click="batchVideos">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                  批量视频
-                </button>
-              </div>
-            </div>
-            <div class="prod-grid">
-              <div v-for="(sb, i) in sbs" :key="sb.id" class="card prod-card">
-                <div class="prod-cover">
-                  <video
-                    v-if="hasVid(sb)"
-                    :src="'/' + getVideoUrl(sb)"
-                    class="prod-video"
-                    controls
-                    preload="metadata"
-                    playsinline
-                  />
-                  <img
-                    v-else-if="hasImg(sb)"
-                    :src="'/' + getStoryboardCover(sb)"
-                    class="previewable-image"
-                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(i + 1).padStart(2, '0')} 参考图`)"
-                  />
-                  <div v-else class="prod-cover-empty">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                  </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
-                  <span v-if="hasComposed(sb)" class="prod-overlay-badge">已合成</span>
-                </div>
-                <div class="prod-info">
-                  <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
-                  <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
-                  <div class="prod-dots">
-                    <span :class="['dot', hasImg(sb) && 'ok']" /><span style="font-size:10px">图</span>
-                    <span :class="['dot', hasVid(sb) && 'ok', isPendingVideo(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingVideo(sb.id) ? '视频生成中' : '视频' }}</span>
-                  </div>
-                  <div v-if="videoFailMessage(sb.id)" class="prod-error">
-                    <span>{{ videoFailMessage(sb.id) }}</span>
-                    <button class="prod-error-link" @click="openVideoEditor(sb)">编辑提示词</button>
-                  </div>
-                </div>
-                <div class="prod-actions">
-                  <button class="btn btn-sm" :disabled="isPendingVideo(sb.id)" @click="genVid(sb)">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                    {{ isPendingVideo(sb.id) ? '生成中' : '生成视频' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <ShotMediaPanel
+            v-else-if="prodTab === 'videos'"
+            :sbs="sbs"
+            mode="videos"
+            :count-label="`${shotVidCount}/${sbs.length} 已生成`"
+            :cost-estimate="costEstimate"
+            :estimate-title="estimateTitle"
+            :is-pending="isPendingVideo"
+            :fail-message="videoFailMessage"
+            @act="genVid"
+            @edit="openVideoEditor"
+            @preview="openImageViewer"
+          >
+            <template #toolbar>
+              <button class="btn btn-sm" @click="openPlaylist">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                连播预览
+              </button>
+              <button class="btn btn-sm" @click="batchVideos">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                批量视频
+              </button>
+            </template>
+            <template #empty-icon>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </template>
+            <template #action-icon>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </template>
+          </ShotMediaPanel>
 
           <!-- Sub: Compose -->
-          <div v-else-if="prodTab === 'compose'" class="prod-content">
-            <div class="prod-section-bar">
-              <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
-              <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
-              <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchCompose">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  批量合成
-                </button>
-              </div>
-            </div>
-            <div class="prod-grid">
-              <div v-for="(sb, i) in sbs" :key="sb.id" class="card prod-card">
-                <div class="prod-cover">
-                  <video
-                    v-if="hasComposed(sb)"
-                    :src="'/' + getComposedVideoUrl(sb)"
-                    class="prod-video"
-                    controls
-                    preload="metadata"
-                    playsinline
-                  />
-                  <video
-                    v-else-if="hasVid(sb)"
-                    :src="'/' + getVideoUrl(sb)"
-                    class="prod-video"
-                    controls
-                    preload="metadata"
-                    playsinline
-                  />
-                  <img
-                    v-else-if="hasImg(sb)"
-                    :src="'/' + getStoryboardCover(sb)"
-                    class="previewable-image"
-                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(i + 1).padStart(2, '0')} 参考图`)"
-                  />
-                  <div v-else class="prod-cover-empty">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
-                  <span v-if="hasComposed(sb)" class="prod-overlay-badge">已合成</span>
-                </div>
-                <div class="prod-info">
-                  <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
-                  <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
-                  <div class="prod-dots">
-                    <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">视频</span>
-                    <span :class="['dot', hasTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
-                    <span :class="['dot', hasComposed(sb) && 'ok', isPendingCompose(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingCompose(sb.id) ? '合成中' : '合成' }}</span>
-                  </div>
-                  <div v-if="composeFailMessage(sb.id)" class="prod-error">{{ composeFailMessage(sb.id) }}</div>
-                </div>
-                <div class="prod-actions">
-                  <button class="btn btn-sm" :disabled="!hasVid(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                    {{ isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '重新合成' : '开始合成') }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <ShotMediaPanel
+            v-else-if="prodTab === 'compose'"
+            :sbs="sbs"
+            mode="compose"
+            :count-label="`${composedCount}/${sbs.length} 已合成`"
+            :cost-estimate="costEstimate"
+            :estimate-title="estimateTitle"
+            :is-pending="isPendingCompose"
+            :fail-message="composeFailMessage"
+            @act="doCompose"
+            @preview="openImageViewer"
+          >
+            <template #toolbar>
+              <button class="btn btn-sm" @click="batchCompose">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                批量合成
+              </button>
+            </template>
+            <template #empty-icon>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </template>
+            <template #action-icon>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </template>
+          </ShotMediaPanel>
 
           <!-- Production Navigator -->
         </template>
@@ -1902,27 +1819,11 @@
       </div>
 
       <div v-if="showBottomBubble" class="step-bubble">
-        <button
-          v-if="panel === 'script'"
-          class="bubble-btn"
-          :disabled="scriptStep === 0"
-          @click="goPrevStep"
-        >
+        <button class="bubble-btn" :disabled="!canBubblePrev" @click="goBubblePrev">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
           </svg>
-          {{ prevStepLabel || '上一步' }}
-        </button>
-        <button
-          v-else-if="panel === 'production'"
-          class="bubble-btn"
-          :disabled="prodTabIdx === 0"
-          @click="prodTabIdx = Math.max(0, prodTabIdx - 1)"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
-          </svg>
-          {{ prodTabDefs[Math.max(0, prodTabIdx - 1)]?.label || '上一步' }}
+          {{ bubblePrevLabel }}
         </button>
 
         <div class="bubble-dots">
@@ -1935,28 +1836,78 @@
           ></button>
         </div>
 
-        <button
-          v-if="panel === 'script'"
-          class="bubble-btn primary"
-          :disabled="!canGoNext"
-          @click="goNextStep"
-        >
-          {{ nextStepLabel || '下一步' }}
+        <button class="bubble-btn primary" :disabled="!canBubbleNext" @click="goBubbleNext">
+          {{ bubbleNextLabel }}
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
           </svg>
         </button>
-        <button
-          v-else-if="panel === 'production'"
-          class="bubble-btn primary"
-          :disabled="panel === 'production' && prodTab === 'compose' && !canExport"
-          @click="goNextProd"
-        >
-          {{ prodTabIdx < prodTabDefs.length - 1 ? (prodTabDefs[prodTabIdx + 1]?.label || '下一步') : '进入导出' }}
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-          </svg>
-        </button>
+      </div>
+
+      <!-- 流水线清单：先让人看清「要跑哪几步、每步差几项」，再点开始。
+           未勾选的步不跑；已齐的步直接标灰跳过（不是隐藏，隐掉会让人以为漏了） -->
+      <div v-if="chainOpen" class="overlay chain-overlay" @click.self="chainRunning ? null : (chainOpen = false)">
+        <div class="card chain-dialog">
+          <div class="chain-head">
+            <div>
+              <div class="chain-title">从当前步继续到成片</div>
+              <div class="chain-sub">
+                共 {{ chainPlannedSteps.length }} 步待跑 · 每步只补缺的，已齐的自动跳过
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-icon" :disabled="chainRunning" @click="chainOpen = false">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="chain-body">
+            <div
+              v-for="(s, i) in chainSteps"
+              :key="s.id"
+              :class="['chain-row', chainState[s.id] || '', { idle: !s.todo, running: chainActiveId === s.id }]"
+            >
+              <label class="chain-check">
+                <input
+                  type="checkbox"
+                  :checked="s.todo > 0 && !chainSkips.includes(s.id)"
+                  :disabled="chainRunning || !s.todo"
+                  @change="toggleChainSkip(s.id)"
+                />
+              </label>
+              <span class="chain-idx">{{ i + 1 }}</span>
+              <span class="chain-copy">
+                <span class="chain-label">
+                  {{ s.label }}
+                  <span v-if="s.todo" class="chain-todo">差 {{ s.todo }}</span>
+                </span>
+                <span class="chain-hint">{{ s.todo ? s.hint : '本步已齐，无需执行' }}</span>
+              </span>
+              <span class="chain-state">
+                <template v-if="chainState[s.id] === 'running'">执行中…</template>
+                <template v-else-if="chainState[s.id] === 'done'">完成</template>
+                <template v-else-if="chainState[s.id] === 'failed'">未完成</template>
+                <template v-else-if="chainState[s.id] === 'skipped'">已停</template>
+                <template v-else-if="!s.todo">跳过</template>
+                <template v-else-if="chainSkips.includes(s.id)">未选</template>
+                <template v-else>待执行</template>
+              </span>
+            </div>
+            <div v-if="!chainTodoSteps.length" class="chain-empty">
+              这一集没有缺的东西了 —— 直接去「导出」看成片。
+            </div>
+          </div>
+          <div class="chain-foot">
+            <span class="chain-note">
+              停止 = 不再提交新任务；已经提交出去的生成会继续跑完（前端叫不停远端）。
+            </span>
+            <button v-if="chainRunning" class="btn" @click="chainAbort = true">停止提交</button>
+            <button
+              v-else
+              class="btn btn-primary"
+              :disabled="!chainPlannedSteps.length"
+              @click="runChain()"
+            >开始（{{ chainPlannedSteps.length }} 步）</button>
+          </div>
+        </div>
       </div>
 
       <div v-if="imageViewer.open && imageViewer.src" class="overlay image-viewer-overlay" @click.self="closeImageViewer">
@@ -2066,25 +2017,45 @@
     @close="closeVideoEditor"
     @regenerated="refresh"
   />
+  <AgentOutputDialog
+    v-model:open="agentOutputOpen"
+    :output="agentOutput"
+    :busy="rn"
+    @retry="retryAgentOutput"
+  />
 </template>
 
 <script setup lang="ts">
 import { ART_STYLE_LABELS } from '~/utils/artStyles'
+// 分镜纯取值（帧/视频/台词判定、角色标签、配置显示名）：与本页状态无关，抽到 utils 共享
+import {
+  ROLE_TAGS, roleTagCls, inferRoleTags, inferCharRoleTag, inferVoiceGender, configLabel,
+  getFirstFrame, getLastFrame, getKeyframe, getStoryboardCover, getVideoUrl, getComposedVideoUrl,
+  hasImg, hasVid, hasComposed, getDialogueLines, getDialogueText,
+  hasDialogue, hasTTS, getTTSUrl,
+} from '~/utils/storyboard'
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, Clapperboard, Download,
   Loader2, Monitor, Smartphone, Square,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI, assetVersionsAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI, assetVersionsAPI, usageAPI, generationsAPI, presetsAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import BaseSelect from '~/components/BaseSelect.vue'
+import ShotMediaPanel from '~/components/ShotMediaPanel.vue'
+import AssetCardGrid from '~/components/AssetCardGrid.vue'
+import DubbingPanel from '~/components/DubbingPanel.vue'
 import ModelSelector from '~/components/ModelSelector.vue'
 import CharacterEditor from '~/components/CharacterEditor.vue'
 import SceneEditor from '~/components/SceneEditor.vue'
 import VideoEditor from '~/components/VideoEditor.vue'
 import { useConfirm } from '~/composables/useConfirm'
+import { useTaskCenter } from '~/composables/useTaskCenter'
 
 const { confirm } = useConfirm()
+// 任务台账（右下角）：本页所有异步生成动作都要在它上面「开一条 → 报阶段 → 收尾」，
+// 这样切页回来还看得见哪条在跑、哪条失败、失败该改什么（见 composable 文件头）
+const taskCenter = useTaskCenter()
 
 definePageMeta({ layout: 'studio' })
 
@@ -2092,6 +2063,73 @@ const route = useRoute()
 const router = useRouter()
 const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
+
+/**
+ * 批量配音/试听同时最多提交几条（走 `runPool`）。
+ *
+ * 声音合成在远端服务上：一集 40 个镜头一起打过去，最常见的结果是 429 **整批**失败。
+ * 3 条既不空转也不会被限流（单条几秒到十几秒，节奏刚好）。
+ * 注意这跟视频不是一回事：视频卡的是**本地显存**（见 `VIDEO_BATCH_LIMIT`）。
+ */
+const TTS_BATCH_LIMIT = 3
+
+/**
+ * 任务中心「失败 → 去处理 / 换模型」的落点：把「哪一屏 / 哪个页签 / 哪个镜头」写进 query。
+ *
+ * 为什么用 URL 而不是闭包直接设 ref：闭包只在**本页还挂着**时有效。用户切到项目页或模型页后，
+ * 再点任务中心的「去处理」，闭包把 ref 设了也没人看得见（静默无效，最难查 ✓✗）；
+ * 写进 URL 则切页、刷新、隔十分钟再点，都还能落回同一格。
+ * 例：`/drama/3/episode/1?panel=production&tab=videos&shot=12`
+ */
+function taskRoute(tab: string, shotId?: number): string {
+  const q = new URLSearchParams({ panel: 'production', tab })
+  if (shotId) q.set('shot', String(shotId))
+  return `/drama/${dramaId}/episode/${episodeNumber}?${q.toString()}`
+}
+
+/** 拼接/导出类任务的落点（导出是第三个大面板，不走 `tab`） */
+function exportRoute(): string {
+  return `/drama/${dramaId}/episode/${episodeNumber}?panel=export`
+}
+
+/**
+ * 应用任务中心带过来的落点 query（见 `taskRoute`）。
+ *
+ * ⚠️ 应用完必须把这三个参数从 URL 上摘掉：否则用户照着修好之后，再点同一条任务的
+ * 「去处理」，query 一个字都没变 ⇒ vue-router 不触发 watcher ⇒ 按钮看起来像坏了 ✓✗。
+ */
+function applyTaskRouteQuery() {
+  const q = route.query
+  if (q.panel !== 'production' && q.panel !== 'export') return
+  panel.value = q.panel === 'export' ? 'export' : 'production'
+  if (q.panel === 'export') {
+    const restExport: Record<string, any> = { ...q }
+    delete restExport.panel
+    delete restExport.tab
+    delete restExport.shot
+    void router.replace({ query: restExport })
+    return
+  }
+  const tab = typeof q.tab === 'string' ? q.tab : ''
+  if (tab && prodTabDefs.value.some(t => t.id === tab)) prodTab.value = tab
+  const shotId = Number(q.shot || 0)
+  if (shotId) {
+    const sb = sbs.value.find(s => s.id === shotId)
+    if (sb) {
+      selectedSb.value = sb
+      // 等一帧让页签内容先渲染，再滚到那个镜头（`data-shot-id` 只在「镜头图片」页签名下存在，
+      // 其它页签拿不到节点，scroll 会静默跳过 —— 那是可接受的降级）
+      setTimeout(() => {
+        document.querySelector(`[data-shot-id="${sb.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 120)
+    }
+  }
+  const rest: Record<string, any> = { ...q }
+  delete rest.panel
+  delete rest.tab
+  delete rest.shot
+  void router.replace({ query: rest })
+}
 
 // 返回项目页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
 function goBack() {
@@ -2118,7 +2156,17 @@ function formValue(event: Event): string {
 }
 
 const panel = ref('script')
-const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, run: runAgent } = useAgent()
+const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, lastOutput: agentOutput, run: runAgent, retry: retryAgentRun } = useAgent()
+
+// AI 只「说了话」没落库时，必须让人看见它说了什么 —— 否则界面毫无变化，看着像没返回
+const agentOutputOpen = ref(false)
+watch(agentOutput, (value) => {
+  if (value && !value.acted) agentOutputOpen.value = true
+})
+function retryAgentOutput() {
+  agentOutputOpen.value = false
+  retryAgentRun()
+}
 
 const localRaw = ref(''), localScript = ref('')
 const scriptEditing = ref(false)
@@ -2154,7 +2202,7 @@ const rawLen = computed(() => localRaw.value.replace(/\s/g, '').length || 0)
 const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 0)
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
-const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
+const composedCount = computed(() => sbs.value.filter(hasComposed).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
 
 const scriptStep = ref(0)
@@ -2164,39 +2212,6 @@ const prodTabIdx = computed({
   set: (v) => { prodTab.value = prodTabDefs.value[v]?.id || 'chars' },
 })
 const frameMode = ref('first')
-// 角色类型标签（旁白/主角/反派/配角）——音色库快速筛选的元数据
-const ROLE_TAGS = [
-  { label: '旁白', cls: 'role-tag-narrator' },
-  { label: '主角', cls: 'role-tag-protagonist' },
-  { label: '反派', cls: 'role-tag-villain' },
-  { label: '配角', cls: 'role-tag-supporting' },
-]
-function roleTagCls(label: string) {
-  if (label === '龙套') return 'role-tag-extra'
-  return ROLE_TAGS.find(t => t.label === label)?.cls || ''
-}
-// 依据音色名 + 描述关键词推断该音色适合的角色类型（一个音色可打多个标签）
-function inferRoleTags(name: string, desc: string[] = []) {
-  const text = `${name || ''} ${Array.isArray(desc) ? desc.join(' ') : (desc || '')}`.toLowerCase()
-  const tags = []
-  if (/旁白|讲述|解说|叙述|播音|磁性|沉稳|醇厚|浑厚|大气|成熟男/.test(text)) tags.push('旁白')
-  if (/反派|低沉|冷酷|霸道|阴冷|沙哑|狠辣|凶狠|邪恶|强势|腹黑/.test(text)) tags.push('反派')
-  if (/主角|男主|女主|青年|少年|少女|阳光|甜美|温柔|清亮|青春|活力|甜润|元气|朝气/.test(text)) tags.push('主角')
-  if (/配角|大叔|大爷|大妈|奶奶|爷爷|老年|萝莉|正太|孩童|小孩|逗趣|憨厚|邻居/.test(text)) tags.push('配角')
-  return tags.slice(0, 3)
-}
-// 依据角色姓名 + 角色定位推断角色类型，用于角色卡片展示对照标签
-function inferCharRoleTag(c: any) {
-  const text = `${c.name || ''} ${c.role || ''}`.toLowerCase()
-  if (text.includes('龙套') || text.includes('路人') || text.includes('群演') || text.includes('extra')) return '龙套'
-  const rt = c?.role_type || c?.roleType || ''
-  if (['主角', '反派', '配角', '旁白', '龙套'].includes(rt)) return rt
-  if (text.includes('旁白') || text.includes('narrator') || text.includes('画外音')) return '旁白'
-  if (text.includes('反派') || text.includes('villain') || text.includes('antagonist')) return '反派'
-  if (text.includes('主角') || text.includes('男主') || text.includes('女主') || text.includes('protagonist') || text.includes('hero')) return '主角'
-  if (text.includes('配角') || text.includes('supporting') || text.includes('support')) return '配角'
-  return ''
-}
 const fallbackVoiceProfiles = [
   { id: 'alloy', label: 'Alloy', gender: '中性', traits: '平衡、自然、克制', suitable: '通用叙述、旁白、需要稳定输出的角色', roleTags: ['旁白', '配角'] },
   { id: 'echo', label: 'Echo', gender: '男声', traits: '低沉、稳重、冷静', suitable: '成熟男性、父辈、旁白、压迫感角色', roleTags: ['旁白', '反派'] },
@@ -2344,12 +2359,6 @@ const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({
   label: `${v.label} · ${v.traits}${(v.roleTags || []).length ? ` · ${v.roleTags.join('/')}` : ''}`,
   value: v.id,
 })))
-const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
-  let modelName = ''
-  try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
-  const label = modelName ? `${modelName} (${c.provider})` : `${c.name} (${c.provider})`
-  return { label, value: c.id }
-}))
 const frameModeOptions = [{ label: '仅首帧', value: 'first' }, { label: '首尾帧', value: 'first_last' }]
 const gridLayoutOptions = [
   { label: '2x2', value: '2x2' },
@@ -2368,13 +2377,6 @@ const pendingComposeIds = ref<number[]>([])
 const failedVideoMessages = ref<Record<number, string>>({})
 const failedComposeMessages = ref<Record<number, string>>({})
 const imageViewer = ref({ open: false, src: '', title: '' })
-
-function configLabel(config: any) {
-  if (!config) return '未配置'
-  let modelName = ''
-  try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
-  return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
-}
 
 function isPendingCharImage(id: number) {
   return pendingCharImageIds.value.includes(id)
@@ -2541,6 +2543,8 @@ async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: 
       else if (type === 'video') episode.value.video_config_id = configId
       else if (type === 'audio') episode.value.audio_config_id = configId
     }
+    // 换模型 = 换单价：生成按钮旁的「待生成 ≈ ¥X」立刻重算（不刷新整页）
+    scheduleEstimate(true)
   } catch (e: any) {
     toast.error(e?.message || '切换配置失败')
   }
@@ -2770,8 +2774,15 @@ const gridBlankStyle = computed(() => {
 })
 
 // Production step helpers
+/**
+ * 制作步骤是否已完成。十二条判据都守同一条规矩：**没有输入就不算完成**。
+ *
+ * `chars` 这里原来少一个前置条件（写成 `!visualCharTotal || …`），于是「一个角色都没提取」
+ * 时侧栏的「角色形象」就带勾，而隔壁「场景图片」要求 `!!scenes.length` —— 同一函数里
+ * 两种口径并存。现在补齐前置条件，与其余十一条对齐。
+ */
 function prodStepDone(id: string) {
-  if (id === 'chars') return !visualCharTotal.value || charImgCount.value === visualCharTotal.value
+  if (id === 'chars') return !!chars.value.length && (!visualCharTotal.value || charImgCount.value === visualCharTotal.value)
   if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
   if (id === 'dubbing') return !!sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
   if (id === 'shots') return !!sbs.value.length && shotImgCount.value === sbs.value.length
@@ -2779,7 +2790,9 @@ function prodStepDone(id: string) {
   if (id === 'compose') return !!sbs.value.length && composedCount.value === sbs.value.length
   return false
 }
-const canExport = computed(() => !!sbs.value.length && composedCount.value === sbs.value.length)
+// 取出口放行条件原本手抄了一遍「全部合成」判据，与 `prodStepDone('compose')` 逐字相同。
+// 走同一处判定，避免哪天只改一边、按钮和勾选状态对不上。
+const canExport = computed(() => prodStepDone('compose'))
 function goNextProd() {
   if (prodTabIdx.value < prodTabDefs.value.length - 1) {
     prodTabIdx.value++
@@ -2788,27 +2801,57 @@ function goNextProd() {
   }
 }
 
-// Script step navigation
-const stepLabels = ['原始内容', 'AI 改写', '提取', '音色', '分镜']
-const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels[scriptStep.value - 1] : '')
-const nextStepLabel = computed(() => {
-  if (scriptStep.value === 4) return '进入制作'
-  return stepLabels[scriptStep.value + 1] || ''
-})
-const canGoNext = computed(() => {
-  if (scriptStep.value === 0) return !!localRaw.value.trim()
-  if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
-  if (scriptStep.value === 2) return chars.value.length > 0
-  if (scriptStep.value === 3) return charsVoiced.value > 0
-  if (scriptStep.value === 4) return sbs.value.length > 0
-  return false
-})
+/**
+ * 剧本工作台五个步骤的唯一真源。
+ *
+ * 这一组事实原本散在五处手抄，彼此没有机器判据保证同步：
+ *   `stepLabels`（面板标题）／`canGoNext`（进入条件）／`activeMainStage`（用 `scriptStep <= 1`、
+ *   `<= 3` 的区间反推属于哪个主阶段）／`activeSubStepKey`（scriptStep → key 的 if 链）／
+ *   `bubbleSteps` 与侧栏 `sidebarSections`（key + 标题 + done 各写一遍）。
+ * 加一个步骤要记得改五处，漏一处就静默错 —— 上一轮修 `activeSubSteps` 时踩的就是这个。
+ *
+ * 现在一处定义：`label` 给侧栏与二级导航（完整标题），`short` 给剧本面板与底部气泡（窄标题），
+ * `stage` 说明这一步归哪个主阶段，`canGo` 是「能不能点下一步」，`done` 是「侧栏是否打勾」。
+ * 注意 `canGo` 与 `done` 不是同一件事：`canGo` 认本地编辑框里的未保存内容（`localRaw`/`localScript`），
+ * 而 `done` 只认已落盘的数据，所以第 4 步 `canGo` 是「有角色配过音」、`done` 是「角色全部配过音」。
+ */
+const scriptStages = computed(() => ([
+  { key: 'script:raw', label: '原始内容', short: '原始内容', stage: 'script', icon: FileText, canGo: !!localRaw.value.trim(), done: !!rawContent.value },
+  { key: 'script:rewrite', label: 'AI 改写', short: 'AI 改写', stage: 'script', icon: FileText, canGo: !!localScript.value.trim() || !!scriptContent.value, done: !!scriptContent.value },
+  { key: 'script:extract', label: '提取角色场景', short: '提取', stage: 'assets', icon: Users, canGo: chars.value.length > 0, done: !!chars.value.length },
+  { key: 'script:voice', label: '分配音色', short: '音色', stage: 'assets', icon: Mic2, canGo: charsVoiced.value > 0, done: !!chars.value.length && charsVoiced.value === chars.value.length },
+  { key: 'script:storyboard', label: '分镜拆解', short: '分镜', stage: 'storyboard', icon: Clapperboard, canGo: sbs.value.length > 0, done: !!sbs.value.length },
+]))
+
+// 当前剧本步骤（`scriptStep` 恒在 0..4，兜底取第一步，避免各处再写 `?.` 与各自的默认值）
+const scriptStage = computed(() => scriptStages.value[scriptStep.value] || scriptStages.value[0])
+
+const prevStepLabel = computed(() => scriptStep.value > 0 ? (scriptStages.value[scriptStep.value - 1]?.short || '') : '')
+// 最后一步的「下一步」不是下一步，而是交接给制作台。判据取表长，不再写死 `=== 4`
+// —— 制作侧一直是这么算的（`prodTabIdx < prodTabDefs.length - 1`），两半此前不对称。
+const isLastStage = computed(() => scriptStep.value >= scriptStages.value.length - 1)
+const nextStepLabel = computed(() => isLastStage.value ? '进入制作' : (scriptStages.value[scriptStep.value + 1]?.short || ''))
+const canGoNext = computed(() => !!scriptStages.value[scriptStep.value]?.canGo)
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
 function goNextStep() {
-  if (scriptStep.value === 0 && localRaw.value.trim()) { saveRaw() }
-  if (scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
-  if (scriptStep.value === 4) { panel.value = 'production'; return }
+  // 离开当前步之前，先把这步编辑框里的未保存内容落盘。哪一步存哪份内容按 key 认，
+  // 不再按 `0` / `1` 的下标认：下标是「位置」，key 是「这一步是谁」，加步插步时不会存错。
+  const key = scriptStage.value.key
+  if (key === 'script:raw' && localRaw.value.trim()) { saveRaw() }
+  if (key === 'script:rewrite' && localScript.value.trim()) { saveScr() }
+  if (isLastStage.value) { panel.value = 'production'; return }
   if (canGoNext.value) scriptStep.value++
+}
+/**
+ * 按 key 跳到某个剧本步骤。
+ *
+ * 「用 key 找下标」这件事原本在四处各写一遍（`goSubStep`、`initScriptStep`、改写完成、
+ * 跳过改写），其中两处还直接写死 `scriptStep = 1` / `= 2`。收成一个函数，
+ * 顺带保证下标越界时统一回到第一步，而不是各自 `?? 0`。
+ */
+function goScriptStage(key: string) {
+  const index = scriptStages.value.findIndex(s => s.key === key)
+  scriptStep.value = index < 0 ? 0 : index
 }
 
 function gridSelectAll() {
@@ -3104,163 +3147,94 @@ const charImgCount = computed(() => visualChars.value.filter(c => c.image_url ||
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
 const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
 const ttsGeneratedCount = computed(() => sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length)
-const shotImgCount = computed(() => sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length)
-const shotVidCount = computed(() => sbs.value.filter(s => s.video_url || s.videoUrl).length)
+const shotImgCount = computed(() => sbs.value.filter(hasImg).length)
+const shotVidCount = computed(() => sbs.value.filter(hasVid).length)
 const visualCharTotal = computed(() => visualChars.value.length)
 
+// 资产卡片的视图模型：把两套字段名（snake/camel）与「是否正在跑」在这里归一。
+// 组件只认「标题 + 元信息 + 图 + 是否在跑」，不必知道后端字段命名（见 AssetCardGrid.vue）
+const charCards = computed(() => visualChars.value.map(c => ({
+  id: c.id,
+  title: c.name,
+  meta: c.role || '角色',
+  imageUrl: (c.image_url || c.imageUrl) ? `/${c.image_url || c.imageUrl}` : null,
+  pending: isPendingCharImage(c.id),
+  previewTitle: `${c.name} 角色形象`,
+  raw: c,
+})))
+const sceneCards = computed(() => scenes.value.map(s => ({
+  id: s.id,
+  title: s.location,
+  meta: s.time || '—',
+  imageUrl: (s.image_url || s.imageUrl) ? `/${s.image_url || s.imageUrl}` : null,
+  pending: isPendingSceneImage(s.id),
+  previewTitle: `${s.location} 场景图`,
+  raw: s,
+})))
+
+/**
+ * 制作台的六个步骤表：标签页、侧栏与进度条共用。
+ *
+ * `stage` 补上了「这一步属哪个主阶段」—— 原来这条知识藏在两处手抄里
+ * （`activeMainStage` 的 `['chars','scenes'].includes(...)`、`sidebarSections` 里两张手写数组），
+ * `done` 则让侧栏与底部气泡不必各自再调一次 `prodStepDone()`。
+ */
 const prodTabDefs = computed(() => [
-  { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
-  { id: 'scenes', label: '场景图片', icon: MapPin, badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
-  { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
-  { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
-  { id: 'videos', label: '视频生成', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
-  { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
+  { id: 'chars', stage: 'assets', label: '角色形象', icon: Users, done: prodStepDone('chars'), badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
+  { id: 'scenes', stage: 'assets', label: '场景图片', icon: MapPin, done: prodStepDone('scenes'), badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
+  { id: 'shots', stage: 'storyboard', label: '镜头图片', icon: ImageIcon, done: prodStepDone('shots'), badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
+  { id: 'dubbing', stage: 'storyboard', label: '配音生成', icon: Mic2, done: prodStepDone('dubbing'), badge: '' },
+  { id: 'videos', stage: 'storyboard', label: '视频生成', icon: Video, done: prodStepDone('videos'), badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
+  { id: 'compose', stage: 'storyboard', label: '视频合成', icon: Layers, done: prodStepDone('compose'), badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
 ])
 
-const mainStageDefs = [
-  { id: 'script', label: '剧本', desc: '内容改写与整理', icon: FileText },
-  { id: 'assets', label: '资产', desc: '角色、场景与音色', icon: FolderKanban },
-  { id: 'storyboard', label: '分镜', desc: '镜头制作与合成', icon: Clapperboard },
-  { id: 'export', label: '导出', desc: '拼接与成片输出', icon: Download },
-]
-
-const sidebarSections = computed(() => ([
-  {
-    id: 'script',
-    label: '剧本',
-    items: [
-      { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
-      { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
-    ],
-  },
-  {
-    id: 'assets',
-    label: '资产',
-    items: [
-      { key: 'script:extract', label: '提取角色场景', desc: '', icon: Users, done: !!chars.value.length },
-      { key: 'script:voice', label: '分配音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
-      { key: 'prod:chars', label: '角色形象', desc: '', icon: Users, done: prodStepDone('chars') },
-      { key: 'prod:scenes', label: '场景图片', desc: '', icon: MapPin, done: prodStepDone('scenes') },
-    ],
-  },
-  {
-    id: 'storyboard',
-    label: '分镜',
-    items: [
-      { key: 'script:storyboard', label: '分镜拆解', desc: '', icon: Clapperboard, done: !!sbs.value.length },
-      { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
-      { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
-      { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
-      { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
-    ],
-  },
-  {
-    id: 'export',
-    label: '导出',
-    items: [
-      { key: 'export:merge', label: '拼接导出', desc: '', icon: Download, done: !!mergeUrl.value },
-    ],
-  },
-]))
-
-const activeMainStage = computed(() => {
-  if (panel.value === 'export') return 'export'
-  if (panel.value === 'production') {
-    return ['chars', 'scenes'].includes(prodTab.value) ? 'assets' : 'storyboard'
-  }
-  if (scriptStep.value <= 1) return 'script'
-  if (scriptStep.value <= 3) return 'assets'
-  return 'storyboard'
-})
-
-function mainStageDone(stageId: string) {
-  if (stageId === 'script') return !!scriptContent.value
-  if (stageId === 'assets') {
-    const charsReady = !!chars.value.length && charsVoiced.value === chars.value.length
-    const charImagesReady = !visualCharTotal.value || charImgCount.value === visualCharTotal.value
-    const sceneImagesReady = !scenes.value.length || sceneImgCount.value === scenes.value.length
-    return charsReady && charImagesReady && sceneImagesReady
-  }
-  if (stageId === 'storyboard') {
-    if (!sbs.value.length) return false
-    const ttsReady = !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value
-    return ttsReady
-      && shotImgCount.value === sbs.value.length
-      && shotVidCount.value === sbs.value.length
-      && composedCount.value === sbs.value.length
-  }
-  if (stageId === 'export') return !!mergeUrl.value
-  return false
-}
-
-function goMainStage(stageId: string) {
-  if (stageId === 'script') {
-    panel.value = 'script'
-    scriptStep.value = Math.min(scriptStep.value, 1)
-    return
-  }
-  if (stageId === 'assets') {
-    const hasAssetWorkspace = !!visualCharTotal.value || !!scenes.value.length
-    const hasPendingAssetGeneration = (visualCharTotal.value && charImgCount.value < visualCharTotal.value)
-      || (scenes.value.length && sceneImgCount.value < scenes.value.length)
-    if (panel.value === 'production' || hasPendingAssetGeneration || hasAssetWorkspace) {
-      panel.value = 'production'
-      prodTab.value = ['chars', 'scenes'].includes(prodTab.value) ? prodTab.value : 'chars'
-      return
-    }
-    panel.value = 'script'
-    scriptStep.value = chars.value.length ? 3 : 2
-    return
-  }
-  if (stageId === 'storyboard') {
-    if (panel.value === 'production') {
-      prodTab.value = ['shots', 'dubbing', 'videos', 'compose'].includes(prodTab.value) ? prodTab.value : 'shots'
-      return
-    }
-    panel.value = 'script'
-    scriptStep.value = 4
-    return
-  }
-  panel.value = 'export'
-}
-
-const activeSubSteps = computed(() => {
-  if (activeMainStage.value === 'script') {
-    return [
-      { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
-      { key: 'script:rewrite', label: 'AI 改写', done: !!scriptContent.value },
-    ]
-  }
-  if (activeMainStage.value === 'assets') {
-    return [
-      { key: 'script:extract', label: '提取角色场景', done: !!chars.value.length },
-      { key: 'script:voice', label: '分配音色', done: !!chars.value.length && charsVoiced.value === chars.value.length },
-      { key: 'prod:chars', label: '角色形象', done: !visualCharTotal.value || charImgCount.value === visualCharTotal.value },
-      { key: 'prod:scenes', label: '场景图片', done: !scenes.value.length || sceneImgCount.value === scenes.value.length },
-    ]
-  }
-  if (activeMainStage.value === 'storyboard') {
-    return [
-      { key: 'script:storyboard', label: '分镜拆解', done: !!sbs.value.length },
-      { key: 'prod:shots', label: '镜头图片', done: !!sbs.value.length && shotImgCount.value === sbs.value.length },
-      { key: 'prod:dubbing', label: '配音生成', done: !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value },
-      { key: 'prod:videos', label: '视频生成', done: !!sbs.value.length && shotVidCount.value === sbs.value.length },
-      { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
-    ]
-  }
+/**
+ * 侧栏导航，同时是「制作进度」的分母来源（见 `pipelineSteps`）。
+ *
+ * 结构不再手写：把两张步骤表按 `stage` 拼进对应段 —— 段内顺序是「剧本步在前、制作步在后」，
+ * 与原手写数组逐条一致（assets：提取角色场景 / 分配音色 / 角色形象 / 场景图片；
+ * storyboard：分镜拆解 / 镜头图片 / 配音生成 / 视频生成 / 视频合成）。
+ * 加一步只需在对应的表里加一行，侧栏、二级导航、底部气泡、总进度会一起跟上。
+ */
+const sidebarSections = computed(() => {
+  const itemsOf = (stageId: string) => [
+    ...scriptStages.value.filter(s => s.stage === stageId).map(s => ({ key: s.key, label: s.label, icon: s.icon, done: s.done })),
+    ...prodTabDefs.value.filter(t => t.stage === stageId).map(t => ({ key: `prod:${t.id}`, label: t.label, icon: t.icon, done: t.done })),
+  ]
   return [
-    { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
+    { id: 'script', label: '剧本', items: itemsOf('script') },
+    { id: 'assets', label: '资产', items: itemsOf('assets') },
+    { id: 'storyboard', label: '分镜', items: itemsOf('storyboard') },
+    { id: 'export', label: '导出', items: [{ key: 'export:merge', label: '拼接导出', icon: Download, done: !!mergeUrl.value }] },
   ]
 })
 
+// 当前处于哪个主阶段，一律问步骤表里的 `stage`：原来这里手写了两处映射
+// （制作台 `['chars','scenes'].includes(...)`、剧本台 `scriptStep <= 1` / `<= 3` 的区间反推）。
+const activeMainStage = computed(() => {
+  if (panel.value === 'export') return 'export'
+  if (panel.value === 'production') return prodTabDefs.value.find(t => t.id === prodTab.value)?.stage || 'storyboard'
+  return scriptStage.value.stage
+})
+
+/**
+ * 主内容区的二级导航（`.stage-subnav`）。
+ *
+ * 这四项以前是手抄的一份：step 键、label 与 done 判定跟 `sidebarSections` 逐条重复。
+ * 而且在「空集」上两处已经漂开了 —— 侧栏 `prodStepDone('scenes')` 要求 `!!scenes.length`，
+ * 这里写的是 `!scenes.length || …`（没场景就算完成）；`prodStepDone('dubbing')` 要求
+ * `!!sbs.length`，这里同样没有。结果是同一个页面里两个导航对同一步打勾不一致。
+ *
+ * 现在只认 `sidebarSections` 一份。键与顺序完全对齐（`goSubStep` 按 key 分发，不受影响），
+ * 唯一可感知的变化：还没做过的「场景图片 / 配音生成」不会再在二级导航里提前显示成已完成。
+ */
+const activeSubSteps = computed(() => {
+  const section = sidebarSections.value.find(s => s.id === activeMainStage.value)
+  return section ? section.items : []
+})
+
 const activeSubStepKey = computed(() => {
-  if (panel.value === 'script') {
-    if (scriptStep.value === 0) return 'script:raw'
-    if (scriptStep.value === 1) return 'script:rewrite'
-    if (scriptStep.value === 2) return 'script:extract'
-    if (scriptStep.value === 3) return 'script:voice'
-    return 'script:storyboard'
-  }
+  if (panel.value === 'script') return scriptStage.value.key
   if (panel.value === 'production') return `prod:${prodTab.value}`
   return 'export:merge'
 })
@@ -3270,23 +3244,10 @@ const sidebarJumpSteps = computed(() => {
   return section?.items || []
 })
 
+// 底部气泡导航：只取两张步骤表里的 key / 窄标题 / 完成态，不再自备一份副本。
 const bubbleSteps = computed(() => {
-  if (panel.value === 'script') {
-    return [
-      { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
-      { key: 'script:rewrite', label: 'AI 改写', done: !!scriptContent.value },
-      { key: 'script:extract', label: '提取', done: !!chars.value.length },
-      { key: 'script:voice', label: '音色', done: !!chars.value.length && charsVoiced.value === chars.value.length },
-      { key: 'script:storyboard', label: '分镜', done: !!sbs.value.length },
-    ]
-  }
-  if (panel.value === 'production') {
-    return prodTabDefs.value.map(step => ({
-      key: `prod:${step.id}`,
-      label: step.label,
-      done: prodStepDone(step.id),
-    }))
-  }
+  if (panel.value === 'script') return scriptStages.value.map(s => ({ key: s.key, label: s.short, done: s.done }))
+  if (panel.value === 'production') return prodTabDefs.value.map(t => ({ key: `prod:${t.id}`, label: t.label, done: t.done }))
   return []
 })
 
@@ -3298,17 +3259,46 @@ const activeBubbleKey = computed(() => {
 
 const showBottomBubble = computed(() => panel.value === 'script' || panel.value === 'production')
 
+/**
+ * 底部气泡栏的「上一步 / 下一步」：剧本台与制作台共用这一对按钮。
+ *
+ * 模板里原来是四个按钮、两套文案、两套禁用条件：剧本侧写死 `scriptStep === 0`、
+ * 文案走 `prevStepLabel`/`nextStepLabel`；制作侧用 `prodTabIdx === 0`、
+ * 文案内联 `prodTabDefs[...]`。两半各写一遍，改一边忘一边就是「剧本侧按钮灰着、
+ * 制作侧亮着」。现在分支只在这四个计算量里，模板只剩两个按钮。
+ *
+ * 容器只在 script / production 两个面板渲染（见 `showBottomBubble`），
+ * 所以这里不必再判一次面板，`v-else-if` 那一层也就没有存在的必要了。
+ */
+const bubblePrevLabel = computed(() => panel.value === 'production'
+  ? (prodTabDefs.value[prodTabIdx.value - 1]?.label || '上一步')
+  : (prevStepLabel.value || '上一步'))
+const bubbleNextLabel = computed(() => {
+  if (panel.value === 'production') {
+    return prodTabIdx.value < prodTabDefs.value.length - 1
+      ? (prodTabDefs.value[prodTabIdx.value + 1]?.label || '下一步')
+      : '进入导出'
+  }
+  return nextStepLabel.value || '下一步'
+})
+const canBubblePrev = computed(() => panel.value === 'production' ? prodTabIdx.value > 0 : scriptStep.value > 0)
+const canBubbleNext = computed(() => panel.value === 'production'
+  ? !(prodTab.value === 'compose' && !canExport.value)
+  : canGoNext.value)
+function goBubblePrev() {
+  if (panel.value === 'production') { prodTabIdx.value = Math.max(0, prodTabIdx.value - 1); return }
+  goPrevStep()
+}
+function goBubbleNext() {
+  if (panel.value === 'production') { goNextProd(); return }
+  goNextStep()
+}
+
 function goSubStep(key: string) {
   if (key.startsWith('script:')) {
     panel.value = 'script'
-    const stepMap: Record<string, number> = {
-      'script:raw': 0,
-      'script:rewrite': 1,
-      'script:extract': 2,
-      'script:voice': 3,
-      'script:storyboard': 4,
-    }
-    scriptStep.value = stepMap[key] ?? 0
+    // 下标顺序即 `scriptStages` 的顺序，不用再维护一张 key → 序号的手表。
+    goScriptStage(key)
     return
   }
   if (key.startsWith('prod:')) {
@@ -3319,30 +3309,25 @@ function goSubStep(key: string) {
   panel.value = 'export'
 }
 
-const pipelineProgress = computed(() => {
-  let p = 0
-  if (rawContent.value) p++
-  if (scriptContent.value) p++
-  if (chars.value.length) p++
-  if (charsVoiced.value) p++
-  if (sbs.value.length) p++
-  if (sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)) p++
-  if (sbs.value.some(s => s.composed_image || s.composedImage)) p++
-  if (sbs.value.some(s => s.video_url || s.videoUrl)) p++
-  if (sbs.value.length && composedCount.value === sbs.value.length) p++
-  if (mergeUrl.value) p++
-  return p
-})
+/**
+ * 制作进度：直接数侧栏步骤的完成数，不再自己养一套判据。
+ *
+ * 旧实现有 10 个自增，分母却在模板里三处写死 `/11` —— 全做完也只到 10/11、进度条
+ * 在 90.9% 封顶，永远走不满。而且那 10 个自增跟侧栏的 12 个步骤对不上：多两个
+ * 「任意一张」判据（`some(composed_image)` / `some(video_url)`，与紧随其后的
+ * 「全部合成」重复计分），少两个真步骤（场景图片、镜头图片）。
+ *
+ * 现在分子分母都从 `sidebarSections` 来，加/删步骤只改那一处。
+ */
+const pipelineSteps = computed(() => sidebarSections.value.flatMap(s => s.items))
+const pipelineTotal = computed(() => pipelineSteps.value.length)
+const pipelineProgress = computed(() => pipelineSteps.value.filter(s => s.done).length)
+const pipelinePercent = computed(() => (pipelineTotal.value ? Math.round(pipelineProgress.value / pipelineTotal.value * 100) : 0))
 
 const currentStageLabel = computed(() => {
-  if (panel.value === 'script') return `剧本阶段 · ${stepLabels[scriptStep.value]}`
+  if (panel.value === 'script') return `剧本阶段 · ${scriptStage.value.short}`
   if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
-})
-
-const currentMainStageLabel = computed(() => {
-  const current = mainStageDefs.find(stage => stage.id === activeMainStage.value)
-  return current?.label || '工作台'
 })
 
 const currentSubStageLabel = computed(() => {
@@ -3686,20 +3671,6 @@ async function deleteShot(sb: any) {
   else selectedSb.value = null
 }
 
-const scriptSteps = computed(() => {
-  const hasScript = !!scriptContent.value
-  const hasChars = chars.value.length > 0 && hasScript
-  const hasVoice = charsVoiced.value > 0 && hasChars
-  const hasSbs = sbs.value.length > 0
-  return [
-    { label: '原始内容', state: rawContent.value ? 'done' : 'active', spinning: false },
-    { label: 'AI 改写', state: hasScript ? 'done' : (rawContent.value ? 'active' : ''), spinning: rt.value === 'script_rewriter' },
-    { label: '提取', state: hasChars ? 'done' : (hasScript ? 'active' : ''), spinning: rt.value === 'extractor' },
-    { label: '音色', state: hasVoice ? 'done' : (hasChars ? 'active' : ''), spinning: rt.value === 'voice_assigner' },
-    { label: '分镜', state: hasSbs ? 'done' : (hasVoice ? 'active' : ''), spinning: rt.value === 'storyboard_breaker' },
-  ]
-})
-
 watch(rawContent, v => { localRaw.value = v }, { immediate: true })
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
@@ -3709,14 +3680,81 @@ watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 function initScriptStep() {
   const epHasContent = !!(episode.value?.content)
   const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
-  if (sbs.value.length) scriptStep.value = 4
-  else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
-  else if (epHasScript && chars.value.length) scriptStep.value = 2
-  else if (epHasScript || epHasContent) scriptStep.value = 1
-  else scriptStep.value = 0
+  // 落点用步骤 key 表达，不再写 `scriptStep = 4/3/2/1/0`：判定链条本身（从后往前看第一个
+  // 已有产物的步骤）一字未改，但「哪一步」不再靠下标，插步/调序时不会把人送错步骤。
+  let landed = 'script:raw'
+  if (sbs.value.length) landed = 'script:storyboard'
+  else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) landed = 'script:voice'
+  else if (epHasScript && chars.value.length) landed = 'script:extract'
+  else if (epHasScript || epHasContent) landed = 'script:rewrite'
+  goScriptStage(landed)
 }
 
-async function refresh() {
+// ====== 生成前成本预估（本集待生成量 × 当前激活单价） ======
+// 后端 /usage/estimate 早就有（含「哪些模型无法定价」的 unestimatable），但前端只在
+// 模型页的费用 tab 里用过 ⇒ **生成按钮旁看不到钱** ✗。这里把它挂到批量按钮上，
+// 但必须节流：refresh 每 2.5–4 秒跑一次，跟着打会把这个接口打成热点 ✗
+const costEstimate = ref<any>(null)
+let estimateTimer: ReturnType<typeof setTimeout> | null = null
+let estimateAt = 0
+function scheduleEstimate(force = false) {
+  // force：换模型/套用预设这类「钱一定变了」的动作要立刻重算，不能等节流窗口过去
+  // （否则按钮旁会挂着上一个模型的价格，看着像预估价没生效 ✓✗）
+  if (force && estimateTimer) { clearTimeout(estimateTimer); estimateTimer = null }
+  if (estimateTimer) return
+  const wait = force ? 0 : Math.max(0, 15000 - (Date.now() - estimateAt))
+  estimateTimer = setTimeout(async () => {
+    estimateTimer = null
+    estimateAt = Date.now()
+    try {
+      costEstimate.value = await usageAPI.estimate({ drama_id: dramaId, episode_id: epId.value })
+    } catch {
+      // 预估失败**不打扰用户**（它是辅助信息，不该用 toast 抢戏）
+    }
+  }, wait)
+}
+const estimateTitle = computed(() => {
+  const e = costEstimate.value
+  if (!e) return ''
+  const parts = [
+    e.pending_images ? `图片 ${e.pending_images} 张` : '',
+    e.pending_videos ? `视频 ${e.pending_videos} 条` : '',
+    e.pending_audio_chars ? `配音 ${e.pending_audio_chars} 字` : '',
+  ].filter(Boolean)
+  const unknown = Array.isArray(e.unestimatable) && e.unestimatable.length
+    ? `；无法定价：${e.unestimatable.join('、')}`
+    : ''
+  return `本集全部待生成项（${parts.join(' · ') || '无'}）按当前激活单价估算${unknown}`
+})
+
+/**
+ * @param opts.quiet 轮询/流水线里的静默刷新：失败不弹 toast。
+ *   流水线每 3 秒刷一次，网络抖一下就会连弹十几个 toast，把真正的信息全埋掉 ✓✗
+ *
+ * 轮询器撞车时共享同一趟刷新。
+ *
+ * 一次 `refresh()` 是**六连请求**（剧本 / 角色 / 场景 / 分镜 / 最新网格图 / 合并状态），
+ * 而 `watchAsyncResult` 是「一个任务一个轮询器、每 2.5 秒各刷一次」。批量生视频时本页
+ * 同时有三条轮询器在跑（批次父任务 + 上限 2 条单镜），读的却是同一份服务器状态 ——
+ * 每 2.5 秒十八个请求换一份数据。
+ *
+ * 所以只合并 **quiet 刷新**（只有轮询器走这个口）。显式刷新（保存、上传、点了按钮之后
+ * 那一种）永远单独跑一趟、不与任何人共享结果：那种调用后面往往紧跟「我刚改的东西到底
+ * 生效没有」的判定，共享一份比它更早发出的响应会把判定带偏。
+ */
+let quietRefreshInFlight: Promise<void> | null = null
+
+function refresh(opts?: { quiet?: boolean }) {
+  if (!opts?.quiet) return doRefresh(opts)
+  if (!quietRefreshInFlight) {
+    quietRefreshInFlight = doRefresh(opts)
+    const clear = () => { quietRefreshInFlight = null }
+    void quietRefreshInFlight.then(clear, clear)
+  }
+  return quietRefreshInFlight
+}
+
+async function doRefresh(opts?: { quiet?: boolean }) {
   try {
     drama.value = await dramaAPI.get(dramaId)
     const ep = drama.value.episodes?.find((e: any) => (e.episode_number || e.episodeNumber) === episodeNumber)
@@ -3743,9 +3781,11 @@ async function refresh() {
       loadAllDubMatchCache().catch(() => {})
     }
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : String(e))
+    if (!opts?.quiet) toast.error(e instanceof Error ? e.message : String(e))
   }
   try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+  // 待生成量随每次生成变化 ⇒ refresh 之后（节流地）重估一次
+  scheduleEstimate()
 }
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
@@ -3835,7 +3875,8 @@ function doRewrite() {
   scriptEditing.value = false
   runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, async () => {
     await refresh()
-    scriptStep.value = 1 // 改写完成后停留在 AI 改写步骤，展示改写后的剧本
+    // 改写完成后停留在 AI 改写步骤，展示改写后的剧本
+    goScriptStage('script:rewrite')
   })
 }
 function skipRewrite() {
@@ -3847,7 +3888,7 @@ function skipRewrite() {
   localScript.value = raw
   saveScr()
   toast.success('已跳过 AI 改写，当前将直接使用原始内容')
-  scriptStep.value = 2
+  goScriptStage('script:extract')
 }
 function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, refresh) }
 function doVoice() { runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh) }
@@ -3857,11 +3898,35 @@ async function batchGenSamples() {
     toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
     return
   }
-  const results = await Promise.allSettled(pending.map(c => characterAPI.voiceSample(c.id, epId.value)))
-  const okCount = results.filter(r => r.status === 'fulfilled').length
-  const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 份试听文件`)
-  if (failCount) toast.error(`${failCount} 份试听文件生成失败`)
+  let stopped = false
+  const parent = taskCenter.start({
+    kind: 'tts',
+    key: 'batch:voiceSample',
+    title: `批量试听 · ${pending.length} 个角色`,
+    subtitle: `已有音色但还没有试听文件 · 同时最多 ${TTS_BATCH_LIMIT} 条`,
+    stage: `0 / ${pending.length}`,
+    route: taskRoute('chars'),
+    retry: () => batchGenSamples(),
+    onCancel: () => { stopped = true },
+  })
+  const res = await runPool(pending, TTS_BATCH_LIMIT, c => characterAPI.voiceSample(c.id, epId.value), {
+    shouldStop: () => stopped,
+    onSettled: (done, ok, fail, total) => taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${fail} 失败 · ${done} / ${total}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((done / total) * 100),
+    ),
+  })
+  if (res.ok) toast.success(`已生成 ${res.ok} 份试听文件`)
+  if (res.fail) {
+    const names = res.errors.slice(0, 5).map(({ item }) => (item as any).name).filter(Boolean)
+    toast.error(`${res.fail} 份试听文件生成失败${names.length ? `：${names.join('、')}` : ''}`)
+    taskCenter.fail(parent.id, res.errors[0]?.error ?? new Error(`${res.fail} 份试听文件生成失败`), { retry: () => batchGenSamples() })
+  } else if (stopped && res.skipped > 0) {
+    taskCenter.cancel(parent.id, `已停止提交：${res.ok} 成功 · 还有 ${res.skipped} 个角色没提交`)
+  } else {
+    taskCenter.done(parent.id)
+  }
   await refresh()
 }
 async function generateVoicesFromCharacters() {
@@ -3896,13 +3961,75 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function watchAsyncResult(check: () => any, attempts: number = 24, delay: number = 2500) {
+/**
+ * 有界并发池：同时最多跑 `limit` 个，腾出一个再上一个。
+ *
+ * 为什么要有：批量动作原来一律 `Promise.allSettled(items.map(...))` —— 40 个镜头就是
+ * 40 个请求**同时**打到声音/图像接口。远端一限流（429）就整批一起失败，而且中途
+ * 无从得知进度（只能等全完）✓✗。改成池子后：并发有上限、每完成一条报一次**数出来的**进度。
+ *
+ * `shouldStop()` 供「取消」用：只拦**还没提交**的那些；已提交的撤不回来，
+ * 所以 `skipped` 要如实报出来，不许假装撤回 ★
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<any>,
+  opts?: {
+    onSettled?: (done: number, ok: number, fail: number, total: number) => void
+    shouldStop?: () => boolean
+  },
+) {
+  const total = items.length
+  let cursor = 0
+  let done = 0
+  let ok = 0
+  let fail = 0
+  const errors: { item: T; error: any }[] = []
+  const lane = async () => {
+    while (true) {
+      if (opts?.shouldStop?.()) return
+      const i = cursor
+      cursor += 1
+      if (i >= total) return
+      const item = items[i] as T
+      try {
+        await worker(item, i)
+        ok += 1
+      } catch (e) {
+        fail += 1
+        errors.push({ item, error: e })
+      }
+      done += 1
+      opts?.onSettled?.(done, ok, fail, total)
+    }
+  }
+  const lanes = Math.max(1, Math.min(limit, total))
+  await Promise.all(Array.from({ length: lanes }, () => lane()))
+  return { total, done, ok, fail, skipped: total - done, errors }
+}
+
+/**
+ * 轮询「某个异步结果是否回填」。
+ *
+ * ⚠️ 第 4 参 `onTimeout` 是 2026-10-27 补的：此前轮询耗尽就**静默退出** ✗ ⇒ 任务中心里
+ * 那条任务会永远停在「进行中」（fab 一直转，用户以为还在跑 ✓✗）。现在收尾时回调一次，
+ * 由调用方决定标成「已停止轮询」还是「失败」（**不自己编造成功** ★）。
+ */
+function watchAsyncResult(check: () => any, attempts: number = 24, delay: number = 2500, onTimeout?: () => void) {
   void (async () => {
     for (let i = 0; i < attempts; i++) {
       await sleep(delay)
-      await refresh()
+      // 这里**刻意不按 `isMounted` 提前退出**：轮询器不只是在刷进度，`check()` 里还带着
+      // `pump()` 这类**提交**动作（批量视频腾出一个槽位就交下一条）。离开剧集页就收工，
+      // 会让用户切去别的页面再回来时发现批量只跑了两条 —— 那是比多打几个请求更糟的结果。
+      // 真正的省法在 `refresh` 的合并上：同一时刻所有轮询器共用一趟六连请求，
+      // 后台待着也只花「一趟 / 2.5 秒」，不是 N 趟。
+      // 静默刷新：轮询期间网络抖一下就弹 toast，几十条任务下去会把真信息全埋掉 ✓✗
+      await refresh({ quiet: true })
       if (check()) return
     }
+    onTimeout?.()
   })()
 }
 function normEpUrl(p?: string | null): string {
@@ -3911,180 +4038,177 @@ function normEpUrl(p?: string | null): string {
   return p.startsWith('/') ? p : '/' + p
 }
 
-async function genCharImg(id: number) {
-  try {
-    if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
-    const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
-    await characterAPI.generateImage(id, epId.value)
-    toast.success('角色图片生成中')
-    await refresh()
-    watchAsyncResult(() => {
-      const char = chars.value.find(c => c.id === id)
-      const cur = normEpUrl(char?.image_url || char?.imageUrl)
-      const done = !!cur && cur !== beforeUrl
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
-    })
-  } catch (e) {
-    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-    toast.error(e instanceof Error ? e.message : String(e))
-  }
-}
-
 // 角色级图片模型选择（每个角色独立）
 const charImageModels = ref<Record<number, string>>({})
 
-async function genCharImgWithModel(id: number) {
+/**
+ * 生成一个角色的定妆板。
+ *
+ * 这里原本有**两个**几乎逐行相同的函数：`genCharImg`（不带模型）与 `genCharImgWithModel`
+ * （带模型）。差别只有三处 —— 多查一次 `charImageModels`、多一个 `指定模型：` 副标题、
+ * `generateImage` 的第三个参数。而 `genCharImg` 除它自己的 `retry` 之外**没有任何调用点**
+ * （模板走的是带模型那个），是彻底不可达的死码：别人改一处、漏一处，它就会安静地过期。
+ *
+ * 合并后保留带模型的形状。`model` 为空时传 `{ model: undefined }`，
+ * `api.post` 内部 `JSON.stringify` 会把这个键丢掉，请求体与旧的无模型版逐字节相同。
+ */
+async function genCharImg(id: number) {
+  const name = chars.value.find(c => c.id === id)?.name || `角色 #${id}`
+  const model = charImageModels.value[id] || undefined
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `charimg:${id}`,
+    title: `${name} · 定妆板`,
+    subtitle: model ? `指定模型：${model}` : '角色设定图',
+    stage: '提交中',
+    route: taskRoute('chars'),
+    retry: () => genCharImg(id),
+  })
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
-    const model = charImageModels.value[id] || undefined
     const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
-    await characterAPI.generateImage(id, epId.value, { prompt: undefined, model })
+    await characterAPI.generateImage(id, epId.value, { model })
+    taskCenter.stage(task.id, '已提交，等待回填')
     toast.success('角色图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const char = chars.value.find(c => c.id === id)
       const cur = normEpUrl(char?.image_url || char?.imageUrl)
       const done = !!cur && cur !== beforeUrl
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+      if (done) {
+        pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+        taskCenter.done(task.id)
+      }
       return done
-    })
+    }, 24, 2500, () => taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）'))
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+    taskCenter.fail(task.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   }
 }
 function batchCharImages() {
   const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
   if (!ids.length) { toast.info('所有角色图片已生成'); return }
+  const parent = taskCenter.start({
+    kind: 'image',
+    key: 'batch:charimg',
+    title: `批量角色定妆板 · ${ids.length} 个`,
+    subtitle: '本集还没有图的角色',
+    stage: `0 / ${ids.length}`,
+    route: taskRoute('chars'),
+    retry: () => batchCharImages(),
+  })
   pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
   characterAPI.batchImages(ids, epId.value).then(async () => {
     toast.success('角色图片批量生成中')
     await refresh()
-    watchAsyncResult(() => ids.every(id => {
-      const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
-    }), 36)
+    let lastDone = 0
+    watchAsyncResult(() => {
+      let done = 0
+      for (const id of ids) {
+        const char = chars.value.find(c => c.id === id)
+        if (char?.image_url || char?.imageUrl) {
+          done += 1
+          pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+        }
+      }
+      lastDone = done
+      taskCenter.stage(parent.id, `${done} / ${ids.length}`, Math.round((done / ids.length) * 100))
+      if (done === ids.length) { taskCenter.done(parent.id); return true }
+      return false
+    }, 36, 2500, () => taskCenter.stage(parent.id, `前端已停止轮询：${lastDone} / ${ids.length} 已回填`))
   }).catch(e => {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
+    taskCenter.fail(parent.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   })
-}
-async function genSceneImg(id: number) {
-  try {
-    if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
-    const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
-    await sceneAPI.generateImage(id, epId.value)
-    toast.success('场景图片生成中')
-    await refresh()
-    watchAsyncResult(() => {
-      const scene = scenes.value.find(s => s.id === id)
-      const cur = normEpUrl(scene?.image_url || scene?.imageUrl)
-      const done = !!cur && cur !== beforeUrl
-      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-      return done
-    })
-  } catch (e) {
-    pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    toast.error(e instanceof Error ? e.message : String(e))
-  }
 }
 
 // 场景级图片模型选择（每个场景独立）
 const sceneImageModels = ref<Record<number, string>>({})
 
-async function genSceneImgWithModel(id: number) {
+/** 生成一个场景的场景卡。与 `genCharImg` 同形：合并了此前那个不可达的无模型死码。 */
+async function genSceneImg(id: number) {
+  const name = scenes.value.find(s => s.id === id)?.name || `场景 #${id}`
+  const model = sceneImageModels.value[id] || undefined
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `sceneimg:${id}`,
+    title: `${name} · 场景卡`,
+    subtitle: model ? `指定模型：${model}` : '环境设定图',
+    stage: '提交中',
+    route: taskRoute('scenes'),
+    retry: () => genSceneImg(id),
+  })
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
-    const model = sceneImageModels.value[id] || undefined
     const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
-    await sceneAPI.generateImage(id, epId.value, { prompt: undefined, model })
+    await sceneAPI.generateImage(id, epId.value, { model })
+    taskCenter.stage(task.id, '已提交，等待回填')
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const scene = scenes.value.find(s => s.id === id)
       const cur = normEpUrl(scene?.image_url || scene?.imageUrl)
       const done = !!cur && cur !== beforeUrl
-      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      if (done) {
+        pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+        taskCenter.done(task.id)
+      }
       return done
-    })
+    }, 24, 2500, () => taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）'))
   } catch (e) {
     pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+    taskCenter.fail(task.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   }
 }
+
 function batchSceneImages() {
   const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
   if (!ids.length) { toast.info('所有场景图片已生成'); return }
+  const parent = taskCenter.start({
+    kind: 'image',
+    key: 'batch:sceneimg',
+    title: `批量场景卡 · ${ids.length} 个`,
+    subtitle: '本集还没有图的场景',
+    stage: `0 / ${ids.length}`,
+    route: taskRoute('scenes'),
+    retry: () => batchSceneImages(),
+  })
   pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
-  ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e instanceof Error ? e.message : String(e))) })
+  let firstError: unknown = null
+  ids.forEach(id => {
+    sceneAPI.generateImage(id, epId.value)
+      .then(() => refresh())
+      .catch((e) => {
+        // 逐条失败的**第一个**原始错误留给归因（原来只 toast 一句，父任务无从判断类型 ✗）
+        if (!firstError) firstError = e
+        toast.error(e instanceof Error ? e.message : String(e))
+      })
+  })
   toast.success('场景图片批量生成中')
-  watchAsyncResult(() => ids.every(id => {
-    const scene = scenes.value.find(s => s.id === id)
-    const done = !!(scene?.image_url || scene?.imageUrl)
-    if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    return done
-  }), 36)
+  let lastDone = 0
+  watchAsyncResult(() => {
+    let done = 0
+    for (const id of ids) {
+      const scene = scenes.value.find(s => s.id === id)
+      if (scene?.image_url || scene?.imageUrl) {
+        done += 1
+        pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      }
+    }
+    lastDone = done
+    taskCenter.stage(parent.id, `${done} / ${ids.length}`, Math.round((done / ids.length) * 100))
+    if (done === ids.length) { taskCenter.done(parent.id); return true }
+    return false
+  }, 36, 2500, () => {
+    if (lastDone === ids.length) return
+    if (firstError) taskCenter.fail(parent.id, firstError, { retry: () => batchSceneImages() })
+    else taskCenter.stage(parent.id, `前端已停止轮询：${lastDone} / ${ids.length} 已回填`)
+  })
 }
-
-const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
-const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
-
-/**
- * 将一段包含多角色对话的文本拆分为多条独立对话行
- * 只匹配真正的"角色名：较长台词"模式，避免把句子中的标点/短句误拆
- * 关键规则：冒号后面必须 >= 8 个字符且不含冒号，才认为是有效对话行
- */
-function getDialogueLines(sb: any) {
-  const raw = sb?.dialogue?.trim() || ''
-  if (!raw) return []
-  const lines = []
-  // 全局匹配：角色名(不含冒号) + 冒号 + 至少8个字符的台词(不含冒号)
-  const regex = /([^\n:：]{1,10}?)[:：]([^:：\n]{8,})/g
-  let match
-
-  while ((match = regex.exec(raw)) !== null) {
-    let speaker = match[1].replace(/[（(].+?[)）]/g, '').trim()
-    const text = match[2].trim()
-    if (!speaker || speaker.length > 10 || IGNORE_TTS_SPEAKERS.test(speaker)) continue
-    if (IGNORE_TTS_TEXT.test(text)) continue
-    lines.push({ speaker, text })
-  }
-
-  return lines
-}
-
-function getDialogueSpeakerRaw(sb: any) {
-  const dialogue = sb?.dialogue?.trim() || ''
-  const match = dialogue.match(/^(.+?)[:：]/)
-  return match ? match[1].replace(/[（(].+?[)）]/g, '').trim() : ''
-}
-
-function getDialogueText(sb: any) {
-  const dialogue = sb?.dialogue?.trim() || ''
-  return dialogue ? dialogue.replace(/^.+?[:：]\s*/, '').trim() : ''
-}
-
-function isTTSIgnorable(sb: any) {
-  const lines = getDialogueLines(sb)
-  const raw = sb?.dialogue?.trim() || ''
-  if (!raw) return true
-  // 有有效对话行 → 不忽略
-  if (lines.length > 0) return false
-  // 拆分不出多角色对话行，但有原文 → fallback 到旧逻辑（当作单人对话）
-  const speaker = getDialogueSpeakerRaw(sb)
-  const text = getDialogueText(sb)
-  if (speaker && IGNORE_TTS_SPEAKERS.test(speaker)) return true
-  if (!text) return true
-  if (IGNORE_TTS_TEXT.test(text)) return true
-  return false
-}
-
-function hasDialogue(sb: any) { return !isTTSIgnorable(sb) }
-function hasTTS(sb: any) { return !!(sb?.tts_audio_url || sb?.ttsAudioUrl) }
-function getTTSUrl(sb: any) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 
 function getDialogueSpeaker(sb: any) {
   const lines = getDialogueLines(sb)
@@ -4144,39 +4268,6 @@ async function loadAllDubMatchCache() {
 }
 
 /**
- * 获取单条 TTS 台词行的匹配状态
- */
-function getTTSLineMatchStatus(sbId: number, ttsLine: any) {
-  if (ttsLine?.match_status) return ttsLine.match_status
-  const cache = dubMatchCache.value[sbId]
-  if (!cache || !cache.lines) return null
-  const found = cache.lines.find((l: any) => l.speaker === ttsLine.speaker && l.text === ttsLine.text)
-  return found?.match_status || null
-}
-
-function getMatchStatusDot(status: string) {
-  if (!status) return ''
-  const map: Record<string, string> = {
-    matched: 'match-dot match-dot-ok',
-    narrator: 'match-dot match-dot-ok',
-    no_voice: 'match-dot match-dot-warn',
-    not_found: 'match-dot match-dot-err',
-  }
-  return map[status] || ''
-}
-
-function getMatchStatusLabel(status: string) {
-  if (!status) return ''
-  const map: Record<string, string> = {
-    matched: '',
-    narrator: '旁白',
-    no_voice: '未配置音色',
-    not_found: '角色不存在',
-  }
-  return map[status] || ''
-}
-
-/**
  * 配音验证问题总数（用于横幅显示）
  */
 const dubIssueCount = computed(() => {
@@ -4203,82 +4294,45 @@ const dubStaleCount = computed(() => {
 })
 
 /**
- * 获取 TTS 台词行的匹配状态颜色（用于左侧边框）
+ * 配音卡片的视图模型。
+ *
+ * 以前模板里一行台词要回调三次取值函数（标签、圆点、边框色），每次都得重进 `dubMatchCache`
+ * 找同一条 —— 一集几十个镜头、每个镜头多行台词，同一份查找重复上百遍。这里一次算完，
+ * 组件只认 `status` 字面量（显示成什么字、什么色属于组件的展示决定）。
+ *
+ * 成立的前提：`dubMatchCache` 是**整体替换**（`dubMatchCache.value = cache`）而非原地改字段，
+ * 所以这个 computed 能正常失效。若哪天改成原地赋值，这里会静默变滞后。
  */
-function getTTSLineMatchStatusColor(sbId: number, ttsLine: any) {
-  const status = getTTSLineMatchStatus(sbId, ttsLine)
-  if (status === 'not_found') return 'var(--danger, #e74c3c)'
-  if (status === 'no_voice') return 'var(--warning, #f59e0b)'
-  return 'var(--accent)'
-}
+const dubRows = computed(() => sbs.value.filter(hasDialogue).map((sb, i) => {
+  const lines = getDialogueLines(sb)
+  const cacheLines = dubMatchCache.value[sb.id]?.lines || []
+  const ttsLines = getTTSLines(sb)
+  const statusOf = (dl: any) => cacheLines.find((l: any) => l.speaker === dl.speaker && l.text === dl.text)?.match_status || null
+  const audioOf = (dl: any) => ttsLines.find((l: any) => l.speaker === dl.speaker && l.text === dl.text)?.tts_audio_url || null
+  const multi = lines.length > 1
 
-/**
- * 单人角色的匹配状态标签文本
- */
-function getDubMatchStatusLabel(sb: any) {
-  const cache = dubMatchCache.value[sb.id]
-  if (!cache || !cache.lines || cache.lines.length === 0) return ''
-  const line = cache.lines[0]
-  return getMatchStatusLabel(line.match_status)
-}
-
-/**
- * 单人角色的匹配状态 CSS 类
- */
-function getDubMatchDotClass(sb: any) {
-  const cache = dubMatchCache.value[sb.id]
-  if (!cache || !cache.lines || cache.lines.length === 0) return ''
-  return getMatchStatusDot(cache.lines[0].match_status)
-}
-
-/**
- * 多人对话：获取某对话行的匹配状态（来自验证缓存）
- */
-function getDLMatchStatus(sbId: number, dialogueLine: any) {
-  const cache = dubMatchCache.value[sbId]
-  if (!cache || !cache.lines) return null
-  const found = cache.lines.find((l: any) => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
-  return found?.match_status || null
-}
-
-/**
- * 多人对话：获取某对话行的边框颜色
- */
-function getDLMatchStatusColor(sbId: number, dialogueLine: any) {
-  const status = getDLMatchStatus(sbId, dialogueLine)
-  if (status === 'not_found') return 'var(--danger, #e74c3c)'
-  if (status === 'no_voice') return 'var(--warning, #f59e0b)'
-  return 'var(--accent)'
-}
-
-/**
- * 多人对话：检查某台词行是否已生成 TTS
- */
-function getDLHasTTS(sbId: number, dialogueLine: any) {
-  const ttsLines = getTTSLinesFromCache(sbId)
-  const found = ttsLines.find(l => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
-  return found?.tts_audio_url || false
-}
-
-/**
- * 多人对话：获取某台词行的音频 URL
- */
-function getDLAudioUrl(sbId: number, dialogueLine: any) {
-  const ttsLines = getTTSLinesFromCache(sbId)
-  const found = ttsLines.find(l => l.speaker === dialogueLine.speaker && l.text === dialogueLine.text)
-  return found?.tts_audio_url || null
-}
-
-/**
- * 从 storyboard 的 ttsAudioUrl 解析台词行（不依赖当前 SBs 数组）
- */
-function getTTSLinesFromCache(sbId: number) {
-  const sb = sbs.value.find(s => s.id === sbId)
-  if (!sb) return []
-  return getTTSLines(sb)
-}
+  return {
+    key: sb.id,
+    sb,
+    // 号仍按「过滤后的顺序」补零：原来模板里的 i 就是 sbs.filter(hasDialogue) 的下标
+    num: String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0'),
+    speaker: getDialogueSpeaker(sb),
+    multi,
+    peopleCount: lines.length,
+    lines: lines.map((dl: any) => ({ speaker: dl.speaker, text: dl.text, status: statusOf(dl), audioUrl: audioOf(dl) })),
+    single: multi ? null : {
+      // 单人卡沿用整镜口径：状态取验证缓存第一条、音频取 sb.tts_audio_url（不按台词行找）
+      status: cacheLines[0]?.match_status || null,
+      text: getDialogueText(sb),
+      meta: [sb.shot_type || sb.shotType || '未设景别', `${sb.duration || 10}s`, sb.location || '未设地点'],
+      hasTTS: hasTTS(sb),
+      audioUrl: hasTTS(sb) ? getTTSUrl(sb) : null,
+    },
+  }
+}))
 
 async function genShotTTS(sb: any) {
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
   // 生成前验证
   const cache = dubMatchCache.value[sb.id]
   const issues = cache?.lines?.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
@@ -4287,13 +4341,27 @@ async function genShotTTS(sb: any) {
     if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${warns}\n\n继续生成可能使用默认音色，是否继续？` }))) return
   }
 
+  const task = taskCenter.start({
+    kind: 'tts',
+    key: `tts:${sb.id}`,
+    title: `镜头 #${shotNo} · 配音`,
+    subtitle: '对白/旁白',
+    stage: '生成中',
+    route: taskRoute('dubbing', sb.id),
+    retry: () => genShotTTS(sb),
+  })
   try {
     await storyboardAPI.generateTTS(sb.id)
-    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
+    toast.success(`镜头 #${shotNo} 配音已生成`)
+    taskCenter.done(task.id)
     await refresh()
-  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
+  } catch (e) {
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
 }
 async function batchShotTTS() {
+  let stopped = false
   const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
   if (!pending.length) {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
@@ -4318,23 +4386,40 @@ async function batchShotTTS() {
     if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${detail}\n\n继续生成可能使用默认音色，是否继续？` }))) return
   }
 
-  const results = await Promise.allSettled(pending.map(sb => storyboardAPI.generateTTS(sb.id)))
-  const okCount = results.filter(r => r.status === 'fulfilled').length
-  const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 条镜头配音`)
-  if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
+  const parent = taskCenter.start({
+    kind: 'tts',
+    key: 'batch:tts',
+    title: `批量配音 · ${pending.length} 个镜头`,
+    subtitle: `本集有对白且还没有配音的镜头 · 同时最多 ${TTS_BATCH_LIMIT} 条`,
+    stage: `0 / ${pending.length}`,
+    route: taskRoute('dubbing'),
+    retry: () => batchShotTTS(),
+    // 停 = 不再提交下一批；已合成出来的声音片段撤不回来，文案里如实说
+    onCancel: () => { stopped = true },
+  })
+  const res = await runPool(pending, TTS_BATCH_LIMIT, sb => storyboardAPI.generateTTS(sb.id), {
+    shouldStop: () => stopped,
+    // 每落一条报一次：数字是数出来的，不是按时间折算的假进度 ✓
+    onSettled: (done, ok, fail, total) => taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${fail} 失败 · ${done} / ${total}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((done / total) * 100),
+    ),
+  })
+  if (res.ok) toast.success(`已生成 ${res.ok} 条镜头配音`)
+  if (res.fail) {
+    // 报**具体哪几个镜头**：失败多半是音色没绑或文本为空，只甩第一条错误定位不了
+    const numbers = res.errors.slice(0, 5).map(({ item }) => `#${(item as any).storyboard_number || (item as any).storyboardNumber || (item as any).id}`)
+    const more = res.fail > numbers.length ? ` 等 ${res.fail} 个` : ''
+    toast.error(`${res.fail} 条镜头配音生成失败：${numbers.join('、')}${more}`)
+    taskCenter.fail(parent.id, res.errors[0]?.error ?? new Error(`${res.fail} 条镜头配音生成失败`), { retry: () => batchShotTTS() })
+  } else if (stopped && res.skipped > 0) {
+    taskCenter.cancel(parent.id, `已停止提交：${res.ok} 成功 · 还有 ${res.skipped} 个镜头没提交`)
+  } else {
+    taskCenter.done(parent.id)
+  }
   await refresh()
 }
-
-function getFirstFrame(s: any) { return s?.first_frame_image || s?.firstFrameImage || null }
-function getLastFrame(s: any) { return s?.last_frame_image || s?.lastFrameImage || null }
-function getKeyframe(s: any) { return s?.keyframe_image || s?.keyframeImage || null }
-function getStoryboardCover(s: any) { return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null }
-function getVideoUrl(s: any) { return s?.video_url || s?.videoUrl || null }
-function getComposedVideoUrl(s: any) { return s?.composed_video_url || s?.composedVideoUrl || null }
-function hasImg(s: any) { return !!getStoryboardCover(s) }
-function hasVid(s: any) { return !!getVideoUrl(s) }
-function hasComposed(s: any) { return !!getComposedVideoUrl(s) }
 
 function getPreviousStoryboard(sb: any) {
   const idx = sbs.value.findIndex(item => item.id === sb.id)
@@ -4416,6 +4501,18 @@ async function genShotFrame(sb: any, frameType: string) {
   const prompt = buildShotImagePrompt(sb, frameType)
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
+  const frameLabel = frameType === 'first_frame' ? '首帧' : frameType === 'last_frame' ? '尾帧' : '关键帧'
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  // 任务中心：同 key 复用 ⇒ 「重试」不会在列表里长出第二条（见 useTaskCenter 文件头）
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `frame:${key}`,
+    title: `镜头 #${shotNo} · ${frameLabel}`,
+    subtitle: '分镜关键帧',
+    stage: '提交中',
+    route: taskRoute('shots', sb.id),
+    retry: () => genShotFrame(sb, frameType),
+  })
   try {
     if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
     const body = {
@@ -4426,6 +4523,7 @@ async function genShotFrame(sb: any, frameType: string) {
       reference_images: referenceImages.length ? referenceImages : undefined,
     }
     await imageAPI.generate(body)
+    taskCenter.stage(task.id, '已提交，等待回填')
     toast.success(frameType === 'first_frame' ? '首帧生成中' : frameType === 'last_frame' ? '尾帧生成中' : '关键帧生成中')
     await refresh()
     watchAsyncResult(() => {
@@ -4433,11 +4531,19 @@ async function genShotFrame(sb: any, frameType: string) {
       const done = frameType === 'first_frame' ? !!getFirstFrame(target)
         : frameType === 'last_frame' ? !!getLastFrame(target)
           : !!getKeyframe(target)
-      if (done) pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+      if (done) {
+        pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+        taskCenter.done(task.id)
+      }
       return done
+    }, 24, 2500, () => {
+      // 轮询停了但结果没回来：**不判成功也不判失败**，如实说「前端不看了」
+      taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）')
+      pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
     })
   } catch (e) {
     pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+    taskCenter.fail(task.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   }
 }
@@ -4462,26 +4568,47 @@ async function genVid(sb: any) {
   if (first && last) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
   else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [effFirst, ...refs].filter(Boolean) }) }
   else if (effFirst) { Object.assign(params, { reference_mode: 'single', image_url: effFirst }) }
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  const task = taskCenter.start({
+    kind: 'video',
+    key: `video:${sb.id}`,
+    title: `镜头 #${shotNo} · 视频`,
+    subtitle: `${Number(sb.duration || 5)} 秒${first && last ? ' · 首尾帧' : refs.length ? ` · 参考图 ${refs.length}` : effFirst ? ' · 首帧' : ' · 纯文生'}`,
+    stage: '提交中',
+    route: taskRoute('videos', sb.id),
+    retry: () => genVid(sb),
+  })
   try {
     delete failedVideoMessages.value[sb.id]
     if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
     const generation = await videoAPI.generate(params)
+    taskCenter.stage(task.id, '已排队，等待渲染')
     toast.success('视频生成中')
     await refresh()
-    pollVideoGeneration(generation?.id, sb.id)
+    pollVideoGeneration(generation?.id, sb.id, task.id)
   } catch (e) {
     pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
+    taskCenter.fail(task.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   }
 }
-async function pollVideoGeneration(generationId: number, storyboardId: number) {
+async function pollVideoGeneration(generationId: number, storyboardId: number, taskId?: string) {
   if (!generationId) {
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === storyboardId)
       const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+      if (done) {
+        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        if (taskId) taskCenter.done(taskId)
+      }
       return done
-    }, 60, 4000)
+    }, 150, 4000, () => {
+      // 没有 generationId 只能盯分镜字段，前端最多盯 10 分钟。到点**必须结案**：
+      // 原来只改 stage 不收尾，条目会永远转圈（比报错更像坏了 ✓✗）。收成「已取消」并说清原因，
+      // 不判失败——渲染可能真的还在跑，判失败会误导用户重复提交。
+      pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+      if (taskId) taskCenter.cancel(taskId, '前端盯到 10 分钟仍未回填，已停止等待（刷新可接回，或去「生成历史」看）')
+    })
     return
   }
   for (let i = 0; i < 120; i++) {
@@ -4489,9 +4616,13 @@ async function pollVideoGeneration(generationId: number, storyboardId: number) {
     try {
       const res = await videoAPI.get(generationId)
       await refresh()
+      // ⚠️ 这里**只报轮次、不报百分比**：上游不给我们渲染进度，「第 N 次查询/120」是
+      //    前端自己的等待轮次，把它换算成 50% 那种条就是假进度 ✓✗（本仓吃过的坑）。
+      if (taskId) taskCenter.stage(taskId, `渲染中 · 第 ${i + 1} 次查询（上限 120）`, null)
       if (res?.status === 'completed') {
         pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         delete failedVideoMessages.value[storyboardId]
+        if (taskId) taskCenter.done(taskId)
         toast.success('视频生成完成')
         return
       }
@@ -4501,6 +4632,7 @@ async function pollVideoGeneration(generationId: number, storyboardId: number) {
           ...failedVideoMessages.value,
           [storyboardId]: res?.error_msg || res?.errorMsg || '视频生成失败',
         }
+        if (taskId) taskCenter.fail(taskId, new Error(failedVideoMessages.value[storyboardId]), { route: taskRoute('videos', storyboardId) })
         toast.error(failedVideoMessages.value[storyboardId])
         return
       }
@@ -4511,15 +4643,170 @@ async function pollVideoGeneration(generationId: number, storyboardId: number) {
     ...failedVideoMessages.value,
     [storyboardId]: '视频生成超时',
   }
+  if (taskId) taskCenter.fail(taskId, new Error('视频生成超时'), { route: taskRoute('videos', storyboardId) })
   toast.error('视频生成超时')
 }
+
+/** 后端生成记录里算「还在飞」的状态（小写比对） */
+const IN_FLIGHT_STATUS = ['processing', 'pending', 'queued', 'generating', 'running']
+
+/**
+ * 从本页提交的提示词尾巴里认帧类型。
+ *
+ * 依据：`buildShotImagePrompt` 末尾固定拼一句 frameHint，三个取值各不相同
+ * （…突出建立关系和动作开始瞬间 / …突出动作结束、情绪落点或结果状态 / …锁定动作进行到一半…）。
+ * **只在恰好命中一种时采信**：0 种（不是本页提交的）或撞了两种以上（用户正文里正好有同样的字）
+ * 一律返回 null ⇒ 调用方不许标具体帧槽位。认错比认不出更糟 ✓✗
+ */
+function inferFrameType(prompt?: string | null): string | null {
+  const text = String(prompt || '')
+  const hits = [
+    text.includes('动作开始瞬间') ? 'first_frame' : '',
+    text.includes('结果状态') ? 'last_frame' : '',
+    text.includes('动作进行到一半') ? 'keyframe' : '',
+  ].filter(Boolean)
+  return hits.length === 1 ? hits[0]! : null
+}
+
+function frameFilled(sb: any, frameType: string) {
+  if (!sb) return false
+  if (frameType === 'first_frame') return !!getFirstFrame(sb)
+  if (frameType === 'last_frame') return !!getLastFrame(sb)
+  return !!getKeyframe(sb)
+}
+
+function filledFrameCount(sb: any) {
+  return ['first_frame', 'last_frame', 'keyframe'].filter(t => frameFilled(sb, t)).length
+}
+
+/**
+ * 刷新/切页回来后，把**还在飞**的生成接回任务台账。
+ *
+ * 真源是后端的生成记录（不是 localStorage）：本地存一份在换设备/清缓存后就开始骗人 ✓✗。
+ *
+ * * **视频**：记录带 `storyboard_id`，且一镜只有一条视频 ⇒ 能精确接回，分镜上的「视频生成中」也能亮。
+ * * **图片**：记录带 `storyboard_id`，但**没有帧类型**（首帧/尾帧/关键帧）✗。所以分两档：
+ *   ① 认得出类型 ⇒ 精确接回（点亮那个槽位、给「重试」）；
+ *   ② 认不出 ⇒ 只接任务台账（标题写「图片」）、**不点亮任何槽位**。
+ *      宁可少显示，也不让用户看到「首帧生成中」其实跑的是关键帧 ✓✗
+ * * 角色卡/场景卡的记录只有 `drama_id`、没有人物/场景 id，对不回具体资产 ⇒ 不接
+ *   （它们在各自页签里点一下就有反馈，刷新丢一次代价小）。
+ *
+ * 接回来的图片帧**共用一个轮询器**：每条任务各起一个 `watchAsyncResult` 就是每 3 秒
+ * 打 N 次全量 refresh（N ＝ 接回来的镜头数），页面会被自己拖死 ✓✗
+ */
+async function restoreInFlightTasks() {
+  let recs: any[] = []
+  try {
+    recs = (await generationsAPI.list({ drama_id: dramaId, limit: 40 })) || []
+  } catch {
+    // 恢复只是锦上添花，失败不打扰用户
+    return
+  }
+  const live = recs.filter((r: any) => IN_FLIGHT_STATUS.includes(String(r.status || '').toLowerCase()))
+
+  // ---- 视频 ----
+  for (const r of live) {
+    if (r.type !== 'video' || !r.storyboardId) continue
+    const sb = sbs.value.find(s => s.id === r.storyboardId)
+    if (!sb || hasVid(sb) || isPendingVideo(sb.id)) continue
+    pendingVideoIds.value.push(sb.id)
+    const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+    const t = taskCenter.start({
+      kind: 'video',
+      key: `video:${sb.id}`,
+      title: `镜头 #${shotNo} · 视频`,
+      subtitle: '刷新前已提交，接着等',
+      stage: '渲染中（页面刷新后接回）',
+      route: taskRoute('videos', sb.id),
+      retry: () => genVid(sb),
+    })
+    // 传 0 走「没有 generationId」那条支路：只盯分镜上的成片字段，
+    // 不去猜记录 id 是不是 video 表的 id（猜错会把轮询打到别的记录上）
+    pollVideoGeneration(0, sb.id, t.id)
+  }
+
+  // ---- 图片（分镜帧）----
+  type Restored = { shotId: number; target: string | null; baseline: number; taskId: string; settled: boolean }
+  const restored: Restored[] = []
+  const frameShotIds = [...new Set(
+    live.filter(r => r.type === 'image' && r.storyboardId).map(r => Number(r.storyboardId)),
+  )]
+
+  for (const shotId of frameShotIds) {
+    const sb = sbs.value.find(s => s.id === shotId)
+    if (!sb) continue
+    // 该镜头可能有不止一条在飞（首帧＋关键帧），类型按最新那条认，认不准就退回「图片」
+    const rec = live.find(r => r.type === 'image' && Number(r.storyboardId) === shotId)
+    const inferred = inferFrameType(rec?.prompt)
+    const target = inferred && !frameFilled(sb, inferred) ? inferred : null
+    if (target && isPendingShotFrame(shotId, target)) continue // 本次会话自己提交的，不重复接
+    // 认不出类型、而当前模式下该有的帧已经齐了 ⇒ 多半是陈旧记录（状态没刷干净），别接
+    if (!target) {
+      const needTypes = frameMode.value === 'first_last' ? ['first_frame', 'last_frame'] : ['first_frame']
+      if (needTypes.every(t => frameFilled(sb, t))) continue
+    }
+    const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+    const label = target === 'first_frame' ? '首帧' : target === 'last_frame' ? '尾帧' : target === 'keyframe' ? '关键帧' : '图片'
+    const t = taskCenter.start({
+      kind: 'image',
+      key: target ? `frame:${framePendingKey(shotId, target)}` : `frame:${shotId}:restored`,
+      title: `镜头 #${shotNo} · ${label}`,
+      subtitle: '刷新前已提交，接着等',
+      stage: '生成中（页面刷新后接回）',
+      route: taskRoute('shots', shotId),
+      // 认得出类型才给「重试」：认不出时瞎重试会多出一张不知道是什么的图 ✓✗
+      retry: target ? () => genShotFrame(sb, target) : undefined,
+    })
+    if (target) pendingShotFrameKeys.value.push(framePendingKey(shotId, target))
+    restored.push({ shotId, target, baseline: filledFrameCount(sb), taskId: t.id, settled: false })
+  }
+
+  if (!restored.length) return
+  const stillRunning = () => restored.filter(r => !r.settled)
+  const releaseSlot = (r: Restored) => {
+    if (!r.target) return
+    const k = framePendingKey(r.shotId, r.target)
+    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== k)
+  }
+  watchAsyncResult(() => {
+    for (const r of stillRunning()) {
+      const cur = sbs.value.find(s => s.id === r.shotId)
+      // 认得出类型就盯那个槽位；认不出就盯「帧数变多了」，不指定是哪一帧
+      const done = r.target ? frameFilled(cur, r.target) : filledFrameCount(cur) > r.baseline
+      if (!done) continue
+      r.settled = true
+      releaseSlot(r)
+      taskCenter.done(r.taskId)
+    }
+    return stillRunning().length === 0
+  }, 120, 3000, () => {
+    // 盯了 6 分钟仍没回填：不判成功也不判失败，如实收成「已停止等待」
+    for (const r of stillRunning()) {
+      r.settled = true
+      releaseSlot(r)
+      taskCenter.cancel(r.taskId, '前端盯了 6 分钟仍没回填，已停止等待（去「生成历史」看，或重新生成）')
+    }
+  })
+}
 async function doCompose(sb: any) {
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  const task = taskCenter.start({
+    kind: 'compose',
+    key: `compose:${sb.id}`,
+    title: `镜头 #${shotNo} · 合成`,
+    subtitle: '画面 + 配音 + 字幕',
+    stage: '合成中',
+    route: taskRoute('compose', sb.id),
+    retry: () => doCompose(sb),
+  })
   try {
     delete failedComposeMessages.value[sb.id]
     if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
     await composeAPI.shot(sb.id)
     toast.success('合成完成')
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
+    taskCenter.done(task.id)
     refresh()
   } catch (e) {
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
@@ -4527,113 +4814,192 @@ async function doCompose(sb: any) {
       ...failedComposeMessages.value,
       [sb.id]: e instanceof Error ? e.message : String(e),
     }
+    taskCenter.fail(task.id, e)
     toast.error(e instanceof Error ? e.message : String(e))
   }
 }
+/**
+ * 批量视频同时最多提交几条。
+ *
+ * 原来这里是 `pendingIds.forEach(id => genVid(sb))` ⇒ 20 镜一集就是 20 条视频**同时**进引擎，
+ * 显存根本吃不下（互相挤爆 → 一排「视频生成超时」）✓✗。改成有上限的调度：
+ * 腾出一个槽位再交下一条；单条仍走 `genVid` 自己的任务与轮询，所以每条都还能各自重试。
+ */
+const VIDEO_BATCH_LIMIT = 2
+
 function batchVideos() {
   const pendingIds = sbs.value.filter(s => !hasVid(s)).map(s => s.id)
-  pendingIds.forEach(id => {
-    const sb = sbs.value.find(item => item.id === id)
-    if (sb) genVid(sb)
+  if (!pendingIds.length) { toast.info('所有镜头都已有视频'); return }
+  let stopped = false
+  const submitted = new Set<number>()
+  let cursor = 0
+  // 批次父任务：报「已回填 m / 失败 k / 已提交 s / 共 n」——这几个数都是**数出来的**，
+  // 所以百分比是真进度（不是时间折算）✓
+  const parent = taskCenter.start({
+    kind: 'video',
+    key: 'batch:video',
+    title: `批量视频 · ${pendingIds.length} 个镜头`,
+    subtitle: `全部未出片的镜头 · 同时最多 ${VIDEO_BATCH_LIMIT} 条（显存）`,
+    stage: `0 / ${pendingIds.length}`,
+    route: taskRoute('videos'),
+    retry: () => batchVideos(),
+    // 停 = **不再提交下一批**；已提交的撤不回来，所以文案里说清（不许假装撤回 ✓✗）
+    onCancel: () => { stopped = true },
   })
-  if (pendingIds.length) {
-    pendingVideoIds.value = [...new Set([...pendingVideoIds.value, ...pendingIds])]
-    watchAsyncResult(() => pendingIds.every(id => {
-      const target = sbs.value.find(s => s.id === id)
-      const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
-      return done
-    }), 80, 4000)
+  const pump = () => {
+    while (!stopped && cursor < pendingIds.length) {
+      // 上限按**全局**在飞数算（本集别处手动点的视频也占显存），不是只算本批
+      if (pendingVideoIds.value.length >= VIDEO_BATCH_LIMIT) return
+      const id = pendingIds[cursor]!
+      cursor += 1
+      if (pendingVideoIds.value.includes(id)) continue
+      const sb = sbs.value.find(item => item.id === id)
+      if (!sb) continue
+      submitted.add(id)
+      void genVid(sb)
+    }
   }
+  pump()
+  const countSettled = () => {
+    let ok = 0
+    let bad = 0
+    // 只统计**已提交**的：还没轮到提交的镜头既没片也没失败，不能算「失败」
+    for (const id of submitted) {
+      const target = sbs.value.find(s => s.id === id)
+      if (target?.video_url || target?.videoUrl) ok += 1
+      else if (failedVideoMessages.value[id]) bad += 1
+      else if (!pendingVideoIds.value.includes(id)) bad += 1 // 已退出 pending 又没片 ⇒ 也算落定
+    }
+    return { ok, bad }
+  }
+  // 每提交一批要等几分钟，轮询上限必须跟总镜头数挂钩（固定 80 次只够 2-3 条）
+  const ticks = Math.max(80, Math.ceil(pendingIds.length / VIDEO_BATCH_LIMIT) * 45)
+  watchAsyncResult(() => {
+    const { ok, bad } = countSettled()
+    const settled = ok + bad
+    taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${bad} 失败 · 已提交 ${submitted.size} / 共 ${pendingIds.length}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((settled / pendingIds.length) * 100),
+    )
+    pendingIds.forEach(id => {
+      const target = sbs.value.find(s => s.id === id)
+      if (target?.video_url || target?.videoUrl) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
+    })
+    pump() // 腾出槽位就交下一条
+    if (settled < submitted.size) return false
+    if (!stopped && submitted.size < pendingIds.length) return false
+    if (stopped) taskCenter.cancel(parent.id, `已停止提交：${ok} 成功 / ${bad} 失败 · 还有 ${pendingIds.length - submitted.size} 个镜头没提交`)
+    else if (bad) taskCenter.fail(parent.id, new Error(`${bad} 个镜头没有出片（可见红色失败提示或未回填）`))
+    else taskCenter.done(parent.id)
+    return true
+  }, ticks, 4000, () => {
+    const { ok, bad } = countSettled()
+    taskCenter.stage(parent.id, `前端已停止轮询：${ok} 成功 / ${bad} 未回填 · 已提交 ${submitted.size} / 共 ${pendingIds.length}`)
+  })
 }
 async function batchCompose() {
-  await composeAPI.all(epId.value)
+  const parent = taskCenter.start({
+    kind: 'compose',
+    key: 'batch:compose',
+    title: '批量合成',
+    subtitle: '本集全部有片镜头',
+    stage: '提交中',
+    route: taskRoute('compose'),
+    retry: () => batchCompose(),
+  })
+  try {
+    await composeAPI.all(epId.value)
+  } catch (e) {
+    taskCenter.fail(parent.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+    return
+  }
   pendingComposeIds.value = [...new Set(sbs.value.filter(sb => !!sb.video_url || !!sb.videoUrl).map(sb => sb.id))]
+  taskCenter.stage(parent.id, `合成中 · ${pendingComposeIds.value.length} 个`)
   toast.success('批量合成已开始')
-  pollComposeStatus()
+  pollComposeStatus(parent.id)
 }
 let mergeIntervalId: ReturnType<typeof setInterval> | null = null
 
 const exporting = ref(false)
 const exportScope = ref<'all' | 'video' | 'assets'>('all')
 
-async function doExportZip() {
+/**
+ * 导出按钮的统一外壳：向 API 要一个文件，存到本地。
+ *
+ * 六个导出处理函数原本各自手抄同一段十六行（导出互斥锁 → fetch → 非 2xx 取 message →
+ * 取 blob → createObjectURL → 造 `<a>` → click → remove → revoke → 成功提示 → 兜底提示），
+ * 只差 url、文件名和两句文案。抄出来的分歧已经能看见：文件名有 `ep${episodeNumber}`、
+ * `ep${epId.value}`、以及不带集号三种写法（见各调用处的 `filename`）。
+ *
+ * `failText` 只用于 HTTP 非 2xx 时的消息（`${failText} (${status})`），
+ * `fallbackText` 只用于「异常没有 message」的回落，默认同 `failText`
+ * —— 两级回落是原代码就有的，别合并成一个。
+ */
+async function exportFile(spec: {
+  url: string
+  filename: string
+  okText: string
+  failText: string
+  fallbackText?: string
+  /** 服务端回纯文本（如 EDL）时按此 MIME 包成 blob；默认按二进制取 */
+  asText?: string
+}) {
   if (exporting.value) return
   exporting.value = true
   try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}?scope=${exportScope.value}`)
+    const resp = await fetch(spec.url)
     if (!resp.ok) {
       const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `导出失败 (${resp.status})`)
+      throw new Error(j?.message || `${spec.failText} (${resp.status})`)
     }
-    const blob = await resp.blob()
+    const blob = spec.asText
+      ? new Blob([await resp.text()], { type: spec.asText })
+      : await resp.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `drama-${dramaId}-${exportScope.value}.zip`
+    a.download = spec.filename
     document.body.appendChild(a)
     a.click()
     a.remove()
     URL.revokeObjectURL(url)
-    toast.success('打包导出完成')
+    toast.success(spec.okText)
   } catch (e: any) {
-    toast.error(e?.message || '打包导出失败')
+    toast.error(e?.message || spec.fallbackText || spec.failText)
   } finally {
     exporting.value = false
   }
 }
 
-async function doExportEdl() {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/edl?episodeId=${epId.value}`)
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `EDL 导出失败 (${resp.status})`)
-    }
-    const text = await resp.text()
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `drama-${dramaId}-ep${episodeNumber}.edl`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    toast.success('EDL 导出完成')
-  } catch (e: any) {
-    toast.error(e?.message || 'EDL 导出失败')
-  } finally {
-    exporting.value = false
-  }
+function doExportZip() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}?scope=${exportScope.value}`,
+    filename: `drama-${dramaId}-${exportScope.value}.zip`,
+    okText: '打包导出完成',
+    failText: '导出失败',
+    fallbackText: '打包导出失败',
+  })
 }
 
-async function doExportJianying() {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/jianying-draft?episodeId=${epId.value}`)
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `剪映草稿导出失败 (${resp.status})`)
-    }
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `drama-${dramaId}-ep${episodeNumber}-jianying.zip`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    toast.success('剪映草稿导出完成')
-  } catch (e: any) {
-    toast.error(e?.message || '剪映草稿导出失败')
-  } finally {
-    exporting.value = false
-  }
+function doExportEdl() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/edl?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}.edl`,
+    okText: 'EDL 导出完成',
+    failText: 'EDL 导出失败',
+    asText: 'text/plain;charset=utf-8',
+  })
+}
+
+function doExportJianying() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/jianying-draft?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}-jianying.zip`,
+    okText: '剪映草稿导出完成',
+    failText: '剪映草稿导出失败',
+  })
 }
 
 const staleCount = ref(0)
@@ -4641,30 +5007,13 @@ const staleSummary = computed(() => staleCount.value
   ? `${staleCount.value} 个分镜剧本指纹与当前剧本不一致（stale），可点击查看明细`
   : '剧本内容指纹校验：分镜与剧本一致时显示 0 stale')
 
-async function doExportLedger(format: 'json' | 'md') {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/project-ledger?format=${format}&episodeId=${epId.value}`)
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `工程账本导出失败 (${resp.status})`)
-    }
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `drama-${dramaId}-ep${episodeNumber}-ledger.${format === 'md' ? 'md' : 'json'}`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    toast.success(format === 'md' ? '工程账本（Markdown）导出完成' : '工程账本（JSON）导出完成')
-  } catch (e: any) {
-    toast.error(e?.message || '工程账本导出失败')
-  } finally {
-    exporting.value = false
-  }
+function doExportLedger(format: 'json' | 'md') {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/project-ledger?format=${format}&episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}-ledger.${format === 'md' ? 'md' : 'json'}`,
+    okText: format === 'md' ? '工程账本（Markdown）导出完成' : '工程账本（JSON）导出完成',
+    failText: '工程账本导出失败',
+  })
 }
 
 async function doCheckStale() {
@@ -4687,56 +5036,22 @@ async function doCheckStale() {
   }
 }
 
-async function doExportQcReport(format: 'json' | 'md' | 'html') {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/qc-report?format=${format}&episodeId=${epId.value}`)
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `QC 报告导出失败 (${resp.status})`)
-    }
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `drama-${dramaId}-qc-report.${format === 'json' ? 'json' : format}`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    toast.success(`QC 报告（${format.toUpperCase()}）导出完成`)
-  } catch (e: any) {
-    toast.error(e?.message || 'QC 报告导出失败')
-  } finally {
-    exporting.value = false
-  }
+function doExportQcReport(format: 'json' | 'md' | 'html') {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/qc-report?format=${format}&episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-qc-report.${format === 'json' ? 'json' : format}`,
+    okText: `QC 报告（${format.toUpperCase()}）导出完成`,
+    failText: 'QC 报告导出失败',
+  })
 }
 
-async function doExportContactSheet() {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/contact-sheet?episodeId=${epId.value}`)
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => null)
-      throw new Error(j?.message || `联系表导出失败 (${resp.status})`)
-    }
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `drama-${dramaId}-episode-${epId.value}-contact-sheet.html`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    toast.success('联系表导出完成')
-  } catch (e: any) {
-    toast.error(e?.message || '联系表导出失败')
-  } finally {
-    exporting.value = false
-  }
+function doExportContactSheet() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/contact-sheet?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-episode-${epId.value}-contact-sheet.html`,
+    okText: '联系表导出完成',
+    failText: '联系表导出失败',
+  })
 }
 
 function routeTag(route: string | null): string {
@@ -4768,28 +5083,393 @@ function shotTag(sb: any): string {
   return mvLabel ? `${stLabel}·${mvLabel}` : stLabel
 }
 
-async function doMerge() {
-  await mergeAPI.merge(epId.value); toast.success('拼接中...')
-  if (mergeIntervalId) clearInterval(mergeIntervalId)
-  mergeIntervalId = setInterval(async () => {
-    try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
-    if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
-      if (mergeIntervalId) { clearInterval(mergeIntervalId); mergeIntervalId = null }
-      mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error('拼接失败')
-    }
-  }, 3000)
+/* ============ 生成参数摘要：按钮旁说清「这一下会用哪个模型、发什么参考图」 ============ */
+/**
+ * 为什么要有：原来用户在同一个页签里点「生成」，并不知道吃的是哪个模型配置、会送几张参考图、
+ * 提示词到底是哪一段（只能靠记忆去别的页签翻）。这里把这几项摊在按钮旁边，
+ * 口径全部**从当前数据算**，不复制一份参数（复制就会漂 ✓✗）。
+ */
+const promptExpanded = ref(false)
+const paramsOpen = ref(false)
+const paramsPos = ref<Record<string, string>>({ top: '0px', left: '0px' })
+
+/**
+ * 把面板钉在按钮下方（视口坐标）。为什么不用相对定位：`.content-panel` 是 `overflow: hidden`，
+ * 下拉会被裁掉一半甚至整块，用户点完以为坏了 ✓✗
+ */
+function toggleParams(ev: MouseEvent) {
+  if (paramsOpen.value) { paramsOpen.value = false; return }
+  const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  // 右边留 8px 边距；面板宽 320px（与 CSS 对齐）
+  const left = Math.max(8, Math.min(r.left - 8, window.innerWidth - 328))
+  paramsPos.value = { top: `${Math.round(r.bottom + 6)}px`, left: `${Math.round(left)}px` }
+  paramsOpen.value = true
+  // 懒加载：面板不打开就不打这个接口（一次也无所谓，但没必要每次进页面都问）
+  if (!genPresetsLoaded.value) loadGenPresets()
 }
 
-async function pollComposeStatus() {
+/* ============ 本集生成预设：三模型 + 帧模式一键存取 ============ */
+/**
+ * 为什么要有：一季 12 集，每集都要在「图片/视频/配音」三个下拉里重新选一遍同样的三项，
+ * 集数一多必然选漏（选漏 = 那集用错模型出图，事后只能重出）。后端 `presets` 表早就有
+ * `type` 字段（调色盘在用），这里复用它存一组「集级生成设置」，不新建表 ✓。
+ * config 存 id 而不是名字：名字会改，id 不会；且套用时走 `switchEpisodeConfig` 同一条路径，
+ * 不会出现「预设里写 A、页面显示 B」的第二套真源 ✓✗。
+ */
+const genPresets = ref<{ id: number; name: string; config: any }[]>([])
+const genPresetsLoaded = ref(false)
+const presetName = ref('')
+const presetBusy = ref(false)
+
+async function loadGenPresets() {
+  try {
+    const list: any = await presetsAPI.list('generation')
+    genPresets.value = Array.isArray(list) ? list : []
+  } catch {
+    genPresets.value = []
+  } finally {
+    genPresetsLoaded.value = true
+  }
+}
+
+/** 当前生效的集级生成设置（全部从页面真源取，不缓存副本） */
+function currentGenConfig() {
+  return {
+    imageConfigId: lockedImageConfigId.value,
+    videoConfigId: lockedVideoConfigId.value,
+    audioConfigId: lockedAudioConfigId.value,
+    frameMode: frameMode.value,
+  }
+}
+
+async function saveGenPreset() {
+  const name = presetName.value.trim()
+  if (!name || presetBusy.value) return
+  presetBusy.value = true
+  try {
+    await presetsAPI.create({ type: 'generation', name, config: currentGenConfig() })
+    presetName.value = ''
+    genPresetsLoaded.value = false
+    await loadGenPresets()
+    toast.success(`已保存预设「${name}」`)
+  } catch (e: any) {
+    toast.error(e?.message || '保存预设失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function applyGenPreset(p: { id: number; name: string; config: any }) {
+  const c = p.config || {}
+  // 逐项套用：缺项的预设不该把现有设置清空（老预设可能只存了图片模型）
+  // 且**先确认这个 id 还在配置列表里** —— 模型配置被删掉后，预设里留的是死 id，
+  // 直接 PUT 上去会让这集「看着有配置、其实指向不存在的行」（出图时才报错，更难查 ✓✗）
+  const alive = (list: any[], id: any) => !!id && list.some(x => x.id === id)
+  const missing: string[] = []
+  if (c.imageConfigId) {
+    if (alive(imageConfigs.value, c.imageConfigId)) await switchEpisodeConfig('image', c.imageConfigId)
+    else missing.push('图片模型')
+  }
+  if (c.videoConfigId) {
+    if (alive(videoConfigs.value, c.videoConfigId)) await switchEpisodeConfig('video', c.videoConfigId)
+    else missing.push('视频模型')
+  }
+  if (c.audioConfigId) {
+    if (alive(audioConfigs.value, c.audioConfigId)) await switchEpisodeConfig('audio', c.audioConfigId)
+    else missing.push('配音')
+  }
+  if (c.frameMode === 'first' || c.frameMode === 'first_last') frameMode.value = c.frameMode
+  // 换模型 = 换单价 ⇒ 按钮旁那个「待生成 ≈ ¥X」必须立刻重算，否则还挂着上一个模型的钱 ✓✗
+  scheduleEstimate(true)
+  if (missing.length) toast.warning(`已套用「${p.name}」，但 ${missing.join('、')} 的配置已被删除，未切换`)
+  else toast.success(`已套用预设「${p.name}」`)
+}
+
+async function removeGenPreset(p: { id: number; name: string }) {
+  if (!(await confirm({ message: `删除预设「${p.name}」？只删这组设置，不影响已经生成的图/视频。`, danger: true }))) return
+  try {
+    await presetsAPI.del(p.id)
+    genPresetsLoaded.value = false
+    await loadGenPresets()
+    toast.success('已删除')
+  } catch (e: any) {
+    toast.error(e?.message || '删除预设失败')
+  }
+}
+
+const selectedSbRefStrategy = computed(() => {
+  const sb = selectedSb.value
+  if (!sb) return '—'
+  const first = getFirstFrame(sb)
+  const last = getLastFrame(sb)
+  const refs = getRefs(sb)
+  if (first && last) return '首帧 + 尾帧'
+  if (refs.length) return `参考图 ${refs.length} 张`
+  if (first) return '首帧'
+  return '纯文生'
+})
+
+const selectedSbPrompt = computed(() => {
+  const sb = selectedSb.value
+  if (!sb) return ''
+  return sb.video_prompt || sb.videoPrompt || sb.description || ''
+})
+
+/* ==================== 「继续到成片」：把一串生成步骤接成一条流水线 ==================== */
+
+/**
+ * 为什么要有这个东西：一集从空到成片要过 7 道手（角色板 → 场景卡 → 首帧 → 配音 → 视频 →
+ * 合成 → 拼接），每一道都要人自己去点那个页签、自己算「还差几个」。竞品那边都是**一条链**，
+ * 用户只决定「跑不跑、跑到哪停」。
+ *
+ * 设计约束（三条，都是被坑教出来的）：
+ * ① **只补缺的**：每步 `todo` 就是「当前还差几个」，差 0 的步自动跳过 —— 绝不做「一键全部重跑」
+ *    那种烧钱的假功能；
+ * ② **进度是真的**：父任务只报「第 i/n 步」与「已完成 i/n」，不报百分比猜测（步数可数）；
+ * ③ **必须能停**：`chainAbort` 每个 3 秒的轮询点检查一次，停的是「下一步不再提交」，
+ *    已经提交出去的任务老老实实跑完（前端叫停不了远端，别在文案上骗人）。
+ */
+type ChainStepId = 'chars' | 'scenes' | 'frames' | 'tts' | 'videos' | 'compose' | 'merge'
+
+interface ChainStep {
+  id: ChainStepId
+  label: string
+  /** 还差几项；0 = 本步已齐，不进流水线 */
+  todo: number
+  hint: string
+  timeoutMs: number
+  route: string
+  run: () => void | Promise<void>
+  /** 这一步到底算不算完（每 3 秒兑现一次，不去猜） */
+  settled: () => boolean
+}
+
+const chainOpen = ref(false)
+const chainRunning = ref(false)
+const chainAbort = ref(false)
+const chainActiveId = ref('')
+const chainState = ref<Record<string, 'running' | 'done' | 'failed' | 'skipped'>>({})
+const chainSkips = ref<string[]>([])
+/** 自动补首帧时同时在飞的镜头数：图片接口并发高了会被限流，2 是稳的 */
+const CHAIN_FRAME_CONCURRENCY = 2
+
+const chainSteps = computed<ChainStep[]>(() => {
+  const charsTodo = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length
+  const scenesTodo = scenes.value.filter(s => !(s.image_url || s.imageUrl)).length
+  const framesTodo = sbs.value.filter(s => !getFirstFrame(s)).length
+  const ttsTodo = sbs.value.filter(s => hasDialogue(s) && !hasTTS(s)).length
+  const videosTodo = sbs.value.filter(s => !hasVid(s)).length
+  const composeTodo = sbs.value.filter(s => hasVid(s) && !hasComposed(s)).length
+  // 拼接只在「全部合成完了、还没拼」时才算一步 —— 否则点下去必失败
+  const mergeTodo = sbs.value.length && sbs.value.every(s => hasComposed(s)) && !mergeUrl.value ? 1 : 0
+  return [
+    {
+      id: 'chars', label: '角色定妆板', todo: charsTodo,
+      hint: `${charsTodo} 个角色还没有形象图`, timeoutMs: Math.max(180_000, charsTodo * 90_000),
+      route: taskRoute('chars'),
+      run: () => batchCharImages(),
+      settled: () => visualChars.value.every(c => !!(c.image_url || c.imageUrl)),
+    },
+    {
+      id: 'scenes', label: '场景卡', todo: scenesTodo,
+      hint: `${scenesTodo} 个场景还没有设定图`, timeoutMs: Math.max(180_000, scenesTodo * 90_000),
+      route: taskRoute('scenes'),
+      run: () => batchSceneImages(),
+      settled: () => scenes.value.every(s => !!(s.image_url || s.imageUrl)),
+    },
+    {
+      id: 'frames', label: '镜头首帧', todo: framesTodo,
+      hint: `${framesTodo} 个镜头还没有首帧`, timeoutMs: Math.max(300_000, framesTodo * 75_000),
+      route: taskRoute('shots'),
+      run: () => chainFrames(),
+      settled: () => sbs.value.every(s => !!getFirstFrame(s)),
+    },
+    {
+      id: 'tts', label: '配音', todo: ttsTodo,
+      hint: `${ttsTodo} 个镜头的对白还没有配音`, timeoutMs: Math.max(120_000, ttsTodo * 30_000),
+      route: taskRoute('dubbing'),
+      run: () => batchShotTTS(),
+      settled: () => sbs.value.every(s => !hasDialogue(s) || hasTTS(s)),
+    },
+    {
+      id: 'videos', label: '镜头视频', todo: videosTodo,
+      hint: `${videosTodo} 个镜头还没有视频`, timeoutMs: Math.max(300_000, videosTodo * 180_000),
+      route: taskRoute('videos'),
+      run: () => batchVideos(),
+      settled: () => sbs.value.every(s => !!hasVid(s)),
+    },
+    {
+      id: 'compose', label: '合成', todo: composeTodo,
+      hint: `${composeTodo} 个镜头还没合成（画面+配音+字幕）`, timeoutMs: Math.max(180_000, composeTodo * 60_000),
+      route: taskRoute('compose'),
+      run: () => batchCompose(),
+      settled: () => sbs.value.every(s => !hasVid(s) || hasComposed(s)),
+    },
+    {
+      id: 'merge', label: '拼接成片', todo: mergeTodo,
+      hint: '把已合成镜头拼成整集', timeoutMs: 360_000,
+      route: exportRoute(),
+      run: () => runMergeStep(),
+      settled: () => !!mergeUrl.value,
+    },
+  ]
+})
+
+const chainTodoSteps = computed(() => chainSteps.value.filter(s => s.todo > 0))
+const chainPlannedSteps = computed(() => chainTodoSteps.value.filter(s => !chainSkips.value.includes(s.id)))
+
+function toggleChainSkip(id: string) {
+  if (chainRunning.value) return
+  chainSkips.value = chainSkips.value.includes(id)
+    ? chainSkips.value.filter(x => x !== id)
+    : [...chainSkips.value, id]
+}
+
+/** 逐条提交缺失的首帧（并发 2），提交完立刻返回 —— 回填由 `waitChainStep` 轮询 */
+async function chainFrames() {
+  const queue = sbs.value.filter(s => !getFirstFrame(s))
+  while (queue.length) {
+    if (chainAbort.value) return
+    const wave = queue.splice(0, CHAIN_FRAME_CONCURRENCY)
+    await Promise.all(wave.map(sb => genShotFrame(sb, 'first_frame').catch((e) => {
+      // 单张失败不中断整条链：由 `settled()` 判定这一波到底有没有齐，
+      // 没齐就会走超时分支，把「缺哪几张」如实报出来
+      console.warn('[chain] 首帧提交失败', sb.id, e)
+    })))
+  }
+}
+
+/** 等某一步「真的齐了」，最多等到该步的超时点；每 3 秒看一次盘上状态 */
+async function waitChainStep(step: ChainStep): Promise<'done' | 'timeout' | 'aborted'> {
+  const deadline = Date.now() + step.timeoutMs
+  for (;;) {
+    if (step.settled()) return 'done'
+    if (chainAbort.value) return 'aborted'
+    if (Date.now() > deadline) return step.settled() ? 'done' : 'timeout'
+    await sleep(3000)
+    // 静默刷新：轮询期网络抖一下不该刷一屏 toast（refresh 内部会 catch，quiet 只关掉那个 toast）
+    await refresh({ quiet: true })
+  }
+}
+
+async function runChain() {
+  if (chainRunning.value) return
+  const steps = chainPlannedSteps.value
+  if (!steps.length) {
+    toast.info('这一集没有待补的内容，可以直接去导出')
+    return
+  }
+  chainRunning.value = true
+  chainAbort.value = false
+  chainState.value = {}
+  const parent = taskCenter.start({
+    kind: 'pipeline',
+    key: `chain:${epId.value}`,
+    title: `继续到成片 · ${steps.length} 步`,
+    subtitle: '只补缺的，补完再拼',
+    stage: '准备中',
+    route: taskRoute('compose'),
+    retry: () => runChain(),
+  })
+
+  let outcome: 'done' | 'stopped' | 'failed' = 'done'
+  try {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!
+      if (chainAbort.value) { outcome = 'stopped'; break }
+      chainActiveId.value = step.id
+      chainState.value = { ...chainState.value, [step.id]: 'running' }
+      // 进度 = 已完成步数 / 总步数（真可数，不编百分比）
+      taskCenter.stage(parent.id, `第 ${i + 1}/${steps.length} 步 · ${step.label}`, Math.round((i / steps.length) * 100))
+      try {
+        await step.run()
+      } catch (e) {
+        chainState.value = { ...chainState.value, [step.id]: 'failed' }
+        taskCenter.fail(parent.id, e, { route: step.route, retry: () => runChain() })
+        outcome = 'failed'
+        break
+      }
+      const waited = await waitChainStep(step)
+      if (waited === 'aborted') {
+        chainState.value = { ...chainState.value, [step.id]: 'skipped' }
+        outcome = 'stopped'
+        break
+      }
+      if (waited === 'timeout') {
+        chainState.value = { ...chainState.value, [step.id]: 'failed' }
+        taskCenter.fail(
+          parent.id,
+          new Error(`「${step.label}」等 ${Math.round(step.timeoutMs / 60_000)} 分钟还没齐，流水线停在这里`),
+          { route: step.route, retry: () => runChain() },
+        )
+        outcome = 'failed'
+        break
+      }
+      chainState.value = { ...chainState.value, [step.id]: 'done' }
+    }
+  } finally {
+    chainRunning.value = false
+    chainActiveId.value = ''
+  }
+
+  if (outcome === 'done') {
+    taskCenter.done(parent.id, `已完成 ${steps.length} 步`)
+    toast.success(steps.some(s => s.id === 'merge') ? '已跑到成片' : '剩余步骤已全部补齐')
+  } else if (outcome === 'stopped') {
+    // 说人话：停的是「不再提交新的」，已经在飞的收不回来
+    taskCenter.cancel(parent.id, '已停止提交新任务（已提交的仍在后台跑）')
+    toast.info('已停止：已经提交出去的生成还会跑完')
+  }
+}
+
+/** 拼接成片（直接 await 到 completed/failed，调用方不需要自己起 interval） */
+async function runMergeStep() {
+  await mergeAPI.merge(epId.value)
+  const deadline = Date.now() + 360_000
+  while (Date.now() < deadline) {
+    await sleep(3000)
+    try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+    const st = mergeData.value?.status
+    if (st === 'completed') return
+    if (st === 'failed') throw new Error(mergeData.value?.error_msg || mergeData.value?.errorMsg || '拼接失败')
+  }
+  throw new Error('拼接等待超时（6 分钟）')
+}
+
+async function doMerge() {
+  const t = taskCenter.start({
+    kind: 'merge',
+    key: `merge:${epId.value}`,
+    title: '拼接成片',
+    subtitle: `${composedCount.value} 个已合成镜头`,
+    stage: '拼接中',
+    route: exportRoute(),
+    retry: () => doMerge(),
+  })
+  try {
+    await runMergeStep()
+    taskCenter.done(t.id)
+    toast.success('拼接完成')
+  } catch (e) {
+    taskCenter.fail(t.id, e, { route: exportRoute(), retry: () => doMerge() })
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function pollComposeStatus(taskId?: string) {
   for (let i = 0; i < 120; i++) {
     await sleep(3000)
-    if (!isMounted.value) return
+    if (!isMounted.value) {
+      if (taskId) taskCenter.stage(taskId, '已离开本页，前端不再轮询（进度以后端为准）')
+      return
+    }
     try {
       const res = await composeAPI.status(epId.value)
       await refresh()
       const items = Array.isArray(res?.items) ? res.items : []
       const processingIds = items.filter((item: any) => item.status === 'compose_processing').map((item: any) => item.id)
       pendingComposeIds.value = processingIds
+      if (taskId) taskCenter.stage(taskId, `合成中 · 剩 ${processingIds.length} 个`)
 
       const failedItems = items.filter((item: any) => item.status === 'compose_failed')
       if (failedItems.length) {
@@ -4801,12 +5481,18 @@ async function pollComposeStatus() {
       }
 
       if (!processingIds.length) {
-        if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
-        else toast.success('批量合成完成')
+        if (failedItems.length) {
+          toast.error(`有 ${failedItems.length} 个镜头合成失败`)
+          if (taskId) taskCenter.fail(taskId, new Error(`${failedItems.length} 个镜头合成失败：${Object.values(failedComposeMessages.value)[0] || ''}`), { route: taskRoute('compose') })
+        } else {
+          toast.success('批量合成完成')
+          if (taskId) taskCenter.done(taskId)
+        }
         return
       }
     } catch {}
   }
+  if (taskId) taskCenter.fail(taskId, new Error('批量合成超时（前端等待 120 轮已尽）'), { route: taskRoute('compose') })
 }
 function getRefs(sb: any) {
   const raw = sb.reference_images || sb.referenceImages
@@ -4825,13 +5511,6 @@ async function loadConfigs() {
     videoConfigs.value = vidCfgs || []
     audioConfigs.value = audCfgs || []
   } catch (e) { console.error('Failed to load AI configs', e) }
-}
-
-function inferVoiceGender(name: string, desc: string[] = []) {
-  const text = `${name} ${Array.isArray(desc) ? desc.join(' ') : ''}`
-  if (/[男|青年|大爷|学长|boy|man|male]/i.test(text)) return '男声'
-  if (/[女|少女|御姐|奶奶|girl|woman|female]/i.test(text)) return '女声'
-  return '中性'
 }
 
 function mapVoiceProfile(v: any) {
@@ -4862,8 +5541,14 @@ watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true 
 onMounted(async () => {
   await refresh()
   initScriptStep()
+  applyTaskRouteQuery()
   loadConfigs(); loadVoices(); loadProps()
+  // 刷新/切页回来后把还在飞的视频接回任务台账（不阻塞首屏）
+  restoreInFlightTasks()
 })
+// 任务中心在别的页面上点「去处理」时，路由会带上 `?panel=&tab=&shot=` —— 本页已经挂着的话
+// 不会重新 mount，只能靠 watch 接住（见 `applyTaskRouteQuery` 里「应用完要摘掉参数」的说明）
+watch(() => route.query, () => applyTaskRouteQuery())
 </script>
 
 <style scoped>
@@ -5107,12 +5792,6 @@ onMounted(async () => {
 
 .pipe-label { flex: 1; font-size: 11.5px; }
 .pipe-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.pipe-sub {
-  font-size: 8.5px;
-  line-height: 1.35;
-  color: var(--text-3);
-  font-weight: 500;
-}
 .pipe-badge {
   font-size: 9px; font-weight: 700; padding: 1px 5px;
   border-radius: 99px; background: var(--bg-3); color: var(--text-3);
@@ -5657,21 +6336,6 @@ onMounted(async () => {
   font-size: 11px;
   font-weight: 600;
 }
-.config-select {
-  height: 28px;
-  padding: 0 8px 0 10px;
-  border-radius: 8px;
-  background: rgba(255,255,255,0.7);
-  border: 1px solid rgba(100,120,180,0.18);
-  color: var(--text-1);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  outline: none;
-  transition: border-color .15s;
-}
-.config-select:hover { border-color: rgba(13,148,136,0.4); }
-.config-select:focus { border-color: rgba(13,148,136,0.5); box-shadow: 0 0 0 2px rgba(13,148,136,0.1); }
 .locked-config-banner {
   margin-bottom: 8px;
   font-size: 12px;
@@ -5711,6 +6375,10 @@ onMounted(async () => {
 .costume-picker-select { height: 30px; padding: 0 8px; font-size: 12px; min-width: 0; flex: 1; }
 
 /* Production tabs */
+/* 工具条右端多了「生成参数 + 继续到成片」两块：窄屏允许换行，
+   否则页签会被挤成两行文字（`flex-wrap` 只在真放不下时才生效） */
+.prod-toolbar { flex-wrap: wrap; row-gap: 6px; }
+.prod-toolbar .toolbar-right { flex-shrink: 0; margin-left: auto; }
 .prod-tabs { display: flex; gap: 0; background: var(--bg-2); border-radius: var(--radius); padding: 2px; }
 .prod-tab {
   display: flex; align-items: center; gap: 4px; padding: 6px 12px; font-size: 12px;
@@ -5794,89 +6462,6 @@ onMounted(async () => {
 .tl-dot.on:nth-child(2) { background: #22c55e; }
 .tl-dot.on:nth-child(3) { background: #f59e0b; }
 
-/* Production content */
-.prod-content { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
-.prod-section-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-
-.dub-grid { display: flex; flex-direction: column; gap: 10px; }
-.dub-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 20px; background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58)); }
-.dub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.dub-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.dub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dub-desc { font-size: 13px; line-height: 1.6; color: var(--text-1); }
-.dub-lines { display: flex; flex-direction: column; gap: 6px; }
-.dub-line-item { display: flex; gap: 6px; align-items: baseline; font-size: 13px; line-height: 1.6; }
-.dub-line-speaker { font-weight: 600; color: var(--accent); white-space: nowrap; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--accent-bg); flex-shrink: 0; }
-.dub-line-text { color: var(--text-1); word-break: break-all; }
-.dub-sub-card { border-left: 3px solid var(--accent); }
-.dub-sub-card .dub-title { margin-bottom: 2px; }
-
-/* 配音角色匹配状态标签 */
-.dub-match-tag { font-size: 10px; padding: 0 6px; border-radius: 10px; white-space: nowrap; flex-shrink: 0; line-height: 18px; font-weight: 500; }
-.match-dot-ok { background: #dcfce7; color: #166534; }
-.match-dot-warn { background: #fef3c7; color: #92400e; }
-.match-dot-err { background: #fee2e2; color: #991b1b; }
-
-/* 配音验证横幅 */
-.dub-validation-banner {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 16px; margin-bottom: 8px;
-  border-radius: 10px; background: #fef3c7; color: #92400e;
-  font-size: 13px; font-weight: 500;
-  border: 1px solid #fde68a;
-  grid-column: 1 / -1;
-}
-.dub-stale-banner { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-.dub-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11px; }
-.dub-foot { display: flex; align-items: center; gap: 10px; padding-top: 8px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
-.dub-audio { flex: 1; min-width: 0; height: 30px; }
-
-/* Asset grid */
-.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
-.asset-card {
-  display: flex; flex-direction: column; overflow: hidden;
-  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
-}
-.asset-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
-.asset-card.clickable { cursor: pointer; }
-.asset-card.clickable:hover { border-color: rgba(13,148,136,0.3); }
-.asset-cover { position: relative; aspect-ratio: 1; background: var(--bg-2); overflow: hidden; }
-.asset-cover.wide { aspect-ratio: 16/9; }
-.asset-cover img { width: 100%; height: 100%; object-fit: cover; }
-.previewable-image { cursor: zoom-in; transition: transform 0.18s var(--ease-out), filter 0.18s var(--ease-out); }
-.previewable-image:hover { transform: scale(1.015); filter: saturate(1.04); }
-.asset-cover-badge {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: rgba(7,11,21,0.58);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-}
-.asset-cover-badge.is-ready {
-  background: rgba(36, 125, 72, 0.92);
-}
-.asset-cover-badge.is-pending {
-  background: rgba(19, 51, 121, 0.92);
-}
-.asset-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
-.asset-body { padding: 10px 12px; }
-.asset-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.asset-name-row .asset-name { flex: 1; min-width: 0; }
-.asset-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.asset-meta { font-size: 11px; }
-.asset-foot { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-top: 1px solid var(--border); gap: 8px; }
-.foot-left { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.foot-status { font-size: 11px; white-space: nowrap; }
-.foot-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.foot-right :deep(.model-selector) { width: 100px !important; }
-.char-style-select { width: 76px; flex-shrink: 0; }
-
 /* Frame grid */
 .frame-grid { display: flex; flex-direction: column; gap: 8px; }
 .frame-row {
@@ -5894,17 +6479,6 @@ onMounted(async () => {
 }
 .frame-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .frame-top { display: flex; align-items: center; gap: 8px; }
-.frame-num {
-  font-size: 13px; font-family: var(--font-mono); font-weight: 800;
-  color: var(--accent);
-}
-.frame-badge {
-  font-size: 11px; font-weight: 600; padding: 2px 8px;
-  border-radius: 20px;
-  background: var(--accent-bg); color: var(--accent);
-  border: 1px solid var(--accent-glow);
-  white-space: nowrap;
-}
 .frame-desc {
   font-size: 12px; line-height: 1.5; color: var(--text-1);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -5930,61 +6504,98 @@ onMounted(async () => {
 }
 .frame-thumb:hover .frame-re { display: flex; }
 .frame-scroll { flex: 1; overflow-y: auto; padding: 10px 12px; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-3); flex-shrink: 0; }
-.dot.ok { background: var(--success); }
-.dot.pending {
-  background: var(--accent-dark);
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14);
+/* 生成参数摘要（工具条右侧，收起时只占一个字宽） */
+.param-digest { font-size: 11px; }
+.param-toggle {
+  cursor: pointer; padding: 4px 9px; border-radius: 8px;
+  border: 1px solid rgba(27, 41, 64, 0.12); color: var(--text-2); background: rgba(255, 255, 255, 0.7);
+  font-weight: 600; font-size: 11px; white-space: nowrap;
 }
+.param-toggle.open { border-color: rgba(19, 51, 121, 0.35); color: var(--accent-text); }
+/* 透明遮罩：点面板外面就关掉（fixed 面板自己不接冒泡，所以遮罩要在 z 序上压住页面、低于面板） */
+.param-shade { position: fixed; inset: 0; z-index: 138; background: transparent; }
+.param-body {
+  position: fixed; z-index: 139; width: 320px;
+  /* 工具条贴着视口上沿时面板会往下长，超过 70vh 就在面板内滚动（不许顶出视口底部） */
+  max-height: 70vh; overflow-y: auto;
+  padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(27, 41, 64, 0.12);
+  background: #fff; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.param-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; }
+.param-row span { color: var(--text-3); flex-shrink: 0; }
+.param-row b { color: var(--text-1); font-weight: 600; text-align: right; word-break: break-all; }
+.param-prompt { margin-top: 4px; padding-top: 8px; border-top: 1px dashed rgba(27, 41, 64, 0.12); }
+.param-prompt-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-3); }
+.param-more { font-size: 11px; color: var(--accent-text); background: none; border: none; cursor: pointer; padding: 0; }
+.param-prompt pre {
+  margin: 6px 0 0; max-height: 64px; overflow: auto; white-space: pre-wrap;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.6; color: var(--text-2);
+  background: rgba(27, 41, 64, 0.03); border-radius: 8px; padding: 6px 8px;
+}
+.param-prompt pre.expanded { max-height: 260px; }
 
-/* Prod grid */
-.prod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-.prod-card {
-  display: flex; flex-direction: column; overflow: hidden;
-  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
-  border-radius: 20px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58));
+/* 预设区（在同一个面板里，跟着「生成参数」一起开） */
+.param-preset { margin-top: 4px; padding-top: 8px; border-top: 1px dashed rgba(27, 41, 64, 0.12); display: flex; flex-direction: column; gap: 6px; }
+.preset-list { display: flex; flex-direction: column; gap: 3px; max-height: 130px; overflow-y: auto; }
+.preset-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 7px; }
+.preset-row:hover { background: rgba(19, 51, 121, 0.05); }
+.preset-name { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preset-btn {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 7px; cursor: pointer;
+  border: 1px solid rgba(19, 51, 121, 0.25); color: var(--accent-text); background: var(--accent-bg);
 }
-.prod-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
-.prod-cover { position: relative; aspect-ratio: 16/9; background: var(--bg-2); overflow: hidden; }
-.prod-cover img { width: 100%; height: 100%; object-fit: cover; }
-.prod-video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
-.prod-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
-.prod-idx {
-  position: absolute; top: 5px; left: 5px; font-size: 10px; font-weight: 700;
-  font-family: var(--font-mono); background: rgba(0,0,0,0.5); color: #fff; padding: 1px 5px; border-radius: 3px;
+.preset-btn:disabled { opacity: 0.45; cursor: default; }
+.preset-btn.ghost { border-color: transparent; background: transparent; color: var(--text-3); font-weight: 500; }
+.preset-btn.ghost:hover { color: var(--danger); }
+.preset-save { display: flex; align-items: center; gap: 6px; }
+.preset-input {
+  flex: 1; min-width: 0; font-size: 11px; padding: 4px 8px; border-radius: 7px;
+  border: 1px solid rgba(27, 41, 64, 0.14); background: rgba(255, 255, 255, 0.9); color: var(--text-1); outline: none;
 }
-.prod-overlay-badge {
-  position: absolute; bottom: 5px; right: 5px; font-size: 10px; font-weight: 600;
-  background: var(--success); color: #fff; padding: 1px 5px; border-radius: 3px;
+.preset-input:focus { border-color: rgba(19, 51, 121, 0.4); }
+
+/* 「继续到成片」按钮 + 清单 */
+.btn-chain {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 8px;
+  font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  border: 1px solid rgba(19, 51, 121, 0.25); color: var(--accent-text); background: var(--accent-bg);
 }
-.prod-info { padding: 10px 12px 8px; }
-.prod-desc { font-size: 12px; line-height: 1.4; }
-.prod-meta-line { margin-top: 5px; font-size: 10px; color: var(--text-3); }
-.prod-dots { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--text-3); }
-.prod-error {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--error);
+.btn-chain:hover { border-color: rgba(19, 51, 121, 0.45); }
+.btn-chain.running { background: rgba(19, 51, 121, 0.12); animation: chainPulse 1.6s ease-in-out infinite; }
+@keyframes chainPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.chain-count {
+  min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-text); color: #fff; font-size: 9.5px; font-weight: 800;
 }
-.prod-error-link {
-  padding: 0;
-  border: none;
-  background: none;
-  color: #0f766e;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
+.chain-overlay { z-index: 130; }
+.chain-dialog { width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
+.chain-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 18px 12px; border-bottom: 1px solid rgba(27, 41, 64, 0.08);
 }
-.prod-error-link:hover { text-decoration: underline; }
-.prod-actions { display: flex; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
-.prod-actions .btn { flex: 1; justify-content: center; }
+.chain-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; color: var(--text-1); }
+.chain-sub { margin-top: 4px; font-size: 11px; color: var(--text-3); }
+.chain-body { padding: 8px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.chain-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; border: 1px solid transparent; }
+.chain-row.idle { opacity: 0.45; }
+.chain-row.running { background: var(--accent-bg); border-color: rgba(19, 51, 121, 0.18); }
+.chain-row.done .chain-state { color: #16a34a; }
+.chain-row.failed .chain-state { color: #dc2626; }
+.chain-check input { width: 14px; height: 14px; cursor: pointer; }
+.chain-idx { font-family: var(--font-mono); font-size: 10px; font-weight: 800; color: var(--text-3); width: 14px; }
+.chain-copy { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.chain-label { font-size: 12.5px; font-weight: 600; color: var(--text-1); display: flex; align-items: center; gap: 6px; }
+.chain-todo { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--accent-bg); color: var(--accent-text); }
+.chain-hint { font-size: 11px; color: var(--text-3); }
+.chain-state { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.chain-empty { padding: 12px; font-size: 12px; color: var(--text-3); text-align: center; }
+.chain-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 18px; border-top: 1px solid rgba(27, 41, 64, 0.08);
+}
+.chain-note { font-size: 10.5px; color: var(--text-3); line-height: 1.5; }
 
 /* Image viewer */
 .image-viewer-overlay {
@@ -6609,9 +7220,7 @@ onMounted(async () => {
   }
 
   .extract-grid,
-  .voice-grid,
-  .asset-grid,
-  .prod-grid {
+  .voice-grid {
     grid-template-columns: 1fr;
   }
 
@@ -6737,14 +7346,6 @@ onMounted(async () => {
   min-width: unset !important;
 }
 .btn-ghost:hover { color: var(--text-0) !important; border-color: var(--border-strong) !important; }
-.btn-edit {
-  background: transparent; border: 1px solid var(--border);
-  color: var(--text-2); padding: 4px 8px;
-  display: inline-flex; align-items: center; gap: 3px;
-  border-radius: 6px; cursor: pointer; font-size: 11px;
-  transition: all .15s; white-space: nowrap;
-}
-.btn-edit:hover { background: var(--accent-bg); border-color: rgba(13,148,136,0.35); color: var(--accent-text); }
 .field {
   display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
 }

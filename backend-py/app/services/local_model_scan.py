@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable
 
 from ..core import config
 from ..core.config import PROJECT_ROOT
-from . import model_ecosystems, model_folders, ollama_store
+from . import model_ecosystems, model_fingerprint, model_folders, ollama_store
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
@@ -80,6 +80,7 @@ __all__ = [
     "save_model_paths",
     "scan_local_models",
     "scan_local_models_async",
+    "weight_fingerprint",
 ]
 
 #: 模型权重扩展名（大小写不敏感）
@@ -608,8 +609,90 @@ def _sort_models(models: list[dict[str, Any]]) -> None:
     models.sort(key=lambda item: (_KIND_ORDER[item["kind"]], -item["sizeBytes"]))
 
 
+# ============================================================
+# 权重指纹（读文件头，不信文件名）
+# ============================================================
+#: 这些 kind 才能写进扫描结果的 ``kind`` 字段（``_KIND_ORDER`` 只认这五种 ⇒
+#: 指纹判出的 ``3d``/``detect``/``depth`` 只进 ``weight`` 明细，**不改分类** ✗✗）。
+_SCAN_KINDS = frozenset({"video", "image", "text", "audio"})
+#: 只有这两档置信度够硬到能改写文件名规则的结论（GC 都实测核过 ✓）。
+#: ⚠️ ``declared``（GGUF 自报 architecture）**不够硬** ✗ —— 实测有量化脚本写错标签的实例
+_WEIGHT_TRUSTED = frozenset({"exact", "single-key"})
+#: 指纹缓存：``(normcase(path), size, mtime_ns) -> 结果``。文件一动键就变 ⇒ 不会吃旧结论 ✓
+_FP_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
+_FP_CACHE_MAX = 4096
+
+
+def weight_fingerprint(path: str, ext: str = "") -> dict[str, Any] | None:
+    """给扫描结果补「权重真身」（架构 / 模态 / 变体 / 证据）。
+
+    * 只读**文件头**（safetensors header / GGUF kv+tensor info）⇒ 实测 ~2ms/个 ✓；
+    * 只对 ``.safetensors`` / ``.gguf`` 做（其余格式没有可读的结构头 ✗）；
+    * **不抛异常**：读不动就回 ``{"error": …}``，扫描因此不会因一个坏文件整体失败 ✓；
+    * 命中缓存则零读盘（同一文件重复扫、或每次 API 请求都扫时不重复付代价 ✓）。
+    """
+    ext = (ext or os.path.splitext(path)[1]).lower()
+    if ext not in (".safetensors", ".gguf"):
+        return None
+    try:
+        info = os.stat(path)
+        key = (os.path.normcase(path), info.st_size, info.st_mtime_ns)
+    except OSError:
+        key = (os.path.normcase(path), 0, 0)
+    cached = _FP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = model_fingerprint.fingerprint_file(path)
+    if len(_FP_CACHE) >= _FP_CACHE_MAX:
+        _FP_CACHE.clear()  # 简单粗暴：清掉重来（比 LRU 记账便宜，且这是缓存不是状态）
+    _FP_CACHE[key] = result
+    return result
+
+
+def _reconcile_kind(hit: dict[str, Any],
+                    weight: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    """**名字规则 vs 权重指纹**不一致时，以权重为准（仅在指纹够硬时）。
+
+    真机上的实例（改前全是错的）：
+    * ``Krea2/krea2_turbo-Q4_K_M.gguf`` —— 命中 ``gguf-llm`` ⇒ 被当成**文本模型** ✗，
+      实际张量里有 ``txtfusion.projector.weight`` ⇒ 图像模型 ✓；
+    * ``SEEDVR2/seedvr2_ema_7b-Q4_K_M.gguf`` —— 同样落到 ``gguf-llm`` ⇒ 文本 ✗，实际是**视频修复** ✓。
+
+    改写时把 ``runtime`` 固定成 ``comfyui``：这些权重是 ComfyUI 格式的 DiT/修复网，
+    **不是** H3 服务也不是 Ollama ⇒ 建议只能是「只读来源」，**不能**据此注册一个假服务 ✗。
+    """
+    if not weight or weight.get("error"):
+        return hit, False
+    kind = str(weight.get("kind") or "")
+    if kind not in _SCAN_KINDS:
+        return hit, False
+    if str(weight.get("confidence") or "") not in _WEIGHT_TRUSTED:
+        return hit, False
+    if kind == hit["kind"]:
+        return hit, False
+    fixed = dict(hit)
+    fixed["kind"] = kind
+    fixed["runtime"] = "comfyui"
+    fixed["role"] = "standalone"
+    fixed["confidence"] = "high"
+    fixed["matchedBy"] = [*hit["matchedBy"], "weight-fingerprint"]
+    return fixed, True
+
+
+def _is_broken(weight: dict[str, Any] | None) -> bool:
+    """权重文件是否**结构上坏了**（头里对账对不上），与「架构认不出」严格分开 ✓。
+
+    ``status`` 只有 ``truncated`` / ``trailing`` 算坏（``padded`` 是对齐填充、``unknown``
+    是读不全 tensor info —— 后者已由 ``weight.error`` 或 ``confidence`` 表达，不重复计 ✗）。
+    """
+    if not weight or weight.get("error"):
+        return False
+    return str((weight.get("integrity") or {}).get("status") or "") in ("truncated", "trailing")
+
+
 def _make_model(full_path: str, filename: str, dir_name: str, ext: str,
-                size_bytes: int, kinds_filter: set[str] | None) -> dict[str, Any] | None:
+                size_bytes: int, kinds_filter: set[str] | None,
+                fingerprint: bool = True) -> dict[str, Any] | None:
     hit = classify(full_path)
     # ⭐ 生态标注 ✓：文件**在哪**（HuggingFace 缓存 / LM Studio / SD WebUI…）——
     # ⚠️ 只改「弱命中」（comfyui/unknown/ollama）✗，强命中（h3/local-sd/cosyvoice）保留事实判断 ✓
@@ -617,10 +700,14 @@ def _make_model(full_path: str, filename: str, dir_name: str, ext: str,
     ecosystem = model_ecosystems.detect(full_path)
     if ecosystem:
         hit = model_ecosystems.apply_ecosystem(hit, ecosystem)
+    # ⭐ 权重指纹 ✓：读文件头拿**真架构** —— 名字可以是错的（改名/量化工具贴错标签），张量名不会 ✗
+    weight = weight_fingerprint(full_path, ext) if fingerprint else None
+    hit, overridden = _reconcile_kind(hit, weight)
     if kinds_filter and hit["kind"] not in kinds_filter:
         return None
+    # 被指纹改写过的，生态建议（按名字猜的落地方式）就不作数了 ⇒ 退回通用建议 ✓
     suggested = (model_ecosystems.build_suggestion(ecosystem, hit, filename, ext)
-                 if ecosystem else None)
+                 if ecosystem and not overridden else None)
     return {
         "path": full_path,
         "filename": filename,
@@ -634,6 +721,13 @@ def _make_model(full_path: str, filename: str, dir_name: str, ext: str,
         "role": hit["role"],
         "matchedBy": hit["matchedBy"],
         "ecosystem": ecosystem,
+        # ``None`` = 这个格式没有可读结构头（.ckpt/.pt/.bin/.onnx…）⇒ 只能按名字判 ✓
+        "weight": weight,
+        "weightVerified": bool(weight and not weight.get("error")
+                               and weight.get("architecture") not in (None, "", "unknown")),
+        # ⭐ 头里的数据区坐标与文件大小对不上 ⇒ 这份权重**是坏文件**（截断/拼接），
+        # 与「架构认不出」是两件事：跑起来只会报 shape 错或半截加载，早点点名比事后查快 ✓
+        "weightBroken": _is_broken(weight),
         "suggested": suggested if suggested is not None else build_suggestion(hit, filename, ext),
     }
 
@@ -703,6 +797,8 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
     max_files = opts.get("maxFiles") if opts.get("maxFiles") is not None else 8000
     kinds = opts.get("kinds") or []
     kinds_filter = set(kinds) if kinds else None
+    # 默认开：读文件头判真架构（~2ms/个，命中缓存后 0）；``fingerprint=False`` 时才纯按名字判
+    fingerprint = opts.get("fingerprint") is not False
 
     explicit_roots = bool(opts.get("roots"))
     roots = _resolve_roots(opts.get("roots"))
@@ -772,7 +868,7 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
                 size_bytes = 0
 
             model = _make_model(full, entry.name, os.path.basename(directory), ext,
-                                size_bytes, kinds_filter)
+                                size_bytes, kinds_filter, fingerprint)
             if model is not None:
                 models.append(model)
 
@@ -795,6 +891,8 @@ def scan_local_models(opts: dict[str, Any] | None = None) -> dict[str, Any]:
         "elapsedMs": _now_ms() - start,
         "byKind": by_kind,
         "byEcosystem": model_ecosystems.by_ecosystem(models),
+        "weightSummary": model_fingerprint.summarize(
+            [m["weight"] for m in models if m.get("weight")]),
     }
 
 
@@ -812,6 +910,7 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
     kinds_filter = set(kinds) if kinds else None
     on_progress: Callable[[dict[str, Any]], None] | None = opts.get("onProgress")
     should_cancel: Callable[[], bool] | None = opts.get("shouldCancel")
+    fingerprint = opts.get("fingerprint") is not False
 
     explicit_roots = bool(opts.get("roots"))
     roots = _resolve_roots(opts.get("roots"))
@@ -891,7 +990,7 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
                 size_bytes = 0
 
             model = _make_model(full, name, os.path.basename(directory), ext,
-                                size_bytes, kinds_filter)
+                                size_bytes, kinds_filter, fingerprint)
             if model is not None:
                 models.append(model)
 
@@ -919,6 +1018,8 @@ async def scan_local_models_async(opts: dict[str, Any] | None = None) -> dict[st
         "elapsedMs": _now_ms() - start,
         "byKind": by_kind,
         "byEcosystem": model_ecosystems.by_ecosystem(models),
+        "weightSummary": model_fingerprint.summarize(
+            [m["weight"] for m in models if m.get("weight")]),
     }
 
 

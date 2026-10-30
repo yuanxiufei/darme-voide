@@ -64,7 +64,7 @@ def main() -> int:  # noqa: C901
             "storyboardId": sb_id, "sceneType": None, "firstFrameImage": None,
             "lastFrameImage": None, "keyframeImage": None, "blocked": False,
             "provider": "volcengine", "canMultiRef": True, "referenceImages": [],
-            "referenceAudioUrls": [], "prevTail": None,
+            "referenceAudioUrls": [], "referenceVideoUrls": [], "prevTail": None,
         }
         base.update(kwargs)
         with engine.begin() as conn:
@@ -126,6 +126,18 @@ def main() -> int:  # noqa: C901
     d = decide(sb, firstFrameImage="f.png", sceneType="action", referenceAudioUrls=["v.mp3"],
                referenceImages=["a.png"], provider="minimax")
     check("路由: ④b 有参考图时 Ref2VA 用 multiple", d["referenceMode"] == "multiple", d)
+    # ⚠️ 只挂**参考视频**也是一种 Ref2VA 诉求 ✓✗（H3 的 ``ref_videos`` 与参考图/音频平级 ✓）；
+    #    漏算 ⇒ 路由写「首帧图生」、适配器却挑 Ref2VA ✓ ⇒ 两处说法互相打脸 ✓✗。
+    d = decide(sb, firstFrameImage="f.png", sceneType="action", referenceVideoUrls=["v.mp4"],
+               provider="minimax")
+    check("路由: ④b 只挂参考视频（无声线样本）⇒ 也是 Ref2VA、理由点名「参考视频」✓",
+          d["route"] == "reference_to_video" and "1 段参考视频" in d["reason"],
+          d)
+    check("路由: ④b 视频+音频同时有 ⇒ 理由两样都点出来 ✓",
+          (lambda dd: "1 条声线样本" in dd["reason"] and "2 段参考视频" in dd["reason"])(
+              decide(sb, firstFrameImage="f.png", sceneType="action",
+                     referenceAudioUrls=["v.mp3"], referenceVideoUrls=["a.mp4", "b.mp4"],
+                     provider="minimax")))
     d = decide(sb, firstFrameImage="f.png", sceneType="action", referenceAudioUrls=["v.mp3"],
                provider="volcengine")
     check(
@@ -233,6 +245,30 @@ def main() -> int:  # noqa: C901
         and "R2V" in (created_row["routeReason"] or ""),
         (created_row["route"], created_row["referenceMode"]),
     )
+    # ⚠️⚠️ 参考**视频**与参考图档位必须**过路由层** ✓✗（2026-10-27 补）：修前路由只读
+    #    ``reference_image_urls`` / ``reference_audio_urls`` ✗ ⇒ 前端带上来的这两样
+    #    在**第一层**就被丢掉 ✓（下游连一句告警都没有 ✓，看回执只能猜 ✓）。
+    #    ⚠️ 用**新分镜**跑：``sb`` 的 take 预算本套后面几条要用满 ✓✗（首次实现挂在 ``sb`` 上
+    #    就多占一次 ⇒ 后面那条 400「take 预算耗尽」✓✗，与字段转发毫无关系的一条红 ✓）。
+    sb_v = new_storyboard()
+    resp_v = client.post("/api/v1/videos", json={
+        "storyboard_id": sb_v, "drama_id": drama_id, "prompt": "换了参考视频的一镜",
+        "duration": 6, "reference_video_urls": ["static/videos/ref1.mp4"],
+        "reference_image_size": "max",
+    })
+    row_v = resp_v.json()["data"]
+    check("POST: ``reference_video_urls`` / ``reference_image_size`` 原样过路由层 ✓",
+          resp_v.status_code == 201
+          and json.loads(row_v["referenceVideoUrls"] or "null") == ["static/videos/ref1.mp4"]
+          and row_v["referenceImageSize"] == "max",
+          (resp_v.status_code, row_v.get("referenceVideoUrls"), row_v.get("referenceImageSize")))
+    check(
+        "POST: 逐镜路由决策落库（对话 + 多参考 + 有参考图 -> R2V/multiple）",
+        created_row["route"] == "reference_to_video"
+        and created_row["referenceMode"] == "multiple"
+        and "R2V" in (created_row["routeReason"] or ""),
+        (created_row["route"], created_row["referenceMode"]),
+    )
     # ⚠️ 该请求落到了 **multiple**（R2V）—— 按设计「multiple 走 reference_image_urls、
     #    **不用帧字段**」，所以分镜里存的 first_frame_image 在这里**不该**被消费。
     check(
@@ -331,6 +367,136 @@ def main() -> int:  # noqa: C901
           client.put(f"/api/v1/videos/{vid}", json={}).status_code == 400)
     check("PUT: 不存在的记录 -> 400 视频记录不存在",
           client.put("/api/v1/videos/999999", json={"prompt": "x"}).status_code == 400)
+
+    # ⚠️⚠️ 参考素材四件必须能过 ``PUT`` 落库 ✓✗（2026-10-27 补）：白名单原来**一项都没有** ✗
+    #    ⇒ 编辑器走「更新已有记录」那条路时，改参考图 / 参考视频 / 参考图档位 = **静默丢弃** ✓✗
+    #    （回读一字未变 ✓、也不报错 ✓，界面还写着「已保存」✓✗ —— 前端有值、库里有旧值、没人报错）。
+    #    顺带核「数组型别把 list 直接绑进 sqlite」✓（那会 InterfaceError ⇒ 400 ✗）。
+    #    ⚠️ 拿 ``degraded`` 那条来改 ✓ —— ``vid`` 后面还要用它的原参数核 regenerate ✗。
+    dv = degraded["id"]
+    put_refs = client.put(f"/api/v1/videos/{dv}", json={
+        "reference_image_urls": ["static/images/r1.png", "static/images/r2.png"],
+        "reference_video_urls": ["static/videos/r1.mp4"],
+        "reference_image_size": "max",
+    })
+    row_refs = put_refs.json()["data"]
+    check(
+        "PUT: 参考图 / 参考视频 / 参考图档位 能落库（数组存紧凑 JSON）",
+        put_refs.status_code == 200
+        and json.loads(row_refs["referenceImageUrls"]) == ["static/images/r1.png", "static/images/r2.png"]
+        and json.loads(row_refs["referenceVideoUrls"]) == ["static/videos/r1.mp4"]
+        and row_refs["referenceImageSize"] == "max",
+        (put_refs.status_code, row_refs.get("referenceImageUrls"),
+         row_refs.get("referenceVideoUrls"), row_refs.get("referenceImageSize")),
+    )
+    check(
+        "PUT: 参考素材显式置空 -> NULL（不是 \"[]\"）",
+        client.put(f"/api/v1/videos/{dv}", json={"reference_video_urls": []})
+        .json()["data"]["referenceVideoUrls"] is None,
+    )
+    check(
+        "PUT: 档位发空串 = 清空 -> NULL（库里不留 '' 这种第二形态的空）",
+        client.put(f"/api/v1/videos/{dv}", json={"reference_image_size": ""})
+        .json()["data"]["referenceImageSize"] is None,
+    )
+    check(
+        "PUT: 已序列化的字符串原样放行（不二次转义）",
+        client.put(f"/api/v1/videos/{dv}", json={"reference_audio_urls": "[\"static/audio/a.mp3\"]"})
+        .json()["data"]["referenceAudioUrls"] == "[\"static/audio/a.mp3\"]",
+    )
+    check(
+        "PUT: 参考音频数组 → 紧凑 JSON（与图/视频同口径）",
+        client.put(f"/api/v1/videos/{dv}", json={
+            "reference_audio_urls": ["static/audio/b.mp3", "static/audio/c.mp3"],
+        }).json()["data"]["referenceAudioUrls"]
+        == '["static/audio/b.mp3","static/audio/c.mp3"]',
+    )
+    # ⚠️ 显式 ``[]`` = **清空** ✓✗：后端 regenerate 原来用 ``or`` 取默认值 ⇒ 空数组被当
+    #    「没给」✓ ⇒ 用户把参考视频删光、界面也显示空了，一重跑**旧素材又回来了** ✓✗。
+    #    这里核 ``_pick`` 的语义（真跑一次 regenerate 会挤 take 预算、且这里只想锁语义 ✓）。
+    from app.routers.videos import _pick
+
+    check(
+        "regenerate: 显式 [] 不被 or 吞掉（清空 vs 未给 分开）",
+        _pick({"reference_video_urls": []}, "reference_video_urls", ["static/videos/old.mp4"]) == []
+        and _pick({}, "reference_video_urls", ["static/videos/old.mp4"]) == ["static/videos/old.mp4"],
+    )
+
+    # ⚠️⚠️ 参考**音频**的「显式 [] = 清空」**两头**都得认 ✓✗（2026-10-27 补）：
+    #    POST 有**自动注入**（对话镜头自动带出场角色声线样本）、regenerate 原来用 ``or`` 回落 ——
+    #    两处都按 falsy 判 ⇒ 用户把声线样本删光、界面也显示空了，一提交**旧样本又注回来** ✓✗。
+    voice_char = _insert_character(
+        drama_id, "声线角色", voice_sample_url="https://cdn.example.com/v.mp3")
+    sb_audio = new_storyboard()
+    with engine.begin() as conn:
+        conn.execute(storyboard_characters.insert().values(
+            storyboard_id=sb_audio, character_id=voice_char))
+        conn.execute(storyboards.update().where(storyboards.c.id == sb_audio).values(
+            scene_type="dialogue", first_frame_image="static/images/af.png",
+            take_budget=10))
+    auto = client.post("/api/v1/videos", json={
+        "storyboard_id": sb_audio, "prompt": "对话自动声线", "duration": 5,
+    }).json()["data"]
+    check(
+        "POST: 对话镜头**未给**参考音频 ⇒ 自动注入出场角色声线样本（原有行为保住）",
+        json.loads(auto["referenceAudioUrls"] or "null") == ["https://cdn.example.com/v.mp3"],
+        auto["referenceAudioUrls"],
+    )
+    cleared = client.post("/api/v1/videos", json={
+        "storyboard_id": sb_audio, "prompt": "对话但不要声线", "duration": 5,
+        "reference_audio_urls": [],
+    }).json()["data"]
+    check(
+        "POST: 显式 ``[]`` 参考音频 ⇒ **不**自动注入（「清空」≠「没给」）",
+        cleared["referenceAudioUrls"] is None, repr(cleared["referenceAudioUrls"]),
+    )
+    regen_audio = client.post(f"/api/v1/videos/{cleared['id']}/regenerate", json={
+        "reference_audio_urls": [],
+    })
+    check(
+        "regenerate: 显式 ``[]`` 参考音频 ⇒ 新记录也不带（原来 ``or`` 会去分镜注回声线样本）",
+        regen_audio.status_code == 201
+        and regen_audio.json()["data"]["referenceAudioUrls"] is None,
+        (regen_audio.status_code, regen_audio.json().get("data", {}).get("referenceAudioUrls")),
+    )
+
+    # ⚠️⚠️ 角色关联（`character_ids`）此前**三处都没人管** ✗✗（2026-10-27 补）：
+    #    ① 前端编辑器勾了角色、`character_ids` 也发上来了 ✓；② `videos.py` 的 PUT 白名单有它 ✓；
+    #    ③ 但 `POST /videos` **一个字都不读**、`generate_video` 的插入列表里**没有这一列**、
+    #    `regenerate` 也不复制 ⇒ 落库恒 NULL ⇒ 重开编辑器勾选全空（谁都不报错 ✓✗）。
+    #    ⚠️ 前端回填还叠了一层：`'[1,2]'.split(',')` ⇒ `[NaN,NaN]`（本次一并修）。
+    sb_cast = new_storyboard()
+    with engine.begin() as conn:
+        conn.execute(storyboards.update().where(storyboards.c.id == sb_cast).values(take_budget=10))
+    cast_row = client.post("/api/v1/videos", json={
+        "prompt": "带角色关联的一镜", "storyboard_id": sb_cast,
+        "character_ids": [char_id, voice_char],
+    }).json()["data"]
+    check(
+        "POST: ``character_ids`` 落库（紧凑 JSON；原来 POST 不读这字段 ⇒ 静默丢弃）",
+        cast_row["characterIds"] == f"[{char_id},{voice_char}]",
+        repr(cast_row["characterIds"]),
+    )
+    cast_regen = client.post(f"/api/v1/videos/{cast_row['id']}/regenerate", json={}).json()["data"]
+    check(
+        "regenerate: ``character_ids`` 未给 ⇒ 沿用原记录（新记录不丢出场角色）",
+        cast_regen["characterIds"] == cast_row["characterIds"],
+        repr(cast_regen["characterIds"]),
+    )
+    # ⚠️⚠️ 二次转义 ✓✗：regenerate 复制过来的参考素材是 **DB 里的 JSON 字符串**，
+    #    过 ``json.dumps`` 一次就变成 `'"[\"a\"]"'` ⇒ 落库成了「一个字符串」而不是数组 ✓✗
+    #    （前端 parseUrlList 解出字符串、指纹 `_refs_map` 解出空 ⇒ 重跑出来的记录参考素材静默消失）。
+    ref_row = client.post("/api/v1/videos", json={
+        "prompt": "带参考图", "storyboard_id": sb_cast,
+        "reference_image_urls": ["static/images/x1.png", "static/images/x2.png"],
+    }).json()["data"]
+    ref_regen = client.post(f"/api/v1/videos/{ref_row['id']}/regenerate", json={}).json()["data"]
+    check(
+        "regenerate: 复制的参考图 JSON 串**不被二次转义**（json.loads 仍是两条）",
+        json.loads(ref_regen["referenceImageUrls"])
+        == ["static/images/x1.png", "static/images/x2.png"],
+        repr(ref_regen["referenceImageUrls"]),
+    )
 
     regen = client.post(f"/api/v1/videos/{vid}/regenerate", json={})
     regen_row = regen.json()["data"]

@@ -63,8 +63,20 @@ def device_facts() -> dict[str, Any]:
     return facts
 
 
+def torch_facts() -> dict[str, Any]:
+    """``torch`` **本体**装没装、是不是 **CUDA 轮子** ✓ —— **转发**到引擎侧的单源实现。
+
+    ⚠️ 这里**不再自带实现** ✗（2026-10-29 合并 ✓）：同一件事（读 ``torch.version.cuda``）
+    在引擎与项目侧各写一遍 ⇒ 迟早一处改了一处没改，报告与实际对不上 ✓✗。实现只有
+    :func:`app.services.engine.torch_backend.torch_facts` 一份 ✓，本函数只为兼容既有调用点 ✓。
+    """
+    from .engine import torch_backend as tb  # noqa: PLC0415 —— 它模块级不碰 torch ✓
+
+    return tb.torch_facts()
+
+
 def environment_report() -> dict[str, Any]:
-    """① 环境 ✓（**不导入**重库 ✓ ⇒ 秒级 ✓）。"""
+    """① 环境 ✓（**不导入**重库 ✓ ⇒ 秒级 ✓ —— 例外：``torch_facts` 要 import torch ✓ 见其注释 ✓）。"""
     from .engine import torch_backend as tb  # noqa: PLC0415 —— 局部引 ✓：它模块级不碰 torch ✓
 
     available, reason = tb.torch_available()
@@ -72,6 +84,8 @@ def environment_report() -> dict[str, Any]:
     return {
         "torchAvailable": available,
         "torchReason": reason,
+        # ⭐ torch **本体**（版本 / CPU 轮子？✓）—— 与上面的「后端可用」分开报 ✗
+        "torch": torch_facts(),
         "missingRequired": status["missing"],
         "optionalMissing": status.get("optionalMissing", []),
         "installRequired": status["install"],
@@ -126,12 +140,20 @@ def quant_plan(load_plan: dict[str, Any]) -> dict[str, Any]:
             continue                                    # GGUF：反量化归运行时 ✓ 不算「装不上」✗
         if detail.get("supported"):
             supported.append({"key": key, "weights": detail.get("weights"),
-                              "layouts": detail.get("layouts")})
+                              "layouts": detail.get("layouts"),
+                              "formats": detail.get("formats")})
         elif detail.get("weights"):
+            #: ⚠️ `family` 是**文件自己说的**（`*.comfy_quant` ✓）⇒ 「哪一族做不了」✓，
+            #: 比 `unresolved`（形状对不上 ✗）精确得多 ✓ —— 两者都在时**优先信 family** ✗✗
             unsupported.append({"key": key, "weights": detail.get("weights"),
                                 "unresolved": detail.get("unresolved"),
                                 "unpaired": detail.get("unpaired"),
-                                "grouped": detail.get("grouped")})
+                                "grouped": detail.get("grouped"),
+                                "family": (detail.get("family") or {}).get("name"),
+                                "familyReason": (detail.get("family") or {}).get("reason"),
+                                #: ⚠️ 命中的那**一条**说明 ✓（不是列表第一条 ✗ —— 同一文件可混几族 ✓）
+                                "familySpec": (detail.get("family") or {}).get("spec"),
+                                "formats": detail.get("formats")})
     return {"supported": supported, "unsupported": unsupported, "notChecked": not_checked}
 
 
@@ -184,6 +206,13 @@ def next_steps(report: dict[str, Any]) -> list[str]:
         steps.append(f"（可选）装参考实现：{command} ✓")
     if not report["environment"]["ffmpeg"]:
         steps.append("装 `ffmpeg` 并确保在 PATH 里 ✓")
+    # ⚠️ CPU 轮子 ⇒ **必须换**（只装 safetensors/pillow 是修不好的 ✗）：按驱动挑 CUDA 索引源 ✓，
+    #    别照抄版本号 ✗（本项目刻意不写死版本 ✓）；装完 `torch.cuda.is_available()` 应为 True ✓
+    if (report["environment"].get("torch") or {}).get("cpuWheel"):
+        steps.append(
+            "把 torch 换成 **CUDA 轮子** ✓（当前是 CPU 版 ✗ ⇒ 装上依赖也只能 CPU 跑 ✓）："
+            "`pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/<cuXXX>` "
+            "✓（`<cuXXX>` 按 `nvidia-smi` 的 CUDA Version 选 ✓）")
     missing = report["weightsReadiness"].get("missingRequired") or []
     if missing:
         models_dir = report["weightsReadiness"].get("modelsDir")
@@ -207,6 +236,13 @@ def next_steps(report: dict[str, Any]) -> list[str]:
         steps.append("权重已在盘上 ⇒ 加 `--weights <DiT 路径> [--tokenizer <词表目录>]` "
                      "跑**真权重预检** ✓")
     for item in (report.get("quantPlan") or {}).get("unsupported") or []:
+        if item.get("family"):
+            # ⚠️ 文件**自己说了**是哪一族（`comfy_quant` ✓）⇒ 别再让人去找 group size ✗
+            #    （那参数就在文件里 ✓，给了也没用 —— 缺的是本仓的**反量化实现** ✗）
+            steps.append(f"`{item['key']}` 属**未实现的量化族**（`{item['family']}` ✗）："
+                         f"{item.get('familyReason') or ''} ⇒ 要么本仓补这一族 ✓，"
+                         f"要么换成**本仓支持**的导出（per-row int8 无旋转 / bf16 ✓）")
+            continue
         steps.append(f"`{item['key']}` 的低精度权重**要随附 json 的 group size** 才能反量化 ✓"
                      f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓ "
                      f"⇒ 本仓不猜 ✗；先换成**非分组**量化的重导出 ✓ 或把 group size 给出来 ✓）")
@@ -270,10 +306,17 @@ def collect(*, weights: str | None = None, tokenizer: str | None = None,
     #    ⚠️ 组件**没下载** ⇒ 记 `notChecked` ✓（**没查 ≠ 通过** ✗ —— 不阻塞、但也不假装绿 ✓）
     report["quantPlan"] = quant_plan(plan)
     for item in report["quantPlan"]["unsupported"]:
+        if item.get("family"):
+            # ⭐ 结论来自**文件自带的说明**（`*.comfy_quant` ✓）⇒ 说「本仓没实现这一族」✗，
+            #    不再说「缺 group size」✗（2026-10-29 实测：盘上 3 件的 group size 都在文件里 ✓）
+            blockers.append(
+                f"`{item['key']}` 的量化格式属**本仓未实现的族**（`{item['family']}` ✗）"
+                f"⇒ 装载会中止 ✓：{item.get('familyReason') or ''}")
+            continue
         blockers.append(
             f"`{item['key']}` 的低精度权重**判不出反量化布局** ✗ ⇒ 装载会中止 ✓"
             f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓）"
-            f"⇒ 需要随附 json 里的 group size ✓ 本仓不猜 ✗")
+            f"⇒ 文件里**没有** `comfy_quant` 说明 ⇒ 需要外部给出 group size ✓ 本仓不猜 ✗")
     report["ready"] = bool(not blockers)
     report["blockers"] = blockers
     report["unchecked"] = ([] if check is not None else
@@ -296,6 +339,9 @@ def summary(report: dict[str, Any]) -> dict[str, Any]:
         "environment": {
             "torchAvailable": report["environment"]["torchAvailable"],
             "torchReason": report["environment"]["torchReason"],
+            # ⭐ 本体版本 / 是不是 CPU 轮子 ✓ —— 「torch ✗」有两种完全不同的含义 ✗，分开报 ✓
+            "torch": report["environment"].get("torch"),
+            "device": report["environment"].get("device"),
             "missingRequired": report["environment"]["missingRequired"],
             "optionalMissing": report["environment"]["optionalMissing"],
             "ffmpeg": report["environment"]["ffmpeg"],

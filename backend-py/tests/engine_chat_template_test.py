@@ -103,8 +103,12 @@ def case_no_builtin() -> None:
 
 
 def case_render_refuses() -> None:
-    undefined = _from("{{ messages[0]['content'] }}{{ tools }}")     # tools 没给 ✗
-    check("④ ⭐ 引用**没给**的变量 ⇒ 抛 ✗（且点明不静默回落 ✓）",
+    # ⚠️ 判据变量**不能再用 ``tools``** ✗（2026-10-29 改）：``tools``/``documents`` 现在由本层
+    # 显式给 ``None`` ✓（对齐 HF ``apply_chat_template`` 的签名 ✓ —— Qwen3 骨架首行就是
+    # ``{%- if tools %}``，不给就整条对话路径当场拒 ✗✗）。所以这里换一个**本层不提供**的变量 ✓，
+    # 才能继续验证 ``StrictUndefined`` 真的还在 ✗（换成宽松 ``Undefined`` 就是静默空串 ✗✗）。
+    undefined = _from("{{ messages[0]['content'] }}{{ custom_var }}")   # custom_var 本层不给 ✗
+    check("④ ⭐ 引用**本层不提供**的变量 ⇒ 抛 ✗（且点明不静默回落 ✓）",
           _raises(lambda: undefined.render([{"role": "user", "content": "x"}]),
                   needle="不静默回落裸拼接"))
     check("④′ ⭐ 空 messages ⇒ 拒 ✗", _raises(lambda: undefined.render([])))
@@ -118,7 +122,34 @@ def case_render_refuses() -> None:
                   needle="只收 user ✓"))
 
 
+def _torch_available() -> bool:
+    """⚠️ 缺 torch ⇒ 本段**显式 SKIP 打印** ✓（SKIP ≠ 通过 ✗）。
+
+    原样会崩在 ``original = llm_mod.generate_llm`` ✗ —— 那是 ``llm.py`` 的**懒导出** ✓，
+    取属性时触发 ``_build()`` ⇒ ``import torch`` ✗。结果：连 ①–④（**纯 jinja2 渲染** ✓，
+    与 torch 毫无关系 ✓）都一条跑不了 ✗✗。
+    """
+    try:
+        import torch  # noqa: F401, PLC0415
+    except ModuleNotFoundError:
+        return False
+    return True
+
+
 def case_backend_wiring() -> None:
+    # ⑤′/⑤″ 是**纯逻辑** ✓（拼 prompt 与读元数据，不建模型 ✗）⇒ 缺 torch 也照跑 ✓
+    blank = llm_backend.LlmBackend(CONFIG)
+    check("⑤′ ⭐ 无骨架 ⇒ **老行为一字未动** ✓（裸拼接 ✓）",
+          blank._build_prompt_text("画个猫", "你是分镜师") == "你是分镜师\n\n画个猫"
+          and blank._build_prompt_text("画个猫") == "画个猫")
+    blank._read_chat_template()              # 没给权重路径 ⇒ 读不出元数据 ✓
+    check("⑤″ ⭐ 读不出元数据 ⇒ 按**没有模板**处理 ✓（不假装有骨架 ✗）+ note 非空 ✓",
+          blank._chat_template is None and bool(blank._chat_template_note), blank._chat_template_note)
+
+    if not _torch_available():
+        print("SKIP  ⑤/⑤‴/⑤⁗：需要 torch（本机未装）⇒ 不判（≠ 通过 ✓）")
+        return
+
     class _StubHub:
         def __init__(self) -> None:
             self.encoded: list[str] = []
@@ -141,14 +172,6 @@ def case_backend_wiring() -> None:
         backend.generate("画个猫", system="你是分镜师")
         check("⑤ ⭐ 有骨架 ⇒ encode 收到的是**骨架文本** ✓（不是裸拼接 ✗）",
               hub.encoded[-1] == EXPECTED, hub.encoded[-1])
-
-        blank = llm_backend.LlmBackend(CONFIG)
-        check("⑤′ ⭐ 无骨架 ⇒ **老行为一字未动** ✓（裸拼接 ✓）",
-              blank._build_prompt_text("画个猫", "你是分镜师") == "你是分镜师\n\n画个猫"
-              and blank._build_prompt_text("画个猫") == "画个猫")
-        blank._read_chat_template()          # 没给权重路径 ⇒ 读不出元数据 ✓
-        check("⑤″ ⭐ 读不出元数据 ⇒ 按**没有模板**处理 ✓（不假装有骨架 ✗）+ note 非空 ✓",
-              blank._chat_template is None and bool(blank._chat_template_note), blank._chat_template_note)
 
         broken = llm_backend.LlmBackend(CONFIG)
         broken._model, broken._hub = object(), _StubHub()

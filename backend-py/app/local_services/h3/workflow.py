@@ -35,10 +35,15 @@ from typing import Any
 
 __all__ = [
     "ASPECT_RATIO_OPTIONS",
+    "H3_MAX_FRAMES",
+    "H3_TRAINED_FRAMES",
     "MAIN_VIDEO_CLASSES",
     "MODE_ACTIVE",
     "MODE_MUTE",
+    "REF_AUDIO_PORT_PREFIX",
     "REF_IMAGE_PORT_PREFIX",
+    "REF_VIDEO_AUDIO_PORT_PREFIX",
+    "REF_VIDEO_PORT_PREFIX",
     "RESOLUTION_SELECTOR_MIN_MEGAPIXELS",
     "RESOLUTION_SELECTOR_MULTIPLE",
     "SUBGRAPH_INPUT_ID",
@@ -46,6 +51,7 @@ __all__ = [
     "WorkflowConversionError",
     "activate_nodes",
     "active_modes_default",
+    "cap_frames",
     "check_combo_choices",
     "combo_options",
     "expected_resolution",
@@ -57,7 +63,10 @@ __all__ = [
     "node_classes",
     "port_source",
     "ratio_terms",
+    "reference_audio_slot_names",
     "reference_slot_names",
+    "reference_video_audio_slot_names",
+    "reference_video_slot_names",
     "resolution_selector_size",
     "scalar_source",
     "seconds_for_frames",
@@ -82,6 +91,12 @@ MODE_BYPASS = 4
 H3_FPS = 24
 H3_MIN_FRAMES = 5
 H3_FRAME_GRID = 17
+#: ``length`` 的**硬上限**（同一条 schema 的 ``max=3600`` ⇒ 150 s ✓）★ —— 超了引擎在
+#: ``validate_inputs`` 那层直接拒单 ✗（**不是**悄悄截断 ✓）⇒ 必须在提交前夹住 ✓。
+H3_MAX_FRAMES = 3600
+#: 后端 tooltip 明写的**训练区间**：``~124-362`` 帧（≈ 5.2–15.1 s ✓）。
+#: ⚠️ 出了区间**不报错** ✓，只是画质／音画稳定性没保证 ✓ ⇒ 我们只告警、不改用户要的时长 ✗。
+H3_TRAINED_FRAMES = (124, 362)
 
 
 class WorkflowConversionError(RuntimeError):
@@ -743,6 +758,23 @@ def seconds_for_frames(frames: int, *, fps: int = H3_FPS) -> float:
     return round(int(frames) / float(fps), 3)
 
 
+def cap_frames(frames: int, *, max_frames: int = H3_MAX_FRAMES,
+               min_frames: int = H3_MIN_FRAMES, grid: int = H3_FRAME_GRID) -> int:
+    """把帧数**向下**收到「网格上、且不超过 ``max_frames``」的那一档 ✓。
+
+    来源：同一条 schema 的 ``max=3600`` ✓（引擎 ``validate_inputs`` 会对越界直接抛错 ✗，
+    **不会**自己往下截 ✓ ⇒ 这层不收，用户拿到的是「提交后 400」而不是「照能做的最长时长出一版」✓）。
+
+    ⚠️ 为什么必须**向下**收、且上限那格要重新对齐 ✗✗：网格是 ``grid*k + min_frames`` ✓，
+    而 ``max_frames`` **本身不一定在网格上** —— 例：``3600 % 17 = 13`` ✗ ⇒ 上限内的最大合法值是
+    ``3592``（``3592 % 17 = 5`` ✓，= 149.67 s ✓）。直接返回 3600 会被引擎拒 ✓✗。
+    """
+    # ⚠️ 必须先 ``min(frames, limit)`` 再对齐 ✗✗：只按上限对齐会把**本来就合法**的短时长
+    #    顶到 3592 帧 ✓✗（123 帧的镜头被拉成两分半 ✓）。这一支是 2026-10-27 自检抓出来的真错 ✓。
+    capped = min(int(frames), max(int(min_frames), int(max_frames)))
+    return capped - ((capped - int(min_frames)) % int(grid))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 分辨率：模板里的 ResolutionSelector 会算出多大
 # ══════════════════════════════════════════════════════════════════════════
@@ -924,10 +956,33 @@ MAIN_VIDEO_CLASSES = ("MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo")
 #:
 #: ⚠️ 两个数别混淆 ✓✗：**节点 schema** 允许 ``ref_image_0..8``（``io.Autogrow.Input("ref_images",
 #: …, min=0, max=9)`` ✓，出处 ``comfy_extras/nodes_minimax_h3.py`` 的
-#: ``MiniMaxH3ReferenceToVideo.define_schema`` ✓）；**盘上那个模板**只接了 3 格
+#: ``MiniMaxH3ReferenceToVideo.define_schema`` ✓）；**盘上那个模板**只声明了 3 格
 #: （``ref_image_0`` / ``_1`` 各接一个 ``LoadImage``、``_2`` 是空插座 ✓）⇒ 本模块一律**以图为准** ✓
-#: （模板哪天加槽位，这里不用改 ✓；节点类还支持 ``ref_videos`` / ``ref_audios``，都在模板里没接 ✗）。
+#: （模板哪天加槽位，这里不用改 ✓）。
 REF_IMAGE_PORT_PREFIX = "ref_images.ref_image_"
+
+#: 参考**音频**槽位的端口名前缀（真名形如 ``ref_audios.ref_audio_0`` ✓）。
+#:
+#: ⚠️⭐⭐ **2026-10-27 更正** ✓✗：旧注释写的是「``ref_videos`` / ``ref_audios`` 都在模板里没接」✗ ——
+#: **那是错的** ✓✗。盘上 ``video_minimax_h3_r2v.json`` 的主节点**确实声明了** ``ref_audios.ref_audio_0``
+#: （类型 ``AUDIO`` ✓、**未接线** ✓，同节点还声明了 ``ref_videos.ref_video_0`` /
+#: ``ref_video_audios.ref_video_audio_0`` ✓）。按那条错注释办事的后果是**真的**：参考音频从来不上传、
+#: 一句「模板没接上」就整包忽略 ✓✗ —— 而产品侧 ``routers/videos.py`` 一直在对话镜头上按 Ref2VA 口径
+#: 带声线样本 ✓（那份样本一路走到这里被丢掉，**没有任何一处数字能看出它没生效** ✗✗）。
+#: ⇒ 口径与图**完全一致**：按**图上真有的端口**读 ✓（节点 schema 允许 ``ref_audio_0..2``，
+#: ``io.Autogrow.Input("ref_audios", …, min=0, max=3)`` ✓；模板声明几格就是几格 ✓）。
+REF_AUDIO_PORT_PREFIX = "ref_audios.ref_audio_"
+
+#: 参考**视频**槽位的端口名前缀（真名形如 ``ref_videos.ref_video_0`` ✓、类型 ``IMAGE`` ✓）。
+#:
+#: ⚠️ 类型是 ``IMAGE`` 不是 ``VIDEO`` ✓✗：H3 的「参考视频」在图上=**一串帧** ✓，所以它上游不是
+#: ``LoadImage`` 而是**读视频的加载器**（``LoadVideo`` 那类 ⇒ 一个节点同时吐 ``IMAGE`` 帧串 ✓ 和
+#: ``AUDIO`` 音轨 ✓）。⚠️ 正因为要吐两路，它和 :data:`REF_VIDEO_AUDIO_PORT_PREFIX` 是**一对**
+#: （同一路视频的第 k 格帧串 + 第 k 格音轨 ✓）—— 但仍**各算各的槽位表** ✓（模板可以只声明一半 ✓）。
+REF_VIDEO_PORT_PREFIX = "ref_videos.ref_video_"
+
+#: 参考视频**自带音轨**槽位的端口名前缀（真名形如 ``ref_video_audios.ref_video_audio_0`` ✓）。
+REF_VIDEO_AUDIO_PORT_PREFIX = "ref_video_audios.ref_video_audio_"
 
 
 def main_video_node(source: Any) -> tuple[str, str] | None:
@@ -1040,19 +1095,19 @@ def scalar_source(source: Any, node_id: Any, port: str, *, prefix: str = "Primit
                             depth=depth)
 
 
-def reference_slot_names(source: Any, node_id: Any) -> list[str]:
-    """主节点上的 ``ref_images.ref_image_*`` 端口名 ✓（**按槽位序** ✓ 未接线的空槽也算 ✓）。
+def _port_slot_names(source: Any, node_id: Any, prefix: str) -> list[str]:
+    """主节点上以 ``prefix`` 开头的端口名 ✓（**按槽位序** ✓ 未接线的空槽也算 ✓）。
 
     「按槽位序」是**排序后**的 ✓（``_2`` 不会排到 ``_10`` 前面 ✗ —— 图形状里端口的先后不可靠 ✓✗）；
-    「空槽也算」也是**故意**的 ✓：调用方要按下标对齐地往 ``ref_image_k`` 上落图 ✓
-    ⇒ 两张表（名字 / 上游 id）长度必须一致 ✓，空槽在 ``ref_image_ids`` 里是 ``None`` ✓（不是被挤掉 ✗）。
+    「空槽也算」也是**故意**的 ✓：调用方要按下标对齐地往 ``<prefix>k`` 上落素材 ✓
+    ⇒ 两张表（名字 / 上游 id）长度必须一致 ✓，空槽在上游 id 表里是 ``None`` ✓（不是被挤掉 ✗）。
     """
     names: list[str] = []
     for node in _as_graph(source).get("nodes") or []:
         if str(node.get("id")) != str(node_id):
             continue
         names = [str(port.get("name")) for port in node.get("inputs") or []
-                 if str(port.get("name")).startswith(REF_IMAGE_PORT_PREFIX)]
+                 if str(port.get("name")).startswith(prefix)]
         break
 
     def slot(name: str) -> int:
@@ -1060,6 +1115,34 @@ def reference_slot_names(source: Any, node_id: Any) -> list[str]:
         return int(tail) if tail.isdigit() else 0
 
     return sorted(names, key=slot)
+
+
+def reference_slot_names(source: Any, node_id: Any) -> list[str]:
+    """主节点上的 ``ref_images.ref_image_*`` 端口名 ✓（口径见 :func:`_port_slot_names` ✓）。"""
+    return _port_slot_names(source, node_id, REF_IMAGE_PORT_PREFIX)
+
+
+def reference_audio_slot_names(source: Any, node_id: Any) -> list[str]:
+    """主节点上的 ``ref_audios.ref_audio_*`` 端口名 ✓（口径与 :func:`reference_slot_names` 逐字一致 ✓）。
+
+    ⚠️ **另开一张表**、不把两种端口混进一个列表 ✓✗：图和音是**两条独立的下标序列** ✓
+    （提示词里的 ``<Picture 1>`` 与 ``<Audio 1>`` 各自从 1 数 ✓）⇒ 混在一起两边编号都会错 ✗。
+    """
+    return _port_slot_names(source, node_id, REF_AUDIO_PORT_PREFIX)
+
+
+def reference_video_slot_names(source: Any, node_id: Any) -> list[str]:
+    """主节点上的 ``ref_videos.ref_video_*`` 端口名 ✓（**第三条独立序列** ✓ ⇒ ``<Video k>`` ✓）。"""
+    return _port_slot_names(source, node_id, REF_VIDEO_PORT_PREFIX)
+
+
+def reference_video_audio_slot_names(source: Any, node_id: Any) -> list[str]:
+    """主节点上的 ``ref_video_audios.ref_video_audio_*`` 端口名 ✓。
+
+    ⚠️ 这张表是**参考视频的音轨** ✗、不是 ``ref_audios.*``（那是独立的音色样本 ✓✗）——
+    混用 ⇒ 音轨被当成「音色样本」、声线声明按错的路数算 ✓✗。
+    """
+    return _port_slot_names(source, node_id, REF_VIDEO_AUDIO_PORT_PREFIX)
 
 
 def video_plan(source: Any) -> dict[str, Any]:
@@ -1080,6 +1163,8 @@ def video_plan(source: Any) -> dict[str, Any]:
     ``first_frame_id``          首帧该落在哪个 ``LoadImage`` ✓
     ``last_frame_id``           尾帧同理 ✓（模板里**没接线**的槽位 ⇒ ``None`` ✗）
     ``ref_slot_names``/``ref_image_ids``  参考图槽位名 + 已接线的 ``LoadImage``（空槽 ⇒ ``None`` ✓）
+    ``ref_audio_slot_names``/``ref_audio_ids``  参考**音频**槽位名 + 已接线的 ``LoadAudio``（同上 ✓；
+                                与图**各算各的** ✓，别互相顶替 ✗）
     ==========================  ==================================================
     """
     graph = _as_graph(source)
@@ -1088,6 +1173,9 @@ def video_plan(source: Any) -> dict[str, Any]:
         "prompt_wired": False, "duration_id": None, "resolution_id": None,
         "first_frame_id": None, "last_frame_id": None,
         "ref_slot_names": [], "ref_image_ids": [],
+        "ref_audio_slot_names": [], "ref_audio_ids": [],
+        "ref_video_slot_names": [], "ref_video_ids": [],
+        "ref_video_audio_slot_names": [], "ref_video_audio_ids": [],
     }
     main = main_video_node(graph)
     if main is None:
@@ -1114,6 +1202,21 @@ def video_plan(source: Any) -> dict[str, Any]:
     plan["ref_slot_names"] = reference_slot_names(graph, main_id)
     plan["ref_image_ids"] = [
         (port_source(graph, main_id, name) or (None, None))[0] for name in plan["ref_slot_names"]
+    ]
+    plan["ref_audio_slot_names"] = reference_audio_slot_names(graph, main_id)
+    plan["ref_audio_ids"] = [
+        (port_source(graph, main_id, name) or (None, None))[0]
+        for name in plan["ref_audio_slot_names"]
+    ]
+    plan["ref_video_slot_names"] = reference_video_slot_names(graph, main_id)
+    plan["ref_video_ids"] = [
+        (port_source(graph, main_id, name) or (None, None))[0]
+        for name in plan["ref_video_slot_names"]
+    ]
+    plan["ref_video_audio_slot_names"] = reference_video_audio_slot_names(graph, main_id)
+    plan["ref_video_audio_ids"] = [
+        (port_source(graph, main_id, name) or (None, None))[0]
+        for name in plan["ref_video_audio_slot_names"]
     ]
     plan["form"] = ("r2va" if main_class == "MiniMaxH3ReferenceToVideo"
                     else "fl2va" if plan["last_frame_id"]

@@ -38,7 +38,9 @@ from fastapi import APIRouter, Query, Request
 from ..core.config import get_storage_root
 from ..core.response import bad_request, success
 from ..core.request_utils import read_json
+from ..services.engine import bridge
 from ..services.engine import conditioning
+from ..services.engine import facade
 from ..services.engine import guidance
 from ..services.engine import hybrid_load
 from ..services.engine import inventory as inv
@@ -52,6 +54,17 @@ from ..services.engine.runtime import engine_runtime
 from ..services.engine.torch_backend import TorchBackend, TorchBackendUnavailable
 
 router = APIRouter(prefix="/api/v1/engine", tags=["engine"])
+
+
+def _engine_error(err: facade.EngineError) -> Any:
+    """门面异常 ⇒ 400 + **引擎错误码**（E1.5：错误码只有一个真源 `facade.CODES`）。
+
+    ⚠️ 码与文案**缺一不可** ✗：`message` 给人看（照着能修 ✓），`engineCode` 给机器分流
+    （「缺包 / 缺权重 / 量化族不支持」是三种完全不同的处置 ✓）。只在 router 里另写一套字符串
+    ⇒ 引擎改了码这里不改，前端就永远收不到新码 ✓✗。
+    """
+    text = err.message + (f"（{err.hint}）" if err.hint else "")
+    return bad_request(text, engine_code=err.code)
 
 #: 前端字段名（camelCase ✓）→ 请求字段（snake_case ✓）—— 两边都收，取第一个非空 ✓
 _REQUEST_KEYS: dict[str, str] = {
@@ -273,14 +286,14 @@ async def hybrid_merge(request: Request) -> Any:
     if not base or not overlay:
         return bad_request("需要 base/baseKey 与 overlay/overlayKey（两份权重 ✓），"
                            "或清单里能解析到的组件 key ✓")
-    include_final = bool(body.get("includeFinalAdaLn"))
     cache_path = str(body.get("cachePath") or "").strip() or None
     try:
+        include_final = _flag(body, "includeFinalAdaLn")
         if not body.get("apply"):
             return success(hybrid_load.plan_hybrid_load(base, overlay,
                                                         include_final_adaln=include_final))
         report = hybrid_load.run_hybrid_load(base, overlay, cache_path,
-                                             force=bool(body.get("force")),
+                                             force=_flag(body, "force"),
                                              include_final_adaln=include_final)
     except hybrid_load.HybridLoadError as err:
         return bad_request(str(err))
@@ -384,7 +397,12 @@ def backends() -> Any:
         "torch": TorchBackend().describe(),
         "guidance": {"supportsCfg": True, "note": "引导由引擎按步计算 ✓ 与后端无关 ✓"},
         "conditioning": {"supportsFirstFrame": True,
-                         "note": "引擎算掩码 ✓、后端套到自己的布局上 ✓（不猜布局 ✗）"},
+                         # 尾帧（fl2v ✓）：双流走 `cond` 段（下标 frames−1 ✓）；
+                         # **单流**（只有 condition_first_frame）做不到 ⇒ 管线会明确拒 ✗ 不静默丢 ✓
+                         "supportsLastFrame": True,
+                         "lastFrameBackends": ["torch（双流形态 ✓）"],
+                         "note": "引擎算掩码 ✓、后端套到自己的布局上 ✓（不猜布局 ✗）；"
+                                 "尾帧只有双流能接 ✓，单流给 lastFrame 会当场失败 ✓"},
     })
 
 
@@ -408,7 +426,12 @@ def load_plan(
     except ValueError:
         capacity = inv.DEFAULT_CAPACITY_GIB
     root = Path(models_dir) if models_dir else None
-    return success(loader.plan_stage(stage, root=root, capacity_gib=max(1.0, capacity)))
+    #: ⚠️ 走**门面**而不是直接调 `loader.plan_stage` ✗（E1.3 唯一入口）：CLI 与 HTTP 必须同一份
+    #: 结论 ✓ —— 两处各算一遍，版本号与错误码迟早只在一处更新 ✓✗。
+    try:
+        return success(facade.plan(stage, root=root, capacity_gib=max(1.0, capacity)))
+    except facade.EngineError as err:
+        return _engine_error(err)
 
 
 @router.post("/plan")
@@ -444,9 +467,14 @@ async def dry_run(request: Request) -> Any:
     # ⚠️ 这里**不再**写 ``isinstance(body, dict)`` ✗ —— ``read_json`` 已经把非法 JSON / 非对象
     #    归一成 ``{}`` ✓（对齐 TS：由**业务校验**给出 400 ✓），那行是死代码 ✗。
     events: list[dict[str, Any]] = []
-    body_events = bool(body.get("includeEvents"))
-    result = pipe.run_sync(_generation_request(body), DryRunBackend(),
-                           on_event=events.append if body_events else None)
+    try:
+        body_events = _flag(body, "includeEvents")
+        result = pipe.run_sync(_generation_request(body), DryRunBackend(),
+                               on_event=events.append if body_events else None)
+    except pipe.StageError as err:
+        # ⚠️ ``_generation_request`` 验参也是抛 ``StageError`` ✓ —— 老代码没接住 ⇒ 500 ✓✗
+        #    （参数写错本该是 400 + 说清哪个字段 ✗）
+        return bad_request(str(err))
     payload = result.to_dict()
     if body_events:
         payload["events"] = events
@@ -464,6 +492,22 @@ _ASSEMBLY_KEYS: dict[str, str] = {
     "attachVae": "attach_video_vae", "attachVideoVae": "attach_video_vae",
     "attach_video_vae": "attach_video_vae",
     "attachAudioVae": "attach_audio_vae", "attach_audio_vae": "attach_audio_vae",
+    # ⚠️ 真 VAE 三个口 ✓（2026-10-29 ✓）：**默认不出现** ⇒ 走参考族 ✓（不给 ≠ 给 false ✓ 但两者
+    #    在装出来的东西上没差别 ✓，差别只在报告里"没要求"这件事没有记录 ✗ —— 保持"不出现"更诚实 ✓）
+    "realVideoVae": "real_video_vae", "real_video_vae": "real_video_vae",
+    "videoVaeDevice": "video_vae_device", "video_vae_device": "video_vae_device",
+    "videoVaeWeights": "video_vae_weights", "video_vae_weights": "video_vae_weights",
+    # ⚠️ `int8_offload` **必须在这张表里** ✗✗（2026-10-29 补 ✓）：`bridge.assembly_from_config`
+    #    早就认它 ✓，这张表却没有 ⇒ 同一个开关在两条路上**行为不同** ✓✗ ——
+    #    走出图服务的 config ⇒ 生效 ✓；走 `POST /engine/load` ⇒ 被白名单**静默丢掉** ✓✗
+    #    （用户以为开了，报告里也不说没收到 ⇒ 在 720×1280 上照样 OOM 且找不到原因 ✓✗）。
+    #    白名单是**逐项手抄**的 ✓ ⇒ 这种漂移只能靠判据盯（见 `engine_router_contract_test` ⑪′ ✓）。
+    "int8Offload": "int8_offload", "int8_offload": "int8_offload",
+    # ⚠️ `loras`（2026-10-29 收 ✓）：以前**故意不收** ✗（裸透传会跳过归一 ✗），改成
+    #    **收下来再走同一份归一** ✓ —— `bridge.lora_specs_from_settings` ✓（跟 config 那条路
+    #    是**同一个函数** ✓，不在这里手抄 ✗✗）。两种写法都收：`loras`（清单）/ `lora`（单条）。
+    #    ⚠️ 值这里先原样搬 ✓，真正归一在 `_assembly_from` 后面那段（要读 `modelsDir` ✓）。
+    "loras": "loras", "lora": "loras",
     "force": "force",
 }
 
@@ -476,8 +520,35 @@ def _bool_from(body: dict[str, Any], *names: str) -> bool | None:
     """取布尔 ✓（``None`` = 没给 ✓ —— 与"给了 false"分得开 ✓✗）。"""
     for name in names:
         if name in body and body[name] not in (None, ""):
-            return bool(body[name])
+            return _as_bool(name, body[name])
     return None
+
+
+def _flag(body: dict[str, Any], name: str, default: bool = False) -> bool:
+    """取一个**必有值**的开关 ✓（没给 ⇒ ``default`` ✓）。"""
+    value = _bool_from(body, name)
+    return default if value is None else value
+
+
+def _as_bool(key: str, value: Any) -> bool:
+    """严格布尔 ✓ —— 不认就**报错** ✗✗（与 ``audio_latent_mode`` 那条同一个口径 ✓）。
+
+    ⚠️ 为什么不能用 ``bool()`` ✗✗：``bool("false")`` 是 **True** ✓✗ —— 前端把开关序列化成
+    字符串（``"false"`` / ``"0"`` / ``"no"`` 都见过 ✓）时，``bool()`` 会把**关**读成**开** ✓✗，
+    而且一声不响：``int8Offload: "false"`` 会让人以为「我没开」，实际每步多一趟 PCIe ✓✗。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise pipe.StageError(
+        "load", f"{key} 只认 true / false ✗，收到 {value!r} ✗"
+                "（不认的值**不许猜** ✗ —— 猜错就是「以为关着、其实开着」✓✗）")
 
 
 def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
@@ -487,7 +558,8 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
         if target in values or source not in body or body[source] in (None, ""):
             continue
         values[target] = body[source]
-    for key in ("dit_path", "tokenizer_path", "device", "stage"):
+    for key in ("dit_path", "tokenizer_path", "device", "stage",
+                "video_vae_device", "video_vae_weights"):
         if key in values:
             values[key] = str(values[key])
     if "audio_latent_mode" in values:
@@ -498,9 +570,26 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
                 "plan", f"未知 audioLatentMode {mode!r} ✗ ⇒ 只能是 "
                         f"{' / '.join(_AUDIO_LATENT_MODES)} ✓（不给 ⇒ 双流不启用 ✓）")
         values["audio_latent_mode"] = mode
-    for key in ("attach_video_vae", "attach_audio_vae", "force"):
+    for key in ("attach_video_vae", "attach_audio_vae", "real_video_vae",
+                "int8_offload", "force"):
         if key in values:
-            values[key] = bool(values[key])
+            values[key] = _as_bool(key, values[key])
+    # ⚠️ ``loras`` **收下来、但必须走归一** ✗✗（2026-10-29 ✓）：白名单只是把它搬进 ``values`` ✓，
+    #    裸用等于跳过三件必做的事 —— 相对路径按 ``modelsDir`` 解析 ✓、**文件不存在当场报** ✓、
+    #    strength/name 归一 ✓（相对路径会按**进程当前目录**解析 ⇒ 指到别处 ✗）。
+    #    ⚠️ 归一**调 config 那条路的同一份函数** ✓（``bridge.lora_specs_from_settings`` ✓）——
+    #    在这里手抄一份 = 埋一次漂移 ✗✗（``int8_offload`` 就是在两条路上行为不同漏过一次 ✓）。
+    #    ⚠️ 两个键**一起递进去** ✓：``loras`` 非空时它压过 ``lora`` ✓ —— 那条优先级本来就在
+    #    归一里写着 ✓，在这里先挑就等于又抄了一遍 ✓✗。
+    #    ⚠️ 报错要翻成 ``StageError`` ✗：``ValueError`` 漏出去就是 **500** ✓✗，而这明明是
+    #    请求写错 ⇒ 该 400 + 说清是哪个文件 ✓。
+    if "loras" in values:
+        try:
+            values["loras"] = bridge.lora_assembly(bridge.lora_specs_from_settings({
+                "loras": body.get("loras"), "lora": body.get("lora"),
+                "models_dir": body.get("modelsDir") or body.get("models_dir")}))
+        except (ValueError, TypeError) as err:
+            raise pipe.StageError("load", str(err)) from err
     return values
 
 
@@ -515,8 +604,14 @@ def runtime_status() -> Any:
 
     ⚠️ ``available=false`` 与 ``loaded.dit=false`` 是**两件事** ✗：前者是 ``torch`` 没装 ✓，
     后者是权重没装 ✓（治法完全不同 ✓ —— 见 ``reason`` ✓）。
+
+    ⚠️ 走**门面** `status()`（E1.3 唯一入口）：CLI 的 `status` 与本路返回**同一份事实** ✓，
+    并多带 `schemaVersion` / `apiVersion` ✓（旧字段一个不少 ✓）。
     """
-    return success(engine_runtime.status())
+    try:
+        return success(facade.status())
+    except facade.EngineError as err:
+        return _engine_error(err)
 
 
 @router.post("/load")
@@ -535,7 +630,7 @@ async def load_runtime(request: Request) -> Any:
     try:
         report = await asyncio.to_thread(engine_runtime.ensure_loaded, **assembly)
     except runtime.EngineBusy as err:
-        return bad_request(str(err))
+        return _engine_error(facade.translate(err))
     except TorchBackendUnavailable as err:
         return bad_request(f"{err}（reason={getattr(err, 'reason', 'pending')} ✓）")
     return success({"loadReport": report, "runtime": engine_runtime.status()})
@@ -549,8 +644,12 @@ async def unload_runtime(request: Request) -> Any:
     """
     body = await read_json(request)
     try:
-        return success(await asyncio.to_thread(engine_runtime.unload, force=bool(body.get("force"))))
+        return success(await asyncio.to_thread(engine_runtime.unload, force=_flag(body, "force")))
     except runtime.EngineBusy as err:
+        return _engine_error(facade.translate(err))
+    except pipe.StageError as err:
+        # ⚠️ ``force: "false"`` 被 ``bool()`` 读成 **True** ⇒ **强卸** ⇒ 在跑的任务跟着死 ✓✗
+        #    （用户的本意正好相反 ✓✗）⇒ 不认的值一律 400 ✓，不许猜 ✓。
         return bad_request(str(err))
 
 
@@ -575,12 +674,21 @@ async def generate(request: Request) -> Any:
     try:
         generation = _generation_request(body)
         assembly = _assembly_from(body)
+        # ⚠️ ``dryRun: "false"`` 被 ``bool()`` 读成 **True** ⇒ 出一段**假画面** ✓✗，
+        #    而用户以为自己关着 ✓✗（产物还标 synthetic ✓ 但没人看标签 ✓）⇒ 严格解析 ✓。
+        assembly["dryRun"] = _flag(body, "dryRun")
+        wait = _flag(body, "wait")
     except pipe.StageError as err:
         return bad_request(str(err))
-    assembly["dryRun"] = bool(body.get("dryRun"))
-    task_id = engine_runtime.submit(generation, assembly=assembly, stage=str(assembly.get("stage") or "h3"))
+    try:
+        task_id = engine_runtime.submit(generation, assembly=assembly,
+                                        stage=str(assembly.get("stage") or "h3"))
+    except runtime.EngineBusy as err:
+        #: ⚠️ 队满**必须当场说**（E3.1 背压）✗：不接住就是 500 ✓✗ —— 前端看到「服务器错误」，
+        #: 既不知道「没入队」也不知道「该等一会儿再试」✓。这里翻成 400 + `E_ENGINE_BUSY` ✓。
+        return _engine_error(facade.translate(err))
     poll = {"taskId": task_id, "pollUrl": f"/api/v1/engine/tasks/{task_id}"}
-    if not bool(body.get("wait")):
+    if not wait:
         return success({**poll, "status": "queued", "waited": False, "synthetic": True})
     try:
         timeout = float(body.get("timeoutSeconds") or body.get("timeout_seconds") or 0) or None
@@ -607,7 +715,13 @@ def get_engine_task(task_id: str, events_limit_raw: int = Query(200, alias="even
 
 @router.post("/tasks/{task_id}/cancel")
 def cancel_engine_task(task_id: str) -> Any:
-    """请求取消 ✓ —— **排队中的**立刻终结 ✓ / **跑着的**由管线在下一步停 ✗（不是瞬停 ✓）。"""
+    """请求取消 ✓ ⇒ 任务快照 + ``cancel.verdict`` ✓。
+
+    ⚠️ 裁决**由 ``runtime.cancel`` 在同一瞬间给出** ✓，这里**原样透传** ✗✗ 不许自己拿
+    ``status`` 再判一次 —— 那读的是另一个瞬间的事实 ✓✗（worker 可能刚好收尾 ✓）：
+    ``accepted``（排队中 ⇒ 已当场终结 ✓，保证停了）/ ``too_late``（已经在跑 ⇒ 只置了旗标，
+    **不保证**停 ✗）/ ``completed``（早已终结 ⇒ 取消无从生效 ✓）。
+    """
     task = engine_runtime.cancel(task_id)
     if task is None:
         return bad_request(f"没有这个任务 {task_id!r} ✓（列表见 /api/v1/engine/tasks ✓）")

@@ -31,9 +31,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["Budget", "CompressionPlan", "apply_plan", "estimate_message_tokens",
-           "estimate_messages_tokens", "estimate_tokens", "plan_compression",
-           "summarize_prompt", "tool_pairs_intact"]
+__all__ = ["Budget", "CompressionPlan", "ContextOverflowError", "apply_plan",
+           "estimate_message_tokens", "estimate_messages_tokens", "estimate_tokens",
+           "plan_compression", "summarize_prompt", "tool_pairs_intact"]
 
 #: ⚠️ **启发式**估算，不是 tokenizer ✓（刻意**不引依赖** ✗ —— 为了估个数字装个库不值 ✓）。
 #: 系数取"偏保守"（宁可早压 ✓ 不可爆 ✗）；中文 ≈ 0.95 token/字 ✓、ASCII ≈ 0.28（≈1/3.6）✓。
@@ -82,6 +82,30 @@ class CompressionPlan:
                 "tokensAfter": round(self.tokensAfter, 1), "elide": self.elide,
                 "summarize": self.summarize, "needsSummarize": self.needsSummarize,
                 "pairsIntact": self.pairsIntact, "notes": self.notes}
+
+
+class ContextOverflowError(RuntimeError):
+    """机械层压完**仍然**超预算 ⇒ 调用方必须显式处理（**不得照发**）。
+
+    ⚠️ 为什么要有它（2026-10-28 实测）：Ollama 的 ``num_ctx`` 是 prompt 与输出**共用**的窗口，
+    输入侧一旦超出，``/api/chat`` 照样 **HTTP 200 且不报错**，只是把 prompt 从**开头**截掉 ⇒
+    被砍掉的正是 system instructions，模型于是"忘了自己在做什么"：分镜导演实测
+    ``prompt_eval_count`` 从 17817 塌到 8194、system 开头的探针答不上来，产出看着正常其实全错。
+
+    此前这里只写一条 warn 就照发 ⇒ 静默出错稿。现在改成**当场失败**：错得早，
+    错误信息里带着「超了多少 / 该改哪个开关」，比让人去事后猜一份错的稿子便宜。
+    """
+
+    def __init__(self, plan: "CompressionPlan", limit_tokens: int) -> None:
+        self.plan = plan
+        self.limit_tokens = limit_tokens
+        self.overflow_tokens = max(0.0, plan.tokensAfter - limit_tokens)
+        super().__init__(
+            f"上下文超出模型窗口：估算 {plan.tokensAfter:.0f} token > 上限 {limit_tokens} token"
+            f"（超 {self.overflow_tokens:.0f}）。token budget exceeded / context window exceeded —— "
+            f"请缩短本次输入（剧本或参考文档只给相关部分），"
+            f"或在 AI 配置里调大 settings.numCtx（窗口 = 上限 + 输出预留）。"
+        )
 
 
 def estimate_tokens(text: Any) -> float:

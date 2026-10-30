@@ -757,6 +757,58 @@ def main() -> int:
           "两路" in str(_raises(lambda: h3.sample_dual_stream(
               trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0], denoise_mask=zeros_v))))
 
+    # ── 曲线变体（2026-10-29 ✓ 厂商真权重 `minimax_h3_*_int8_convrot` 走这一支 ✓）──
+    #    ⚠️ 这是**真实装载实证出来的缺口** ✗：真权重没有 `time_embedder.*` 那 4 把 ✗，
+    #    改由 `adaln_t_table`（顶层 buffer ✓）查表 ✓；按标准建 ⇒ 缺 4 键 + 多 1 键 ⇒
+    #    `complete=False` ⇒ 被装载闸口判「不是完整模型」✓✗。
+    curved = h3.H3FormTrunk(**tiny, use_adaln_curves=True, adaln_curve_grid=5)
+    curved_keys = set(dict(curved.named_parameters())) | set(dict(curved.named_buffers()))
+    plain_keys = set(dict(trunk.named_parameters())) | set(dict(trunk.named_buffers()))
+    check("㊴ 曲线变体：**有** `adaln_t_table`（顶层 buffer ✓、fp32 ✓、形状 (grid, time_dim) ✓）、"
+          "**没有** `time_embedder.*` ✓；标准变体**恰好相反** ✓（两支互斥 ✓ ⇒ 不会既缺又多 ✓）",
+          "adaln_t_table" in curved_keys
+          and not any(key.startswith("time_embedder.") for key in curved_keys)
+          and "adaln_t_table" not in plain_keys
+          and any(key.startswith("time_embedder.") for key in plain_keys)
+          and curved.adaln_t_table.dtype == torch.float32
+          and tuple(curved.adaln_t_table.shape) == (5, tiny["time_dim"]),
+          (sorted(curved_keys - curved_keys.intersection(plain_keys)),
+           int(curved.adaln_t_table.shape[0])))
+
+    # ⭐ 查表口径**逐条**钉 ✓（直接测积木 ✓ 不经主干 ✓）
+    ramp = torch.arange(5, dtype=torch.float32).reshape(5, 1).expand(5, 6).contiguous()
+    at0 = h3.curve_t_emb(ramp, torch.tensor([0.0]))
+    at1 = h3.curve_t_emb(ramp, torch.tensor([1.0]))
+    at_half = h3.curve_t_emb(ramp, torch.tensor([0.5]))
+    check("㊴′ 端点**精确落格** ✓：`t=0` ⇒ 第 0 行 ✓、`t=1` ⇒ **末行** ✓（grid=5 ⇒ pos=4 ✓；"
+          "⚠️ 这里正是 `i0.clamp(max=grid-2)` 负责的地方 ✗ —— 少了它就会读表尾之外 ✓✗）",
+          torch.equal(at0, ramp[0].reshape(1, 6)) and torch.equal(at1, ramp[4].reshape(1, 6)),
+          (at0.tolist(), at1.tolist()))
+    check("㊴″ ⭐⭐ **真插值**（不是取整 ✗）：`t=0.125` ⇒ pos=0.5 ⇒ 结果 **0.5** ✓"
+          "（若四舍五入到最近格 ⇒ 只能是 0 或 1 ✗✗ —— 这条就是「闪烁」那个病的探针 ✓）",
+          torch.allclose(h3.curve_t_emb(ramp, torch.tensor([0.125])),
+                         torch.full((1, 6), 0.5)), h3.curve_t_emb(ramp, torch.tensor([0.125])))
+    check("㊴‴ 越界 σ **被夹住** ✓（`t=-3` ⇒ 第 0 行 ✓、`t=7` ⇒ 末行 ✓ —— 不越界、不报错 ✓）；"
+          "`t=0.5` ⇒ 落在第 2 行 ✓（grid=5 ✓ 整数格点 ✓）",
+          torch.equal(h3.curve_t_emb(ramp, torch.tensor([-3.0])), ramp[0].reshape(1, 6))
+          and torch.equal(h3.curve_t_emb(ramp, torch.tensor([7.0])), ramp[4].reshape(1, 6))
+          and torch.equal(at_half, ramp[2].reshape(1, 6)))
+
+    # ⭐⭐ 整链：**表真的参与计算** ✓（两张不同的表 ⇒ 输出必不同 ✗）—— 否则这一支就是
+    #    装了个 buffer 摆着看 ✓✗（症状：装载成功、出片却与时间无关 ⇒ 画质「糊成一片」✓）
+    with torch.no_grad():
+        same_shape = tuple(trunk(v_rows_in, a_rows_in, text_in, 0.5, 4, 4)[0].shape)
+        curved.adaln_t_table.fill_(0.0)
+        flat_out = curved(v_rows_in, a_rows_in, text_in, 0.5, 4, 4)[0]
+        curved.adaln_t_table.copy_(ramp)
+        ramp_out = curved(v_rows_in, a_rows_in, text_in, 0.5, 4, 4)[0]
+    check("㊴⁗ ⭐⭐ 曲线变体**整链跑得通** ✓（输出形状与标准变体**同一个** ✓、全有限 ✓）"
+          "且**换表 ⇒ 输出必变** ✓（不变 ⇒ 那个 buffer 只是摆设 ✗✗）",
+          tuple(flat_out.shape) == same_shape and bool(torch.isfinite(ramp_out).all())
+          and not torch.equal(flat_out, ramp_out),
+          (tuple(flat_out.shape), same_shape,
+           float(flat_out.abs().max()), float(ramp_out.abs().max())))
+
     return _report()
 
 

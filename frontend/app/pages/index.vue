@@ -152,8 +152,8 @@
     <!-- Auto Gen Dialog -->
     <div v-if="showAutoGen" class="overlay" @click.self="closeAutoGen">
       <div class="modal card auto-modal">
-        <!-- 输入态 -->
-        <template v-if="!autoRunning">
+        <!-- 输入态（跑完之后不再返回这里，见 autoDone） -->
+        <template v-if="!autoRunning && !autoDone">
           <div class="modal-header">
             <div class="modal-icon">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -209,16 +209,19 @@
           </form>
         </template>
 
-        <!-- 进度态 -->
+        <!-- 进度态 / 结果态 -->
         <template v-else>
           <div class="modal-header">
-            <div class="modal-icon auto-spin">
+            <div class="modal-icon" :class="{ 'auto-spin': autoRunning }">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <path d="M21 12a9 9 0 1 1-6.2-8.6"/>
               </svg>
             </div>
-            <h2 class="modal-title">AI 生成中…</h2>
-            <p class="modal-desc">{{ autoStatus ? `已完成 ${autoStatus.doneCount}/${autoStatus.totalEpisodes} 集${autoStatus.failedCount ? `，${autoStatus.failedCount} 集失败` : ''}` : '正在创建项目与集数…' }}</p>
+            <h2 class="modal-title">{{ autoRunning ? 'AI 生成中…' : (autoInterrupted ? 'AI 生成已中断' : 'AI 生成完成') }}</h2>
+            <p class="modal-desc">
+              <template v-if="autoRunning && autoDisconnected">连接中断，正在自动重连…（已完成的集不会丢）</template>
+              <template v-else>{{ autoStatus ? `已完成 ${autoStatus.doneCount}/${autoStatus.totalEpisodes} 集${autoStatus.failedCount ? `，${autoStatus.failedCount} 集失败` : ''}` : '正在创建项目与集数…' }}</template>
+            </p>
           </div>
           <div class="auto-progress">
             <div v-if="!autoStatus" class="auto-empty">正在初始化任务…</div>
@@ -237,6 +240,13 @@
             </div>
           </div>
           <div class="modal-actions">
+            <template v-if="autoDone">
+              <button type="button" class="btn" @click="closeAutoGen">关闭</button>
+              <!-- 续跑入口：后端 resume 幂等（已 done 的集不动、缺媒体的降级补跑、失败的重新排队） -->
+              <button type="button" class="btn btn-ai" @click="resumeAutoGen">
+                {{ autoInterrupted ? `继续（补跑 ${autoFailedCount} 个失败集）` : '继续（检查缺失并补跑）' }}
+              </button>
+            </template>
             <button type="button" class="btn btn-primary" @click="goAutoDrama">查看项目</button>
           </div>
         </template>
@@ -277,6 +287,17 @@ const autoRunning = ref(false)
 const autoStatus = ref(null)
 const autoDramaId = ref(null)
 let autoEs = null
+/**
+ * 2026-10-27 新增两态 —— 原来 `finishAutoStream()` 一律把 `autoRunning` 设 false ✗
+ * ⇒ 弹窗**跳回输入态**（`v-if="!autoRunning"`）⇒ 用户看不到哪一集失败、也拿不到
+ * 「继续」入口，只能重新建一个项目重跑 ✓✗。而 `POST /auto-pipeline/resume/{id}`
+ * 后端**早就有了**（幂等续跑 + 媒体补跑，见 routers/auto_pipeline.py 文件头）⇒ 前端零调用 ✗。
+ */
+const autoDone = ref(false)
+/** SSE 断开中（浏览器自动重连；重连后会再收到 snapshot 全量） */
+const autoDisconnected = ref(false)
+const autoFailedCount = computed(() => Number(autoStatus.value?.failedCount || 0))
+const autoInterrupted = computed(() => autoDone.value && autoFailedCount.value > 0)
 
 const AUTO_STAGE_LABELS = {
   'auto:queued': '排队中',
@@ -369,6 +390,8 @@ async function delDrama(d) {
 async function runAutoGen() {
   if (!autoForm.value.premise?.trim()) return
   autoRunning.value = true
+  autoDone.value = false
+  autoDisconnected.value = false
   autoStatus.value = null
   try {
     const res = await autoPipelineAPI.run({ ...autoForm.value })
@@ -393,9 +416,16 @@ function startAutoStream() {
     try {
       const s = JSON.parse(e.data)
       autoStatus.value = s
+      autoDisconnected.value = false
       if (!s.running) finishAutoStream()
     } catch { /* 忽略解析失败 */ }
   })
+
+  // 断线：EventSource 会自动重连（重连后再收 snapshot 全量），这里只做提示，
+  // **不**据此判定失败（网络抖动很常见，判错会让用户以为整条管线没了 ✓✗）
+  es.onerror = () => {
+    if (autoEs === es) autoDisconnected.value = true
+  }
 
   // 单集状态推进（增量：只含 episodeId + status）
   es.addEventListener('status', (e) => {
@@ -442,8 +472,34 @@ function finishAutoStream() {
   if (!autoEs) return // 幂等：已收尾则忽略
   stopAutoStream()
   autoRunning.value = false
-  toast.success('AI 生成完成')
+  autoDone.value = true
+  // ⚠️ 原来这里无条件 `toast.success('AI 生成完成')` ✗：9 集里 4 集失败也叫「完成」，
+  //    弹窗还直接跳回输入态 ⇒ 用户以为全都好了 ✓✗
+  const failed = autoFailedCount.value
+  if (failed) toast.warning(`AI 生成结束：${failed} 集失败，可点「继续」只补没完成的`)
+  else toast.success('AI 生成完成')
   load()
+}
+
+/**
+ * 断点续跑 —— 接的是**后端早就有的** `POST /auto-pipeline/resume/{dramaId}`
+ * （幂等：已 done 的集不动、done 但媒体缺的降级补跑、failed 的重新排队）。
+ * 前端此前零调用 ✗ ⇒ 断一次（关弹窗/关浏览器/上游挂掉）就只能整条重跑 ✓✗。
+ */
+async function resumeAutoGen() {
+  if (!autoDramaId.value) return
+  autoDone.value = false
+  autoDisconnected.value = false
+  autoRunning.value = true
+  try {
+    await autoPipelineAPI.resume(autoDramaId.value)
+    toast.success('已继续：已完成的集不会重跑，只补未完成/失败/缺媒体的')
+    startAutoStream()
+  } catch (e) {
+    autoRunning.value = false
+    autoDone.value = true
+    toast.error(e.message)
+  }
 }
 
 function stopAutoStream() {
@@ -453,6 +509,7 @@ function stopAutoStream() {
 function closeAutoGen() {
   if (autoRunning.value) return
   showAutoGen.value = false
+  autoDone.value = false
   stopAutoStream()
   autoStatus.value = null
   autoDramaId.value = null

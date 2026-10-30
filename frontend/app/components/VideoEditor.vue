@@ -102,6 +102,68 @@
                 <textarea v-model="form.lastFramePrompt" class="input" rows="2" placeholder="描述尾帧画面，留空自动生成" />
               </label>
             </div>
+
+            <!-- 参考视频 + 参考图档位（H3 引擎的 ref_videos / ref_image_size） -->
+            <div class="grid-2">
+              <label class="field">
+                <span>参考图档位</span>
+                <BaseSelect v-model="form.referenceImageSize" :options="refImageSizeOptions" placeholder="自动" />
+              </label>
+              <label class="field">
+                <span>参考视频 {{ (form.referenceVideoUrls?.length || 0) }}/{{ REF_VIDEO_LIMIT }}</span>
+                <div class="input-row">
+                  <button type="button" class="btn-upload" @click="addRefVideo">+ 添加</button>
+                  <button type="button" class="btn-upload" :disabled="uploadingRefVideo" @click="triggerRefVideoUpload">
+                    {{ uploadingRefVideo ? '上传中…' : '上传视频' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-upload"
+                    :disabled="!prevShotVideoUrl"
+                    :title="prevShotVideoUrl ? '把上一镜成片作为本镜参考视频，动作/造型连续' : '上一镜还没有成片'"
+                    @click="usePrevShotVideo"
+                  >用上镜成片</button>
+                </div>
+              </label>
+            </div>
+            <div v-if="form.referenceVideoUrls?.length" class="ref-video-list">
+              <div v-for="(u, i) in form.referenceVideoUrls" :key="i" class="input-row">
+                <input v-model="form.referenceVideoUrls[i]" class="input" placeholder="参考视频 URL（留空则忽略这条）" />
+                <button type="button" class="btn-upload" @click="removeRefVideo(Number(i))">移除</button>
+              </div>
+            </div>
+            <span class="ref-hint">
+              参考视频走 H3 的 Ref2VA（声线/动作延续），最多 {{ REF_VIDEO_LIMIT }} 段；只填视频不填参考图时后端路由判为 R2V。
+              档位仅 H3 引擎生效（match 快 / max 身份最准），其他厂商忽略。
+            </span>
+            <input ref="refVideoInput" type="file" accept="video/mp4,video/quicktime,video/webm" class="hidden-input" @change="onPickRefVideo" />
+
+            <!-- 参考音频（H3 Ref2VA 的 ref_audios：出场角色的声线样本） -->
+            <label class="field">
+              <span>参考音频 {{ (form.referenceAudioUrls?.length || 0) }}/{{ REF_AUDIO_LIMIT }}</span>
+              <div class="input-row">
+                <button type="button" class="btn-upload" @click="addRefAudio">+ 添加</button>
+                <button type="button" class="btn-upload" :disabled="uploadingRefAudio" @click="triggerRefAudioUpload">
+                  {{ uploadingRefAudio ? '上传中…' : '上传音频' }}
+                </button>
+              </div>
+            </label>
+            <div v-if="form.referenceAudioUrls?.length" class="ref-video-list">
+              <div v-for="(u, i) in form.referenceAudioUrls" :key="i" class="input-row">
+                <input
+                  v-model="form.referenceAudioUrls[i]"
+                  class="input"
+                  placeholder="参考音频 URL（声线样本，留空则忽略这条）"
+                  @input="refAudioTouched = true"
+                />
+                <button type="button" class="btn-upload" @click="removeRefAudio(Number(i))">移除</button>
+              </div>
+            </div>
+            <span class="ref-hint">
+              参考音频走 H3 的 Ref2VA 声线克隆，最多 {{ REF_AUDIO_LIMIT }} 条（引擎侧槽位上限，miniMax/H3 线生效）。
+              对话类镜头不填时后端会自动带出场角色的声线样本；手动清空则表示「本镜不要参考音频」，重跑也不会注回。
+            </span>
+            <input ref="refAudioInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" class="hidden-input" @change="onPickRefAudio" />
             <div class="grid-2">
               <label class="field">
                 <span>过渡效果</span>
@@ -207,6 +269,11 @@ const regenerating = ref(false)
 const regeneratingFrame = ref<'first_frame' | 'last_frame' | null>(null)
 const errorMsg = ref('')
 const selectedCharIds = ref<number[]>([])  // 多选角色 ID
+// 参考音频「用户动过没」标记 ✓✗：**不能**像参考视频那样一律发数组 —— 后端对**未给**该字段的
+// 对话镜头会按 Ref2VA 自动带出场角色声线样本 ✓，一律发 `[]` 等于把这条自动注入**永久关掉** ✓✗
+// （新镜头还没有 video 记录 ⇒ 列表本来就是空 ⇒ 用户没动也发空 ⇒ 声线样本再也不来）。
+// 所以：未动 ⇒ 不发送；动过 ⇒ 连 `[]` 一起发（空数组 = 明确不要，后端 `_pick` 认这个语义 ✓）。
+const refAudioTouched = ref(false)
 
 const paddedIdx = computed(() => {
   const idx = props.storyboard?.index ?? props.storyboard?.id ?? 1
@@ -229,6 +296,80 @@ function normalizeRefMode(mode?: string | null): string {
   if (v === 'first') return 'single'
   if (v === 'last') return 'first_last'
   return v
+}
+
+// ===== 参考素材：参考图档位 + 参考视频（H3 的 ref_image_size / ref_videos）=====
+// ⚠️⚠️ 下面两条是**后端真源的镜像** ✗✗，后端**没有** HTTP 口把它们暴露给前端
+//    （只有 H3 自己的 `/capabilities`），所以只能手抄一份 ✓：
+//    · 档位枚举：核心节点 `comfy_extras/nodes_minimax_h3.py` 的
+//      `io.Combo.Input("ref_image_size", options=["match", "max"], default="match")`；
+//      H3 wrapper 见 `app/local_services/h3/server.py::_reference_image_size`（默认 match ✓，
+//      非法值告警回落 ✓ —— 所以选错**不会报错**，只会静默变成 match ✗）。
+//    · 参考视频上限：`app/local_services/h3/server.py::REF_VIDEO_LIMIT`（env
+//      `H3_REF_VIDEO_LIMIT`，默认 3 ✓；adapter 侧同样截到 3 ✓，见 `video_adapters.py`
+//      的 `body["reference_video"] = [...][:3]`）。
+//    后端改枚举/改上限时**必须同步改这里**，否则界面能选、后端静默回落。
+const REF_VIDEO_LIMIT = 3
+// 参考音频上限同源：H3 主节点 `io.Autogrow.Input("ref_audios", …, min=0, max=3)`；
+// `workflow.py::REF_AUDIO_PORT_PREFIX` 按**模板真有的槽位**读；`video_adapters.py` 的 minimax
+// 同样截到 3（`body["reference_audio"][:3]`）。模板只有 1 格时多送的那几路会在引擎侧
+// 告警丢弃（不会报错）—— 所以界面上限按协议上限写 3，不猜模板。
+const REF_AUDIO_LIMIT = 3
+const refImageSizeOptions = [
+  { value: '', label: '自动（引擎默认 match）' },
+  { value: 'match', label: 'match — 匹配首帧尺寸（快）' },
+  { value: 'max', label: 'max — 保最大清晰度（慢，身份最准）' },
+]
+
+/**
+ * 后端 JSON 列（TEXT）→ 数组 ✓✗。
+ *
+ * ⚠️⚠️ 这一步是**必须**的：`video_generations.reference_*_urls` 是 TEXT 列、存的是
+ * JSON **字符串**，而 `row_to_camel` **不解析**它 ✗ ⇒ 拿到的 `vr.referenceImageUrls`
+ * 是 `'["a","b"]'` 而不是数组 ✓✗。修前这里直接赋给 form、下游用 `Array.isArray()`
+ * 判断 ⇒ **恒 false** ⇒「多参考图模式下回传已有参考图」从来**没发出去过** ✓✗
+ * （界面上看着有、提交时静默变 undefined、后端改用自动注入 —— 三方都不报错）。
+ * 四种形态都能吃：已是数组 / JSON 串 / 单条裸 URL（老数据）/ 空。
+ */
+function parseUrlList(raw: any): string[] {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw.filter(Boolean).map(String)
+  if (typeof raw !== 'string') return []
+  const s = raw.trim()
+  if (!s) return []
+  if (s.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(s)
+      if (Array.isArray(parsed)) return parsed.filter(Boolean).map(String)
+    } catch { /* 坏 JSON 当单条裸 URL 处理（比整条丢掉更接近原意） */ }
+  }
+  return [s]
+}
+
+/**
+ * 角色 ID 列表的回填解析 ✓✗（与 :func:`parseUrlList` **同病根**，⑯ 只治了参考图那一条）：
+ * `video_generations.character_ids` 同样是 TEXT 列存 JSON **字符串**（`'[1,2]'`），原来这里
+ * `existingIds.split(',')` 拿到的就是 `['[1', '2]']` ⇒ `map(Number)` ⇒ **`[NaN, NaN]`** ✓✗
+ * ⇒ 角色多选**回填全空**（勾选一个都没有），且提交时 `[NaN,NaN]` 经 JSON 变 `[null,null]` ✓✗
+ * （库里落两个 null，谁都不报错 ✓）。
+ * 五种形态都能吃：数组 / JSON 串 / 逗号串（老数据）/ 单个数字 / 空。
+ */
+function parseIdList(raw: any): number[] {
+  const toIds = (arr: any[]): number[] =>
+    arr.map((v) => Number(v)).filter((n) => Number.isFinite(n) && n > 0)
+  if (raw === null || raw === undefined || raw === '') return []
+  if (Array.isArray(raw)) return toIds(raw)
+  if (typeof raw === 'number') return toIds([raw])
+  if (typeof raw !== 'string') return []
+  const s = raw.trim()
+  if (!s) return []
+  if (s.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(s)
+      if (Array.isArray(parsed)) return toIds(parsed)
+    } catch { /* 坏 JSON 当逗号串处理 */ }
+  }
+  return toIds(s.split(',').map((x) => x.trim().replace(/^\[|\]$/g, '')))
 }
 
 const aspectRatioOptions = [
@@ -292,12 +433,18 @@ watch(() => props.visible && (props.storyboard || props.videoRecord), () => {
   form.transitionType = sb.transitionType || sb.transition_type || 'cut'
   form.transitionDuration = sb.transitionDuration ?? sb.transition_duration ?? 0.5
   form.characterIds = vr?.characterIds || vr?.character_ids || ''
-  // 初始化多选角色
-  const existingIds = (vr?.characterIds || vr?.character_ids || '')
-  selectedCharIds.value = typeof existingIds === 'string'
-    ? existingIds.split(',').filter(Boolean).map(Number)
-    : (Array.isArray(existingIds) ? existingIds : [])
-  form.referenceImageUrls = vr?.referenceImageUrls || vr?.reference_image_urls || null
+  // 初始化多选角色 —— ⚠️ **必须**过 parseIdList（后端给的是 JSON 字符串，见函数注释 ✗）
+  selectedCharIds.value = parseIdList(vr?.characterIds || vr?.character_ids)
+  // ⚠️ 必须过 parseUrlList（后端给的是 JSON **字符串**，见函数注释）—— 否则下游
+  //    `Array.isArray()` 恒 false ⇒ 多参考图回传**静默失效** ✗
+  form.referenceImageUrls = parseUrlList(vr?.referenceImageUrls || vr?.reference_image_urls)
+  // 参考**视频**（H3 ref_videos，≤3 路）与参考图档位（match/max）—— 同为 JSON 串/标量
+  form.referenceVideoUrls = parseUrlList(vr?.referenceVideoUrls || vr?.reference_video_urls)
+  form.referenceImageSize = vr?.referenceImageSize || vr?.reference_image_size || ''
+  // 参考**音频**（H3 ref_audios，声线样本）—— 后端**会**给对话镜头自动注入，所以「空」有
+  // 两种含义：用户没动过（沿用后端自动收集）／用户主动删光（本镜不要）。用 touched 区分 ✗
+  form.referenceAudioUrls = parseUrlList(vr?.referenceAudioUrls || vr?.reference_audio_urls)
+  refAudioTouched.value = false
 }, { immediate: true })
 
 function toggleCharId(id: number) {
@@ -328,6 +475,156 @@ function reuseNextFirstFrame() {
   form.lastFrameUrl = url
   toast.success('已复用下一镜头首帧作为尾帧')
 }
+
+// ===== 参考视频（H3 Ref2VA 的 ref_videos）=====
+const prevShotVideoUrl = computed(
+  () => props.neighbors?.prev?.video_url || props.neighbors?.prev?.videoUrl || null,
+)
+
+function ensureRefVideoList() {
+  if (!Array.isArray(form.referenceVideoUrls)) form.referenceVideoUrls = []
+  return form.referenceVideoUrls as string[]
+}
+
+function refVideoRoom(): boolean {
+  if (ensureRefVideoList().length < REF_VIDEO_LIMIT) return true
+  toast.warning(`参考视频最多 ${REF_VIDEO_LIMIT} 段（引擎侧上限）`)
+  return false
+}
+
+function addRefVideo() {
+  if (!refVideoRoom()) return
+  ensureRefVideoList().push('')
+}
+
+function removeRefVideo(index: number) {
+  if (Array.isArray(form.referenceVideoUrls)) form.referenceVideoUrls.splice(index, 1)
+}
+
+function usePrevShotVideo() {
+  const url = prevShotVideoUrl.value
+  if (!url) return
+  const list = ensureRefVideoList()
+  if (list.includes(url)) {
+    toast.info('上一镜成片已经在参考视频里了')
+    return
+  }
+  if (list.length >= REF_VIDEO_LIMIT) {
+    toast.warning(`参考视频最多 ${REF_VIDEO_LIMIT} 段（引擎侧上限）`)
+    return
+  }
+  list.push(url)
+  toast.success('已把上一镜成片加入参考视频（动作/造型续接）')
+}
+
+// 上传参考视频：**不走**抽帧逻辑（那是首/尾帧的那条路，会 setFrame 改分镜），只取 URL 入列
+const refVideoInput = ref<HTMLInputElement | null>(null)
+const uploadingRefVideo = ref(false)
+
+function triggerRefVideoUpload() {
+  if (!refVideoRoom()) return
+  refVideoInput.value?.click()
+}
+
+async function onPickRefVideo(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingRefVideo.value = true
+  errorMsg.value = ''
+  try {
+    const { uploadAPI } = await import('../composables/useApi')
+    const { url } = await uploadAPI.video(file)
+    const list = ensureRefVideoList()
+    // 先清掉「+ 添加」留下的空占位，再插真 URL（否则空串会占掉一个名额）
+    const blank = list.indexOf('')
+    if (blank >= 0) list.splice(blank, 1)
+    if (list.length >= REF_VIDEO_LIMIT) throw new Error(`参考视频最多 ${REF_VIDEO_LIMIT} 段`)
+    list.push(url)
+    toast.success('参考视频已上传')
+  } catch (err: any) {
+    errorMsg.value = err.message
+  } finally {
+    uploadingRefVideo.value = false
+    input.value = ''
+  }
+}
+
+// ===== 参考音频（H3 Ref2VA 的 ref_audios）=====
+function ensureRefAudioList() {
+  if (!Array.isArray(form.referenceAudioUrls)) form.referenceAudioUrls = []
+  return form.referenceAudioUrls as string[]
+}
+
+function refAudioRoom(): boolean {
+  if (ensureRefAudioList().length < REF_AUDIO_LIMIT) return true
+  toast.warning(`参考音频最多 ${REF_AUDIO_LIMIT} 条（引擎侧上限）`)
+  return false
+}
+
+function addRefAudio() {
+  if (!refAudioRoom()) return
+  refAudioTouched.value = true
+  ensureRefAudioList().push('')
+}
+
+function removeRefAudio(index: number) {
+  if (!Array.isArray(form.referenceAudioUrls)) return
+  form.referenceAudioUrls.splice(index, 1)
+  // 删到空也照样标记「动过」⇒ 提交发 `[]` ⇒ 后端清空（否则会被当成没给、旧样本又注回来）
+  refAudioTouched.value = true
+}
+
+const refAudioInput = ref<HTMLInputElement | null>(null)
+const uploadingRefAudio = ref(false)
+
+function triggerRefAudioUpload() {
+  if (!refAudioRoom()) return
+  refAudioInput.value?.click()
+}
+
+async function onPickRefAudio(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingRefAudio.value = true
+  errorMsg.value = ''
+  try {
+    const { uploadAPI } = await import('../composables/useApi')
+    const { url } = await uploadAPI.audio(file)
+    const list = ensureRefAudioList()
+    const blank = list.indexOf('')
+    if (blank >= 0) list.splice(blank, 1)
+    if (list.length >= REF_AUDIO_LIMIT) throw new Error(`参考音频最多 ${REF_AUDIO_LIMIT} 条`)
+    list.push(url)
+    refAudioTouched.value = true
+    toast.success('参考音频已上传')
+  } catch (err: any) {
+    errorMsg.value = err.message
+  } finally {
+    uploadingRefAudio.value = false
+    input.value = ''
+  }
+}
+
+// ===== 提交载荷：所见即所存 =====
+// 空数组**照发**（后端 `_json_text([])` ⇒ NULL ✓）—— 用户把参考视频删光就是「清空」的意思，
+// 发 undefined 会让服务端保留旧值 ⇒ 用户以为删了、重跑还是拿旧素材。
+const refVideoPayload = computed(() =>
+  parseUrlList(form.referenceVideoUrls).filter((u) => u.trim()),
+)
+// 多参考图模式下才回传（其余模式由后端按分镜自动注入角色/场景/道具图）
+const refImagePayload = computed(() =>
+  form.referenceMode === 'multiple' && parseUrlList(form.referenceImageUrls).length
+    ? parseUrlList(form.referenceImageUrls)
+    : undefined,
+)
+const refImageSizePayload = computed(() => form.referenceImageSize || undefined)
+// 参考音频：**未动过就不发**（见 refAudioTouched 的注释 —— 后端对话镜头会自动注入声线样本）；
+// 动过才发，空数组也发（= 明确清空）。
+const refAudioPayload = computed(() =>
+  refAudioTouched.value ? parseUrlList(form.referenceAudioUrls).filter((u) => u.trim()) : undefined,
+)
 
 // ===== AI 优化提示词（对齐 gcc KeyframeEditor 的 AI 优化，用户主动触发，与「审核失败自动改写」无关）=====
 const optimizing = ref(false)
@@ -463,7 +760,9 @@ async function regenerate() {
         transition_duration: form.transitionDuration ?? undefined,
       })
     }
-    const charIdsPayload = selectedCharIds.value.length ? selectedCharIds.value : undefined
+    // ⚠️ 过滤非法值再发（回填 bug 曾让这里带出 `[NaN, NaN]` ⇒ JSON 里变 `[null, null]`）
+    const validCharIds = selectedCharIds.value.filter((n) => Number.isFinite(n) && n > 0)
+    const charIdsPayload = validCharIds.length ? validCharIds : undefined
     // 如果存在已有 video record，走 regenerate；否则走 generate
     if (props.videoRecord?.id) {
       // 先更新参数
@@ -477,11 +776,29 @@ async function regenerate() {
         character_ids: charIdsPayload,
         first_frame_url: form.firstFrameUrl || undefined,
         last_frame_url: form.lastFrameUrl || undefined,
+        // ⚠️ 参考素材**必须**也放进 update ✗✗：后端 PUT 白名单原来没有这四件 ✓✗ ⇒
+        //    「更新已有记录」这条路上改参考图/参考视频/档位 = 静默丢弃（本轮已补白名单 ✓）。
+        reference_image_urls: refImagePayload.value,
+        reference_video_urls: refVideoPayload.value,
+        // 参考音频：动过才发（未动 = 不碰库里的旧值；动过且为空 = 清空 ⇒ NULL）
+        reference_audio_urls: refAudioPayload.value,
+        // ⚠️ update 这条**发空串**而不是 undefined ✗：选「自动」= 用户要**清掉**档位 ✓，
+        //    发 undefined 时后端 `key not in body` ⇒ 保留旧值 ✓✗（选了自动，重跑还是 max）。
+        //    后端 `_json_text("")` ⇒ NULL ✓，引擎侧回落默认 match ✓。
+        reference_image_size: String(form.referenceImageSize ?? ''),
       })
       await videoAPI.regenerate(props.videoRecord.id, {
         model: form.model || undefined,
         prompt: form.prompt,
         negative_prompt: form.negativePrompt || undefined,
+        // regenerate 只给「覆盖项」，未给的沿用原记录 ✓；但参考素材**显式发**更稳 ✗：
+        // 上面那次 update 若因任何原因没生效，这里就是最后一道（后端同样认这两个 key ✓）。
+        reference_video_urls: refVideoPayload.value,
+        reference_audio_urls: refAudioPayload.value,
+        // 角色关联 / 参考图同属「未给 ⇒ 后端回落原记录」：给了就以本次为准 ✓
+        character_ids: charIdsPayload,
+        reference_image_urls: refImagePayload.value,
+        reference_image_size: refImageSizePayload.value,
         config_id: props.configId,  // ✅ 传递配置 ID
       })
     } else {
@@ -500,10 +817,13 @@ async function regenerate() {
         first_frame_url: form.firstFrameUrl || undefined,
         last_frame_url: form.lastFrameUrl || undefined,
         // 多参考图模式回传已有参考图；其余模式留空，由后端按分镜自动注入角色/场景/道具图
-        reference_image_urls: form.referenceMode === 'multiple'
-          && Array.isArray(form.referenceImageUrls) && form.referenceImageUrls.length
-          ? form.referenceImageUrls
-          : undefined,
+        reference_image_urls: refImagePayload.value,
+        // 参考视频（H3 Ref2VA）：≤3 段；只给视频不给图时后端路由判 R2V/single ✓
+        reference_video_urls: refVideoPayload.value,
+        // 参考音频（H3 Ref2VA）：未动过不发（留给后端按对话镜头自动注入声线样本）
+        reference_audio_urls: refAudioPayload.value,
+        // 参考图档位：match（快）/ max（身份最准）；空=引擎默认
+        reference_image_size: refImageSizePayload.value,
         config_id: props.configId,  // ✅ 传递配置 ID
       })
     }
@@ -706,6 +1026,14 @@ async function regenerate() {
 }
 .input-row { display: flex; gap: 6px; align-items: center; }
 .input-row .input { flex: 1; min-width: 0; }
+.ref-video-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.ref-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
 .btn-upload {
   flex-shrink: 0;
   padding: 8px 12px;

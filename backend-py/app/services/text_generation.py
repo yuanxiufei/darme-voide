@@ -149,35 +149,46 @@ async def generate_text(
     raise ValueError("文本生成失败")
 
 
-#: 自研文本后端缓存 ✓（key = ``(gguf_path, tokenizer_path)`` ✓ —— 大权重只 load 一次 ✗）
-_engine_backends: dict[tuple[str, str | None], Any] = {}
+#: 自研文本后端缓存 ✓（key = ``(gguf_path, tokenizer_path, device, dtype)`` ✓ —— 大权重只 load 一次 ✗）
+#: ⚠️ 设备/精度**必须进 key** ✗✗：只按路径缓存 ⇒ 改 ``device``/``dtype`` 后仍拿到**旧设备**的后端 ✗
+#: （表现：配置里写了 cuda，跑起来还是 CPU 的速度 ✓ 而且看不出来 ✗）。
+_engine_backends: dict[tuple[str, str | None, str, str], Any] = {}
 
 
-def _get_engine_backend(gguf_path: str, tokenizer_path: str | None) -> Any:
+def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
+                        device: str = "auto", dtype: str | None = None) -> Any:
     """自研文本后端（缓存 + 幂等 load ✓）。"""
     from .engine import gguf, gguf_to_llm, llm_backend
 
-    key = (gguf_path, tokenizer_path)
+    key = (gguf_path, tokenizer_path, device or "auto", dtype or "")
     backend = _engine_backends.get(key)
     if backend is not None:
         return backend
     info = gguf.inspect(gguf_path)
     config = gguf_to_llm.infer_llm_config(info.metadata)
-    backend = llm_backend.LlmBackend(config, gguf_path=gguf_path, tokenizer_path=tokenizer_path)
+    backend = llm_backend.LlmBackend(config, gguf_path=gguf_path, tokenizer_path=tokenizer_path,
+                                     device=device, dtype=dtype)
     backend.load()
     _engine_backends[key] = backend
     return backend
 
 
 async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
-                                options: dict[str, Any]) -> str:
-    """provider=engine ⇒ 走**自研文本后端**（进程内推理 ✓ 不 HTTP 调 ollama ✗）。"""
+                               options: dict[str, Any]) -> str:
+    """provider=engine ⇒ 走**自研文本后端**（进程内推理 ✓ 不 HTTP 调 ollama ✗）。
+
+    设备口径 ✓（2026-10-29 补）：``settings.device``（默认 ``auto`` ⇒ 有卡用卡 ✓）、
+    ``settings.dtype``（默认随设备 ✓：CPU·fp32 / CUDA·bf16 ✓）。
+    """
     settings = config.get("settings") or {}
     gguf_path = settings.get("ggufPath") or settings.get("gguf_path")
     tokenizer_path = settings.get("tokenizerPath") or settings.get("tokenizer_path")
+    device = str(settings.get("device") or "auto")
+    dtype = settings.get("dtype")
     if not gguf_path:
         raise ValueError("自研文本后端缺少 ggufPath（在文本服务 settings 里配 ✓）")
-    backend = _get_engine_backend(str(gguf_path), str(tokenizer_path) if tokenizer_path else None)
+    backend = _get_engine_backend(str(gguf_path), str(tokenizer_path) if tokenizer_path else None,
+                                  device=device, dtype=str(dtype) if dtype else None)
     return await asyncio.to_thread(
         backend.generate, user_prompt,
         system=options.get("system"),

@@ -1,4 +1,4 @@
-"""本地模型路由 —— 与 ``routes/localModels.ts``（688 行）对齐。**11 端点**。
+"""本地模型路由 —— 与 ``routes/localModels.ts``（688 行）对齐。**11 端点 + 2 个自研端点**。
 
 * ``GET  /api/v1/local-models/scan``          扫描模型（``roots/kinds/maxDepth/maxFiles``）
 * ``GET  /api/v1/local-models/roots``         默认扫描根目录 + 探测状态
@@ -11,6 +11,12 @@
 * ``POST /api/v1/local-models/hf/files``      列 HF/ModelScope 仓库文件
 * ``POST /api/v1/local-models/hf/download``   下载到模型存储目录（**NDJSON 流式**）
 * ``POST /api/v1/local-models/delete``        删除存储目录内的模型文件/目录
+
+⭐ **自研新增（Node 侧没有）**：``GET/POST /api/v1/local-models/fingerprint`` —— 读权重文件头，
+按**张量名与形状**判出真实架构/模态/变体（不信文件名），并顺带给出 **`quant`（量化账：scheme ＋
+各类型字节占比 ＋ weightsBytes）、`integrity`（拿头里自带的 ``data_offsets``/``offset`` 对账文件大小
+⇒ ``exact/padded/truncated/trailing``）、`nameAudit`（文件名自称的 fp8/Q4_K_M 到底是 verified 还是
+refuted）**；见 ``services/model_fingerprint.py``。
 
 ⚠️ 七处保真点：
 
@@ -46,6 +52,7 @@ from ..core.models import ai_service_configs
 from ..core.request_utils import read_json
 from ..core.response import bad_request, now, success
 from ..services.ai_configs import map_config_row, parse_settings_object
+from ..services import model_fingerprint
 from ..services.local_model_scan import (
     ScanCancelledError,
     get_default_roots,
@@ -56,6 +63,7 @@ from ..services.local_model_scan import (
     save_model_paths,
     scan_local_models,
     scan_local_models_async,
+    weight_fingerprint,
 )
 from ..services.task_logger import log_task_error, log_task_success
 
@@ -442,6 +450,98 @@ def cancel_scan(task_id: str | None = Query(None, alias="taskId")):
         return bad_request("任务不存在或已过期")
     state["cancel"]()
     return success({"taskId": task_id, "cancelled": True})
+
+
+# ============================================================
+# 权重指纹（读文件头判真架构 —— **不信文件名**）
+# ============================================================
+#: 一次最多探测多少个文件（每份 ~2ms，2000 个 ≈ 4 秒，够用且不会把请求拖死）
+MAX_FINGERPRINT_PATHS = 2000
+
+
+def _fingerprint_paths(paths: list[str]) -> list[dict[str, Any]]:
+    """逐个读文件头（**在线程里跑**）。单个文件失败只影响它自己 ✓。"""
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        target = os.path.abspath(str(raw).strip())
+        key = os.path.normcase(target)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not os.path.isfile(target):
+            files.append({"path": target, "error": "文件不存在"})
+            continue
+        detected = weight_fingerprint(target)
+        if detected is None:
+            files.append({"path": target,
+                          "error": "该格式没有可读的结构头（只支持 .safetensors / .gguf）"})
+            continue
+        files.append(detected)
+    return files
+
+
+@router.get("/fingerprint")
+async def fingerprint_file(path: str | None = None):
+    """读**单个权重文件**的文件头 → 真架构 / 模态 / 变体 / 证据（毫秒级）。
+
+    ⚠️ 这是「**这条权重到底是什么**」的权威答案：文件名可以改、可以写错，
+    张量名与形状不会（真机实例：``krea2_turbo-Q4_K_M.gguf`` 的自报标签是 ``qwen_image``）。
+    """
+    if not path or not path.strip():
+        return bad_request("请指定要探测的权重文件路径")
+    target = os.path.abspath(path.strip())
+    if not os.path.isfile(target):
+        return bad_request(f"文件不存在：{path.strip()}")
+    detected = await asyncio.to_thread(weight_fingerprint, target)
+    if detected is None:
+        return bad_request("该格式没有可读的结构头（只支持 .safetensors / .gguf）")
+    return success(detected)
+
+
+@router.post("/fingerprint")
+async def fingerprint_batch(request: Request):
+    """批量探测。两种用法（body 二选一）：
+
+    * ``{"paths": ["…a.safetensors", "…b.gguf"]}`` —— 点名探测；
+    * ``{"roots": [...], "maxDepth": 5, "maxFiles": 8000}`` —— 按扫描口径找出所有权重再逐个探测。
+
+    返回 ``{files, summary, ...}``：``summary`` 是**按架构聚合**的结果（「这台机器能拍什么」）。
+    """
+    body = await read_json(request)  # 已保证是 dict，别再加 isinstance 兜底（那是死代码）
+
+    raw_paths = body.get("paths")
+    if isinstance(raw_paths, list) and raw_paths:
+        paths = [str(p) for p in raw_paths if isinstance(p, str) and p.strip()]
+        if not paths:
+            return bad_request("paths 里没有有效的文件路径")
+        if len(paths) > MAX_FINGERPRINT_PATHS:
+            return bad_request(f"一次最多探测 {MAX_FINGERPRINT_PATHS} 个文件")
+        files = await asyncio.to_thread(_fingerprint_paths, paths)
+        return success({"mode": "paths", "roots": [], "files": files,
+                        "summary": model_fingerprint.summarize(files)})
+
+    raw_roots = body.get("roots")
+    if isinstance(raw_roots, str):
+        roots = parse_roots(raw_roots)
+    elif isinstance(raw_roots, list):
+        roots = [str(r) for r in raw_roots if isinstance(r, str) and r.strip()]
+    else:
+        roots = None
+    if roots is not None and len(roots) == 0:
+        return bad_request("roots 参数为空或格式不正确")
+
+    scanned = await asyncio.to_thread(scan_local_models, {
+        "roots": roots,
+        "kinds": None,
+        "maxDepth": _js_number_or(str(body.get("maxDepth", "")), 5),
+        "maxFiles": _js_number_or(str(body.get("maxFiles", "")), 8000),
+        "fingerprint": True,
+    })
+    files = [m["weight"] for m in scanned["models"] if m.get("weight")]
+    return success({"mode": "scan", "roots": scanned["roots"], "files": files,
+                    "summary": scanned["weightSummary"],
+                    "scanned": scanned["total"], "elapsedMs": scanned["elapsedMs"]})
 
 
 # ============================================================

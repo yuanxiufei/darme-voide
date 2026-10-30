@@ -37,6 +37,7 @@ __all__ = [
     "SafetensorsError",
     "SafetensorsInfo",
     "TensorEntry",
+    "TensorReader",
     "inspect",
     "read_header",
     "read_tensor_bytes",
@@ -259,3 +260,72 @@ def read_tensor_bytes(path: str | Path, name: str, *, max_bytes: int = 64 * 1024
                 f"（真要整块请显式调大 ✓）")
         handle.seek(8 + header_length + begin)
         return handle.read(end - begin)
+
+
+class TensorReader:
+    """**一次**解析头部、按名 seek 取字节 ✓ —— 流式装载的唯一 IO 入口 ✓。
+
+    为什么不用 :func:`read_tensor_bytes` 循环：它每次调用都重开文件 + 重读头部 ✗
+    —— 真实检查点上万个张量 ⇒ 上万次头部解析 ✓✗（头部本身就有几 MB ✓）。
+    本类把「头部解析**一次**」与「按偏移取**一个**张量」分开 ✓，
+    且**不持有任何张量数据** ✗：读出来的字节由调用方立刻消费后丢弃 ✓。
+
+    ⚠️ 它**不做 mmap** ✗（2026-10-29 定）：`seek + read` 与 mmap 在「按层顺序读」这个
+    访问模式下**效果等价** ✓（都是一次顺序 IO ✓），而 mmap 的页由 OS 工作集管理器回收，
+    Windows 上**时机不可控** ✗ —— 页被挤掉时延迟会在最不该出现的时刻冒出来 ✓✗。
+    显式 seek 的失败点可枚举（读短了就是截断 ✓），对「资源受限环境」更好归因 ✓。
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._metadata, header, header_length = _read_header(self._path)
+        self._header_length = header_length
+        self._data_start = 8 + header_length
+        data_bytes = max(0, self._path.stat().st_size - self._data_start)
+        self.entries: dict[str, TensorEntry] = {}
+        for name, raw in header.items():
+            self.entries[str(name)] = _parse_tensor(str(name), raw, data_bytes)
+        self._handle: Any = None
+
+    @property
+    def metadata(self) -> dict[str, str]:
+        return dict(self._metadata)
+
+    @property
+    def header_bytes(self) -> int:
+        """头部（含 8 字节长度前导）占多少字节 ✓ —— 「只读头部就判完」这句话的**成本证据** ✓。"""
+        return self._data_start
+
+    def meta(self) -> dict[str, tuple[str, tuple[int, ...]]]:
+        """``{名字: (dtype 字符串, 形状)}`` ✓ —— **只有元信息** ✓，正是体检/预检要的形态 ✓。"""
+        return {name: (entry.dtype, tuple(entry.shape)) for name, entry in self.entries.items()}
+
+    def read(self, name: str) -> bytes:
+        """读**一个**张量的原始字节 ✓（不解释、不转张量、不缓存 ✓）。"""
+        entry = self.entries.get(name)
+        if entry is None:
+            raise SafetensorsError(f"没有张量 {name!r}（可用：{len(self.entries)} 个 ✓）")
+        handle = self._ensure_open()
+        handle.seek(self._data_start + entry.begin)
+        payload = handle.read(entry.nbytes)
+        if len(payload) != entry.nbytes:
+            raise SafetensorsError(
+                f"张量 {name!r} 只读到 {len(payload)}/{entry.nbytes} 字节 ⇒ **文件被截断** ✗")
+        return payload
+
+    def _ensure_open(self) -> Any:
+        if self._handle is None:
+            self._handle = self._path.open("rb")
+        return self._handle
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def __enter__(self) -> "TensorReader":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self.close()
+        return False

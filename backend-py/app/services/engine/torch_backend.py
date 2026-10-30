@@ -1,4 +1,4 @@
-"""**torch 后端** —— 真张量实现（2026-09-17；本机已装 CPU 版 torch 2.14 ✓）。
+"""**torch 后端** —— 真张量实现（2026-09-17；2026-10-29 落定：``.venv`` = torch 2.14.1+cu130、CUDA 可用 ✓）。
 
 ## 它现在是**真**的哪一半（务必分清 ✗）
 
@@ -13,10 +13,15 @@
 ⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（没装真权重时画面不真 ✗）。
 UI/接口据此可以显示「真张量 ✓ / 真模型 ✗」而不至于误导 ✓。
 
-## 关于 CPU / CUDA（⚠️ 2026-09-26 更正）
+## 关于 CPU / CUDA（⚠️ 2026-10-29 实测落定）
 
 **别在代码或文档里写死"本机没有 N 卡"** ✗✗ —— 本仓换过机器 ✓：笔记本时代是 Iris Xe 集显 ✓（CPU 轮子 ✓），
-现在跑在 **A5000 工作站**上 ✓（torch 2.13.0+cu130 ✓、RTX A5000 22.5 GiB ✓、`device=cuda` ✓）。
+现在跑在 **A5000 工作站**上 ✓。2026-10-29 实测：``backend-py/.venv`` 装 **torch 2.14.1+cu130** ✓
+（``cuda_built=True`` ✓、``torch.version.cuda=13.0`` ✓、``cuda.is_available()=True`` ✓、bf16 可用 ✓、
+4096³ bf16 矩阵乘实测 91.7 TFLOP/s ✓、可用显存 21.28 GiB ✓、跑 5790 的后端已在该环境上 ✓）。
+上游事实：**torch 2.15.0 在 cu126/cu128/cu129/cu130 全平台（含 Linux）都没有轮子** ✓，最高仅 2.14.1 ✓
+⇒ 要用 CUDA 就停在 2.14.1，不是本机特例 ✗。旧的 ``2.15.0+cpu``（影子 .venv）与全局 Python 的
+``2.13.0+cpu`` 都是 CPU-only ✗（前者从未被生产加载 ✓）。
 ⇒ 设备一律**实测** ✓（``_detect_device()`` / ``engine_readiness.device_facts()`` ✓，
 `/engine/runtime` 的 ``device`` + ``deviceSource`` 也是它 ✓）；代码**一行都不用改** ✓。
 
@@ -34,7 +39,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from app.core import cpu_budget
 
@@ -42,6 +47,7 @@ from . import audio_vae as audio_vae_mod
 from . import dit as dit_mod
 from . import geometry as geometry_mod
 from . import inventory as inv
+from . import keyframes as keyframes_mod
 from . import loader
 from . import media as media_mod
 from . import safetensors as st
@@ -56,6 +62,7 @@ __all__ = [
     "TorchBackendUnavailable",
     "dependency_status",
     "torch_available",
+    "torch_facts",
 ]
 
 
@@ -162,6 +169,129 @@ def _same_setting(left: Any, right: Any) -> bool:
     return left == right
 
 
+def int8_scale_plan(info: Any) -> dict[str, tuple[int, ...]]:
+    """从权重头部挑出「该走 **int8 常驻**」的线性层 ✓ ⇒ ``{子模块名: scale 形状}`` ✓。
+
+    判据只两条 ✓：键以 ``.weight`` 结尾 ✓、dtype 是 ``I8`` ✓；且**必须有配套 scale** ✓。
+    ⚠️ 缺 scale 的**不在这里补** ✗ —— 留给装载闸口报「缺 scale」✓（这里塞个假尺度只是把
+    真问题藏起来 ✓✗）。``weight_scale`` 与 ``.scale`` 两种写法盘上都有 ✓。
+    """
+    plan: dict[str, tuple[int, ...]] = {}
+    for logical, tensor in info.tensors.items():
+        if tensor.dtype != "I8" or not logical.endswith(".weight"):
+            continue
+        name = logical[: -len(".weight")]
+        scale = info.tensors.get(f"{name}.weight_scale") or info.tensors.get(f"{name}.scale")
+        if scale is None:
+            continue
+        plan[name] = tuple(int(dim) for dim in scale.shape)
+    return plan
+
+
+def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], str | None]:
+    """核对「int8 权重是不是**全都**落成了常驻层」✓ ⇒ ``(账目, 致命问题或 None)`` ✓。
+
+    ## 为什么必须有这一条 ✗
+
+    :func:`h3_form.upgrade_linear_to_int8` 返回「换掉了哪些层」✓，但装载侧一直是把它**丢掉**的 ✗
+    —— 换失败（某层名解析错 / 不是 ``nn.Linear`` / 将来权重多出一类新键）时最可能的结局**不是报错** ✗，
+    而是：「计划里点名了、模块里还是普通 ``nn.Linear``」⇒ 装载时 ``copy_`` 走**反量化**那条路 ✓
+    ⇒ 该层按 **bf16 落盘（2 倍显存）** ✓✗ ⇒ 22.49 GiB 的卡上直接 OOM ✓✗，
+    而错误会出现在**后面的前向**里（「CUDA out of memory」），指不到「哪层没接管」✗。
+
+    两个数字原本并排在报告里（``int8Resident`` 文件侧 ✓、``parked`` 模块侧 ✓），
+    但它们**从来没人对过账** ✗ —— 各自都"正常"、合起来才说明问题 ✓✗。
+
+    ## 判据（两条，都是**不猜**的等式 ✓）
+
+    1. ``Int8Linear`` 层数 == int8 参数个数 ✓（一层恰好一个 int8 权重 ✓）；
+    2. 文件侧 ``int8Resident`` **不少于**层数 ✓ —— 少了就是「常驻层没被填」✓
+       （那几层权重要么全 0 ✓✗，要么被反量化进了别的形状 ✓✗，两种都必错 ✗）。
+
+    ⚠️ 只查 ``<``（漏装）不查 ``>``：将来若出现**不是** Linear 的 int8 张量（如量化后的
+    embedding ✓），``int8Resident`` 会比层数**大** ✓ —— 那是合法的新品类，不该被这条判死 ✗。
+    """
+    import torch  # noqa: PLC0415
+
+    layers = sum(1 for sub in module.modules() if type(sub).__name__ == "Int8Linear")
+    int8_params = [param for param in module.parameters() if param.dtype == torch.int8]
+    resident = int(getattr(report, "int8Resident", 0) or 0)
+    ledger = {
+        "layers": layers,
+        "int8Params": len(int8_params),
+        #: 留在 CPU 的那份 ✓ —— 这就是 `int8_offload` 要省下的显存 ✓（单位见 `parkedBytes` ✓）
+        "int8OnCpu": sum(1 for param in int8_params if param.device.type == "cpu"),
+        "int8OnGpu": sum(1 for param in int8_params if param.device.type != "cpu"),
+        "int8Resident": resident,
+    }
+    if layers != len(int8_params):
+        return ledger, (
+            f"int8 常驻层 {layers} 个、int8 参数 {len(int8_params)} 个 ✗ ⇒ 结构自相矛盾"
+            f"（一层应当恰好一个 int8 权重 ✓）")
+    if resident < layers:
+        return ledger, (
+            f"文件里只有 {resident} 个 int8 权重被**原样**装进常驻层，而计划换掉的是 {layers} 层 ✗ ⇒ "
+            f"差的 {layers - resident} 层会按 bf16 落盘（显存 2 倍 ✓✗），"
+            f"在 22.49 GiB 的卡上就是 OOM ✓✗ —— 而报告里 `parked` / `int8Resident` 两个数各自都\"正常\"✓✗")
+    return ledger, None
+
+
+def _prepare_h3_module(h3_form_mod: Any, form_defaults: dict[str, Any], target: Path,
+                       info: Any) -> Any:
+    """建 H3 主干、按**权重自己说的精度**摆好 ✓ ⇒ 交给 :func:`weights.load_module_weights` ✓。
+
+    ## 三件事，顺序不能换 ✗
+
+    1. **只建一次** ✓ —— 老写法建**两**次（先建一个「验一下」，再建一个真装 ✓✗）⇒ 主机内存与
+       显存各多一份 ✓✗：19.53 GiB 的主干在 fp32 下是 **78 GiB** ✗，96 GB 的机器上一次建两次
+       就直接炸 ✓✗（而且报错会是「内存不足」，指不到真原因 ✗）；
+    2. **降到计算精度** ✓（有 CUDA 时 bf16 ✓）—— 但**文件里写明 fp32 的键必须留在 fp32** ✓
+       （H3 的 ``video_patch_proj`` / 输出头是 **fp32 岛** ✓，降了就是数值退化 ✓✗）；
+    3. **int8 层换成常驻层** ✓（:func:`h3_form.upgrade_linear_to_int8` ✓）—— 必须在降精度
+       **之后** ✗：否则 ``weight_scale`` 被一起降成 bf16 ✗（尺度精度比 int8 的量化误差还大 ✗）。
+
+    ⚠️ 第 2 步**不能**改成「干脆不降」✗：fp32 主干 78 GiB ⇒ 装不下 ✓（这正是
+    「22.49 GiB 显存装 19.53 GiB 权重」那条账的另一半 ✓）。
+    """
+    import torch  # noqa: PLC0415
+
+    from app.services.engine import quant as quant_mod  # noqa: PLC0415 —— 局部 ✓ 不拖 torch ✓
+
+    module = h3_form_mod.H3FormTrunk(**form_defaults)
+    # ② 计算精度：CUDA 上 bf16 ✓（A5000 原生支持 ✓、权重里非 int8 的张量本来就是 bf16 ✓）；
+    #    CPU 上留 fp32 ✓（bf16 在 CPU 上既慢又没有收益 ✓）。
+    module.to(torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+    #: ⚠️ 逐键把文件里是 **F32** 的键扳回 fp32 ✓（不能只认名字 ✗：fp32 岛的具体清单属于
+    #:    「权重自己说了算」那一类 ✓，写死名单就会与将来的重导出权重脱钩 ✓✗）。
+    #    ⚠️ 必须遍历 **`named_parameters`/`named_buffers`** ✗ —— `state_dict()` 里给的是
+    #    **detached 张量** ✓✗：改它们的 `.data` 只是改了那份 view ✓，`module` 里的参数纹丝不动 ✓✗
+    #    （2026-10-29 实测踩到 ✓：fp32 岛静默留成 bf16 ⇒ 前向报
+    #    「mat1 and mat2 must have the same dtype, but got Float and BFloat16」✗，
+    #    而报错位置在 `video_patch_proj` ✓ 与本行只隔一次 `.to()` ✓）。
+    holders = (dict(module.named_parameters()), dict(module.named_buffers()))
+    for logical, tensor in info.tensors.items():
+        if tensor.dtype != "F32":
+            continue
+        for holder in holders:
+            target = holder.get(logical)
+            if target is not None and target.is_floating_point():
+                target.data = target.data.to(torch.float32)
+
+    #: ③ int8 常驻层 ✓ —— convrot 必须走**逐层**说明（`loader.quant_specs_of` ✓ 与体检、装载侧
+    #:    同一个入口 ✓✗）：`quant_formats_of` 只读前 8 个**去重**的族级说明 ✓ ⇒ 两个坑都在这里：
+    #:    ① H3 全量版逐层分组不同（64/256 并存）⇒ 拿族级判会把正品拒掉 ✓；
+    #:    ② Krea2 int4 那族一个 `*.comfy_quant` 都没有、说明只在 metadata 里 ⇒ 拿族级判等于
+    #:       「没看见旋转」⇒ 常驻层**少一步反旋转** ⇒ 能装、能跑、画面全错 ✓✗（假绿 ✓）。
+    convrot, convrot_gap = quant_mod.convrot_group_of(loader.quant_specs_of(target, info))
+    if convrot_gap:
+        raise TorchBackendUnavailable(
+            f"convrot 说明自相矛盾 ✗ ⇒ 不装载（不按猜的 group 算 ✗）：{convrot_gap}", reason="pending")
+    plan = int8_scale_plan(info)
+    if plan:
+        h3_form_mod.upgrade_linear_to_int8(module, plan, convrot=convrot)
+    return module
+
+
 def _spec(name: str) -> Any:
     try:
         return importlib.util.find_spec(name)
@@ -201,6 +331,44 @@ def dependency_status() -> dict[str, Any]:
     }
 
 
+def torch_facts() -> dict[str, Any]:
+    """``torch`` **本体**装没装、是不是 **CUDA 轮子** ✓ —— 与「后端能不能用」是**两件事** ✗。
+
+    ⚠️ 为什么单列（2026-10-29 ✓）：``torch_available()`` 是「**必需依赖齐不齐**」✓ —— 缺
+    ``safetensors`` 时它也返回 ``False`` ✗，于是报告只写「torch ✗」，读起来像「torch 没装」
+    ✗✗。2026-10-29 实测本机：``torch 2.14.1+cu130`` **装了** ✓ 且**是 CUDA 轮子** ✓
+    （``cudaAvailable=True`` ✓）；此前一度是 ``2.15.0+cpu`` ✗（上游 2.15.0 尚无任何 CUDA 轮子 ✓）
+    —— 那种情形比缺两个小包严重得多（19.53 GiB 主权重在 CPU 上跑不出片），却完全不会出现在报告里 ✗。
+
+    ⭐ **单一真源** ✓：本函数是唯一实现 ✓；`app.services.engine_readiness.torch_facts` 只是
+    转发 ✓ —— 同一个事实两处各写一遍，迟早给出两个说法 ✗✗（2026-10-29 的重复实现已合并 ✓）。
+    """
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        #: ⚠️ `sys.modules["torch"] = None` 时 `find_spec` 会抛 **ValueError** ✗（不是返回 None ✓）
+        #: ⇒ 不接住它，「无 torch 也能算」这条判据会在探测这一步就崩 ✓✗（契约测试 ⑥ 正是这么打的 ✓）。
+        spec = None
+    if spec is None:
+        return {"installed": False, "version": None, "cudaVersion": None,
+                "cudaAvailable": False, "cpuWheel": False}
+    try:
+        import torch  # noqa: PLC0415 —— 只有体检才走这里 ✓（命令行/手动端点 ✓ 不是热路径 ✓）
+    except Exception as err:  # noqa: BLE001 —— 装坏了也是**结论** ✓ 不抛 ✗
+        return {"installed": False, "version": None, "cudaVersion": None,
+                "cudaAvailable": False, "cpuWheel": False,
+                "error": f"{type(err).__name__}: {err}"}
+    cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        cuda_available = False
+    return {"installed": True, "version": str(getattr(torch, "__version__", "") or ""),
+            # ⚠️ `version.cuda is None` ＝ **CPU 轮子** ✓（编译期事实 ✓ 与「有没有卡」无关 ✗）
+            "cudaVersion": cuda_version, "cudaAvailable": cuda_available,
+            "cpuWheel": cuda_version is None}
+
+
 def torch_available() -> tuple[bool, str]:
     """``(可用?, 原因)`` ✓ —— 不可用时原因**可行动** ✓。"""
     status = dependency_status()
@@ -223,11 +391,20 @@ class TorchBackend:
     width = 512
 
     def __init__(self, device: str | None = None, *,
-                 audio_latent_mode: str | None = None) -> None:
+                 audio_latent_mode: str | None = None,
+                 int8_offload: bool = False) -> None:
         available, reason = torch_available()
         self._available = available
         self._reason = reason
         self._device = device or self._detect_device()
+        #: **int8 常驻权重留在 CPU** ✓（``int8_offload`` ✓ —— 2026-10-29 加 ✓）。
+        #:
+        #: ⚠️ 为什么要有这一档 ✗：17.94 GiB int8 全常驻显卡后**只剩 2.87 GiB** 给激活 ✓✗，
+        #: 而 720×1280×5s 的激活要十几 GiB ✓✗（三档实测见 `h3_form.place_module` 的注释 ✓）。
+        #: ⇒ 这一档把 int8 钉在 **CPU 锁页内存** ✓、前向逐层搬到卡上 ✓（峰值 = **单层** ✓）。
+        #: ⚠️ 默认 **False** ✓：CPU 那条（自检 / 无卡机）与"装得下"的大卡都该走老路 ✓，
+        #: 只有真的 OOM 才值得付这趟 PCIe ✓ —— 默认打开会让**每台机器**都慢一截 ✓✗。
+        self._int8Offload = bool(int8_offload)
         #: 装载成功后这里就是**真模型** ✓（None ⇒ 前向走占位 ✓，`describe()` 会如实说 ✓）
         self._model: Any = None
         self._config: Any = None
@@ -235,6 +412,12 @@ class TorchBackend:
         #: 参考 VAE ✓（挂了才解码出真帧 ✓）；未训练 ⇒ 画面是噪声 ✓（如实标 ✓）
         self._vae: Any = None
         self._vaeConfig: Any = None
+        #: 这个 VAE 是**哪一族** ✓（``reference-untrained`` / ``h3-real`` ✓ —— 报告与 note 都读它 ✓；
+        #: ⚠️ 不许从"挂上了"推"真权重"✗：两族的调用点**完全一样** ✓✗）
+        self._vaeKind: str | None = None
+        #: 音频那侧的同一件事 ✓（现在只有参考一族 ✓；写在这里是为了 `_decode_dual` 的 ``synthetic`` ✓
+        #: 能**按事实算** ✓ 而不是写死 True ✗）
+        self._audioVaeKind: str | None = None
         #: 参考**音频** VAE ✓（**与视频 VAE 是两族** ✗ —— 见 `vae.H3_AUDIO_VAE_FACTS` ✓）
         self._audioVae: Any = None
         self._audioVaeConfig: Any = None
@@ -253,6 +436,9 @@ class TorchBackend:
         self._upscaler: Any = None
         self._upscalerReport: dict[str, Any] | None = None
         self.refineDetails: dict[str, Any] | None = None
+        #: 本实例**借来还没还**的 LoRA ✓（E2.5 ✓：借的是进程级 `lora_cache` 里那份共享张量 ✓，
+        #: 同一个内容挂两次只占**一份**内存 ✓）；模型被换掉 / 卸载时必须 :meth:`release_loras` ✗✗
+        self._loraLeases: list[Any] = []
 
     @property
     def conditioningNote(self) -> dict[str, Any] | None:  # noqa: N802 —— 与前端 camelCase 对齐 ✓
@@ -287,6 +473,9 @@ class TorchBackend:
             #    编成 `cond` 段 ✓（见 `_dual_keyframes` ✓）—— 管线据此决定"要不要拒绝"✓
             #    （对**不做这一步**的后端 ✓ 管线会**明确拒绝**首帧 ✗，而不是静默按文生视频跑 ✗✗）。
             "firstFrame": True,
+            # 尾帧（fl2v ✓）同理 ✓ —— 同一个 ``cond`` 段机制 ✓，只是下标取 ``frames − 1`` ✓
+            # （见 `_dual_keyframes` ✓）。管线对**没声明**它的后端会**明确拒绝**尾帧 ✗。
+            "lastFrame": True,
             # ⚠️ 参考块**分类自述** ✓（别合成一个 bool ✗ —— 那样管线分不清"缺哪一类"✓✗）：
             #    * 图片 → ``ref_img`` 块 ✓（用**图片自己的**空间网格 ✓）；
             #    * 音频 → ``ref_audio`` 块 ✓（走**另一族** VAE ✓、不重采样 ✓）；
@@ -406,7 +595,7 @@ class TorchBackend:
             reason="pending")
 
     def load_weights(self, *, path: str | None = None,
-                     config: Any = None) -> dict[str, Any]:
+                     config: Any = None, loras: Any = None) -> dict[str, Any]:
         """**装载真模型** ✓ ⇒ 之后 :meth:`denoise` 走**真前向** ✓（不再占位 ✓）。
 
         * ``path`` 省略 ⇒ 按 ``configs/models.json`` 里的主 DiT 解析 ✓（同一份清单 ✓）；
@@ -466,57 +655,209 @@ class TorchBackend:
                     f"（两者必须一致 ✓ —— 不静默取其中一个 ✗）", reason="pending")
             form_defaults.update({key: value for key, value in explicit.items()
                                   if key not in inferred.config})   # 推不出的字段（如 eps ✓）由显式配置补 ✓
-            form_report = weights_mod.load_module_weights(
-                h3_form.H3FormTrunk(**form_defaults), target, device=self._device)
+            # ⚠️ **只建一次** ✓（老写法建两次 ✓✗ —— fp32 主干 78 GiB，建两次直接炸 ✓✗）；
+            #    顺序见 :func:`_prepare_h3_module` ✓（降精度 → 扳回 fp32 岛 → int8 常驻层 ✓）。
+            module = _prepare_h3_module(h3_form, form_defaults, target, info)
+            parked = None
+            if self._int8Offload and str(self._device).split(":")[0] != "cpu":
+                # ⚠️ **int8 钉 CPU** ✓：`module.to()` 会把 17.94 GiB 全搬上卡 ✗✗ ⇒ 走 `place_module`
+                #    （只搬"其它参数/缓冲区"到卡上 ✓，int8 那几个留在锁页内存 ✓）。
+                parked = h3_form.place_module(module, self._device, park_int8_on="cpu")
+            else:
+                # ⚠️ CPU 后端上 `int8_offload` 没有意义 ✓（本来就在内存里 ✓）⇒ 如实退回老路 ✓，
+                #    但**报告里要说清"没生效"** ✗（静默忽略 = 让人以为省了显存 ✓✗）。
+                module.to(self._device)
+                if self._int8Offload:
+                    parked = {"device": str(self._device), "parkedOn": None,
+                              "applied": False, "moved": 0, "parked": 0,
+                              "parkedBytes": 0, "pinned": False,
+                              "note": "CPU 后端本来就在内存里 ⇒ `int8_offload` 无需生效 ✓"
+                                      "（**不是失败** ✗，但也没省到任何显存 ✓）"}
+            form_report = weights_mod.load_module_weights(module, target)
             if not form_report.complete:
                 raise TorchBackendUnavailable(
                     f"H3 形态权重与结构对不上 ✗（complete=False ⇒ **不是**完整模型）"
                     f"　：{form_report.to_dict()}",
                     reason="pending")
-            self._model = h3_form.H3FormTrunk(**form_defaults).to(self._device)
-            weights_mod.load_module_weights(self._model, target, device=self._device)
+            # ⚠️ int8 的账**当场对** ✓✗（见 :func:`_int8_residency_problems` ✓）：层没升级成功
+            #    不会在这行报错 ✗，而是几十分钟后在前向里「CUDA out of memory」✗✗ —— 指不到真原因 ✓。
+            #    ⚠️ **与 offload 无关地查** ✓：老路（全在卡上）同样会因为漏升级而爆 ✓✗。
+            int8_ledger, int8_problem = _int8_residency_problems(module, form_report)
+            if int8_problem:
+                raise TorchBackendUnavailable(
+                    int8_problem + "　⇒ **不装载** ✓（装进去也跑不起来 ✗；"
+                    "而报告里那几个数各自都\"正常\"✓✗）", reason="pending")
+            self._model = module
             self._config = form_defaults
             self._form = self.H3_FORM_NAME
             try:
                 vae_check = self._check_attached_vaes()
                 text_check = self._check_text_encoder()   # ⭐ 已挂的 TE 也在这一刻再核一次 ✓
+                lora_report = self._apply_loras(loras)    # ⭐ LoRA 在**权重装齐之后**挂 ✓
             except TorchBackendUnavailable:
                 # ⚠️ 校验失败 ⇒ **中止装载 + 不污染模块** ✓（本仓在反量化那条上定过这条规矩 ✓）：
                 #    留着半装状态会让 `dualStream` / `latentMode` 按"装好了"自述 ✓✗。
                 self._model = None
                 self._config = None
                 self._form = None
+                self.release_loras(reason="装载中止 ⇒ 旧模型的 LoRA 也还回去 ✓")
                 raise
             self._loadReport = {
                 **form_report.to_dict(),
                 # ⭐ 「哪些字段是**权重里读出来的** ✓、哪些是**不可推的回落** ✗」随报告一起给 ✓
                 #    —— 装真权重时，光看 `complete=True` 分不清这两种 ✓✗（本仓那条纪律 ✓）。
                 "configSources": dict(inferred.sources),
+                # ⭐ 「int8 到底在卡上还是在 CPU」是**显存能不能跑起来**的那件事 ✓ ⇒ 进报告 ✓
+                #    （`parked=None` ⇒ 老路：全在卡上 ✓；`parked.parkedBytes` 是留在 CPU 的那份 ✓）
+                "int8Residency": parked,
+                # ⭐ 四个数放一处 ✓：层数 / int8 参数数 / 在 CPU 的 / 文件侧常驻数 ✓
+                #    —— 前两个与第四个必须相等（不等已经在上面**拒绝装载**了 ✓）
+                "int8Ledger": int8_ledger,
                 "derivedFields": inferred.derived_count,
                 "fieldCount": len(inferred.config),
                 # ⭐ 已挂的 VAE 在这里**再查一次** ✓（挂载顺序反过来也要守 ✓ ——
                 #    先挂 VAE 的那次调用时形态还没定 ⇒ 只能等这一刻 ✓）；空 = 还没有 VAE 可比 ✓
                 "vaeCheck": vae_check,
                 "textEncoderCheck": text_check,
+                "loras": lora_report,
             }
             return self._loadReport
         if config is None:
             config = dit_mod.DiTConfig.from_metadata(info.metadata)   # 读不到会**明确报错** ✓
-        report = weights_mod.load_module_weights(
-            dit_mod.build_dit(config), target, device=self._device)
+        # ⚠️ **只建一次、只装一次** ✓✗ —— 老写法是「先建一个验一下、再建一个真装」✗，
+        #    而 :func:`weights.load_module_weights` 的 ``device`` **不参与读取** ✓（字节先进 CPU ✓，
+        #    再由 ``copy_`` 落到 param 自己所在的 device ✓）⇒ 那个"验一下"的 model 从没 ``.to()`` ✓
+        #    ⇒ 整份权重被**装进一份马上要丢弃的 CPU 模型** ✓✗：白建一遍 + 白读一遍盘 ✓✗，
+        #    峰值上多压一份模型 ✓（与 :func:`_prepare_h3_module` 里记的那条**同一个**病根 ✓✗，
+        #    那边已修 ✓、这里漏着 ✗ —— 19.53 GiB 的权重上，这一份就是能不能装得下的差别 ✓）。
+        #    ⚠️ 复用同一份时**放置必须和原来"真装"那一次完全一样** ✓：先 ``.to(device)`` 再装 ✓，
+        #    否则权重会落在 CPU 而 ``self._model`` 自以为在卡上 ✓✗（静默，前向才炸 ✗）。
+        module = dit_mod.build_dit(config).to(self._device)
+        report = weights_mod.load_module_weights(module, target, device=self._device)
         if not report.complete:
+            del module                        # 别让半装的模型在 raise 期间继续被引用 ✓
             raise TorchBackendUnavailable(
                 f"权重与模型结构对不上 ✗（complete=False ⇒ **不是**完整模型）"
                 f"　：{report.to_dict()}",
                 reason="pending")
-        self._model = dit_mod.build_dit(config).to(self._device)
-        weights_mod.load_module_weights(self._model, target, device=self._device)
+        self._model = module
         self._config = config
         # ⚠️ 形态必须**每次装载都显式写** ✓：同一实例"先装 H3、再装 DiT"时，不写就会把上一次的
         #    `_form` 留着 ✓✗ ⇒ 双流自述会说"可用"而模型其实是 DiT ✗✗（静默 ✓）。
         self._form = "dit"
         self._loadReport = report.to_dict()
+        if self._int8Offload:
+            # ⚠️ **必须如实说"没生效"** ✗✗：`int8_offload` 只认 H3 形态的 `Int8Linear` 常驻层 ✓
+            #    （见 :func:`_prepare_h3_module` ✓）；这条路把 int8 **反量化进计算精度** ✓✗
+            #    ⇒ 一个 int8 参数都不会被 park ✓。静默忽略的后果是「以为省了 18 GiB 显存」✓✗，
+            #    然后在 720×1280 上照样 OOM、且找不到原因 ✓✗
+            #    （与 CPU 后端那条"无需生效"**同一个口径** ✓：不生效可以 ✓，不说不行 ✗）。
+            self._loadReport["int8Residency"] = {
+                "device": str(self._device), "parkedOn": None, "applied": False,
+                "moved": 0, "parked": 0, "parkedBytes": 0, "pinned": False,
+                "note": "DiT 形态没有 `Int8Linear` 常驻层 ⇒ `int8_offload` **不生效** ✓"
+                        "（它只对 H3 形态的 int8 权重有意义 ✓；"
+                        "这条路上的 int8 会被反量化成计算精度 ⇒ 显存按 2 倍算 ✓）"}
+        try:
+            self._loadReport["loras"] = self._apply_loras(loras)
+        except TorchBackendUnavailable:
+            self._model = None                       # 不半装 ✓（同 H3 那条 ✓）
+            self._config = None
+            self._form = None
+            self.release_loras(reason="装载中止 ⇒ 旧模型的 LoRA 也还回去 ✓")
+            raise
         return self._loadReport
+
+    def _apply_loras(self, loras: Any) -> dict[str, Any] | None:
+        """按 :class:`engine.lora.LoraSpec` 挂 LoRA ✓（**权重装齐之后** ✓）⇒ 报告 ✓。
+
+        ⚠️ **装不上必须炸** ✗✗（本仓纪律 ✓）：少挂一层 LoRA 的后果是「跑得动、出得来、
+        但不是你要的那个档」✓✗ —— 4 步档尤其（turbo LoRA 就是那 4 步的全部依据 ✓）。
+        三种拒装理由各说各的 ✓：① 全部层都对不上（拿错文件 / 拿错底模 ✗）；
+        ② 有 adaln 层（本仓还不支持运行期注入 ✗）；③ 一层都没生效 ✓。
+        """
+        from app.services.engine import lora as lora_mod  # noqa: PLC0415 —— 局部 import ✓ 不拖 torch ✓
+
+        specs: list[Any] = []
+        for item in (loras or ()):
+            #: ⚠️ 写法与 ``strength`` 口径交给 `lora.coerce_spec` ✓（单一真源 ✓）——
+            #:    这里以前写的是 ``float(item.get("strength", 1.0) or 1.0)`` ✗✗：显式 ``0``
+            #:    会被抬成 **1.0** ✓✗，而装载键按 ``0.0`` 记 ✓ ⇒ 「键说 0.0、实际按 1.0 挂」✓✗。
+            try:
+                specs.append(lora_mod.coerce_spec(item))
+            except lora_mod.LoraError as err:
+                raise TorchBackendUnavailable(f"LoRA 参数 ✗：{err}", reason="pending") from err
+        if not specs:
+            return None
+
+        # ⚠️ 换模型先还上一批 ✗✗：本实例再来一次 `load_weights` ⇒ 旧模型的 LoRA 张量没人用了 ✓；
+        #    不还就变成"每换一次装多吊一份" ✓✗（E2.5 之前正是这个形状：压根没有账本 ✓）。
+        self.release_loras()
+
+        from app.services.engine import lora_cache as cache_mod  # noqa: PLC0415 —— 零依赖 ✓
+
+        cache = cache_mod.shared()
+        leases: list[Any] = []
+        loaded: list[str] = []
+
+        def reader(path: str) -> Mapping[str, Any]:
+            """借一份张量 ✓ —— **同内容不读第二遍** ✓（E2.5 ✓）。"""
+            lease = cache.acquire(path, reader=lora_mod.read_tensors,
+                                  reason=f"挂 LoRA ✓：{Path(path).name}")
+            leases.append(lease)
+            loaded.append(lease.digest)
+            return lease.tensors
+
+        try:
+            result = lora_mod.apply_specs(self._model, specs, ops=lora_mod.torch_ops(),
+                                          reader=reader)
+        except Exception:
+            # ⚠️ 挂到一半炸了 ⇒ 借出去的全还回去 ✗✗（这里不还 ⇒ 张量永远吊在账本里 ✓✗，
+            #    而症状要等到下一次装载才发现"怎么又多占了一份"✓✗）
+            self._release_leases(leases, reason="挂 LoRA 失败 ⇒ 还回去 ✓")
+            raise
+        report = {"specs": [spec.to_dict() for spec in specs], **result.to_dict(),
+                  "files": loaded}
+        if result.error or result.applied == 0:
+            self._release_leases(leases, reason="LoRA 没装全 ⇒ 不占用内存 ✓")
+            if result.error:
+                raise TorchBackendUnavailable(f"LoRA 没装全 ✗：{result.error}", reason="pending")
+            raise TorchBackendUnavailable(
+                f"LoRA 一层都没装上 ✗（键名与底模对不上 ⇒ 多半拿错了文件 ✓）：{report}",
+                reason="pending")
+        #: ⚠️ 借来的**一律留到模型卸载** ✓✗ —— 报告里分不出"哪条 spec 折进了权重、哪条走的是
+        #:    hook"，而 hook 那批**必须**一直活着 ✓（张量被回收 ⇒ 前向读到已释放的内存 ✗✗）；
+        #:    折进去的那批其实可以立刻还 ✓，但为多省那点 LoRA 内存去猜"哪条是 merge"不值得 ✓
+        #:    （猜错 = 跑起来像对、数值悄悄不对 ✓✗）。要优化得先让 `apply_specs` 逐条回报 ✓。
+        self._loraLeases.extend(leases)
+        facts = cache.facts()
+        report["cache"] = {"entries": facts["entryCount"], "refTotal": facts["refTotal"],
+                           "tensorBytes": facts["tensorBytes"],
+                           "deduped": facts["deduped"], "misses": facts["misses"],
+                           "note": "同内容只留一份 ✓（`lora_cache` ✓）；这些张量**留到模型卸载** ✓"}
+        return report
+
+    def _release_leases(self, leases: list[Any], *, reason: str) -> dict[str, Any]:
+        """把一批租约还掉 ✓（**成对** ✓）—— 已经不在账本里的跳过 ✗（`release_all` 之后就会这样 ✓）。"""
+        from app.services.engine import lora_cache as cache_mod  # noqa: PLC0415
+
+        cache = cache_mod.shared()
+        released = 0
+        freed_bytes = 0
+        for lease in leases:
+            try:
+                fact = cache.release(lease, reason=reason)
+            except cache_mod.LoraCacheError:
+                continue                      # 已被 `release_all` 清掉 ⇒ 不算错 ✓
+            if fact.get("released"):
+                released += 1
+                freed_bytes += int(fact.get("tensorBytes") or 0)
+        return {"leases": len(leases), "released": released, "freedBytes": freed_bytes}
+
+    def release_loras(self, *, reason: str = "") -> dict[str, Any]:
+        """还掉本实例借的全部 LoRA ✓ ⇒ 报告 ✓（**模型卸载 / 换装配时必须调** ✗✗）。"""
+        leases, self._loraLeases = self._loraLeases, []
+        return self._release_leases(leases, reason=reason or "模型卸载 ⇒ 还 LoRA ✓")
 
     def _default_dit_path(self) -> str | None:
         """按清单找主 DiT ✓（``category=video`` 且 ``required`` 的第一个 ✓ —— 与体检同一份清单 ✓）。
@@ -569,6 +910,8 @@ class TorchBackend:
             "name": self.name, "synthetic": self.synthetic, "realTensors": self.realTensors,
             "available": self._available, "reason": self._reason,
             "device": self._device, "torchVersion": torch_version,
+            # ⚠️ 「int8 在卡上还是 CPU」默认**看不见** ✗ ⇒ 显存账对不上时只能猜 ✓✗（所以报出来 ✓）
+            "int8Offload": self._int8Offload,
             "cudaAvailable": self._device == "cuda",
             # ⚠️ 四个层次**分开答** ✓（混在一起就会变成"看着像能做、其实不行" ✗）：
             #    依赖齐了 ✓ → 张量是真的 ✓ → DiT 真前向（装了权重才是 ✓）→ 能不能出片 ✗
@@ -912,31 +1255,46 @@ class TorchBackend:
         return video.to(self._device), audio.to(self._device)
 
     def _dual_keyframes(self, plan: Any, request: Any, scale: int) -> list[dict[str, Any]]:
-        """首帧 → **关键帧条件块** ✓（H3 的 ``cond`` 段 ✓）—— 没给首帧 ⇒ 空列表 ✓（正常 ✓）。
+        """首帧 / 尾帧 → **关键帧条件块** ✓（H3 的 ``cond`` 段 ✓）—— 两个都没给 ⇒ 空列表 ✓。
 
-        ⚠️ 事实（核自参考 ✓）：``cond`` 行用的是**目标的空间网格** ✓ ⇒ 首帧**必须**编码成目标潜尺寸 ✓
-        （图片按 ``plan`` 的宽高缩放 ✓ 再编码 ✓）；``t`` 起点 = ``cursor + FRAME_RESCALE × 帧号`` ✓，
-        首帧就是**第 0 帧** ✓。
+        ⚠️ 事实（核自参考 ✓）：``cond`` 行用的是**目标的空间网格** ✓ ⇒ 关键帧**必须**编码成目标潜尺寸 ✓
+        （图片按 ``plan`` 的宽高缩放 ✓ 再编码 ✓）；``t`` 起点 = ``cursor + FRAME_RESCALE × 帧号`` ✓。
+        首帧 = **第 0 帧** ✓、尾帧 = **第 ``frames − 1`` 帧** ✓ —— 两者共用同一套 ``cond`` 机制 ✓，
+        只是下标不同 ✓（参考实现的 fl2v 也是这么落的 ✓）。
+
+        ⚠️ 尾帧要 ``frames ≥ 2`` ✓：只有 1 帧时首尾是同一个位置 ✓✗ ⇒ 当场报错 ✗，不悄悄退化成首帧 ✓。
+
         ⚠️ 编码用的是本仓**参考（未训练）视频 VAE** ✓ ⇒ 这条条件**数值上没有语义** ✓（验的是管道 ✓）；
         真权重到位后调用点不变 ✓。
         """
-        image = getattr(request, "first_frame", None)
-        if not image:
+        first = getattr(request, "first_frame", None)
+        last = getattr(request, "last_frame", None)
+        if not first and not last:
             return []
+        # 下标规划 → `keyframes.plan_keyframes` ✓（纯函数 ✓ 无 GPU 也能验 ✓）
+        try:
+            wanted = keyframes_mod.plan_keyframes(plan.frames, first, last)
+        except keyframes_mod.KeyframePlanError as error:
+            raise TorchBackendUnavailable(str(error), reason="pending") from error
         if self._vae is None:
             raise TorchBackendUnavailable(
-                "双流首帧条件需要**视频 VAE**（把首帧编码成潜变量 ✓）✗ ⇒ 先 attach_vae() ✓",
+                "双流首/尾帧条件需要**视频 VAE**（把关键帧编码成潜变量 ✓）✗ ⇒ 先 attach_vae() ✓",
                 reason="pending")
-        torch = self._torch()
-        frames, info = media_mod.load_image_tensor(
-            image, width=int(plan.width), height=int(plan.height))
         if int(plan.width) % scale or int(plan.height) % scale:
             raise TorchBackendUnavailable(
-                f"首帧尺寸 {plan.width}×{plan.height} 不能被 vae_scale={scale} 整除 ✗", reason="pending")
-        with torch.no_grad():
-            latent = self._vae.encode(frames.to(self._device))[0]
-        return [{"resolved_frame_index": 0, "latent": latent, "audio_latent": None,
-                 "imagePath": str(info.get("path") or image)}]
+                f"关键帧尺寸 {plan.width}×{plan.height} 不能被 vae_scale={scale} 整除 ✗",
+                reason="pending")
+        torch = self._torch()
+        blocks: list[dict[str, Any]] = []
+        for index, image in wanted:
+            frames, info = media_mod.load_image_tensor(
+                image, width=int(plan.width), height=int(plan.height))
+            with torch.no_grad():
+                latent = self._vae.encode(frames.to(self._device))[0]
+            blocks.append({"resolved_frame_index": int(index), "latent": latent,
+                           "audio_latent": None,
+                           "imagePath": str(info.get("path") or image)})
+        return blocks
 
     def _dual_references(self, plan: Any, request: Any) -> list[dict[str, Any]]:
         """参考图 → ``ref_img`` 块 ✓（⚠️ 用**图片自己的**网格 ✓ —— 与 ``cond`` 用**目标**网格**不同** ✓ 事实 ✓）。
@@ -1587,19 +1945,49 @@ class TorchBackend:
         return report
 
     def attach_vae(self, config: Any = None) -> dict[str, Any]:
-        """挂上 :mod:`app.services.engine.vae` 的参考 VAE ✓ ⇒ :meth:`decode` 能出**真帧** ✓。
+        """挂视频 VAE ✓ ⇒ :meth:`decode` 能出**真帧** ✓ —— **两族都认** ✓（2026-10-29 扩 ✓）。
 
-        ⚠️ 它是**未经训练**的 ✓ ⇒ 画面是噪声 ✓（验的是**管道** ✓）。真 VAE 权重到位后换 `vae.py`
-        的实现即可 ✓（`decode` 的调用点不变 ✓）。
+        * 不给 / 给 :class:`vae.VideoVAEConfig` ⇒ **参考** VAE ✓（⚠️ **未经训练** ✗ ⇒ 画面是噪声 ✓，
+          验的是**管道** ✓）；
+        * 给 :class:`vae_h3.H3VideoVAEConfig`（**必须带 ``weights``** ✓）⇒ **真** VAE ✓
+          （H3 那份 fp16 权重 ✓，562 个键逐个对上 ✓）⇒ :meth:`decode` 出的是**真画面** ✓。
+
+        ⚠️ 两族的 ``encode`` / ``decode`` 调用点**完全一样** ✓（当初才敢写"换实现即可" ✓）；
+        差别只在**权重从哪来** ✗ 与**报告里怎么说** ✓ ⇒ 报告多两个字段 ``kind`` / ``complete`` ✓：
+        调用方据此才知道这条链路到底是不是真画面 ✓✗（**不许沉默** ✗）。
+        ⚠️ 真 VAE 的**设备另算** ✗：``H3VideoVAEConfig.device`` 说了算 ✓（默认 **cpu** ✓）——
+        它与"主 DiT **19.62 GiB int8 常驻**"抢同一块显存 ✓✗（``loader.residency_plan`` 早说过：
+        两族生命周期**不重叠** ✓ ⇒ 要上卡得先让 DiT 下卡 ✓，那是分时驻留的事 ✓，本方法不替它决定 ✗）。
         """
         self._gate()
+        from . import vae_h3 as vae_h3_mod  # noqa: PLC0415 —— 只有真 VAE 那条路要它 ✓
+
+        if isinstance(config, vae_h3_mod.H3VideoVAEConfig):
+            # ⚠️ **先核后改** ✓（同一套跨来源校验 ✓）：候选不合格 ⇒ 此刻模块一个字没动 ✓
+            self._check_attached_vaes(video=config)
+            # ⚠️ 内部 strict=True ✓：装不满**当场抛** ✗（不返回"半个模型" ✓✗）
+            module = vae_h3_mod.build_h3_video_vae(config)
+            load_report = getattr(module, "loadReport", None)
+            report = config.to_dict()
+            report["kind"] = "h3-real"
+            report["complete"] = bool(getattr(load_report, "complete", False))
+            report["weightDevice"] = str(module.weight_device)
+            report["missing"] = list(getattr(load_report, "missing", []) or [])
+            self._vae = module
+            self._vaeConfig = config
+            self._vaeKind = "h3-real"
+            return report
+
         config = config or vae_mod.VideoVAEConfig()
         # ⚠️ **先核后改** ✗（2026-09-22 ✓）：核不过是**候选配置**的问题 ✓ ⇒ 此刻模块一个字没动 ✓
         #    —— 若改成"先挂上再核" ✗，失败时要么留着坏的 ✓✗、要么把**先前挂好的**那个也清掉 ✓✗。
         self._check_attached_vaes(video=config)
         self._vae = vae_mod.build_vae(config).to(self._device).eval()
         self._vaeConfig = config
-        return config.to_dict()
+        self._vaeKind = "reference-untrained"
+        report = config.to_dict()
+        report["kind"] = "reference-untrained"
+        return report
 
     def attach_audio_vae(self, config: Any = None) -> dict[str, Any]:
         """挂上 :mod:`app.services.engine.audio_vae` 的参考音频 VAE ✓ ⇒ 双流的音频侧能解出波形 ✓。
@@ -1615,7 +2003,10 @@ class TorchBackend:
         self._check_attached_vaes(audio=config)   # ⭐ 同上：**先核后改** ✓（音频那一档 ✓）
         self._audioVae = audio_vae_mod.build_audio_vae(config).to(self._device).eval()
         self._audioVaeConfig = config
-        return config.to_dict()
+        self._audioVaeKind = "reference-untrained"
+        report = config.to_dict()
+        report["kind"] = "reference-untrained"
+        return report
 
     def _check_text_encoder(self, *, candidate: Any = None,
                             raise_on_mismatch: bool = True) -> dict[str, Any] | None:
@@ -1761,10 +2152,22 @@ class TorchBackend:
             frames = self._vae.decode(latents["video"].unsqueeze(0))
             waveform = self._audioVae.decode(latents["audio"].unsqueeze(0))
         sample_rate = int(getattr(self._audioVaeConfig, "sample_rate", 0) or 32000)
+        # ⚠️ ``synthetic`` **按事实算** ✓（2026-10-29 ✓）：视频 VAE 可以是**真权重** ✓、音频那族还只有
+        #    参考实现 ✗ ⇒ 写死 True 会在"真视频 VAE + 假音频"时**骗人** ✗（两者都在场时画面确实是
+        #    噪声 ✓，但理由得说对 ✓ —— 是音频侧拉了后腿 ✓，不是视频没接 ✓）。
+        video_real = self._vaeKind == "h3-real"
+        audio_real = self._audioVaeKind == "h3-real"
         return {
-            "synthetic": True,      # 真张量 ✓ + 两个真 VAE ✓ ⇒ 但**都没训练** ✗ ⇒ 仍是合成 ✓
-            "note": "真 torch 张量 + 两个参考 VAE ✓（视频 / 音频 ✓），但都**未经训练** ✗ "
-                    "⇒ 画面与声音都是噪声 ✓（验的是管道 ✓；真权重到位后换实现 ✓）",
+            "synthetic": not (video_real and audio_real),
+            "note": ("真 torch 张量 + 视频 VAE="
+                     + ("**H3 真权重** ✓" if video_real else "参考（**未经训练** ✗）")
+                     + " / 音频 VAE="
+                     + ("**H3 真权重** ✓" if audio_real else "参考（**未经训练** ✗）")
+                     + (" ⇒ 两族都真 ✓，这是真画面 ✓"
+                        if video_real and audio_real
+                        else " ⇒ 音频侧仍是噪声 ✓（视频侧的接法已换真 ✓）"
+                             if video_real else
+                             " ⇒ 画面与声音都是噪声 ✓（验的是管道 ✓；真权重到位后换实现 ✓）")),
             # ⚠️ 两条流的 batch 处理**刻意不同** ✗✓ —— 各自按**落盘工具的契约**来 ✓：
             #    `media.write_video` 要 **5 维** ``(B,3,T,H,W)`` ✓（与单流 decode 同口径 ✓）
             #    ⇒ 视频**保留**那一维 ✓；`media.write_wav` 要 ``(channels, N)`` ✓ ⇒ 音频**去掉** ✓。
@@ -1779,6 +2182,7 @@ class TorchBackend:
             "shape": list(frames.shape), "dtype": str(frames.dtype), "device": str(frames.device),
             "audioWaveform": waveform[0], "audioShape": list(waveform.shape),
             "sampleRate": sample_rate,
+            "vaeKind": self._vaeKind, "audioVaeKind": self._audioVaeKind,
             "vaeConfig": self._vaeConfig.to_dict() if self._vaeConfig is not None else None,
             "audioVaeConfig": (self._audioVaeConfig.to_dict()
                                if self._audioVaeConfig is not None else None),
@@ -1800,10 +2204,14 @@ class TorchBackend:
             torch = self._torch()
             with torch.no_grad():
                 frames = self._vae.decode(latents)
+            real = self._vaeKind == "h3-real"
             return {
-                "synthetic": True,          # 真张量 ✓ 真 VAE ✓ 但**未训练** ✗ ⇒ 仍是合成 ✓
-                "note": "真 torch 张量 + 参考 VAE ✓，但 VAE **未经训练** ✗ ⇒ 画面是噪声 ✓"
-                        "（验的是管道 ✓；接真权重后这里换成训练好的 VAE ✓）",
+                "synthetic": not real,      # 真张量 ✓ + **真 H3 VAE** ✓ ⇒ 这就是真画面 ✓
+                "note": ("真 torch 张量 + **H3 真 VAE** ✓ ⇒ 这是真画面 ✓（潜变量若是 DiT 出的 ✓ 就是成品 ✓）"
+                         if real else
+                         "真 torch 张量 + 参考 VAE ✓，但 VAE **未经训练** ✗ ⇒ 画面是噪声 ✓"
+                         "（验的是管道 ✓；接真权重后这里换成训练好的 VAE ✓）"),
+                "vaeKind": self._vaeKind,
                 "frames": frames, "frameCount": int(frames.shape[2]),
                 "shape": list(frames.shape), "dtype": str(frames.dtype),
                 "device": str(frames.device), "vaeConfig": self._vaeConfig.to_dict()

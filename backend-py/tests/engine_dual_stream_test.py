@@ -293,6 +293,38 @@ def case_pipeline(root: Path) -> None:
           and Path(with_frame.outputs["audioPath"]).read_bytes() != Path(audio).read_bytes(),
           with_frame.error)
 
+    # ── 尾帧条件（fl2v ✓ 2026-10-29 接线 ✓：与首帧**同一套** ``cond`` 段 ✓，只换下标 ✓）──
+    torch.manual_seed(13)
+    last_png = media_mod.write_image(torch.rand(1, 3, 1, 64, 64) * 2.0 - 1.0,
+                                     root / "last_frame.png", index=0)["path"]
+    planned_frames = int(pipe.build_plan(pipe.GenerationRequest(**REQUEST)).frames)
+    with_last = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "last"),
+                                  "last_frame": last_png}),
+        _h3_backend(root, name="h3_lf"))
+    check("㉜″ ⭐⭐ 双流 + **尾帧** ⇒ 跑通 ✓ 且如实标注 `lastFrameIndex = frames−1` ✓"
+          "（尾帧是``cond`` 段里**最后一帧**那个下标 ✓ —— 记成 0 就成了首帧 ✓✗）",
+          with_last.ok is True
+          and (with_last.conditioning or {}).get("lastImagePath")
+          and int((with_last.conditioning or {}).get("lastFrameIndex") or -1) == planned_frames - 1,
+          (with_last.error, with_last.conditioning, planned_frames))
+    check("㉜‴ ⭐⭐ **反套套**：只给尾帧 vs 什么都不给 ⇒ **mp4 字节必不同** ✓"
+          "（相同 ⇒ 尾帧被静默丢掉 ✗✗ —— 产物末端不像尾帧，而且肉眼根本看不出来 ✓✗）",
+          with_last.ok is True
+          and Path(with_last.outputs["videoPath"]).read_bytes()
+          != Path(outputs["videoPath"]).read_bytes(), with_last.error)
+
+    both_ends = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "both_frames"),
+                                  "first_frame": frame_png, "last_frame": last_png}),
+        _h3_backend(root, name="h3_fl"))
+    check("㉜⁗ ⭐ 首帧 + 尾帧同时给 ⇒ 跑通 ✓ 且**两条都**记进 `conditioning` ✓"
+          "（fl2v 就是这个形态 ✓）",
+          both_ends.ok is True
+          and (both_ends.conditioning or {}).get("imagePath")
+          and (both_ends.conditioning or {}).get("lastImagePath"),
+          (both_ends.error, both_ends.conditioning))
+
     # ── 参考图（H3 的 `ref_img` 段 ✓ 2026-09-20 接线 ✓）──
     with_ref = pipe.run_sync(
         pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "ref"),

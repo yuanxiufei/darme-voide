@@ -55,7 +55,9 @@ from ..services.ai_configs import (
 )
 from ..services.gpu_manager import get_nvidia_smi, gpu_manager
 from ..services.task_logger import log_task_error
-from ..services import ollama_store
+from ..services import ollama_catalog, ollama_store, ollama_video
+from ..services.ollama_client import OllamaClient, OllamaError, normalize_show
+from ..services.ollama_native import capabilities as capability_rules
 from ..services.ollama import (
     LOCAL_RUNTIMES,
     find_ollama_exe,
@@ -551,6 +553,157 @@ async def ollama_delete(request: Request):
             text = resp.text
             return bad_request((text or f"HTTP {resp.status_code}")[:400])
         return success({"ok": True, "deleted": name})
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Ollama 完整集成：能力面 / 目录 / 加载状态 / 复制 / 向量化 / 视频识别
+# ⚠️ 这一段与上面的 ``status|start|pull|delete`` 是**两套实现口径**：
+#    上面那 4 条是早期按 TS 逐行移植（自己拼 httpx、自己判 URL）；
+#    下面这 6 条走 ``services/ollama_client.py``（统一超时/NDJSON/错误体）＋
+#    ``services/ollama_catalog.py``（在线权威 + 离线清单回落）。
+#    新端点一律走新口径，**老 4 条暂不动**：它们被前端既有页面依赖，改口径要单独回归。
+# ---------------------------------------------------------------------------
+
+
+@router.post("/ollama/catalog")
+async def ollama_catalog_report(request: Request):
+    """模型目录：能力面 + 视频可读模型 + 插件清单（连不上服务时**自动回落盘上清单** ✓）。
+
+    body: ``{base_url?, include_details?, include_video_generation?}``
+    """
+    try:
+        body = await _lenient_json(request)
+        base_url = str(body.get("base_url") or "").strip() or None
+        include_details = body.get("include_details")
+        report = await ollama_catalog.inventory(
+            base_url,
+            include_details=True if include_details is None else bool(include_details),
+        )
+        models = report.get("models") or []
+        report["videoReaders"] = ollama_catalog.video_readers(models)
+        report["plugins"] = ollama_catalog.plugin_summary(models)
+        report["videoGeneration"] = (
+            ollama_catalog.video_generation_models()
+            if body.get("include_video_generation")
+            else {"skipped": True}
+        )
+        return success(report)
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/ollama/show")
+async def ollama_show(request: Request):
+    """单个模型详情：能力面 / 详情 / 模板 / 参数 / 投影器（在线为权威口径 ✓）。"""
+    try:
+        body = await _lenient_json(request)
+        base_url = str(body.get("base_url") or "").strip() or None
+        name = str(body.get("name") or body.get("model") or "").strip()
+        if not name:
+            return bad_request("缺少模型名")
+        async with OllamaClient(base_url) as client:
+            payload = await client.show(name)
+        detail = normalize_show(payload)
+        detail["name"] = name
+        detail["capabilityLabel"] = capability_rules.describe(detail["capabilities"])
+        detail["videoReader"] = capability_rules.is_video_reader(detail["capabilities"])
+        return success(detail)
+    except OllamaError as exc:
+        return bad_request(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/ollama/ps")
+async def ollama_ps(request: Request):
+    """**已加载**到显存的模型（``/api/ps``：``expires_at`` / ``size_vram`` 决定要不要卸载 ✓）。"""
+    try:
+        body = await _lenient_json(request)
+        base_url = str(body.get("base_url") or "").strip() or None
+        async with OllamaClient(base_url) as client:
+            loaded = await client.ps()
+        return success({
+            "models": loaded,
+            "count": len(loaded),
+            "totalVram": sum(int(m.get("size_vram") or 0) for m in loaded),
+        })
+    except OllamaError as exc:
+        return bad_request(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/ollama/copy")
+async def ollama_copy(request: Request):
+    """复制模型（改参数/加 adapter 前先留一份原样的，是 Ollama 的常规做法 ✓）。"""
+    try:
+        body = await _lenient_json(request)
+        base_url = str(body.get("base_url") or "").strip() or None
+        source = str(body.get("source") or "").strip()
+        destination = str(body.get("destination") or "").strip()
+        if not source or not destination:
+            return bad_request("缺少 source / destination")
+        async with OllamaClient(base_url) as client:
+            await client.copy(source, destination)
+        return success({"ok": True, "source": source, "destination": destination})
+    except OllamaError as exc:
+        return bad_request(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/ollama/embed")
+async def ollama_embed(request: Request):
+    """向量化（批量）。⚠️ 模型必须具备 ``embedding`` 能力，否则先给一句人话错误 ✓。"""
+    try:
+        body = await _lenient_json(request)
+        base_url = str(body.get("base_url") or "").strip() or None
+        name = str(body.get("name") or body.get("model") or "").strip()
+        raw_input = body.get("input")
+        if not name:
+            return bad_request("缺少模型名")
+        if not raw_input:
+            return bad_request("缺少 input")
+        async with OllamaClient(base_url) as client:
+            payload = await client.embed(name, raw_input)
+        vectors = payload.get("embeddings") or []
+        return success({
+            "model": name,
+            "count": len(vectors),
+            "dimensions": len(vectors[0]) if vectors and isinstance(vectors[0], list) else 0,
+            "embeddings": vectors,
+        })
+    except OllamaError as exc:
+        return bad_request(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/ollama/video/analyze")
+async def ollama_video_analyze(request: Request):
+    """**视频识别**：抽帧 → 视觉模型 → 结构化描述（详见 ``services/ollama_video.py`` 抬头 ✓）。
+
+    body: ``{path | video_url, model?, frames?, prompt?, base_url?}``
+    """
+    try:
+        body = await _lenient_json(request)
+        video = str(body.get("path") or body.get("video_url") or "").strip()
+        if not video and not body.get("images"):
+            return bad_request("缺少 path（视频路径）或 images（已抽好的帧）")
+        frames = int(body.get("frames") or 0) or ollama_video.DEFAULT_FRAMES
+        result = await ollama_video.analyze_video(
+            video,
+            model=str(body.get("model") or "").strip() or None,
+            frames=max(1, min(frames, 16)),      # 上限 16 帧：再多就只是烧上下文（见模块抬头 ✓）
+            prompt=str(body.get("prompt") or "").strip() or None,
+            base_url=str(body.get("base_url") or "").strip() or None,
+            precomputed_images=body.get("images"),
+        )
+        return success(result)
+    except FileNotFoundError as exc:
+        return bad_request(str(exc))
     except Exception as exc:  # noqa: BLE001
         return bad_request(str(exc))
 

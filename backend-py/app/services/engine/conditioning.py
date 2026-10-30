@@ -190,11 +190,23 @@ def audio_declaration(refs: Sequence[AudioReference], *,
                               ("detailed_description", details)))
 
 
-def video_declaration(count: int, *, header: str | None = VIDEO_BLOCK_HEADER) -> str:
+def video_declaration(count: int, *, soundtracks: int = 0,
+                      header: str | None = VIDEO_BLOCK_HEADER) -> str:
     """参考视频 → **结构化声明区块** ✓：运镜/动作/走位/节奏 1:1 复刻 ✓ + 主体**全部替换**为参考图主体 ✓。
 
     ⚠️ 官方关系是 ``reference`` ✓（动作跟视频、外观跟参考图 ✓）；⚠️ 路数上限 :data:`MAX_REFERENCE_VIDEOS` ✓，
     单路时长（2~15 s ✓）本模块看不到 ✗ ⇒ 由调用方在提交前核 ✓。
+
+    ⭐ ``soundtracks``：**带音轨的参考视频路数** ✓（从第 1 路数起 ✓，即 ``<Video 1..S>`` 各有音轨 ✓）。
+
+    ⚠️⚠️ 为什么声轨要在这块里声明、而且要**排在它那段视频前面** ✗✗（2026-10-27 照后端口径补 ✓）：
+    ``nodes_minimax_h3.py`` 的 ``MiniMaxH3ReferenceToVideo.execute`` 按这个顺序拼 tokenizer 输入 ——
+    每路视频**先** ``ref_items.append({"type": "audio"})``、**再** append 视频本身 ✓，源码注释原文
+    「the soundtrack gets its own ``<Audio j>`` label, emitted before ``<Video k>``」✓；
+    而独立音频 ``ref_audios`` 排在**全部视频之后** ✓。
+    ⇒ ① 声轨占掉的是 ``<Audio j>`` 序列的**前面几位** ✓✗（独立音频的编号必须从 ``S+1`` 起 ✓，
+    调用方负责 ✓）；② 声轨自己**必须**声明 ✓ —— 只把帧串接进去、不声明它的音轨 ⇒ 模型不知道
+    那条音轨存在 ✓✗（与音频那条同形状的静默错 ✓）。
     """
     total = int(count)
     if total < 1:
@@ -203,15 +215,32 @@ def video_declaration(count: int, *, header: str | None = VIDEO_BLOCK_HEADER) ->
         raise ConditioningError(
             f"参考视频 {total} 路超过上限 {MAX_REFERENCE_VIDEOS} 路 ✗ ⇒ H3 原生只接 3 路 ✓"
             f"（多出来的会被忽略 ✓✗）")
-    tags = [f"<Video {index}>" for index in range(1, total + 1)]
-    joined = " and ".join(tags)
+    sound = int(soundtracks or 0)
+    if sound < 0 or sound > total:
+        raise ConditioningError(
+            f"声轨路数 {soundtracks} 超出范围 ✗ ⇒ 只能是 0..{total} ✓（声轨是**视频**的音轨 ✓，"
+            f"没有那种视频就没有那种声轨 ✓）")
+    definitions: list[str] = []
+    retentions: list[str] = []
+    for index in range(1, total + 1):
+        video = f"<Video {index}>"
+        if index <= sound:
+            audio = f"<Audio {index}>"
+            # ⚠️ 声轨那行**必须紧跟它自己那段视频之前** ✓（后端的呈现顺序 ✓）
+            definitions.append(f"{audio} is the soundtrack of {video}.")
+            retentions.append(f"{audio}: reference - {audio} is referenced as the soundtrack of "
+                              f"{video}; the target audio follows its music, ambience and voice "
+                              f"character without copying the original signal.")
+        definitions.append(f"{video} is a source video.")
+        retentions.append(
+            f"{video}: reference - the camera trajectory, subject motion, blocking and rhythm of "
+            f"{video} are recreated 1:1, and every subject in {video} is replaced by the subjects "
+            f"from the reference images.")
+    definitions.append("The reference images supply the subjects' visual appearance (look, style, scene).")
+    joined = " and ".join(f"<Video {index}>" for index in range(1, total + 1))
     return _declared(header, (
-        ("subject_definitions", [f"{tag} is a source video." for tag in tags]
-         + ["The reference images supply the subjects' visual appearance (look, style, scene)."]),
-        ("retention_analysis", [
-            f"{tag}: reference - the camera trajectory, subject motion, blocking and rhythm of "
-            f"{tag} are recreated 1:1, and every subject in {tag} is replaced by the subjects "
-            f"from the reference images." for tag in tags]),
+        ("subject_definitions", definitions),
+        ("retention_analysis", retentions),
         ("detailed_description", [
             f"One continuous smooth take following the camera path and pacing of {joined}; all "
             f"appearances come from the reference images and the prompt. No cuts, no flicker, "
@@ -261,11 +290,16 @@ def declaration_plan(prompt: str, *, audio_refs: Sequence[AudioReference] = (),
 
 
 def apply_declarations(prompt: str, *, audio_refs: Sequence[AudioReference] = (),
-                       video_count: int = 0, audio_header: str | None = AUDIO_BLOCK_HEADER,
+                       video_count: int = 0, video_soundtracks: int = 0,
+                       audio_header: str | None = AUDIO_BLOCK_HEADER,
                        video_header: str | None = VIDEO_BLOCK_HEADER) -> tuple[str, DeclarationPlan]:
     """把该追加的声明**追加**到提示词尾部 ✓ ⇒ ``(最终提示词, 计划 ✓)``。
 
     ⚠️ 只追加 ✓（不重排、不改写原文 ✓）；⚠️ 判据见 :func:`declaration_plan` ✓（标签不算声明 ✗）。
+
+    ⚠️ ``video_soundtracks``（带音轨的参考视频路数 ✓）只影响**视频块内部**的 ``<Audio j>`` 声明 ✓ ——
+    独立音频的编号偏移由调用方在 ``audio_refs`` 里给好 ✓✗（本函数不替它算 ✓：那是「有几路素材」的事实 ✓，
+    不是渲染细节 ✓）。
     """
     plan = declaration_plan(prompt, audio_refs=audio_refs, video_count=video_count)
     text = str(prompt or "").rstrip()
@@ -273,7 +307,8 @@ def apply_declarations(prompt: str, *, audio_refs: Sequence[AudioReference] = ()
     if plan.audio_needed:
         blocks.append(audio_declaration(audio_refs, header=audio_header))
     if plan.video_needed:
-        blocks.append(video_declaration(video_count, header=video_header))
+        blocks.append(video_declaration(video_count, soundtracks=video_soundtracks,
+                                        header=video_header))
     if blocks:
         text = text + "\n\n" + "\n\n".join(blocks)
     return text, plan

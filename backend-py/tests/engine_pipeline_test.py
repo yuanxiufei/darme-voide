@@ -24,6 +24,7 @@ BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
+from app.services.engine import keyframes as keyframes_mod  # noqa: E402
 from app.services.engine import pipeline as pipe  # noqa: E402
 from app.services.engine import upscale as upscale_mod  # noqa: E402
 from app.services.engine.dryrun import DryRunBackend, TinyTensor  # noqa: E402
@@ -369,6 +370,31 @@ def case_conditioning() -> None:
           and "未实现" in str((unsupported.error or {}).get("message")),
           unsupported.error)
 
+    # ── 关键帧**下标规划**（纯函数 ✓ 无 torch 也能验 ✓）──
+    check("⑬⁗ ⭐ 首帧 ⇒ 下标 **0**；尾帧 ⇒ 下标 **frames−1** ✓（同一套 `cond` 段 ✓ 只换下标 ✓）",
+          keyframes_mod.plan_keyframes(21, "首.png", None) == [(0, "首.png")]
+          and keyframes_mod.plan_keyframes(21, None, "尾.png") == [(20, "尾.png")]
+          and keyframes_mod.plan_keyframes(21, "首.png", "尾.png") == [(0, "首.png"), (20, "尾.png")],
+          keyframes_mod.plan_keyframes(21, "首.png", "尾.png"))
+    check("⑬⁗′ 两个都不给 ⇒ 空（纯文本情形 ✓，不算错 ✓）",
+          keyframes_mod.plan_keyframes(21, None, None) == [])
+    try:
+        keyframes_mod.plan_keyframes(1, None, "尾.png")
+    except keyframes_mod.KeyframePlanError as error:
+        one_frame_error = str(error)
+    else:
+        one_frame_error = ""
+    check("⑬⁗″ ⭐ frames=1 给尾帧 ⇒ **报错**（首尾同一位置 ✓✗ —— 悄悄退化成首帧就是丢尾帧 ✗）",
+          "2 帧" in one_frame_error, one_frame_error)
+
+    last_unsupported = pipe.run_sync(
+        req(steps=4, seconds=2.5, temporal_compression=4, last_frame="尾帧.png"), DryRunBackend())
+    check("⑬''' ⭐⭐ 单流后端给**尾帧** ⇒ **明确失败**（stage=condition、文案点名尾帧 ✓）"
+          "—— 单流的掩码只能混第 0 潜帧 ✓ ⇒ 硬做会把**尾帧**放到**开头** ✓✗，比报错难查得多 ✗",
+          last_unsupported.ok is False
+          and (last_unsupported.error or {}).get("stage") == "condition"
+          and "尾帧" in str((last_unsupported.error or {}).get("message")),
+          last_unsupported.error)
     check("⑭'' 没给压缩比就要求首帧 ⇒ 也归到 condition 阶段失败（而不是 500 ✗）",
           (pipe.run_sync(req(steps=4, seconds=2.5, first_frame="首帧.png"),
                          DryRunBackend()).error or {}).get("stage") == "condition", "")
@@ -436,6 +462,20 @@ class _FailingAtStep(DryRunBackend):
         return super().denoise(latents, sigma, condition, request)
 
 
+class OutOfMemoryError(Exception):  # noqa: A001 —— 刻意与 torch 的类名一致 ✓（见 docstring ✓）
+    """模拟 ``torch.cuda.OutOfMemoryError`` ✓（**类名必须一致** ✓ —— `_fail` 是按类名判的 ✓✗）。
+
+    ⚠️ 不用真 torch 类 ✗：`pipeline` 是**零依赖**的 ✓（torch 没装也要能跑这条 ✓），
+    而判据要验的是「这个类名会不会被单独点名」✓，不是 torch 的行为 ✓。
+    ⚠️ 它遮蔽了 3.11+ 的内建同名异常 ✓ —— 本模块不用那个 ✓（内建 ``MemoryError`` 才是常用的 ✓）。
+    """
+
+
+class _VramExhausted(DryRunBackend):
+    def denoise(self, latents, sigma, condition, request):  # noqa: ANN001
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+
 def case_error_attribution() -> None:
     failed = pipe.run_sync(req(), _FailingDecode())
     check("㉚ decode 抛错 ⇒ 归因到「解码」阶段 + 保留原类型（能据此排障 ✓）",
@@ -457,6 +497,31 @@ def case_error_attribution() -> None:
     check("㉞ plan 阶段就失败 ⇒ **没有**后续阶段耗时（根本没开始跑 ✓）",
           (bad_plan.error or {}).get("stage") == "plan"
           and set(bad_plan.stageMs) == {"plan"}, (bad_plan.error, bad_plan.stageMs))
+
+    # ⭐ OOM **必须点名可行动的路** ✗✗（2026-10-29 加 ✓）
+    #    ⚠️ 原生报错是 ``CUDA out of memory. Tried to allocate 2.00 GiB`` ✓ —— 它只说明分配失败 ✓，
+    #    不会告诉你「720×1280 只有 `int8_offload` 这一档装得下」✓✗，而本仓**自己知道**那句话 ✓
+    #    （三处实测写在 `h3_form.place_module` 与 `TorchBackend.__init__` 的注释里 ✓）。
+    #    这是本仓唯一一个「答案在注释里、用户看不到」的失败 ✓✗ ⇒ 必须进 message + 结构化字段 ✓。
+    oom = pipe.run_sync(req(steps=4), _VramExhausted())
+    oom_error = oom.error or {}
+    check("㉞′ ⭐ OOM ⇒ 错误里**点名 `int8Offload`** ✓✗（老代码只有英文那句 ⇒ "
+          "用户照着排障只能瞎试：换卡 / 降分辨率都是猜 ✓✗）",
+          "int8Offload" in str(oom_error.get("message")),
+          str(oom_error.get("message"))[:160])
+    check("㉞″ ⭐ OOM ⇒ 结构化字段 ``vramExhausted=True`` ✓（前端要能**直接判**，"
+          "不许解析中文 ✓ —— 与「取消」那条同一个口径 ✓）",
+          oom_error.get("vramExhausted") is True
+          and oom_error.get("type") == "OutOfMemoryError", oom_error)
+    check("㉞‴ 三条路都写全了（① 开 offload 省 17.94 GiB ／ ② 降分辨率帧数 ／ ③ 换大卡 ✓）"
+          "且说明「已开还爆就只剩 ②③」✓（否则会让人反复去开一个已经开着的开关 ✗）",
+          all(word in str(oom_error.get("message"))
+              for word in ("17.94 GiB", "megapixels", "更大的卡", "已经开着")),
+          str(oom_error.get("message"))[:400])
+    check("㉞⁗ ⚠️ **非** OOM 的失败不许被当成显存问题 ✗✗（否则真因会被这三条建议盖住 ✓✗）",
+          "vramExhausted" not in (failed.error or {})
+          and "int8Offload" not in str((failed.error or {}).get("message")),
+          failed.error)
 
 
 # ══════════════════════════════════════════════════════════════════════════

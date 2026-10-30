@@ -117,6 +117,28 @@ SPECS: dict[str, dict[str, Any]] = {
         "strength_clip": ["FLOAT", {"default": 1.0}],
         "model": ["MODEL", {}], "clip": ["CLIP", {}]}},
         "output": ["MODEL", "CLIP"]},
+    # ⭐ 读视频的加载器 ✓ —— **不在任何模板图里**（R2V 的 ``ref_videos`` 是空插座 ✓）⇒ 和 ``LoraLoader``
+    #    一样得单独并进注册表 ✓✗，否则 ``_video_loader`` 探不到它 ⇒ 参考视频那条路**在本套里永远验不到** ✓✗
+    #    （正是本仓反复记的那类假覆盖 ✓）。
+    #    ⚠️⚠️ 形状照 **`reference/comfy-org` 的真身** ✓✗（2026-10-27 改 ✓）：核心 ``LoadVideo`` 的输出
+    #    **只有 ``VIDEO``** ★（``comfy_extras/nodes_video.py``：``inputs=[io.Combo.Input("file", ...,
+    #    upload=io.UploadType.video)]``、``outputs=[io.Video.Output()]`` ✓）——
+    #    旧 stub 写成 ``[IMAGE, AUDIO]`` 是**假的**：它让「一拍接两处」那条用例在**真机上根本跑不通**
+    #    的形状上通过 ✓✗（真机得两跳 ✓，见下一条 ✓）。
+    "LoadVideo": {"input": {"required": {
+        "file": ["COMBO", {"options": ["clip.mp4"]}],
+        "upload": ["COMBO", {"options": ["image"]}]}},
+        "output": ["VIDEO"]},
+    # ⭐ 第二跳 ✓：``VIDEO`` → 帧串 + 音轨 ✓（核心 ``GetVideoComponents`` ✓，槽位按真身的
+    #    ``outputs=[images(IMAGE), audio(AUDIO), fps, bit_depth, color_space]`` ✓ 排 ✓）。
+    "GetVideoComponents": {"input": {"required": {"video": ["VIDEO", {}]}},
+                           "output": ["IMAGE", "AUDIO", "FLOAT", "COMBO", "COMBO"]},
+    # ⭐ 生态形状（一跳就够 ✓）：``VHS_LoadVideo`` 自带 ``IMAGE``/``AUDIO`` ✓ —— 留一份，
+    #    才验得到「不是每个引擎都需要两跳」✓（也护住「优先用一跳」那条 ✓）。
+    "VHS_LoadVideo": {"input": {"required": {
+        "video": ["COMBO", {"options": ["clip.mp4"]}],
+        "force_rate": ["INT", {"default": 0}]}},
+        "output": ["IMAGE", "AUDIO"]},
 }
 
 
@@ -274,8 +296,32 @@ def find_node(prompt: dict[str, Any], class_type: str, title_contains: str = "")
     return {}
 
 
+def _injected_prompt(task: dict[str, Any], prompt: dict[str, Any]) -> str:
+    """读**这一单真正提交上去**的那段提示词 ✓（按服务端回报的 ``prompt_node`` ✓，不猜节点类 ✗）。
+
+    ⚠️ 别照旧写 ``find_node(..., "MiniMaxH3ImageToVideo")`` ✗✗：2026-10-27 起「只给参考音频」也会换
+    R2V 模板 ✓ ⇒ 主节点变成 ``MiniMaxH3ReferenceToVideo`` ✓、提示词落在它上游那串里 ✓
+    ⇒ 按老节点类找恒取到**空串** ✓✗，判据就被「模板切换」打成假红 ✓（本轮实测踩到 ✓）。
+    """
+    node_id, _, field = str(task.get("prompt_node") or "").partition(".")
+    node = prompt.get(node_id) if node_id else None
+    if not isinstance(node, dict) or not field:
+        return ""
+    return str((node.get("inputs") or {}).get(field) or "")
+
+
 def png_data_url(payload: bytes = b"\x89PNG-stub-frame") -> str:
     return "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
+
+
+def audio_data_url(payload: bytes = b"RIFF-stub-audio") -> str:
+    """一段 ``data:`` 音频地址 ✓ —— 它**没有后缀** ✓，正好用来钉「扩展名回落 ``.wav``」那条 ✓。"""
+    return "data:audio/wav;base64," + base64.b64encode(payload).decode("ascii")
+
+
+def video_data_url(payload: bytes = b"\x00\x00\x00\x18ftypmp42-stub-video") -> str:
+    """一段 ``data:`` 视频地址 ✓（同样**没有后缀** ✓ ⇒ 钉「回落 ``.mp4``」那条 ✓）。"""
+    return "data:video/mp4;base64," + base64.b64encode(payload).decode("ascii")
 
 
 def main() -> int:  # noqa: C901
@@ -286,10 +332,38 @@ def main() -> int:  # noqa: C901
     r2v = graph_of("video_minimax_h3_r2v.json")
     # ⚠️ ``LoraLoader`` **不在模板图里**（是加速链要现挂上去的 ✓）⇒ 得单独并进注册表 ✓
     catalog = {**class_specs(t2v), **class_specs(i2v), **class_specs(off_t2v),
-               **class_specs(off_i2v), **class_specs(r2v), "LoraLoader": SPECS["LoraLoader"]}
+               **class_specs(off_i2v), **class_specs(r2v), "LoraLoader": SPECS["LoraLoader"],
+               # 读视频的加载器不在模板里 ⇒ 同上，单独并进注册表 ✓（否则参考视频整条路验不到 ✓✗）
+               # 三个都得在：``LoadVideo``（核心，两跳 ✓）、``GetVideoComponents``（第二跳 ✓）、
+               # ``VHS_LoadVideo``（生态，一跳 ✓）
+               "LoadVideo": SPECS["LoadVideo"],
+               "GetVideoComponents": SPECS["GetVideoComponents"],
+               "VHS_LoadVideo": SPECS["VHS_LoadVideo"]}
     base, server, thread = start_server(build_stub(catalog))
     wrapper = load_wrapper(base)
     client = TestClient(wrapper.app)
+
+    def probe_env(*candidates: str):
+        """临时换「读视频节点候选表」并清掉探测缓存 ✓ ⇒ 返回复原函数 ✓。
+
+        ⚠️ 两处缓存都要清 ✓✗：``_VIDEO_LOADER_CACHE``（加载器 ✓）与 ``_VIDEO_SPLITTER_CACHE``
+        （拆解节点 ✓）—— 只清一处 ⇒ 用例之间互相污染 ✓（假红/假绿都出现过 ✓）。
+        """
+        old = wrapper.REF_VIDEO_LOADERS
+
+        def reset() -> None:
+            wrapper._VIDEO_LOADER_CACHE.clear()
+            wrapper._VIDEO_SPLITTER_CACHE.clear()
+
+        wrapper.REF_VIDEO_LOADERS = tuple(candidates)
+        reset()
+
+        def restore() -> None:
+            wrapper.REF_VIDEO_LOADERS = old
+            reset()
+
+        return restore
+
     try:
         # ── ① T2V：无首帧 ⇒ T2V 模板；注入要落在正确节点上 ✓ ──
         created = client.post("/v1/video_generation", json={
@@ -378,13 +452,16 @@ def main() -> int:  # noqa: C901
         created_c = client.post("/v1/video_generation", json={
             "prompt": "雨夜街头，主角开口 @音1 说出台词",
             "duration": 3, "aspect_ratio": "16:9",
-            "reference_audio": ["https://cdn.test/voice.mp3"],
+            # ⚠️ 用 ``data:`` 地址 ✓ 不用假的 https 域名 ✗：那个域名解析不了 ⇒ 参考音频下载失败 ⇒
+            #    整单失败 ✓✗（而这三条验的是**契约层**，不是下载 ✓）；data URL 才会真的走到上传 ✓。
+            "reference_audio": [audio_data_url()],
         }).json()
         task_c = wait_terminal(client, created_c["task_id"])
-        prompt_c = str(find_node(SEEN["prompts"][-1], "MiniMaxH3ImageToVideo")
-                       .get("inputs", {}).get("prompt") or "")
+        prompt_c = _injected_prompt(task_c, SEEN["prompts"][-1])
         check("⑰ ⭐ 文本写法 ``@音1`` ⇒ ``<Audio 1>`` 标签（提交前转换 ✓）",
-              "<Audio 1>" in prompt_c and "@音1" not in prompt_c, prompt_c[:120])
+              task_c.get("status") == "succeeded"
+              and "<Audio 1>" in prompt_c and "@音1" not in prompt_c,
+              (task_c.get("status"), task_c.get("error_msg"), prompt_c[:120]))
         check("⑰′ ⭐⭐ 参考音频的**结构化声明被追加** ✗✗（只写标签**不算声明** ✓ ⇒ 不追加等于参考白给 ✓✗）",
               "[reference generation + audio reference]" in prompt_c
               and "retention_analysis" in prompt_c and "reference -" in prompt_c, prompt_c[-200:])
@@ -395,9 +472,8 @@ def main() -> int:  # noqa: C901
         created_n = client.post("/v1/video_generation", json={
             "prompt": "没有参考音频的段", "duration": 3, "aspect_ratio": "16:9",
         }).json()
-        wait_terminal(client, created_n["task_id"])
-        prompt_n = str(find_node(SEEN["prompts"][-1], "MiniMaxH3ImageToVideo")
-                       .get("inputs", {}).get("prompt") or "")
+        task_n = wait_terminal(client, created_n["task_id"])
+        prompt_n = _injected_prompt(task_n, SEEN["prompts"][-1])
         check("⑰‴ 没有参考音频的段 ⇒ 提示词**一字不改** ✓（不往提示词里塞噪声 ✗）",
               prompt_n == "没有参考音频的段", prompt_n)
 
@@ -664,6 +740,416 @@ def main() -> int:  # noqa: C901
               all(item["runnable_locally"] is False and item["family"] == "official-cloud-api"
                   for item in listed["templates"] if item["name"].startswith("api_")),
               [item["name"] for item in listed["templates"] if item["name"].startswith("api_")])
+        # ⚠️ 音频槽位也必须在清单里 ✓✗：调用方拿这份清单挑模板 ✓，只报图槽位 ⇒ 它会挑一个
+        #    「有语音样本、模板却没有音频槽位」的组合 ✓✗（正是这轮要修的病 ✓）。
+        check("㉕⁵ 清单里连**音频槽位**一起报 ✓（R2V：1 格空插座 ✓；自家模板：空 ✓；上限 3 ✓）",
+              by_name["video_minimax_h3_r2v.json"]["reference_audio_slots"]
+              == ["ref_audios.ref_audio_0"]
+              and by_name["video_minimax_h3_r2v.json"]["reference_audio_nodes"] == [None]
+              and by_name["MiniMax_H3_Fast_T2V.json"]["reference_audio_slots"] == []
+              and listed["reference_audio_limit"] == 3,
+              {k: (v["reference_audio_slots"], v["reference_audio_nodes"])
+               for k, v in by_name.items()})
+        check("㉕⁶ 清单里连**参考视频**槽位一起报 ✓（R2V：帧串 1 格 + 音轨 1 格，都是空插座 ✓）",
+              by_name["video_minimax_h3_r2v.json"]["reference_video_slots"]
+              == ["ref_videos.ref_video_0"]
+              and by_name["video_minimax_h3_r2v.json"]["reference_video_nodes"] == [None]
+              and by_name["video_minimax_h3_r2v.json"]["reference_video_audio_slots"]
+              == ["ref_video_audios.ref_video_audio_0"]
+              and by_name["MiniMax_H3_Fast_T2V.json"]["reference_video_slots"] == []
+              and listed["reference_video_limit"] == 3
+              # ⚠️ 候选类名也公开 ✓✗：调用方要能判断「这台机器到底能不能读视频」✓（探测是运行时的 ✓）
+              and listed["reference_video_loader_candidates"] == ["LoadVideo", "VHS_LoadVideo"],
+              {k: (v["reference_video_slots"], v["reference_video_audio_slots"])
+               for k, v in by_name.items()})
+
+        # ── ⭐⭐ 参考**音频**（Ref2VA 的音色参考）：2026-10-27 接通 ✓ ──
+        #    现场 ✗：盘上 R2V 模板**本来就声明了** ``ref_audios.ref_audio_0``（空插座 ✓），
+        #    代码里却有一句「本地模板还没接上 ⇒ 被忽略」✓✗ ⇒ 声线样本一路走到这里被丢掉 ✓
+        #    （产品侧 ``routers/videos.py`` 一直在对话镜头上带它 ✓）。
+        uploads_before13 = len(SEEN["uploads"])
+        created13 = client.post("/v1/video_generation", json={
+            "prompt": "照着这个音色说话" + "。" * 200, "duration": 4,
+            "referenceAudioUrls": [audio_data_url()],
+        }).json()
+        task13 = wait_terminal(client, created13["task_id"])
+        prompt13 = SEEN["prompts"][-1]
+        audio_nodes13 = [nid for nid, node in prompt13.items()
+                         if isinstance(node, dict) and node.get("class_type") == "LoadAudio"]
+        wired13 = (prompt13.get(str(r2v_plan["main_id"])) or {}).get("inputs", {}).get(
+            "ref_audios.ref_audio_0")
+        check("㉙ ⭐ 参考音频 ⇒ 走 R2V、**真上传**并落到 ``ref_audios.ref_audio_0``（现建 LoadAudio ✓）",
+              task13.get("status") == "succeeded"
+              and task13.get("workflow") == "video_minimax_h3_r2v.json"
+              and [u["name"] for u in SEEN["uploads"][uploads_before13:]] == ["ref_audio_1.wav"]
+              and len(audio_nodes13) == 1
+              and wired13 == [audio_nodes13[0], 0]
+              and prompt13[audio_nodes13[0]]["inputs"].get("audio") == "ref_audio_1.wav"
+              and task13.get("reference_audios") == 1,
+              (task13.get("status"), task13.get("workflow"), task13.get("error_msg"),
+               SEEN["uploads"][uploads_before13:], wired13, audio_nodes13,
+               task13.get("reference_audios")))
+        # ⚠️ 契约层那条「声明必须追加」对音频同样成立 ✓✗：模板只有 1 格 ⇒ 2 路只落 1 路 ✓
+        #    ⇒ 提示词里**不许出现** ``<Audio 2>`` ✓（按请求 2 路声明 = 声明了一段不存在的音色 ✗）。
+        #    ⚠️ 判据别写成「``<Audio`` 只出现 1 次」✗✗ —— 声明区块自己就会写 3~4 次 ``<Audio 1>`` ✓
+        #    （``cond.audio_declaration`` 三行协议键 ✓）⇒ 数总次数会**因为声明写得完整而红** ✓✗
+        #    （判据自己错，本轮实测踩到 ✓）。要钉的是「编号**不越界**」✓。
+        uploads_before14 = len(SEEN["uploads"])
+        created14 = client.post("/v1/video_generation", json={
+            "prompt": "两路声线只要一个" + "。" * 200, "duration": 4,
+            "referenceAudioUrls": [audio_data_url(b"a"), audio_data_url(b"b")],
+        }).json()
+        task14 = wait_terminal(client, created14["task_id"])
+        text14 = _injected_prompt(task14, SEEN["prompts"][-1])
+        check("㉙′ 模板只有 1 格 ⇒ 2 路音频只落 1 路、只声明 ``<Audio 1>``（不虚报 ``<Audio 2>``）、"
+              "**多余那路一个都不上传**、并**响亮告警**",
+              task14.get("status") == "succeeded"
+              and task14.get("reference_audios") == 1
+              and [u["name"] for u in SEEN["uploads"][uploads_before14:]] == ["ref_audio_1.wav"]
+              and "<Audio 2>" not in text14
+              and "<Audio 1>: reference -" in text14
+              and any("参考音频只落地了 1 路" in str(w) for w in task14.get("warnings") or []),
+              (task14.get("reference_audios"), SEEN["uploads"][uploads_before14:],
+               text14.count("<Audio"), task14.get("warnings")))
+        # ⚠️ 只有音频、一张图都没有 ⇒ **也算参考素材** ✓✗：旧写法只数图 ⇒ 这种请求被塞进 T2V 模板
+        #    ⇒ 主节点连 ``ref_audios.*`` 都没有 ⇒ 声线样本静默丢掉 ✓✗。
+        created15 = client.post("/v1/video_generation", json={
+            "prompt": "只有声线样本，没有图" + "。" * 200, "duration": 4,
+            "reference_audio": [audio_data_url()],
+        }).json()
+        task15 = wait_terminal(client, created15["task_id"])
+        check("㉙″ 只给音频不给图 ⇒ 也走 R2V ✓（旧写法会选 T2V ⇒ 音频槽位一个都没有 ✗）",
+              task15.get("status") == "succeeded"
+              and task15.get("workflow") == "video_minimax_h3_r2v.json"
+              and task15.get("reference_audios") == 1,
+              (task15.get("status"), task15.get("workflow"), task15.get("reference_audios")))
+        uploads_before16 = len(SEEN["uploads"])
+        created16 = client.post("/v1/video_generation", json={
+            "prompt": "硬选没有音频槽位的模板" + "。" * 200, "duration": 3,
+            "template": "MiniMax_H3_Fast_T2V.json",
+            "referenceAudioUrls": [audio_data_url()],
+        }).json()
+        task16 = wait_terminal(client, created16["task_id"])
+        check("㉚ 模板没有音频槽位 ⇒ 音频**一个都不上传** ✓ 且告警明说「没有参考音频槽位」✗",
+              task16.get("status") == "succeeded"
+              and len(SEEN["uploads"]) == uploads_before16
+              and task16.get("reference_audios") == 0
+              and any("没有参考音频槽位" in str(w) for w in task16.get("warnings") or []),
+              (SEEN["uploads"][uploads_before16:], task16.get("reference_audios"),
+               task16.get("warnings")))
+        # ⚠️ 扩展名不是装饰 ✗：``LoadAudio`` 的 ``audio`` 是 COMBO ✓，选项按 mimetypes 现算 ✓
+        #    ⇒ 存成 ``.bin`` 就是「上传成功、节点里选不出来」⇒ 提交 400 ✓✗。判据在这里钉死 ✓。
+        names31 = (wrapper._audio_filename(0, "https://x/a.mp3?token=1"),
+                   wrapper._audio_filename(1, audio_data_url()),
+                   wrapper._audio_filename(2, "https://x/a.bin"))
+        check("㉛ 上传名后缀按 mimetypes 判 ✓（.mp3 保留 ✓；无后缀/非音频回落 .wav ✓）",
+              names31 == ("ref_audio_1.mp3", "ref_audio_2.wav", "ref_audio_3.wav"), names31)
+
+        # ── ⭐⭐ 参考**视频**（Ref2VA 的第三条素材路）：2026-10-27 接通 ✓ ──
+        #    ⚠️ 它与图/音**结构不同** ✓✗，而且是**两跳** ✓✗（2026-10-27 照 ``reference/comfy-org``
+        #    的真身改 ✓）：端口类型是 ``IMAGE``（=一串帧 ✓）⇒ 上游不是 ``LoadImage`` ✗；
+        #    而核心 ``LoadVideo`` 只吐 **``VIDEO``** ✗ ⇒ 中间必须再来一个 ``GetVideoComponents``
+        #    （``video``(VIDEO) → ``images``(IMAGE) / ``audio``(AUDIO) ✓）。两个类**都不在模板里**
+        #    （空插座 ✓）⇒ 由 ``_video_loader`` 问 ``/object_info`` 现挑 ✓、现建 ✓。
+        #    ⚠️ 帧串与音轨**不同源** ✗✗：都从**拆解节点**取 ✓ —— 照加载器的槽接 ⇒ 给主节点的
+        #    ``IMAGE`` 口接一条 ``VIDEO`` 线 ✓✗（提交时类型不符 ✓，而错看在 ComfyUI 侧 ✓）。
+        main_id = str(r2v_plan["main_id"])
+        uploads_before32 = len(SEEN["uploads"])
+        created32 = client.post("/v1/video_generation", json={
+            "prompt": "照着这段运镜来" + "。" * 200, "duration": 4,
+            "referenceVideoUrls": [video_data_url()],
+        }).json()
+        task32 = wait_terminal(client, created32["task_id"])
+        prompt32 = SEEN["prompts"][-1]
+        video_nodes32 = [nid for nid, node in prompt32.items()
+                         if isinstance(node, dict) and node.get("class_type") == "LoadVideo"]
+        split_nodes32 = [nid for nid, node in prompt32.items()
+                         if isinstance(node, dict) and node.get("class_type") == "GetVideoComponents"]
+        inputs32 = (prompt32.get(main_id) or {}).get("inputs") or {}
+        text32 = _injected_prompt(task32, prompt32)
+        check("㉜ ⭐ 参考视频 ⇒ 走 R2V、**真上传**、**两跳**：LoadVideo(VIDEO) → "
+              "GetVideoComponents(IMAGE/AUDIO)，帧串与音轨都从**拆解节点**取 ✓（不是从加载器 ✗）",
+              task32.get("status") == "succeeded"
+              and task32.get("workflow") == "video_minimax_h3_r2v.json"
+              and [u["name"] for u in SEEN["uploads"][uploads_before32:]] == ["ref_video_1.mp4"]
+              and len(video_nodes32) == 1 and len(split_nodes32) == 1
+              and prompt32[video_nodes32[0]]["inputs"].get("file") == "ref_video_1.mp4"
+              and prompt32[split_nodes32[0]]["inputs"].get("video") == [video_nodes32[0], 0]
+              and inputs32.get("ref_videos.ref_video_0") == [split_nodes32[0], 0]
+              and inputs32.get("ref_video_audios.ref_video_audio_0") == [split_nodes32[0], 1]
+              and task32.get("reference_videos") == 1
+              and task32.get("video_loader") == "LoadVideo",
+              (task32.get("status"), task32.get("error_msg"),
+               SEEN["uploads"][uploads_before32:], video_nodes32, split_nodes32,
+               inputs32.get("ref_videos.ref_video_0"),
+               inputs32.get("ref_video_audios.ref_video_audio_0"),
+               task32.get("reference_videos"), task32.get("video_loader")))
+        # ⚠️ 契约层对视频**同样**要求「该追加的声明必须追加」✓✗（``declaration_plan`` 的坑：
+        #    只写 ``<Video 1>`` 引用句而没 ``retention_analysis`` ⇒ 视为用户没写 ⇒ **必须补** ✓）。
+        check("㉜′ 参考视频 ⇒ 提示词尾部**自动追加**视频声明区块（不是只写一句 ``<Video 1>`` ✗）",
+              "[reference generation + video reference]" in text32
+              and "<Video 1>: reference -" in text32
+              and "<Video 2>" not in text32,
+              text32[-260:])
+        uploads_before33 = len(SEEN["uploads"])
+        created33 = client.post("/v1/video_generation", json={
+            "prompt": "硬选没有视频槽位的模板" + "。" * 200, "duration": 3,
+            "template": "MiniMax_H3_Fast_T2V.json",
+            "referenceVideoUrls": [video_data_url()],
+        }).json()
+        task33 = wait_terminal(client, created33["task_id"])
+        text33 = _injected_prompt(task33, SEEN["prompts"][-1])
+        check("㉜″ 模板没有视频槽位 ⇒ **一个字节都不上传**、声明里也不许出现 ``<Video 1>`` ✗、并告警",
+              task33.get("status") == "succeeded"
+              and len(SEEN["uploads"]) == uploads_before33
+              and task33.get("reference_videos") == 0
+              and "<Video" not in text33
+              and any("没有参考视频槽位" in str(w) for w in task33.get("warnings") or []),
+              (SEEN["uploads"][uploads_before33:], task33.get("reference_videos"),
+               task33.get("warnings")))
+        # ⚠️ 第三道闸（视频独有 ✓）：模板**有**槽位、引擎里却**没有**读视频的类 ⇒ 同样别传 ✗。
+        #    ⚠️ 候选表只留 ``LoadVideo`` ✓✗：stub 里还注册着生态那版 ``VHS_LoadVideo``（一跳 ✓），
+        #    不清走它 ⇒ 这一单会**从它那儿成功** ✓，用例就验不到「一个都没有」那条路 ✓✗
+        #    （正是本仓反复记的假绿 ✓）。
+        restore_probe = probe_env("LoadVideo")
+        MISSING_CLASS["name"] = "LoadVideo"
+        try:
+            uploads_before34 = len(SEEN["uploads"])
+            created34 = client.post("/v1/video_generation", json={
+                "prompt": "引擎里没有读视频的节点" + "。" * 200, "duration": 3,
+                "referenceVideoUrls": [video_data_url()],
+            }).json()
+            task34 = wait_terminal(client, created34["task_id"])
+            text34 = _injected_prompt(task34, SEEN["prompts"][-1])
+            check("㉜‴ 有槽位但引擎里**找不到读视频的节点** ⇒ 忽略且**不上传**、不虚报 ``<Video 1>``、"
+                  "告警点名候选类 ✗",
+                  task34.get("status") == "succeeded"
+                  and len(SEEN["uploads"]) == uploads_before34
+                  and task34.get("reference_videos") == 0
+                  and task34.get("video_loader") is None
+                  and "<Video" not in text34
+                  and any("找不到能读视频的节点" in str(w) for w in task34.get("warnings") or [])
+                  and any("LoadVideo：引擎里没有这个类" in str(w)
+                          for w in task34.get("warnings") or []),
+                  (SEEN["uploads"][uploads_before34:], task34.get("reference_videos"),
+                   task34.get("video_loader"), task34.get("warnings")))
+        finally:
+            MISSING_CLASS["name"] = None
+            restore_probe()
+        names35 = (wrapper._video_filename(0, "https://x/a.mp4"),
+                   wrapper._video_filename(1, video_data_url()),
+                   wrapper._video_filename(2, "https://x/a.png?x=1"))
+        check("㉜⁗ 参考视频上传名后缀**只认视频** ✓（.mp4 保留 ✓；无后缀/图片后缀回落 .mp4 ✓）",
+              names35 == ("ref_video_1.mp4", "ref_video_2.mp4", "ref_video_3.mp4"), names35)
+        # ⭐ 生态形状：``VHS_LoadVideo`` 自带 ``IMAGE``/``AUDIO`` ⇒ **一跳就够** ✓（不该白建拆解节点 ✗）。
+        #    这条护的是「两跳只是 LoadVideo 那种形状的需要」✓ —— 一刀切成两跳 ⇒ 生态节点上会多一个
+        #    毫无必要的 ``GetVideoComponents`` ✓✗（多一次解码 ✓、多一份显存 ✓）。
+        restore_one_hop = probe_env("VHS_LoadVideo")
+        try:
+            created36 = client.post("/v1/video_generation", json={
+                "prompt": "生态节点一跳" + "。" * 200, "duration": 4,
+                "referenceVideoUrls": [video_data_url()],
+            }).json()
+            task36 = wait_terminal(client, created36["task_id"])
+            prompt36 = SEEN["prompts"][-1]
+            vhs36 = [nid for nid, node in prompt36.items()
+                     if isinstance(node, dict) and node.get("class_type") == "VHS_LoadVideo"]
+            split36 = [nid for nid, node in prompt36.items()
+                       if isinstance(node, dict) and node.get("class_type") == "GetVideoComponents"]
+            inputs36 = (prompt36.get(main_id) or {}).get("inputs") or {}
+            check("㉝ 生态加载器（自带 IMAGE/AUDIO）⇒ **一跳**接两处、**不多建**拆解节点 ✓",
+                  task36.get("status") == "succeeded"
+                  and task36.get("video_loader") == "VHS_LoadVideo"
+                  and len(vhs36) == 1 and not split36
+                  and prompt36[vhs36[0]]["inputs"].get("video") == "ref_video_1.mp4"
+                  and inputs36.get("ref_videos.ref_video_0") == [vhs36[0], 0]
+                  and inputs36.get("ref_video_audios.ref_video_audio_0") == [vhs36[0], 1],
+                  (task36.get("status"), task36.get("video_loader"), vhs36, split36,
+                   inputs36.get("ref_videos.ref_video_0"),
+                   inputs36.get("ref_video_audios.ref_video_audio_0")))
+        finally:
+            restore_one_hop()
+        # ⚠️ 第三种缺法（比「一个都没有」更常见 ✓）：**加载器在、拆解节点不在** ✗ ——
+        #    只报「找不到能读视频的节点」会把用户引到错的方向 ✓✗（该装的是 ``GetVideoComponents`` ✓）。
+        restore_split = probe_env("LoadVideo")
+        MISSING_CLASS["name"] = "GetVideoComponents"
+        try:
+            uploads_before37 = len(SEEN["uploads"])
+            created37 = client.post("/v1/video_generation", json={
+                "prompt": "有 LoadVideo 但没有拆解节点" + "。" * 200, "duration": 3,
+                "referenceVideoUrls": [video_data_url()],
+            }).json()
+            task37 = wait_terminal(client, created37["task_id"])
+            check("㉝′ 加载器只吐 VIDEO、引擎里没有拆解节点 ⇒ 同样**不上传**，且告警**点名缺哪一步** ✗",
+                  task37.get("status") == "succeeded"
+                  and len(SEEN["uploads"]) == uploads_before37
+                  and task37.get("reference_videos") == 0
+                  and any("把视频拆成帧串的节点" in str(w) for w in task37.get("warnings") or []),
+                  (SEEN["uploads"][uploads_before37:], task37.get("reference_videos"),
+                   task37.get("warnings")))
+        finally:
+            MISSING_CLASS["name"] = None
+            restore_split()
+        # ⭐⭐ 声轨编号（2026-10-27 照后端口径补 ✓）：带音轨的参考视频**先占** ``<Audio j>`` 的号 ✓，
+        #    独立音频从它后面起 ✓✗；而且声轨那句声明必须**排在它那段视频之前** ✓（后端呈现顺序 ✓）。
+        #    ⚠️ 这条是本轮最容易「看起来对、实际撞号」的地方 ✓：两边都写 ``<Audio 1>`` ⇒ 模型把音乐
+        #    当音色参考 ✓✗（它不知道那号属于谁 ✓）。
+        created38 = client.post("/v1/video_generation", json={
+            "prompt": "按这段运镜，声音照参考音频" + "。" * 200, "duration": 4,
+            "referenceVideoUrls": [video_data_url()],
+            "referenceAudioUrls": [audio_data_url()],
+        }).json()
+        task38 = wait_terminal(client, created38["task_id"])
+        text38 = _injected_prompt(task38, SEEN["prompts"][-1])
+        at_sound38 = text38.find("<Audio 1> is the soundtrack of <Video 1>.")
+        at_video38 = text38.find("<Video 1> is a source video.")
+        check("㉝″ 视频声轨**先占** ``<Audio 1>``（声明紧贴其 <Video 1> 之前 ✓）；独立音频自动顺延成 "
+              "``<Audio 2>`` ✓✗（两边都写 <Audio 1> ⇒ 撞号 ✓）；任务回报声轨数 ✓",
+              task38.get("status") == "succeeded"
+              and task38.get("reference_videos") == 1
+              and task38.get("reference_video_soundtracks") == 1
+              and task38.get("reference_audios") == 1
+              and at_sound38 >= 0 and at_video38 > at_sound38
+              and "<Audio 2>: reference -" in text38,
+              (task38.get("status"), task38.get("reference_videos"),
+               task38.get("reference_video_soundtracks"), task38.get("reference_audios"),
+               at_sound38, at_video38, text38[-420:]))
+        # ⚠️ 槽位不够那条纪律对视频**同样**成立 ✓✗（图/音已各有一条 ✓）：落不下去的那几路
+        #    **一个字节都别上传** ✓ —— 传上去只会在 input 目录里留垃圾 ✓，回来的回执还让人以为用上了 ✓。
+        uploads_before39 = len(SEEN["uploads"])
+        created39 = client.post("/v1/video_generation", json={
+            "prompt": "两段视频但只有一格" + "。" * 200, "duration": 4,
+            "referenceVideoUrls": [video_data_url(), video_data_url(b"\x00\x00\x00\x18ftypmp42-b")],
+        }).json()
+        task39 = wait_terminal(client, created39["task_id"])
+        check("㉝‴ 请求 2 路视频但模板只有 1 格 ⇒ **只传 1 路**、如实告警（多出来的不传也不声明 ✗）",
+              task39.get("status") == "succeeded"
+              and [u["name"] for u in SEEN["uploads"][uploads_before39:]] == ["ref_video_1.mp4"]
+              and task39.get("reference_videos") == 1
+              and any("只有 1 个视频槽位" in str(w) for w in task39.get("warnings") or []),
+              (SEEN["uploads"][uploads_before39:], task39.get("reference_videos"),
+               task39.get("warnings")))
+
+        # ── ⭐⭐ 参考图缩放档位 ``ref_image_size``（2026-10-27 照后端口径接 ✓）──
+        #    出处：核心 ``comfy_extras/nodes_minimax_h3.py`` 的
+        #    ``io.Combo.Input("ref_image_size", options=["match", "max"], default="match")`` ✓ ——
+        #    ``match`` = 缩到**本次出图的像素量** ✓；``max`` = 缩到 **2048 短边** ✓
+        #    （docstring：best identity fidelity ✓，但每步采样都带着这些 token ⇒ 更慢更吃显存 ✓✗）。
+        #    ⚠️ 它是模板里的**普通 widget**（盘上 R2V 写死 ``"match"`` ✓）⇒ 只能**改图** ✓；
+        #    在提示词里写一句 ✗ 一点用都没有 ✓（最容易被当成「说一下就行」的那类参数 ✓✗）。
+        created40 = client.post("/v1/video_generation", json={
+            "prompt": "参考图要最高保真" + "。" * 200, "duration": 4,
+            "referenceImageUrls": [png_data_url(b"\x89PNG-hi")],
+            "referenceImageSize": "max",
+        }).json()
+        task40 = wait_terminal(client, created40["task_id"])
+        inputs40 = (SEEN["prompts"][-1].get(main_id) or {}).get("inputs") or {}
+        check("㉞ ⭐ 参考图档位 ``max`` ⇒ 主节点 ``ref_image_size`` **真改成 max** ✓（不是只写在回执里 ✗）",
+              task40.get("status") == "succeeded"
+              and task40.get("workflow") == "video_minimax_h3_r2v.json"
+              and inputs40.get("ref_image_size") == "max"
+              and task40.get("reference_image_size") == "max"
+              and task40.get("reference_images") == 1,
+              (task40.get("status"), inputs40.get("ref_image_size"),
+               task40.get("reference_image_size"), task40.get("warnings")))
+        # ⚠️ 没有参考图时那格**对本次出图毫无意义** ✗ ⇒ 不许改、也不许回执成「用了 max」✓✗
+        #    （改了只会让回执与画面互相打脸 ✓：一片纯文生，用户却以为吃到了 2048 短边 ✓）。
+        created41 = client.post("/v1/video_generation", json={
+            "prompt": "纯文生也带着这个档位" + "。" * 200, "duration": 4,
+            "referenceImageSize": "max",
+        }).json()
+        task41 = wait_terminal(client, created41["task_id"])
+        check("㉞′ 没有参考图 ⇒ 回执 ``None`` ✓、也不刷「档位落不下去」这类无意义告警 ✓",
+              task41.get("status") == "succeeded"
+              and task41.get("reference_images") == 0
+              and task41.get("reference_image_size") is None
+              and not any("ref_image_size" in str(w) for w in task41.get("warnings") or []),
+              (task41.get("reference_images"), task41.get("reference_image_size"),
+               task41.get("warnings")))
+        # ⚠️ 一个可选画质档位写错**不该把整单判死** ✗ ⇒ 告警 + 回落默认 ✓，回执报**实际生效**值 ✓。
+        created42 = client.post("/v1/video_generation", json={
+            "prompt": "档位写成上界词" + "。" * 200, "duration": 4,
+            "referenceImageUrls": [png_data_url(b"\x89PNG-typo")],
+            "referenceImageSize": "MAXIMUM",
+        }).json()
+        task42 = wait_terminal(client, created42["task_id"])
+        inputs42 = (SEEN["prompts"][-1].get(main_id) or {}).get("inputs") or {}
+        check("㉞″ 档位写错（``MAXIMUM``）⇒ **告警 + 回落 match** ✓、回执报实际值（不虚报 max ✗）",
+              task42.get("status") == "succeeded"
+              and inputs42.get("ref_image_size") == "match"
+              and task42.get("reference_image_size") == "match"
+              and any("不是后端认的档位" in str(w) for w in task42.get("warnings") or []),
+              (inputs42.get("ref_image_size"), task42.get("reference_image_size"),
+               task42.get("warnings")))
+        check("㉞‴ 档位三个键名都认、大小写不敏感 ✓（``referenceImageSize`` / ``reference_image_size`` / "
+              "``ref_image_size`` ✓；`` MAX `` ⇒ ``max`` ✓；空 ⇒ 默认 match ✓）",
+              (wrapper._reference_image_size({"referenceImageSize": " MAX "}) == "max"
+               and wrapper._reference_image_size({"reference_image_size": "Max"}) == "max"
+               and wrapper._reference_image_size({"ref_image_size": "max"}) == "max"
+               and wrapper._reference_image_size({}) == "match"),
+              [str(body) for body in ({}, {"referenceImageSize": " MAX "})])
+        # ⚠️「有参考图槽位、却没有 ``ref_image_size`` 这一格」是**真实存在**的分支 ✓✗
+        #    （自家模板/老模板都可能 ✓）⇒ 请求了别的档位就**必须告警** ✓，绝不假装改成功 ✗；
+        #    而请求的就是默认值 ⇒ **静默** ✓（引擎默认就是它 ✓，报出来只是噪声 ✗）。
+        #    盘上 9 份模板里凑不出这个组合（R2V 有那格、自家两件没有参考槽位 ✓）⇒ 用**造出来的 API 图**
+        #    验这一支 ✓（与 ``_audio_filename`` / ``_video_filename`` 那两条同一手法 ✓）。
+        api_no_slot = {"136": {"class_type": "MiniMaxH3ReferenceToVideo",
+                               "inputs": {"ref_images.ref_image_0": ["7", 0]}}}
+        task43: dict[str, Any] = {}
+        got43 = wrapper._wire_reference_image_size(
+            task43, api_no_slot, {"main_id": "136"}, {"referenceImageSize": "max"}, 1)
+        quiet43: dict[str, Any] = {}
+        got43b = wrapper._wire_reference_image_size(
+            quiet43, {"136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {}}},
+            {"main_id": "136"}, {"referenceImageSize": "match"}, 1)
+        check("㉞⁗ 模板没有那格 ⇒ 非默认档位**告警且回执 None** ✓；请求默认值 ⇒ **静默** None ✓",
+              got43 is None and got43b is None and not quiet43.get("warnings")
+              and any("落不下去" in str(w) for w in task43.get("warnings") or []),
+              (got43, got43b, task43.get("warnings"), quiet43.get("warnings")))
+        # ⚠️ 那格若被上游 ``PrimitiveString`` **牵着线** ✗：写主节点会被连线覆盖 ✓（ComfyUI 里连线优先 ✓）
+        #    ⇒ 必须写**上游那个节点** ✓✗ —— 这类「写了但没生效」是最难查的一种 ✓。
+        api_linked = {"136": {"class_type": "MiniMaxH3ReferenceToVideo",
+                              "inputs": {"ref_image_size": ["200", 0]}},
+                      "200": {"class_type": "PrimitiveString", "inputs": {"value": "match"}}}
+        got44 = wrapper._wire_reference_image_size(
+            {}, api_linked, {"main_id": "136"}, {"referenceImageSize": "max"}, 1)
+        check("㉞⁵ 那格被 ``PrimitiveString`` 牵着线 ⇒ 落到**上游** ✓、原连线保留 ✓（不是覆盖连线 ✗）",
+              got44 == "max" and api_linked["200"]["inputs"]["value"] == "max"
+              and api_linked["136"]["inputs"]["ref_image_size"] == ["200", 0],
+              (got44, api_linked))
+
+        # ── ⭐⭐ ``length`` 的硬上限（2026-10-27 照后端口径接 ✓）──
+        #    schema：``io.Int.Input("length", min=5, max=3600, step=17)`` ✓ —— 超了引擎在
+        #    ``validate_inputs`` **直接拒单** ✗（**不会**替我们截 ✓✗）⇒ 不夹住 = 用户拿到 400 ✓。
+        #    ⚠️ 网格是 ``17k+5`` ⇒ 「上限内最大的合法帧数」**不是** 3600 ✓ 而是 ``3592`` ✓
+        #    （3600 本身不在网格上 ✗，硬塞进去同样是拒单 ✓）。
+        created45 = client.post("/v1/video_generation", json={
+            "prompt": "要一段两分半的长镜头" + "。" * 200, "duration": 200,
+        }).json()
+        task45 = wait_terminal(client, created45["task_id"])
+        dur45 = find_node(SEEN["prompts"][-1], "PrimitiveFloat", "DURATION")
+        seconds45 = (dur45.get("inputs") or {}).get("value")
+        check("㉟ ⭐ 时长超硬上限（200s ⇒ 网格对齐后 4816 帧）⇒ 夹到 **3592 帧** ✓、注入秒数与之自洽 ✓、响亮告警",
+              task45.get("status") == "succeeded"
+              and task45.get("expected_frames") == 3592
+              and task45.get("expected_seconds") == 149.667
+              and isinstance(seconds45, float) and abs(seconds45 - 3592 / 24) < 1e-6
+              and any("硬上限" in str(w) for w in task45.get("warnings") or []),
+              (task45.get("status"), task45.get("expected_frames"), task45.get("expected_seconds"),
+               seconds45, task45.get("warnings")))
+        check("㉟′ 3592 是「网格内、且不超 3600」的最大值 ✓（``cap_frames`` 不是简单减一 ✗）",
+              (3592 - wf.H3_MIN_FRAMES) % wf.H3_FRAME_GRID == 0
+              and wf.cap_frames(wf.H3_MAX_FRAMES) == 3592
+              and wf.cap_frames(124) == 124
+              and wf.frames_for_seconds(5) == 124
+              and wf.frames_for_seconds(200) == 4816,
+              (wf.cap_frames(wf.H3_MAX_FRAMES), wf.frames_for_seconds(200)))
+        # ⚠️ 训练区间（tooltip ``~124-362``）**只告警、不改** ✓✗：出了区间只降稳定性 ✓，
+        #    把它当硬限制去压用户要的时长 = 把「没保证」读成「不允许」✓✗。
+        check("㉟″ 3592 帧在训练区间外 ⇒ 只**告警**、帧数**不因此缩短** ✓（区间不是硬限制 ✗）",
+              any("训练区间" in str(w) for w in task45.get("warnings") or [])
+              and task45.get("expected_frames") == 3592,
+              (task45.get("expected_frames"), task45.get("warnings")))
 
         # ── ⑤ ComfyUI 不可达：报错要明确，且**不再是**「阶段 2 未接线」那句 ✗ ──
         server.should_exit = True

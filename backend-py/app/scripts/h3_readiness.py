@@ -35,6 +35,16 @@ def render(report: dict[str, Any]) -> None:
     env = report["environment"]
     print("── ① 环境 ─────────────────────────────────────────")
     print(f"torch：{'可用 ✓' if env['torchAvailable'] else '不可用 ✗ —— ' + env['torchReason']}")
+    # ⚠️ 「torch ✗」有**两种**完全不同的含义 ✗（2026-10-29 实测本机占的是第二种 ✓）：
+    #    ① 本体没装 ✓；② 本体装了但**是 CPU 轮子** ✗ —— 后者装再多依赖也上不了卡 ✓✗
+    body = env.get("torch") or {}
+    if body.get("installed"):
+        wheel = ("**CPU 轮子** ✗（编译时无 CUDA ⇒ 只能 CPU 跑 ✓）" if body.get("cpuWheel")
+                 else f"CUDA 轮子 ✓（编译 {body.get('cudaVersion')} ✓）")
+        print(f"torch 本体：{body.get('version')} ✓ {wheel}"
+              f"　cuda.is_available={body.get('cudaAvailable')}")
+    else:
+        print(f"torch 本体：**没装** ✗{('（' + str(body.get('error')) + '）') if body.get('error') else ''}")
     print(f"必需依赖缺失：{env['missingRequired'] or '无 ✓'}　"
           f"可选依赖缺失：{env['optionalMissing'] or '无 ✓'}")
     print(f"ffmpeg：{env['ffmpegVersion'] or '没装 ✗'}")
@@ -85,6 +95,17 @@ def render(report: dict[str, Any]) -> None:
         print("低精度权重：可**自动反量化** ✓　" + "　".join(
             f"{item['key']}×{item['weights']}（{item['layouts']} ✓）" for item in quant["supported"]))
     for item in quant["unsupported"]:
+        if item.get("family"):
+            # ⚠️ 文件自带 `comfy_quant` 说了是哪一族 ⇒ 打**族名 + 理由** ✓，
+            #    别再把它写成「判不出布局 / 缺 group size」✗（那会把下一步引到错的地方 ✗）
+            print(f"低精度权重：`{item['key']}` 属**未实现的族** ✗ `{item['family']}` ⇒ 装载会中止 ✓")
+            # ⚠️ 用**命中的那一条**说明 ✗（`formats[0]` 可能是同文件里另一族的 ✓ —— 如 nvfp4 与 embed 的 int8 ✓）
+            spec = item.get("familySpec") or (item.get("formats") or [{}])[0]
+            shown = {k: v for k, v in spec.items() if k != "tensor"}
+            if shown:
+                print(f"    文件自带的量化说明（`{spec.get('tensor', '*.comfy_quant')}` ✓）：{shown}")
+            print(f"    ⇒ {item.get('familyReason') or ''}")
+            continue
         print(f"低精度权重：`{item['key']}` **判不出布局** ✗ ⇒ 装载会中止 ✓"
               f"（判不出：{item['unresolved'] or item['grouped'] or item['unpaired']} ✓）")
     if quant["notChecked"]:

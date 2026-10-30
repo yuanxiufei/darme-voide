@@ -140,8 +140,21 @@ class ChatTemplate:
 
     def render(self, messages: Iterable[Mapping[str, Any]] | None, *,
                add_generation_prompt: bool = True, bos_token: str = "",
-               eos_token: str = "") -> str:
-        """消息列表 ⇒ 骨架文本 ✓（⚠️ 渲染失败**抛** ✗ —— **不静默回落裸拼接** ✗✗）。"""
+               eos_token: str = "", tools: Any = None, documents: Any = None,
+               extra: Mapping[str, Any] | None = None) -> str:
+        """消息列表 ⇒ 骨架文本 ✓（⚠️ 渲染失败**抛** ✗ —— **不静默回落裸拼接** ✗✗）。
+
+        ⚠️ **``tools`` / ``documents`` 必须显式传 ``None``** ✗✗（2026-10-29 真机 qwen3:8b 撞出来 ✓）：
+        本层用 ``StrictUndefined`` ✓，而 Qwen3 的骨架**首行**就是 ``{%- if tools %}`` ✗ ⇒
+        不给这个变量 ⇒ ``UndefinedError: 'tools' is undefined`` ⇒ 整条对话路径**当场拒** ✗。
+        HF ``apply_chat_template`` 的签名里这两个参数本来就默认 ``None`` ✓（``{% if None %}`` 为假 ✓）
+        —— 这里是**对齐**它，不是放宽判据 ✓（放宽 = 把 ``StrictUndefined`` 换回 ``Undefined`` ✗，
+        那会让「模板要一个本层没给的变量」静默渲染成空串 ✗✗）。
+
+        ``extra`` 用来透传模板自定义变量 ✓（如 Qwen3 的 ``enable_thinking`` ✓：给 ``False`` ⇒
+        骨架里带空的 ``<think></think>`` ⇒ 不生成思考过程 ✓）；不给就**不定义** ✓（模板用
+        ``is defined`` 自行判定 ✓ —— 本层不替模板编默认值 ✗）。
+        """
         rows = _normalize_messages(messages)
         if not rows:
             raise ChatTemplateError("messages 是空的 ✗ ⇒ 没有东西可渲染 ✓（给 system/user 至少一条 ✓）")
@@ -152,6 +165,9 @@ class ChatTemplate:
                 add_generation_prompt=bool(add_generation_prompt),
                 bos_token=str(bos_token or ""),
                 eos_token=str(eos_token or ""),
+                tools=tools,
+                documents=documents,
+                **(dict(extra) if extra else {}),
             ))
         except ChatTemplateError:
             raise

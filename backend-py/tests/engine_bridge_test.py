@@ -596,18 +596,36 @@ def case_component_spots(tmp: Path) -> None:
     paths = manager.Paths("", str(root), "", "")  # 空根 ⇒ ``model_status`` 只做 isfile ✓ 不下潜 ✓
     keys: list[str] = []
     mismatched: list[tuple[str, str, str]] = []
+    elsewhere: list[tuple[str, str, str]] = []
     for entry in inventory_mod.load_catalog()["models"]:
         if entry.get("runtime") != "comfyui" or not entry.get("filename"):
             continue
         mine = inventory_mod.component_path(entry, root)
         _state, theirs = manager.model_status(entry, paths)
         keys.append(str(entry.get("key")))
-        if str(mine) != theirs:
+        if str(mine) == theirs:
+            continue
+        # ⚠️ 2026-10-29 判据分两支 ✓（安装器 2026-10-28 起**先看本仓、再看引擎可见处** ✓：
+        #    ``model_manager.find_elsewhere`` 会报共享池 / 别的 ComfyUI 安装里的**同一份**权重 ✓）。
+        #    ① 报的位置**真有这个文件**、文件名也对得上、且**正是 `find_elsewhere` 算的那一个**
+        #       ⇒ 这是「引擎看得见、只是不在本仓」✓ —— **不是漂移** ✗（本仓落点仍由 `component_path` 说了算 ✓）；
+        #    ② 其余一律算漂移 ✗（两边各说各的位置、而那边**空着** ⇒ 就是「装好了」与「说没装」并存 ✓✗）。
+        if theirs and os.path.isfile(theirs) \
+                and os.path.basename(theirs) == str(entry.get("filename")) \
+                and str(manager.find_elsewhere(entry, paths) or "") == str(theirs):
+            elsewhere.append((str(entry.get("key")), str(theirs),
+                              str(entry.get("filename"))))
+        else:
             mismatched.append((str(entry.get("key")), str(mine), str(theirs)))
-    check("⭐⭐ 落点: 体检算的 == 安装器算的（逐字 ✓）—— 不等 ⇒ 「装好了」与「体检说没装」能同时成立 ✗",
+    check("⭐⭐ 落点: 「本仓落点」逐字一致（不等且那个位置**不存在** ⇒ 「装好了」与「体检说没装」"
+          "能同时成立 ✗）",
           not mismatched
           and {"sdxl_base", "dit_fl2va_int8", "vae_video_fp8mix"} <= set(keys),
           (len(keys), mismatched[:3]))
+    check("⭐ 落点: 报「别处可见」的必须是**那份真的**（isfile ✓ + 文件名对 ✓ + 就是 `find_elsewhere`"
+          " 的结果 ✓ —— 放宽的是「哪份」✗ 不是「有没有」✗）",
+          all(os.path.basename(path) == name for _key, path, name in elsewhere),
+          (len(elsewhere), elsewhere[:3]))
 
 
 def case_tokenizer(tmp: Path) -> None:
