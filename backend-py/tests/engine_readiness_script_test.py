@@ -134,6 +134,19 @@ def case_with_weights(root: Path) -> None:
           (weights_check.get("tokenizer") or {}).get("backend") == "own-bpe"
           and (weights_check.get("tokenizer") or {}).get("vocabSize", 0) > 250,
           weights_check.get("tokenizer"))
+    # ⚠️ 「装上了」≠「切得对」✗：backend/vocabSize 只证明装进去 ✓ —— 切法若与参考实现不同，
+    #    token id 会**整体错位**且**不报错** ✗ ⇒ 互校结果必须**单独**出现 ✓（否则这条接线会被静默删掉）
+    crosscheck = weights_check.get("tokenizerCrosscheck") or {}
+    check("⑦b ⭐ 词表互校**接线在** ✓：要么真比过（`compared>0` ✓）要么如实说明**为什么没比成** ✓"
+          "（不许只留一个 ✓ 就完事 ✗）",
+          bool(crosscheck) and ((crosscheck.get("ok") is not None
+                                 and crosscheck.get("compared", 0) > 0)
+                                or bool(crosscheck.get("notes"))),
+          crosscheck)
+    check("⑦c 互校若判**不一致** ⇒ 必须进阻断项 ✓（不许 `ready=True` 糊过去 ✗）",
+          crosscheck.get("ok") is not False
+          or any("不一致" in item for item in report["blockers"]),
+          report["blockers"])
 
     broken = tiny_h3_weights(root, broken=True)
     broken_report = svc.collect(weights=str(broken), tokenizer=str(tokenizer))

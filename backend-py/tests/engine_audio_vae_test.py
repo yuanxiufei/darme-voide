@@ -123,6 +123,70 @@ def main() -> int:
           "潜变量应为" in str(_raises(lambda: model.decode(torch.randn(1, 3, 2, 5))))
           and "波形应为" in str(_raises(lambda: model.encode(torch.randn(1, 3, 8)))))
 
+    # ⑧ ⭐ **键名逐条对齐参考** ✓（2026-11-01 按 `comfy/ldm/minimax/audio_vae.py` **逐行**重写 ✓）：
+    #    真权重是**按名字**装进模块的 ✓ ⇒ 名字差一个字就「装不上」✓；这里把**每一处结构判断**
+    #    都钉成一条键 ✓（嵌套/扁平、有 bias/无 bias、`act.` 那层、`block`/`blocks` 的拼法 ✓）。
+    keys = set(av.build_audio_vae(small).state_dict())
+    must_have = (
+        "encoder.block.0.weight",                     # Conv1d(1, d, 7) ✓
+        "encoder.block.1.block.0.block.0.alpha",      # ResidualUnit 的 Snake1d ✓
+        "encoder.block.1.block.0.block.1.weight",     # 7×1 带膨胀卷积 ✓
+        "encoder.block.1.block.3.alpha",              # 三个 ResidualUnit 之后的 Snake1d ✓
+        "encoder.block.1.block.4.weight",             # 跨步卷积 ✓
+        "pre_block.norm1.weight", "pre_block.norm3.weight", "pre_block.norm2.weight",
+        "pre_block.attn.qkv.weight",                  # **无 bias** ✓
+        "pre_block.attn.q_bias", "pre_block.attn.v_bias",   # 参数 ✓
+        "pre_block.attn.zero_k_bias",                 # **buffer** ✓（k 侧恒 0 ✓）
+        "pre_block.attn.proj.weight", "pre_block.proj.weight",
+        "pre_block.mlp.norm.weight", "pre_block.mlp.w0.weight",
+        "pre_block.mlp.w1.weight", "pre_block.mlp.w2.weight",
+        "mean_proj.weight", "logs_proj.weight", "dec_in_proj.weight",
+        "decoder.conv_pre.weight",
+        "decoder.ups.0.0.weight",                     # **嵌套** ModuleList ✓
+        "decoder.resblocks.0.convs1.0.weight",        # **扁平** resblocks ✓
+        "decoder.resblocks.0.convs2.0.weight",
+        "decoder.resblocks.0.activations.0.act.alpha",   # Activation1d 包着 SnakeBeta ✓
+        "decoder.resblocks.0.activations.0.upsample.filter",
+        "decoder.resblocks.0.activations.0.downsample.lowpass.filter",
+        "decoder.activation_post.act.alpha",
+        "decoder.activation_post.upsample.filter",
+        "decoder.conv_post.weight",
+        "latents_mean", "latents_std",                # 检查点里的**统计 buffer** ✓
+    )
+    must_not = (
+        "decoder.conv_post.bias",            # 参考 bias=False ✓
+        "decoder.ups.0.weight",              # 扁平版（旧实现 ✗）
+        "pre_block.attn.in_proj_weight",     # MultiheadAttention（旧近似 ✗）
+        "encoder.blocks.0.weight",           # 旧名字 ✗（参考叫 encoder.block ✓）
+    )
+    missing = [name for name in must_have if name not in keys]
+    extra = [name for name in must_not if name in keys]
+    check("⑧ ⭐ **键名逐条对齐参考** ✓：结构判断全钉在键上（嵌套 `ups.0.0` ✓、扁平 `resblocks` ✓、"
+          "`activations.0.act.*` ✓、`qkv` 无 bias ✓、`zero_k_bias` 是 buffer ✓、`conv_post` 无 bias ✓、"
+          "`logs_proj` ✓、`latents_mean/std` ✓）—— 少了哪个真权重就装不上 ✓",
+          not missing and not extra, (missing, extra))
+
+    ratio_of = av.build_audio_vae(small).decoder
+    check("⑧′ `ups` 是**双层**的、`resblocks` 是**扁平** `级数×kernel 数` 个 ✓（参考如此 ✓；"
+          "写成一层 ups / 嵌套 resblocks ⇒ 键全错 ✓）",
+          all(isinstance(inner, torch.nn.ModuleList) and len(inner) == 1
+              for inner in ratio_of.ups)
+          and len(ratio_of.resblocks) == len(small.decoder_rates) * len(small.resblock_kernels),
+          (len(ratio_of.ups), len(ratio_of.resblocks)))
+
+    # ⑨ ⭐ 抗混叠链**真的守恒** ✓：常数信号进 `Activation1d`（升采样→Snake→降采样）必须还是常数 ✓
+    #    （滤波器没归一化 / 补边用错 ⇒ 边界与内部都会鼓包 ✓；这条能当场抓到 ✓）
+    activation = model.decoder.activation_post
+    probe = torch.full((1, small.decoder_dim // (2 ** len(small.decoder_rates)), 40), 0.3)
+    with torch.no_grad():
+        activated = activation(probe)
+    check("⑨ 抗混叠链守恒 ✓：常数 0.3 过 `upsample → Snake → downsample` 仍是常数 ✓"
+          "（内部**逐元素相同** ✓、长度不变 ✓）—— 滤波器归一化/补边写错就会鼓包 ✓",
+          tuple(activated.shape) == tuple(probe.shape)
+          and bool(torch.allclose(activated, activated[..., 10:11].expand_as(activated),
+                                  atol=1e-5)),
+          (tuple(activated.shape), float(activated.std())))
+
     return _report()
 
 

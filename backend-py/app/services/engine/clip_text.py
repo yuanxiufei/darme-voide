@@ -841,7 +841,14 @@ def sdxl_token_ids(
         raise ClipTextError(
             f"max_length({limit}) 超过 {config.name} 的位置嵌入上限 "
             f"{config.max_position_embeddings} ✗（位置嵌入只有那么多行 ✓）")
-    ids = [int(item) for item in tokenizer.encode(text)]
+    #: ⚠️ **必须**显式 ``add_special_tokens=False`` ✗（2026-10-31）：本函数在下面第 856 行
+    #: **自己**拼 ``[BOS] + ids + [EOS] + pad`` ✓ —— 词表若也补一遍就是**双 BOS** ✓✗：
+    #: 不报错、位置嵌入整体错一位、图整体偏 ✓✗。词表不认这个 kwarg 时按老样子只传文本 ✓。
+    try:
+        raw = tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        raw = tokenizer.encode(text)
+    ids = [int(item) for item in raw]
     bad = [item for item in ids if not 0 <= item < config.vocab_size]
     if bad:
         raise ClipTextError(f"tokenizer 给出的 id 超出词表范围 ✗（例如 {bad[:3]} ✓）")

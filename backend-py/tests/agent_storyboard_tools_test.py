@@ -4,7 +4,8 @@
 
 1. **``read_storyboard_context`` 的过滤规则**：角色/场景是「本集已关联的优先，
    **未关联任何东西时全给**」（空关联集 = 不过滤）；且原文取值链是 ``scriptContent || content``；
-2. **``save_storyboards`` 的整集重建**：先删旧分镜**及其角色关联**（物品关联不删）→
+2. **``save_storyboards`` 的整集重建**：先删旧分镜**及其角色关联／道具关联／镜头级连续性
+   状态**（场景级状态不删：场景本身还在）→
    逐镜校验绑定 → **说话人自动绑定**（对白首个「角色名：」→ 角色名到 speaker_id 映射）→
    **对白一致性校验**（只告警不改数据，旁白/画外音跳过）→ 集时长 = ``ceil(总秒/60)`` → 三件后置；
 3. **``save_continuity_states`` 是整体替换**（幂等：再存一次不会累积）；
@@ -18,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import sys
 import tempfile
@@ -27,7 +29,7 @@ os.environ.setdefault("DATA_ROOT", tempfile.mkdtemp(prefix="sbtools_"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
@@ -36,9 +38,12 @@ from app.core.models import (
     continuity_states,
     episode_characters,
     episode_scenes,
+    episode_props,
     episodes,
+    prop_templates,
     scenes,
     storyboard_characters,
+    storyboard_props,
     storyboards,
 )  # noqa: E402
 from app.core.response import now  # noqa: E402
@@ -237,6 +242,62 @@ def main() -> int:  # noqa: C901
           numbers == [(1, "新开场"), (2, "续写"), (3, None), (4, "补A"), (5, "补B")],
           numbers)
 
+    # 整集重建要**连挂件一起清**。2026-10-30 修前只删角色关联（注释还写着「物品关联不删」），
+    # 旧镜头删掉后 `storyboard_props` 与**镜头级** `continuity_states` 成了指向不存在镜头的
+    # 孤儿行 —— 后者最阴：跨镜状态机按 storyboard_id 读「上一镜手上是什么」时，会命中幽灵镜头
+    # （值是真实的、镜头已经没了）。场景级状态（只有 scene_id）**不许删**：场景本身还在。
+    with engine.begin() as conn:
+        rebuild_ep = int(conn.execute(episodes.insert().values(
+            drama_id=drama_id, episode_number=90, title="重建不留孤儿",
+            status="draft", created_at=now(), updated_at=now())).lastrowid)
+        rebuild_prop = int(conn.execute(prop_templates.insert().values(
+            drama_id=drama_id, name="旧怀表", created_at=now(), updated_at=now()
+        )).lastrowid)
+        conn.execute(episode_props.insert().values(
+            episode_id=rebuild_ep, prop_id=rebuild_prop))
+        conn.execute(episode_scenes.insert().values(
+            episode_id=rebuild_ep, scene_id=scene_id, created_at=now()))
+    tools_rebuild = st.create_storyboard_tools(rebuild_ep, drama_id)
+    _call(tools_rebuild, "save_storyboards", {"storyboards": [
+        {"shot_number": 1, "title": "旧镜", "duration": 5, "scene_id": scene_id,
+         "prop_ids": [rebuild_prop]}]})
+    with engine.begin() as conn:
+        old_shot = conn.execute(select(storyboards.c.id)
+                                .where(storyboards.c.episode_id == rebuild_ep)).first()[0]
+        # ⚠️ 多行 values([...]) 用**第一个 dict 的键集**建 INSERT：两行键必须一致，
+        #    否则后半行多带的键（scene_id）会被静默丢掉
+        conn.execute(continuity_states.insert().values([
+            {"episode_id": rebuild_ep, "storyboard_id": old_shot, "scene_id": None,
+             "state_type": "wound", "entity_key": "林昭", "state_value": "手臂渗血",
+             "created_at": now(), "updated_at": now()},
+            {"episode_id": rebuild_ep, "storyboard_id": None, "scene_id": scene_id,
+             "state_type": "weather", "entity_key": "客栈", "state_value": "雨停",
+             "created_at": now(), "updated_at": now()},
+        ]))
+        before_props = conn.execute(select(storyboard_props.c.storyboard_id)).all()
+        before_states = [(r[0], r[1]) for r in conn.execute(
+            select(continuity_states.c.storyboard_id, continuity_states.c.scene_id)
+            .where(continuity_states.c.episode_id == rebuild_ep)).all()]
+    check("保存: 造好前置 —— 旧镜挂着道具 + 一条镜头级状态 + 一条场景级状态",
+          len(before_props) == 1 and len(before_states) == 2, (before_props, before_states))
+
+    _call(tools_rebuild, "save_storyboards", {"storyboards": [
+        {"shot_number": 1, "title": "新镜", "duration": 5, "scene_id": scene_id}]})
+    with engine.begin() as conn:
+        after_props = conn.execute(select(storyboard_props.c.storyboard_id)).all()
+        after_states = [(r[0], r[1]) for r in conn.execute(
+            select(continuity_states.c.storyboard_id, continuity_states.c.scene_id)
+            .where(continuity_states.c.episode_id == rebuild_ep)).all()]
+        new_shot = conn.execute(select(storyboards.c.title)
+                                .where(storyboards.c.episode_id == rebuild_ep)).first()[0]
+    check("保存: 整集重建后**道具关联不留孤儿**（旧镜的道具绑定一起清掉）",
+          after_props == [], after_props)
+    check("保存: 整集重建后**镜头级连续性状态不留孤儿**，场景级那条留着",
+          after_states == [(None, scene_id)], after_states)
+    # 注意：SQLite 无 AUTOINCREMENT，删掉最大 rowid 再插入会**复用同一个 id**，
+    # 所以这里只能按标题认，不能按 id 认
+    check("保存: 重建后本集只剩新的那一条镜头", new_shot == "新镜", new_shot)
+
     # 绑定校验
     err = ""
     try:
@@ -321,6 +382,23 @@ def main() -> int:  # noqa: C901
     ok_update = _call(tools, "update_storyboard", {"storyboard_id": target, "action": "开门"})
     check("更新: 未传 scene_id/character_ids 时用库里已有值做校验（通过）",
           "message" in ok_update, ok_update)
+
+    # 改单镜时长 ⇒ 集时长（分钟，ceil）必须跟着重算。
+    # 原来只有整集重建算过这一列，单镜 update 完全不碰 ⇒ 改短/改长后集卡片还显示旧分钟数。
+    with engine.begin() as conn:
+        before_sec = conn.execute(
+            select(func.coalesce(func.sum(storyboards.c.duration), 0))
+            .where(storyboards.c.episode_id == episode_id)).scalar()
+    _call(tools, "update_storyboard", {"storyboard_id": target, "duration": 600})
+    with engine.begin() as conn:
+        after_sec = conn.execute(
+            select(func.coalesce(func.sum(storyboards.c.duration), 0))
+            .where(storyboards.c.episode_id == episode_id)).scalar()
+        ep_after_update = conn.execute(
+            select(episodes.c.duration).where(episodes.c.id == episode_id)).scalar()
+    check("更新: 改单镜 duration 后 episodes.duration 按 ceil(总秒/60) 重算",
+          after_sec != before_sec and ep_after_update == math.ceil(after_sec / 60),
+          (before_sec, after_sec, ep_after_update))
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

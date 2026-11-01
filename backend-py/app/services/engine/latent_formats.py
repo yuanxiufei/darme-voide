@@ -20,8 +20,12 @@ SD3 / Flux 是 16 通道且**先减 shift 再乘 scale** ✓，H3 视频是 24 �
 * **H3 的 24 通道不是这里发明的** ✓：引用 :data:`latent_container.H3_VIDEO_CHANNELS` ✓
   （与 ``h3_form.H3_TRUNK_DEFAULTS["latents_dim"]`` 同一个事实 ✓，自检逐值比对 ✓）；
 * **音频 32 通道同理** ✓：与 ``h3_form.H3_TRUNK_DEFAULTS["audio_latents_dim"]`` 同源 ✓（自检比对 ✓）；
-* ⚠️ **下采样比只有 H3 是实测的** ✓（16× 空间 / 4× 时间 ✓，见 ``vae_h3`` ✓）；其余族保持基类默认
-  （8 / 1 ✓）—— **别当实测值拿去算尺寸** ✗（尺寸/帧数走 ``vae_h3`` 等既有口径 ✓）。
+* ⚠️ **下采样比逐族抄自参考实现的声明** ✓（``comfy/latent_formats.py`` 各 ``class`` 的
+  ``spacial_downscale_ratio`` / ``temporal_downscale_ratio`` ✓ —— 2026-10-31 补齐 ✓）：
+  参考实现只给**部分族**写了这两格 ✓，没写的才落基类默认（8 / 1 ✓）。⚠️ 别再"统一按 8 / 1"✗ ——
+  那是一整片静默错值 ✓✗（``wan22`` 是 16 ✓、``ltxv`` 是 32/8 ✓、``mochi`` 时间 6 ✓、
+  ``stable_audio_1`` 时间 2048 ✓）：拿它算潜形状 ⇒ 尺寸/帧数全错却**不报错** ✓✗。
+  H3 的 16/4 另有独立实证（``vae_h3`` ✓），两者一致 ✓。
 """
 from __future__ import annotations
 
@@ -85,9 +89,9 @@ class LatentFormatSpec:
     latent_channels: int = 4
     #: 潜维数 ✓（2 = 图像 ✓ / 3 = 视频 ✓ / 1 = 音频 ✓）。
     latent_dimensions: int = 2
-    #: 空间下采样比 ✓（⚠️ 除 H3 外均为**基类默认 8** ✗ —— 未采集到，别当实测值 ✓✗）。
+    #: 空间下采样比 ✓（逐族抄参考实现的 ``spacial_downscale_ratio`` ✓；没声明的族落 8 ✓）。
     spatial_downscale_ratio: int = 8
-    #: 时间下采样比 ✓（⚠️ 同上，除 H3 外为默认 1 ✗）。
+    #: 时间下采样比 ✓（同上 ✓；**视频族几乎都不是 1** ✗ —— wan 4 / mochi 6 / cosmos 8 / ltxv 8 ✓）。
     temporal_downscale_ratio: int = 1
     #: 配套 TAESD 解码器名 ✓（``None`` = 没有 ✓）。
     taesd_decoder_name: str | None = None
@@ -146,18 +150,40 @@ def _build_specs() -> tuple[LatentFormatSpec, ...]:
         S("flux", scale_factor=0.3611, shift_factor=0.1159, latent_channels=16, latent_dimensions=2,
           taesd_decoder_name="taef1_decoder", process=PROCESS_AFFINE, aliases=("flux1", "flux_1")),
         S("flux2", scale_factor=1.0, latent_channels=128, latent_dimensions=2,
+          spatial_downscale_ratio=16,
           taesd_decoder_name="taef2_decoder", process=PROCESS_IDENTITY, aliases=("flux_2",)),
         S("hunyuan_image_21", scale_factor=0.75289, latent_channels=64, latent_dimensions=2,
+          spatial_downscale_ratio=32,  # 参考实现写死 32 ✓（**不是** 8 ✓✗）
           aliases=("hunyuan_image_2_1",)),
+        # ⚠️ **不是**上面那条 ✗：同为 64 通道、但换算方式与 ``scale_factor`` 两回事 ✓
+        #    （2.1 是 ``(x − mean) / std`` ✓，mean/std 由 ``vae_wan.latents_stats`` 供 ✓ ——
+        #    表本身**不存**它们 ✓，见 :func:`_mean_std` ✓）。下采样 16× 与
+        #    ``vae_wan.WanVaeShape.scale`` 同源（4 次下采样 ✓）。
+        # ⚠️ **不是**上面的 2.1 ✗，也不是下面的 ``wan21`` ✗ —— 三族都是"Qwen-Image 系"、通道数
+        #    与反缩放却各不相同（2512 = **16ch / 恒等** ✓；2.1 = 64ch / 64 个 mean·std ✓；
+        #    Wan21 = 16ch / 16 个 mean·std ✓）。ComfyUI 里 2512 走的是 ``LatentFormat`` **基类**
+        #    默认（``scale_factor=1.0``、无 mean/std ⇒ 恒等 ✓，见 ``supported_models.QwenImage``
+        #    没有覆写 ``latent_format`` ✓）；mean/std 由 ``vae_wan.latents_stats`` 供 (0,1) ✓
+        #    ⇒ 这里标 ``meanstd`` 是因为**换算语义**是 ``x*std+mean`` ✓，(0,1) 时正好退化恒等 ✓。
+        #    只标 ``scale`` 也行但会丢掉"可以带 mean/std"这一格 ✓；标错成 2.1 那族 ⇒ 16 个潜通道
+        #    去查 64 个数 ⇒ `decode_latents` 当场报长度不符 ✓（不会静默错图 ✓）。
+        S("qwen_image", scale_factor=1.0, latent_channels=16, latent_dimensions=2,
+          process=PROCESS_MEANSTD, aliases=("qwen_2512", "qwen_image_2512", "qwen_image_vae")),
+        S("qwen_image21", scale_factor=1.0, latent_channels=64, latent_dimensions=2,
+          spatial_downscale_ratio=16, process=PROCESS_MEANSTD,
+          aliases=("qwen_image_2_1", "qwen_image_21", "qwen_image21_vae")),
         S("hunyuan_image_21_refiner", scale_factor=1.03682, latent_channels=64, latent_dimensions=3,
           process=PROCESS_REARRANGE, aliases=("hunyuan_image_2_1_refiner",)),
         S("sd_x4", scale_factor=1.0 / 12.0, latent_channels=4, latent_dimensions=2,
           aliases=("sd_x4_upscaler", "esrgan_x4")),  # 1/12 ≈ 0.08333 ✓（结构超分 ✓）
         S("sc_prior", scale_factor=1.0, latent_channels=16, latent_dimensions=2,
+          spatial_downscale_ratio=42,  # 参考实现写死 42（不是 8 ✓✗）
           aliases=("stable_cascade_prior",)),
         S("sc_b", scale_factor=1.0 / 0.43, latent_channels=4, latent_dimensions=2,
+          spatial_downscale_ratio=4,  # 参考实现写死 4 ✓（Stage-B 只下采样 4× ✓）
           aliases=("stable_cascade_b",)),  # ≈ 2.3256 ✓
         S("pixel_space", scale_factor=1.0, latent_channels=3, latent_dimensions=2,
+          spatial_downscale_ratio=1,  # 像素空间 ⇒ **不下采样** ✓（留 8 就是凭空缩 8 倍 ✓✗）
           process=PROCESS_IDENTITY,
           aliases=("chroma_radiance", "z_image_pixel", "hidream_o1_pixel", "pixel_dit_pixel")),
         # ── 视频（3 维 ✓）───────────────────────────────────────────────
@@ -165,24 +191,40 @@ def _build_specs() -> tuple[LatentFormatSpec, ...]:
           spatial_downscale_ratio=16, temporal_downscale_ratio=4, taesd_decoder_name="taeh3",
           aliases=("minimax_h3", "minimax_h3_video", "h3")),  # 24 通道引 latent_container ✓
         S("hunyuan_video", scale_factor=0.476986, latent_channels=16, latent_dimensions=3,
+          temporal_downscale_ratio=4,  # 参考实现写死 4 ✓（3D VAE 时间压 4× ✓）
           taesd_decoder_name="taehv", aliases=("hunyuanvideo", "hunyuan_video_1")),
         S("hunyuan_video_15", scale_factor=1.03682, latent_channels=32, latent_dimensions=3,
+          spatial_downscale_ratio=16, temporal_downscale_ratio=4,
           taesd_decoder_name="lighttaehy1_5", aliases=("hunyuan_video_1_5",)),
+        # ⚠️ ``temporal_downscale_ratio=4`` 是**参考实现明确写死的** ✓（``class Wan21``：
+        #    ``latent_dimensions=3`` ＋ ``temporal_downscale_ratio=4`` ✓）—— 漏了这一格 ⇒ 帧数
+        #    换算按"时间不下采样"算 ✓✗ ⇒ 潜时间维算成帧数、解码出 4 倍的帧或直接形状错 ✓（2026-10-31 补）。
         S("wan21", scale_factor=1.0, latent_channels=16, latent_dimensions=3, process=PROCESS_MEANSTD,
-          taesd_decoder_name="lighttaew2_1", aliases=("wan_2_1", "wan2.1")),
+          temporal_downscale_ratio=4, taesd_decoder_name="lighttaew2_1",
+          aliases=("wan_2_1", "wan2.1")),
         S("wan22", scale_factor=1.0, latent_channels=48, latent_dimensions=3, process=PROCESS_MEANSTD,
-          taesd_decoder_name="lighttaew2_2", aliases=("wan_2_2", "wan2.2")),
+          # ⚠️ Wan22 **继承** Wan21 的那两格 ✓：时间 4 ✓、空间改 **16** ✓（Wan21 是 8 ✓）——
+          #    抄成 8 ⇒ 潜空间凭空大一倍 ✓✗（2026-10-31 对照补齐）。
+          spatial_downscale_ratio=16, temporal_downscale_ratio=4,
+          taesd_decoder_name="lighttaew2_2",
+          aliases=("wan_2_2", "wan2.2")),
         S("ltxv", scale_factor=1.0, latent_channels=128, latent_dimensions=3,
+          spatial_downscale_ratio=32, temporal_downscale_ratio=8,
           aliases=("ltx_video", "ltx")),
         S("ltxav", scale_factor=1.0, latent_channels=128, latent_dimensions=3,
+          spatial_downscale_ratio=32, temporal_downscale_ratio=8,  # LTXAV **继承** LTXV ✓
           aliases=("ltx_av",)),
         S("mochi", scale_factor=1.0, latent_channels=12, latent_dimensions=3,
+          temporal_downscale_ratio=6,  # 参考实现写死 6 ✓（**不是** 4 ✓✗）
           process=PROCESS_MEANSTD, aliases=("mochi_1",)),
         S("cosmos_1_c_v8x8x8", scale_factor=1.0, latent_channels=16, latent_dimensions=3,
+          temporal_downscale_ratio=8,  # 名字里的 v8x8x8 就是它 ✓
           aliases=("cosmos", "cosmos1")),
         S("cogvideox", scale_factor=1.15258426, latent_channels=16, latent_dimensions=3,
+          temporal_downscale_ratio=4,
           aliases=("cog_video_x",)),
         S("cogvideox_1_5", scale_factor=0.7, latent_channels=16, latent_dimensions=3,
+          temporal_downscale_ratio=4,  # CogVideoX1_5 **继承** CogVideoX ✓
           aliases=("cog_video_x_1_5",)),
         S("seedvr2", scale_factor=1.0, latent_channels=16, latent_dimensions=3,
           aliases=("seed_vr2",)),
@@ -198,17 +240,22 @@ def _build_specs() -> tuple[LatentFormatSpec, ...]:
         S("audio_48khz_2ch", scale_factor=1.0, latent_channels=8, latent_dimensions=1,
           spatial_downscale_ratio=1, aliases=("audio_48k",)),
         S("stable_audio_1", scale_factor=1.0, latent_channels=64, latent_dimensions=1,
-          spatial_downscale_ratio=1, aliases=("stable_audio",)),
+          spatial_downscale_ratio=1, temporal_downscale_ratio=2048,  # 44.1k ⇒ 每 token 2048 帧 ✓
+          aliases=("stable_audio",)),
         S("stable_audio_3", scale_factor=1.0, latent_channels=256, latent_dimensions=1,
-          spatial_downscale_ratio=1, aliases=("stable_audio3",)),
+          spatial_downscale_ratio=1, temporal_downscale_ratio=4096,  # 48k ⇒ 4096 ✓
+          aliases=("stable_audio3",)),
         S("ace_audio", scale_factor=1.0, latent_channels=8, latent_dimensions=2,
           aliases=("ace_step_audio",)),
         S("ace_audio_15", scale_factor=1.0, latent_channels=64, latent_dimensions=1,
-          spatial_downscale_ratio=1, aliases=("ace_audio_1_5",)),
+          spatial_downscale_ratio=1, temporal_downscale_ratio=1764,
+          aliases=("ace_audio_1_5",)),
         S("yue2", scale_factor=1.0, latent_channels=64, latent_dimensions=1,
-          spatial_downscale_ratio=1, aliases=("yue_2",)),
+          spatial_downscale_ratio=1, temporal_downscale_ratio=1920,
+          aliases=("yue_2",)),
         S("minimax_music3", scale_factor=1.0, latent_channels=128, latent_dimensions=1,
-          spatial_downscale_ratio=1, aliases=("minimax_music_3", "music3")),
+          spatial_downscale_ratio=1, temporal_downscale_ratio=512,
+          aliases=("minimax_music_3", "music3")),
     )
 
 

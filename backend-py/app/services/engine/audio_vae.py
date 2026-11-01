@@ -9,12 +9,23 @@
 * 激活是 **Snake / SnakeBeta** ✓（``x + (1/β)·sin²(αx)`` ✓；beta 存 log 域 ✓）；
 * 潜变量**逐通道归一化** ✓（``z*std + mean`` ✓ 统计随检查点走 ✓）。
 
-## ⚠️ 本实现与参考的差别（写清楚 ✗，免得读成"等价"✓）
+## 结构（2026-11-01 **按参考逐行对齐** ✓ ⇒ 键名与数值都对齐 ✓，不再有"近似层"✗）
 
-* ``pre_block`` / ``AttnProjection``：参考那层我**没读内部** ✗ ⇒ 这里用**自己的**跨通道注意力近似 ✓
-  （形状契约一致 ✓：``latent_dim → vae_latent_channels`` ✓；**数值不等价** ✗）；
-* 编码器的 EncoderBlock 内部结构（抗混叠细节 ✓）也是**按事实重写**的近似 ✓；
-* ⇒ **能装真权重的只有一部分键** ✗（要不要逐键对齐，等真权重到手再核 ✓）。
+* 编码器 = DAC 血统 ✓：``Conv(1→d,7)`` → 逐级 ``EncoderBlock``（**块内宽度 = dim//2** ✓，含三个
+  ``ResidualUnit``）+ ``Snake1d`` + ``Conv(→latent_dim,3)`` ✓，名字挂在 ``encoder.block`` ✓；
+* 后验头 = ``AttnProjection`` ✓（``LayerNorm`` + **因果** ``CausalAttention`` + ``GeGluMlp`` ✓，
+  ``qkv`` 无 bias 而 ``q_bias``/``v_bias`` 是参数 ✓、``zero_k_bias`` 是 buffer ✓）⇒ 只在编码侧 ✓；
+  ``logs_proj`` 参考里**推理不用** ✓ 但**检查点里有** ⇒ 必须建出来 ✓（否则白多一组键 ✗）；
+* 解码器 = **BigVGAN** ✓：``ups`` 是**嵌套** ``ModuleList`` ✓、``resblocks`` 是**扁平**
+  ``级数×kernel`` 个 ``AMPBlock1`` ✓、激活一律 ``Activation1d``（**升采样→Snake→降采样** ✓，
+  kaiser-sinc ✓）、末尾 ``activation_post → conv_post(无 bias) → clamp(-1,1)`` ✓；
+* 上采样核是 ``(9,9,4,4,4,4,4)`` ✓（**不是** ``2·rate`` ✗✓）⇒ ``L = T × hop`` **精确成立** ✓
+  （旧写法每级少 1 个样本 ⇒ 8 帧解出 6208 而不是 6400 ✗）；
+* 激活是 **Snake / SnakeBeta** ✓（``x + (1/β)·sin²(αx)`` ✓ 含 ``+1e-9`` ✓；beta 存 log 域 ✓）；
+* 潜变量**逐通道归一化** ✓（``z*std + mean`` ✓ 统计是检查点里的 ``latents_mean``/``latents_std``
+  buffer ✓ —— 真权重直接盖过来 ✓，``config`` 给了就先写进去 ✓）。
+
+⇒ 结论：**真权重可以逐键装进来** ✓（`tests/engine_audio_vae_test.py` 的 ⑧ 把每处结构判断都钉成键名 ✓）。
 """
 from __future__ import annotations
 
@@ -62,6 +73,9 @@ class AudioVAEConfig:
     decoder_dim: int = 1024
     resblock_kernels: tuple[int, ...] = (3, 7, 11)
     resblock_dilations: tuple[tuple[int, ...], ...] = ((1, 3, 5), (1, 3, 5), (1, 3, 5))
+    #: 上采样**核** ✓（参考 H3 档是 ``(9,9,4,4,4,4,4)`` ✓）；``None`` ⇒ 按 stride 推 ✓（见
+    #: :attr:`upsample_kernels` ✓，只有自检的小配置会走到 ✓）。**不能**用 ``2·rate`` 顶替 ✗✗。
+    decoder_kernels: tuple[int, ...] | None = None
     #: 逐通道统计 ✓（``None`` ⇒ **恒等** ✓ = 合成/自检路径 ✓）。
     #: ⚠️ **真权重必须给** ✗ —— 不给的话波形"听着有声音"但**数值全错** ✗✗（且**不会报错** ✗）；
     #: 所以 `None` 的含义**只有一个**：**这条路径不做归一化** ✓，**不是**「H3 不需要」✗。
@@ -109,6 +123,14 @@ class AudioVAEConfig:
                 f"decoder_dim={self.decoder_dim} 太小 ✗：{len(self.decoder_rates)} 级上采样逐级减半 ✓ "
                 f"⇒ 至少要 {needed} ✓（否则末级通道数是 0，造出的卷积**非法** ✗ —— "
                 f"而报错要到 forward 里才出现，且是一句看不懂的卷积后端消息 ✗✗）")
+        # ⚠️ 上采样**核**是参考的硬事实 ✓（H3 档 ``(9,9,4,4,4,4,4)`` ✓，不是 ``2*rate`` ✗✓）：
+        #    核与 stride 的**奇偶必须同** ✓，否则 ``(k−rate)//2`` 的补边让长度差 1 ✓
+        #    ⇒ 解出来的样本数比 ``T × hop`` 少/多几个 ✓（**不报错** ✓，只是时长悄悄不对 ✓✗）。
+        for rate, kernel in zip(self.decoder_rates, self.upsample_kernels):
+            if kernel <= rate or (kernel - rate) % 2:
+                raise AudioVAEError(
+                    f"上采样核 {kernel} 与 stride {rate} 不匹配 ✗：要 kernel > stride ✓ 且"
+                    f"「kernel − stride」为**偶数** ✓（参考的配方是 4/2 ✓、9/5 ✓）")
 
     @property
     def hop_length(self) -> int:
@@ -124,6 +146,18 @@ class AudioVAEConfig:
     def latents_per_second(self) -> int:
         """**潜帧/秒** ✓（H3 = **40** ✓，与 `geometry.AUDIO_LATENT_HZ` 一致 ✓）。"""
         return self.sample_rate // self.hop_length
+
+    @property
+    def upsample_kernels(self) -> tuple[int, ...]:
+        """上采样核 ✓：显式给了就用 ✓，否则按参考配方推 ✓（``5 → 9`` ✓、``2 → 4`` ✓、其它 ``2·rate`` ✓）。
+
+        ⚠️ 参考 H3 是 ``(9,9,4,4,4,4,4)`` ✓ —— **不是** ``2·rate`` ✗✓（``2·5=10`` 长度会差 ✓）。
+        只有自检用的小配置（``decoder_rates=(2,2)``）走推导分支 ✓。
+        """
+        if self.decoder_kernels is not None:
+            return tuple(self.decoder_kernels)
+        return tuple(9 if rate == 5 else 4 if rate == 2 else 2 * rate
+                     for rate in self.decoder_rates)
 
     @property
     def uses_stats(self) -> bool:
@@ -197,123 +231,285 @@ def _build() -> Any:
         def forward(self, x: Any) -> Any:
             return snake(x, torch.exp(self.alpha).view(1, -1, 1), torch.exp(self.beta).view(1, -1, 1))
 
-    class ResBlock1(nn.Module):  # noqa: D101
-        """BigVGAN 的残差块 ✓：**每个 kernel 一组** ✓，组内按各自的 dilations 走并相加 ✓，再按组平均 ✓。
+    # ── 抗混叠重采样 ✓（参考 `kaiser_sinc_filter1d` / `UpSample1d` / `LowPassFilter1d` /
+    #    `DownSample1d` / `Activation1d` ✓ —— 2026-11-01 **逐行照参考** ✓，此前是「无重采样的
+    #    Snake」✗ ⇒ 键名（`…act.alpha` / `…upsample.filter`）与数值**双双**对不上真权重 ✓✗）──
+    def kaiser_sinc_filter1d(cutoff: float, half_width: float, kernel_size: int) -> Any:
+        """Kaiser 窗 sinc 低通 ✓（``[1, 1, kernel_size]`` ✓，和为 1 ✓）。"""
+        even = kernel_size % 2 == 0
+        half_size = kernel_size // 2
+        attenuation = 2.285 * (half_size - 1) * math.pi * 4 * half_width + 7.95
+        if attenuation > 50.0:
+            beta = 0.1102 * (attenuation - 8.7)
+        elif attenuation >= 21.0:
+            beta = 0.5842 * (attenuation - 21) ** 0.4 + 0.07886 * (attenuation - 21.0)
+        else:
+            beta = 0.0
+        window = torch.kaiser_window(kernel_size, beta=beta, periodic=False)
+        if even:
+            time = torch.arange(-half_size, half_size) + 0.5
+        else:
+            time = torch.arange(kernel_size) - half_size
+        response = 2 * cutoff * window * torch.sinc(2 * cutoff * time)
+        return (response / response.sum()).view(1, 1, kernel_size)
 
-        ⚠️ 这里我**理解错过一次** ✗✓：把 ``kernels`` 与 ``dilations`` 当成了**叉乘** ✗，
-        实际是「``resblock_dilation_sizes`` 的第 i 项配 ``resblock_kernel_sizes`` 的第 i 个 kernel」✓
-        ⇒ 叉乘写法会让 ``dilation`` 变成**元组** ✓ ⇒ ``tuple // 2`` 直接 `TypeError` ✓（**响亮** ✓）。
-        """
+    class UpSample1d(nn.Module):  # noqa: D101
+        """转置卷积升采样 ✓（``× ratio`` 缩放 ✓ + 两侧裁掉边缘 ✓，与参考逐项相同 ✓）。"""
 
-        def __init__(self, channels: int, kernels: Any, dilations: Any) -> None:
+        def __init__(self, ratio: int = 2, kernel_size: int = 12) -> None:
             super().__init__()
-            kernels, dilations = tuple(kernels), tuple(dilations)
-            if len(kernels) != len(dilations):
-                raise AudioVAEError(
-                    f"每个 kernel 要配**一组** dilations ✗（收到 {len(kernels)} 个 kernel、"
-                    f"{len(dilations)} 组 dilation ✓）")
-            self.blocks = nn.ModuleList([
-                nn.ModuleList([
-                    nn.Sequential(
-                        SnakeBeta(channels),
-                        nn.Conv1d(channels, channels, kernel, dilation=dilation,
-                                  padding=dilation * (kernel - 1) // 2))
-                    for dilation in dilations[index]])
-                for index, kernel in enumerate(kernels)])
+            self.ratio = ratio
+            self.stride = ratio
+            self.pad = kernel_size // ratio - 1
+            self.pad_left = self.pad * ratio + (kernel_size - ratio) // 2
+            self.pad_right = self.pad * ratio + (kernel_size - ratio + 1) // 2
+            self.register_buffer("filter", kaiser_sinc_filter1d(
+                cutoff=0.5 / ratio, half_width=0.6 / ratio, kernel_size=kernel_size))
 
         def forward(self, x: Any) -> Any:
-            groups = []
-            for group in self.blocks:
-                summed = x
-                for path in group:
-                    summed = summed + path(x)
-                groups.append(summed)
-            stacked = torch.stack(groups, dim=0)
-            return stacked.mean(dim=0)
+            channels = x.shape[1]
+            value = torch.nn.functional.pad(x, (self.pad, self.pad), mode="replicate")
+            value = torch.nn.functional.conv_transpose1d(
+                value, self.filter.expand(channels, -1, -1).to(x.dtype),
+                stride=self.stride, groups=channels) * self.ratio
+            return value[..., self.pad_left:-self.pad_right]
 
-    class AttnProjection(nn.Module):  # noqa: D101
-        """``latent_dim → latent_channels`` ✓ 用**自己的**注意力近似 ✓（⚠️ 参考那层内部**没读** ✗）。"""
+    class LowPassFilter1d(nn.Module):  # noqa: D101
+        """sinc 低通 + 跨步 ✓（降采样先滤波 ✓，否则会混叠 ✓）。"""
 
-        def __init__(self, latent_dim: int, out_channels: int, heads: int) -> None:
+        def __init__(self, cutoff: float = 0.5, half_width: float = 0.6, stride: int = 1,
+                     kernel_size: int = 12) -> None:
             super().__init__()
-            self.heads = max(1, int(heads))
-            self.norm = nn.LayerNorm(latent_dim)
-            self.attn = nn.MultiheadAttention(latent_dim, self.heads, batch_first=True)
-            self.proj = nn.Linear(latent_dim, out_channels)
+            self.pad_left = kernel_size // 2 - int(kernel_size % 2 == 0)
+            self.pad_right = kernel_size // 2
+            self.stride = stride
+            self.register_buffer("filter", kaiser_sinc_filter1d(cutoff, half_width, kernel_size))
 
         def forward(self, x: Any) -> Any:
-            pooled = self.norm(x)
-            attended, _ = self.attn(pooled, pooled, pooled, need_weights=False)
-            return self.proj(attended + pooled)
+            channels = x.shape[1]
+            value = torch.nn.functional.pad(x, (self.pad_left, self.pad_right), mode="replicate")
+            return torch.nn.functional.conv1d(
+                value, self.filter.expand(channels, -1, -1).to(x.dtype),
+                stride=self.stride, groups=channels)
 
-    class EncoderBlock(nn.Module):  # noqa: D101
-        """``Snake → 带 strides 的卷积`` ✓（**下采样 + 通道翻倍** ✓；抗混叠细节是近似 ✓）。
+    class DownSample1d(nn.Module):  # noqa: D101
+        """``LowPassFilter1d`` 的薄封装 ✓（cutoff 随 ratio 收窄 ✓）。"""
 
-        ⚠️ 这里我**也写错过一次** ✗✓：照抄参考那种「先 ``d_model *= 2`` 再建块」的写法 ✗，
-        导致块的**输入宽度**比实际张量多一倍 ✓ ⇒ ``4 vs 8`` 的 size mismatch ✓（**响亮** ✓）。
-        ⇒ 本实现自己保证**自洽** ✓：输入 = 当前宽度 ✓、输出 = 翻倍 ✓（与参考的**外部行为**一致 ✓）。
-        """
+        def __init__(self, ratio: int = 2, kernel_size: int = 12) -> None:
+            super().__init__()
+            self.ratio = ratio
+            self.kernel_size = kernel_size
+            self.lowpass = LowPassFilter1d(cutoff=0.5 / ratio, half_width=0.6 / ratio,
+                                           stride=ratio, kernel_size=kernel_size)
 
-        def __init__(self, in_channels: int, stride: int) -> None:
+        def forward(self, x: Any) -> Any:
+            return self.lowpass(x)
+
+    class Activation1d(nn.Module):  # noqa: D101
+        """**升采样 → 激活 → 降采样** ✓（alias-free ✓；参考的 ``Activation1d`` 逐项相同 ✓）。"""
+
+        def __init__(self, activation: Any, up_ratio: int = 2, down_ratio: int = 2,
+                     up_kernel_size: int = 12, down_kernel_size: int = 12) -> None:
+            super().__init__()
+            self.act = activation
+            self.upsample = UpSample1d(up_ratio, up_kernel_size)
+            self.downsample = DownSample1d(down_ratio, down_kernel_size)
+
+        def forward(self, x: Any) -> Any:
+            return self.downsample(self.act(self.upsample(x)))
+
+    # ── DAC 编码器 ✓（参考 `ResidualUnit` / `EncoderBlock` / `Encoder` 逐行 ✓）──
+    class ResidualUnit(nn.Module):  # noqa: D101
+        """``Snake→Conv(dil)→Snake→Conv1`` ✓ + 残差 ✓（长度差**两侧对称**裁掉 ✓，参考如此 ✓）。"""
+
+        def __init__(self, dim: int, dilation: int) -> None:
             super().__init__()
             self.block = nn.Sequential(
-                Snake1d(in_channels),
-                nn.Conv1d(in_channels, in_channels * 2, 2 * stride, stride=stride,
-                          padding=stride // 2))
+                Snake1d(dim),
+                nn.Conv1d(dim, dim, 7, dilation=dilation, padding=((7 - 1) * dilation) // 2),
+                Snake1d(dim),
+                nn.Conv1d(dim, dim, 1))
+
+        def forward(self, x: Any) -> Any:
+            value = self.block(x)
+            pad = (x.shape[-1] - value.shape[-1]) // 2
+            if pad > 0:
+                x = x[..., pad:-pad]
+            return value + x
+
+    class EncoderBlock(nn.Module):  # noqa: D101
+        """三个 ``ResidualUnit`` ＋ ``Snake`` ＋ **跨步卷积** ✓（宽度是块宽的一半 ✓ —— 参考如此 ✓）。"""
+
+        def __init__(self, dim: int, stride: int) -> None:
+            super().__init__()
+            self.block = nn.Sequential(
+                ResidualUnit(dim // 2, 1),
+                ResidualUnit(dim // 2, 3),
+                ResidualUnit(dim // 2, 9),
+                Snake1d(dim // 2),
+                nn.Conv1d(dim // 2, dim, 2 * stride, stride=stride,
+                          padding=math.ceil(stride / 2)))
 
         def forward(self, x: Any) -> Any:
             return self.block(x)
 
-    class BigVGANDecoder(nn.Module):  # noqa: D101
-        """**BigVGAN 血统解码器** ✓：``conv_pre`` → 逐级 ``ConvTranspose1d`` + 残差块 → ``tanh`` ✓。
+    # ── 后验头 ✓（参考 `GeGluMlp` / `CausalAttention` / `AttnProjection` 逐行 ✓ ——
+    #    **只走编码侧** ✓：解码不经过它 ✓，但它挂在检查点里 ✓，缺了就是一组键装不上 ✓）──
+    class GeGluMlp(nn.Module):  # noqa: D101
+        """``LayerNorm → (gelu(w0·x) · w1·x) → w2`` ✓（GELU 用 **tanh 近似** ✓，参考如此 ✓）。"""
 
-        ⚠️ 输出**夹到 [-1, 1]** ✓（参考如此 ✓ —— 这是"能直接写 wav"的前提 ✓）。
+        def __init__(self, in_features: int, hidden_features: int) -> None:
+            super().__init__()
+            self.norm = nn.LayerNorm(in_features)
+            self.act = nn.GELU(approximate="tanh")
+            self.w0 = nn.Linear(in_features, hidden_features)
+            self.w1 = nn.Linear(in_features, hidden_features)
+            self.w2 = nn.Linear(hidden_features, in_features)
+
+        def forward(self, x: Any) -> Any:
+            value = self.norm(x)
+            return self.w2(self.act(self.w0(value)) * self.w1(value))
+
+    class CausalAttention(nn.Module):  # noqa: D101
+        """**因果**自注意力 ✓ ⇒ 各头取均值 ✓ ⇒ 沿特征维池化到 ``out_dim`` ✓ ⇒ ``proj`` ✓。
+
+        ⚠️ 三个偏置的形状是参考的**硬事实** ✓：``qkv`` 本身 ``bias=False`` ✓，而
+        ``q_bias`` / ``v_bias`` 是参数 ✓、``zero_k_bias`` 是 **buffer** ✓（k 侧恒 0 ✓）——
+        写成「一个普通 bias」会让键名与形状都对不上 ✓✗。
+        """
+
+        def __init__(self, in_dim: int, out_dim: int, num_heads: int) -> None:
+            super().__init__()
+            self.head_dim = in_dim // num_heads
+            self.num_heads = num_heads
+            self.out_dim = out_dim
+            self.qkv = nn.Linear(in_dim, in_dim * 3, bias=False)
+            self.q_bias = nn.Parameter(torch.zeros(in_dim))
+            self.v_bias = nn.Parameter(torch.zeros(in_dim))
+            self.register_buffer("zero_k_bias", torch.zeros(in_dim))
+            self.proj = nn.Linear(out_dim, out_dim)
+
+        def forward(self, x: Any) -> Any:
+            batch, count, _ = x.shape
+            bias = torch.cat((self.q_bias, self.zero_k_bias, self.v_bias)).to(x.dtype)
+            qkv = torch.nn.functional.linear(x, self.qkv.weight.to(x.dtype), bias)
+            q, k, v = qkv.reshape(batch, count, 3, self.num_heads,
+                                  self.head_dim).permute(2, 0, 3, 1, 4).unbind(0)
+            attended = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+            pooled = torch.nn.functional.adaptive_avg_pool1d(
+                torch.mean(attended, dim=1), self.out_dim)
+            return self.proj(pooled)
+
+    class AttnProjection(nn.Module):  # noqa: D101
+        """``[B,T,latent_dim] → [B,T,latent_channels]`` ✓（**残差**两跳 ✓，参考 ``AttnProjection`` ✓）。"""
+
+        def __init__(self, in_dim: int, out_dim: int, num_heads: int, mlp_ratio: int = 2) -> None:
+            super().__init__()
+            self.norm1 = nn.LayerNorm(in_dim)
+            self.attn = CausalAttention(in_dim, out_dim, num_heads)
+            self.proj = nn.Linear(in_dim, out_dim)
+            self.norm3 = nn.LayerNorm(in_dim)
+            self.norm2 = nn.LayerNorm(out_dim)
+            self.mlp = GeGluMlp(in_features=out_dim,
+                                hidden_features=int(out_dim * mlp_ratio))
+
+        def forward(self, x: Any) -> Any:
+            value = self.proj(self.norm3(x)) + self.attn(self.norm1(x))
+            return value + self.mlp(self.norm2(value))
+
+    # ── BigVGAN 解码器 ✓（参考 `AMPBlock1` / `BigVGAN` 逐行 ✓）──
+    def get_padding(kernel_size: int, dilation: int = 1) -> int:
+        return int((kernel_size * dilation - dilation) / 2)
+
+    class AMPBlock1(nn.Module):  # noqa: D101
+        """**抗混叠**残差块 ✓：``convs1[i]`` 带膨胀 ✓、``convs2[i]`` 不带 ✓，两者各配一个激活 ✓。"""
+
+        def __init__(self, channels: int, kernel_size: int = 3,
+                     dilation: Any = (1, 3, 5)) -> None:
+            super().__init__()
+            self.convs1 = nn.ModuleList([
+                nn.Conv1d(channels, channels, kernel_size, stride=1, dilation=dilation,
+                          padding=get_padding(kernel_size, dilation))
+                for dilation in dilation])
+            self.convs2 = nn.ModuleList([
+                nn.Conv1d(channels, channels, kernel_size, stride=1, dilation=1,
+                          padding=get_padding(kernel_size, 1))
+                for _ in range(len(tuple(dilation)))])
+            self.num_layers = len(self.convs1) + len(self.convs2)
+            self.activations = nn.ModuleList([
+                Activation1d(activation=SnakeBeta(channels)) for _ in range(self.num_layers)])
+
+        def forward(self, x: Any) -> Any:
+            acts1, acts2 = self.activations[::2], self.activations[1::2]
+            for conv1, conv2, act1, act2 in zip(self.convs1, self.convs2, acts1, acts2):
+                x = x + conv2(act2(conv1(act1(x))))
+            return x
+
+    class BigVGAN(nn.Module):  # noqa: D101
+        """**BigVGAN 解码器** ✓：``conv_pre`` → 逐级（``ConvTranspose1d`` ＋ 该级全部残差块取均值）
+        → ``activation_post`` → ``conv_post`` → **``clamp(-1, 1)``** ✓。
+
+        ⚠️ 三处**键名/数值的硬事实** ✓（2026-11-01 照参考改 ✓，此前全都不对 ✗）：
+        ① ``ups`` 是**嵌套** ``ModuleList([ConvTranspose1d])`` ✓ ⇒ 键是 ``ups.0.0.weight`` ✓；
+        ② ``resblocks`` 是**扁平**的 ✓（``num_ups × num_kernels`` 个 ✓）⇒ 键是 ``resblocks.7.convs1.0.weight`` ✓；
+        ③ 末尾是 ``clamp`` **不是** ``tanh`` ✗✓，且 ``conv_post`` **无 bias** ✓ ⇒ 多一个
+        ``conv_post.bias`` 键 ✓✗。①②③ 任一写错 ⇒ 真权重装进去就是**形状缺失/静默走错层** ✓。
         """
 
         def __init__(self, config: AudioVAEConfig) -> None:
             super().__init__()
             self.num_kernels = len(config.resblock_kernels)
+            self.num_upsamples = len(config.decoder_rates)
             self.conv_pre = nn.Conv1d(config.latent_dim, config.decoder_dim, 7, padding=3)
-            ups, resblocks = nn.ModuleList(), nn.ModuleList()
-            for index, rate in enumerate(config.decoder_rates):
-                ups.append(nn.ConvTranspose1d(
+            self.ups = nn.ModuleList()
+            for index, (rate, kernel) in enumerate(zip(config.decoder_rates,
+                                                       config.upsample_kernels)):
+                self.ups.append(nn.ModuleList([nn.ConvTranspose1d(
                     config.decoder_dim // (2 ** index),
-                    config.decoder_dim // (2 ** (index + 1)), 2 * rate, stride=rate,
-                    padding=rate // 2 + rate % 2))
-                resblocks.append(nn.ModuleList([
-                    ResBlock1(config.decoder_dim // (2 ** (index + 1)), config.resblock_kernels,
-                              config.resblock_dilations)
-                    for _ in range(self.num_kernels)]))
-            self.ups, self.resblocks = ups, resblocks
-            self.activation_post = SnakeBeta(config.decoder_dim // (2 ** len(config.decoder_rates)))
-            self.conv_post = nn.Conv1d(config.decoder_dim // (2 ** len(config.decoder_rates)),
-                                       1, 7, padding=3)
+                    config.decoder_dim // (2 ** (index + 1)),
+                    kernel, rate, padding=(kernel - rate) // 2)]))
+            self.resblocks = nn.ModuleList()
+            for index in range(self.num_upsamples):
+                width = config.decoder_dim // (2 ** (index + 1))
+                for kernel, dilations in zip(config.resblock_kernels, config.resblock_dilations):
+                    self.resblocks.append(AMPBlock1(width, kernel, dilations))
+            width = config.decoder_dim // (2 ** self.num_upsamples)
+            self.activation_post = Activation1d(activation=SnakeBeta(width))
+            self.conv_post = nn.Conv1d(width, 1, 7, padding=3, bias=False)
 
         def forward(self, x: Any) -> Any:
             x = self.conv_pre(x)
-            for index, (up, resblock_set) in enumerate(zip(self.ups, self.resblocks)):
-                x = up(x)
-                if index == len(self.ups) - 1:
-                    x = x[..., :x.shape[-1]]
-                summed = resblock_set[0](x)
-                for resblock in resblock_set[1:]:
-                    summed = summed + resblock(x)
-                x = summed / len(resblock_set)
-            return torch.tanh(self.conv_post(self.activation_post(x)))
+            for index in range(self.num_upsamples):
+                for up in self.ups[index]:
+                    x = up(x)
+                summed = None
+                for offset in range(self.num_kernels):
+                    block = self.resblocks[index * self.num_kernels + offset]
+                    summed = block(x) if summed is None else summed + block(x)
+                x = summed / self.num_kernels
+            x = self.activation_post(x)
+            return self.conv_post(x).clamp(-1.0, 1.0)
 
     class Encoder(nn.Module):  # noqa: D101
+        """DAC 编码器 ✓：``Conv(1→d,7)`` → 逐级 ``EncoderBlock``（**先翻倍再建块** ✓）→ ``Snake`` ＋ ``Conv(→latent)`` ✓。
+
+        ⚠️ 参考是「``d_model *= 2`` 之后建块」✓，而块的**内部宽度是 ``dim // 2``** ✓ ⇒
+        「翻倍」与「半宽」正好抵消 ✓，这才是它能接上前一级的原因 ✓（我此前按「输入宽度翻倍」
+        写过一版 ✗ ⇒ 8 vs 4 尺寸不匹配 ✓；按参考的**块内半宽**写就自洽 ✓）。
+        """
+
         def __init__(self, config: AudioVAEConfig) -> None:
             super().__init__()
-            blocks = [nn.Conv1d(1, config.encoder_dim, 7, padding=3)]
             width = config.encoder_dim
+            blocks: list[Any] = [nn.Conv1d(1, width, 7, padding=3)]
             for stride in config.encoder_rates:
-                blocks.append(EncoderBlock(width, stride))   # 输入 = 当前宽度 ✓
-                width *= 2                                   # 输出翻倍 ⇒ 下一块的输入 ✓
+                width *= 2
+                blocks.append(EncoderBlock(width, stride))
             blocks += [Snake1d(width), nn.Conv1d(width, config.latent_dim, 3, padding=1)]
-            self.blocks = nn.Sequential(*blocks)
+            self.block = nn.Sequential(*blocks)
 
         def forward(self, x: Any) -> Any:
-            return self.blocks(x)
+            return self.block(x)
 
     class AudioVAE(nn.Module):  # noqa: D101
         """**潜变量 ⇄ 波形** ✓（``[B,32,2,T] ⇄ [B,2,L]`` ✓，``L = T × hop`` ✓）。"""
@@ -321,20 +517,38 @@ def _build() -> Any:
         def __init__(self, config: AudioVAEConfig) -> None:
             super().__init__()
             self.config = config
+            self.sample_rate = config.sample_rate
+            self.hop_length = config.hop_length
             self.encoder = Encoder(config)
             self.pre_block = AttnProjection(config.latent_dim, config.latent_channels,
                                             config.heads)
             self.mean_proj = nn.Conv1d(config.latent_channels, config.latent_channels, 1)
+            #: ``logs_proj`` **推理不用** ✓（参考 ``encode`` 只回后验均值 ✓），但**检查点里有** ✓
+            #: ⇒ 不建它，真权重装进来就多出一组没人认领的键 ✓✗（不建 ⇏ 省显存，只 ⇏ 装得上 ✓）。
+            self.logs_proj = nn.Conv1d(config.latent_channels, config.latent_channels, 1)
             self.dec_in_proj = nn.Conv1d(config.latent_channels, config.latent_dim, 1)
-            self.decoder = BigVGANDecoder(config)
+            self.decoder = BigVGAN(config)
+            #: 统计量在参考里是 **buffer** ✓（``latents_mean`` / ``latents_std`` 各 ``latent_channels`` 个 ✓）
+            #: ⇒ 真权重会**直接盖过来** ✓；``config`` 里给了就**先写进去** ✓（两条来源同一处 ✓）。
+            self.register_buffer("latents_mean", torch.zeros(config.latent_channels))
+            self.register_buffer("latents_std", torch.ones(config.latent_channels))
+            if config.uses_stats:
+                self.latents_mean.copy_(torch.tensor(config.latents_mean, dtype=torch.float32))
+                self.latents_std.copy_(torch.tensor(config.latents_std, dtype=torch.float32))
 
-        # ── 归一化（统计随检查点走 ✓；没给 ⇒ 恒等 ✓）──
+        # ── 归一化（统计随检查点走 ✓；恒等值 ⇒ 原样 ✓）──
+        def _has_stats(self) -> bool:
+            """检查点里是不是带**非平凡**统计 ✓（默认全 0 / 全 1 ⇒ 数学上就是恒等 ✓）。"""
+            if not bool(torch.count_nonzero(self.latents_mean)):
+                return not bool(torch.allclose(self.latents_std,
+                                               torch.ones_like(self.latents_std)))
+            return True
+
         def _stats(self, reference: Any, name: str) -> Any:
-            values = getattr(self.config, name)
-            if values is None:
+            if not self._has_stats():
                 return None
-            return torch.tensor(values, dtype=reference.dtype,
-                                device=reference.device).view(1, -1, 1)
+            buffer = getattr(self, name)
+            return buffer.to(dtype=reference.dtype, device=reference.device).view(1, -1, 1)
 
         def normalize_latents(self, latents: Any) -> Any:
             """``(z − mean) / std`` ✓（**逐通道** ✓）；没给统计 ⇒ **原样** ✓。"""

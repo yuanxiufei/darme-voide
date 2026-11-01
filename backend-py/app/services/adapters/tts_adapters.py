@@ -151,7 +151,7 @@ class MiniMaxTTSAdapter:
 
 
 class CosyVoiceTTSAdapter:
-    """CosyVoice 2 本地 TTS —— ⚠️ **面向本地薄封装**（``app/local_services/cosyvoice/server.py``）。
+    """CosyVoice 2 本地 TTS —— ⚠️ **面向本地薄封装**（``app/local_services/tts/server.py``）。
 
     * 普通合成 → ``POST /tts``（JSON）
     * **带参考音频时走零样本克隆** → ``POST /inference_zero_shot``（JSON；``prompt_audio`` 是 **base64** ✓）
@@ -173,7 +173,7 @@ class CosyVoiceTTSAdapter:
     # ── 能力声明 ✓（同上 ✓）──
     #: ⭐⭐ **两条路径都不收情绪** ✗✗：``/tts`` → 上游 ``/inference_sft`` 只认 ``tts_text``/``spk_id`` ✓；
     #: 零样本 → 上游 ``/inference_zero_shot`` 只认 ``tts_text``/``prompt_text``/``prompt_wav`` ✓
-    #: （见 ``app/local_services/cosyvoice/server.py`` ✓ 包装器**明确忽略**这两个字段 ✓✗）。
+    #: （见 ``app/local_services/tts/server.py`` ✓ 包装器**明确忽略**这两个字段 ✓✗）。
     #: ⇒ 声明 ``False`` ✓ ⇒ 用户选的情绪会进 ``dropped`` 并被**如实报告** ✓✗，不再静默消失 ✓。
     supports_emotion = False
     supports_emotion_vector = False

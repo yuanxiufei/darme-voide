@@ -1,4 +1,4 @@
-# backend-py/app/scripts/ — 工具与自检脚本（**全部 Python**）
+# backend-py/app/scripts/ — 工具与自检脚本（**全部 Python**，外加本 README）
 
 > 2026-09-15 从仓库根 `scripts/` 整体搬来，并把原来的 Node 守卫（`.mjs`）与 PowerShell
 > 脚本**逐条移植为 Python**。现在仓库根**没有** `scripts/` 了。
@@ -7,17 +7,22 @@
 > 不再需要「Node 工具链 + Python 工具链」两套；放 `backend-py/app/scripts/` 也让
 > 「后端自检（`backend-py/tests/`）」与「仓库自检（本目录）」在同一棵树里，找得着。
 
-本目录有**四类**：
+本目录有**五类**（15 个 `.py` + 本 `README.md`，以盘上为准）：
 
 | 类别 | 脚本 | 运行环境 |
 |---|---|---|
-| **仓库自检** | `check_skill_refs.py` / `check_memory.py` / `test_guards.py` / `check_all.py` —— 防资产**静默漂移** | Python 3.8+，**仅标准库**（零第三方依赖） |
+| **仓库自检** | `check_skill_refs.py` / `check_memory.py` / `test_guards.py` / `check_all.py` / `check_cli_encoding.py`（拦「裸跑就崩」的编码事故）—— 防资产**静默漂移** | Python 3.8+，**仅标准库**（零第三方依赖） |
 | **语料管线** | `corpus/fetch_raw.py` → `normalize.py` → `search.py`（+ `analyze{,2,3}.py` 统计） | Python 3.8+，**仅标准库** |
 | **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` / `resource_watch.py` | Python 3.8+，**仅标准库**（与后端通过 subprocess 解耦） |
+| **引擎/度量工具** | `h3_readiness.py`（上机前自检**薄壳**：业务在 `app/services/engine_readiness.py`，本文件只解析参数与渲染）/ `dit_families.py`（盘上有几族 DiT、每族**差什么**才能跑；只核对不装载）/ `tokenizer_bench.py`（自研分词器 vs 参考实现：吞吐与规模） | Python 3.8+，`h3_readiness` / `tokenizer_bench` 需要后端 venv |
 | **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改）<br>`db_upgrade.py`（旧库**补列**；2026-09-25 加，真实库当时缺 **32 列**） | Python 3.8+，**仅标准库** |
 
-> 四类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
+> 五类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
 > （`run_all.py` 的 `TESTS` 清单才是权威；改后端代码请跑它）。
+>
+> ⚠️ 这张表就是「本目录有哪几个文件」的人工版；**新加脚本要顺手登记**，否则下一个人只会看到
+> 一个来历不明的 `.py`（结构守卫 `tests/structure_test.py` 只管 `app/` 源码里**被点名**的路径是否存在，
+> 不管本目录的清单完不完整 ✗）。
 >
 > ⚠️ 本条原先写死「66 套件 / 2481 项」✗ —— 那份数字早就不对了 ✓（2026-09-25 实测已远超）。
 > **别再把套件数写死在这里** ✗：`run_all.py` 自己会打出总数 ✓，抄进来的数字只会变成下一条过期信息 ✓。
@@ -184,7 +189,7 @@ python backend-py/app/scripts/resource_watch.py --run "python backend-py/tests/r
 
 ⚠️ **应用侧（`app/`）不要各自算**：唯一权威是 `app/core/config.py` —— `PROJECT_ROOT`（仓库根）、
 `BACKEND_PY_ROOT`（`backend-py/`）、`skills_dir()`（技能库，`SKILLS_DIR` 可覆盖）。
-2026-09-15 收口前，`services/skills.py`、`services/agents/skills.py`、`services/local_model_scan.py`
+2026-09-15 收口前，`app/services/skills.py`、`app/agent/skills.py`、`app/services/local_model_scan.py`
 各自算过一遍 ✗ —— 那类重复**改漏一处不会报错**，只会静默读错目录。
 
 ## 依赖关系

@@ -1007,7 +1007,23 @@ with TestClient(app) as client:
           qc.get("overallScore") == 88 and qc.get("issues") == ["new"] and qc.get("dimensions") == {"b": 2},
           str(qc))
 
-    # --- DELETE：硬删 + 只清 characters 关联（props 关联会留孤儿，与 TS 一致）---
+    # --- DELETE：硬删 + **挂在镜头上的附表全清** ---
+    # ⚠️ 这里原先断言的是「props 关联 NOT cleaned (inherited behaviour)」—— 那是照抄原 TS 的
+    # 残缺清理，等于用测试把孤儿行锁成"预期行为"。实测库里就这样攒了 39 条指向已不存在镜头的
+    # storyboard_props；SQLite 无 AUTOINCREMENT，删到低位重建会复用 rowid ⇒ 孤儿会复活成假绑定。
+    raw = sqlite3.connect(get_db_path())
+    raw.execute(
+        "INSERT INTO continuity_states (episode_id, storyboard_id, state_type, entity_key,"
+        " state_value, created_at, updated_at) VALUES (?, ?, 'wound', 'hand', 'bleeding',"
+        " '2026-10-30T00:00:00', '2026-10-30T00:00:00')",
+        (sb_ep, sb_id),
+    )
+    raw.commit()
+    # 本集只有这一个 10 秒镜头 ⇒ 建镜时就该把集时长算成 ceil(10/60)=1 分钟
+    dur_before = raw.execute("SELECT duration FROM episodes WHERE id=?", (sb_ep,)).fetchone()[0]
+    raw.close()
+    check("sb create: 集时长按镜头重算（10s -> 1 分钟，不是停在 0）", dur_before == 1, dur_before)
+
     r = client.delete(f"/api/v1/storyboards/{sb_id}")
     dump("DELETE /storyboards/{id}", r)
     check("sb delete: 200", r.status_code == 200 and r.json().get("code") == 200)
@@ -1016,8 +1032,13 @@ with TestClient(app) as client:
           raw.execute("SELECT COUNT(*) FROM storyboards WHERE id=?", (sb_id,)).fetchone()[0] == 0)
     check("sb delete: storyboard_characters cleaned",
           raw.execute("SELECT COUNT(*) FROM storyboard_characters WHERE storyboard_id=?", (sb_id,)).fetchone()[0] == 0)
-    check("sb delete: storyboard_props NOT cleaned (inherited behaviour, documented)",
-          raw.execute("SELECT COUNT(*) FROM storyboard_props WHERE storyboard_id=?", (sb_id,)).fetchone()[0] == 1)
+    check("sb delete: storyboard_props 也清干净（不再留孤儿）",
+          raw.execute("SELECT COUNT(*) FROM storyboard_props WHERE storyboard_id=?", (sb_id,)).fetchone()[0] == 0)
+    check("sb delete: 镜头级 continuity_states 也清干净",
+          raw.execute("SELECT COUNT(*) FROM continuity_states WHERE storyboard_id=?", (sb_id,)).fetchone()[0] == 0)
+    check("sb delete: 删完最后一镜后集时长归 0（不留旧分钟数）",
+          raw.execute("SELECT duration FROM episodes WHERE id=?", (sb_ep,)).fetchone()[0] == 0,
+          raw.execute("SELECT duration FROM episodes WHERE id=?", (sb_ep,)).fetchone()[0])
     raw.close()
 
     # --- 未迁移端点仍走 501（**动态派生**，同上）---
@@ -2265,7 +2286,9 @@ with TestClient(app) as client:
 
     # ============ S1 地基：定价目录 / trace 写入侧 / Agent 协议 / 费用预估 ============
     from app.services.cost_catalog import estimate_cost  # noqa: E402
-    from app.services.protocol import build_protocol_contract, parse_agent_protocol  # noqa: E402
+    # ⚠️ 2026-10-30：原 `app/services/protocol.py` 是**已经分叉**的第二份实现（缺 `_stringify_status`：
+    # 键不存在时 TS 出 `undefined`、那份出 `null`），生产代码从未用它 ⇒ 已删，改指向权威版。
+    from app.agent.protocol import build_protocol_contract, parse_agent_protocol  # noqa: E402
     from app.services.task_logger import sanitize_value  # noqa: E402
     from app.services.trace_store import append_trace_event  # noqa: E402
 

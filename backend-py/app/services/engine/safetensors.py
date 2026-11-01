@@ -30,7 +30,7 @@ import json
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 __all__ = [
     "DTYPE_ITEMSIZE",
@@ -274,9 +274,21 @@ class TensorReader:
     访问模式下**效果等价** ✓（都是一次顺序 IO ✓），而 mmap 的页由 OS 工作集管理器回收，
     Windows 上**时机不可控** ✗ —— 页被挤掉时延迟会在最不该出现的时刻冒出来 ✓✗。
     显式 seek 的失败点可枚举（读短了就是截断 ✓），对「资源受限环境」更好归因 ✓。
+
+    ⚠️ ``unbuffered``（2026-11-01 移植 ``win_io`` 后接上 ✓）：
+    * ``None``（默认）＝**Windows 上用无缓冲重叠读、其他平台用 seek+read** ✓；
+    * ``True``/``False`` 可强制指定 ✓（A/B 与排障的口 ✓）。
+    两条路**返回的字节必须逐字节相同** ✓✗（判据在 ``tests/engine_win_io_test.py`` ✓）。
+    ⚠️ 无缓冲读**不走页缓存** ⇒ 同一份权重装第二遍不会再从内存里捡 ✓，
+    这既是它的好处（内存账不翻倍 ✓）也是它的代价（重读要吃满一次盘 ✓）✓✗。
     """
 
-    def __init__(self, path: str | Path) -> None:
+    #: 槽区上限 ✓：够装下最大张量就够 ✓（不够 ``win_io`` 自己会切块 ✓）。
+    _SLOT_CAP_BYTES = 256 * 1024 * 1024
+    #: 同时在飞的笔数 ✓（对应 NVMe 队列深度 ✓；4 起步不抢采样线程 ✗）。
+    _SLOTS = 4
+
+    def __init__(self, path: str | Path, *, unbuffered: bool | None = None) -> None:
         self._path = Path(path)
         self._metadata, header, header_length = _read_header(self._path)
         self._header_length = header_length
@@ -286,6 +298,51 @@ class TensorReader:
         for name, raw in header.items():
             self.entries[str(name)] = _parse_tensor(str(name), raw, data_bytes)
         self._handle: Any = None
+        self._raw: Any = None
+        self._raw_error = ""
+        self._closed = False
+        self._unbuffered = unbuffered
+        self._open_raw()
+
+    # ---------------------------------------------------------------- 无缓冲层
+
+    def _open_raw(self) -> None:
+        """建无缓冲读口 ✓（**失败一律退回 seek+read** ✓✗：读盘方式不许让装载失败 ✗）。"""
+        if self._unbuffered is None:
+            from . import win_io
+
+            wanted = win_io.windows_available()
+        else:
+            wanted = bool(self._unbuffered)
+        if not wanted:
+            return
+        from . import win_io
+
+        biggest = max((entry.nbytes for entry in self.entries.values()), default=0)
+        slot = min(self._SLOT_CAP_BYTES, max(win_io.SECTOR_BYTES * 8, biggest + win_io.SECTOR_BYTES))
+        try:
+            raw = win_io.UnbufferedReader(self._path, slots=self._SLOTS, slot_bytes=slot,
+                                          force_plain=False)
+        except OSError as err:  # pragma: no cover - 真机上少见
+            self._raw_error = f"无缓冲读口建不起来，退回 seek+read：{err}"
+            return
+        if raw.describe()["mode"] != "unbuffered":
+            self._raw_error = raw.describe().get("error") or "无缓冲路径不可用，退回 seek+read"
+            raw.close()
+            return
+        self._raw = raw
+
+    @property
+    def ioMode(self) -> str:
+        """实际在用哪条读路 ✓（``unbuffered`` / ``plain`` / ``closed`` ✓）—— 要能被报出来 ✓✗。"""
+        if self._closed:
+            return "closed"
+        return "unbuffered" if self._raw is not None else "plain"
+
+    @property
+    def ioNote(self) -> str:
+        """降级原因 ✓（空＝没降级 ✓✗：「读得慢还查不出为什么」的坑就在这句 ✓）。"""
+        return self._raw_error
 
     @property
     def metadata(self) -> dict[str, str]:
@@ -302,9 +359,9 @@ class TensorReader:
 
     def read(self, name: str) -> bytes:
         """读**一个**张量的原始字节 ✓（不解释、不转张量、不缓存 ✓）。"""
-        entry = self.entries.get(name)
-        if entry is None:
-            raise SafetensorsError(f"没有张量 {name!r}（可用：{len(self.entries)} 个 ✓）")
+        entry = self._entry(name)
+        if self._raw is not None:
+            return self._raw.read(self._data_start + entry.begin, entry.nbytes)
         handle = self._ensure_open()
         handle.seek(self._data_start + entry.begin)
         payload = handle.read(entry.nbytes)
@@ -313,7 +370,23 @@ class TensorReader:
                 f"张量 {name!r} 只读到 {len(payload)}/{entry.nbytes} 字节 ⇒ **文件被截断** ✗")
         return payload
 
+    def read_many(self, names: Sequence[str]) -> list[bytes]:
+        """一次读**多段** ✓（顺序与入参一致 ✓）—— 只是把多笔提交给读口，不改语义 ✓✗。"""
+        entries = [self._entry(name) for name in names]
+        if self._raw is None:
+            return [self.read(name) for name in names]
+        return list(self._raw.read_many(
+            [(self._data_start + entry.begin, entry.nbytes) for entry in entries]))
+
+    def _entry(self, name: str) -> TensorEntry:
+        entry = self.entries.get(name)
+        if entry is None:
+            raise SafetensorsError(f"没有张量 {name!r}（可用：{len(self.entries)} 个 ✓）")
+        return entry
+
     def _ensure_open(self) -> Any:
+        if self._closed:
+            raise SafetensorsError("读口已关闭 ⇒ 不能再读 ✓✗（静默重开会把「关干净了没」这件事弄丢 ✗）")
         if self._handle is None:
             self._handle = self._path.open("rb")
         return self._handle
@@ -322,6 +395,10 @@ class TensorReader:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+        if self._raw is not None:
+            self._raw.close()
+            self._raw = None
+        self._closed = True
 
     def __enter__(self) -> "TensorReader":
         return self

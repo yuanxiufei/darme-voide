@@ -34,7 +34,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -61,6 +60,8 @@ from app.core.models import (
 from app.core.response import now
 from app.services.script_fingerprint import stamp_storyboards_script_hash
 from app.services.storyboard_helpers import (
+    delete_storyboard_children,
+    recalc_episode_duration,
     sync_storyboard_characters,
     sync_storyboard_props,
     validate_storyboard_bindings,
@@ -414,7 +415,6 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
             "shotNumbers": ",".join(str(sb.get("shot_number")) for sb in payload_storyboards),
         })
 
-        total_duration = 0
         dialogue_issue_count = 0
         with engine.begin() as conn:
             # 整集重建：先把**挂在旧镜头上的一切**删干净，再删分镜本身
@@ -424,19 +424,13 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
             #    ``storyboard_props`` 与镜头级 ``continuity_states`` 全成了指向不存在镜头的孤儿行：
             #    前者让道具绑定读数虚高，后者更糟 —— 跨镜状态机按 storyboard_id 读到的
             #    「上一镜手上是什么」会命中幽灵镜头（值是真的、镜头已经没了）。
-            #    场景级状态（只看 scene_id、scene_id 非空）**不删**：场景本身还在。
+            #    「分镜挂了哪些附表」统一由 ``delete_storyboard_children`` 说，别在这再抄一遍。
             existing_ids = [] if append else [
                 row[0] for row in conn.execute(
                     select(storyboards.c.id).where(storyboards.c.episode_id == episode_id)
                 ).all()
             ]
-            if existing_ids:
-                conn.execute(sql_delete(storyboard_characters).where(
-                    storyboard_characters.c.storyboard_id.in_(existing_ids)))
-                conn.execute(sql_delete(storyboard_props).where(
-                    storyboard_props.c.storyboard_id.in_(existing_ids)))
-                conn.execute(sql_delete(continuity_states).where(
-                    continuity_states.c.storyboard_id.in_(existing_ids)))
+            delete_storyboard_children(conn, existing_ids)
             if not append:
                 conn.execute(sql_delete(storyboards).where(
                     storyboards.c.episode_id == episode_id))
@@ -554,19 +548,10 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
                 # 关联用现成 helper（语义与 TS 局部实现一致，另支持 costume 映射）
                 sync_storyboard_characters(conn, storyboard_id, shot.get("character_ids") or [])
                 sync_storyboard_props(conn, storyboard_id, shot.get("prop_ids") or [])
-                total_duration += duration
 
-            # 续写模式下「本集总时长」必须含**之前几轮**已存的镜头，否则集时长会越写越短
-            if append:
-                total_duration = int(conn.execute(
-                    select(func.coalesce(func.sum(storyboards.c.duration), 0))
-                    .where(storyboards.c.episode_id == episode_id)
-                ).scalar() or 0)
-
-            # 集时长：向上取整到分钟（`Math.ceil(total/60)`）
-            conn.execute(episodes.update().where(episodes.c.id == episode_id).values(
-                duration=math.ceil(total_duration / 60), updated_at=ts
-            ))
+            # 集时长：镜头行是唯一真源 ⇒ 直接按库里重算（续写模式自然也含**之前几轮**已存镜头，
+            # 不必再单独 sum 一遍；那段手算就是这口径的第二份副本）
+            total_duration = int(recalc_episode_duration(conn, episode_id))
 
             # 三个后置：剧本指纹盖章 / take 预算重置 / 节奏相位
             stamp_storyboards_script_hash(conn, episode_id)
@@ -652,6 +637,9 @@ def create_storyboard_tools(episode_id: int, drama_id: int) -> dict[str, Tool]:
             )
             if "character_ids" in fields:
                 sync_storyboard_characters(conn, storyboard_id, fields.get("character_ids") or [])
+            if "duration" in fields:
+                # 改单镜时长 ⇒ 集时长（分钟，ceil）必须跟着重算，否则前端集卡片仍是旧值
+                recalc_episode_duration(conn, episode_id)
 
         log_task_success("StoryboardTool", "update-complete", {
             "episodeId": episode_id, "storyboardId": storyboard_id,

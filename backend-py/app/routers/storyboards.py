@@ -27,8 +27,9 @@ GET     ``/{id}/qc``                   最近一次 QC 打分
 2. ``PUT`` 的 ``character_costumes`` 来自 JSON，**键是字符串**。JS 里
    ``costumes[characterId]`` 会把数字键强制转成字符串所以能命中；Python 必须显式
    把键转回 int，否则 ``3 in {"3": ...}`` 恒为 False ⇒ 服装变体静默丢失。
-3. ``DELETE`` **只清 storyboard_characters，不清 storyboard_props** —— 原 TS 就是如此
-   （会留下 props 关联孤儿行）。照抄不改，但要知情。
+3. ``DELETE`` **不再照抄原 TS 的残缺清理**：原实现只删 storyboard_characters，把
+   storyboard_props 与镜头级 continuity_states 留成孤儿行（2026-10-30 实测库里攒了 39 条）。
+   现统一走 ``delete_storyboard_children``（与整集重建同一真源）。
 """
 
 from __future__ import annotations
@@ -65,7 +66,9 @@ from ..core.response import (
 )
 from ..services.character_match import match_character_by_speaker_name
 from ..services.storyboard_helpers import (
+    delete_storyboard_children,
     get_storyboard_character_costumes,
+    recalc_episode_duration,
     get_storyboard_character_ids,
     get_storyboard_prop_ids,
     parse_dialogue_for_tts,
@@ -170,6 +173,9 @@ async def create_storyboard(request: Request, conn: Connection = Depends(get_tx)
         sync_storyboard_characters(conn, sb_id, body.get("character_ids") or [])
         if "prop_ids" in body:
             sync_storyboard_props(conn, sb_id, body.get("prop_ids") or [])
+        # 多了一镜 ⇒ 集时长跟着涨（镜头行是时长唯一真源；原来只有整集重建算过这一列）
+        if body.get("episode_id") is not None:
+            recalc_episode_duration(conn, int(body["episode_id"]))
 
         row = _fetch_storyboard(conn, sb_id)
         payload = row_to_dict(row) if row is not None else {}
@@ -231,6 +237,10 @@ async def update_storyboard(storyboard_id: str, request: Request, conn: Connecti
         if "prop_ids" in body:
             prop_ids = body.get("prop_ids")
             sync_storyboard_props(conn, sid, prop_ids if isinstance(prop_ids, list) else [])
+
+        # 改单镜时长 ⇒ 集时长跟着重算（镜头行是时长唯一真源，别让 episodes.duration 停在旧值）
+        if "duration" in body:
+            recalc_episode_duration(conn, row.episode_id)
 
         # 对话角色名验证：保存时检测 dialogue 中的角色名是否存在于剧组角色列表
         dialogue_validation: list[dict[str, Any]] | None = None
@@ -357,11 +367,18 @@ def delete_storyboard(storyboard_id: str, conn: Connection = Depends(get_tx)):
         sid = parse_param_id(storyboard_id)
         if sid is None:
             return not_found("Invalid storyboard id")
-        # ⚠️ 只清 storyboard_characters，**不清 storyboard_props** —— 与 TS 一致
-        conn.execute(
-            delete(storyboard_characters).where(storyboard_characters.c.storyboard_id == sid)
-        )
+        # ⚠️ 原 TS 只清 storyboard_characters（留下 props 关联与镜头级 continuity_states 孤儿行）。
+        # 2026-10-30 改为走单一真源：实测库里就是这样攒出 39 条指向已不存在镜头的
+        # ``storyboard_props``；更麻烦的是 SQLite 没有 AUTOINCREMENT，删到低位再重建会**复用 rowid**
+        # ⇒ 孤儿行会「复活」成新镜头的假道具绑定。分镜挂了哪些附表只由这里说，别手抄第二份。
+        episode_id = conn.execute(
+            select(storyboards.c.episode_id).where(storyboards.c.id == sid)
+        ).scalar()
+        delete_storyboard_children(conn, [sid])
         conn.execute(delete(storyboards).where(storyboards.c.id == sid))
+        # 少了一个镜头 ⇒ 集时长要跟着降（否则删完还显示原来的分钟数）
+        if episode_id is not None:
+            recalc_episode_duration(conn, episode_id)
         return success()
     except Exception as exc:  # noqa: BLE001
         return bad_request(str(exc))
@@ -940,6 +957,8 @@ async def split_storyboard(storyboard_id: str, conn: Connection = Depends(get_tx
                 "visualFocus": sub.get("visualFocus"),
             })
 
+        # 一镜拆成多镜（原镜被删、新镜按 [2,4] 秒夹取）⇒ 总和会变，集时长必须重算
+        recalc_episode_duration(conn, sb.episode_id)
         log_task_success("StoryboardAPI", "split",
                          {"storyboardId": sid, "count": len(created_shots)})
         return success({"subShots": created_shots})

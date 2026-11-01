@@ -38,10 +38,13 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from . import prefetch as pf_mod
 from . import quant as quant_mod
 from . import quant_nvfp4 as nvfp4_mod
 from . import safetensors as st_mod
@@ -109,6 +112,15 @@ class WeightLoadReport:
             "consumedNvfp4": self.consumedNvfp4, "consumedScales": self.consumedScales,
             "dequant": dict(self.dequant), "error": self.error,
         }
+
+
+#: 读前置的**件数** ✓（2＝当前这件在反量化/写卡时，下一件已经在盘上读 ✓）。
+_READ_AHEAD = 2
+#: 读前置的**单件字节上限** ✓✗：20 GiB 的模型里也有 780 MiB 的 embedding ✓，
+#: 提前读它等于峰值多吃 780 MiB（而它只换来几毫秒 ✗）⇒ 超过这条线的一律就地读 ✓。
+_READ_AHEAD_MAX_BYTES = 256 * 1024 * 1024
+#: 上一次装载的读前置统计 ✓（``engine_readahead_test`` 靠它证明**真的用上了** ✗✗ 而不是「接了个空壳」）。
+_LAST_PREFETCH: dict[str, Any] = {}
 
 
 def _torch() -> Any:
@@ -277,7 +289,8 @@ def _apply_key_map(state: dict[str, Any], key_map: dict[str, str]) -> tuple[dict
 
 def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
                         device: str | None = None,
-                        key_map: dict[str, str] | None = None) -> WeightLoadReport:
+                        key_map: dict[str, str] | None = None,
+                        read_ahead: int = _READ_AHEAD) -> WeightLoadReport:
     """把 ``path`` 的权重**逐张量**装进 ``module`` ✓，并**如实**报告差异 ✓（不静默 ✗）。
 
     ## 为什么是流式（2026-10-29 起 ✓）
@@ -315,12 +328,73 @@ def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
         report.error = f"读取权重失败：{type(err).__name__}: {err}"
         return report
 
-    with reader:
-        return _load_streaming(reader, own, report, dtype=dtype, key_map=key_map)
+    with reader, _prefetch_scope(read_ahead) as prefetcher:
+        return _load_streaming(reader, own, report, dtype=dtype, key_map=key_map,
+                               read_ahead=read_ahead, prefetcher=prefetcher)
+
+
+def _read_ahead_bytes(entries: dict[str, Any], orig: str) -> int:
+    """这件**有多少字节** ✓（读前置要按它筛 ✓✗：省一条 780 MiB 的 embedding 比多读十层值钱 ✓）。"""
+    entry = entries.get(orig)
+    return int(getattr(entry, "nbytes", 0) or 0)
+
+
+def _submit_ahead(prefetcher: Any, reader: Any, plan: list[tuple[str, str]],
+                  entries: dict[str, Any], start: int, count: int) -> None:
+    """把后面 ``count`` 件**交给后台读** ✓（不阻塞 ✓、不抛 ✓、超上限的跳过 ✓）。
+
+    ⚠️ 只在**本次装载调用**里有意义 ✗：跨阶段预取（趁 encode 时读 sample 要的 DiT ✓）听着更划算，
+    但换装的第一步是 `release_part` ⇒ 预取好的字节会在「退干净」之后**指向已经不要的东西** ✓✗，
+    且峰值要多吃一整件（11~19 GiB ✗）⇒ 那不属于「预取」✓，属于「两套同时在内存里」✗✗。
+    """
+    for orig, _logical in plan[start:start + count]:
+        if _read_ahead_bytes(entries, orig) > _READ_AHEAD_MAX_BYTES:
+            continue                      # 大件就地读 ✓（预取它等于把峰值翻倍 ✗）
+        prefetcher.submit(orig, partial(reader.read, orig))
+
+
+@contextmanager
+def _prefetch_scope(read_ahead: int) -> Iterator[Any]:
+    """开一个**只活一次装载**的预取器 ✓（``read_ahead<=0`` ⇒ 给 ``None`` ✓ 全走就地读 ✓）。
+
+    ⚠️ 退出时 `close(wait=True)` **必须等干净** ✓✗：不等的话，本函数已经返回、装配线接着去
+    `release_part` ⇒ 后台线程还捏着旧 reader 的字节在写 ✓，而调用方以为「退干净了」✓✗
+    —— 这正是「跨阶段预取」被否掉的那个账 ✓，在这里用作用域把它焊死 ✓。
+    """
+    if int(read_ahead) <= 0:
+        yield None
+        return
+    prefetcher = pf_mod.Prefetcher(name="load", max_inflight=max(1, int(read_ahead)))
+    try:
+        yield prefetcher
+    finally:
+        global _LAST_PREFETCH
+        try:
+            _LAST_PREFETCH = {**prefetcher.snapshot(), "readAhead": int(read_ahead)}
+        except Exception:  # noqa: BLE001 - 观测面不许反过来搞坏装载 ✓✗
+            _LAST_PREFETCH = {"readAhead": int(read_ahead)}
+        prefetcher.close(wait=True)
+
+
+def last_prefetch() -> dict[str, Any]:
+    """上一次装载的读前置统计 ✓（``hits`` 为 0 ⇒ 一次都没用上 ✓：那这个优化等于没接 ✗✗）。"""
+    return dict(_LAST_PREFETCH)
+
+
+def _read_raw(prefetcher: Any, reader: Any, orig: str) -> bytes:
+    """取一件的字节 ✓（预取里有就等它 ✓、没有就地读 ✓ —— **两条路字节相同** ✓✗）。"""
+    if prefetcher is None:
+        return reader.read(orig)
+    try:
+        return prefetcher.take(orig)
+    except KeyError:
+        #: 没提交过（大件被筛掉 / 槽满被拒 ✓）⇒ 就地读 ✓：预取是**加速**，不是**通路** ✗✗
+        return reader.read(orig)
 
 
 def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, *,
-                    dtype: Any = None, key_map: dict[str, str] | None = None) -> WeightLoadReport:
+                    dtype: Any = None, key_map: dict[str, str] | None = None,
+                    read_ahead: int = _READ_AHEAD, prefetcher: Any = None) -> WeightLoadReport:
     """流式装载的**主体** ✓（差集 → 预检 → 逐张量 ✓；分三段是为了「失败时不写字节」✓）。"""
     entries = reader.entries
     report.sourceKeys = len(entries)
@@ -530,13 +604,20 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
         return report
 
     # ④ 逐张量：读 → 还原 → cast → 写入 ✓ ⇒ 峰值 ≈ **单个张量**（不是整份 ✗）
+    #: ⭐ 读前置（2026-11-01 ✓，`prefetch` 的唯一接线点 ✓）：**当前这件在反量化/写卡时，
+    #: 后面几件已经在盘上读** ✓ —— 省的是「等盘」那一段 ✓，不改变峰值（在飞的就 ``read_ahead`` 件、
+    #: 且都 ≤ ``_READ_AHEAD_MAX_BYTES`` ✓）。
+    #: ⚠️ 作用域由 :func:`_prefetch_scope` 管 ✓✗：出函数前 `close(wait=True)` 走完 ⇒ 不存在
+    #: 「换装退干净了、预取的字节还挂着」那种账 ✗✗（跨阶段预取被明确否掉 ✓，见 :func:`_submit_ahead` ✓）。
     casts: dict[str, int] = {}
     written = 0
     with torch.no_grad():
-        for orig, logical in plan:
+        for index, (orig, logical) in enumerate(plan):
+            if prefetcher is not None:
+                _submit_ahead(prefetcher, reader, plan, entries, index + 1, read_ahead)
             try:
-                raw = reader.read(orig)
-            except (st_mod.SafetensorsError, OSError) as err:
+                raw = _read_raw(prefetcher, reader, orig)
+            except (st_mod.SafetensorsError, OSError, pf_mod.PrefetchError) as err:
                 report.error = (f"读取 `{logical}` 失败：{type(err).__name__}: {err}"
                                 f" ⇒ 已写入 {written}/{len(plan)} 个键（模块处于**半装**状态 ✗）")
                 return report

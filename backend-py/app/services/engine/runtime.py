@@ -41,11 +41,12 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, NoReturn
 
 from . import audio_vae as audio_vae_mod
 from . import chain
+from . import device_policy
 from . import lora as lora_mod
 from . import lora_cache
 from . import pipeline as pipe
@@ -58,6 +59,11 @@ from .torch_backend import (
     dependency_status,
     torch_available,
 )
+#: ⚠️ 判族常量**单独引** ✗（不整包铺开 ✓）：装配时要拿它核「`ditPath` 到底是不是 Z-Image」✓ ——
+#: 判错的后果是「装得进去、跑得出来、图是噪声」✓✗，见 :meth:`EngineRuntime._ensure_zimage_loaded` ✓。
+#: ⚠️ ``QWEN21_FAMILY`` 同理 ✓：2.1 与 2512 的 `text_dim`/VAE 通道**全一样** ✓✗ ⇒ 三道互核全过 ✓，
+#: 只有族名拦得住 ✓（见 :meth:`EngineRuntime._ensure_qwen21_loaded` ✓）。
+from .torch_backend import QWEN21_FAMILY, QWEN_IMAGE_FAMILY, ZIMAGE_FAMILY
 
 __all__ = [
     "EngineBusy",
@@ -69,6 +75,73 @@ __all__ = [
 
 #: 终结态 ✓（到了这三种就不再变 ✓ —— 别用 `status != "running"` 判 ✗：``queued`` 也不是终结 ✓✗）
 _TERMINAL = ("done", "failed", "cancelled")
+
+#: ``stage=zimage`` 的装配要**三份权重 + 一本词表** ✓（2026-10-31 起装配口收齐 ✓）：
+#: ``ditPath`` ✓ / ``textWeights`` ✓ / ``imageVaeWeights`` ✓ / ``tokenizerPath`` ✓。
+#: ⚠️ 这份文案只在**确实缺格**时出现 ✗ —— 收齐了就真装（不拒 ✓）。
+_ZIMAGE_STAGE_NOTE = (
+    "Z-Image 的装配要**三份权重 + 一本词表** ✓：DiT（`ditPath` ✓）+ **Qwen3 文本塔**"
+    "（`textWeights` ✗）+ **Flux VAE**（`imageVaeWeights` ✗）+ Qwen3 词表（`tokenizerPath` ✗）。"
+    "⚠️ 这里**不猜路径** ✗：猜错会「装得进去、跑得出来、结果是噪声」✓✗（比装不上糟得多 ✓）。"
+    "三份权重各是什么：`unet/z_image_turbo_bf16.safetensors`（453 键 ✓）、"
+    "`text_encoders/qwen_3_4b.safetensors`（398 键 ✓，**不是** Qwen3-VL ✗）、"
+    "`vae/ae.safetensors`（244 键 ✓，**是 Flux 的 ae** ✗ 不是 `qwen_image_vae`）；"
+    "词表是 `tokenizers/qwen3vl_32b/` 这种**目录** ✓（含 `tokenizer.json` ✓，不是 SDXL 的 "
+    "`sd1_tokenizer` ✗）。"
+)
+
+#: ``stage=qwen_image21`` 的装配同样要**三份权重 + 一本词表** ✓（2026-10-31 ✓）：
+#: ``ditPath`` ✓ / ``textWeights`` ✓ / ``imageVaeWeights`` ✓ / ``tokenizerPath`` ✓。
+#: ⚠️ 这三份**与 Z-Image 那三份一件都不能互换** ✗✗ —— 两族都是「DiT + 文本塔 + VAE」，
+#: 形状还都"看着能对上" ✓：拿 Z-Image 的 Qwen3-4B（`text_dim=2560` ✓）配 2.1 主干
+#: （`text_dim=4096` ✓）会在 `_check_text_encoder` 当场被拒 ✓（这条能拦住 ✓），
+#: 但拿 **25/12 的 qwen_image VAE** 顶 2.1 的 **64 通道** VAE ✓✗ ⇒ 通道数一核就拒 ✓；
+#: 真正拦不住的是「同族不同代」的 DiT 权重 ✓✗（2.1 与 2512 的键数 649 vs 1933 ⇒ 键集能区分 ✓）。
+_QWEN21_STAGE_NOTE = (
+    "Qwen-Image **2.1** 的装配要**三份权重 + 一本词表** ✓：DiT（`ditPath` ✓）+ **Qwen3.5 文本塔**"
+    "（`textWeights` ✓）+ **64 通道 VAE**（`imageVaeWeights` ✓）+ Qwen3.5 词表（`tokenizerPath` ✓）。"
+    "⚠️ **不猜路径** ✗：猜错会「装得进去、跑得出来、图是噪声/糊」✓✗。三份长这样："
+    "`diffusion_models/qwen_image_2.1_int8_convrot.safetensors`（**649** 键 ✓，不是 2512 的 1933 ✗）、"
+    "`text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors`"
+    "（语言塔 + **视觉塔 + lm_head** 同文件 ✓ —— 加载器会自动单列后两族 ✓）、"
+    "`vae/qwen_image_2.1_vae_bf16.safetensors`（**238** 键 ✓，Wan 式 3D 因果 VAE ✓、"
+    "**不是** `qwen_image_vae`（那是 2512 的 ✗ 通道数不对 ✓））。"
+)
+
+#: ⭐ H3 那三件的**驻留账** ✓（GiB ✓）—— 与 `TorchBackend.PART_NEED_GIB`（Qwen-Image 2.1 的 ✓）
+#: **必须分开** ✗✗（两张表差 11 GiB ✓✗）。三个数是**盘上文件大小 ＋ dtype 直接读出来的** ✓：
+#:
+#: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
+#: |---|---|---|---|---|
+#: | DiT | ``h3_ref2va_pruned_int8_convrot`` ✓ | 19.53 GiB ✓ | **19.62** ✓ | int8 常驻（`Int8Linear` ✓ 不反量化 ✓）＋ fp32 岛/输出头/buffers 抬到 bf16 ✓ |
+#: | 文本塔 | ``qwen3vl_32b_minimax_h3_int8_convrot`` ✓ | 25.28 GiB ✓ | **25.44** ✓ | 同上 ✓；其中 int8 部分 **22.7 GiB** ✓、非 int8（视觉塔 ＋ 嵌入 ＋ 范数）**2.57 GiB** ✓ |
+#: | 视频 VAE | ``h3_video_vae`` ✓ | 5.2 GiB ✓ | **5.2** ✓ | 默认落 **cpu** ✓（不占卡 ✓） |
+#:
+#: ⚠️ **驻留数不许按文件大小抄** ✗✗（2026-11-01 端到端实测纠了一遍 ✓）：DiT 原来记的是
+#: ``17.94``（＝更早那份 pruned 文件的字节数 ✓），可实测 `memory_allocated` 是 **19.62 GiB** ✓
+#: —— 差的 1.68 GiB 是"文件字节 ≠ 驻留字节"（int8 之外的那些参数要抬到 bf16 ✓）。
+#: 记小了会**误判装得下** ✓✗：按 17.94 判「余 21.28 ≥ 17.94+1 ⇒ 整份上卡」✓，实际装上占 19.62 ⇒
+#: 只剩 **1.3 GiB** 给采样工作区 ✓（这才是「明明装下了、采样第 1 步就 OOM」的真因 ✓）。
+#: TE 同样按实测 25.44 记（差 0.16 GiB 属毛刺 ✓ 但一律以实测为准 ✓）。
+#:
+#: ⚠️ 拿 2.1 的 ``{"dit": 13.26, "text": 14.79}`` 判 H3 ✗✗：DiT 少算 6.4 GiB ✓、TE 少算 10.6 GiB ✓
+#: ⇒ 决策说"装得下" ✓、`residency` 留 ``off`` ✓（= 不切 ✗）、装到一半 OOM ✓，且 OOM 落在
+#: **后装的那件**上 ✓✗（读起来像"TE 坏了" ✗，实际是两张表混用 ✓）。
+H3_PART_NEED_GIB: dict[str, float] = {"dit": 19.62, "text": 25.44, "vae": 5.2}
+
+_QWEN_IMAGE_STAGE_NOTE = (
+    "Qwen-Image **2512 / Edit 2511** 的装配要**三份权重 + 一本词表** ✓：DiT（`ditPath` ✓）+ "
+    "**Qwen2.5-VL-7B 文本塔**（`textWeights` ✓）+ **16 通道 VAE**（`imageVaeWeights` ✓）+ "
+    "Qwen2.5 词表（`tokenizerPath` ✓）。"
+    "⚠️ **不猜路径** ✗：这一族与 2.1 的 `text_dim` / VAE 通道**都不一样** ✓，配错就是「装得进去、"
+    "图是糊的/脱钩的」✓✗。五份长这样："
+    "`diffusion_models/qwen_image_2512_bf16.safetensors`（**1933** 键 ✓、bf16 38.05 GiB ✓；"
+    "Edit 是 `qwen_image_edit_2511_int8_convrot.safetensors` ✓、带 `__index_timestep_zero__` ✓）、"
+    "`text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors`（语言塔 + **视觉塔 + lm_head** 同文件 ✓ —— "
+    "只装语言塔 ✓、后两族单列不装 ✓）、"
+    "`vae/qwen_image_vae.safetensors`（**16** 通道 ✓、8 倍 ✓ —— **不是** 2.1 的 64 通道 ✗）、"
+    "词表是 Qwen2.5-VL 的**目录** ✓（含 `tokenizer.json` ✓，特殊符 `<|im_start|>=151644` ✓）。"
+)
 
 
 class EngineUnavailable(RuntimeError):
@@ -276,6 +349,149 @@ def _release_torch_cache() -> bool:
         return True
     except Exception:
         return False
+
+
+def _abandon_assembly(backend: Any, err: BaseException, *, what: str = "") -> NoReturn:
+    """装配失败 ⇒ **丢掉整个候选后端** ✓✗（模块一个字不变 ✓），并把 ``reason`` **原样**传下去 ✓。
+
+    ⚠️⚠️ 三件事必须**一起**做 ✗✗（2026-10-31 收口 ✓）：四条装配线各自手抄了一段
+    ``except TorchBackendUnavailable`` ＋ 一段 ``except BaseException`` ✓✗，其中 SDXL 那条
+    **少抄了一整段** ✓✗ —— 见下面第 3 条。
+
+    1. ``del backend`` ✓✗：只靠"局部变量出作用域"**不算** ✗ —— 异常仍挂在 traceback 里被引用 ✓，
+       不显式删就留到栈帧销毁才可能回收 ✓（G 级张量 ⇒ 装下一个模型时峰值翻倍 ✓）。
+    2. ``_release_torch_cache()`` ✓✗：不还缓存时 ``reserved`` 仍占着整卡 ✓（症状：
+       "明明卸载了，新装配还是 OOM" ✓）。
+    3. **``reason`` 必须原样往下传** ✗✗：SDXL 那条只有 ``except BaseException`` 一段 ⇒
+       它内部抛的 ``TorchBackendUnavailable(reason="deps")``（缺 torch）被重包成
+       ``reason="pending"``（权重没就绪）✓✗ —— 调用方照文档去补权重白忙 ✓，
+       而真正该做的是装依赖 ✓。**报错分类错 = 指错方向** ✓，比不报更贵 ✓。
+
+    ⚠️ 正因为第 3 条要分派，调用方**只需要一段** ``except BaseException`` ✓✗
+    （两段 except 是历史写法 ✓；``str(err)`` ＋ 换 reason 的路径在下面统一 ✓）。
+    """
+    del backend                              # 引用一断 ⇒ traceback 里的那份才真被回收 ✓
+    _release_torch_cache()
+    reason = str(getattr(err, "reason", "") or "pending")
+    if isinstance(err, TorchBackendUnavailable):
+        raise TorchBackendUnavailable(str(err), reason=reason) from err
+    prefix = f"{what} " if what else ""
+    raise TorchBackendUnavailable(f"{prefix}装配失败：{type(err).__name__}: {err}",
+                                  reason=reason) from err
+
+
+#: 「**没传**」与「传了个 ``None``」要分开 ✓✗：``pressure=None`` 是**有意义的**输入 ✓
+#: （＝测不到卡况 ✓），不能拿来当"没传"的哨兵 ✗（否则注入测不到卡况的场景时，
+#: 函数反而会自己去探一次真卡 —— 测试就变成了「看这台机器卡忙不忙」✓✗）。
+_UNSET: Any = object()
+
+
+def _chain_device_decision(*, part: str, device: str | None, need_bytes: int,
+                           policy: Any = None, pressure: Any = _UNSET,
+                           gpu_available: bool | None = None,
+                           split_note: str) -> dict[str, Any] | None:
+    """**整条链**该在哪台设备上装配 ✓（``None`` ⇒ 用户钉死了设备 ✓ / 不需要决策 ✓）。
+
+    三条线共用这一份 ✓✗（SDXL 四件套 ✓ / Z-Image 三件同驻 ✓ / 2.1 装配前那一次复判 ✓），
+    为的是把「判成 ``split`` 但**这条线落不了地** ⇒ 按装不下处理、整份转 CPU」这条规则
+    **只写一处** ✓ —— 三处各写一遍必然改一处忘两处 ✓✗（那种错不报异常 ✓，只是在卡上硬塞到 OOM ✓）。
+
+    ``need_bytes``：**只接受已经量出来的数** ✓（SDXL 取 ``os.stat`` 的文件字节 ✓、Z-Image 取
+    :attr:`TorchBackend.CHAIN_NEED_GIB` 的实测账 ✓）；量不出来 ⇒ 传 ``0`` 走「需求未知」的
+    占用率粗判 ✓（**不编一个 GiB 数** ✗✗ —— 那会让报告看着精确、其实全是猜的 ✓✗）。
+
+    ``split_note``：这条线**为什么**落不了 ``split`` ✓ —— 会拼进 ``reason`` 里一起报出去 ✓✗
+    （只写"降级"的话，读者分不清「卡不够」还是「这条线本来就不支持」✓✗）。
+
+    ``pressure`` / ``gpu_available`` 是**注入位** ✓（自检必需 ✓✗）：不注入就现读真卡 ✓，
+    注入后**不再碰真机** ✓ —— 否则「装不下 ⇒ 转 CPU」这条断言在卡空着的机器上永远走不到 ✓✗。
+    """
+    if str(device or "").strip().lower() not in ("", "auto"):
+        return None
+    engine_torch: Any = None
+    if gpu_available is None:
+        gpu_ok = False
+        try:
+            import torch as engine_torch  # noqa: PLC0415 —— 可选依赖 ✓
+            gpu_ok = bool(engine_torch.cuda.is_available())
+        except Exception:  # noqa: BLE001 —— 没装 torch ⇒ 当「没卡」✓（各后端自己会报依赖缺 ✓）
+            gpu_ok = False
+    else:
+        gpu_ok = bool(gpu_available)
+        if gpu_ok:
+            try:
+                import torch as engine_torch  # noqa: PLC0415
+            except Exception:  # noqa: BLE001
+                engine_torch = None
+    if pressure is _UNSET:
+        pressure = device_policy.probe(engine_torch) if gpu_ok else None
+    picked = device_policy.decide(
+        policy=device_policy.normalize_policy(policy), requested_device=device,
+        need_bytes=max(0, int(need_bytes)), pressure=pressure,
+        gpu_available=gpu_ok, phase="assemble", part=part)
+    if picked.residency == "split":
+        #: ⚠️ ``split`` 有**两个来源** ✓✗，不能一并推去 CPU ✗✗：
+        #:   · 「**装不下**整件、但还剩 ≥0.5 GiB」⇒ 联合是唯一不 OOM 的活法 ✓
+        #:     ⇒ 这条线落不了地就只能整份转 CPU ✓（慢，但跑得完 ✓）；
+        #:   · 「**装得下**，但 `balanced` 主动想省显存」⇒ 整份上卡**不是**降级 ✓✗
+        #:     ⇒ 落不了地就照常上卡 ✓（为了"没能省那点余量"把速度砍一个数量级是错的 ✓✗）。
+        fits = (pressure is not None
+                and int(pressure.freeBytes) >= max(0, int(need_bytes)) + device_policy.HEADROOM_BYTES)
+        if fits:
+            picked = replace(picked, residency="off", degraded=False,
+                             reason=picked.reason + "；⚠️ " + split_note
+                             + " ⇒ 实际按**整份上卡** ✓（装得下 ✓，只是没能按联合摊开 ✗）")
+        else:
+            picked = replace(picked, device="cpu", residency="off", degraded=True,
+                             reason=picked.reason + "；⚠️ " + split_note + " ⇒ 这一档落到 CPU ✓")
+    return picked.to_dict()
+
+
+def _image_device_decision(*, dit_path: str | None, device: str | None,
+                           policy: Any = None, need_bytes: int | None = None,
+                           pressure: Any = _UNSET,
+                           gpu_available: bool | None = None) -> dict[str, Any] | None:
+    """SDXL 出图这条线的**设备决策** ✓（判据与口径见 :func:`_chain_device_decision` ✓）。
+
+    ⚠️ 这里只管一件事 ✗：把需求量**量出来** ✓（:func:`os.stat` 盘上真字节 ✓）——
+    SDXL 是**单个** checkpoint ✓、权重无量化 ✓ ⇒ 文件大小就是驻留量的下界 ✓
+    （实测装载后真占 6.73 GiB ✓）。读不到大小 ⇒ ``0`` ⇒ 走占用率粗判 ✓（不猜 ✗）。
+    """
+    if str(device or "").strip().lower() not in ("", "auto"):
+        return None
+    if need_bytes is None:
+        need_bytes = 0
+        try:
+            if dit_path:
+                need_bytes = int(os.stat(dit_path).st_size)  # noqa: PTH116 —— 只要大小 ✓
+        except OSError:
+            need_bytes = 0                  # 读不到 ⇒ 「需求未知」✓（不猜 ✗）
+    return _chain_device_decision(
+        part="sdxl", device=device, need_bytes=need_bytes, policy=policy,
+        pressure=pressure, gpu_available=gpu_available,
+        split_note="SDXL 线没有分层驻留（四件套整份落位 ✓）")
+
+
+def _zimage_device_decision(*, device: str | None, policy: Any = None,
+                            pressure: Any = _UNSET,
+                            gpu_available: bool | None = None) -> dict[str, Any] | None:
+    """Z-Image 这条线的**设备决策** ✓（判据见 :func:`_chain_device_decision` ✓）。
+
+    ⚠️ 需求量取 :attr:`TorchBackend.CHAIN_NEED_GIB` 的**整链同驻实测账** ✓✗（19.28 GiB ✓）——
+    这条线 DiT ＋ TE ＋ VAE **同时在卡上** ✓，不是 2.1 那种一段一段 ✓。
+    拿「最重的那一件（11.46）」去判会以为卡上剩 12 GiB 就够 ✓✗ ⇒ DiT 装进去了 ✓、
+    装 TE 时才 OOM ✓，报错落在 TE 上、看着像"文本塔坏了" ✓✗（这个误导实测踩过一次 ✓）。
+
+    ⚠️ 落不了 ``split`` 的理由与 SDXL 不同 ✗：这条线的三件**各自整份 ``to(device)``** ✓，
+    没有"按条切前缀"这种口径 ✓ ⇒ 判成联合也落不了地 ✓✗（真要联合得按件拆预算 ✓，
+    本仓没有这条实现 ⇒ 不假装有 ✗✗）。
+    """
+    need_gib = float(TorchBackend.CHAIN_NEED_GIB.get("zimage") or 0.0)
+    return _chain_device_decision(
+        part="zimage", device=device,
+        need_bytes=int(need_gib * device_policy.GIB), policy=policy,
+        pressure=pressure, gpu_available=gpu_available,
+        split_note="Z-Image 三件**同时在卡上**（DiT＋TE＋VAE 各自整份落位 ✓、没有按条拆分 ✗）")
 
 
 def _vram_facts() -> dict[str, Any] | None:
@@ -616,7 +832,11 @@ class EngineRuntime:
                       attach_audio_vae: bool = True, loras: Any = None,
                       real_video_vae: bool = False, video_vae_device: str | None = None,
                       video_vae_weights: str | None = None,
+                      text_weights: str | None = None,
+                      image_vae_weights: str | None = None,
                       int8_offload: bool = False,
+                      residency: str = "off", residency_budget_mib: float | None = None,
+                      policy: str = "auto",
                       force: bool = False) -> dict[str, Any]:
         """把引擎**装齐** ✓（同名参数 ⇒ **复用**已装的 ✓）⇒ 返回装载报告 ✓。
 
@@ -633,13 +853,37 @@ class EngineRuntime:
         （锁页 ✓）、前向逐层搬上卡 ✓ —— 720×1280 那种长度**只有这一档装得下** ✓✗（见
         `h3_form.place_module` 的实测 ✓）。⚠️ 它也**必须进装载键** ✗✗：同一份权重、
         同一张卡，「int8 在卡上」与「int8 在 CPU」显存差 **17.94 GiB** ✓✗ ⇒ 不进键就会复用错的那个 ✓✗。
+
+        ``residency`` / ``residency_budget_mib``（2026-10-31 新增 ✓，**默认 off** ✗）：开 ⇒ **卡 + CPU
+        联合跑** ✓（``split`` 卡上算前缀、CPU 算剩下的 ✓；``park`` 权重留内存、逐层搬上卡 ✓，
+        口径见 `residency` ✓）。创作者原话：「以后不能只走 CPU，也要可以 GPU 和 CPU 联合跑模型，
+        单个 CPU 很容易超载」✓。⚠️ 两者**必须进装载键** ✗✗：同一份权重、同一张卡，
+        「卡上 30 层」与「卡上 0 层」的运行速度差**一个数量级** ✓✗ ⇒ 不进键就会复用错的那一套 ✓✗。
+
+        ``text_weights`` / ``image_vae_weights``（2026-10-31 新增 ✓，**只对 ``stage=zimage`` 有意义** ✓）：
+        Z-Image 是**三份权重**拼起来的一条链 ✓（DiT ✓ + Qwen3-4B 文本塔 ✓ + Flux VAE ✓），
+        三者**不在同一个文件里** ✗✗ ⇒ 必须各给一格 ✓。缺任一格 ⇒ **当场拒** ✗ 并说清缺哪个
+        （**不猜路径** ✗：猜错是「装齐了、跑得出、图是噪声」✓✗，比装不上糟得多 ✓）。
+        ⚠️ 两者**必须进装载键** ✗✗：换 TE 或换 VAE 就是**换了一个模型** ✓ —— 不进键就会
+        「给了新的 qwen_3_4b 却复用上一套」✓✗，而且一声不响 ✓✗。
         """
+        #: ⚠️ 先**归一**再进键 ✗✗：``None`` / ``"auto"`` / ``"gpu-first"`` 是同一种策略 ✓，
+        #: 但 ``repr`` 进键后是**三个不同的键** ✓✗ ⇒ 会白装三遍，而且 "改了个写法" 的复用键也不稳 ✓✗。
+        #: 拼错的策略名在这里**当场抛** ✓（不静默回落 ✓）。
+        policy = device_policy.normalize_policy(policy)
         key = _load_key(stage=stage, dit_path=dit_path, tokenizer_path=tokenizer_path,
                         device=device, audio_latent_mode=audio_latent_mode,
                         attach_video_vae=attach_video_vae, attach_audio_vae=attach_audio_vae,
                         real_video_vae=real_video_vae, video_vae_device=video_vae_device,
                         video_vae_weights=video_vae_weights,
+                        text_weights=text_weights,
+                        image_vae_weights=image_vae_weights,
                         int8_offload=int8_offload,
+                        residency=residency, residency_budget_mib=residency_budget_mib,
+                        #: ⚠️ **策略必须进键** ✗✗：同一份权重、同一张卡，`auto` 与 `cpu` 装出来的
+                        #: 是**两套设备布局** ✓（一个在卡上、一个在内存里 ✓）⇒ 不进键就会「改了策略却复用
+                        #: 上一套」✓✗，而且一声不响 ✓✗（症状是"改了没效果"，比报错难查得多 ✓）。
+                        policy=policy,
                         loras=_lora_key(loras))
         with self._lock:
             same = self._backend is not None and key == self._loadKeyTuple
@@ -674,8 +918,73 @@ class EngineRuntime:
                                             real_video_vae=real_video_vae,
                                             video_vae_device=video_vae_device,
                                             video_vae_weights=video_vae_weights,
+                                            text_weights=text_weights,
+                                            image_vae_weights=image_vae_weights,
                                             int8_offload=int8_offload,
+                                            residency=residency,
+                                            residency_budget_mib=residency_budget_mib,
+                                            policy=policy,
                                             loras=loras)
+
+    def _reset_loaded(self) -> bool:
+        """丢掉当前装载的**三格账** ✓（``_backend`` / ``_loadKeyTuple`` / ``_loadReport``）
+        ⇒ 返回「原来有没有装」✓（调用方的 ``report["replaced"]`` 读它 ✓）。
+
+        ⚠️⚠️ **三格必须一起清** ✗✗（2026-10-31 收口 ✓）：这段话此前在**四条装配线**里各手抄了一遍 ✓✗，
+        而 SDXL 那条（``_ensure_image_loaded``）只抄到 ``self._backend = None`` ✓✗ ——
+        后果不是炸，而是**报告撒谎** ✗：装失败之后 ``_loadKeyTuple`` / ``_loadReport`` 还停在
+        **上一个**模型上 ⇒ ``/engine/runtime`` 与 ``unload()`` 的回执答的是已经不在场的模型 ✓✗。
+        （假复用**不会**发生 ✓：``reused`` 判据同时看 ``self._backend is not None`` ✓ ——
+        所以这个错永远不报错，只是让人按错的模型估余量 ✓✗，正是本仓最贵的那一类 ✓。）
+
+        ⚠️ 只置 ``None`` **不会**让 G 级张量被回收 ✓✗（本仓实测过 ✓）：``previous`` 是本函数的
+        局部变量 ⇒ 返回时引用自动断 ✓，调用方随后调 :func:`_release_torch_cache` 才真还回去 ✓。
+
+        ⚠️ ``unload()`` **不用**这个助手 ✓：它要在清空**之前**记 ``eviction`` 与读旧 ``device`` ✓
+        （记账时机是那条口径的一部分 ✓），所以那里保持原样 ✓。
+        """
+        with self._lock:
+            had = self._backend is not None
+            self._backend = None
+            self._loadKeyTuple = None
+            self._loadReport = None
+        return had
+
+    def _require_slots(self, what: str, note: str,
+                       slots: list[tuple[Any, str]]) -> None:
+        """四格（或任意 N 格）缺任一 ⇒ **当场拒** ✓✗，且**首行只列真缺的几格** ✓。
+
+        ⚠️⚠️ 收口理由（2026-10-31 ✓）：Z-Image 与 Qwen-Image 2.1 两条线各自手抄了一段
+        "``missing: list[str] = []`` ＋ 四个 ``if not xxx: missing.append(...)`` ＋ ``if missing: raise``"
+        共 **23 行** ✓✗。这段的坏处不在啰嗦，而在**纪律**：报错首行必须只列真缺的那几格 ✓
+        （四格全列 = 调用方照着补也会漏、还把真缺的埋进说明里 ✓✗；测试也只读首行 ✓）。
+        两处各写一遍 ⇒ 改一处口径另一处不会跟着改 ✓✗。
+
+        ⚠️ 调用方登记顺序要**保持原有顺序** ✗（报错文本逐字进过测试与文档 ✓）。
+        """
+        missing = [label for value, label in slots if not value]
+        if missing:
+            raise TorchBackendUnavailable(
+                f"{what} 装配缺格 ✗：还没给 " + "、".join(missing) + f"\n  · {note}",
+                reason="pending")
+
+    def _commit_load(self, key: tuple[Any, ...], backend: Any,
+                     report: dict[str, Any]) -> None:
+        """装配成功后**一次性**提交三格账 ✓（``_backend`` / ``_loadKeyTuple`` / ``_loadReport``）。
+
+        ⚠️⚠️ 收口理由同 :meth:`_reset_loaded` ✓✗（2026-10-31）：这段 ``with self._lock:`` 五行
+        在四条装配线里逐字抄了四遍 ✓✗。少抄一格的后果**方向相反**但一样静默：
+        漏 ``_loadKeyTuple`` ⇒ 复用判据永远不成立 ⇒ **每次调用都白装一遍**（Z-Image 40 秒／19 GiB ✓✗）；
+        漏 ``_loadReport`` ⇒ ``/load`` 回执与 ``/engine/runtime`` 的 ``loadReport`` 是空的 ✓✗
+        （上一轮刚修完的「报告必须如实」在这里会整段消失 ✓）。
+
+        ⚠️ 必须在**装配全部成功之后**调 ✓，不许提前 ✓：提前提交 ⇒ 随后抛异常时
+        ``self._backend`` 指着半装的模型 ⇒ 下一次调用 ``reused=True`` 直接拿去出图 ✓✗。
+        """
+        with self._lock:
+            self._backend = backend
+            self._loadKeyTuple = key
+            self._loadReport = report
 
     def _ensure_loaded_internal(self, *, stage: str = "h3", dit_path: str | None = None,
                                tokenizer_path: str | None = None, device: str | None = None,
@@ -686,7 +995,12 @@ class EngineRuntime:
                                real_video_vae: bool = False,
                                video_vae_device: str | None = None,
                                video_vae_weights: str | None = None,
-                               int8_offload: bool = False) -> dict[str, Any]:
+                               text_weights: str | None = None,
+                               image_vae_weights: str | None = None,
+                               int8_offload: bool = False,
+                               residency: str = "off",
+                               residency_budget_mib: float | None = None,
+                               policy: str = "auto") -> dict[str, Any]:
         """真正装配 ✓（**不带排队守卫** ✗ —— worker 自己持有当前任务，见 :meth:`_execute` ✓）。
 
         顺序**按依赖来** ✓（⚠️ 不是随便排的 ✗）：主 DiT 先装 ✓ ⇒ ``attach_text_encoder`` 才能
@@ -695,47 +1009,102 @@ class EngineRuntime:
         ⚠️ 显存排班（谁先谁后、谁能在下一步前释放 ✓）是**另一件事** ✗ —— 见 ``loader.residency_plan`` ✓。
         ⚠️ 但"装完把**空着的**缓存还给驱动"是**这一件** ✓（装之前先 ``_release`` ✓ ⇒ 装完再
         :func:`_reclaim_cuda_cache` ✓ —— 一头一尾都还 ✓，见报告里的 ``cache`` 事实 ✓）。
+        ⚠️ ``stage=zimage`` 走**独立的第三条装配线** ✓（:meth:`_ensure_zimage_loaded` ✓）——
+        绝不能落到 H3 那条线上 ✗✗：那会挂上**参考 TE / 参考 VAE**（synthetic ✓）⇒
+        「装齐了、跑得出、图是噪声」✓✗。而"缺格（``textWeights`` / ``imageVaeWeights`` /
+        ``tokenizerPath``）"⇒ **当场拒** ✗ 并说清缺哪个 ✓（**不猜路径** ✗ —— 猜错就是
+        「装得进去、跑得出来、结果是噪声」✓✗，比装不上糟得多 ✓）。
         """
+        #: 归一（幂等 ✓）：本方法也可能被 :meth:`ensure_loaded` 之外的路径直接调 ✓ —— 键必须一致 ✓✗
+        policy = device_policy.normalize_policy(policy)
         key = _load_key(stage=stage, dit_path=dit_path, tokenizer_path=tokenizer_path,
                         device=device, audio_latent_mode=audio_latent_mode,
                         attach_video_vae=attach_video_vae, attach_audio_vae=attach_audio_vae,
                         real_video_vae=real_video_vae, video_vae_device=video_vae_device,
                         video_vae_weights=video_vae_weights,
+                        text_weights=text_weights,
+                        image_vae_weights=image_vae_weights,
                         int8_offload=int8_offload,
+                        residency=residency, residency_budget_mib=residency_budget_mib,
+                        policy=policy,
                         loras=_lora_key(loras))
         with self._lock:
             if self._backend is not None and key == self._loadKeyTuple:
                 return {**dict(self._loadReport or {}), "reused": True}
 
-        if loras and str(stage or "").strip().lower() == pipe.IMAGE_STAGE:
-            # ⚠️ 出图那套（SDXL）还没接 LoRA ✗ ⇒ **当场报** ✗，不许静默丢掉这层增量 ✓✗
-            raise TorchBackendUnavailable(
-                f"出图（stage={pipe.IMAGE_STAGE}）还不支持 LoRA ✗（收到 {len(list(loras))} 条 ✓）；"
-                f"视频侧已支持 ✓ —— 要么去掉 loras，要么等出图侧接上 ✓。", reason="pending")
+        #: ⭐ 2026-10-31：出图（SDXL）侧**已接** LoRA ✓✗（此前这里直接拒 ✓）——
+        #: 三处分派 UNet / CLIP-L / CLIP-G 归 `SdxlBackend._apply_loras` ✓；
+        #: kohya 那种下划线分层键由 `lora.kohya_module_name` 翻译 ✓。
+        #: 挂不全 ⇒ `load_weights` 当场炸 ✓（不留「四件齐、档不对」的模型 ✓✗）。
+
+        if str(stage or "").strip().lower() == pipe.ZIMAGE_STAGE:
+            # ⚠️ Z-Image 是**第三套组件** ✗（DiT + Qwen3-4B 文本塔 + Flux VAE ✓）——
+            #    既不等于 H3 那套（参考 TE/VAE 未训练 ✗）也不等于 SDXL 四件套 ✓。
+            return self._ensure_zimage_loaded(
+                key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
+                text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
+                policy=policy, loras=loras)
+
+        if str(stage or "").strip().lower() == pipe.QWEN21_STAGE:
+            # ⚠️ Qwen-Image 2.1 是**第四套组件** ✗（DiT 649 键 + Qwen3.5-9B + 64 通道 VAE ✓）——
+            #    与 Z-Image 同为三件套 ✓，但**三件一件都不能互换** ✗✗（见 `_QWEN21_STAGE_NOTE` ✓）。
+            return self._ensure_qwen21_loaded(
+                key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
+                text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
+                policy=policy, loras=loras)
+
+        if str(stage or "").strip().lower() == pipe.QWEN_IMAGE_STAGE:
+            #: ⚠️ **族名比较一律 `==`** ✗ 不许 `startswith` ✓：``"qwen_image21"`` 以
+            #: ``"qwen_image"`` 开头 ✓ —— 用前缀判，2.1 会连同上面那条一起命中 ✓✗
+            #: （两条装配线抢着装同一次请求，后装的把先装的顶掉 ✓，报错还落在"消失的那件"上 ✓✗）。
+            #    2512 / Edit 2511 与 2.1 是**两代** ✓：双流 vs 单流、16ch vs 64ch、
+            #    `1000·σ` 不翻转 vs 翻转、3.1 vs 0.69、Qwen2.5 3584 vs Qwen3.5 4096 ✓✗
+            #    —— 一件都不能互换（见 `_QWEN_IMAGE_STAGE_NOTE` ✓）。
+            return self._ensure_qwen_image_loaded(
+                key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
+                text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
+                policy=policy, loras=loras)
 
         if str(stage or "").strip().lower() == pipe.IMAGE_STAGE:
             # ⚠️ 出图是**另一套组件** ✗（SDXL 四件套 ✓ ≠ H3 DiT + 参考 TE/VAE ✓）⇒ 分开装配 ✓。
-            return self._ensure_image_loaded(key=key, dit_path=dit_path,
-                                             tokenizer_path=tokenizer_path, device=device)
+            report = self._ensure_image_loaded(key=key, dit_path=dit_path,
+                                               tokenizer_path=tokenizer_path, device=device,
+                                               policy=policy, loras=loras)
+            if str(residency or "off").strip().lower() != "off":
+                # ⚠️ **不生效要说** ✗（同 `int8_offload` 在 DiT 上那条口径 ✓）：出图那条路（SDXL）
+                #    还没接联合驻留 ✓ —— 它本来也不需要（四件套几 GB ✓），但"配了没生效"必须看得见 ✗。
+                report["residency"] = {
+                    "mode": residency, "applied": False,
+                    "note": "出图（SDXL 四件套）那条路**还没接**联合驻留 ✗ —— `residency` 只在 "
+                            "H3 / DiT 视频那条路上生效 ✓（它本来就不需要：四件套几 GB ✓）"}
+            return report
 
         # ⚠️ 装新的之前**先把旧的放掉** ✗✗（与 :meth:`_ensure_image_loaded` 同一条规矩 ✓）：
-        #    H3 主干 int8 是 **17.94 GiB** ✓（offload 时全在 CPU 锁页 ✓）、全量 19.53 GiB ✓，
-        #    而装配期还要**临时建一份 fp32 主干**（78 GiB ✓，见 :func:`_prepare_h3_module` ✓）✗
-        #    ⇒ 旧的活着就装新的 = 同时压两份大模型 ✓✗：96 GB 的机器也炸 ✓
-        #    （⚠️ 老路更硬：17.94 GiB 还在显存里 ⇒ 22.49 GiB 的卡**必 OOM** ✗）。
+        #    H3 主干 int8 是 **17.94 GiB** ✓（offload 时全在 CPU 锁页 ✓）、全量 19.53 GiB ✓
+        #    ⇒ 旧的活着就装新的 = 同时压两份大模型 ✓✗（⚠️ 22.49 GiB 的卡上 17.94 GiB 还在显存里
+        #    时再装一份**必 OOM** ✗）。
+        #    ✅ 2026-11-01 起装配期**不再**临时建 fp32 主干 ✓（``_prepare_h3_module`` 改成 meta 建壳
+        #    + 按最终精度物化 ✓，峰值 ≈ 19.5 GiB 而不是 78 GiB ✓）—— 但"先丢旧的"仍然必要 ✓：
+        #    两份 19.5 GiB 一样会把这台 96 GB 的机器压到只剩十几 GiB ✓✗。
         #    丢旧的可恢复（重装一次 ✓）；⚠️ 代价是"装失败时旧的也没了" ✓ —— 刻意取舍 ✓，
         #    与出图那条路的口径一致 ✓（不静默降级 ✗）。
-        with self._lock:
-            previous = self._backend
-            had_previous = previous is not None
-            self._backend = None
-            self._loadKeyTuple = None
-            self._loadReport = None
-        del previous                         # 引用一断 ⇒ 大张量才真被回收 ✓（只置 None 不算 ✓✗）
+        #: ⚠️ **先核再丢旧模型** ✓✗：`text_weights`（真文本塔 ✓）离了词表就装得上、编不出 ✓
+        #: —— 这种「请求本身不成立」要在 `_reset_loaded()` **之前**拒 ✓，否则白丢一台已装好的 ✓
+        #: （重装 17.94 GiB ≈ 20 秒 ✓，而调用方只是漏了个参数 ✓）。
+        if str(text_weights or "").strip() and not str(tokenizer_path or "").strip():
+            raise TorchBackendUnavailable(
+                "给了 `text_weights`（真 H3 文本塔 ✓）却**没给词表** ✗ ⇒ 装得上、编不出 ✓："
+                "`<|image_pad|>` 这类特殊 token 的 id 只有 Qwen3-VL 的 tokenizer 里才有 ✓"
+                "（拿别族的词表 ⇒ id 全错 ✓、形状全对 ✓✗）。请一并给 `tokenizer_path` ✓",
+                reason="pending")
+        had_previous = self._reset_loaded()   # 三格一起清 ✓（引用断在函数返回时 ⇒ 才真能回收 ✓✗）
         _release_torch_cache()
 
         backend = TorchBackend(device=device, audio_latent_mode=audio_latent_mode,
-                               int8_offload=int8_offload)
+                               int8_offload=int8_offload,
+                               residency=residency,
+                               residency_budget_mib=residency_budget_mib,
+                               policy=policy)
         report: dict[str, Any] = {"stage": stage, "reused": False, "components": {},
                                   "replaced": had_previous, "synthetic": True}
         try:
@@ -744,7 +1113,42 @@ class EngineRuntime:
             # ⚠️ 参考 VAE 的尺寸**必须从已装主干现推** ✗（`attach_vae()` 不给配置 ⇒ 拿默认那套
             #    `channel_multipliers=(1,2,2)` ⇒ `spatial_scale=4` ✗ ≠ H3 的 16 ✓ ⇒ **当场被拒** ✓✗）
             trunk = (backend.describe().get("config") or {})
-            if tokenizer_path:
+            if str(text_weights or "").strip():
+                # ⭐⭐ **第四条装配线：真文本塔** ✓✗（2026-11-01 ✓）—— Qwen3-VL-32B 双塔 ✓
+                #    （语言塔 `model.*` ＋ 视觉塔 `visual.*` 同文件 ✓，`attach_h3_text` ✓）。
+                #
+                # ⚠️ 为什么**不在装配期**把它装上来 ✗✗：TE 是 **25.28 GiB**（int8 常驻 22.7 ✓）、
+                #    DiT 是 **17.94 GiB**（int8 ✓）—— 两件之和 43.2 GiB ✓✗，而卡只有 22.49 GiB ✓
+                #    ⇒ 同驻**必然 OOM** ✓，且 OOM 落在**后装的那件**上 ✓（读起来像"TE 坏了" ✗）。
+                #    好在这三段本来就不交叠 ✓（`encode` 只用 TE ✓、`sample` 只用 DiT ✓）⇒
+                #    **按阶段互斥换装** ✓，沿用 Qwen-Image 2.1 的那套机制 ✓（`declare_chain` ＋
+                #    `enter_phase` ✓），但驻留账必须换一份 ✗✗（见 `H3_PART_NEED_GIB` ✓）。
+                report["chain"] = backend.declare_chain(
+                    dit_path=dit_path, text_weights=str(text_weights),
+                    tokenizer_path=tokenizer_path,
+                    #: ``vaePath`` **留空** ✓：H3 的真 VAE 在下面按 `real_video_vae` 挂 ✓，且
+                    #: 这条链的 `phase_parts` 里**没有 decode** ✓ ⇒ `enter_phase("decode")` 不换装 ✓。
+                    vae_path="", vae_family="h3", text_kind="h3-te",
+                    #: ⚠️ **`decode` 要单列** ✓✗（2026-11-01 补 ✓）：它这一段要用视频 VAE ✓ ——
+                    #: 列进来才会「把 DiT 退掉 ✓、把常驻的 VAE 搬上卡 ✓」（见 `_relocate_keep_parts` ✓）；
+                    #: 不列的话 `enter_phase("decode")` 直接返回 ``None`` ✓ ⇒ DiT 仍占着 19.62 GiB ✓、
+                    #: VAE 留在 cpu ✓ ⇒ 整段解码在 cpu 上跑 ✓（实测 320×320 × 34 帧 **94.6 秒** ✓✗）。
+                    #: ⚠️ 列进来**不会**重读 5.2 GiB ✓：VAE 是 `keep_parts` ✓，`present` 命中就只搬不装 ✓。
+                    phase_parts={"encode": ("text",), "sample": ("dit",),
+                                 "decode": ("vae",)},
+                    #: ⭐ **VAE 是常驻件** ✓✗（2026-11-01 端到端逼出来的 ✓）：它在装配期由
+                    #: `_attach_video_vae` 挂到 **cpu** ✓（5.2 GiB ✓ 不占卡 ✓）⇒ 换装翻不到它 ✓、
+                    #: 也不该被"这一阶段用不着"退掉 ✓✗。⚠️ 千万别把它塞进 `phase_parts` ✗✗ ——
+                    #: 一进 `decide_for` 的账，`encode` 阶段就会凭空多要 5.2 GiB ⇒ 判"装不下"
+                    #: ⇒ 整座 25.44 GiB 的 TE 被推去 CPU ✓✗（症状＝编码慢十倍、卡空着 ✓）。
+                    keep_parts=("vae",),
+                    part_need_gib=H3_PART_NEED_GIB)
+                report["components"]["textEncoder"] = {
+                    "kind": "h3-te", "path": str(text_weights), "phased": True,
+                    "note": ("真文本塔**不在装配期装** ✓：它 25.28 GiB、DiT 17.94 GiB 同驻装不下 ✗ "
+                             "⇒ `encode` 阶段由 `enter_phase(\"encode\")` 现装 ✓（形状与键都在那时核 ✓）")}
+                report["synthetic"] = False if real_video_vae else True
+            elif tokenizer_path:
                 # ⚠️ 只有给了词表才挂真分词器 ✗ —— 不给就挂桩 ✓（桩的分词**没有语义** ✓，如实标 ✓）
                 report["components"]["textEncoder"] = backend.attach_text_encoder(
                     tokenizer_path=tokenizer_path)
@@ -757,16 +1161,9 @@ class EngineRuntime:
                     device=video_vae_device, weights=video_vae_weights)
             if attach_audio_vae:
                 report["components"]["audioVae"] = _attach_reference_audio_vae(backend, trunk)
-        except TorchBackendUnavailable as err:
-            # ⚠️ **不半装** ✗：失败 ⇒ 丢掉整个候选后端 ✓（模块一个字不变 ✓）
-            del backend
-            _release_torch_cache()
-            raise TorchBackendUnavailable(str(err), reason=getattr(err, "reason", "pending")) from err
         except BaseException as err:  # noqa: BLE001
-            del backend
-            _release_torch_cache()
-            raise TorchBackendUnavailable(f"装配失败：{type(err).__name__}: {err}",
-                                          reason="pending") from err
+            # ⚠️ **不半装** ✗：失败 ⇒ 丢掉整个候选后端 ✓（模块一个字不变 ✓）
+            _abandon_assembly(backend, err)
 
         described = backend.describe()
         report["device"] = described.get("device") or device
@@ -775,25 +1172,34 @@ class EngineRuntime:
         vae_kind = str(((report.get("components") or {}).get("vae") or {}).get("kind") or "")
         report["vaeKind"] = vae_kind or None
         if vae_kind == "h3-real":
-            report["note"] = ("DiT 主权重**是真的** ✓；视频 VAE = **H3 真权重** ✓；"
-                              "但 TE / 音频 VAE **未训练** ✗ ⇒ 解码链路是真的 ✓、潜变量来源仍是噪声 ✗ "
-                              "⇒ `synthetic` 保持 True ✓（区别：换成真 TE 就能直接出片 ✓，"
-                              "不必再换 VAE ✓）")
+            if str(text_weights or "").strip():
+                report["note"] = (
+                    "DiT 主权重**是真的** ✓、TE = **真 Qwen3-VL-32B 双塔** ✓（`encode` 阶段现装 ✓）、"
+                    "视频 VAE = **H3 真权重** ✓ —— 三件全真 ✓；唯一未训练的只剩**音频 VAE** ✗ "
+                    "（音频潜帧的来源仍无色 ✓）")
+            else:
+                report["note"] = ("DiT 主权重**是真的** ✓；视频 VAE = **H3 真权重** ✓；"
+                                  "但 TE / 音频 VAE **未训练** ✗ ⇒ 解码链路是真的 ✓、潜变量来源仍是噪声 ✗ "
+                                  "⇒ `synthetic` 保持 True ✓（区别：换成真 TE 就能直接出片 ✓，"
+                                  "不必再换 VAE ✓；现在给 `textWeights` 就走第四条装配线 ✓）")
+        elif str(text_weights or "").strip():
+            report["note"] = ("DiT 主权重**是真的** ✓、TE = **真 Qwen3-VL-32B 双塔** ✓（`encode` 阶段现装 ✓）、"
+                              "但**视频 VAE 仍是参考族** ✗（未训练 ✓）⇒ 解码链路是假的 ✓ "
+                              "⇒ `synthetic` 保持 True ✓（补 `realVideoVae` 即三件全真 ✓）")
         else:
             report["note"] = ("DiT 主权重**是真的** ✓；参考 TE / VAE **未训练** ✗ ⇒ "
                               "产物是真文件 + 噪声画面 ✓（`synthetic` 保持 True ✓）")
         #: ⚠️ 装完**还一次缓存** ✗（G 级权重是一件件塞进去的 ⇒ 缓存被碎片顶起来 ✓✗，见
         #: :func:`_reclaim_cuda_cache` 的实测 ✓）—— 只还空着的块 ✓，在用的张量一个不动 ✓。
         report["cache"] = _reclaim_cuda_cache()
-        with self._lock:
-            self._backend = backend
-            self._loadKeyTuple = key
-            self._loadReport = report
+        self._commit_load(key, backend, report)   # 三格一起提交 ✓（少一格 ⇒ 白装或回执空 ✓✗）
         return report
 
     def _ensure_image_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
                              tokenizer_path: str | None,
-                             device: str | None) -> dict[str, Any]:
+                             device: str | None,
+                             policy: str | None = None,
+                             loras: Any = None) -> dict[str, Any]:
         """装 **SDXL 出图后端** ✓（``stage="sdxl"`` ✓ ⇒ :class:`~.sdxl_backend.SdxlBackend` ✓）。
 
         ⚠️ 与视频那条路**不是同一套组件** ✗✗：那边是 H3 DiT + 参考 TE/VAE ✓；
@@ -826,32 +1232,39 @@ class EngineRuntime:
         # ⚠️ 装新的之前**先把旧的放掉** ✗✗：SDXL 四件套与 H3 DiT 都是 GB 级 ✓
         #    两套同时在内存里 ⇒ 峰值翻倍 ⇒ OOM ✓（丢旧的可恢复：重装一次即可 ✓；
         #    ⚠️ 代价是**装失败时旧的也没了** ✓ —— 这是刻意的取舍 ✓，不静默降级 ✓）。
-        with self._lock:
-            previous = self._backend
-            self._backend = None
-        del previous
+        had_previous = self._reset_loaded()   # ⚠️ 原来这里只清 `_backend` ✓✗ ⇒ 报告会停在旧模型上
         _release_torch_cache()
+
+        #: ⭐ **出图这条线也走设备策略** ✓✗（2026-10-31 ✓）：SDXL 四件套装完真占 **6.73 GiB** ✓，
+        #: 卡被别人占着时老路照样硬上 ⇒ `CUDA out of memory` ✓✗。细节见
+        #: :func:`_image_device_decision` ✓（需求取盘上真字节 ✓、`split` 落不了地 ⇒ 转 CPU ✓）。
+        decision = _image_device_decision(dit_path=dit_path, device=device, policy=policy)
+        if decision is not None:
+            device = decision["device"]
 
         backend = SdxlBackend(device=device)
         report: dict[str, Any] = {"stage": pipe.IMAGE_STAGE, "reused": False,
-                                  "components": {}, "synthetic": True}
+                                  "components": {}, "replaced": had_previous,
+                                  "synthetic": True}
         try:
+            #: ⭐ LoRA 从 ``ensure_loaded(loras=…)`` 一路透到这里 ✓（2026-10-31 补 ✓）——
+            #: 挂不全 ``load_weights`` 自己会炸 ✓（不会留下「四件齐、档不对」的模型 ✓✗）。
             report["weights"] = backend.load_weights(
-                path=dit_path, tokenizer=load_tokenizer(tokenizer_path))
+                path=dit_path, tokenizer=load_tokenizer(tokenizer_path), loras=loras)
             # 报告里只留**事实** ✓（四件各自的张量数 ✓ —— 与事实表逐个可比 ✓）
             for name, component in (report["weights"].get("components") or {}).items():
                 report["components"][name] = dict(component).get("keys") or True
         except BaseException as err:  # noqa: BLE001
-            del backend
-            _release_torch_cache()
-            raise TorchBackendUnavailable(
-                f"SDXL 装配失败：{type(err).__name__}: {err}", reason="pending") from err
+            _abandon_assembly(backend, err, what="SDXL")
 
         described = backend.describe()
         report["device"] = described.get("device") or device or "cpu"
         report["backend"] = described.get("name")
         report["synthetic"] = bool(described.get("synthetic"))
         report["facts"] = described.get("facts")
+        #: ⭐ 装配期那次**设备决策** ✓✗（`auto` 下可能就是「卡上只剩 0.4 GiB ⇒ 转 CPU」✓）——
+        #: 只报 `device` 会让人以为「这台机器只能 CPU」✓✗（与另两条装配线同一口径 ✓）。
+        report["devicePolicy"] = decision
         #: ⚠️ 与 `SdxlBackend.synthetic` 同一条诚实口径 ✓：**真权重**装齐 ⇒ False ✓
         report["note"] = ("SDXL 四件套（UNet / VAE / CLIP-L / CLIP-G）**全是真权重** ✓ ⇒ "
                           "`synthetic` 如实为 **False** ✓"
@@ -859,10 +1272,384 @@ class EngineRuntime:
         #: ⚠️ 这条**尤其**要还 ✗：SDXL 是 1680+248+197+390 件小张量 ✗ ⇒ 装机就把缓存顶到
         #: **13.88 GiB（真占用只有 6.73 GiB）** ✓✗ ⇒ 不还就等于**白白占掉半张卡** ✗。
         report["cache"] = _reclaim_cuda_cache()
-        with self._lock:
-            self._backend = backend
-            self._loadKeyTuple = key
-            self._loadReport = report
+        self._commit_load(key, backend, report)   # 三格一起提交 ✓（少一格 ⇒ 白装或回执空 ✓✗）
+        return report
+
+    def _ensure_zimage_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
+                              tokenizer_path: str | None, text_weights: str | None,
+                              image_vae_weights: str | None,
+                              device: str | None,
+                              policy: str | None = None,
+                              loras: Any = None) -> dict[str, Any]:
+        """装 **Z-Image 出图链** ✓（``stage=zimage`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
+
+        ## 为什么是**单独一条线** ✗（不塞进 H3 / SDXL ✓）
+
+        三个组件**不是同一份权重** ✓✗：DiT（`z_image_turbo_bf16` ✓ **453** 键 ✓）、
+        Qwen3-4B 文本塔（`qwen_3_4b` ✓ **398** 键 ✓）、Flux VAE（`ae` ✓ **244** 键 ✓）。
+        H3 那条线装的是「H3 DiT + **参考** TE/VAE（未训练 ✓）」⇒ 拿它装 Z-Image 会得到
+        「形状顺、跑得动、图是噪声」✓✗（正是本仓最忌的那类 ✓）；SDXL 那条线是四件套切分 ✓，
+        更不是一回事 ✓。
+
+        ## 缺格 ⇒ **当场拒** ✗（不猜 ✓）
+
+        四格缺任一：``ditPath`` / ``tokenizerPath`` / ``textWeights`` / ``imageVaeWeights`` ✓。
+        ⚠️ **不猜路径** ✗✗：盘上同时有 `qwen_3_vl_32b`（不是它 ✓）、`qwen_image_vae`（不是它 ✓）
+        —— 猜错的后果不是装不上 ✓，而是**装上了、出噪声** ✓✗，那比装不上难查得多 ✓。
+
+        ## 与 :meth:`_ensure_image_loaded` 同一条纪律
+
+        1. **先放旧的** ✓（GB 级模型不许两套同时在内存里 ✓：DiT 11.46 + TE 7.49 + VAE 0.33
+           ≈ 19.3 GiB ✓，卡上 22.49 可用 ⇒ **刚好装得下** ✓，再多一套必 OOM ✗）；
+        2. **不半装** ✗：任一步失败 ⇒ 丢掉整个候选后端 ✓（模块一个字不变 ✓）；
+        3. **报告说真话** ✓：``synthetic=False`` ✓（三份都是真权重 ✓ ⇒ 出来的是真图 ✓）。
+        """
+        self._require_slots("Z-Image", _ZIMAGE_STAGE_NOTE, [
+            (dit_path, "`ditPath`（DiT 主干 ✓ `unet/z_image_turbo_bf16.safetensors` ✓）"),
+            (text_weights, "`textWeights`（Qwen3-4B 文本塔 ✓ `text_encoders/qwen_3_4b.safetensors` ✓）"),
+            (image_vae_weights, "`imageVaeWeights`（Flux VAE ✓ `vae/ae.safetensors` ✓）"),
+            (tokenizer_path, "`tokenizerPath`（Qwen3 词表**目录** ✓ 含 `tokenizer.json` ✓）"),
+        ])
+
+        # ⚠️ 装新的之前**先把旧的放掉** ✗✗（同 H3 / SDXL 两条线 ✓）：三份权重合计 ≈19.3 GiB ✓，
+        #    旧的活着就装新的 ⇒ 峰值翻倍 ⇒ 96 GB 内存 + 22.49 GiB 卡**必炸** ✓✗。
+        had_previous = self._reset_loaded()   # 三格一起清 ✓（引用断在函数返回时 ⇒ 才真能回收 ✓✗）
+        _release_torch_cache()
+
+        #: ⭐ 装配前按**整链同驻**的实测账判一次 ✓✗（19.28 GiB ✓，见
+        #: :func:`_zimage_device_decision` ✓）：构造期那次 `decide_for(())` 的 need 是"**未知**" ✓
+        #: ⇒ 只能按占用率粗判 ✓，卡上剩 12 GiB（占用率 47%）照样判"能上卡" ✓✗ ⇒ 装 TE 时 OOM ✓。
+        #: ⚠️ 必须落在 `TorchBackend(...)` **构造之前** ✗✗：设备决定精度（cuda⇒bf16 / cpu⇒fp32 ✓），
+        #: 构造完再改就是"按 bf16 建的模块搬到 CPU 上跑"✓✗（CPU 上 conv 未实现 ✓）。
+        decision = _zimage_device_decision(device=device, policy=policy)
+        if decision is not None:
+            device = decision["device"]
+        backend = TorchBackend(device=device, policy=policy)
+        report: dict[str, Any] = {"stage": pipe.ZIMAGE_STAGE, "reused": False,
+                                  "components": {}, "replaced": had_previous,
+                                  "synthetic": False}
+        try:
+            # ① DiT 主干 ✓（`load_weights` 自己按**键名**判族 ✓ ⇒ 不是 Z-Image 的形态会走别的族 ✓）
+            #: ⭐ LoRA 必须**往下传** ✗✗（2026-10-31 修 ✓）：这条线原先不带 ``loras`` ✓，调用方送
+            #: 了也**静默丢掉** ✓✗ —— 装出来是「没挂 LoRA 的底模」✓，跑得动、出得来、不是那个档 ✓✗。
+            report["weights"] = backend.load_weights(path=dit_path, loras=loras)
+            report["components"]["dit"] = (report["weights"] or {}).get("path") or True
+            #: ⚠️ **必须显式核一次族** ✗✗：`load_weights` 对判不出的族会走 `dit_generic` ✓ ——
+            #: 拿 Krea2 的权重配上 Qwen3 TE + Flux VAE 也能"装得进去"✓✗（TE 的 `output_dim`
+            #: 与它要的 `text_dim` 恰好也可能对得上 ✓），出来是**噪声图**且一声不响 ✓✗。
+            family = str(((backend.describe().get("config") or {}) or {}).get("family") or "")
+            if family != ZIMAGE_FAMILY:
+                raise TorchBackendUnavailable(
+                    f"`ditPath` 这份权重判出来是 **{family or '未知'}** 族 ✗，不是 Z-Image（`{ZIMAGE_FAMILY}` ✓）"
+                    f"\n  · 给的：{dit_path} ✓\n"
+                    f"  · Z-Image 的 DiT 长这样：`unet/z_image_turbo_bf16.safetensors` ✓（453 键 ✓）"
+                    f"\n  ⚠️ 这里**不将就** ✗：配错族的权重「装得进去、跑得出来、图是噪声」✓✗",
+                    reason="pending")
+            # ② Qwen3-4B 文本塔 ✓（`_check_text_encoder` 会拿主干 `text_dim` 互核 ✓ 2560 ✓）
+            report["components"]["textEncoder"] = backend.attach_qwen3_te(
+                str(text_weights), tokenizer_path=str(tokenizer_path))
+            # ③ Flux VAE ✓（`_check_attached_vaes` 会核 16 通道 ↔ `in_channels` ✓、8 倍 ↔ `vae_scale` ✓）
+            report["components"]["vae"] = backend.attach_flux_vae(str(image_vae_weights))
+        except BaseException as err:  # noqa: BLE001
+            _abandon_assembly(backend, err, what="Z-Image")
+
+        described = backend.describe()
+        report["device"] = described.get("device") or device or "cpu"
+        report["backend"] = described.get("name")
+        #: ⭐ 装配期那一次**设备决策** ✓✗（`auto` 下可能就是"因为卡上只剩 0.2 GiB ⇒ 转 CPU" ✓）——
+        #: 只报 `device` 会让人以为「这台机器只能 CPU」✓✗（2026-10-31 加策略 ✓）。
+        report["devicePolicy"] = described.get("devicePolicy")
+        #: ⭐ 装配前那次**整链**决策 ✓✗（与上面那格是两个问题 ✓）：上面答「这台后端现在什么策略、
+        #: 逐阶段怎么判的」✓，这格答「**装这条链之前**按 19.28 GiB 总账判成了什么」✓。
+        #: 只有前者时，「为什么这次整条链在 CPU 上」答不出来 ✓✗（后端是被传进 `device="cpu"` 的 ✓）。
+        report["chainDevicePolicy"] = decision
+        report["vaeKind"] = str((report["components"].get("vae") or {}).get("kind") or "") or None
+        #: ⚠️ 与 H3 那条线**刻意不同** ✓：这边 TE 与 VAE 都要求**真权重** ✓（缺格就拒 ✗，
+        #: 没有"挂桩出图"这条路 ✓）⇒ ``synthetic`` 如实为 **False** ✓。
+        report["note"] = ("Z-Image 三份权重**全是真的** ✓（DiT 453 键 ✓ / Qwen3-4B 398 键 ✓ / "
+                          "Flux VAE 244 键 ✓）⇒ 出来的是**真图** ✓，`synthetic` 如实为 False ✓。"
+                          "装齐之后出图直接走 `pipeline.run_sync(stage=\"zimage\")` ✓"
+                          "（2026-10-31 实测：装配 40.5 秒 ✓、1024² / 8 步 13.1 秒 ✓、"
+                          "与手动 `attach_*` 那条路的产物**逐字节相同** ✓）。"
+                          "⚠️ 卡上占用 ≈19.39 GiB / 22.49 ✓（余 1.77 GiB ✓）—— 这个余量只够 1024² 那档 ✓，"
+                          "再往上加分辨率要掂量 ✓。")
+        report["cache"] = _reclaim_cuda_cache()
+        self._commit_load(key, backend, report)   # 三格一起提交 ✓（少一格 ⇒ 白装或回执空 ✓✗）
+        return report
+
+    def _ensure_qwen21_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
+                              tokenizer_path: str | None, text_weights: str | None,
+                              image_vae_weights: str | None,
+                              device: str | None,
+                              policy: str | None = None,
+                              loras: Any = None) -> dict[str, Any]:
+        """装 **Qwen-Image 2.1 出图链** ✓（``stage=qwen_image21`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
+
+        ## 为什么是**第四条线** ✗（不塞进 Z-Image / H3 / SDXL ✓）
+
+        三件组件没有一件能与前三条线共用 ✓✗：
+
+        * DiT —— 2.1 的主干（**649** 键 ✓、`in_channels=64` ✓、`img_in` 是 ``Linear`` **没有
+          patchify** ✗、`vae_scale=16` ✓，见 `dit_qwen21` 模块头 ✓）；
+        * 文本塔 —— **Qwen3.5-9B**（24 层 Gated DeltaNet ＋ 8 层 full attention ✓、
+          `text_dim=4096` ✓、取 `layer_idx=-2` ✓），Z-Image 那座是 Qwen3-4B（`text_dim=2560` ✓）✗；
+        * VAE —— **64 通道**的 Wan 式 3D 因果 VAE ✓（238 键 ✓），Flux 的 ae 是 16 通道 ✗。
+
+        ⚠️ 任何一对互换都在"不报错"那一类里 ✓✗：文本塔换错 ⇒ `_check_text_encoder` 能拦 ✓（宽度对不上 ✓）；
+        VAE 换错 ⇒ 通道数一核就拦 ✓；**同一族不同代**的 DiT（2.1 与 2512）才是真难分的那对 ✓✗ ——
+        2.1 只有 **649** 键（2512 是 1933 ✓）⇒ 键集能区分 ✓，所以这里**显式核族** ✓。
+
+        ## 缺格 ⇒ **当场拒** ✗（不猜 ✓）
+
+        四格缺任一：``ditPath`` / ``tokenizerPath`` / ``textWeights`` / ``imageVaeWeights`` ✓。
+
+        ## 与 :meth:`_ensure_zimage_loaded` 同一条纪律
+
+        1. **先放旧的** ✓（GB 级模型不许两套同在内存 ✓）；
+        2. **不半装** ✗（任一步失败 ⇒ 丢掉整个候选后端 ✓，模块一个字不变 ✓）；
+        3. **报告说真话** ✓（``synthetic=False`` ✓、``vaeKind`` 如实 ✓ —— 分时驻留下它是 ``None`` ✓）。
+
+        ## ⚠️ 这里**只装 DiT** ✓（与 Z-Image 那条不同 ✗✗）
+
+        三件**反量化到 bf16 之后**的驻留量是 DiT **13.26 GiB** ＋ TE **14.79 GiB** ＋ VAE
+        **0.63 GiB** ＝ **28.68 GiB** ✓，而这张卡可用 **22.49 GiB** ✓（连 TE+DiT 的 28.05 都过不去 ✗）。
+        ⚠️ 盘上那三个文件是 **int8** ✓（6.76 / 8.82 / 0.63 GiB ✓）—— 拿它们相加得 ≈16.2 GiB ✓
+        是**装进来的字节数** ✗✗，**不是驻留量** ✓（2 倍关系 ✓）。按 16.2 判"装得下"就是这条线
+        最容易犯的错 ✓✗（OOM 会落在最后一件 ⇒ 报错指向 VAE ✓，看着像"VAE 坏了" ✓）。
+        ⇒ 本装配线只装 DiT ＋ :meth:`TorchBackend.declare_chain` 登记另外两件 ✓，管线在
+        encode / decode 边界换装 ✓（峰值 ≈14.8 GiB ✓）。
+        """
+        self._require_slots("Qwen-Image 2.1", _QWEN21_STAGE_NOTE, [
+            (dit_path, "`ditPath`（DiT 主干 ✓ `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` ✓）"),
+            (text_weights, "`textWeights`（Qwen3.5-9B 文本塔 ✓ "
+                           "`text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` ✓）"),
+            (image_vae_weights, "`imageVaeWeights`（64 通道 VAE ✓ `vae/qwen_image_2.1_vae_bf16.safetensors` ✓）"),
+            (tokenizer_path, "`tokenizerPath`（Qwen3.5 词表**目录** ✓ 含 `tokenizer.json` ✓）"),
+        ])
+
+        # ⚠️ 装新的之前**先把旧的放掉** ✗✗（同前三条线 ✓）：光 DiT 一件就 13.26 GiB ✓，
+        #    旧的活着就装新的 ⇒ 峰值翻倍 ⇒ 22.49 GiB 卡**必炸** ✓✗。
+        had_previous = self._reset_loaded()   # 三格一起清 ✓（引用断在函数返回时 ⇒ 才真能回收 ✓✗）
+        _release_torch_cache()
+
+        #: ⭐ 策略随装配下去 ✓✗：`policy="auto"`（默认）⇒ 装配这件时**现测**卡况 ✓，
+        #: 卡上没地方就自动转 CPU / 联合 ✓（老路只看"有没有卡" ⇒ 卡满也硬上 ⇒ OOM ✗）。
+        backend = TorchBackend(device=device, policy=policy)
+        #: ⭐ 装配这件之前再按**实测账**判一次 ✓✗（`PART_NEED_GIB["dit"] = 13.26` ✓）：构造期那次
+        #: 的 need 是"**未知**" ✓ ⇒ 只能按占用率粗判 ✓，7 成占用照样敢上卡 ✓✗ ⇒ 装到一半 OOM ✓。
+        #: 判成 `split` ⇒ 权重按层切给卡＋内存 ✓；判成 `cpu` ⇒ 整件在内存 ✓（慢，但不失败 ✓）。
+        #: ⚠️ 只对**有实测账**的族这么做 ✗（目前只有 2.1 三件 ✓）—— 别的族没有账，编一个数字进去
+        #: 就等于"看着精确、其实是猜" ✓✗（见 `PART_NEED_GIB` 注释 ✓）。
+        backend._apply_decision(backend.decide_for(("dit",), phase="assemble"))  # noqa: SLF001
+        report: dict[str, Any] = {"stage": pipe.QWEN21_STAGE, "reused": False,
+                                  "components": {}, "replaced": had_previous,
+                                  "synthetic": False}
+        try:
+            # ① DiT 主干 ✓（`load_weights` 按键名判族 ✓）
+            #: ⭐ LoRA 必须**往下传** ✗✗（2026-10-31 修 ✓）：原先不带 ``loras`` ⇒ 调用方送了
+            #: 也静默丢掉 ✓✗（装出来是没挂 LoRA 的底模 ✓，跑得动但不是那个档 ✓✗）。
+            report["weights"] = backend.load_weights(path=dit_path, loras=loras)
+            report["components"]["dit"] = (report["weights"] or {}).get("path") or True
+            #: ⚠️ **必须显式核族** ✗✗：`load_weights` 判不出就走 `dit_generic` ✓ ——
+            #: 把 2512 的 1933 键（同族不同代 ✓）配 Qwen3.5 TE + 64 通道 VAE 也"装得进去" ✓✗：
+            #: `text_dim` 都是 4096 ✓、VAE 通道也都是 64 ✓ ⇒ 三道互核**全部通过** ✓✗，
+            #: 出来是「结构错代」的图 ✓ —— 只有族名这一处能说话 ✓。
+            family = str(((backend.describe().get("config") or {}) or {}).get("family") or "")
+            if family != QWEN21_FAMILY:
+                raise TorchBackendUnavailable(
+                    f"`ditPath` 这份权重判出来是 **{family or '未知'}** 族 ✗，不是 Qwen-Image 2.1"
+                    f"（`{QWEN21_FAMILY}` ✓）\n  · 给的：{dit_path} ✓\n"
+                    f"  · 2.1 的 DiT 长这样：`diffusion_models/qwen_image_2.1_int8_convrot.safetensors` ✓"
+                    f"（**649** 键 ✓；2512 是 1933 键 ✗ —— 两代 `text_dim` / VAE 通道都一样 ✓✗，"
+                    f"只有键集与族名能分 ✓）", reason="pending")
+            # ② 三件**不同时驻留** ✗✗：只登记链 ✓，由 `pipeline` 在 encode/sample/decode
+            #    三个边界上调 `enter_phase` 换装 ✓（账见 `TorchBackend.PHASE_PARTS` ✓）。
+            #    ⚠️ 这里**不再** `attach_qwen35_te` / `attach_wan_vae` ✗✗：三件 bf16 驻留
+            #    合计 **28.68 GiB** ✓（DiT 13.26 ＋ TE 14.79 ＋ VAE 0.63 ✓）> 卡上 22.49 ✓
+            #    ⇒ 「一次装完」**必然 OOM** ✓✗，而且 OOM 落在最后一件 ⇒ 报错指向 VAE ✓✗。
+            report["components"]["textEncoder"] = {"phased": True, "loaded": False,
+                                                   "phase": "encode",
+                                                   "path": str(text_weights),
+                                                   "tokenizer": str(tokenizer_path)}
+            report["components"]["vae"] = {"phased": True, "loaded": False,
+                                           "phase": "decode",
+                                           "path": str(image_vae_weights)}
+            report["chain"] = backend.declare_chain(
+                dit_path=str(dit_path), text_weights=str(text_weights),
+                tokenizer_path=str(tokenizer_path), vae_path=str(image_vae_weights),
+                vae_family=QWEN21_FAMILY)
+        except BaseException as err:  # noqa: BLE001
+            _abandon_assembly(backend, err, what="Qwen-Image 2.1")
+
+        described = backend.describe()
+        report["device"] = described.get("device") or device or "cpu"
+        report["backend"] = described.get("name")
+        #: ⭐ 装配期决策 ✓（同 zimage 线 ✓）：`auto` 下"卡满 ⇒ 转 CPU"必须看得见 ✓✗。
+        report["devicePolicy"] = described.get("devicePolicy")
+        #: ⚠️ 此时 VAE **还没装** ✓（分时驻留 ✓）⇒ ``vaeKind`` 如实是 ``None`` ✓✗
+        #: —— 不许从"登记了链"推"VAE 已就位" ✓✗（那时解码还没发生 ✓）。
+        report["vaeKind"] = None
+        #: ⚠️ 「在场没在场」只认后端自己的自述 ✓✗ —— 2026-10-31 实测踩过：这里原本写
+        #: ``components[name] is not None`` ✓，而 ``components["textEncoder"]`` 是一个**登记
+        #: 用的 dict** ✓（有 path ✓）⇒ 三件全报 true ✓✗（看着像"分时驻留没生效"✓，其实只是
+        #: 判据读错了对象 ✓）。真正的答案是 ``describe()`` 的 ``*Loaded`` 三格 ✓。
+        report["phasedComponents"] = {"dit": bool(described.get("modelLoaded")),
+                                      "textEncoder": bool(described.get("textEncoderLoaded")),
+                                      "vae": bool(described.get("vaeLoaded"))}
+        report["note"] = (
+            "Qwen-Image 2.1 三份权重**全是真的** ✓（DiT 649 键 ✓ / Qwen3.5-9B 语言塔 ✓ / "
+            "64 通道 VAE 238 键 ✓）⇒ 出来的是**真图** ✓，`synthetic` 如实为 False ✓。"
+            "出图走 `pipeline.run_sync(stage=\"qwen_image21\")` ✓；"
+            "⚠️ 采样 shift 是 **0.69** ✓（`pipeline.QWEN21_FLOW_SHIFT` ✓，**不是** Z-Image 的 3 ✓✗）、"
+            "**没有** patchify ⇒ 尺寸只吸附到 16 ✓✗。"
+            "⭐ **分时驻留** ✓：三件 bf16 驻留合计 **28.68 GiB** ✗（DiT 13.26 ＋ TE 14.79 ＋ "
+            "VAE 0.63 ✓）装不进 22.49 GiB 的卡 ✓✗ ⇒ 现在**只装了 DiT** ✓，TE 与 VAE 由管线在 "
+            "encode / decode 边界换装 ✓（`TorchBackend.enter_phase` ✓）。"
+            "峰值 ≈**14.8 GiB** ✓（余 7.7 ✓）。"
+            "⚠️ 代价：**每次出图多两段装配** ✓（TE 14.79 GiB ＋ VAE 0.63 GiB 读盘 ✓）"
+            "—— 这是装不下的必付成本 ✓，不是可省的优化 ✗。"
+        )
+        report["cache"] = _reclaim_cuda_cache()
+        self._commit_load(key, backend, report)   # 三格一起提交 ✓（少一格 ⇒ 白装或回执空 ✓✗）
+        return report
+
+    def _ensure_qwen_image_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
+                                 tokenizer_path: str | None, text_weights: str | None,
+                                 image_vae_weights: str | None,
+                                 device: str | None,
+                                 policy: str | None = None,
+                                 loras: Any = None) -> dict[str, Any]:
+        """装 **Qwen-Image 2512 / Edit 2511 出图链** ✓（``stage=qwen_image`` ⇒
+        :class:`~.torch_backend.TorchBackend` ✓）。
+
+        ## 为什么是**第五条线** ✗（不塞进 2.1 那条 ✓）
+
+        逐件列一遍"能不能共用"（**全不能** ✗✗，见 :data:`_QWEN_IMAGE_STAGE_NOTE` ✓）：
+
+        | | 2.1（2509） ✓ | **2512 / Edit** ✓ |
+        |---|---|---|
+        | DiT | 649 键 / 单流 / 64ch ✓ | **1933 键**（Edit 3614 ✓）/ **双流** / **16ch** ✓ |
+        | 文本塔 | Qwen3.5-9B / **4096** / 取 −2 ✓ | **Qwen2.5-VL-7B / 3584 / 取 −1** ✓ |
+        | VAE | 64 通道（238 键 ✓） | **16 通道**（`qwen_image_vae` ✓） |
+        | 时间口径 | lumina 式翻转 ✓ | **`1000·σ` 不翻转** ✓ |
+        | flow shift | 0.69 ✓ | **3.1** ✓ |
+
+        ⚠️ 词表也要换 ✓（Qwen2.5 的 `<|im_start|>=151644` ✓ / vocab 152064 ✓ —— 与 Qwen3.5 不同 ✗）。
+
+        ## 分时驻留（**这一族更狠** ✗✗）
+
+        | 部件 | 驻留 | 出处 |
+        |---|---|---|
+        | DiT | **38.05 GiB** ✓ | 盘上 `qwen_image_2512_bf16` 本来就是 bf16 ⇒ 1:1 ✓ |
+        | 文本塔 | ≈**16.1 GiB** ✓ | `qwen_2.5_vl_7b_fp8_scaled` 8.74 GiB × 2 − 视觉塔 ✓ |
+        | VAE | **0.24 GiB** ✓ | 本体即最终精度 ✓ |
+
+        合计 ≈**54.4 GiB**（卡 22.49 ✓、内存 96 GB ✓）⇒ **三件绝无可能同驻** ✓✗，而且
+        **DiT 单件就超卡** ✓✗（38.05 > 22.49）⇒ `auto` 必然判 `split`（按层切 ✓，跨界前向慢 ✓）
+        或 `cpu`（整件在内存 ✓，更慢 ✓）。⚠️ **这是必付成本** ✗，报告里如实写 ✓，
+        不许写成"已优化" ✗✗。
+
+        ⚠️ **Edit 2511 的参考图通路还没接** ✗✗（视觉塔 + 参考图 VAE 编码 + `ref_latents` ✓）：
+        这里**照装**（键对账与形状现在就能核 ✓），但 :meth:`TorchBackend.denoise` 会在
+        Edit 权重上**明确报错** ✓✗ —— 静默按 t2i 出图＝编辑能力凭空消失 ✓✗。
+        """
+        self._require_slots("Qwen-Image 2512", _QWEN_IMAGE_STAGE_NOTE, [
+            (dit_path, "`ditPath`（DiT 主干 ✓ `diffusion_models/qwen_image_2512_bf16.safetensors` ✓"
+                       " / Edit `qwen_image_edit_2511_int8_convrot.safetensors` ✓）"),
+            (text_weights, "`textWeights`（**Qwen2.5-VL-7B** 文本塔 ✓ "
+                           "`text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors` ✓）"),
+            (image_vae_weights, "`imageVaeWeights`（**16 通道** VAE ✓ `vae/qwen_image_vae.safetensors` ✓）"),
+            (tokenizer_path, "`tokenizerPath`（Qwen2.5 词表**目录** ✓ 含 `tokenizer.json` ✓）"),
+        ])
+
+        had_previous = self._reset_loaded()   # 三格一起清 ✓（引用断在函数返回时 ⇒ 才真能回收 ✓✗）
+        _release_torch_cache()
+
+        backend = TorchBackend(device=device, policy=policy)
+        #: ⭐ 按**本族**的账判一次 ✓✗（`QWEN_IMAGE_PART_NEED_GIB["dit"] = 38.05` ✓）：
+        #: 拿 2.1 的 13.26 判 ⇒ "装得下" ✓✗、`residency` 留 `full` ✓、装到 20 GiB 才 OOM ✓。
+        #: ⚠️ 账挂在 :class:`TorchBackend` 上（`QWEN_IMAGE_PART_NEED_GIB` ✓ 与 2.1 的
+        #: `PART_NEED_GIB` 并列 ✓，两族**必须分开** ✗✗）—— 这里用**实例**取，不另抄一份 ✓。
+        backend._apply_decision(backend.decide_for(  # noqa: SLF001
+            ("dit",), phase="assemble", need_gib=backend.QWEN_IMAGE_PART_NEED_GIB))
+        report: dict[str, Any] = {"stage": pipe.QWEN_IMAGE_STAGE, "reused": False,
+                                  "components": {}, "replaced": had_previous,
+                                  "synthetic": False}
+        try:
+            #: ⭐ LoRA 必须**往下传** ✗✗（2026-10-31 修 ✓）：原先不带 ``loras`` ⇒ 调用方送了
+            #: 也静默丢掉 ✓✗（装出来是没挂 LoRA 的底模 ✓，跑得动但不是那个档 ✓✗）。
+            report["weights"] = backend.load_weights(path=dit_path, loras=loras)
+            report["components"]["dit"] = (report["weights"] or {}).get("path") or True
+            #: ⚠️ **必须显式核族** ✗✗，而且这次是**双向**的：2.1 与 2512 的 `text_dim`
+            #: 与 VAE 通道**都不一样** ✓（4096/64 vs 3584/16 ✓）⇒ 文本塔与 VAE 那一关也能拦 ✓；
+            #: 但 **Edit 2511 与 2512 t2i 的配置完全相同** ✓✗（同族同代 ✓，只差参考图通路 ✓）
+            #: ⇒ 族名拦不住这一对 ✓，只能靠 `ref_timestep_zero` 那一格区分 ✓（见下面的警告 ✓）。
+            config = (backend.describe().get("config") or {}) or {}
+            family = str(config.get("family") or "")
+            if family != QWEN_IMAGE_FAMILY:
+                raise TorchBackendUnavailable(
+                    f"`ditPath` 这份权重判出来是 **{family or '未知'}** 族 ✗，不是 Qwen-Image 2512 / Edit 2511"
+                    f"（`{QWEN_IMAGE_FAMILY}` ✓）\n  · 给的：{dit_path} ✓\n"
+                    f"  · 2512 的 DiT 长这样：`diffusion_models/qwen_image_2512_bf16.safetensors` ✓"
+                    f"（**1933** 键 ✓、bf16 ✓）；Edit 是 `qwen_image_edit_2511_int8_convrot.safetensors` ✓"
+                    f"（3614 键 ✓）\n"
+                    f"  · ⚠️ **不是** `qwen_image_2.1_int8_convrot.safetensors` ✗（那是 649 键的单流 2.1 ✓，"
+                    f"走 `stage=\"qwen_image21\"` ✓）", reason="pending")
+            #: ⚠️ Edit 权重**照装**但把事实写在报告里 ✓（`denoise` 会拒跑 ✓，见方法 docstring ✓）：
+            #: 若这里静默放行、报告也不提，读者只会看到"装成功了、图不对" ✓✗。
+            is_edit = bool(config.get("ref_timestep_zero"))
+            report["components"]["textEncoder"] = {"phased": True, "loaded": False,
+                                                   "phase": "encode",
+                                                   "path": str(text_weights),
+                                                   "tokenizer": str(tokenizer_path),
+                                                   "kind": "qwen25-te"}
+            report["components"]["vae"] = {"phased": True, "loaded": False,
+                                           "phase": "decode",
+                                           "path": str(image_vae_weights)}
+            #: ⚠️ 三个按族参数**一个都不能省** ✗✗：
+            #: ``text_kind="qwen25"`` ⇒ encode 时接 Qwen2.5 塔 ✓（缺省是 qwen35 ✗ ⇒ 报「缺 linear_attn」✓✗）；
+            #: ``vae_family="qwen_image"`` ⇒ 反缩放取**恒等** ✓（`vae_wan.latents_stats` ✓）。
+            #: ⚠️ 这个族名 **不能用 ``wan21``** ✗✗（2026-10-31 修）：2512 的 VAE 只是**结构**与 Wan21
+            #: 同档（16ch / 8× ✓），**反缩放不同** ✓ —— Wan21 有 16 个真 mean/std（-0.7571… ✓），
+            #: 而 2512 走 ComfyUI 的 ``LatentFormat`` 基类（恒等 ✓）。借名的话 ``wan21`` 一旦登真值，
+            #: 2512 就吃到 Wan 的 mean/std ⇒ 图整体偏色、不报错 ✓✗。给 2.1 的 `qwen_image21` 也不行
+            #: （64 通道 ⇒ 长度对不上当场报 ✓）。
+            #: ``part_need_gib`` ⇒ 每阶段决策按 38.05 / 16.1 / 0.24 判 ✓（缺省是 2.1 的 13.26 ✗）。
+            report["chain"] = backend.declare_chain(
+                dit_path=str(dit_path), text_weights=str(text_weights),
+                tokenizer_path=str(tokenizer_path), vae_path=str(image_vae_weights),
+                vae_family="qwen_image", text_kind="qwen25",
+                part_need_gib=backend.QWEN_IMAGE_PART_NEED_GIB)
+        except BaseException as err:  # noqa: BLE001
+            _abandon_assembly(backend, err, what="Qwen-Image 2512")
+
+        described = backend.describe()
+        report["device"] = described.get("device") or device or "cpu"
+        report["backend"] = described.get("name")
+        report["devicePolicy"] = described.get("devicePolicy")
+        report["vaeKind"] = None      #: 分时驻留下 VAE 还没装 ✓（同 2.1 那条 ✓）
+        report["phasedComponents"] = {"dit": bool(described.get("modelLoaded")),
+                                      "textEncoder": bool(described.get("textEncoderLoaded")),
+                                      "vae": bool(described.get("vaeLoaded"))}
+        report["ditVariant"] = "edit-2511" if is_edit else "t2i-2512"
+        report["warnings"] = ([] if not is_edit else [
+            "⚠️ 装的是 **Edit 2511** 权重（带 `__index_timestep_zero__` 哨兵 ✓），而参考图通路"
+            "（Qwen2.5-VL 视觉塔 + 参考图 VAE 编码 + `ref_latents` ✓）**尚未接** ✗ ⇒ 出图会在 "
+            "`TorchBackend.denoise` 前**明确报错** ✓（不会静默按纯 t2i 画 ✓✗）。"
+            "要用编辑能力：换 2512 的 t2i 权重，或先把视觉塔接上 ✓"
+        ])
+        report["note"] = (
+            "Qwen-Image 2512 三份权重**全是真的** ✓（DiT 1933 键 ✓ / Qwen2.5-VL-7B 语言塔 28 层 3584 ✓ / "
+            "16 通道 VAE ✓）⇒ `synthetic` 如实为 False ✓。"
+            "出图走 `pipeline.run_sync(stage=\"qwen_image\")` ✓；"
+            "⚠️ 采样 shift 是 **3.1** ✓（`pipeline.QWEN_IMAGE_FLOW_SHIFT` ✓，**不是** 2.1 的 0.69 ✗）、"
+            "尺寸吸附 **16** ✓（VAE 8× × DiT patch 2 ✓）、时间口径 **`1000·σ` 不翻转** ✓✗。"
+            "⭐ **分时驻留，且这一族更狠** ✓✗：DiT **38.05 GiB** ＋ TE ≈16.1 ＋ VAE 0.24 ＝ ≈54.4 GiB ✓，"
+            "而**单是 DiT 就超卡**（22.49 ✓）⇒ `auto` 会判 `split`（按层切给卡＋内存 ✓）或 `cpu` ✓。"
+            "**这是必付成本** ✗，不是可省的优化 ✗：逐层跨界前向会比 Z-Image 慢一个量级 ✓。"
+        )
+        report["cache"] = _reclaim_cuda_cache()
+        self._commit_load(key, backend, report)   # 三格一起提交 ✓（少一格 ⇒ 白装或回执空 ✓✗）
         return report
 
     def unload(self, *, force: bool = False) -> dict[str, Any]:

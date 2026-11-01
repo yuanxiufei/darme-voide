@@ -133,7 +133,7 @@ async def clone_voice_cosyvoice(input_data: dict[str, Any]) -> dict[str, Any]:
     无需训练，传入参考音频（``prompt_audio``，**base64**）+ 参考文本（``prompt_text``）即时模仿音色。
 
     ✅ **2026-09-16 已核实**（读上游 ``runtime/python/fastapi/server.py``）：打的是**薄封装**
-    ``app/local_services/cosyvoice/server.py``（端口 9880 ✓ 见 ``ai_configs.PRESET_SERVICES``），
+    ``app/local_services/tts/server.py``（端口 9880 ✓ 见 ``ai_configs.PRESET_SERVICES``），
     **不是**官方服务本身 —— 官方那条要的是 **multipart 文件**（字段 ``prompt_wav`` ✗）且返回
     **裸 PCM**（不是 JSON 的 ``audio`` ✗），封装负责吸收这些差异 ✓。契约由
     ``tests/cosyvoice_seam_test.py`` 守卫（含「base64 → multipart 文件」的真 HTTP 转换断言 ✓）。

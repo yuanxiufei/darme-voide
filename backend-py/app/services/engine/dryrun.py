@@ -162,6 +162,16 @@ class DryRunBackend:
         rng = random.Random(int(request.seed))
         return TinyTensor([rng.uniform(-1.0, 1.0) for _ in range(self.width)])
 
+    def noise_like(self, sample: TinyTensor, request: GenerationRequest, *,
+                   nonce: int = 0) -> TinyTensor:
+        """随机采样器（``sa_solver`` / ``euler_ancestral``）每步回注的噪声 ✓。
+
+        ⚠️ ``nonce`` 必须进种子 ✗：每步给**同一个**噪声 ⇒ 每步都往同一方向推 ⇒
+        结构性条纹 ✓✗（而干跑里看不出来、真图上才现形 ✓）。
+        """
+        rng = random.Random(int(request.seed) * 2654435761 + int(nonce) * 7919)
+        return TinyTensor([rng.uniform(-1.0, 1.0) for _ in sample.data])
+
     def denoise(self, latents: TinyTensor, sigma: float,
                 condition: TinyTensor, request: GenerationRequest) -> TinyTensor:
         """**故意做成一阶收敛的模型** ✓：``denoised = (1−g)·cond + g·x``，``g → 0`` 当 ``σ → 0`` ✓。

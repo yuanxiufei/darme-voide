@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "apiVersion": "1.0.0",
   "engine": "darme-engine (in-process)",
   "python": "3.12.10",
@@ -7,7 +7,10 @@
     "audio",
     "h3",
     "image",
-    "text"
+    "qwen_image",
+    "qwen_image21",
+    "text",
+    "zimage"
   ],
   "operations": [
     "capabilities",
@@ -50,9 +53,44 @@
       "mxfp4"
     ]
   },
+  "devicePolicy": {
+    "policies": [
+      "auto",
+      "gpu",
+      "cpu",
+      "balanced"
+    ],
+    "default": "auto",
+    "headroomGiB": 1.0,
+    "minSplitFreeGiB": 0.5,
+    "highUsedRatio": 0.8,
+    "hardUsedRatio": 0.92,
+    "judgedOn": "memory",
+    "rules": [
+      "剩余显存 ≥ 该件需求 + 1 GiB ⇒ 上卡",
+      "剩余放不下整件、但仍 ≥ 0.5 GiB ⇒ 上卡 + 联合驻留（residency=split ✓）",
+      "剩余 < 0.5 GiB ⇒ 整件转移到 CPU（慢，但跑得完 ✓）",
+      "需求未知且显存占用 ≥ 92% ⇒ 转移到 CPU"
+    ],
+    "needGiB": {
+      "part": {
+        "dit": 13.26,
+        "text": 14.79,
+        "vae": 0.63
+      },
+      "chain": {
+        "zimage": 19.28
+      },
+      "qwenImagePart": {
+        "dit": 38.05,
+        "text": 16.1,
+        "vae": 0.24
+      }
+    }
+  },
   "catalog": {
     "path": "D:\\code\\voide\\darme-voide\\configs\\models.json",
-    "models": 16,
+    "models": 26,
     "error": null,
     "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models"
   },

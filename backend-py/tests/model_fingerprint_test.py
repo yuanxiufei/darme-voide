@@ -690,6 +690,7 @@ def main() -> int:  # noqa: C901
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     code = main()
     print(f"\nSUMMARY: {TOTAL - FAILED}/{TOTAL} 通过，{FAILED} 失败")
     sys.exit(1 if FAILED else code)

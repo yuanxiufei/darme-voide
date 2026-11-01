@@ -1603,6 +1603,172 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
       ⓗ ⚠️ **仍未落**：把 nvfp4 真正喂进某个模块的**前向** ✗ —— 本仓的文本编码器是玩具实现 ✓✗，
       盘上那 32B 的 Qwen3-VL 还没有对应模型骨架 ⇒ 现在能做的到「逐层还原出正确 fp32 权」为止 ✓，
       挂载点等模型落地再补 ✓（不许为了"看起来接通"去写无人调用的假接线 ✓✗）。
+    * ㉟ **2026-10-30·结构守卫（新套件 `structure_test`，16 条）＋ 六处路径腐烂已修** ——
+      这轮不加引擎能力 ✓，只把「分层规范」从纸上搬进判据 ✓。病根四条同形：**结构约定只写在
+      README 与模块头里，没有任何测试会失败** ✗ ⇒ 同类事故反复出现（仓库根留 `scripts/` 空壳、
+      `app/services/agents/` 改名成 `app/agent/` 后三处说明还指着旧路径、`engine/__all__` 只登记 55/63）✓✗。
+      ⓐ 判据五条：㊀ `MODULE_GROUPS`（`engine/__init__.py` 的 6 组登记表）与盘上模块**双向相等**、
+      `__all__` 由它拼出、无重复；㊁ `numeric` 组顶层零重依赖（不装 torch 也能测，函数内惰性 import
+      不算）；㊂ 每个 engine 模块头 ≥8 词；㊃ 仓库根无 `scripts/` 空壳、无空目录；㊄ `app/` 下所有源码
+      点名的 `app/…py` 必须真实存在（**双正则**：带 `app/` 前缀的 ＋ 当年漏网那种不带前缀的
+      `services/agents/skills.py`）✓。
+      ⓑ ㊄ 首跑就抓出 5 处真错（全是「文件改名/搬家后说明没跟」）：`app/core/config.py`、
+      `app/routers/grid.py`、`app/scripts/check_skill_refs.py`、`app/services/skills.py` 里的
+      `services/agents/*` 旧路径 ⇒ 改为 `app/agent/skills.py` / `app/agent/runtime.py` ✓；
+      `app/services/engine/registry.py` 的下载提示写 `scripts/engine_readiness.py` ✗ ——
+      盘上既没有这个文件、业务也不在那儿（真链是业务 `app/services/engine_readiness.py` ＋ 薄壳
+      `app/scripts/h3_readiness.py`，全仓现有提示一律写 `python app/scripts/h3_readiness.py --weights`）✓。
+      ⓒ **反验四条，全部喂坏数据实测**：谎报一个不存在的模块名 ⇒ 报「有登记没文件」；
+      临时文件写顶层 `import torch` ⇒ 被抓；写函数内惰性 import ⇒ 不算（别把允许的写法判红）；
+      说明里指向 `app/services/agents/skills.py` ⇒ 报，指向真路径 ⇒ 不报 ✓。
+      ⓓ 第一版自身踩过两个坑，记档：①「盘上多模块」的反验原打算用「把真模块从集合里剥掉」，
+      可那测的是**另一个方向**（会报「有登记没文件」）✗ ⇒ 改成 `on_disk | {"幽灵模块"}` ✓；
+      ② 反验 ㊁ 原本拿 `torch_backend` 当样本，而它是**惰性 import** ⇒ 永远 PASS，判据等于没验
+      ✗ ⇒ 改为在临时目录里写两个样本（顶层 import / 函数内 import）✓。
+      ⓔ 顺带清掉的空壳（都已不在盘上）：仓库根 `scripts/`（只剩 `.pyc`）、`local_services/`、
+      `backend-py/outputs/`、`backend-py/_probe_header.py` ✓。
+      ⓕ 判据：`structure_test` 全绿 ✓（零 torch、纯 stdlib ＋ 一次 `import app.services.engine`；用例数不写死）。
+      ⓖ **同日第二轮：加 ㊅「已实现 ≠ 已接线」** —— ㊀~㊄ 只管「文件在不在、说明对不对」✗，管不了
+      「代码到底有没有人用」✗。实测 3 个模块生产代码 **0 处 import**（`image_ops` / `mappings` /
+      `latent_formats`，只有测试在钉它们的口径）⇒ 这类最危险的不是占地方，是**看起来像已经能用** ✗。
+      判据：每个 engine 模块都得有**生产**调用者，否则必须登记进 `UNWIRED` 并写明「该接到谁身上、
+      为什么允许断着」✓；**反方向也判** ✓ —— 登记了却已经接上线 ⇒ 报「那条欠账该删了」✗
+      （白名单只增不减就成谎话 ✗）。
+      ⓗ ㊅ 立起来当场就抓出**判据自己**的缺陷两次，都记档：① 首版只认字面 `module`，于是
+      `app/services/*` 那句 `from .engine import cache_key` 认不出来 ⇒ `cache_key` / `audio_mix` /
+      `llm_backend` 三个**早就接好线**的模块被误报成孤儿 ✗ ⇒ 补 `_absolute_module()` 把 `(level, module)`
+      归一成绝对点分路径再判 ✓，并加反验「相对写法也算接线」✓；② 顺带发现 `llm_backend` 的接线点是
+      `text_generation.py` 里**函数内惰性 import** ✓ —— 所以扫描必须 `ast.walk` 整棵树、不能只看顶层 ✗。
+      ⓘ 删壳：`app/agent/skill_parser.py` 是纯 re-export 转发壳 ✓，注释写「agent/ 里多处按旧路径 import」
+      —— **实测只有 1 处、还是测试**（`skills_test.py`）✗，`app/agent/skills.py` 早已直接指向权威版 ⇒
+      删壳 + 测试改 import ✓（`skills_test` 45/45 ✓）；壳路径进 `_REF_ALLOW` 的「讲历史」例外 ✓，
+      因为说明里必须点名它，否则读者只看到一个凭空消失的模块 ✗。
+    * ㊱ **2026-10-30·第三轮：功能分类地图（`docs/feature-map.md`）＋两处「分叉副本」已删** ——
+      ⓐ 病根与 `skill_parser` **同形、且更严重**：同一个 TS 文件被移植两遍，各走各的调用链，**改了其中
+      一份另一份不会有任何测试失败** ✗。实测两例：① `app/services/protocol.py` vs `app/agent/protocol.py`
+      —— 后者多一个 `_stringify_status`（键不存在时 TS 出 `undefined`、前者出 `null`）⇒ **已经分叉**，
+      而 services 版只被 `tests/smoke_test.py` 用、生产代码 0 处 import ⇒ 删，测试改指向
+      `app/agent/protocol.py`（`agent_protocol_test` 25/25 ✓、`smoke_test` 481/481 ✓）。
+      ② `app/services/skills.py` vs `app/agent/skills.py` —— 4 个同名函数各写一遍，且 `skill_char_budget`
+      的语义**已分叉**（agent 版支持 0=关闭、services 版 0 会回落 60000 ✗）⇒ 以 agent 版为唯一实现
+      （补上它 `__all__` 里**声明有、实现无**的 `list_skill_ids` ✓），`app/routers/skills.py` 改引用
+      （`SKILLS_DIR`/`SKILL_CHAR_BUDGET` 两个导入期常量改成 `skills_dir()`/`skill_char_budget()` 调用），
+      删 services 版 ✓。⚠️ 去重方向**不是随便选**：`layering_test` 规定 `services` 只能依赖 `core`
+      ⇒ 「services 反向 import agent」是违规 ✗，唯一合法方向是**路由直接指向 agent**（`routers → agent` 允许）✓。
+      ⓑ 删完 ㊄ 立刻报 5 处路径腐烂（都是「讲历史」的句子还指着已删文件）⇒ 改写成不带路径的说法
+      （「services 侧那份……（已删）」），**不往 `_REF_ALLOW` 里堆** —— 白名单只留给「必须点名」的那种 ✓。
+      ⓒ **功能分类地图**：新增 `docs/feature-map.md`，七层（接口/智能体/业务服务/引擎/本地执行与适配/
+      平台/开发期）× 二级域（8+5+12+6+4+3+4），每个模块只进一格、共 300 个模块全覆盖（含 63 个 engine
+      模块按 `MODULE_GROUPS` 六组展开）。分类原则三条写进文档：**按运行时职责分层**（与 `layering_test`
+      同一条线）、**层内按改动会一起碰到的文件切域**、**一格一个落点**（找不到格 ⇒ 先补体系，不许塞「其他」）。
+      ⓓ 把该文档接入 ㊄：它是全仓**点名 `app/…py` 最多**的一份（300+ 处）⇒ 路径腐烂判据一并扫它，
+      `structure_test` 24/24 ✓ —— 文档与代码同生共死，不靠人记 ✓。
+      ⓔ 刻意**不写死**的数字：总览表的模块数（会随增删变化）只写当次口径，套件数一律指向
+      `tests/run_all.py::TESTS`（㉟ⓕ 起就守这条）。
+    * ㊲ **2026-10-30·第四轮：把「覆盖完整」从声称变成判据（㊆）＋ 27 处漏点名补齐** ——
+      ⓐ 上一轮 ㊱ⓒ 说「300 个模块全覆盖」，实测**不成立** ✗：`app/` 下 285 个非 `__init__` 模块里
+      有 **27 个从没被点到**（`app/main.py` / `passthrough.py` / `http_logger.py`、`local_services/h3`
+      5 个、`local_services/tts/server.py`、`scripts/corpus` 6 个、`lora_train/dataset` 5 个、
+      `vendor/ollama` 3 个、`engine/__main__.py`、技能脚本 3 个）—— 「目录名泛称」把没点名掩盖成了
+      覆盖 ✓✗。病根：**只有「点到的必须存在」（㊄），没有「存在的必须点到」** ⇒ 漏一个模块不会失败 ✗。
+      ⓑ 补新判据 **㊆**（`map_gaps` + `case_coverage`）：`app/**.py`（除 `__init__.py`）逐份必须在
+      `docs/feature-map.md` 点名，漏一份即 FAIL；两条反验（抹掉一个真点名 ⇒ 必须报、
+      `__init__.py` 不要求点名 ⇒ 不许误报）。文档侧新增 L1-0（入口与横切 3）、L2-5 技能脚本表、
+      L5-2 vendored 客户端 3 行、L5-3 `dataset/` 5 行、L5-4 本地原生服务 6 行、L7-3 语料 6 行、
+      L4-6 CLI 入口行 ⇒ 覆盖 **285/285** ✓（`structure_test` 27/27 ✓）。
+      ⓒ 顺带校准**层内数字**（上一轮口径混乱）：L1 45（routers 42 + 顶层 3）、L2 23、L4 64（63 模块 +
+      `__main__.py`）、L5 48、L7 21（顶层 15 + `corpus/` 6），合计 285 —— 与 ㊆ 的实测同源 ✓。
+      ⓓ §11 的「核覆盖」命令原来只 `.glob('app/services/*.py')`，会让人以为查一层就算覆盖完整 ✗；
+      改成 `rglob` 全量 + 指向 ㊆。
+    * ㊳ **2026-10-31·第五轮：把「测试清单完整」也变成判据（㊇）＋ 一个漏了一个多月的套件补登记** ——
+      ⓐ 静态核对 `TESTS` 时发现：盘上 166 份 `tests/*_test.py`，清单只登记了 165 ⇒
+      **`lora_train_test.py`（85 项）从来没进过清单** ✗ 「一条命令验完全量」从来没验过它 ✓✗。
+      它自身 **85/85 全绿** ✓ —— 问题不在代码，在**没人跑** ✗。病根与 ㊆ 同形：
+      清单只被**手抄**一遍，没有任何反向往回对 ✗（`run_all.py` 里也没有自动收集逻辑 ✓，
+      所以「盘上有、清单没有」只能靠人眼发现 ✗✗）。
+      ⓑ 新判据 **㊇**（`registered_tests` ＋ `test_list_gaps` ＋ `_unregistered_fixture`）：
+      盘上每份 `*_test.py` 必须在 `TESTS` 里，或登记进 `NOT_IN_RUN_ALL` 并写明
+      「什么时候该手工跑」；四问（漏登记 / 点名了盘上不在 / 重复登记 / 白名单已过期）＋
+      两条反验（造一份未登记 ⇒ 必须报、登记进白名单 ⇒ 必须不报）。
+      白名单现在是**空的** ✓ —— 现有套件没有一个「该被排除」✓。
+      ⓒ 数值同步：套件数 165 → **166**（`docs/feature-map.md` 三处、`README.md` 两处），
+      守卫类别 7 → **8**（`README.md` 结构树、本文档头判据清单）。
+      ⓓ 本轮回归（逐套单跑，未跑全量）：`structure_test` **33/33** ✓（原 27 + ㊇ 六条）、
+      `layering` 6/6、`contract_mirror` 8/8、`route_parity` 0 吞、`skills` 45/45、`smoke` 481/481、
+      `auto_pipeline` 71/71、`agent_extract_tools` 31/31、`agent_storyboard_tools` 45/45、
+      `engine_dit_family` 36/36、`engine_dit_families_script` 15/15、`engine_independence` 18/18、
+      `model_fingerprint` 135/135、`engine_router_contract` 19/19、`engine_readiness_script` 22/22、
+      `engine_queue_backpressure` 24/24、`engine_tokenizer_hub` 33/33、`engine_quant` 60/60、
+      `engine_env_docs` **29/29**（原 18 ＋ ③″ 四条 ＋ ②′ 三条 ＋ ② 两条 ＋ ④′ 两条）、
+      `check_all` 17/17 四道自检、
+      `lora_train` 85/85。
+      ⓔ 顺手查出同一形状的第三个洞：`quant.SUPPORTED_FORMATS` 有 4 个键 ✓，而
+      `docs/compatibility-matrix.md` §三「量化族 × 支持结论」表里**没有 fp8 的行** ✗
+      （fp8 只在 §四 硬件节以「有 fp8 语义、无硬件加速」出现 ✓）⇒ 读者查「fp8 到底支不支持」
+      在主题表里找不到答案 ✓✗。原判据只**逐族点名** `mxfp4` / `nvfp4` 两族 ✓，
+      代码新加一族、文档漏写则没有任何一行会红 ✗ —— 与 ㊇ 完全同形：
+      **只核「写了的必须对」，没核「支持的必须写」** ✗。
+      ⇒ 新判据 **③″**：`DOC_TOKENS`（代码 token → 文档里的称呼，**多写法任一命中**）＋
+      `undocumented_families()` 纯函数 ＋ `_matrix_section()`（只认 §三 那一节：
+      `fp8` 在 §一/§四 也有行，全文扫会把「GPU 有 fp8 语义」误当成「量化表写了 fp8」✗）＋
+      两条反验（抹掉 fp8 行 ⇒ 必须报两族；抹掉 4 bit 打包行 ⇒ 只报 `convrot_w4a4`，
+      末行那句「`convrot_w4a4` 是旋转分组、不是量化分组 ⇒ 支持」**不许**替它顶包 ✓）；
+      外加一条反向：`DOC_TOKENS` 自己不许有过期条目 ✓（某族不再支持却还登记着，
+      它就会永久「覆盖」一个不存在的族 —— 与 ㊇ 的 `NOT_IN_RUN_ALL` 过期检查同形 ✓）。
+      文档侧补 §三 的 fp8 行（带 scale ⇒ per-tensor 乘／无 scale ⇒ 合法 cast／
+      `scale_input` 激活侧丢弃／int8·int4 无 scale 仍拒／本机装得下但不更快）。
+    * ㊴ **2026-10-31·第六轮：把 §二 依赖版本表也接上判据（②′），并拆掉 ② 里手抄的五个包名** ——
+      ⓐ ③ 那条只用 `must` 盯 **torch / Python / CUDA / cuDNN** 四个字面量 ✓，
+      `docs/compatibility-matrix.md` §二「依赖 × 实测版本」的 `numpy` / `safetensors` /
+      `pillow` / `transformers` **四个版本没有任何判据** ✗ ⇒ 升级依赖后表里留旧值，
+      读者照表去装就装成另一个组合 ✓✗（与 fp8 那个洞同形：**只核点过名的，不核存在的** ✗）。
+      ⓑ 新判据 **②′**：`package_doc_problems()` 纯函数把 §二 表 ⇄ `packages` 逐项对死
+      （「缺行」＋「写错」两问），两条反验（把 numpy 改成旧值 ⇒ 必报写错；
+      抹掉 pillow 行 ⇒ 必报缺行）。复合行（`fastapi / uvicorn / …`）不逐个核 ✓，
+      它的版本真源本就在 `THIRD_PARTY_NOTICES.md` ✓。节界用 `_matrix_section(text, "## 二、")` ✓。
+      ⓒ 顺手拆掉 ② 里的**手抄元组** `("torch","numpy","safetensors","pillow","transformers")` ✓✗
+      —— 采集端多记一个包，这条判据就完全不看它 ✗。改成遍历 `packages` 全键 ＋
+      `PackageNotFoundError` 记成「本机未安装」＋ 一条「`packages` 不许为空」
+      （空表会让 ② 与 ②′ 一起空转成「全绿」，与 ㊇ 白名单过期同一个病 ✓✗）。
+      ⇒ 三层链条现在是闭合的：**文档 §二 ⇄ `runtime-versions.json`（②′）⇄ 现场
+      `importlib.metadata`（②）** ✓。
+      ⓓ 顺手补显存这一格：② 一直核 `device.name` / `capability` / `driverVersion`，
+      **唯独没核 `memoryTotalMiB`** ✗ —— 而它正是 §四 那两个数字（`23028 MiB` / `22.49 GiB`）
+      的来源 ✓。新判据 ④′ 核「§四 抄的就是它」（标称整 MiB ＋ GiB 两位小数）＋ 反验。
+      ⚠️ ② 落成**容差 1 MiB**（照实测的取整差）：`mem_get_info().total`
+      = 24146083840 B = **23027.34 MiB** ⇒ torch 截断 23027、`nvidia-smi` 显示 23028，
+      差 1 MiB 是**取整**不是**过期** ✓（换卡是 GB 级差，这容差拦不住真问题）。
+      尺子用 `mem_get_info()`（与 `runtime.py:290` 同源）而不是 `get_device_properties()`
+      —— 后者今天恰好也是 23027，但不是运行时真正用的那把 ✓。
+    * ㊵ **2026-10-31·第七轮：设备策略接上可见面（`SCHEMA_VERSION` 3→4）＋ 一个「拼错回 500」的真缺陷** ——
+      ⓐ 策略本体（`device_policy.py` / `TorchBackend(policy=)` / `enter_phase` / 三条装配线的
+      装配前决策）在上一轮已经落地 ✓，但**外面看不见** ✗✗：各条只报 `device`（结论 ✓）⇒
+      一次显存降级被读成「这台机器不支持 GPU」✓✗（读的人只能猜 ✓）。
+      `capabilities().devicePolicy` 补四样 ✓：四档策略名与默认档 ✓、判定规则（**由常量拼** ✓✗，
+      不手抄数字 —— 改 `HEADROOM_BYTES` 报告自动跟着变 ✓）、`judgedOn: "memory"`
+      （主判据是显存占用率、**不是** SM 利用率 ✓✗）、`needGiB.{part,chain}` **两本账** ✓✗
+      （分时 13.26/14.79/0.63 ⇄ 整链同驻 zimage 19.28 ✓ —— 混一起报会按最重的单件估 ⇒ 差 4.5 GiB OOM ✓✗）。
+      ⚠️ 这一栏**只报静态事实** ✗：`capabilities()` 的契约是「零副作用、不 import torch、毫秒级」✓，
+      当时的卡况走 `GET /engine/runtime` 的 `devicePolicy.pressure` ✓（判据 ①″ 钉住 ✓）。
+      ⓑ `SCHEMA_VERSION` **3→4** ✓（顶层加键＝破坏性 ✓✗，同 `cache`（1→2）/ `lora`（2→3）两例）＋
+      `docs/engine-api.schema.json`（`capabilities.top` 增 `devicePolicy`、`nested` 增 9 键）＋
+      `docs/env/hardware-report.json`（同栏 ＋ `schemaVersion: 4`）三处同步 ✓；
+      `engine_env_docs_test` 的 `stable` 加 `devicePolicy` ✓✗（**不加就没有判据** ⇒ 这一栏明年
+      一定烂 ✓，与那份文件头写的病同形 ✓）。
+      ⓒ 真缺陷（本轮抓到）：`policy` 的归一原先**只在** `ensure_loaded` 里做 ✓，抛的是 `ValueError` ✓，
+      而 `POST /load` 只接 `EngineBusy` / `TorchBackendUnavailable` ⇒ **500** ✓✗ ——
+      用户看到「服务器错误」，根本不知道自己是把 `balanced` 拼错了一个字母 ✓✗
+      （`residency` / `audioLatentMode` 那两处早就是当场 400 ✓：同一份口径不能只做一半 ✗）。
+      修＝`_assembly_from` 里调**同一个** `device_policy.normalize_policy` ✓（别名表只有一份 ✓，
+      不手抄 ✗）并翻成 `StageError` ✓；判据 ⑪¹¹ 反验 ✓。
+      ⚠️ ⑪¹¹ 第一版拿 `"balance"` 当"拼错"✗ —— 它是 `balanced` 的**合法别名** ✓ ⇒ 判据绿了，
+      但它测的是「别名能用」✗，不是「拼错要报」✗（改用 `"balenced"` ✓）。
+      ⓓ `/load` 的 docstring 补全四档语义 ＋ 两格回执 ✓✗（`loadReport.devicePolicy` 答「现在什么状态」、
+      `loadReport.chainDevicePolicy` 答「这次为什么整条链落在 CPU」✓）；判据 ⑪¹² 盯**字面量** ✓
+      （文档不写＝这个开关等于不存在 ✓）。
+      ⓔ 本轮测试：`router_contract` 25/25（⑪¹⁰ ⑪¹¹ ⑪¹² ＋ ⑨ 快照）、`env_docs` 31/31（①′ ①″）、
+      `runtime` 59、`pipeline` 127、`zimage` 40、`qwen21` 41、`structure` 33、`registry` 37、
+      `inventory` 52、`quant` 60、`loader` 33、`device_policy` 0 failed ✓。
     """
 
 from __future__ import annotations
@@ -1757,6 +1923,10 @@ TESTS = [
     ("自研引擎·加载计划（量化配套/层号连续性/显存排班；零依赖）", "engine_loader_test.py"),
     ("自研引擎·GGUF 读取器（头格式/张量表/截断检测/量化方案名；零依赖）", "engine_gguf_test.py"),
     ("自研引擎·H3 键名核对器（键全集/形状关系/PDD 头库/curve 变体；零依赖 torch-free）", "engine_h3_keys_test.py"),
+    ("自研引擎·DiT 判族与拓扑（键名归一↔读形状同源 / 前缀与 all-in-one 大包 / 4bit 打包列数按声明还原 / "
+     "同族两代不为同一份前向）", "engine_dit_family_test.py"),
+    ("自研引擎·族盘点脚本（专用族不按通用口径判 / 配套件缺就报缺 / `--strict` 只拦没通路与缺件）",
+     "engine_dit_families_script_test.py"),
     ("自研引擎·BPE 分词器（真词表 tokenizer.json/vocab+merges；往返恒等；零依赖离线）", "engine_tokenizer_test.py"),
     ("自研引擎·反量化（fp8/int8 × 四种布局 × 两种 scale 方向；判不出来就拒绝；接进装载）", "engine_quant_test.py"),
     ("自研引擎·NVFP4（E2M1 高半字节打包 / cuBLAS 128×4 swizzled 块 scale / f32 二级 scale / AWQ 折列；"
@@ -1769,7 +1939,106 @@ TESTS = [
     ("自研引擎·int8 常驻（convrot 搬边数值对齐 / 装载不许 cast / scale 不降精度 / 元数据不算多键 / "
      "`int8_offload` 只钉 int8 且峰值不随层数增长（4 层 vs 12 层对照）/ 账目自洽且**漏装即拒** / "
      "开关只认显式 True；无 torch 或无卡逐条显式 SKIP）", "engine_int8_resident_test.py"),
-    ("自研引擎·独立性契约（AST 禁 Web 层依赖/门面无 torch 可算/坏权重必拦/CLI 退出码/两处判据不漂）",
+    ("自研引擎·Z-Image/Lumina 骨架（`NextDiT` 同构：patchify 令牌内顺序 `(ph,pw,c)`；"
+     "**caption 不填位**（`has_pad_tokens` 由权重决定 / `pad_tokens=0` ⇒ 改 pad token 不许影响输出）、"
+     "`t_out` 与块调制入维一致性、与参考实现逐层相对差 0 → 端到端一致）",
+     "engine_dit_lumina_test.py"),
+   ("自研引擎·Z-Image 采样口径（flow matching：σ 恒在 [0,1]、`timestep` 就是 σ 不乘 1000、"
+    "主干 `t=(1−σ)×1000`；plan 侧 16 对齐/单帧/无 fps/与 turbo 模板差异只报不改；"
+    "**装配口**：缺 `textWeights`/`imageVaeWeights`/`tokenizerPath` 逐格点名、换这两格必须换装载键；"
+    "**就绪档**：`zimage` 只列这条链的三件、全算必需（19.27 GiB），而 `image` 档的必需权重**不含**它"
+    "（三条若直接标 required 会被加成 25.73 GiB ⇒ 24GB 卡凭空报装不下）；"
+    "**同一份筛选**：`plan_stage` 与就绪档必须走 `inventory.stage_entries`（各写一遍会漂 ⇒ "
+    "计划里必需集合为空 ⇒ `ready` 恒 True，文件全缺也说就绪）；"
+    "**反向验证**：拿 karras 的 σ（最大 14.6）喂它 ⇒ 主干收到大负数 ⇒ 形状对、不报错、出噪声）",
+    "engine_zimage_test.py"),
+   ("自研引擎·Qwen-Image 2.1 单流 DiT（键集合与盘上 649 张量逐键对账；`heads` 由 `norm_q` 宽算出、"
+    "拿不对就拒；**两行调制**（文本 t=0 / 图像采样 t，gate 要 tanh）与 `modulation` 里 **SiLU 在 Linear 之前**；"
+    "文本段因果 + 图像段全可见；ZeroCentered RMSNorm 存 `scale−1`；SwiGLU `[gate;up]` 顺序；"
+    "三轴 RoPE(16,56,56) 位置号（图像 t 轴 = 文本长度、h/w 中心化）；与**独立参照实现**双精度一致 + "
+    "四处改坏反验可辨（判据取「没改坏时的差 ×1e3」，不是拍脑袋的绝对阈值）；"
+    "`torch_backend._build_qwen21_module` 接线：meta 建 + `to_empty`、三件改名事实 in_channels/text_dim/vae_scale）",
+    "engine_qwen21_test.py"),
+   ("自研引擎·Qwen3.5 文本塔（Qwen-Image 2.1 的提示词入口：24 层 Gated DeltaNet ＋ 8 层 full attention；"
+    "真权重 549 键反推形状＋`expected_keys` 逐字对账、视觉塔/lm_head 单列不装；"
+    "chunked delta rule 与**朴素逐 token 递推**对拍（单块/跨块两档）、块级与整层与 comfy 参考块**逐位**"
+    "`maxDiff=0`；八处易错口径改坏反验可辨（门控 RMSNorm 不加 1 / conv 切头尾 / head repeat vs tile / "
+    "衰减符号 / 交错劈 q|gate / QK norm 加 1 / split-half RoPE）；`layer_idx=-2` 不过 final norm、batch>1 拒）",
+    "engine_qwen35_te_test.py"),
+   ("自研引擎·Qwen-Image 2512 / Edit 2511 双流 DiT（MMDiT 两支 + 6 组调制是本族指纹；"
+    "`heads` 由 `attn.norm_q` 宽反推；时间口径 `1000·σ` **不翻转**（与 Z-Image 相反）；"
+    "patch 2×2 拍平 `channels = img_in 宽 / 4`；Edit 侧参考图 token 串联 + 三轴位置号 t 分量 = 参考图序号 + "
+    "`__index_timestep_zero__` 哨兵决定 σ=0 行调制；键集合与盘上真张量逐键对账）",
+    "engine_dit_qwen_image_test.py"),
+   ("自研引擎·Qwen2.5-VL-7B 文本塔（Qwen-Image 2512/Edit 的提示词入口：28 层 / 3584 / 28×128 头 / kh=4；"
+    "**q/k/v 带 bias**、`o_proj` 与 MLP 无偏置、**无 QK-norm**、`layer=\"last\"` 且不过 `model.norm`；"
+    "ChatML 模板两套逐字照抄 + 系统段按第 2 个 `<|im_start|>` 截掉、空串补空格、自带 im_start 不套模板；"
+    "先整条编码再切行（位置编码算在完整序列上）；真权重 1108 根多余键全被 `visual.`/scale 规则认领）",
+    "engine_qwen25_te_test.py"),
+   ("自研引擎·Qwen-Image **2512/Edit 2511** 的出图口径与装配门禁（与 2.1 只差一个 `21` ⇒ 族名比较"
+    "只能 `==`，前缀判族会让 2.1 被 2512 的 shift 接走：σ 钉 **3.1**、逐点比 2.1 的 0.69 更偏噪、也不等于"
+    "Z-Image 的 3.0；尺寸吸 **16** 且**潜边长必须偶数**（只吸 8 ⇒ 奇数潜边 ⇒ `img_in` 拍平爆）、单帧 "
+    "`frames=1`/`fps=0`、`timesteps` 就是 σ 不翻转；四格缺项逐格点名（只看首行，说明段有意列四格）；"
+    "就绪档只列这条链三件且全算必需 ≈47.03 GiB、Edit 故意不进 `qwen2512` tag；"
+    "**三个按族参数**真被用上：`text_kind=qwen25` 接 Qwen2.5 塔（接成 qwen35 ⇒ 报「缺 `linear_attn.*`」）、"
+    "`vae_family=wan21`（16 通道、反缩放**恒等**是族事实而非回退）、`part_need_gib` 换成本族账；"
+    "**三本账不许混**（拿 2.1 的 13.26 判 38.05 ⇒ 判「装得下」⇒ 装到一半 OOM；假体卡况下 2.1 判 `off`、"
+    "2512 必须 `split`、余量不足 0.5 GiB 才整份转 CPU；三个可见面都要是生效值：能力表单开 "
+    "`needGiB.qwenImagePart`、`describe()` 的 `partNeedGiB`/`defaultPartNeedGiB`、`declare_chain` 回执）；"
+    "Edit 权重**在向前之前**拒跑并给两条出路）",
+    "engine_qwen_image_test.py"),
+   ("自研引擎·Wan 系 VAE（先接 Qwen-Image 2.1 的 64 通道：238 键与 comfy `WanVAE` 逐键同名；"
+    "`temporal_kernel=1` ⇒ 单帧路径；四通道 RGBA 出图要丢第 4 通道；"
+    "解码前反缩放走 `latent_formats.QwenImage21` 的 mean/std —— 直接喂 `decode()` 形状全对、图是灰噪）",
+    "engine_vae_wan_test.py"),
+   ("自研引擎·Flux VAE（16 通道 / 无 `quant_conv` / 244 键 = SDXL 的 248 − 4；"
+    "`x/0.3611+0.1159` 反缩放用**恒等解码桩**钉死，并反向钉住「`(x−shift)/scale` 在 SDXL 上恒等价 ⇒ "
+    "试不出来」这条差；真权重键集+逐键形状+参数量全等；"
+    "预检把潜通道换成 4 必须报「拿成了 SDXL VAE」）",
+    "engine_vae_flux_test.py"),
+    ("自研引擎·GPU+CPU 联合驻留（非层先上卡、层取**连续前缀**、放不下就 `fits=False` 不假装；"
+     "`blocks.N` 也认层（DiT/H3 真形态）；split 搬激活 / park 搬权重且峰值=单层；"
+     "不挂 hook 必报设备不一致；老路 `off` 零 hook 零搬运；接线后报告可观察"
+     "（`applied` 与「没有第二台设备」「预算 0 ⇒ 等于纯 CPU」都如实说））",
+     "engine_residency_test.py"),
+   ("自研引擎·设备策略（默认 GPU 优先 ✓；余量够就上卡 / 差一点改**联合** / 差太多**转移 CPU** ✓；"
+    "「刚好装得下」按装不下算（留 1 GiB 硬余量）；`auto`·`gpu`·`cpu`·`balanced` 四档与别名；"
+    "拼错的策略名**当场抛**、不静默回落；读不到卡况 ⇒ 保持优先 GPU 而不是降级；"
+    "`mem_get_info` 假体注入逐档验，`source` 如实是 `memory`（**不许**把显存占用说成 SM 利用率）；"
+    "接进 `TorchBackend`：压力爆表 ⇒ 构造期就不上卡且精度转 fp32、卡空了 ⇒ 下一阶段**自动回切** GPU、"
+    "需求按部件相加、`describe()` 报策略实况；装载键把 `None`/`auto`/`gpu-first` 归一到同一个键）",
+    "engine_device_policy_test.py"),
+   ("自研引擎·调度（**GPU 优先 ⇒ 不足则 GPU/CPU 协同 ⇒ 都不够就拒**：指令档先于估算"
+    "（策略 `cpu`/显式 `cpu` 不被「卡还空着」劝回去、策略 `gpu` 再紧也上卡）、协同两本账"
+    "（卡上 + 内存**正好等于**需求、卡上只给到「余量 − 1 GiB」）、**第二台设备也要核**"
+    "（内存放不下 CPU 那一半 ⇒ 加卡减内存，两边都不够 ⇒ `InsufficientResources`，"
+    "不靠交换文件硬跑）、`balanced` 的主动协同**不算降级**、运行期滞回（单次超硬阈值不动手/"
+    "连续两次才回收/回落立即归位/读不到压力不改状态）、回收判据抽成纯函数 `reclaim_for`"
+    "（阶段表没登记 ⇒ 一个都不退）、后端真接线（`describe().scheduling`、CPU 后端 `tick()` 不探显存、"
+    "`_host_guard` 巨量需求当场拒、事件表限长）)",
+    "engine_scheduler_test.py"),
+   ("自研引擎·采样器（扩散/流匹配去噪循环：σ 序列两侧端点、CFG 重标定与步区间、取消/回调/进度；"
+    "零 torch 也能验流程 ✓ —— **此前漏登记 ⇒ 一直没进全量** ✗）",
+    "engine_sampler_test.py"),
+   ("自研引擎·无缓冲重叠读（移植自 `expert-stream` ✓：任意字节偏移与跨扇区长度**逐字节**与普通读相同；"
+    "批量提交按入参顺序回填、超槽请求自动切块；越界当场拒不做短读；关闭后再读当场抛；"
+    "⚠️ 「三笔同时在飞」是**真事故**回归 —— 每槽没有自己的手动复位事件时"
+    "`GetOverlappedResult` 会对未完成的那笔返回 TRUE ＋ 0 字节）",
+     "engine_win_io_test.py"),
+   ("自研引擎·预取（移植自 `airllm` ✓：提交只接单、错误留到**取**的那端；同一件**不许取两次**"
+    "（取两次＝两份驻留）；同 key 重复提交如实答 `pending`；槽满答 `busy` 不阻塞；"
+    "`close` 后提交不抛；`snapshot` 报在飞/就绪/命中/`lastError`）",
+     "engine_prefetch_test.py"),
+   ("自研引擎·读前置（`weights.load_module_weights(read_ahead=)` ✓：预取是**加速器**不是通路 ——"
+    "`read_ahead=2` 与 `0` 装出的权重**逐张量相同**；超 `_READ_AHEAD_MAX_BYTES` 的大件一律就地读；"
+    "出函数不留后台线程（不等干净 ⇒ 换装退完后还在读旧文件）；截断文件必须当场报；"
+    "⚠️ 这条套件连跑三次才抓到 `win_io` 的**槽共用**缺陷：短读不报错、单线程永远测不出来）",
+     "engine_readahead_test.py"),
+   ("自研引擎·VAE 分块缩放/解码（`tile`/`overlap` 是**像素**单位 ⇒ 除 8× 才是潜像素；"
+    "权重累积＋除法归一 ⇒ 重叠带精确平均、与整张解码逐位相同；`overlap ≥ tile` 死循环 / 不足 1 潜像素 / "
+    "`tile` 过小 三条「不报错但结果坏」的坑一律改成报错；只切空间不切时间维）",
+    "engine_vae_tiling_test.py"),
+   ("自研引擎·独立性契约（AST 禁 Web 层依赖/门面无 torch 可算/坏权重必拦/CLI 退出码/两处判据不漂）",
      "engine_independence_test.py"),
     ("自研引擎·入口契约（HTTP 唯一入口走门面/错误码单一真源/六接口字段快照/"
      "**装配白名单盖住 `ensure_loaded` 签名·零豁免**（少抄一项＝开关静默失效）/开关严格解析"
@@ -1787,6 +2056,9 @@ TESTS = [
      "engine_readiness_script_test.py"),
     ("safetensors 交叉验证（纯 Python 读取器 vs 官方库；缺库则显式 SKIP）", "safetensors_crosscheck_test.py"),
     ("自研引擎·真模型层（DiT 前向/条件生效/权重往返/差异报告；CPU 可验）", "engine_dit_test.py"),
+    ("自研引擎·通用单流 DiT 骨架（Krea2/Lumina-2 同构；维度**全从权重形状反推**、键集合与盘上"
+     " 878 个张量双向对账；`scale+1` 归一化 / RoPE 原点恒等且保范数 / 文本与时间支路缺一即变 / "
+     "形状矛盾当场拒）", "engine_dit_generic_test.py"),
     ("自研引擎·H3 形态积木（RMSNorm / SwiGLU / 18 路 adaLN / 正弦时间嵌入 / RoPE 旋转不变量 / "
      "双 fp32 输出头 / PDD 头库 —— 已接进 `TorchBackend` 双流路径 ✓ `H3_FORM_TODO` 已清零 ✓）",
      "engine_h3_form_test.py"),
@@ -1795,6 +2067,25 @@ TESTS = [
     ("自研引擎·H3 真视频 VAE（`kind=h3-real` 报告 + `decode` 不再自称合成 / 时间几何 "
      "`5+17k` 严格互逆 / 发现不到权重**当场拒**不回落 / 真权重档要 `DARME_H3_VAE_LIVE=1`）",
      "engine_vae_h3_test.py"),
+    ("自研引擎·H3 视频 VAE **时间分块解码**（桩解码器把「来源潜格号 / 调用流水号」编进像素 ⇒ "
+     "逐帧验跨段拼接：画布写满不截断 / 帧序不回跳 / 边界恰 5 帧线性混合；计划与参考转写逐值对账）",
+     "engine_vae_h3_temporal_test.py"),
+    ("自研引擎·H3 文本口·呈现格式（`fl2va`/`ref2va` 交错布局 + `token_tags` 视觉区间取 0）",
+     "engine_h3_prompt_test.py"),
+    ("自研引擎·H3 **文本标签 → adaLN 行号**（文本段按 `token_tags` 切 run、视觉占位走 video 行；"
+     "段表与另写的参考转写逐值对账；主干只换标签输出必变）", "engine_h3_mod_segments_test.py"),
+    ("自研引擎·H3 文本口·条件编码串联（`plan_sequence` 段序列与 spans / `combine()` 合成一个编码器 / "
+     "换图 hidden 必须变 / 因果两向断言）", "engine_h3_encode_test.py"),
+    ("自研引擎·H3 文本口·权重对账（只读 safetensors 头 + meta 空壳：语言塔 551 键与视觉塔逐名逐形一致；"
+     "反向验证 `self.model = text_tower` 会立刻多出 `model.model.*`）", "engine_h3_te_weights_test.py"),
+    ("自研引擎·H3 **真文本塔装配**（`attach_h3_text`：同一份 int8 文件里语言塔 + 视觉塔、"
+     "`combine()` 键名与盘上逐字对上、缺视觉塔/全 bf16 当场拒）", "engine_h3_text_test.py"),
+    ("自研引擎·Qwen3-VL 像素预处理（resize 到 32 倍数 / `(v-0.5)/0.5` / merge 块优先行序 / `(t,h,w)` 网格）",
+     "engine_qwen3vl_pixels_test.py"),
+    ("自研引擎·Qwen3-VL 语言塔（interleaved mrope / QK-norm 无 final norm / DeepStack 层后注入）",
+     "engine_qwen3vl_te_test.py"),
+    ("自研引擎·Qwen3-VL 视觉塔（27 层 ViT / `merger` pre-shuffle、`deepstack_merger_list` post-shuffle）",
+     "engine_qwen3vl_vision_test.py"),
     ("自研引擎·decoder-only LLM（RMSNorm / GQA / RoPE / SwiGLU / 因果掩码 / KV cache / 采样；缩小版 CPU 可验）",
      "engine_llm_test.py"),
     ("自研引擎·GGUF 权重反量化（F32/F16/BF16/Q8_0/Q4_K/Q6_K 精确字节布局 + 2/4/6-bit 解包；"
@@ -1820,6 +2111,9 @@ TESTS = [
      "（`freedBytes` 不许假释放）/ 算不出的字节数报 None 不编数 / **接线静态守卫**：`_apply_loras` 经账本借、"
      "失败两条路径都还、`unload` 先还租约再清账本（按行号判序，不比 ast.walk 下标）；零依赖）",
      "engine_lora_cache_test.py"),
+    ("LoRA 训练（**不装模型、不跑训练** ✓，钉的是「跑之前那一半」：参数收敛 / argv 拼装 / 输出切行 /"
+     "日志增量取 / 真子进程取消不算失败 / 素材改写拒绝；85 项。**此前漏登记 ⇒ 一个多月没人跑过** ✗）",
+     "lora_train_test.py"),
     ("自研引擎·**阶段注册表 ＋ 装载前兼容性闸门**（E2.1/E2.2 ✓ 阶段集合**双向相等** / 未注册 ⇒ "
      "`E_BAD_CONFIG` 不回落 / 四类各一条故障注入（依赖·权重·量化族·显存）都在**装载前**出码 / "
      "「没查 ≠ 通过」进 `unchecked` / 组件 key 不许在注册表里手抄一份；零 torch）",
@@ -1829,7 +2123,10 @@ TESTS = [
      "engine_licenses_test.py"),
     ("环境与兼容性落盘事实（E0.1/E0.2 ✓ `docs/env/*.json` 与现场 `capabilities()` 逐项对账 / "
      "版本与显卡事实 == 本机实测 / 矩阵里的版本字面量 == 实测 / GPU 可用时不许还当着事实说 CPU-only / "
-     "手写的 `knownGaps` 与 `quant` 报告**双向**对账 —— 已支持的族不许写成「未实现」、未支持的必须点名）",
+     "手写的 `knownGaps` 与 `quant` 报告**双向**对账 —— 已支持的族不许写成「未实现」、未支持的必须点名 / "
+     "**逐族覆盖**：`quant.SUPPORTED_FORMATS` 每一族在 §三 量化表里都得有「支持」行（代码支持、表里没行 ⇒ 读者只能猜）/ "
+     "**依赖表**：§二 每个包的版本 == `packages` 实测（遍历全键，不按手抄的五个名字走）/ "
+     "显存：落盘 == `mem_get_info().total`（容差 1 MiB 取整差）且 §四 那两个数字抄的也是它）",
      "engine_env_docs_test.py"),
     ("自研引擎·H3 双流接进管线（**真 mp4 + 真 wav**；参考块四类入口 ✓ / 能力自述逐条报缺 / "
      "取整口径必填 / 当场拒绝 / 单流默认路径一字未动 ✓）", "engine_dual_stream_test.py"),
@@ -1837,6 +2134,9 @@ TESTS = [
      "**续拍头部逐位等于上一段尾巴** ✓ / 两条流各自的 σ₀ / "
      "`frames`·压缩比·形状三条守卫都不静默兜底 / **接线静态守卫**：chain 切 → segments 旁挂 → "
      "pipeline 递同一个 request → 后端从 request 读）", "engine_h3_edit_test.py"),
+    ("自研引擎·视频 σ 日程（**默认 flow 而不是 karras**：karras 首值 14.61 喂 H3 ⇒ `t = 1−σ` 为负、"
+     "音频 shift 分母翻号 / 自适应 α 的闭式与 `√frames` / 两端外不夹断 / "
+     "`flow` 三形由**单一**解析处出（plan 与二采同源）)", "engine_video_schedule_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片 + "
      "**设备口径逐入口**：错设备当场说清 / 判据不许比字符串 / 不许误伤真链路）", "engine_io_test.py"),
     ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
@@ -1872,6 +2172,9 @@ TESTS = [
     ("生产链端到端（真工具写状态 → 取数 → 适配 → 判定 → 门；**填齐就当绿** ✓ 临时库 ✓）",
      "chain_e2e_test.py"),
     ("路径 + 常量守卫", "route_parity_test.py"),
+    ("结构守卫（engine 分组登记表与盘上**双向相等**/`__all__` 由登记表拼出/`numeric` 组顶层零依赖/"
+     "模块头 ≥8 词/仓库根无空壳/说明里的 `app/…py` 不腐烂/每个 engine 模块有生产调用者或登记为欠账/"
+     "`docs/feature-map.md` 点到 `app/` 每一个 `.py`；零 torch）", "structure_test.py"),
 ]
 
 

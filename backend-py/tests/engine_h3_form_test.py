@@ -93,6 +93,44 @@ def main() -> int:
     check("⑥′ 前向：`[S, hidden] → [S, hidden]` ✓（S=5 无 batch 维 ✓）",
           tuple(head.shape) == (5, 8), tuple(head.shape))
 
+    # ⑥″ ⭐ **q/k 一定是「先 norm、再 rope」** ✓✗（2026-10-31 补 ✓）：参考实现那步是**融合核**
+    #      `ck.rms_rope_split_half` ✓（名字即顺序 ✓），纯 python 的同族实现也写死
+    #      `q = apply_rope_split_half1(self.norm_q(q), freqs)`（`comfy/ldm/ideogram4/model.py` ✓）。
+    #      ⚠️ RMS 因子本身对旋转不变 ✓ ⇒ **只有 `q_norm.weight` 逐维 ≠ 1 时才露馅** ✓：
+    #      旋转会把相邻两维混起来 ✓ ⇒「先乘 w 再转」≠「先转再乘 w」✓✗。训过的权重不可能全 1 ✓，
+    #      写反的症状是视频整体发糊、**一个错都不报** ✓✗。
+    ordered = h3.Attention(hidden=8, heads=2, head_dim=4)
+    with torch.no_grad():
+        ordered.q_norm.weight.copy_(torch.tensor([1.0, 2.0, 0.5, 3.0]))
+        ordered.k_norm.weight.copy_(torch.tensor([0.3, 1.5, 2.0, 0.7]))
+    x5 = torch.randn(5, 8)
+    ang5 = torch.randn(5, 4)               # rot_dim=4 = head_dim ⇒ 整头都转 ✓
+    got5 = ordered(x5, ang5, 4)
+
+    def _norm_t(t: Any, w: Any) -> Any:
+        f = t.to(torch.float32)
+        return (f * torch.rsqrt(f.pow(2).mean(-1, keepdim=True) + ordered.q_norm.eps)
+                * w.to(torch.float32)).to(t.dtype)
+
+    def _attend(q5: Any, k5: Any) -> Any:
+        v5 = ordered.qkv_proj(x5).detach().split(8, dim=-1)[2].reshape(5, 2, 4)
+        out5 = torch.nn.functional.scaled_dot_product_attention(
+            q5.transpose(0, 1), k5.transpose(0, 1), v5.transpose(0, 1))
+        return ordered.out_proj(out5.transpose(0, 1).reshape(5, 8))
+
+    q_raw, k_raw = (t.reshape(5, 2, 4)
+                    for t in ordered.qkv_proj(x5).detach().split(8, dim=-1)[:2])
+    right = _attend(h3.Attention.apply_rope(_norm_t(q_raw, ordered.q_norm.weight), ang5, 4),
+                    h3.Attention.apply_rope(_norm_t(k_raw, ordered.k_norm.weight), ang5, 4))
+    wrong = _attend(_norm_t(h3.Attention.apply_rope(q_raw, ang5, 4), ordered.q_norm.weight),
+                    _norm_t(h3.Attention.apply_rope(k_raw, ang5, 4), ordered.k_norm.weight))
+    check("⑥″ 前向与「**先 norm 再 rope**」逐位一致 ✓（权重要取成 ≠1 才测得出 ✓）",
+          torch.allclose(got5, right, atol=1e-6), (float(got5.abs().sum()), float(right.abs().sum())))
+    check("⑥‴ 这条用例**真能分辨**顺序 ✓ —— 换成「先 rope 再 norm」必须**不一样** ✓"
+          "（否则 ⑥″ 永远绿、写反也发现不了 ✓✗）",
+          not torch.allclose(got5, wrong, atol=1e-4),
+          float((got5 - wrong).abs().max()))
+
     # ⑦ RoPE 的**四个不变量**（角度的**分配方式**没核过 ✗ ⇒ 只验"给定角度怎么转"✓）
     vec = torch.randn(3, 2, 6)
     angles_zero = torch.zeros(3, 4)
@@ -388,6 +426,79 @@ def main() -> int:
           not torch.equal(mixed_rows, swapped_rows) and not torch.equal(mixed_audio, swapped_audio)
           and missing_err is not None and "没有它" in str(missing_err),
           (mixed["video_blocks"], mixed["audio_blocks"], missing_err))
+
+    # ── ⭐ 条件行**噪声增广**（2026-11-01 ✓ 对齐参考 `_cond_video_rows` / `_cond_audio_rows`）──
+    # ⚠️ 这一步以前**没做** ✗（见模块 docstring）✓ —— 所以下面每条都是"能失败"的判据 ✓：
+    #    只验"跑起来不报错"等于没验 ✓✗（静默糊的正是这里 ✓：条件行喂干净了，首帧接不上后续帧 ✓）。
+    def noise_of(shape: tuple[int, ...], seed: int) -> "torch.Tensor":
+        """**独立**算一遍参考口径的噪声 ✓（用同一条 CPU 流 ✓ ⇒ 与实现**逐位**可比 ✓）。"""
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        return torch.randn(shape, generator=generator, dtype=torch.float32)
+
+    probe_z = torch.full((6, 4), 0.5)
+    auged = h3.cond_noise_augment(probe_z, h3.VISUAL_COND_TIMESTEP, 12345)
+    check("㊾ ⭐⭐ **增广公式逐位对齐** ✓：``0.999·z + 0.001·noise(seed)`` ✓（参考逐字 ✓）"
+          "—— 公式写错（比如把 ``aug`` 当成噪声比例、或漏了 ``.to(rows.device)`` 的顺序）"
+          "**不会报错** ✓，只会让条件行偏一点点 ✓✗",
+          torch.allclose(auged, 0.999 * probe_z + 0.001 * noise_of((6, 4), 12345), atol=1e-7)
+          and not torch.equal(auged, probe_z),
+          (float((auged - probe_z).abs().max()),))
+    check("㊾′ ⭐ ``aug >= 1`` ⇒ **原样返回同一个对象** ✓（不是「乘 1 再算一遍」 ✗ —— 那会白算一遍"
+          "并把随机数消耗掉 ✓✗；返回 `is` 判断能抓到 ✓）；``aug`` 越界 ⇒ **当场报错** ✗"
+          "（给 12.0 那种 ⇒ 12 倍放大的行 ✓ 且**不报错** ✓ 才是最坏的 ✓）",
+          h3.cond_noise_augment(probe_z, 1.0, 7) is probe_z
+          and _raises(lambda: h3.cond_noise_augment(probe_z, 12.0, 7)) is not None
+          and _raises(lambda: h3.cond_noise_augment(probe_z, -0.1, 7)) is not None)
+    # ⭐ 逐块重启同一 RNG 流 ✓：两块**同值同形** ⇒ 加噪后两段**逐位相同** ✓
+    #   （改成"整条拼完再加" ⇒ 第二段接的是流的后半 ⇒ 两段必不同 ✓ 当场红 ✓）
+    # ⚠️ 自带一份布局 ✓（下面的 `two` 在本段之后才定义 ⇒ 借用会 `UnboundLocalError` ✓ 实测踩过 ✓）；
+    #    ⚠️ 关键帧字典**必须带 `latent` / `audio_latent`** ✗ —— 只给 `resolved_frame_index` 的话
+    #    布局**一段都不发** ✓（`same_rows` 直接是 `None` ✓ 实测踩过 ✓ 不是"增广没生效" ✓）。
+    aug_layout = h3.packed_layout(3, 2, 4, 4, 2, keyframes=[
+        {"resolved_frame_index": 0, "latent": torch.full((2, 1, 4, 4), 0.25),
+         "audio_latent": torch.full((3, 2, 4), 0.5)},
+        {"resolved_frame_index": 1, "latent": torch.full((2, 1, 4, 4), 0.25),
+         "audio_latent": torch.full((3, 2, 4), 0.5)}])
+    same_v = {("keyframe", 0): torch.full((2, 1, 4, 4), 0.25),
+              ("keyframe", 1): torch.full((2, 1, 4, 4), 0.25)}
+    same_a = {("keyframe", 0): torch.full((3, 2, 4), 0.5),
+              ("keyframe", 1): torch.full((3, 2, 4), 0.5)}
+    same_rows, same_audio = h3.assemble_blocks(aug_layout, same_v, same_a, seed=99)
+    half_v = int(same_rows.shape[0]) // 2
+    half_a = int(same_audio.shape[0]) // 2
+    check("㊿ ⭐⭐ **每个 cond 块各自重启同一 RNG 流** ✓（参考原话 \"every condition intentionally restarts "
+          "the same RNG stream\" ✓）：两块**同值同形** ⇒ 两段**逐位相同** ✓"
+          "（不同 ⇒ 增广被搬到 `cat` 之后了 ✓✗ —— 一条连续流 ✓ 不报错 ✓ 只是与参考不一致 ✓）",
+          torch.equal(same_rows[:half_v], same_rows[half_v:])
+          and torch.equal(same_audio[:half_a], same_audio[half_a:]),
+          (tuple(same_rows.shape), tuple(same_audio.shape)))
+    # ⭐ 音频流的种子是 **seed + 1** ✓（两条流共用一个种子 ⇒ 音视频条件行吃到相关噪声 ✓ 不报错 ✓）
+    z_rows, z_audio = h3.assemble_blocks(aug_layout, same_v, same_a, seed=7,
+                                         visual_cond_aug=0.0, audio_cond_aug=0.0)
+    want_v = h3.cond_noise_augment(h3.patchify_video(torch.full((2, 1, 4, 4), 0.25)), 0.0, 7)
+    want_a = h3.cond_noise_augment(h3.pack_audio(torch.full((3, 2, 4), 0.5)), 0.0, 8)
+    check("㊿′ ⭐⭐ `aug = 0` ⇒ 行**就是纯噪声** ✓ ⇒ 可反解种子 ✓：视频流吃 ``seed`` ✓、"
+          "**音频流吃 ``seed + 1``** ✓✗（参考逐字 ✓）；两者**不能同种子** ✓",
+          torch.allclose(z_rows[:half_v], want_v, atol=1e-6)
+          and torch.allclose(z_audio[:half_a], want_a, atol=1e-6),
+          (float((z_rows[:half_v] - want_v).abs().max()),
+           float((z_audio[:half_a] - want_a).abs().max())))
+    # ⭐ 默认档**必须真的在加噪** ✓✗（默认 1.0 那种"关掉"会让上面的公式用例全绿而功能是空的 ✓）
+    plain_v = h3.patchify_video(torch.full((2, 1, 4, 4), 0.25))
+    d_rows, d_audio = h3.assemble_blocks(aug_layout, same_v, same_a)   # ← 不给任何参数 ✓
+    check("㊿″ ⭐⭐ **默认档就是参考的默认** ✓：视频条件行 ``0.999``（**必须真的变了** ✓✗）、"
+          "音频条件行 ``1.0``（**必须一点没变** ✓ —— 参考的音频默认就是不加 ✓）"
+          "（默认写成 1.0 的「顺手关掉」会让所有公式用例照样绿 ✓✗ 而功能是空的 ✓）",
+          not torch.equal(d_rows[:half_v], plain_v)
+          and torch.allclose(d_rows[:half_v], 0.999 * plain_v
+                             + 0.001 * noise_of((half_v, int(plain_v.shape[1])), 0), atol=1e-7)
+          and torch.equal(d_audio[:half_a], h3.pack_audio(torch.full((3, 2, 4), 0.5))),
+          (float((d_rows[:half_v] - plain_v).abs().max()),))
+    seed_rows_a, _ = h3.assemble_blocks(aug_layout, same_v, same_a, seed=1)
+    seed_rows_b, _ = h3.assemble_blocks(aug_layout, same_v, same_a, seed=2)
+    check("㊿‴ ⭐ 换 `seed` ⇒ 条件行**必变** ✓（不变 ⇒ seed 根本没递进来 ✓✗ —— 症状是"
+          "「同提示词换种子，条件行那一丁点噪声永远一样」✓ 不报错 ✓）",
+          not torch.equal(seed_rows_a, seed_rows_b))
 
     # ── ⚠️ 「混了不报错」的**网格规则**逐条钉住（2026-09-24 补 ✓）──
     # 文档里写着三条：`cond` 用**目标**网格 ✓、参考图用**它自己的** ✓、`ref_audio` 的 w 取**目标**两端 ✓
@@ -694,9 +805,51 @@ def main() -> int:
     check("㉝′ ⭐ **反套套逻辑**（端到端这层也要证 ✓）：改 σ ⇒ velocity **变** ✓"
           "（否则就是「条件没接进去」的假绿 ✗✗ —— 一个「永不生效」的接线与「没接」长得一样 ✗）",
           not torch.allclose(v_vel, other_vel, atol=1e-6))
-    check("㉞ 潜帧与 patch **不整除** ⇒ 报错 ✓（**不猜、也不补零** ✗）",
-          "不能被 patch" in str(_raises(
-              lambda: h3.denoise_step(trunk, tiny_video[:, :, :, :7], tiny_audio, text, 0.5))))
+    # ⚠️ 2026-11-01 **改判**：这里原本断言「不整除 ⇒ 报错 ✗」，那是**本仓自己的收紧** ✗
+    #    参考不是这样 ✓ —— `_forward` 头一件事是 `pad_to_patch_size(video_x, self.patch_size)`
+    #    （circular ✓），末尾 `video_out[:, :, :orig_t, :orig_h, :orig_w]` 裁回 ✓
+    #    （`model.py` 606 / 781 行 ✓）⇒ 奇数尺寸**照跑** ✓，我们却在门口 raise ✗
+    #    ⇒ 症状是「某些分辨率一个都进不来」✓（能跑、只是挡路 »» 与"静默错值"相反那一类 ✓）
+    odd_video = tiny_video[:, :, :, :7]       # W=7 ✓ patch_w=2 ⇒ 要补 1 列 ✓
+    with torch.no_grad():
+        try:
+            odd_vel, _ = h3.denoise_step(trunk, odd_video, tiny_audio, text, 0.5)
+            odd_err = None
+        except Exception as err:  # noqa: BLE001
+            odd_vel, odd_err = None, err
+    check("㊺ ⭐⭐ 潜帧与 patch **不整除 ⇒ 补边照跑** ✓（不再报错 ✗）且输出**与输入同形** ✓"
+          "—— 补边口径照参考 ✓（circular ✓）；本仓曾在这里直接 raise ✗ ⇒ 奇数 H/W 一个都进不来 ✓✗",
+          odd_err is None and tuple(odd_vel.shape) == tuple(odd_video.shape)
+          and bool(torch.isfinite(odd_vel).all()),
+          odd_err if odd_err is not None else tuple(odd_vel.shape))
+    check("㊺′ 已是整数倍 ⇒ **原样返回**（不自作主张补 ✓ 也不复制 ✓ ⇒ 常规路径零改动 ✓）",
+          h3.pad_to_patch_size(tiny_video, (1, 2, 2)) is tiny_video)
+    padded_odd = h3.pad_to_patch_size(odd_video, (1, 2, 2))
+    check("㊺″ ⭐ 补边是 **circular** ✓ 不是 replicate ✗：补出来的那一列 **等于第 0 列** ✓"
+          "（replicate 会是第 6 列 ✓ —— 两者只在**画面右边缘一条竖痕**上分家 ✓ ⇒ 看不太出来、但确实不同 ✗）",
+          tuple(padded_odd.shape) == (2, 3, 8, 8)
+          and torch.equal(padded_odd[:, :, :, 7], padded_odd[:, :, :, 0]))
+    with torch.no_grad():
+        manual_vel, _ = h3.denoise_step(trunk, padded_odd, tiny_audio, text, 0.5)
+    check("㊺‴ ⭐⭐⭐ **补出来的行真的参与了计算** ✗ 不是「补完就丢」："
+          "奇数尺寸跑一次 == 先手动补到偶数跑一次、再裁掉多出来的那一列 ✓（逐位相同 ✓）"
+          "—— 这条同时钉住「补了要算进去 ✓」与「算完要裁回 ✓」两半 ✓（少任何一半都红 ✓）",
+          odd_err is None and tuple(odd_vel.shape) == tuple(odd_video.shape)
+          and torch.allclose(odd_vel, manual_vel[:, :, :, :7], atol=1e-6))
+    odd_mask = torch.ones(2, 3, 8, 7)
+    odd_mask[:, :, :, 4:] = 0.0
+    with torch.no_grad():
+        try:
+            masked_odd, _ = h3.denoise_step(trunk, odd_video, tiny_audio, text, 0.5,
+                                            denoise_mask=(odd_mask,
+                                                          torch.zeros_like(tiny_audio)))
+            masked_err = None
+        except Exception as err:  # noqa: BLE001
+            masked_odd, masked_err = None, err
+    check("㊺⁴ 奇数尺寸 + 掩码 ⇒ 掩码**跟着目标一起补** ✓（replicate ✓ 与参考同口径 ✓）"
+          "—— 不补的话 `mask_rows_for` 会因 H/W 与补后尺寸不同而**当场报错** ✓✗（补边就白做了 ✓）",
+          masked_err is None and tuple(masked_odd.shape) == tuple(odd_video.shape)
+          and not torch.allclose(masked_odd, odd_vel, atol=1e-7), masked_err)
 
     # ── 双流采样（第 ⑦ 批 ✓）──
     seen: list[tuple[int, float, float]] = []
@@ -757,6 +910,112 @@ def main() -> int:
           "两路" in str(_raises(lambda: h3.sample_dual_stream(
               trunk, tiny_video, tiny_audio, text, [1.0, 0.5, 0.0], denoise_mask=zeros_v))))
 
+    # ── 掩码的**另一半**：逐行时间戳（2026-11-01 补 ✓ 口径逐字核自参考 `MiniMaxH3Model.forward` ✓）──
+    #    ⚠️ 此前本仓只有「缩放增量」那一半 ✗：被掩掉的行（二采的音频流 ✓）档位仍是 `1−σ` ✓✗
+    #    ⇒ 主干把它们当**含噪**样本 ✓（参考给的是条件档 `t=1.0` = 「已定稿的干净音轨」✓）
+    #    ⇒ 口型条件的信号变软 ✓ 而日志全绿 ✓✗。下面这几条就是那个病的探针 ✓。
+    all_v = torch.ones(2, 3, 8, 8)            # 全重采 ✓（= 一采主路 ✓）
+    none_v = torch.zeros(2, 3, 8, 8)          # 全保留 ✓
+    half_v = torch.full((2, 3, 8, 8), 0.5)    # 半掩 ✓（既非全重采也非全保留 ⇒ 逐行档位 ✓）
+    hole_v = torch.ones(2, 3, 8, 8)
+    hole_v[:, 1] = 0.0                        # 第 2 帧整帧掩掉 ✓ ⇒ 该帧的行按「已定稿」定档 ✓
+    all_a = torch.ones(3, 2, 5)
+    none_a = torch.zeros(3, 2, 5)
+
+    def _stamps(mask_v: Any, mask_a: Any) -> tuple[Any, Any, Any, Any]:
+        return h3.mask_row_timesteps(0.5, mask_v, mask_a, latent_t=3, latent_h=8, latent_w=8,
+                                     audio_channels=2)
+
+    plain_stamps = _stamps(all_v, all_a)
+    all_stamps = _stamps(none_v, None)
+    half_stamps = _stamps(half_v, None)
+    hole_stamps = _stamps(hole_v, None)
+    audio_stamps = _stamps(all_v, none_a)
+    check("㊹ ⭐ 掩码**全 1** ⇒ 四格**全 None** ✓（= 与不给掩码同一档 ✓ —— "
+          "这条保证「一采主路一字未动」✓；⚠️ 全靠 `1−1·σ = t_v` 恰好等于原档 ✓，不是特判 ✓）",
+          plain_stamps == (None, None, None, None), plain_stamps)
+    check("㊹′ ⭐⭐ **全掩 ⇒ 塌成单值 = 条件档** ✓（`max(1−σ, 0.999)` = 0.999 ✓ 不是 None ✗）"
+          "—— 参考在这里写的是 `clamp(max=t_pin)` ✓：`t_pin` 取的是「当前 t 与条件档的较大者」✓ "
+          "⇒ 恒 1 的行**不被夹**（这正是 ㊹ 那条成立的原因 ✓）",
+          all_stamps[1] is None
+          and abs(float(all_stamps[0]) - h3.VISUAL_COND_TIMESTEP) < 1e-6, all_stamps)
+    check("㊹″ ⭐ **均匀半掩 ⇒ 仍是单值**（`1−0.5·σ` = 0.75 ✓）：整段按同一比例放在 σ 上 ✓ "
+          "⇒ 塌成一档 ✓ 不是逐行 ✗（⚠️ 只有「行与行不同」才走逐行那条路 ✓）",
+          half_stamps[0] == 0.75 and half_stamps[1] is None, half_stamps)
+    check("㊹‴ ⭐⭐ 整帧挖洞 ⇒ **逐行**档位 ✓（0.5 ✓ / 0.999 ✓ 两档 ⇒ 不是「全掩」那条路 ✗）",
+          hole_stamps[1] is not None
+          and sorted({round(float(value), 6) for value in hole_stamps[1].unique().tolist()})
+          == [0.5, round(h3.VISUAL_COND_TIMESTEP, 6)],
+          None if hole_stamps[1] is None else hole_stamps[1].unique().tolist())
+    check("㊹⁗ ⭐⭐⭐ **audio 流 mask=0 ⇒ 档位 = 1.0**（条件档 ✓ = 「已定稿的干净音轨」✓）"
+          "—— 改动前这里给的是 `1−σ_a` ✗ ⇒ 主干把已定稿的音频当**含噪**样本 ✓✗（不报错 ✓）",
+          audio_stamps[2] == h3.AUDIO_COND_TIMESTEP and audio_stamps[3] is None, audio_stamps)
+    check("㊹⁵ 音频掩码给**全 1** ⇒ 那一路也得 None ✓（参考这边是显式挡「全 1」✓，"
+          "与视频那路靠 `mask_row_values` 返回 None 不对称 ✓ —— 两处都得有 ✓）",
+          plain_stamps[2] is None and plain_stamps[3] is None, plain_stamps)
+
+    # ⭐ 唯一时间戳表**必须登记逐行取值** ✓（漏登 ⇒ 行号整体错位 ✓ 却不报错 ✗ ⇒ 这里改成当场炸 ✓）
+    t_vals_rows, index_rows = h3.t_vals_for(0.5)
+    values_rows = [float(value) for value in t_vals_rows.tolist()]
+    per_row = h3.mod_segments_for([(0, 48, "video")], index_rows, 3,
+                                  video_rows_t=hole_stamps[1], t_vals=t_vals_rows)
+    stray_rows = torch.tensor([0.5, 0.75, float(h3.VISUAL_COND_TIMESTEP)])
+    missing = _raises(lambda: h3.mod_segments_for(
+        [(0, 3, "video")], index_rows, 3, video_rows_t=stray_rows, t_vals=t_vals_rows))
+    registered = h3.mod_segments_for(
+        [(0, 3, "video")], h3.t_vals_for(0.5, extra=(0.75,))[1], 3,
+        video_rows_t=stray_rows, t_vals=h3.t_vals_for(0.5, extra=(0.75,))[0])
+    check("㊹⁶ ⭐⭐⭐ 逐行档位 ⇒ 段里的行号**不再整段一个整数**，而是**逐 token 一串行号** ✓"
+          "（`序号×模态 + 标签` ✓ 两个序号 × 3 + 0 ✓），长度 = 段长 ✓",
+          tuple(per_row[0][2].shape) == (48,)
+          and sorted({int(value) for value in per_row[0][2].unique().tolist()})
+          == sorted({values_rows.index(0.5) * 3,
+                     values_rows.index(float(hole_stamps[1].max())) * 3}),
+          None if per_row[0][2] is None else per_row[0][2].unique().tolist())
+    check("㊹⁷ ⭐⭐ 漏登记逐行取值 ⇒ **当场报错** ✗（不静默取近似行 ✗ —— 那等于把这块的调制接到"
+          "别人的参数上 ✓✗，全程不报错 ✓）；补登记 `extra` ⇒ 同一次调用**正常返回** ✓",
+          missing is not None and "不在唯一时间戳表里" in str(missing)
+          and tuple(registered[0][2].shape) == (3,), missing)
+    check("㊹⁸ 段长与逐行时间戳个数对不上 ⇒ **报错** ✓（掩码与布局不同源 ⇒ 不猜 ✗）",
+          "对不上就是掩码与布局不同源" in str(_raises(lambda: h3.mod_segments_for(
+              [(0, 24, "video")], index_rows, 3,
+              video_rows_t=hole_stamps[1], t_vals=t_vals_rows))))
+
+    # ⭐⭐ **集成探针**：主干真按掩码换档 ✓（这三条在改动前**恒为「不变」** ⇒ 一改就红 ✓）
+    with torch.no_grad():
+        bare_vel, _ = h3.denoise_step(trunk, tiny_video, tiny_audio, text, 0.5)
+        ones_vel, _ = h3.denoise_step(trunk, tiny_video, tiny_audio, text, 0.5,
+                                      denoise_mask=(torch.ones_like(tiny_video),
+                                                    torch.ones_like(tiny_audio)))
+        hole_vel, _ = h3.denoise_step(trunk, tiny_video, tiny_audio, text, 0.5,
+                                      denoise_mask=(hole_v, torch.ones_like(tiny_audio)))
+        lock_vel, _ = h3.denoise_step(trunk, tiny_video, tiny_audio, text, 0.5,
+                                      denoise_mask=(torch.ones_like(tiny_video),
+                                                    torch.zeros_like(tiny_audio)))
+    check("㊹⁹ ⭐⭐ 掩码全 1 ⇒ 与**不给掩码**逐位相同 ✓（默认路径一字未动 ✓）",
+          torch.equal(ones_vel, bare_vel))
+    check("㊹¹⁰ ⭐⭐⭐ **挖洞 ⇒ 输出必变** ✗✗（改动前这条恒 False ⇒ 就是「掩码只缩增量、不改档位」"
+          "那个静默病 ✓✗）", not torch.allclose(hole_vel, bare_vel, atol=1e-7))
+    check("㊹¹¹ ⭐⭐⭐ **锁住音频 ⇒ 视频输出也变** ✗✗（音频行档位从 `1−σ_a` 换成 1.0 ✓ ⇒ "
+          "它作为条件的分量跟着变 ✓ —— 这正是「口型条件变软」那条病的探针 ✓）",
+          not torch.allclose(lock_vel, bare_vel, atol=1e-7))
+    # ⚠️ 上面那个洞的取值（0.5 ✓ / 0.999 ✓）**恰好都已经在**唯一时间戳表里 ✓ ⇒ 还没验到
+    #    `t_vals_for(extra=...)` 那根线 ✓ ⇒ 这里用**半掩**造一个表外的取值（`1−0.5·σ` = 0.75 ✓）：
+    #    漏登记的话主干会当场 `ValueError` ✓（而不是静默把这块的调制接到隔壁行 ✓✗）
+    with torch.no_grad():
+        try:                                   # ⚠️ 这里**必须自己接住**：漏登记是 `ValueError` ✓ 不是
+            mixed_vel, _ = h3.denoise_step(  #    一个假值 ✓ ⇒ 不接住就整份自检崩在这儿 ✓
+                trunk, tiny_video, tiny_audio, text, 0.5,
+                denoise_mask=(hole_v * 0.5 + 0.5, torch.ones_like(tiny_audio)))
+            mixed_err = None
+        except Exception as err:  # noqa: BLE001
+            mixed_vel, mixed_err = None, err
+    check("㊹¹² ⭐⭐ 掩码里出现**唯一时间戳表外的取值** ⇒ 主干照跑 ✓（`extra` 那根线真接上了 ✓）"
+          "且输出与不给掩码**不同** ✓ —— 漏登记的表现是 `ValueError` ✓（不静默 ✗）",
+          mixed_err is None and tuple(mixed_vel.shape) == tuple(tiny_video.shape)
+          and bool(torch.isfinite(mixed_vel).all())
+          and not torch.allclose(mixed_vel, bare_vel, atol=1e-7), mixed_err)
+
     # ── 曲线变体（2026-10-29 ✓ 厂商真权重 `minimax_h3_*_int8_convrot` 走这一支 ✓）──
     #    ⚠️ 这是**真实装载实证出来的缺口** ✗：真权重没有 `time_embedder.*` 那 4 把 ✗，
     #    改由 `adaln_t_table`（顶层 buffer ✓）查表 ✓；按标准建 ⇒ 缺 4 键 + 多 1 键 ⇒
@@ -808,6 +1067,37 @@ def main() -> int:
           and not torch.equal(flat_out, ramp_out),
           (tuple(flat_out.shape), same_shape,
            float(flat_out.abs().max()), float(ramp_out.abs().max())))
+
+    # ── ⭐⭐ 曲线档的 adaLN **不许套 SiLU** ✓（2026-11-01 查出并修 ✓）──
+    #    参考对**块**与**输出层**喂的是同一份 `curve` 字典 ✓：``apply_silu = not use_adaln_curves`` ✓。
+    #    ⚠️ 曲线档的 `t_emb` 是**曲线基系数**（宽 8 ✓）不是时间嵌入 ✗ ⇒ 套 SiLU 等于把系数
+    #    **非线性压扁** ✓ ⇒ 每块每层的调制全偏 ✓ 而且**不报错** ✓✗（真权重就是这个档 ✓）。
+    probe_t = torch.linspace(-1.0, 1.5, tiny["time_dim"]).reshape(1, -1)
+    with torch.no_grad():
+        # ⚠️ `AdalnProj.forward` 返回的是**元组**（`expand` 个张量 ✓ 每个 `[S×modalities, hidden]` ✓）
+        #    ⇒ 比之前先 `cat(dim=-1)` 拼回一整条 ✓（直接拿元组进 `torch.equal` 会 TypeError ✓ 踩过 ✓）
+        curved_block = torch.cat(curved.blocks[0].adaln_proj(probe_t), dim=-1)
+        plain_block = torch.cat(trunk.blocks[0].adaln_proj(probe_t), dim=-1)
+        curved_final = torch.cat(curved.final_layer.adaln_proj(probe_t), dim=-1)
+    want_curved = curved.blocks[0].adaln_proj.linear(probe_t).reshape(-1, curved_block.shape[-1])
+    want_plain = torch.nn.functional.silu(probe_t) @ trunk.blocks[0].adaln_proj.linear.weight.T \
+        + trunk.blocks[0].adaln_proj.linear.bias
+    want_plain = want_plain.reshape(-1, plain_block.shape[-1])
+    check("⑥⁵ ⭐⭐ **曲线档的 adaLN 不套 SiLU** ✗：块与输出层都 ``apply_silu=False`` ✓、"
+          "输出逐位 = ``linear(t_emb)`` ✓；标准档仍是 ``silu`` 前处理 ✓（两档不能一样 ✗）"
+          "—— 写错**不报错** ✓，只是 8 维基系数被压扁 ⇒ 调制全偏 ✓✗",
+          curved.blocks[0].adaln_proj.apply_silu is False
+          and curved.final_layer.adaln_proj.apply_silu is False
+          and trunk.blocks[0].adaln_proj.apply_silu is True
+          and trunk.final_layer.adaln_proj.apply_silu is True
+          and torch.allclose(curved_block, want_curved, atol=1e-6)
+          and torch.allclose(plain_block, want_plain, atol=1e-6)
+          and not torch.allclose(curved_block, plain_block, atol=1e-4)
+          and torch.allclose(curved_final,
+                             curved.final_layer.adaln_proj.linear(probe_t).reshape(1, -1),
+                             atol=1e-6),
+          (curved.blocks[0].adaln_proj.apply_silu, trunk.blocks[0].adaln_proj.apply_silu,
+           curved.blocks[0].adaln_proj.linear.weight.dtype))
 
     return _report()
 

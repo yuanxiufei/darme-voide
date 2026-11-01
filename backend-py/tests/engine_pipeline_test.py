@@ -172,6 +172,57 @@ def case_algorithm_really_runs() -> None:
           _preview(req(prompt="另一个场景")) != _preview(req()), "")
 
 
+class _CountingNoise(DryRunBackend):
+    """数「每步真的来要噪声了吗」✓ 并记下 ``nonce`` ✓（要证的是**通路**＋**每步不同** ✓）。
+
+    ⚠️ 判据不能写成「调用次数 = 步数」✗：祖先档最后一步 ``σ_next == 0`` 直接回 x₀ ✓，
+    ``sa_solver`` 的随机强度只在 σ 中段（20%~80% ✓）打开 ✓ ⇒ 两者都**少于**步数 ✓。
+    写成等式会把正确行为判成缺陷 ✓✗（同族：把"没有 ``layers.N``"当缺陷那次 ✓）。
+    """
+
+    def __init__(self) -> None:
+        self.nonces: list[int] = []
+        self.sizes: list[int] = []
+
+    def noise_like(self, sample, request, *, nonce=0):  # noqa: ANN001
+        self.nonces.append(int(nonce))
+        self.sizes.append(len(sample.data))
+        return super().noise_like(sample, request, nonce=nonce)
+
+
+class _NoNoiseBackend(DryRunBackend):
+    """**没有** ``noise_like`` 的后端 ✓（模拟只做了确定性那条路的实现 ✓）。"""
+
+    noise_like = None
+
+
+def case_stochastic_samplers() -> None:
+    """随机采样器（``sa_solver`` / ``euler_ancestral``）在**真管线**里的噪声通路 ✓。"""
+    for name in ("sa_solver", "euler_ancestral"):
+        backend = _CountingNoise()
+        request = req(steps=8, sampler=name)
+        result = pipe.run_sync(request, backend)
+        want = len(DryRunBackend().init_latents(pipe.build_plan(request), request).data)
+        check(f"㉕ᴿ {name}：管线**真把噪声注回去**了 ✓（{name} 是随机档 ⇒ 没人来要就说明接错了 ✗）",
+              result.ok and 1 <= len(backend.nonces) < 8, (result.error, backend.nonces))
+        check(f"㉖ᴿ {name}：每次的 ``nonce`` **都不同** ✓✗（同一条噪声反复注入 ⇒ 结构性条纹 ✓）",
+              len(set(backend.nonces)) == len(backend.nonces) and len(backend.nonces) >= 1,
+              backend.nonces)
+        check(f"㉗ᴿ {name}：噪声**形状跟着当前 x** ✓（不是随手造一个 ✓）",
+              bool(backend.sizes) and set(backend.sizes) == {want}, (backend.sizes, want))
+
+    missing = pipe.run_sync(req(steps=4, sampler="sa_solver"), _NoNoiseBackend())
+    check("㉘ᴿ ⭐ 后端没实现 ``noise_like`` ⇒ **sample 阶段明确报错** ✓✗"
+          "（静默按 ODE 跑 = 用户以为在跑随机档 ✓✗ 本仓最忌讳「看不出来」✗）",
+          missing.error is not None and missing.error.get("stage") == "sample"
+          and "noise_like" in str(missing.error.get("message")), missing.error)
+    check("㉙ᴿ 确定性采样器（euler）不碰这条通路 ✓（后端没实现也照跑 ✓ 不该被牵连 ✗）",
+          pipe.run_sync(req(steps=4, sampler="euler"), _NoNoiseBackend()).ok is True)
+    check("㉚ᴿ 随机档**同 seed 可复现** ✓（nonce 序列是确定的 ✓）",
+          _preview(req(steps=6, sampler="euler_ancestral"))
+          == _preview(req(steps=6, sampler="euler_ancestral")))
+
+
 def _preview(request: pipe.GenerationRequest) -> tuple[float, ...]:
     result = pipe.run_sync(request, DryRunBackend())
     path = result.outputs["artifacts"][0]["path"]
@@ -918,6 +969,7 @@ def main() -> int:
     case_plan()
     case_end_to_end()
     case_algorithm_really_runs()
+    case_stochastic_samplers()
     case_cancel()
     case_error_attribution()
     case_serialization()

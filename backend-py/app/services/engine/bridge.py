@@ -27,6 +27,9 @@
 ``tokenizerPath``    **视频**可选 —— 不给则挂**桩**分词器 ✓（分词无语义 ✓，运行时会如实标注 ✓）；
                      **出图必需** ✗ —— 不给则按上游约定探测 ✓，探测不到**当场报** ✗（见下）
 ``device``           可选 —— ``cuda`` / ``cpu``；不给则由引擎自己探 ✓
+``residency``        **卡 + CPU 联合跑** ✓ —— ``split``（卡上算前缀、CPU 算剩下的 ✓）/
+                     ``park``（权重留内存、逐层搬上卡 ✓）；不给 = ``off``（老路 ✓）
+``residencyBudgetMib`` 可选 —— 显存预算（MiB）；**不给就别写死** ✗：按装载时空闲显存 ×(1−余量) 现算 ✓
 ``audioLatentMode``  可选 —— ``round`` / ``ceil`` / ``floor``；**不给就不开双流** ✗（见下）
 ``temporalCompression`` 可选 —— 双流/潜帧要对齐时**必须显式给** ✓（本仓不猜 ✗）
 ``megapixels`` / ``steps`` / ``sampler`` / ``schedule`` / ``seed``  可选 —— 覆盖默认 ✓
@@ -60,6 +63,8 @@ from typing import Any, Mapping, Sequence
 from ...core.config import get_storage_root
 from ..file_storage import get_absolute_path, parse_data_url
 from ..task_logger import log_task_error, log_task_progress, log_task_warn
+from . import device_policy
+from . import residency as residency_mod
 
 __all__ = [
     "AUDIO_LATENT_MODES",
@@ -346,6 +351,17 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
     if vae_device:
         assembly["video_vae_device"] = vae_device
 
+    # ⭐ Z-Image / Qwen-Image 2.1 的两格（2026-10-31 ✓）：这两档都是**三份权重**拼的一条链 ✓，
+    #    DiT 走 `ditPath` ✓，另两份各占一格 ✓（2.1 另要 `tokenizerPath` ✓，上面那段一并转手 ✓）。
+    #    ⚠️ 这里**只转手、不补默认** ✗✗（盘上同名的 `qwen_3_vl_32b` / `qwen_image_vae` 都不是它们 ✓；
+    #    2.1 的 64 通道 VAE 与 `qwen_image_vae` 是**同族不同代** ✓✗）——
+    #    缺格让 `runtime._ensure_zimage_loaded` / `._ensure_qwen21_loaded` 当场拒 ✓
+    #    （拒的时候会说清缺哪个 ✓），比在这里猜一个"看起来对"的路径强得多 ✓✗。
+    for key in ("text_weights", "image_vae_weights"):
+        val = str(settings.get(key) or "").strip()
+        if val and not assembly.get(key):
+            assembly[key] = val
+
     # ⚠️ int8 驻留，**只认显式开启** ✗（2026-10-29 ✓）：默认 int8 全在卡上 ✓ ——
     #    17.94 GiB 常驻之后只剩 2.87 GiB 给激活 ✓，720×1280 那种长度**必然 OOM** ✓✗，
     #    那一档才需要把 int8 钉回 CPU ✓（代价是每步一趟 PCIe ✓）。
@@ -353,6 +369,32 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
     #    显存账是 `describe()` / 装载报告里的 `int8Residency` 说了算 ✓。
     if settings.get("int8_offload") is True:
         assembly["int8_offload"] = True
+
+    # ⚠️ **卡 + CPU 联合跑**（2026-10-31 ✓，创作者原话：「以后不能只走 CPU，也要可以 GPU 和 CPU
+    #    联合跑模型，单个 CPU 很容易超载」✓）：``residency`` = ``split`` / ``park`` ✓。
+    #    ⚠️ 取值**只认 `residency.MODES`** ✗✗（``off`` 视同不配 ✓）—— 别处不许手抄清单 ✗
+    #    （``int8_offload`` 漏过一次 ✓）。写错 ⇒ **当场报** ✗，不静默退回 ``off`` ✓。
+    mode = str(settings.get("residency") or "off").strip().lower()
+    if mode not in residency_mod.MODES:
+        raise ValueError(f"residency 只认 {' / '.join(residency_mod.MODES)}，拿到 {settings.get('residency')!r}")
+    if mode != "off":
+        assembly["residency"] = mode
+        #: ⚠️ 预算**可选** ✓：不给 ⇒ 装载时按**当时**空闲显存 ×(1−余量) 现算 ✓
+        #: （写死一个数会在"机器换了/别人占着卡"时变成骗人的常量 ✓✗）。
+        budget = settings.get("residency_budget_mib", settings.get("residencyBudgetMib"))
+        if budget not in (None, ""):
+            assembly["residency_budget_mib"] = float(budget)
+
+    # ⭐ **设备策略**（2026-10-31 ✓，创作者原话：「默认优先分配任务到 GPU 执行，当 GPU 占用率过高时
+    #    自动进行适当的负载优化与任务降级或转移」✓）：``auto`` = GPU 优先、每阶段现测现定 ✓；
+    #    ``gpu`` = 钉住上卡（显存不够就 OOM，**不**自动转移 ✓）；``cpu`` = 全内存 ✓；
+    #    ``balanced`` = 装得下也主动联合 ✓。
+    #    ⚠️ **合法值只认 `device_policy.POLICIES`** ✗✗（这里不手抄清单 ✓ —— `int8_offload` 漏过一次 ✓）。
+    #    ⚠️ 与 `int8_offload` 那段注释不冲突 ✗：那边说的是"**驻留**不自动切"（int8 钉回 CPU 的代价是
+    #       每步一趟 PCIe ✓），这边说的是"**哪台设备**跑"，两者的判据与代价都不同 ✓。
+    policy = settings.get("policy") or settings.get("devicePolicy") or settings.get("device_policy")
+    if policy not in (None, ""):
+        assembly["policy"] = device_policy.normalize_policy(policy)
 
     specs = lora_specs_from_settings(settings)
     if specs:

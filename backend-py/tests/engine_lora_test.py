@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -299,6 +300,58 @@ class ShapeOnly:
         self.shape = tuple(int(size) for size in shape or ())
 
 
+def case_kohya_names() -> None:
+    """⑨ kohya 下划线分层键（2026-10-31 补 ✓）。
+
+    为什么单独立一条 ✗：kohya 出的 SD1.5/SDXL/SD3 LoRA，键整串**一个点都没有** ✓
+    （``lora_unet_down_blocks_0_attentions_0_attn1_to_q`` ✓），模型里是点分层 ✓ ——
+    不翻译就 ``modules.get()`` 全 None ⇒ 报「一层都没装上」✓✗（报错好过静默 ✓，
+    但能力等于没有 ✓✗）。
+    """
+    check("⑨ 下划线分层 → 点分层 ✓（SDXL 的 attn1.to_q ✓）",
+          lora_mod.kohya_module_name(
+              "lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q")
+          == "down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q", "")
+    check("⑨′ 已是点分层 ⇒ **原样返回** ✓✗（二次翻译会把 `to_q` 这类段拆坏 ✓）",
+          lora_mod.kohya_module_name("blocks.0.mlp.fc1") == "blocks.0.mlp.fc1", "")
+    check("⑨″ 文本塔的键也认 ✓（`lora_te1_text_model_encoder_layers_0_mlp_fc1` ✓）",
+          lora_mod.kohya_module_name("lora_te1_text_model_encoder_layers_0_mlp_fc1")
+          == "text_model.encoder.layers.0.mlp.fc1", "")
+
+    parsed = lora_mod.parse_lora({
+        "lora_unet_down_blocks_0_attentions_0_attn1_to_q.lora_A.weight": DOWN,
+        "lora_unet_down_blocks_0_attentions_0_attn1_to_q.lora_B.weight": UP})
+    linear = FakeLinear(WEIGHT)
+    result = lora_mod.apply_to_model(
+        FakeModel({"down_blocks.0.attentions.0.attn1.to_q": linear}), parsed, ops=OPS)
+    check("⑨‴ kohya 键**靠翻译真装上** ✓✗（不翻译 ⇒ 「一层都没装上」⇒ 能力等于没有 ✓✗）",
+          result.bypassed == ["lora_unet_down_blocks_0_attentions_0_attn1_to_q"]
+          and bool(result.translated) and linear.hooks and result.ok, result.to_dict())
+
+    blocked = lora_mod.apply_to_model(
+        FakeModel({"down_blocks.0.attentions.0.attn1.to_q": FakeLinear(WEIGHT)}), parsed,
+        ops=OPS, transform=lambda name: name)
+    check("⑨⁴ 传了 `transform` ⇒ **不再**叠加翻译 ✓✗（两套口径打架 ⇒ 悄悄折进错的层 ✓✗）",
+          blocked.applied == 0 and not blocked.translated and bool(blocked.error),
+          blocked.to_dict())
+
+    #: ⚠️ 段名**长得像**别的段，切开顺序/最长匹配一错就整份 LoRA 装不上 ✗（2026-10-31 实测补 ✓）。
+    check("⑨⁵ ``self_attn_out_proj`` ⇒ ``self_attn.out_proj`` ✓（参考实现的 ``LORA_CLIP_MAP`` "
+          "列的就是这个名 ✓；漏 ``out_proj`` ⇒ 被切成 ``out.proj`` ⇒ 整份 LoRA 一层都装不上 ✓✗）",
+          lora_mod.kohya_module_name(
+              "lora_te1_text_model_encoder_layers_0_self_attn_out_proj")
+          == "text_model.encoder.layers.0.self_attn.out_proj", "")
+    check("⑨⁶ ``ff_net_0_proj`` ⇒ ``ff.net.0.proj`` ✓（GEGLU 前馈的模块名**本身含点** ✓ —— "
+          "光靠切段只能切出 ``ff_net.0.proj`` ⇒ 对不上 ✓✗）",
+          lora_mod.kohya_module_name(
+              "lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_ff_net_0_proj")
+          == "down_blocks.1.attentions.0.transformer_blocks.0.ff.net.0.proj", "")
+    check("⑨⁷ 文本塔的 LayerNorm 名不许被拆成 ``layer.norm1`` ✓（``layer_norm1`` 是整段 ✓）",
+          lora_mod.kohya_module_name(
+              "lora_te1_text_model_encoder_layers_0_layer_norm1")
+          == "text_model.encoder.layers.0.layer_norm1", "")
+
+
 def case_real_file() -> None:
     from app.services.engine import safetensors as st  # noqa: PLC0415
 
@@ -494,11 +547,18 @@ def case_reuse_gate() -> None:
     dit = r"D:\m\dit.safetensors"
 
     def _key(*loras: Any) -> tuple[Any, ...]:
-        return runtime_mod._load_key(
-            stage="h3", dit_path=dit, tokenizer_path=None, device=None,
-            audio_latent_mode=None, attach_video_vae=True, attach_audio_vae=True,
-            real_video_vae=False, video_vae_device=None, video_vae_weights=None,
-            int8_offload=False, loras=runtime_mod._lora_key(list(loras)))
+        # ⚠️ 装载键的**参数清单不许手抄** ✗✗：2026-10-31 实测正在这里翻车 ✓✗ —— 加了 `residency` 之后
+        #    这里少抄两项 ⇒ 正例被判成"没复用" ⇒ 抛 `EngineBusy` ✓✗，而报错文字说的是"引擎正忙"，
+        #    **完全看不出是这条测试漏了一行** ✓✗（红得对、指错地方 = 下一轮还得从头查一遍 ✓）。
+        # ⇒ 取 `_ensure_loaded_internal` 的**签名默认值** ✓：`ensure_loaded` 把它的全部参数原样转给
+        #    `_load_key` ✓（这条等价关系由 `engine_router_contract_test` ⑪′ 那侧兜着 ✓），
+        #    以后再加装载参数**不用回来改这里** ✓。
+        params = inspect.signature(
+            runtime_mod.EngineRuntime._ensure_loaded_internal).parameters  # noqa: SLF001
+        defaults = {name: param.default for name, param in params.items()
+                    if name != "self" and param.default is not inspect.Parameter.empty}
+        return runtime_mod._load_key(**{**defaults, "stage": "h3", "dit_path": dit,
+                                        "loras": runtime_mod._lora_key(list(loras))})
 
     def _installed() -> Any:
         #: 假装"已按 strength=0.5 装好" ✓ —— `_backend` 只要非 None ✓（复用门不看它的类型 ✓）
@@ -591,6 +651,71 @@ def case_training_gate() -> None:
               not (isinstance(got_plain, lora_mod.LoraError) and "训练产物" in str(got_plain)), got_plain)
 
 
+class Flat:
+    """只有 ``reshape`` 的桩 ✓（DoRA 的 ``dora_scale`` 判「是不是全 1」要用 ✓）。"""
+
+    def __init__(self, items: list[float]) -> None:
+        self._items = list(items)
+
+    def reshape(self, *shape: Any) -> list[float]:  # noqa: ARG002 —— 只服务 -1 拉平 ✓
+        return self._items
+
+
+def case_reference_parity() -> None:
+    """对照参考实现（kohya / diffusers / ComfyUI）补齐的口径 ✓（2026-10-31 ✓）。"""
+    zero_alpha = lora_mod.parse_lora({
+        "m.lora_A.weight": DOWN, "m.lora_B.weight": UP, "m.alpha": 0.0})
+    check("对照: alpha=0 ⇒ scale=1.0（kohya/diffusers 按 rank 抬 ✓；照字面算 = 静默乘 0 ✗✗）",
+          abs(zero_alpha.deltas["m"].scale() - 1.0) < 1e-9, zero_alpha.deltas["m"].scale())
+
+    dora = lora_mod.parse_lora({
+        "m.lora_A.weight": DOWN, "m.lora_B.weight": UP,
+        "m.dora_scale": Flat([2.0, 3.0, 4.0])})
+    check("对照: DoRA（dora_scale 非全 1）⇒ 当场拒（只装 A/B 数值必错 ✗✗）",
+          bool(dora.error) and "DoRA" in dora.error, dora.to_dict())
+
+    identity = lora_mod.parse_lora({
+        "m.lora_A.weight": DOWN, "m.lora_B.weight": UP,
+        "m.dora_scale": Flat([1.0, 1.0, 1.0])})
+    check("对照: DoRA 但 dora_scale 全 1 ⇒ 等价「没有 DoRA」，放行（不白拦 ✗）",
+          identity.ok and list(identity.deltas) == ["m"], identity.to_dict())
+
+    loha = lora_mod.parse_lora({"m.hada_w1_a": DOWN, "m.hada_w2_a": UP})
+    check("对照: LoHa（hada_*）⇒ 当场拒、点明族名（静默少装 = 数值悄悄不对 ✗✗）",
+          bool(loha.error) and "LoHa" in loha.error, loha.to_dict())
+
+    te = lora_mod.apply_to_model(
+        FakeModel({"blocks.0.mlp.fc1": FakeLinear(WEIGHT)}),
+        lora_mod.LoraReport(deltas={
+            "blocks.0.mlp.fc1": lora_mod.LoraDelta(module="blocks.0.mlp.fc1", down=DOWN, up=UP),
+            "lora_te_text_model_encoder_layers_0_mlp_fc1": lora_mod.LoraDelta(
+                module="lora_te_text_model_encoder_layers_0_mlp_fc1", down=DOWN, up=UP)}),
+        ops=OPS)
+    check("对照: 文本编码器层 ⇒ 记 skipped、**不算部分生效**（DiT 里本来没有它 ✗）",
+          te.ok and len(te.skipped) == 1 and te.applied == 1, te.to_dict())
+
+    partial = lora_mod.apply_to_model(
+        FakeModel({"blocks.0.mlp.fc1": FakeLinear(WEIGHT)}),
+        lora_mod.LoraReport(deltas={
+            "blocks.0.mlp.fc1": lora_mod.LoraDelta(module="blocks.0.mlp.fc1", down=DOWN, up=UP),
+            "blocks.7.mlp.fc1": lora_mod.LoraDelta(module="blocks.7.mlp.fc1", down=DOWN, up=UP)}),
+        ops=OPS)
+    check("对照: 部分层对不上 ⇒ 报「没有完整生效」（半装的 LoRA 只会像但不对 ✗✗）",
+          bool(partial.error) and partial.applied == 1, partial.to_dict())
+
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:
+        skip("因子对齐（本环境没装 torch）")
+        return
+    ref = torch.zeros(3, 3, dtype=torch.float64)
+    aligned = lora_mod._align_delta(
+        lora_mod.LoraDelta(module="m", down=torch.zeros(1, 2), up=torch.zeros(3, 1)), ref)
+    check("对照: 因子的 dtype/设备跟目标层走（LoRA 存 fp32、底模 bf16 ⇒ 不搬会崩 ✗✗）",
+          aligned.down.dtype == torch.float64
+          and aligned.down.device == ref.device, (aligned.down.dtype, aligned.down.device))
+
+
 def case_torch_ops_optional() -> None:
     try:
         import torch  # noqa: F401,PLC0415
@@ -612,10 +737,12 @@ def case_torch_ops_optional() -> None:
 def main() -> int:
     for label, case in (("解析", case_parse), ("边界", case_orphan_and_error),
                         ("选路", case_paths), ("数学", case_math),
-                        ("装配", case_apply_model), ("真文件", case_real_file),
+                        ("装配", case_apply_model), ("kohya 键", case_kohya_names),
+                   ("真文件", case_real_file),
                         ("接线", case_wiring), ("口径", case_coerce_spec),
                         ("复用门", case_reuse_gate),
                         ("契约门", case_training_gate),
+                        ("对照参考", case_reference_parity),
                         ("torch", case_torch_ops_optional)):
         try:
             case()

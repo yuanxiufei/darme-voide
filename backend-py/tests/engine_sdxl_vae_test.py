@@ -250,11 +250,15 @@ def case_scale() -> None:
     check("⑤′ `to_unit=True` 即 `(x+1)/2` 且**夹到 [0,1]** ✓（超界被 clamp ✓ 不是溢出 ✓）",
           torch.allclose(unit, torch.tensor([[[[1.0, 0.0]]]])), unit.tolist())
     shifted = mod.SdxlVaeConfig(scaling_factor=0.5, shift_factor=2.0)
-    check("⑤″ `shift_factor` 也参与 ✓（口径是 `(z − shift) / scale` ✓ —— SDXL 的 shift 是 0 ✓ "
-          "但**别写死成 0** ✗）",
+    #: ⚠️ 口径是 ``z / scale + shift`` ✓（＝ `latent_formats` 的 ``process_out`` ✓）——
+    #: **不是** ``(z − shift) / scale`` ✗✗。两者只在 ``shift == 0`` 时等价 ✓（SDXL 恰好是 0 ✓
+    #: ⇒ 这条式子在 SDXL 上**永远试不出来** ✓✗，换到 Flux 族（shift=0.1159 ✗）就是常数偏移 ✓）。
+    #: 所以这里用 ``shift=2.0`` 的假配置把两条式子**分开**：正解 3/0.5+2 = **8.0** ✓、错解 2.0 ✗。
+    check("⑤″ `shift_factor` 参与且方向是 **+shift** ✓（`z/scale + shift` ✓；写成 `(z−shift)/scale` ✗ "
+          "在 SDXL 上恒等价、在 Flux 上偏色 ✓✗）",
           torch.allclose(mod.decode_latents(_Identity(shifted), torch.tensor([[[[3.0]]]]),
                                             config=shifted, to_unit=False),
-                         torch.tensor([[[[2.0]]]])))
+                         torch.tensor([[[[8.0]]]])))
     zero = type("_Raw", (), {"scaling_factor": 0.0, "shift_factor": 0.0})()
     check("⑤‴ 缩放为 0 ⇒ **响亮报错** ✗（绝不除以 0 静默出 NaN ✓）—— ⚠️ 配置层已拦一次 ✓，"
           "这里是**第二道**：拿**绕过校验**的裸配置对象来，也必须拦 ✓（判据要够得着 ✓）",

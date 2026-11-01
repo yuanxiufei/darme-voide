@@ -28,24 +28,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
+from ..agent.skills import list_skill_ids, resolve_default_skills, skill_char_budget
+from ..core.config import skills_dir
 from ..core.db import get_conn
 from ..core.models import agent_configs
 from ..core.response import bad_request, internal_error, js_truthy, success
 from ..services.agent_registry import AGENT_PHASES, get_default_name, get_host_tool_names
 from ..services.skill_parser import ParsedSkill, parse_skill, render_skill
-from ..services.skills import (
-    SKILL_CHAR_BUDGET,
-    SKILLS_DIR,
-    list_skill_ids,
-    resolve_default_skills,
-)
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 
 #: 外部技能库声明文件名：顶层目录含此文件 = 一个技能库（vendor）
 LIBRARY_FILE = "library.yaml"
 
-#: 允许的 skill id 字符集（再配合「无 `..`、非绝对路径、解析后仍在 SKILLS_DIR 内」三重校验）
+#: 允许的 skill id 字符集（再配合「无 `..`、非绝对路径、解析后仍在 skills_dir() 内」三重校验）
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-./]+$")
 
 
@@ -60,7 +56,7 @@ def _read_library(dir_name: str) -> dict[str, str]:
     声明损坏时回退「目录名即库名」，不让整个列表接口失败。
     """
     fallback = {"id": dir_name, "label": dir_name, "description": ""}
-    file = SKILLS_DIR / dir_name / LIBRARY_FILE
+    file = skills_dir() / dir_name / LIBRARY_FILE
     if not file.exists():
         return fallback
     try:
@@ -81,12 +77,12 @@ def _read_library(dir_name: str) -> dict[str, str]:
 
 def _list_libraries() -> list[dict[str, str]]:
     """扫描 ``skills/`` 顶层，列出全部外部技能库（按库标识排序）。"""
-    if not SKILLS_DIR.is_dir():
+    if not skills_dir().is_dir():
         return []
     return sorted(
         (
             _read_library(entry.name)
-            for entry in SKILLS_DIR.iterdir()
+            for entry in skills_dir().iterdir()
             if entry.is_dir() and (entry / LIBRARY_FILE).exists()
         ),
         key=lambda lib: lib["id"],
@@ -103,9 +99,9 @@ def _classify(skill_id: str) -> tuple[str, str | None]:
         return "core", None
     top = skill_id.split("/")[0]
     # 顶层目录自身含 SKILL.md → 自有 skill 的子目录，其子项仍按自有处理
-    if (SKILLS_DIR / top / "SKILL.md").exists():
+    if (skills_dir() / top / "SKILL.md").exists():
         return "core", None
-    if (SKILLS_DIR / top / LIBRARY_FILE).exists():
+    if (skills_dir() / top / LIBRARY_FILE).exists():
         return "vendor", _read_library(top)["id"]
     # 兜底：无声明文件的容器目录，退化为「目录名即库名」
     return "vendor", top
@@ -120,19 +116,19 @@ def _validate_skill_id(raw_id: str) -> str | None:
         return None
     if ".." in sanitized:
         return None
-    resolved = (SKILLS_DIR / sanitized).resolve()
-    # 与原 TS 同形：既允许严格在 SKILLS_DIR 之下，也允许恰好等于它
-    if not (str(resolved).startswith(str(SKILLS_DIR) + "/") or str(resolved).startswith(str(SKILLS_DIR) + "\\") or str(resolved) == str(SKILLS_DIR)):
+    resolved = (skills_dir() / sanitized).resolve()
+    # 与原 TS 同形：既允许严格在 skills_dir() 之下，也允许恰好等于它
+    if not (str(resolved).startswith(str(skills_dir()) + "/") or str(resolved).startswith(str(skills_dir()) + "\\") or str(resolved) == str(skills_dir())):
         return None
     return sanitized
 
 
 def _safe_skill_path(skill_id: str) -> Path:
-    return SKILLS_DIR / skill_id / "SKILL.md"
+    return skills_dir() / skill_id / "SKILL.md"
 
 
 def _safe_skill_dir(skill_id: str) -> Path:
-    return SKILLS_DIR / skill_id
+    return skills_dir() / skill_id
 
 
 def _is_protected_skill(skill_id: str, agents: list[str] | None) -> bool:
@@ -250,7 +246,7 @@ def list_skills(conn: Connection = Depends(get_conn)):
         host_tools = get_host_tool_names()
         skills: list[dict[str, Any]] = []
 
-        if not SKILLS_DIR.is_dir():
+        if not skills_dir().is_dir():
             return success(skills)
 
         def scan(directory: Path, prefix: str = "") -> None:
@@ -302,7 +298,7 @@ def list_skills(conn: Connection = Depends(get_conn)):
                 # Always recurse —— 子目录里可能还有嵌套 skill
                 scan(entry, skill_id)
 
-        scan(SKILLS_DIR)
+        scan(skills_dir())
         return success(skills)
     except Exception as exc:  # noqa: BLE001
         return internal_error(str(exc))
@@ -362,7 +358,7 @@ def skills_meta():
         return success(
             {
                 "agents": agents,
-                "charBudget": SKILL_CHAR_BUDGET,
+                "charBudget": skill_char_budget(),
                 "sources": sources,
                 "coreCount": core_count,
             }

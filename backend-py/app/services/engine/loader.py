@@ -119,6 +119,8 @@ class LoadPlan:
     blockCount: int = 0
     loadMode: str = "full"
     readSecondsEstimate: float = 0.0
+    #: 是否该阶段的**必需件** ✓（来自清单条目，或被 `STAGE_FILTERS[*].requireAll` 覆盖 ✓）。
+    required: bool = False
     warnings: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
@@ -130,6 +132,10 @@ class LoadPlan:
         return {
             "key": self.key, "name": self.name, "role": self.role, "path": self.path,
             "present": self.present, "verified": self.verified, "gib": self.gib,
+            #: ⭐ 这一栏 2026-10-31 补 ✓✗：`component_status` 早就有 `required` ✓，这份**没有** ——
+            #: 于是 `plan_stage` 的消费方（前端 / `plan` 子命令）看不出哪些件是必需的 ✓✗，
+            #: 而「必需件到底有没有」正是 `ready` 那条判据的全部依据 ✓。
+            "required": self.required,
             "tensorCount": self.tensorCount, "dtypeClasses": self.dtypeClasses,
             "computeDtype": self.computeDtype, "quantScheme": self.quantScheme,
             "dequantPlan": dict(self.dequantPlan),
@@ -148,6 +154,9 @@ def plan_component(entry: dict[str, Any], *, root: Path | None = None,
     plan.path = status.get("path")
     plan.present = bool(status.get("present"))
     plan.bytes = int(status.get("bytes") or 0)
+    #: 取 **status** 而不是 `entry` ✓：`requireAll` 覆盖的是 :func:`inventory.stage_entries`
+    #: 返回的**副本** ✓，`entry` 上那份 `required` 可能还是清单原值（`false` ✓）。
+    plan.required = bool(status.get("required"))
     # ⚠️ 「大小与清单不符」按 :mod:`.inventory` 的口径只是**可疑、不阻断** ✓（社区量化版/重新导出
     #    会让体积合法地变 ✓）⇒ 这里**降级成 warning** ✗，别混进 `problems` ✓。
     #    初版直接把 status 的全部 problems 抄进 problems ⇒ 于是 `plan_stage.ready` 因为
@@ -607,12 +616,18 @@ def residency_plan(components: list[LoadPlan], *, capacity_gib: float = inv.DEFA
 
 def plan_stage(stage: str = "h3", *, root: Path | None = None,
                capacity_gib: float = inv.DEFAULT_CAPACITY_GIB) -> dict[str, Any]:
-    """某阶段的**完整加载计划** ✓（= 逐组件计划 + 显存排班 ✓）。"""
-    catalog = inv.load_catalog()
-    rule = inv.STAGE_FILTERS.get(stage)
-    entries = [item for item in catalog["models"] if not rule or item.get("category") == rule["category"]]
+    """某阶段的**完整加载计划** ✓（= 逐组件计划 + 显存排班 ✓）。
+
+    ⚠️ 条目筛选走 :func:`inventory.stage_entries` ✓，**不许**在这里再写一遍 ``category`` 比较 ✗✗
+    （2026-10-31：抽真源之前这里自己筛了一遍、不认 ``tags``/``requireAll`` ⇒
+    ``plan_stage("zimage")`` 会把 SDXL 也列进来，而三条 Z-Image 件的 ``required`` 是 ``false``
+    ⇒ ``ready`` 恒为 ``True`` ✓✗）。
+    """
+    entries = inv.stage_entries(stage)
     components = [plan_component(entry, root=root, capacity_gib=capacity_gib) for entry in entries]
-    required = [component for component, entry in zip(components, entries) if entry.get("required")]
+    #: ⚠️ 取 **component.required**（已经过 `requireAll` 覆盖 ✓）而不是 `entry.get("required")` ✗✗ ——
+    #: 后者在 `requireAll` 的档上恒为 `False` ⇒ `required` 是空表 ⇒ `ready = all([]) = True` ✓✗。
+    required = [component for component in components if component.required]
     return {
         "stage": stage,
         "modelsDir": str(root or inv.models_dir() or ""),

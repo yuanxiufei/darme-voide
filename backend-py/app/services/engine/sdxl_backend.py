@@ -340,7 +340,12 @@ def _dtype_name(value: Any) -> str | None:
 
 def _is_cuda_device(device: Any) -> bool:
     """``device`` 是否**明确**指向 CUDA ✓（``None`` ⇒ 假 ✓：那意味着权重留在 CPU ✓，见 ``build_*`` ✓）。"""
-    return str(device or "").strip().lower().startswith("cuda")
+    #: ⚠️ 实现**只许**走 `device_policy.is_cuda_device` ✓✗（2026-10-31 收口）：这里原本是
+    #: ``startswith("cuda")`` ✓，与 `torch_backend` 里的 `split(":")[0]` 和 `== "cuda"`
+    #: 并存 —— **同一件事三份手抄** ✓✗，而 `== "cuda"` 那份在 `cuda:0` 上是错的 ✓✗。
+    from . import device_policy as _device_policy  # noqa: PLC0415 —— 局部引：本模块顶层不碰 engine 内部 ✓
+
+    return _device_policy.is_cuda_device(device)
 
 
 def resolve_sdxl_dtype_names(device: Any = None, *, dtype: Any = None,
@@ -443,6 +448,54 @@ class _Condition:
     truncated: bool
 
 
+#: 文本塔在模型里的**容器**前缀 ✓ —— ``ClipTextModel`` 是 ``transformer`` ＋ 可选 ``text_projection`` ✓。
+#: ⚠️ kohya 键翻出来是 ``text_model.…`` ✓（塔**内部**的写法 ✓），少这一层前缀就整份 TE-LoRA
+#: 一层都装不上 ✓✗（2026-10-31 实测补齐）。
+_TE_CONTAINER = "transformer"
+#: 各口径在键前面多出来的一层 ✓（长的先匹配 ✓）。
+_TE_LEADING = ("text_encoders.clip_l.", "text_encoders.clip_g.", "text_encoders.",
+               "clip_l.", "clip_g.", "te1.", "te2.", "te.")
+#: 挂在**外层**（不在 ``transformer`` 下面）的文本塔权重 ✓。
+_TE_OUTER = ("text_projection", "logit_scale", "position_ids")
+
+
+def _is_tower_g(key: str) -> bool:
+    """这个键属于 **CLIP-G**（bigG）吗 ✓ —— 不属于就是 CLIP-L ✓。
+
+    ⚠️ 漏认的后果不是「报错」而是**串塔** ✓✗（2026-10-31 补 ✓）：两塔结构同形 ✓，
+    键里若不认 ``clip_g`` / ``text_encoder_2`` 这些写法 ✓，delta 会被塞进 **CLIP-L** ✓，
+    形状恰好对得上的层就**静默改写错的那一座塔** ✓✗ —— 出图「提词跟随怪怪的」，全程无错 ✓✗。
+    """
+    lowered = str(key).lower()
+    return lowered.startswith(("lora_te2", "te2.", "text_encoder_2", "clip_g.", "clipg.",
+                               "text_encoders.clip_g.", "lora_clip_g"))
+
+
+def tower_module_name(key: str) -> str:
+    """LoRA 里的文本塔键 → ``ClipTextModel`` 里的**真实**模块路径 ✓。
+
+    两个都要对 ✓：
+    * ``lora_te1_text_model_encoder_layers_0_mlp_fc1``（kohya 下划线 ✓）⇒
+      ``transformer.text_model.encoder.layers.0.mlp.fc1`` ✓；
+    * ``text_encoders.clip_l.transformer.text_model.…``（点分层 ✓）⇒ 剥掉容器 ⇒ 同上 ✓；
+    * ``…text_projection`` ⇒ 留在**外层** ``text_projection`` ✓（加前缀就找不到 ⇒ 整份报没装全 ✓✗）。
+
+    ⚠️ 不剥前缀、也不加 ``transformer.`` 的后果是**报错**（不是静默 ✓），但能力等于没有 ✓✗ ——
+    kohya 训出来的每一份 SDXL LoRA 都带 TE 层 ✓，所以那就是「SDXL 的 LoRA 支持」整个不生效 ✓。
+    """
+    from app.services.engine import lora as lora_mod  # noqa: PLC0415 —— 局部 import ✓ 不拖 torch ✓
+
+    name = lora_mod.kohya_module_name(str(key))
+    lowered = name.lower()
+    for lead in _TE_LEADING:
+        if lowered.startswith(lead):
+            name = name[len(lead):]
+            break
+    if name.startswith(_TE_OUTER) or name.startswith(f"{_TE_CONTAINER}."):
+        return name
+    return f"{_TE_CONTAINER}.{name}"
+
+
 class SdxlBackend:
     """SDXL 出图后端 ✓（`GenerationBackend` 的一个实现 ✓ —— 引擎里**唯一**碰 SDXL 张量的地方 ✓）。
 
@@ -453,15 +506,20 @@ class SdxlBackend:
     name = "sdxl"
 
     def __init__(self, *, device: Any = None, dtype: Any = None,
-                 vae_dtype: Any = None, tokenizer: Any = None) -> None:
+                 vae_dtype: Any = None, tokenizer: Any = None,
+                 decode_tile: int | None = None) -> None:
         """``dtype`` 只管计算组件 ✓、``vae_dtype`` 管 VAE ✓（默认各自见 :func:`resolve_sdxl_dtype_names` ✓）。
 
         ⚠️ 两个都留 ``None`` 也**不是**"随便" ✓：``device="cuda"`` ⇒ 计算组件 **fp16**、VAE **fp32** ✓
         （出处与实测见 :data:`SDXL_COMPUTE_DTYPE` ✓——生产装配 ``runtime`` 正是这么调的 ✓）。
+
+        ``decode_tile``：**像素**单位的分块解码阈值 ✓（``None`` = 整张解 ✓，与历史产物逐字节相同 ✓）。
+        只有像素数顶爆显存时才该给 ✓（4K 单图 / Wan 81 帧 720p ✓，见 `vae_tiling` 模块头 ✓）。
         """
         self.device = device
         self.dtype = dtype
         self.vae_dtype = vae_dtype
+        self.decode_tile = decode_tile
         self._tokenizer = tokenizer
         self._unet: Any = None
         self._vae: Any = None
@@ -493,7 +551,70 @@ class SdxlBackend:
         return self._tokenizer
 
     # ── 装配 ─────────────────────────────────────────────────────────────
-    def load_weights(self, path: str | Path, *, tokenizer: Any = None) -> dict[str, Any]:
+    def _apply_loras(self, loras: Any) -> dict[str, Any] | None:
+        """⭐ SDXL 的三处都挂 ✓ —— UNet ＋ CLIP-L ＋ CLIP-G ✓（2026-10-31 补 ✓）。
+
+        ⚠️ 为什么必须**分派**而不是一把塞给 UNet ✗✗：SD1.5/SDXL 的 LoRA 一份文件里混着
+        ``lora_unet_…`` / ``lora_te1_…`` / ``lora_te2_…`` 三族 ✓ —— 全塞给 UNet ⇒ 文本塔那些层
+        全报「找不到」⇒ 要么炸、要么（更糟）只挂上一半还报成功 ✓✗。SDXL 的 ``te1`` 归
+        CLIP-L、``te2`` 归 CLIP-G ✓（SD1.5 只有 ``lora_te_`` ⇒ 归 CLIP-L ✓）。
+
+        ⚠️ 也**不许**把 「文本塔层对不上」当没事 ✓✗：本仓只给 SDXL（两塔齐全）用这条线 ✓，
+        真出现了就是键名口径变了 ✓ ⇒ 当场炸 ✓（少挂一层 = 跑得动、出得来、不是那个档 ✓✗）。
+        """
+        from app.services.engine import lora as lora_mod  # noqa: PLC0415 —— 局部 import ✓ 不拖 torch ✓
+
+        specs = [lora_mod.coerce_spec(item) for item in (loras or ())]
+        if not specs:
+            return None
+        ops = lora_mod.torch_ops()
+        report: dict[str, Any] = {"specs": [spec.to_dict() for spec in specs],
+                                  "unet": None, "clipL": None, "clipG": None,
+                                  "translated": 0, "files": []}
+        for spec in specs:
+            parsed = lora_mod.parse_lora(lora_mod.read_tensors(spec.path))
+            if not parsed.ok:
+                raise SdxlBackendError(f"LoRA 解析失败 ✗：{spec.label}：{parsed.error}")
+            buckets: dict[str, dict[str, Any]] = {"unet": {}, "clipG": {}, "clipL": {}}
+            for name, delta in parsed.deltas.items():
+                if not lora_mod.is_text_encoder_key(name):
+                    buckets["unet"][name] = delta
+                elif _is_tower_g(name):
+                    buckets["clipG"][name] = delta
+                else:
+                    buckets["clipL"][name] = delta
+            report["files"].append(str(spec.path))
+            for tag, model in (("unet", self._unet), ("clipL", self._clip_l),
+                               ("clipG", self._clip_g)):
+                deltas = buckets[tag]
+                if not deltas:
+                    continue
+                if model is None:
+                    #: ⚠️ 目标件**还没装上**时不许静默跳过 ✗✗（2026-10-31 补 ✓）：原先与
+                    #:    ``not deltas`` 并成一条 ``continue`` ⇒ 那几层**一声不响地没了** ✓✗，
+                    #:    报告里三栏照样是干净的 ⇒ 「挂好了」是假的 ✓✗（本仓最恨的那类 ✓）。
+                    #:    ``load_weights`` 的调用顺序保证四件套齐全 ✓，所以这里报出来的都是真问题 ✓。
+                    raise SdxlBackendError(
+                        f"LoRA 没装全 ✗：{spec.label} → {tag} 有 {len(deltas)} 层，"
+                        f"但 {tag} 这一件**还没装上** ⇒ 这几层会被静默丢掉 ✗"
+                        f"（少挂一层就是「跑得动但不是那个档」✗✗）")
+                part = lora_mod.apply_to_model(
+                    model, lora_mod.LoraReport(deltas=deltas), strength=spec.strength, ops=ops,
+                    #: ⚠️ 文本塔要多走一步映射 ✗✗（2026-10-31 补 ✓）：kohya 键翻出来是
+                    #:    ``text_model.…`` ✓，而塔本体挂在 ``.transformer`` 下面 ✓ ⇒ 直接查不到 ✓✗。
+                    #:    UNet 不需要（默认的 kohya 兜底就够 ✓）。
+                    transform=None if tag == "unet" else tower_module_name)
+                if part.error or part.missing:
+                    head = part.missing[0] if part.missing else part.error
+                    raise SdxlBackendError(
+                        f"LoRA 没装全 ✗：{spec.label} → {tag} 有 {len(part.missing)} 层对不上"
+                        f"（如 {head} ✓）⇒ 少挂一层就是「跑得动但不是那个档」✗✗")
+                report[tag] = {**(report[tag] or {}), **part.to_dict()}
+                report["translated"] += len(part.translated)
+        return report
+
+    def load_weights(self, path: str | Path, *, tokenizer: Any = None,
+                     loras: Any = None) -> dict[str, Any]:
         """装四件套 ✓ 并返回报告 ✓。⚠️ 任一件不齐 ⇒ **报错** ✗（不会留下半个模型 ✓）。"""
         # ⚠️ **CPU 线程预算**（用户口径 ✓ 2026-09-26）：重张量运算走 GPU ✓，CPU 只做加载/IO/搬张量 ✓
         #    ⇒ 钳住 torch 线程池 ✗（默认并行度 = **逻辑核数** ✓✗ ⇒ 四件套的 `to(device, dtype)`
@@ -509,6 +630,11 @@ class SdxlBackend:
             self._tokenizer = tokenizer
         for model in (self._unet, self._vae, self._clip_l, self._clip_g):
             model.eval()
+        #: ⭐ LoRA 在**四件套装齐之后**挂 ✓（装到一半挂 ⇒ 失败时要回滚的东西多一倍 ✗）。
+        #: 挂不全 ⇒ 当场炸 ✓✗（`synthetic` 仍是 False ✓，但模型不是你要的那个档 ✓✗）。
+        lora_report = self._apply_loras(loras)
+        if lora_report is not None:
+            report["lora"] = lora_report
         report["synthetic"] = self.synthetic
         report["device"] = str(self.device or "cpu")
         self.load_report = report
@@ -555,7 +681,19 @@ class SdxlBackend:
         # ⚠️ 落位**照权重问** ✗（见 :func:`_model_device` ✓）—— 信 `self.device` 会在它为 ``None`` 时
         #    把潜变量丢在 CPU 上 ✓，而下一步 UNet 在 CUDA ⇒ 又是一次「换设备才炸」✓✗。
         return (noise * float(sigmas[0])).to(device=_model_device(self._unet),
-                                             dtype=_model_dtype(self._unet))
+                                            dtype=_model_dtype(self._unet))
+
+    def noise_like(self, sample: Any, request: Any, *, nonce: int = 0) -> Any:
+        """随机采样器（``sa_solver`` / ``euler_ancestral``）每步回注的噪声 ✓。
+
+        ⚠️ 三件事都照 ``sample`` 抄 ✗（**不乘 σ_max** ✗✗ —— :meth:`init_latents` 是
+        ``n·σ_max``，而回注量由采样器自己乘 ``σ·renoise`` ⇒ 这里再乘一次就是**平方** ✓✗，
+        症状是随机档画面比确定性档明显更脏、且步数越多越脏 ✓）。
+        """
+        generator = torch.Generator(device="cpu").manual_seed(
+            (int(getattr(request, "seed", 0) or 0) * 2654435761 + int(nonce) * 7919) & 0x7FFFFFFF)
+        return torch.randn(tuple(sample.shape), generator=generator, dtype=torch.float32).to(
+            device=sample.device, dtype=sample.dtype)
 
     # ── 协议 ③：单步去噪（**返回 x0** ✓ —— 采样器要的就是这个 ✓）─────────────
     def denoise(self, latents: Any, sigma: float, condition: Any, request: Any) -> Any:
@@ -621,7 +759,10 @@ class SdxlBackend:
             pixels = vae_mod.decode_latents(
                 self._vae,
                 latents.to(device=_model_device(self._vae), dtype=_model_dtype(self._vae)),
-                config=self._vae.config)
+                config=self._vae.config,
+                #: ⚠️ 默认 ``None`` = **整张解** ✓✗：小图整张更快、且与历史产物逐字节相同 ✓；
+                #: 只有像素数顶爆显存时才切成块 ✓（接缝是切块的固有代价 ✓，见 `vae_tiling` ✓）。
+                tile=self.decode_tile)
         return {"frames": pixels.unsqueeze(2).to(torch.float32).cpu()}
 
     # ── 协议 ⑤：落盘 ─────────────────────────────────────────────────────

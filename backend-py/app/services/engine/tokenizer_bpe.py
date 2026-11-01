@@ -195,6 +195,16 @@ class BpeTokenizer:
         ids = list(self.vocab.values()) + list(self._added.values())
         return (max(ids) + 1) if ids else 0
 
+    @property
+    def bos_ids(self) -> tuple[int, ...]:
+        """BOS 的 id 序列 ✓（空 = 这个词表没有 BOS ✓ —— 不猜 0 ✗）。"""
+        return self._bos
+
+    @property
+    def eos_ids(self) -> tuple[int, ...]:
+        """EOS 的 id 序列 ✓（空 = 没有 ✓）。"""
+        return self._eos
+
     def describe(self) -> dict[str, Any]:
         """自述 ✓（词表从哪来、多少 token、多少条 merge、有什么保留说明 ✓）。"""
         return {"name": self.name, "vocabSize": self.vocab_size, "merges": self.merge_count,

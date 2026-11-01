@@ -51,7 +51,10 @@ API_VERSION = "1.0.0"
 #: ⚠️ 2 = `status().cache` 新增（E3.4 ✓，2026-10-29 ✓）—— 顶层**加了一个键**就是破坏性变更 ✓✗：
 #: 老调用方按「字段集合相等」校验会红 ✓（这正是 `engine_router_contract_test` ⑨ 的用法 ✓）。
 #: 3 = `status().lora` 新增（E2.5 ✓，2026-10-30 ✓）—— 同上 ✓。
-SCHEMA_VERSION = 3
+#: 4 = `capabilities().devicePolicy` 新增（2026-10-31 ✓）—— 同上 ✓✗。这一栏补的是
+#:     「**凭什么**把这条链放在这台设备上」✓：此前只有各条的 `device`（结论 ✓）⇒ 一次
+#:     显存降级会被读成「这台机器不支持 GPU」✓✗（读的人只能猜 ✓）。
+SCHEMA_VERSION = 4
 
 #: 错误码（WBS-1.2：机器可判，不是只有一句中文）。
 CODES: dict[str, str] = {
@@ -147,6 +150,7 @@ def capabilities() -> dict[str, Any]:
     from . import inventory as inv  # noqa: PLC0415
     from . import quant  # noqa: PLC0415
     from . import torch_backend as tb  # noqa: PLC0415
+    from . import device_policy as policy_mod  # noqa: PLC0415
 
     available, reason = tb.torch_available()
     status = tb.dependency_status()
@@ -177,6 +181,44 @@ def capabilities() -> dict[str, Any]:
             "supportedFormats": sorted(quant.SUPPORTED_FORMATS),
             "unsupportedFamilies": sorted(quant.UNSUPPORTED_FAMILIES),
             "unsupportedFormats": sorted(quant.UNSUPPORTED_FORMATS),
+        },
+        #: ⭐ **设备策略**（2026-10-31 加 ✓）：这一栏答的是「这台引擎把什么跑在哪台设备上、
+        #: **凭什么判**」✓✗。只报各条的 `device` 时，读的人只能看到**结论** ✓（“这次在 CPU” ✓），
+        #: 看不出「是不是机器不支持」/「能不能改回来」⇒ 会把一次降级读成能力缺失 ✓✗。
+        #: ⚠️ 这里**只报静态事实**（常量 / 判定规则 / 实测账）✗✗ —— :func:`capabilities` 的契约是
+        #: 「零副作用、不 import torch、毫秒级」✓，读卡况是另一回事 ✓✗：**当时的**卡况走
+        #: ``GET /engine/runtime`` 的 ``devicePolicy.pressure`` ✓（那里真读 ✓）。两个面各答一半 ✓。
+        "devicePolicy": {
+            "policies": list(policy_mod.POLICIES),
+            "default": policy_mod.DEFAULT_POLICY,
+            #: 余量/联合下限**从常量算** ✓✗（不手抄数字：改常量时报告自动跟着变 ✓，
+            #: 手抄的话两处必然漂移 ✓✗ —— 本仓文档就是这么烂过一遍的 ✓）。
+            "headroomGiB": round(policy_mod.HEADROOM_BYTES / policy_mod.GIB, 2),
+            "minSplitFreeGiB": round(policy_mod.MIN_SPLIT_FREE_BYTES / policy_mod.GIB, 3),
+            "highUsedRatio": policy_mod.HIGH_USED_RATIO,
+            "hardUsedRatio": policy_mod.HARD_USED_RATIO,
+            #: ⚠️ 主判据是**显存占用率**、不是 SM 利用率 ✓✗（见 `device_policy` 模块头 ✓）：
+            #: 这一格写出来，读的人才不会把 `usedRatio` 当成 "GPU 忙不忙" ✓✗。
+            "judgedOn": "memory",
+            "rules": [
+                f"剩余显存 ≥ 该件需求 + {policy_mod.HEADROOM_BYTES / policy_mod.GIB:g} GiB ⇒ 上卡",
+                f"剩余放不下整件、但仍 ≥ {policy_mod.MIN_SPLIT_FREE_BYTES / policy_mod.GIB:g} GiB"
+                f" ⇒ 上卡 + 联合驻留（residency=split ✓）",
+                f"剩余 < {policy_mod.MIN_SPLIT_FREE_BYTES / policy_mod.GIB:g} GiB ⇒ 整件转移到 CPU"
+                f"（慢，但跑得完 ✓）",
+                f"需求未知且显存占用 ≥ {policy_mod.HARD_USED_RATIO * 100:g}% ⇒ 转移到 CPU",
+            ],
+            #: 两本账必须分开报 ✓✗：`part` 是**分时**账（2.1 三段各占一段 ✓）、
+            #: `chain` 是**整链同驻**账（Z-Image 三件同时占满 ✓）。混在一起报，
+            #: 读者会按"最重的单件"去估 ⇒ 差 4.5 GiB 就 OOM ✓✗（Z-Image 实测踩过 ✓）。
+            "needGiB": {
+                "part": dict(tb.TorchBackend.PART_NEED_GIB),
+                "chain": dict(tb.TorchBackend.CHAIN_NEED_GIB),
+                #: ⚠️ 第三本 ✓✗：2512 的**分时账**（与 `part` 同为分时，但**族不同** ✓）。
+                #: 不能并进 `part` ✗：两族的键名一样（`dit`/`text`/`vae` ✓）⇒ 并进去必然互相覆盖 ✓✗，
+                #: 2512 的 38.05 会被 2.1 的 13.26 顶掉 ✓ ⇒ 读者按 13.26 估余量 ⇒ 装到一半 OOM ✓✗。
+                "qwenImagePart": dict(tb.TorchBackend.QWEN_IMAGE_PART_NEED_GIB),
+            },
         },
         "catalog": {
             "path": str(inv.catalog_path()),

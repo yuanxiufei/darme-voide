@@ -2,7 +2,10 @@
 与之是同一套逻辑的两份实现 ✗，改一处忘另一处即静默分叉）。
 
 ⚠️ 位置按**层级**定：`agent → services` 允许、反向禁止 ⇒ 权威版落在 `services/`；
-`app/agent/skill_parser.py` 现在只是**转发壳**（re-export）✓。
+`app/agent/skill_parser.py` 那个**转发壳已于 2026-10-30 删除** ✓（壳的注释当年写「agent/ 里多处按
+旧路径 import」，实测只剩一处**测试**引用、`app/agent/skills.py` 早已直接指向本模块 ⇒ 壳没有存在理由 ✗；
+现在全仓 import 本模块的只有 `app/routers/skills.py` / `app/agent/skills.py` / `tests/skills_test.py`
+—— services 侧那份 skills 扫描模块已于 2026-10-30 删除，见 `app/agent/skills.py` 的 `list_skill_ids`）。
 
 对外契约：**数据类** `ParsedSkill`（`metadata.*` / `body` / `foreign_tool_refs`），
 字段名一律 snake_case（去重前 dict 版用 camelCase ✗ —— 已统一）。

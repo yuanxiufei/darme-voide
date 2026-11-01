@@ -33,7 +33,7 @@ from app.core.config import PROJECT_ROOT  # noqa: E402
 from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.core.models import dramas  # noqa: E402
-from app.agent import skill_parser as sp  # noqa: E402
+from app.services import skill_parser as sp  # noqa: E402（⚠️ 2026-10-30：`app/agent/skill_parser.py` 转发壳已删）
 from app.agent import skills as sk  # noqa: E402
 from app.agent import runtime as rt  # noqa: E402
 

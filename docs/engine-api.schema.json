@@ -6,22 +6,24 @@
     "只登记**顶层**与**关键嵌套**（不是全字段树）：全树会随内部实现抖动，顶层才是对外承诺。"
   ],
   "apiVersion": "1.0.0",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "interfaces": {
     "capabilities": {
-      "top": ["apiVersion", "backend", "catalog", "engine", "knownGaps", "limits",
+      "top": ["apiVersion", "backend", "catalog", "devicePolicy", "engine", "knownGaps", "limits",
               "operations", "python", "quant", "schemaVersion", "stages", "unverified"],
       "nested": {
-        "backend": ["available", "installRequired", "missingRequired", "optionalMissing", "reason"]
+        "backend": ["available", "installRequired", "missingRequired", "optionalMissing", "reason"],
+        "devicePolicy": ["default", "hardUsedRatio", "headroomGiB", "highUsedRatio", "judgedOn",
+                         "minSplitFreeGiB", "needGiB", "policies", "rules"]
       }
     },
     "plan": {
       "top": ["apiVersion", "components", "modelsDir", "ready", "residency", "schemaVersion", "stage"],
       "nested": {
         "components[]": ["blockCount", "blockHead", "computeDtype", "dequantPlan", "dtypeClasses",
-                         "gib", "key", "loadMode", "name", "path", "present", "problems",
-                         "quantScheme", "readSecondsEstimate", "role", "tensorCount", "verified",
-                         "warnings"],
+                        "gib", "key", "loadMode", "name", "path", "present", "problems",
+                        "quantScheme", "readSecondsEstimate", "required", "role", "tensorCount",
+                        "verified", "warnings"],
         "residency": ["capacityGiB", "fits", "missing", "note", "peakResidentGiB", "steps", "strategy"]
       }
     },

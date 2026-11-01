@@ -253,6 +253,89 @@ def case_assembly_keys() -> None:
           "（同 `audioLatentMode` 那条口径 ✓）",
           isinstance(bad, pipe_mod.StageError), repr(bad)[:120])
 
+    #: ⭐ **卡 + CPU 联合跑**（2026-10-31 ✓，⑪′ 那条"少抄一项就静默失效"的镜像用例 ✓）：
+    #: 取值清单只有 `residency.MODES` 一份 ✓ ⇒ 这里判的是"搬得过去 + 不认的当场报"✓，
+    #: 不在这里抄第二份清单 ✗（抄一份 = 下次加模式又漏一处 ✓✗）。
+    res_split = engine_router._assembly_from({"residency": "SPLIT"})  # noqa: SLF001
+    res_park = engine_router._assembly_from({"residency": "park"})  # noqa: SLF001
+    res_off = engine_router._assembly_from({"residency": "off"})  # noqa: SLF001
+    res_absent = engine_router._assembly_from({})  # noqa: SLF001
+    budget_camel = engine_router._assembly_from(  # noqa: SLF001
+        {"residency": "split", "residencyBudgetMib": 4096})
+    budget_snake = engine_router._assembly_from(  # noqa: SLF001
+        {"residency": "split", "residency_budget_mib": "2048"})
+    check("⑪⁷ ⭐ `residency` 透到 `ensure_loaded` ✓（大小写归一 ✓）；不给 ⇒ **键不出现** ✓"
+          "（走签名默认 off ✓）；预算两种写法都收 ✓ 且转成 float ✓（`\"2048\"` 不许原样透传 ✗）",
+          res_split.get("residency") == "split" and res_park.get("residency") == "park"
+          and res_off.get("residency") == "off" and "residency" not in res_absent
+          and budget_camel.get("residency_budget_mib") == 4096.0
+          and budget_snake.get("residency_budget_mib") == 2048.0,
+          {"split": res_split, "off": res_off, "absent": res_absent,
+           "camel": budget_camel, "snake": budget_snake})
+
+    bad_res: Exception | None = None
+    try:
+        engine_router._assembly_from({"residency": "half"})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        bad_res = err
+    check("⑪⁸ ⚠️ `residency` 给了不认识的值 ⇒ 当场 400 ✓（静默当成 off = 用户以为在联合跑、"
+          "实际整份在内存里爬 ✓✗）", isinstance(bad_res, pipe_mod.StageError), repr(bad_res)[:120])
+
+    lone_budget: Exception | None = None
+    try:
+        engine_router._assembly_from({"residencyBudgetMib": 4096})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        lone_budget = err
+    neg_budget: Exception | None = None
+    try:
+        engine_router._assembly_from({"residency": "split", "residencyBudgetMib": -1})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        neg_budget = err
+    check("⑪⁹ ⚠️ 只给预算不给模式 ⇒ 当场 400 ✓（预算会被 `off` 吞掉 ⇒「配了没生效」✓✗）；"
+          "负预算也拒 ✓（那是让整份退回 CPU 的假配置 ✓✗）",
+          isinstance(lone_budget, pipe_mod.StageError)
+          and isinstance(neg_budget, pipe_mod.StageError),
+          (repr(lone_budget)[:120], repr(neg_budget)[:120]))
+
+    #: ⭐ **设备策略**（2026-10-31 ✓）：三种写法都收 ✓、别名归一 ✓、拼错当场 400 ✓。
+    #: ⚠️ 拼错这一路是本轮修的真缺陷 ✗✗：归一原先只在 `ensure_loaded` 里做 ✓，抛的是
+    #: `ValueError` ✓，而 `/load` 只接 `EngineBusy` / `TorchBackendUnavailable` ⇒ **500** ✓✗
+    #: ——用户看到「服务器错误」，不知道自己只是把 `balanced` 拼错了 ✓✗。
+    pol_camel = engine_router._assembly_from({"devicePolicy": "GPU-FIRST"})  # noqa: SLF001
+    pol_snake = engine_router._assembly_from({"device_policy": "joint"})  # noqa: SLF001
+    pol_alias = engine_router._assembly_from({"policy": "cuda"})  # noqa: SLF001
+    pol_absent = engine_router._assembly_from({})  # noqa: SLF001
+    check("⑪¹⁰ ⭐ `policy` 三种写法都透到 `ensure_loaded` ✓、别名归一成四档之一 ✓；"
+          "不给 ⇒ **键不出现** ✓（走签名默认 auto ✓，不是塞一个 auto 进去 ✓）",
+          pol_camel.get("policy") == "auto" and pol_snake.get("policy") == "balanced"
+          and pol_alias.get("policy") == "gpu" and "policy" not in pol_absent,
+          {"camel": pol_camel, "snake": pol_snake, "alias": pol_alias, "absent": pol_absent})
+
+    bad_policy: Exception | None = None
+    try:
+        #: ⚠️ 用**真拼错**的字面量 ✓✗：`balance` 是 `balanced` 的合法别名 ✓，拿它测等于没测 ✓✗
+        #: （第一版就是这么写的 ✓ —— 判据绿了，但它测的是"别名能用"，不是"拼错要报"✓）。
+        engine_router._assembly_from({"policy": "balenced"})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        bad_policy = err
+    except Exception as err:  # noqa: BLE001 —— 漏成 500 的那条路要能被抓到 ✓
+        bad_policy = err
+    check("⑪¹¹ ⚠️ 拼错策略名 ⇒ **400（`StageError`）** ✓✗，不是 500 ✓"
+          "（`normalize_policy` 抛 `ValueError` ⇒ 漏出去就是「服务器错误」✓✗）；"
+          "且**不许**静默回落 auto ✗（回落＝「以为钉了 gpu、其实被挪去 CPU」✓✗）",
+          isinstance(bad_policy, pipe_mod.StageError), repr(bad_policy)[:160])
+
+    #: ⚠️ `/load` 的说明**必须把四档与两格回执写出来** ✗✗：这段是 API 唯一的口径来源 ✓ ——
+    #: 只写「装齐引擎」时，前端与人都不知道有 `policy` 可传 ✓，也不知道该读
+    #: `chainDevicePolicy` 才能回答「为什么这次整条链在 CPU」✓✗（只看 `device` 会把一次
+    #: 降级读成能力缺失 ✓✗）。这条判据盯的是**字面量**，不是文风 ✓。
+    doc = engine_router.load_runtime.__doc__ or ""
+    check("⑪¹² `/load` 的文档写全四档策略 + 两格回执 ✓✗（文档不写＝这个开关等于不存在 ✓）",
+          all(word in doc for word in ("auto", "gpu", "cpu", "balanced"))
+          and "chainDevicePolicy" in doc and "devicePolicy" in doc,
+          [word for word in ("auto", "gpu", "cpu", "balanced",
+                             "chainDevicePolicy", "devicePolicy") if word not in doc])
+
     flag_bad: Exception | None = None
     try:
         engine_router._flag({"force": "maybe"}, "force")  # noqa: SLF001
@@ -392,4 +475,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

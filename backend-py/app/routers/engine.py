@@ -30,6 +30,7 @@ SD WebUI / Ollama** ✓、不起任何子进程 ✓；但它**同样**标 ``synt
 from __future__ import annotations
 
 import asyncio
+import math
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +41,13 @@ from ..core.response import bad_request, success
 from ..core.request_utils import read_json
 from ..services.engine import bridge
 from ..services.engine import conditioning
+from ..services.engine import device_policy as policy_mod
 from ..services.engine import facade
 from ..services.engine import guidance
 from ..services.engine import hybrid_load
 from ..services.engine import inventory as inv
 from ..services.engine import loader
+from ..services.engine import residency as residency_mod
 from ..services.engine import runtime
 from ..services.engine import upscale as upscaler
 from ..services.engine import pipeline as pipe
@@ -497,12 +500,26 @@ _ASSEMBLY_KEYS: dict[str, str] = {
     "realVideoVae": "real_video_vae", "real_video_vae": "real_video_vae",
     "videoVaeDevice": "video_vae_device", "video_vae_device": "video_vae_device",
     "videoVaeWeights": "video_vae_weights", "video_vae_weights": "video_vae_weights",
+    # ⭐ Z-Image 那两格 ✓（2026-10-31 ✓）：`stage=zimage` 要**三份权重** ✓ —— DiT 走 `ditPath` ✓，
+    #    另两份在这里 ✓。⚠️ 不加进这张表 ⇒ 传了也被**静默丢掉** ✓✗，然后装配报「缺 textWeights」✓✗
+    #    —— 用户明明给了，报错却说没给（正是 2026-10-29 `int8_offload` 那次漂移的同款 ✓）。
+    "textWeights": "text_weights", "text_weights": "text_weights",
+    "imageVaeWeights": "image_vae_weights", "image_vae_weights": "image_vae_weights",
     # ⚠️ `int8_offload` **必须在这张表里** ✗✗（2026-10-29 补 ✓）：`bridge.assembly_from_config`
     #    早就认它 ✓，这张表却没有 ⇒ 同一个开关在两条路上**行为不同** ✓✗ ——
     #    走出图服务的 config ⇒ 生效 ✓；走 `POST /engine/load` ⇒ 被白名单**静默丢掉** ✓✗
     #    （用户以为开了，报告里也不说没收到 ⇒ 在 720×1280 上照样 OOM 且找不到原因 ✓✗）。
     #    白名单是**逐项手抄**的 ✓ ⇒ 这种漂移只能靠判据盯（见 `engine_router_contract_test` ⑪′ ✓）。
     "int8Offload": "int8_offload", "int8_offload": "int8_offload",
+    # ⭐ **卡 + CPU 联合跑** ✓（2026-10-31 加 ✓ —— 上一条注释说的"漂移"正是这次要避的 ✓）：
+    #    取值清单在 `residency.MODES` ✓，这里**只搬不改** ✗，校验在下面对 `residency` 那段 ✓。
+    "residency": "residency",
+    "residencyBudgetMib": "residency_budget_mib", "residency_budget_mib": "residency_budget_mib",
+    # ⭐ **设备策略** ✓（2026-10-31 加 ✓）：`auto`（默认，GPU 优先、压力大才转移）/ `gpu` / `cpu`
+    #    / `balanced` ✓ —— 合法清单在 `device_policy.POLICIES` ✓，归一与校验都交给
+    #    `normalize_policy` ✓（在下面 `_assembly_from` 里**调一次** ✓✗，白名单**只搬不改** ✗
+    #    —— 否则同一份合法值又在这里手抄一遍 ✓✗）。
+    "policy": "policy", "devicePolicy": "policy", "device_policy": "policy",
     # ⚠️ `loras`（2026-10-29 收 ✓）：以前**故意不收** ✗（裸透传会跳过归一 ✗），改成
     #    **收下来再走同一份归一** ✓ —— `bridge.lora_specs_from_settings` ✓（跟 config 那条路
     #    是**同一个函数** ✓，不在这里手抄 ✗✗）。两种写法都收：`loras`（清单）/ `lora`（单条）。
@@ -559,9 +576,49 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
             continue
         values[target] = body[source]
     for key in ("dit_path", "tokenizer_path", "device", "stage",
-                "video_vae_device", "video_vae_weights"):
+                "video_vae_device", "video_vae_weights",
+                "text_weights", "image_vae_weights"):
         if key in values:
             values[key] = str(values[key])
+    if "residency" in values:
+        mode = str(values["residency"]).strip().lower()
+        # ⚠️ 不认的取值**当场报** ✗✗（静默当成 ``off`` ⇒ 用户以为开了联合驻留、实际整份在内存里爬 ✓✗）
+        if mode not in residency_mod.MODES:
+            raise pipe.StageError(
+                "plan", f"未知 residency {mode!r} ✗ ⇒ 只能是 {' / '.join(residency_mod.MODES)} ✓"
+                        "（`split` 卡上算前缀 / `park` 权重留内存逐层搬 / `off` 不切 ✓）")
+        values["residency"] = mode
+    if "residency_budget_mib" in values:
+        raw = values["residency_budget_mib"]
+        try:
+            mib = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise pipe.StageError(
+                "plan", f"residencyBudgetMib 只认数字（MiB）✗，收到 {raw!r} ✗") from exc
+        # ⚠️ 负预算 = 让整份退回 CPU 的**假配置** ✗（报告里会被判"没联合"✓✗）⇒ 直接报 ✗
+        if not math.isfinite(mib) or mib < 0:
+            raise pipe.StageError(
+                "plan", f"residencyBudgetMib 只认 ≥0 的有限数 ✗，收到 {raw!r} ✗"
+                        "（不想设预算就**别写这一项** ✓ —— 装载时按当时空闲显存现算 ✓）")
+        values["residency_budget_mib"] = mib
+        # ⚠️ **只给预算、不给模式** ⇒ 当场报 ✗✗：预算只在 `residency` 开着时才有意义 ✓ ——
+        #    收下它再让 `off` 吞掉，用户会以为"预算都给了、肯定在切" ✓✗（正是"配了没生效"那种坑 ✓）。
+        if str(values.get("residency") or "off") == "off":
+            raise pipe.StageError(
+                "plan", "给了 `residencyBudgetMib` 但 **`residency` 没开** ✗ ⇒ 预算无处可用 ✓"
+                        "（要联合跑就同时给 `residency: split` 或 `park` ✓）")
+    if "policy" in values:
+        # ⚠️ 在这里就归一 ✗✗（**不**留到 `ensure_loaded` ✓）：拼错要 **400**、不是 **500** ✓ ——
+        #    `normalize_policy` 抛的是 `ValueError` ✓，而 `/load` 只接 `EngineBusy` /
+        #    `TorchBackendUnavailable` ⇒ 漏出去就是 500 ✓✗，用户看到「服务器错误」，
+        #    根本不知道自己只是把 `balanced` 拼成了一个别的词 ✓✗（`residency` /
+        #    `audioLatentMode` 那两处早就是当场 400 ✓ —— 同一份口径不能只做一半 ✗）。
+        #    ⚠️ 归一仍调**同一个函数** ✓（`device_policy.normalize_policy` ✓）⇒ 别名表
+        #    （`gpu-first` / `cuda` / `joint` … ✓）只有一份 ✓，不在这里手抄 ✗。
+        try:
+            values["policy"] = policy_mod.normalize_policy(values["policy"])
+        except ValueError as err:
+            raise pipe.StageError("load", str(err)) from err
     if "audio_latent_mode" in values:
         mode = str(values["audio_latent_mode"]).strip()
         # ⚠️ 不认的口径**必须报错** ✗（静默当成单流 = 用户以为双流开着 ✓✗）
@@ -621,6 +678,31 @@ async def load_runtime(request: Request) -> Any:
     ⚠️ 装载是**阻塞**的 ✗（19.53 GiB 光读盘就很久 ✓）⇒ 用 ``to_thread`` 扔出事件循环 ✓✗
     （**不**在事件循环里直接调 ✓：那会把整个后端卡死 ✓✗ —— 本模块第一条纪律 ✓）。
     装不上 ⇒ **400 + 缺什么** ✓（``reason``: ``deps`` 依赖没装 / ``pending`` 权重或结构没到 ✓）。
+
+    ## 设备策略 ``policy`` ✓（2026-10-31 ✓，不写默认走 ``auto`` ✓）
+
+    「谁跑在哪台设备上」**每次装载前现测** ✓，不是构造时定死的开关 ✓✗。四种取值：
+
+    * ``auto``（**默认** ✓）—— GPU 优先 ✓，装了才看卡上有多满：够 ⇒ 上卡 ✓；
+      差一点 ⇒ 上卡 + ``residency=split``（GPU/CPU **联合** ✓）；差太多 ⇒ 整件转 CPU ✓（慢，但不失败 ✓）；
+    * ``gpu`` —— 钉住上卡 ✓（装不下就 OOM ✓✗，**不替你降级** ✗：这是调用方的决定 ✓）；
+    * ``cpu`` —— 钉住内存 ✓（fp32 ✓，慢但稳 ✓）；
+    * ``balanced`` —— 余量足时**主动**摊开 ✓（省显存换一点速度 ✓）。
+
+    三种写法都收 ✓：``policy`` / ``devicePolicy`` / ``device_policy``（取第一个非空的 ✓）。
+    别名也认（``gpu-first`` ⇒ ``auto`` ✓、``cuda`` ⇒ ``gpu`` ✓、``joint`` ⇒ ``balanced`` ✓）。
+    ⚠️ 拼错**当场 400** ✓✗（不静默回落 ``auto`` ✗ —— 回落的后果是「你以为钉了 gpu、其实被挪去 CPU」✓✗）。
+    ⚠️ 同时给了显式 ``device`` ⇒ **以 device 为准、策略不动它** ✗（钉死的设备是调用方的决定 ✓）；
+    此时 ``policy`` 只影响**后续阶段**（``enter_phase`` 换装时）✓。
+
+    ## 回执里怎么读「为什么在这台设备上」✓
+
+    * ``loadReport.devicePolicy`` —— 这台后端**现在**的策略实况 ✓（``policy`` / ``pressure``
+      当时的卡况 ✓ / ``partNeedGiB`` 分时账 ✓ / ``lastDecision`` 最近一次判定 ✓）；
+    * ``loadReport.chainDevicePolicy`` —— **这次装配之前**按整链账判的那一次 ✓（``null`` ＝ 没判 ✓，
+      比如显式给了 ``device`` ✓）。两者答的是不同问题 ✓✗：前者答"现在什么状态"，
+      后者答"这次为什么整条链落在 CPU 上" ✓（只看 ``device`` 会把一次降级读成能力缺失 ✓✗）；
+    * ``runtime.devicePolicy`` —— 同上那份实况 ✓（前端轮询 ``GET /engine/runtime`` 时读它 ✓）。
     """
     body = await read_json(request)
     try:

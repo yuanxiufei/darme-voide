@@ -423,6 +423,165 @@ def case_half_load() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ②c′ 装载账三格：**只许两个助手改** ✓✗（2026-10-31 收口 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+#: 装载账的三格 ✓（`_backend` / `_loadKeyTuple` / `_loadReport`）—— 少一格就静默坏 ✓✗：
+#: 漏 key ⇒ 每次调用**白装一遍**（Z-Image 40 秒／19 GiB）；漏 report ⇒ `/load` 回执空 ✓✗；
+#: 清空时只清 `_backend` ⇒ 回执答的是**已经不存在的模型** ✓✗（SDXL 那条线的历史原样 ✓）。
+_LEDGER_LINES = ("self._backend =", "self._loadKeyTuple =", "self._loadReport =")
+_LEDGER_KEEPERS = frozenset({"__init__", "_reset_loaded", "_commit_load", "unload"})
+
+
+def _method_bodies(src: str) -> dict[str, str]:
+    """把类源码按 4 空格缩进的 ``def`` 切成 ``{方法名: 该方法的源码}`` ✓。"""
+    import re as _re  # noqa: PLC0415
+
+    bodies: dict[str, str] = {}
+    name: str | None = None
+    buf: list[str] = []
+    for line in src.splitlines():
+        hit = _re.match(r"    def (\w+)\(", line)
+        if hit:
+            if name:
+                bodies[name] = "\n".join(buf)
+            name, buf = hit.group(1), [line]
+        elif name is not None:
+            buf.append(line)
+    if name:
+        bodies[name] = "\n".join(buf)
+    return bodies
+
+
+def _ledger_offenders(src: str) -> list[tuple[str, str]]:
+    """哪些方法在**自己**改那三格 ✓✗（白名单见 :data:`_LEDGER_KEEPERS` ✓）。"""
+    found: list[tuple[str, str]] = []
+    for name, body in _method_bodies(src).items():
+        if name in _LEDGER_KEEPERS:
+            continue
+        for line in body.splitlines():
+            if any(key in line for key in _LEDGER_LINES):
+                found.append((name, line.strip()))
+    return found
+
+
+def case_load_ledger() -> None:
+    """⚠️ 装载账三格必须只能由 ``_reset_loaded`` / ``_commit_load`` 改 ✓✗。
+
+    收口前这五行 ``with self._lock:`` 在**四条装配线**里逐字抄了四遍 ✓✗，且 SDXL 那条
+    清空时**只抄了一格** ✓✗ —— 装失败之后回执还在讲上一个模型 ✓。它的坏处正是"不报错"：
+    `reused` 判据同时看 `_backend is not None` ✓ ⇒ 假复用不会发生，所以这个错**永远不会自己暴露** ✓✗。
+    """
+    from app.services.engine import runtime as runtime_mod  # noqa: PLC0415
+
+    # ① 自检：扫描器必须先**抓得住**历史那行坏写法，否则下面那条就是永绿的摆设 ✓✗
+    bad_sample = (
+        "class Fake:\n"
+        "    def _ensure_image_loaded(self, device):\n"
+        "        with self._lock:\n"
+        "            previous = self._backend\n"
+        "            self._backend = None\n"
+        "        del previous\n"
+        "        return previous\n"
+        "    def _commit_load(self, key, backend, report):\n"
+        "        with self._lock:\n"
+        "            self._backend = backend\n"
+        "            self._loadKeyTuple = key\n"
+        "            self._loadReport = report\n"
+    )
+    sample_hits = _ledger_offenders(bad_sample)
+    check("②c′ 自检: 扫描器抓得住「只清 `_backend`、漏清另两格」的历史写法 ✓✗，"
+          "且**放行** `_commit_load` 里的三行 ✓（不验 ⇒ 这条判据可能永绿 ✓✗）",
+          [name for name, _ in sample_hits] == ["_ensure_image_loaded"], sample_hits)
+
+    # ② 真源码：四条装配线自己不许再写那三行 ✓
+    src = inspect.getsource(runtime_mod.EngineRuntime)
+    offenders = _ledger_offenders(src)
+    check("②c′ 装载账: 装配线**不再各抄一遍**三格（只许 `_reset_loaded` / `_commit_load` 改 ✓✗）",
+          offenders == [], offenders)
+
+    # ③ **五条**装配线都要报 `replaced` ✓（SDXL 原来漏报 ⇒ 换装看不出来 ✓✗；
+    #    2026-10-31 加 `qwen_image` 后 4 → 5 ✓ —— 这条判据**本来就该跟着条数走** ✓✗：
+    #    它数的是"有多少条线记得报" ✓，写死 4 会让新增的那条线**漏报也过** ✓✗）。
+    #    ⚠️ 认**代码形态** ``"replaced": had_previous`` ✓ 而不是裸键名 ✗：文档里也写着
+    #    ``report["replaced"]`` ✓ ⇒ 数裸键名会得多一个、判据变成"6 才算对"那种莫名数字 ✓✗。
+    assembly_lines = ("_ensure_loaded_internal", "_ensure_image_loaded", "_ensure_zimage_loaded",
+                      "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded")
+    replaced_hits = src.count('"replaced": had_previous')
+    check("②c′ 报告: 五条装配线**都**报 `replaced` ✓（漏一条 ⇒ 那条线的换装看不见 ✓✗）",
+          replaced_hits == 5, replaced_hits)
+
+    # ③b 缺格收集也一样 ✓✗：两条装配线各抄过 23 行「missing.append + if missing: raise」✓，
+    #     而这段的**纪律**是"首行只列真缺的那几格" ✓（测试也只读首行 ✓）⇒ 必须只有一份实现 ✓
+    bodies = _method_bodies(src)
+    slot_users = ("_ensure_zimage_loaded", "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded")
+    slot_copies = [(name, line.strip())
+                   for name in slot_users
+                   for line in bodies.get(name, "").splitlines() if "missing.append(" in line]
+    check("②c′ 缺格: 三条装配线不再各抄一遍「收集 + 首行只列真缺」（只许 `_require_slots` ✓✗）",
+          slot_copies == [], slot_copies)
+    slot_callers = [name for name in slot_users if "_require_slots(" in bodies.get(name, "")]
+    check("②c′ 缺格: 三条装配线**都真调** `_require_slots` ✓"
+          "（上一条只查'不再手抄' ⇒ 把这段整段删掉也能过 ✓✗）",
+          slot_callers == list(slot_users), slot_callers)
+    check("②c′ 覆盖面: 这份测试点名的装配线**与实现里的条数一致** ✓✗"
+          "（漏一条 ⇒ 新增那条线的 `replaced`/缺格/收尾三条约束全都没被查 ✓✗）",
+          all(f"def {name}(" in src for name in assembly_lines), assembly_lines)
+
+    # ③c 失败收尾也一样 ✓✗：`del backend` + 还缓存 + **保住 reason** 三件事 ✓
+    #     其中 SDXL 那条原来只有一段 `except BaseException` ✓✗ ⇒ 内部的 reason="deps" 被重包成
+    #     "pending" ✓（缺依赖被报成"权重没就绪" ⇒ 照文档去补权重白忙 ✓✗，比不报更贵 ✓）
+    del_copies = [(name, line.strip()) for name, body in bodies.items()
+                  for line in body.splitlines() if line.strip() == "del backend"]
+    check("②c′ 失败收尾: `del backend` 只许出现在 `_abandon_assembly` 里"
+          "（装配线不再各抄一遍 ✓✗；漏这一句 ⇒ 半装的后端还挂在 traceback 上 ✓）",
+          del_copies == [], del_copies)
+
+    try:
+        runtime_mod._abandon_assembly(  # noqa: SLF001
+            object(), TorchBackendUnavailable("缺 torch", reason="deps"))
+    except TorchBackendUnavailable as err:
+        raised: Any = err
+    else:
+        raised = None
+    check('②c′ 失败收尾: `reason="deps"` **原样**传出 ✓✗'
+          "（SDXL 原来重包成 pending ⇒ 用户去补权重、而真正缺的是依赖 ✓✗）",
+          raised is not None and getattr(raised, "reason", None) == "deps"
+          and "缺 torch" in str(raised), getattr(raised, "reason", None))
+
+    try:
+        runtime_mod._abandon_assembly(object(), ValueError("boom"), what="SDXL")  # noqa: SLF001
+    except TorchBackendUnavailable as err:
+        raised = err
+    else:
+        raised = None
+    check("②c′ 失败收尾: 普通异常 ⇒ 「SDXL 装配失败：ValueError: boom」＋ reason=pending ✓"
+          "（前缀丢了 ⇒ 四条线的报错分不出是谁装的 ✓✗）",
+          raised is not None and getattr(raised, "reason", None) == "pending"
+          and str(raised) == "SDXL 装配失败：ValueError: boom", str(raised))
+
+    # ④ 行为：复位真清三格、提交真写三格 ✓（不依赖 torch ✓）
+    rt = runtime_mod.EngineRuntime()
+    rt._backend = "OLD"                      # noqa: SLF001 —— 白盒：就为验"清了几格" ✓
+    rt._loadKeyTuple = ("old",)              # noqa: SLF001
+    rt._loadReport = {"stage": "old"}         # noqa: SLF001
+    had = rt._reset_loaded()
+    check("②c′ 复位: 三格**一起**清 且答出「原来有装」✓",
+          had is True and rt._backend is None and rt._loadKeyTuple is None
+          and rt._loadReport is None,
+          {"had": had, "backend": rt._backend, "key": rt._loadKeyTuple,
+           "report": rt._loadReport})
+    check("②c′ 复位: 空转时答 False ✓（否则 `replaced` 会对着空气报 true ✓✗）",
+          rt._reset_loaded() is False)
+
+    rt._commit_load(("k",), "NEW", {"stage": "new"})  # noqa: SLF001
+    check("②c′ 提交: 一次写满三格 ✓（少一格 ⇒ 白装一遍或回执空 ✓✗）",
+          rt._backend == "NEW" and rt._loadKeyTuple == ("k",)
+          and rt._loadReport == {"stage": "new"},
+          {"backend": rt._backend, "key": rt._loadKeyTuple, "report": rt._loadReport})
+    rt._reset_loaded()                       # noqa: SLF001 —— 别把假账留给后面的用例 ✓
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ②d 装配量计：**这一程**复用 / 真装 / 丢弃各几次 ✓（E3.4 ✓）
 # ══════════════════════════════════════════════════════════════════════════
 def case_cache_meter() -> None:
@@ -657,9 +816,15 @@ def case_reclaim() -> None:
         check("回收: 有卡 ⇒ released=True 且还回的量**非负**",
               report.get("released") is True and float(report.get("reclaimedGiB", -1)) >= 0,
               report)
-        check("回收: 还完的账**只减不增**（reserved 不涨 / free 不降）",
+        #: ⚠️ `freeGiB` 是**整张卡**的读数 ✓✗（含别的进程 ✓）⇒ 严格「一点不降」在多进程机器上
+        #: 本来就站不住 ✓✗（2026-10-31 实测：本进程 `memory_allocated` 前后完全一致 ✓、
+        #: `reserved` 也没涨 ✓，但 free 被外部占了 10 MiB ⇒ 原式判负 ✗）。
+        #: 能钉的是两条 ✓：**reserved 不涨** ✓ ＋ **free 抖动在 256 MiB 内** ✓；
+        #: 「一点没动」由下面那条 `memory_allocated` 前后相等来钉 ✓✗（那才是本进程自己的账 ✓）。
+        FREE_JITTER_GIB = 0.25
+        check("回收: 还完的账**只减不增**（reserved 不涨 / free 不降，容外部进程 256 MiB 抖动）",
               float(report.get("reservedGiB") or 0) <= float(before["reservedGiB"]) + 1e-6
-              and float(report.get("freeGiB") or 0) >= float(before["freeGiB"]) - 1e-6,
+              and float(report.get("freeGiB") or 0) >= float(before["freeGiB"]) - FREE_JITTER_GIB,
               (before, report))
     check("⭐ 回收 **≠** 卸载: 在用的张量**一点没动**（memory_allocated 前后必须一致）",
           allocated_after == allocated_before, (allocated_before, allocated_after))
@@ -702,6 +867,7 @@ def main() -> int:
     case_missing_weights(tmp)
     case_replace_order()
     case_half_load()
+    case_load_ledger()
     case_cache_meter()
     if not _have_torch():
         skip("缺 torch ⇒ 真装载 / 真产物 / 真卸载 跳过 ✓")

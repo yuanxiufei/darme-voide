@@ -499,6 +499,54 @@ def case_switch() -> None:
           ([a.get("int8_offload") for a in loose], on.get("int8_offload")))
 
 
+def case_frozen() -> None:
+    """⑨ 一族：**推理不许建图** ✓✗（2026-11-01 端到端实测 83.7 GiB 的那个根因 ✓）。
+
+    这条与 int8 常驻是同一件事的两面 ✓：``Int8Linear.forward`` 每层现反量化的 bf16 权重是
+    **局部变量** ✓ —— 正常情况下 `forward` 一返回就释放 ✓；一旦 autograd 建了图，它就被
+    ``AddmmBackward`` 当 saved tensor 吊住 ✓✗（探针实测：378 次反量化里 28 个副本一直活着 ✓，
+    累计 37.18 GiB ✓）。而建图的开关就是**骨架里 norm 权重的 `requires_grad`** ✓（默认 True ✓）。
+    """
+    import torch  # noqa: PLC0415
+    from torch import nn  # noqa: PLC0415
+
+    from app.services.engine import h3_form, torch_backend  # noqa: PLC0415
+
+    #: ⚠️ 取积木走**模块级懒加载** ✓（`h3_form.RMSNorm` ✓ —— 模块 `__getattr__` 已登记 ✓），
+    #:    别再套一层"先建 dict 再取键"✗（那样拿反了 `_build_torch_parts()` 的返回值 ✓ 会 `TypeError` ✓）。
+    fresh = h3_form.RMSNorm(8)
+    check("⑨ ⭐ 骨架的 norm 权重**默认取梯度** ✓（`nn.Parameter(torch.ones(dim))` 不写 False ✓ —— "
+          "这就是整条采样在**建图**的根因 ✓，不是「某个模块写错」✗）",
+          fresh.weight.requires_grad is True, fresh.weight.requires_grad)
+
+    sample = torch.randn(2, 8)
+    before = fresh(sample).requires_grad
+    frozen = torch_backend._freeze_inference(fresh)
+    after = fresh(sample).requires_grad
+    check("⑨′ ⭐⭐ 冻**之前**前向带梯度 ✓（⇒ 每个中间激活都被钉住 ✓✗）、冻**之后**不带 ✓（图建不起来 ✓）"
+          "—— 并且 `_freeze_inference` 报出冻了几个 ✓（1 ✓）",
+          before is True and after is False and frozen == 1,
+          (before, after, frozen))
+
+    #: ⚠️ 已经是不取梯度的参数**不重复冻** ✓（`Int8Linear` 的 weight/bias 建时就写了 False ✓）——
+    #: 计数要是把"本来就是 False"的也算进去，报告上就分不清"真冻了几个" ✓✗
+    layer = h3_form.Int8Linear(8, 4)
+    check("⑨″ `Int8Linear` 建时就不取梯度 ⇒ 再冻一次**计数为 0** ✓（不误计 ✓）",
+          torch_backend._freeze_inference(layer) == 0)
+
+    #: ⚠️ **挂完 LoRA 要再冻一次** ✓✗：LoRA 的 A/B 是挂载那一刻才建出来的 ✓、默认取梯度 ✓ ⇒
+    #: 只冻底模 = LoRA 那几层照样把整张图吊起来 ✓（症状与"完全不冻"一模一样 ✓✗）。
+    holder = nn.Sequential(nn.Linear(4, 4))
+    torch_backend._freeze_inference(holder)
+    holder[0].weight.requires_grad_(True)          # 模拟"挂完 LoRA 又多出来的取梯度参数" ✓
+    again = torch_backend._freeze_inference(holder)
+    check("⑨‴ 挂 LoRA 之后再冻一次 ⇒ **新参数也收掉** ✓ 且计数只报新冻的那一个 ✓",
+          again == 1 and not any(p.requires_grad for p in holder.parameters()), again)
+
+    check("⑨⁗ `_freeze_inference(None)` 返回 0 ✓（没模型可冻不算失败 ✓）",
+          torch_backend._freeze_inference(None) == 0)
+
+
 def main() -> int:
     skips = _skips()
     if skips:
@@ -511,6 +559,7 @@ def main() -> int:
         case_peak()
         case_int8_ledger()
         case_switch()
+        case_frozen()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             case_resident_load(root)

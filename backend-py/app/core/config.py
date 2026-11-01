@@ -44,11 +44,12 @@ CONFIG_PATH = Path(os.environ["CONFIG_PATH"]) if os.environ.get("CONFIG_PATH") e
 def skills_dir() -> Path:
     """技能库目录（``backend-py/app/skills``）—— **唯一权威**；``SKILLS_DIR`` 环境变量可覆盖（测试隔离用）。
 
-    ⚠️ 2026-09-15 收口：此前这个路径在**三处**各写一遍（``services/skills.py`` 的常量、
-    ``services/agents/skills.py`` 的 ``skills_dir()``、``scripts/check_skill_refs.py`` 的常量），
+    ⚠️ 2026-09-15 收口：此前这个路径在**三处**各写一遍（services 侧 skills 扫描模块的常量
+    —— 该模块已于 2026-10-30 删除、``app/agent/skills.py`` 的 ``skills_dir()``、
+    ``app/scripts/check_skill_refs.py`` 的常量），
     并靠注释互相提醒「必须一致」✗ —— 那是「搬库漏改一处**不会报错**、只是静默读不到技能」的坑。
-    现在前两处都从这里取；``scripts/`` 那份**刻意保留**独立实现（scripts 不 import ``app.*``，
-    见 ``scripts/README.md`` 的依赖约定），由守卫自检对齐。
+    现在运行链与 HTTP 层都从这里取；``app/scripts/`` 那份**刻意保留**独立实现（脚本不 import ``app.*``，
+    见 ``app/scripts/README.md`` 的依赖约定），由守卫自检对齐。
 
     与 ``PROJECT_ROOT`` 的区别：技能库在 **`app/` 内**（``backend-py/app/skills/``），故这里从
     **本文件位置**推导（``app/core/config.py`` 上跳两级 = ``backend-py``），与 ``process.cwd()`` 解耦。

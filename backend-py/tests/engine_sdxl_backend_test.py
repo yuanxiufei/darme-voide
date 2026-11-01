@@ -437,6 +437,292 @@ def case_dtype_policy() -> None:
           mod.SdxlBackend(device="cuda").describe().get("dtypes"))
 
 
+def _write_lora(path: Path, tensors: dict[str, tuple[tuple[int, ...], list[float]]]) -> None:
+    """造一个**最小** LoRA safetensors ✓（全 F32 ✓）—— 只为喂 ``read_tensors``/``parse_lora`` ✓。"""
+    import json  # noqa: PLC0415 —— 只在造夹具时用 ✓
+    import struct  # noqa: PLC0415
+
+    header: dict[str, object] = {}
+    blobs: list[bytes] = []
+    offset = 0
+    for name, (shape, values) in tensors.items():
+        payload = struct.pack(f"<{len(values)}f", *values)
+        header[name] = {"dtype": "F32", "shape": list(shape),
+                        "data_offsets": [offset, offset + len(payload)]}
+        blobs.append(payload)
+        offset += len(payload)
+    raw = json.dumps(header, ensure_ascii=False).encode("utf-8")
+    path.write_bytes(len(raw).to_bytes(8, "little") + raw + b"".join(blobs))
+
+
+def _zero_linear(torch: object, in_features: int, out_features: int) -> object:
+    """权重**全零**的 Linear ✓ ⇒ 基座输出恒为 0 ✓，于是「输出 != 0」只可能来自 LoRA ✓。"""
+    linear = torch.nn.Linear(in_features, out_features, bias=False)
+    linear.weight.data.zero_()
+    return linear
+
+
+def _at(model: object, path: str) -> object:
+    """按 ``a.0.b`` 取子模块 ✓（``ModuleList`` 的数字段要走下标 ✓，``getattr`` 取不到 ✓）。"""
+    for part in path.split("."):
+        try:
+            model = getattr(model, part)
+        except AttributeError:
+            model = model[int(part)]
+    return model
+
+
+#: 探测层在 UNet 里的路径 ✓ —— **LDM/comfy 口径** ✓（``input_blocks`` / ``mid_block`` / ``output_blocks`` ✓）。
+#: ⚠️ 前一版拿 diffusers 的 ``down_blocks.0.attentions.0.attn1.to_q`` 做替身 ✗ —— 自研 UNet
+#: 与 sd-scripts/comfy 都是 **LDM 口径** ✓，两套命名的键**互不认** ✓✗；替身用自己的口径 ⇒
+#: 「翻译对了」只是因为替身配合它 ✓（真文件的键换成 ``lora_unet_down_blocks_…`` 在真模型上照样找不到 ✓✗）。
+_UNET_PROBE = "input_blocks.1.0.emb_layers.1"
+
+
+def _unet_stub(torch: object) -> object:
+    """``input_blocks.1.0.emb_layers.1`` ✓（真 UNet 的同名层 ✓、``lora_unet_*`` 的落点 ✓）。"""
+    unet = torch.nn.Module()
+    block = torch.nn.Module()                      # ``input_blocks.1.0`` ＝ 那个 ResBlock ✓
+    block.emb_layers = torch.nn.ModuleList([torch.nn.Identity(), _zero_linear(torch, 4, 6)])
+    unet.input_blocks = torch.nn.ModuleList([torch.nn.Identity(), torch.nn.ModuleList([block])])
+    return unet
+
+
+def _clip_stub(torch: object, *, projection: bool = False) -> object:
+    """**真的** ``ClipTextModel`` ✓（塔在 ``.transformer`` 下面、可选外层 ``text_projection`` ✓）。
+
+    ⚠️ 前一版这里拿裸 ``nn.Module`` 拼了个 ``text_model.…`` ✓ —— 假塔**没有** ``.transformer``
+    那一层 ✓，于是恰好替真模型"挡掉"了「kohya 键少一层前缀」这个错 ✓✗（**假替身比真模型宽松**，
+    是测试最容易自欺的形状之一 ✓）。现在用真类 ✓，且把探测层的权重清零 ✓（⇒ 输出 != 0 只可能
+    来自 LoRA ✓）。
+    """
+    from app.services.engine import clip_text  # noqa: PLC0415
+
+    model = clip_text.ClipTextModel(clip_text.ClipTextConfig(
+        hidden_size=4, num_hidden_layers=1, num_attention_heads=2,
+        intermediate_size=6, vocab_size=8, max_position_embeddings=4, pad_token=1,
+        projection_dim=8 if projection else 0))
+    probe = _tower_fc1(model)
+    probe.weight.data.zero_()
+    if getattr(probe, "bias", None) is not None:
+        probe.bias.data.zero_()          # ⚠️ 真 Linear 有 bias ✓；只清 weight ⇒ 底子不是 0 ✓✗
+    return model
+
+
+def _tower_fc1(model: object) -> object:
+    """文本塔里被 LoRA 改写的那层 ✓（真模型的路径：``transformer.text_model.…`` ✓）。"""
+    return model.transformer.text_model.encoder.layers[0].mlp.fc1
+
+
+def case_loras() -> None:
+    """⑧ SDXL 的 LoRA **三处分派** ✓（2026-10-31 补 ✓）。
+
+    为什么单独立一条 ✗：SD1.5/SDXL 的 LoRA **一份文件**里混着 ``lora_unet_…`` / ``lora_te1_…`` /
+    ``lora_te2_…`` 三族 ✓ —— 一把塞给 UNet ⇒ 文本塔那几十层全「找不到」✓；真挂上却**只挂一半
+    还报成功** ⇒ 图「像但不对」（提词跟随变弱、风格档不对），**全程不报错** ✓✗ ——
+    正是本仓最恨的那类静默失效 ✓。``te1`` 归 CLIP-L、``te2`` 归 CLIP-G ✓（SD1.5 只有 ``lora_te_``）。
+    """
+    if mod.torch is None:
+        skip("没装 torch ⇒ LoRA 分派不跑 ✓（**没跑 ≠ 绿** ✗）")
+        return
+    import tempfile  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    unet_key = "lora_unet_input_blocks_1_0_emb_layers_1"
+    te1_key = "lora_te1_text_model_encoder_layers_0_mlp_fc1"
+    te2_key = "lora_te2_text_model_encoder_layers_0_mlp_fc1"
+    down = ((2, 4), [1.0] * 8)                       # rank=2 ✓、in=4 ✓
+    up_one = ((6, 2), [1.0] * 12)                    # out=6 ✓ ⇒ 每个输出 = 4+4 = 8 ✓
+    up_two = ((6, 2), [2.0] * 12)                    # te2 单独用 2 ⇒ 出 16 ✓ 以便分清去了哪个塔 ✓
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        good = root / "good.safetensors"
+        _write_lora(good, {
+            f"{unet_key}.lora_A.weight": down, f"{unet_key}.lora_B.weight": up_one,
+            f"{te1_key}.lora_A.weight": down, f"{te1_key}.lora_B.weight": up_one,
+            f"{te2_key}.lora_A.weight": down, f"{te2_key}.lora_B.weight": up_two,
+        })
+
+        backend = mod.SdxlBackend(device="cpu")
+        backend._unet = _unet_stub(torch)
+        backend._clip_l = _clip_stub(torch)
+        backend._clip_g = _clip_stub(torch)
+
+        probe = torch.ones(1, 4)
+        with torch.no_grad():
+            before = (_at(backend._unet, _UNET_PROBE)(probe),
+                      _tower_fc1(backend._clip_l)(probe),
+                      _tower_fc1(backend._clip_g)(probe))
+        check("⑧ 没给 LoRA ⇒ ``_apply_loras`` 返回 ``None`` ✓（不装、也不报 ✓；"
+              "⚠️ 基座此时**全是零** ✓ ⇒ 下面「输出 != 0」只可能来自 LoRA ✓）",
+              backend._apply_loras(None) is None
+              and backend._apply_loras([]) is None
+              and all(float(t.abs().max()) == 0.0 for t in before),
+              [float(t.abs().max()) for t in before])
+
+        report = backend._apply_loras([{"path": str(good), "strength": 0.5}])
+        with torch.no_grad():
+            after = (_at(backend._unet, _UNET_PROBE)(probe),
+                     _tower_fc1(backend._clip_l)(probe),
+                     _tower_fc1(backend._clip_g)(probe))
+        check("⑧′ ⭐ **三族各回各家** ✗✗：``lora_unet_*`` ⇒ UNet ✓、``lora_te1_*`` ⇒ CLIP-L ✓、"
+              "``lora_te2_*`` ⇒ CLIP-G ✓ —— 数值也分得开：te1 的 up=1 ⇒ 4.0 ✓、te2 的 up=2 ⇒ 8.0 ✓"
+              "（两塔**接反**或**全塞给 UNet** ⇒ 这两个数就对不上 ✓✗）",
+              torch.allclose(after[0], torch.full((1, 6), 4.0), atol=1e-5)
+              and torch.allclose(after[1], torch.full((1, 6), 4.0), atol=1e-5)
+              and torch.allclose(after[2], torch.full((1, 6), 8.0), atol=1e-5),
+              [after[0][0, 0].item(), after[1][0, 0].item(), after[2][0, 0].item()])
+
+        check("⑧″ kohya 的下划线键**真被翻译**了 ✓（``translated == 3`` ✓ —— 不翻译 ⇒ "
+              "「一层都没装上」⇒ 能力等于没有 ✓✗）；报告三栏各自记了层数 ✓、强度按 0.5 用了 ✓",
+              report is not None and int(report["translated"]) == 3
+              and all(int(report[tag]["bypassed"]) == 1 for tag in ("unet", "clipL", "clipG"))
+              and report["specs"][0]["strength"] == 0.5
+              and len(report["files"]) == 1,
+              report)
+
+        #: ⚠️ **一层对不上**就必须炸 ✗✗（少挂一层 = 跑得动、出得来、不是那个档 ✓✗）。
+        partial = root / "partial.safetensors"
+        bogus = "lora_unet_down_blocks_9_attentions_9_attn1_to_q"
+        _write_lora(partial, {
+            f"{unet_key}.lora_A.weight": down, f"{unet_key}.lora_B.weight": up_one,
+            f"{bogus}.lora_A.weight": down, f"{bogus}.lora_B.weight": up_one,
+        })
+        broken = mod.SdxlBackend(device="cpu")
+        broken._unet = _unet_stub(torch)
+        broken._clip_l = _clip_stub(torch)
+        broken._clip_g = _clip_stub(torch)
+        error = _raises(lambda: broken._apply_loras([{"path": str(partial)}]), "没装全")
+        check("⑧‴ ⭐ 只对上一半 ⇒ **当场炸** ✗✗（不静默挂上半份 ✓ —— 半份 LoRA 的画面"
+              "「像但不对」，比没挂更难查 ✓）；文案要点出「有几层对不上」✓", error is not None, error)
+
+        tower_only = root / "tower_only.safetensors"
+        _write_lora(tower_only, {
+            f"{te2_key}.lora_A.weight": down, f"{te2_key}.lora_B.weight": up_two})
+        unloaded = mod.SdxlBackend(device="cpu")
+        unloaded._unet = _unet_stub(torch)
+        unloaded._clip_l = _clip_stub(torch)          # ⚠️ CLIP-G **故意不给** ✓
+        dropped = _raises(lambda: unloaded._apply_loras([{"path": str(tower_only)}]), "没装上")
+        check("⑧⁴ ⭐ 目标塔**没装上**时不许静默丢 ✗✗（``clipG`` 为 None ⇒ 那 1 层直接被跳过 ✓"
+              "＝「报成功但没挂」✓✗）—— 现在当场说清是哪一栏 ✓",
+              dropped is not None, dropped)
+
+        #: ⚠️ 塔本体挂在 ``.transformer`` 下面 ✓、``text_projection`` 在**外层** ✓ ✗✗（2026-10-31 补 ✓）。
+        #:    少一层 / 多一层前缀 ⇒ 整份 TE-LoRA 报「没装全」⇒ **SDXL 的 LoRA 支持整体不生效** ✓✗。
+        proj_key = "lora_te2_text_projection"
+        proj_down = ((2, 4), [1.0] * 8)
+        proj_up = ((8, 2), [2.0] * 16)               # out=8（projection_dim）✓ ⇒ 每个输出 8.0 ✓
+        mixed = root / "mixed.safetensors"
+        _write_lora(mixed, {
+            f"{te2_key}.lora_A.weight": down, f"{te2_key}.lora_B.weight": up_two,
+            f"{proj_key}.lora_A.weight": proj_down, f"{proj_key}.lora_B.weight": proj_up,
+        })
+        tower_backend = mod.SdxlBackend(device="cpu")
+        tower_backend._unet = _unet_stub(torch)
+        tower_backend._clip_l = _clip_stub(torch, projection=True)
+        tower_backend._clip_g = _clip_stub(torch, projection=True)
+        tower_backend._clip_g.text_projection.weight.data.zero_()
+        mixed_report = tower_backend._apply_loras([{"path": str(mixed)}])
+        with torch.no_grad():
+            tower_out = _tower_fc1(tower_backend._clip_g)(probe)
+            proj_out = tower_backend._clip_g.text_projection(probe)
+        check("⑧⁵ ⭐ kohya 键要落到**真模型路径** ✓✗：塔内层 ⇒ ``transformer.text_model.…`` ✓、"
+              "``text_projection`` ⇒ 留在**外层** ✓ —— 两处都得真被改写 ✓（这里是强度 1.0 ⇒ 16.0 ✓；"
+              "少加/多加一层前缀 ⇒ 整份 TE-LoRA 报没装全 ⇒ SDXL 的 LoRA 等于没有 ✓✗）",
+              torch.allclose(tower_out, torch.full((1, 6), 16.0), atol=1e-4)
+              and torch.allclose(proj_out, torch.full((1, 8), 16.0), atol=1e-4)
+              and int(mixed_report["translated"]) == 2,
+              (float(tower_out[0, 0]), float(proj_out[0, 0]),
+               mixed_report["clipG"]["applied"], mixed_report["translated"]))
+
+        #: ⚠️ **串塔**才是真正难查的 ✓✗（2026-10-31 补 ✓）：``text_encoders.clip_g.…`` 这种写法
+        #:    若不被认成 G ⇒ 那把 delta 就落到 **CLIP-L** 上 ✓；形状对得上的层会**静默改写错塔** ✓✗。
+        dotted_g = "text_encoders.clip_g.transformer.text_model.encoder.layers.0.mlp.fc1"
+        g_only = root / "g_only.safetensors"
+        _write_lora(g_only, {f"{dotted_g}.lora_A.weight": down,
+                             f"{dotted_g}.lora_B.weight": up_two})
+        g_backend = mod.SdxlBackend(device="cpu")
+        g_backend._unet = _unet_stub(torch)
+        g_backend._clip_l = _clip_stub(torch)
+        g_backend._clip_g = _clip_stub(torch)
+        g_report = g_backend._apply_loras([{"path": str(g_only)}])
+        with torch.no_grad():
+            g_l = _tower_fc1(g_backend._clip_l)(probe)
+            g_g = _tower_fc1(g_backend._clip_g)(probe)
+        check("⑧⁷ ⭐ ``text_encoders.clip_g.…`` 这种写法必须认成 **CLIP-G** ✓✗（认不出 ⇒ 落到 CLIP-L ✓ "
+              "⇒ 形状对上的层**静默改写错塔** ✓✗）；CLIP-L 必须**一点没动** ✓",
+              torch.allclose(g_l, torch.zeros_like(g_l), atol=1e-5)
+              and torch.allclose(g_g, torch.full((1, 6), 16.0), atol=1e-4)
+              and int(g_report["clipG"]["applied"]) == 1
+              and int((g_report["clipL"] or {}).get("applied", 0)) == 0,
+              (float(g_l[0, 0]), float(g_g[0, 0]), g_report["clipL"]))
+
+        check("⑧⁸ 键 → 模块路径的映射本身也对得上 ✓（``text_encoders.clip_l.`` 这类容器前缀要剥掉、"
+              "已是点分层的原样保留 ✓ —— 剥错就落到不存在的模块上 ✓✗）",
+              mod.tower_module_name("lora_te1_text_model_encoder_layers_0_self_attn_out_proj")
+              == "transformer.text_model.encoder.layers.0.self_attn.out_proj"
+              and mod.tower_module_name(
+                  "text_encoders.clip_l.transformer.text_model.encoder.layers.0.mlp.fc1")
+              == "transformer.text_model.encoder.layers.0.mlp.fc1"
+              and mod.tower_module_name("lora_te2_text_projection") == "text_projection",
+              (mod.tower_module_name("lora_te1_text_model_encoder_layers_0_self_attn_out_proj"),
+               mod.tower_module_name("lora_te2_text_projection")))
+
+
+def _kohya_roundtrip(model: object, root: str) -> list[tuple[str, str]]:
+    """模型里**每个**带自身参数的模块 ⇒ 压成 kohya 键 ⇒ 再翻译回来 ✓ ⇒ 返回翻不回来的 ✓。
+
+    为什么这么比 ✗：参考实现的 ``model_lora_keys_unet`` / ``model_lora_keys_clip`` **不是**靠猜段，
+    而是拿**模型自己的键**做 ``<name>.replace(".", "_")`` 造映射 ✓ —— 也就是说「对真模型无损」
+    才是这条通路的判据 ✓；我们的表驱动翻译必须对**全部**模块名成立 ✓，漏一段（如 ``out_proj``）
+    就整份 LoRA 装不上 ✓✗。
+    """
+    from app.services.engine import lora as lora_mod  # noqa: PLC0415
+
+    bad: list[tuple[str, str]] = []
+    for name, module in model.named_modules():
+        if not name or not any(p is not None for p in module.parameters(recurse=False)):
+            continue
+        back = lora_mod.kohya_module_name(f"{root}_{name.replace('.', '_')}")
+        if back != name:
+            bad.append((name, back))
+    return bad
+
+
+def case_kohya_coverage() -> None:
+    """⑨ kohya 键翻译必须对**真模块名**无损 ✓（2026-10-31 补 ✓）。
+
+    ⚠️ 这条盯的是「**整份 LoRA 一层都装不上**」✓✗：``parse_lora``/``apply_to_model`` 会在
+    第一层对不上时就报「没装全」✓ —— 报错本身不静默 ✓，但**能力等于没有** ✓✗
+    （kohya 的 SD1.5/SDXL LoRA 全都长这样 ✓，盘上随手一份就能撞上 ✓）。
+    """
+    if mod.torch is None:
+        skip("没装 torch ⇒ kohya 键覆盖不跑 ✓（**没跑 ≠ 绿** ✗）")
+        return
+    from app.services.engine import clip_text, sdxl  # noqa: PLC0415
+
+    unet = sdxl.build_sdxl_unet(sdxl.SdxlUnetConfig(
+        model_channels=32, channel_mult=(1, 2), num_res_blocks=1,
+        context_dim=16, adm_in_channels=8, num_head_channels=8,
+        transformer_depth=(0, 1), transformer_depth_output=(1, 1, 0, 0),
+        norm_num_groups=8), device="cpu")
+    bad_unet = _kohya_roundtrip(unet, "lora_unet")
+    check("⑨ kohya 的 ``lora_unet_*`` 键 ⇒ **整个** UNet 的模块名都能翻回来 ✓"
+          "（漏一段就整份 LoRA 装不上 ✓✗；按参考实现口径：键 = 模块名把点换成下划线 ✓）",
+          not bad_unet, bad_unet[:6])
+
+    tower = clip_text.ClipTextTransformer(clip_text.ClipTextConfig(
+        hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
+        intermediate_size=16, vocab_size=32, max_position_embeddings=8, pad_token=1,
+        projection_dim=8))                       # ⚠️ CLIP-G 有 `text_projection` ✓ 一起覆盖 ✓
+    bad_te = _kohya_roundtrip(tower, "lora_te1")
+    check("⑨′ 文本塔同理 ✓（``self_attn_out_proj`` / ``mlp_fc1`` 这些 sd-scripts 真会训的段 "
+          "必须在表里 ✓ —— 参考实现的 ``LORA_CLIP_MAP`` 就列了 ``out_proj`` ✓）",
+          not bad_te, bad_te[:6])
+
+
 def main() -> int:
     case_sigma()
     case_eps()
@@ -445,6 +731,8 @@ def main() -> int:
     case_full_load()
     case_plan_floor()
     case_dtype_policy()
+    case_loras()
+    case_kohya_coverage()
 
     failed = [row for row in _RESULTS if not row[1]]
     for name, ok, detail in _RESULTS:

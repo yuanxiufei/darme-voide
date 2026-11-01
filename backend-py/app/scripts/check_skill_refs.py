@@ -42,9 +42,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # depth-adjusted-to-app
 #: 技能库根：**2026-09-15 起并入后端**（`backend-py/app/skills/`，原为仓库根 `skills/`）。
-#: ⚠️ 应用侧的**唯一权威**是 ``app/core/config.py::skills_dir()``（``services/skills.py`` 与
-#: ``services/agents/skills.py`` 都转发它）。本守卫**刻意保留自己的独立实现**（scripts 不
-#: ``import app.*``，见 ``scripts/README.md`` 的依赖约定）—— 所以这里**不再是「三处必须同步」**，
+#: ⚠️ 应用侧的**唯一权威**是 ``app/core/config.py::skills_dir()``（``app/agent/skills.py`` 转发它；
+#: services 侧那份转发者已于 2026-10-30 随模块一并删除）。本守卫**刻意保留自己的独立实现**（脚本不
+#: ``import app.*``，见 ``app/scripts/README.md`` 的依赖约定）—— 所以这里**不再是「三处必须同步」**，
 #: 而是「两套：应用侧单一权威 + 守卫侧独立」；改路径时两边都要改，但改漏一边会有测试/守卫显形
 #: （守卫自检 + ``test_guards.py`` 的基线用例）。
 #: 可被 ``SKILL_REFS_DIR`` 覆盖：供 ``test_guards.py`` 在**临时副本**上做负向实证

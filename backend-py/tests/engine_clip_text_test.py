@@ -393,6 +393,31 @@ def case_token_ids(t: Any) -> None:
     check("⑧ tokenizer 不会 ``encode`` ⇒ 报错 ✓",
           _raises(lambda: ct.sdxl_token_ids(object(), "a", ct.CLIP_L), "encode") is not None)
 
+    #: ⚠️ 2026-10-31 修的真缺陷：`sdxl_token_ids` **自己**拼 BOS/EOS，可调用词表时没传
+    #: ``add_special_tokens=False`` ⇒ 词表（`tokenizer_hub` 那类）也补一遍 ⇒ **双 BOS** ✓✗：
+    #: 不报错、位置嵌入整体错一位、图整体偏 ✓✗。用一个"会补"的词表把它钉住 ✓。
+    class AddingTokenizer:
+        """像 ``tokenizer_hub`` 那样**会**补特殊符的词表 ✓（不传就以 True 计 ✓）。"""
+
+        vocab_size = 49408
+
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+
+        def encode(self, text: str, *, add_special_tokens: bool = True) -> list[int]:
+            self.calls.append(bool(add_special_tokens))
+            base = [100 + i for i in range(len(text))]
+            return ([49406] + base + [49407]) if add_special_tokens else base
+
+    adding = AddingTokenizer()
+    double_ids, _ = ct.sdxl_token_ids(adding, "abc", ct.CLIP_L)
+    check("⑧ᵃ 喂给词表的是 ``add_special_tokens=False`` ✓✗（要过 True ⇒ 词表自己补一遍 ⇒ 双 BOS ✓✗）",
+          adding.calls == [False], adding.calls)
+    check("⑧ᵇ 全文**只有一个** BOS（49406）✓、EOS 在 BOS 之后 ✓✗（双 BOS ⇒ 计数变 2 ✓）",
+          double_ids.count(49406) == 1 and double_ids.index(49407) == 4, double_ids[:6])
+    check("⑧ᶜ 中间段与「不加特殊符」的词表**逐字相同** ✓（两路口径必须一致 ✓✗）",
+          double_ids[1:4] == ids[1:4], (double_ids[:5], ids[:5]))
+
 
 class _ShapeOnly:
     """只带形状的假张量 ✓ —— 真权重**只读头**就能核对键集与切分形状 ✓（不载 1.4 GB ✗）。"""

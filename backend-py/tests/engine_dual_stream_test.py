@@ -246,10 +246,14 @@ def case_pipeline(root: Path) -> None:
           (channels, rate, frames, reported))
     check("㉘ 音频时长**自己成立** ✓（≈0.19s ✓ —— 不假装与视频逐帧对齐 ✗）",
           abs(frames / rate - 0.2) < 0.02, frames / rate)
-    check("㉘′ ⚠️ 别把「理想值 T×hop = 6400」当事实 ✗：实测 **6208** ✓ —— `ConvTranspose1d` 带 "
-          "padding ✓ 每级少 1 个样本 ✓ ⇒ **结构使然** ✓（我第一版断言就是照理想值写的 ✗ ⇒ 当场红 ✓）",
-          frames < 8 * AUDIO_VAE.hop_length and frames > 8 * AUDIO_VAE.hop_length * 0.9,
-          (frames, 8 * AUDIO_VAE.hop_length))
+    #: ⚠️ **2026-11-01 更正**：这里曾断言「实测 6208、不是理想的 6400 ✓ ⇒ 结构使然 ✓」✗——
+    #: 那不是事实 ✓，是**上采样核写错**的后果 ✗：旧写法用 `2·rate` 的核配 `rate//2 + rate%2` 的补边 ✓ ⇒
+    #: 每级 `ConvTranspose1d` 少 1 个样本 ✓（`(L−1)·u − 2·pad + k = u·L − 1` ✓），四级 5× 少 4 个 ✓
+    #: ⇒ 6400 − 192 = 6208 ✓。按参考的配方（`u=5 ⇒ k=9, pad=2` ✓、`u=2 ⇒ k=4, pad=1` ✓）**长度是精确的** ✓
+    #: （`u·L` ✓）⇒ 现在必须是 **6400** ✓，而「差几个样本」恰恰说明核/补边没对齐 ✓✗。
+    check("㉘′ ⭐ 解码长度**精确等于** `T × hop` ✓（8 × 800 = **6400** ✓，一个样本都不差 ✓）—— "
+          "差几个样本就说明上采样核/补边没按参考配方来 ✓✗（旧实现 6208 ✗ 曾被当成「结构使然」✗）",
+          frames == 8 * AUDIO_VAE.hop_length, (frames, 8 * AUDIO_VAE.hop_length))
 
     # ⭐ 反套套逻辑：换提示词 ⇒ 音频必须变（同一次前向出的两条流 ✓ 条件没接进去就当不了绿 ✓）
     changed = pipe.run_sync(pipe.GenerationRequest(**{**REQUEST, "prompt": "晴日海边",
@@ -259,6 +263,40 @@ def case_pipeline(root: Path) -> None:
           changed.ok is True
           and Path(changed.outputs["audioPath"]).read_bytes() != Path(audio).read_bytes(),
           changed.error)
+
+    # ⭐⭐ **`tags` 的整条接线** ✓（2026-11-01 ✓）：编码的副产品 → **请求** → 采样 ✓✗。
+    #    ⚠️ 断在**任何**一环都不报错 ✗：视觉块整段用错 adaLN 行 ✓、形状全对 ✓、出片才看得出 ✓。
+    #    这里把编码结果改成一串 **0**（`mod_row(text_index, 0)` ⇒ video 行 ✓ 仍然合法 ✓、能跑完 ✓，
+    #    但与默认的"全 1"**逐位不同** ✓）⇒ 只有真递到采样的那版才看得见它 ✓。
+    tagged_backend = _h3_backend(root, name="h3_tags")
+    solid_encode = tagged_backend.encode_text
+    solid_dual = tagged_backend.sample_dual
+    seen_tags: dict[str, Any] = {}
+
+    def encode_all_zero(request: Any) -> Any:
+        payload = solid_encode(request)
+        #: 长度必须与文本段**逐位相同** ✓（主干那边 `numel() == text_len` 会当场拒 ✗）
+        payload["tags"] = [0] * int(payload.get("tokens") or 0)
+        seen_tags["tokens"] = int(payload.get("tokens") or 0)
+        return payload
+
+    def capture_tags(*args: Any, **kwargs: Any) -> Any:
+        incoming = args[3] if len(args) > 3 else kwargs.get("request")
+        seen_tags["tags"] = getattr(incoming, "text_token_tags", None)
+        return solid_dual(*args, **kwargs)
+
+    tagged_backend.encode_text = encode_all_zero            # type: ignore[method-assign]
+    tagged_backend.sample_dual = capture_tags               # type: ignore[method-assign]
+    tagged = pipe.run_sync(pipe.GenerationRequest(**{**REQUEST,
+                                                     "outputs_dir": str(root / "p3")}),
+                           tagged_backend)
+    check("㉙′ ⭐⭐ **`tags` 从编码一路递到采样** ✓：`pipeline` 把 `condition[\"tags\"]` 填进 "
+          "`request.text_token_tags` ✓、后端再递给主干 ✓（任何一环断了都**不报错** ✗ ⇒ "
+          "视觉块整段用错 adaLN 行 ✓，只有形状对 ✓✗）",
+          tagged.ok is True
+          and seen_tags.get("tags") == tuple([0] * int(seen_tags.get("tokens") or -1)),
+          (tagged.ok, tagged.error, seen_tags.get("tags"),
+           seen_tags.get("tokens")))
 
     # ── 三条"必须当场拒绝"的路（拒绝 = 什么都不做 ✓ 不是"照跑但忽略那个参数"✗）──
     cfg_dir = root / "cfg"
@@ -463,6 +501,20 @@ def case_reference_video(root: Path) -> None:
               with_audio.ok is True
               and Path(with_audio.outputs["audioPath"]).read_bytes()
               != Path(result.outputs["audioPath"]).read_bytes(), with_audio.error)
+
+        # ── ⭐ 块序：`[image…] → [video / video_audio…] → [audio…]` ✓（与文本侧 `<Audio j>` 同源 ✓）──
+        plan = pipe.build_plan(pipe.GenerationRequest(**REQUEST))
+        png = media_mod.write_image(torch.zeros(1, 3, 1, 64, 64),
+                                    root / "ref_order.png")["path"]
+        ordered = _h3_backend(root, name="h3_reforder")._dual_references(
+            plan, pipe.GenerationRequest(**{**REQUEST, "reference_frames": (png,),
+                                            "reference_audio": (wav_path,),
+                                            "reference_videos": (str(mkv),)}))
+        check("52″ ⭐ 三类参考同给 ⇒ 块序 `[image, video_audio, audio]` ✓"
+              "（独立音频**排在全部视频之后** ✓ —— 排到视频前 ⇒ 文本 `<Audio 1>` 说的是第 1 路声轨 ✓、"
+              "而块序里第 1 个音频块却是那条独立音频 ✓✗ 形状全对 ✓）",
+              [block.get("kind") for block in ordered] == ["image", "video_audio", "audio"],
+              [block.get("kind") for block in ordered])
     else:
         skip("ffmpeg 混流 mkv 失败 ⇒ ``video_audio`` 块用例跳过 ✓")
 
@@ -676,6 +728,78 @@ def case_text_encoder_crosscheck(root: Path) -> None:
           late.describe()["latentMode"])
 
 
+def case_cond_row_augment() -> None:
+    """⭐ 条件行噪声增广的**接线** ✓（2026-11-01 ✓）。
+
+    公式本身（``0.999·z + 0.001·noise``、逐块重启同一 RNG 流、音频 ``seed + 1``）已在
+    `engine_h3_form_test` 里逐位钉过 ✓ ⇒ 这里钉**另一件事** ✗：`sample_dual` 有没有把
+    ``request.seed`` 与两个 aug **递到** `assemble_blocks` ✓。不递的话公式再对也用不上 ✓✗，
+    而且**不报错** ✓（症状：同提示词换 seed，条件行噪声永远一样；aug 旋钮永远不起作用 ✓）。
+    """
+    import types  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    # ⚠️ 设备**显式钉 cpu** ✓：后端默认跟卡走（cuda ✓）⇒ 自造的 cpu 张量会被 `_require_own_device`
+    #    当场拒 ✓（这是**对的** ✓ 它替调用方点破"混用会炸" ✓）；自检得像 engine_io / engine_refine
+    #    那样自己钉同一个设备 ✓，别指望后端替你搬 ✗。
+    wired = TorchBackend(device="cpu", audio_latent_mode="round")
+    # ⚠️ 鸭子类型的模型 ✓ —— `_dual_extra_rows` 只要 `patch_size` ✓（不装权重 ✓ 也就不拖 40 秒 ✓）
+    wired._model = types.SimpleNamespace(patch_size=(1, 2, 2))
+    kf_latent = torch.full((2, 1, 4, 4), 0.25)
+    latents = {"video": torch.zeros(1, 2, 4, 4), "audio": torch.zeros(1, 2, 8),
+               "keyframes": [{"resolved_frame_index": 0, "latent": kf_latent,
+                              "audio_latent": torch.full((3, 2, 4), 0.5)}]}
+    condition = torch.zeros(3, 6)
+    plain = h3_form.patchify_video(kf_latent)
+
+    rows_one, audio_one = wired._dual_extra_rows(latents, condition, seed=1)
+    rows_two, _ = wired._dual_extra_rows(latents, condition, seed=2)
+    check("㊿ᵃ ⭐⭐ `_dual_extra_rows` **默认就带增广** ✓（行 ≠ 原样 patchify ✓✗）且 **seed 真的进去** ✓"
+          "（换 seed 行必变 ✓）—— 默认写成 1.0 或 seed 没递 ⇒ 两条都静默 ✓ 不报错 ✓",
+          not torch.equal(rows_one[:plain.shape[0]], plain) and not torch.equal(rows_one, rows_two),
+          (float((rows_one[:plain.shape[0]] - plain).abs().max()),))
+    check("㊿ᵇ ⭐ 音频默认档 ``1.0`` ⇒ **一点没变** ✓（参考的音频条件行默认不加噪 ✓；"
+          "跟着视频一起 0.999 是**改错** ✓✗ 而不报错 ✓）",
+          torch.equal(audio_one, h3_form.pack_audio(torch.full((3, 2, 4), 0.5))),
+          None)
+    # ⭐ 端到端接线：`sample_dual` → `_dual_extra_rows(seed=request.seed)` ✓
+    captured: dict[str, Any] = {}
+    original = h3_form.sample_dual_stream
+
+    def fake_stream(model: Any, video: Any, audio: Any, cond: Any, sigmas: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return {}
+
+    h3_form.sample_dual_stream = fake_stream          # type: ignore[assignment]
+    try:
+        wired.sample_dual(latents, [1.0, 0.0], condition, types.SimpleNamespace(seed=4242))
+    finally:
+        h3_form.sample_dual_stream = original         # type: ignore[assignment]
+    want_video, want_audio = wired._dual_extra_rows(latents, condition, seed=4242)
+    check("㊿ᶜ ⭐⭐ **`request.seed` 一直递到底** ✓：`sample_dual` 送进采样的 `extra_video_rows` "
+          "必须**逐位**等于 `_dual_extra_rows(seed=4242)` ✓✗（截在中途 ⇒ 条件行永远是 seed=0 的噪声 ✓"
+          "不报错 ✓）",
+          torch.equal(captured.get("extra_video_rows"), want_video)
+          and torch.equal(captured.get("extra_audio_rows"), want_audio),
+          None)
+
+    #: ⭐⭐ `text_token_tags` 的**后端这一跳** ✓（2026-11-01 ✓）——㉙′ 只钉到「pipeline 交给
+    #: `sample_dual`」为止 ✓，`sample_dual` → `sample_dual_stream` 这最后一步漏了同样**不报错** ✗
+    #: （主干收 None ⇒ 整段按 text 行 ✓），所以单独钉住 ✓。
+    captured.clear()
+    h3_form.sample_dual_stream = fake_stream          # type: ignore[assignment]
+    try:
+        wired.sample_dual(latents, [1.0, 0.0], condition,
+                          types.SimpleNamespace(seed=7, text_token_tags=(1, 0, 0, 1)))
+    finally:
+        h3_form.sample_dual_stream = original         # type: ignore[assignment]
+    check("㊿ᵈ ⭐⭐ `request.text_token_tags` **递进采样器** ✓（`sample_dual` 这一跳漏掉 ⇒ 主干收到 "
+          "None ⇒ 视觉块整段用 text 行 ✓ 不报错 ✓✗）",
+          tuple(captured.get("text_token_tags") or ()) == (1, 0, 0, 1),
+          captured.get("text_token_tags"))
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engine_dual_"))
     case_gating()
@@ -692,6 +816,7 @@ def main() -> int:
         case_text_encoder_crosscheck(root)
         case_reference_audio(root)
         case_reference_video(root)
+        case_cond_row_augment()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

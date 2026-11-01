@@ -80,9 +80,70 @@ def case_known_values() -> None:
     check("②⁗ 像素空间族 = **恒等** ✓（3 通道 ✓ 不改数值 ✓）",
           lf.get_latent_format("pixel_space").process == lf.PROCESS_IDENTITY
           and lf.get_latent_format("pixel_space").latent_channels == 3)
-    check("②⁵ 均值/标准差族有 4 条 ✓（Wan21 / Wan22 / Mochi / SDXL-Playground ✓）",
+    check("②⁵ 均值/标准差族有 6 条 ✓（Wan21 / Wan22 / Mochi / SDXL-Playground / Qwen-Image 2.1 / "
+          "Qwen-Image 2512 ✓）",
           sorted(n for n, s in lf.LATENT_FORMATS.items() if s.process == lf.PROCESS_MEANSTD)
-          == ["mochi", "sdxl_playground_2_5", "wan21", "wan22"])
+          == ["mochi", "qwen_image", "qwen_image21", "sdxl_playground_2_5", "wan21", "wan22"])
+    check("②⁵′ ⭐ Qwen-Image 2.1 = **64 通道 / 16×** ✓ 且与 ``vae_wan`` 的结构事实**逐值相同** ✓"
+          "（两处一起漂才会漏 ✓✗）",
+          (lf.get_latent_format("qwen_image21").latent_channels,
+           lf.get_latent_format("qwen_image21").spatial_downscale_ratio) == (64, 16))
+
+
+#: 参考实现 ``comfy/latent_formats.py`` **逐类声明**的空间/时间下采样比 ✓（2026-10-31 抄录 ✓）。
+#: ⚠️ 只抄「**不等于基类默认 8 / 1**」的那些 ✓ —— 参考实现没写的族就是 8 / 1 ✓✗。
+#: 这张表就是判据：我们表里少抄一格 ⇒ 拿它算潜形状的尺寸/帧数**全错却不报错** ✓✗
+#: （这类错最贵：图/视频出来只是"尺寸不对"或"抖动"，看不出根因 ✓✗）。
+REF_DOWNSCALE = {
+    "h3_video": (16, 4),
+    "wan21": (8, 4),
+    "wan22": (16, 4),       # Wan22 **继承** Wan21 的时间 4 ✓、空间改 16 ✓
+    "hunyuan_video": (8, 4),
+    "hunyuan_video_15": (16, 4),
+    "hunyuan_image_21": (32, 1),
+    "ltxv": (32, 8),
+    "ltxav": (32, 8),       # LTXAV **继承** LTXV ✓
+    "mochi": (8, 6),        # **不是** 4 ✓✗
+    "cosmos_1_c_v8x8x8": (8, 8),
+    "cogvideox": (8, 4),
+    "cogvideox_1_5": (8, 4),  # 继承 CogVideoX ✓
+    "flux2": (16, 1),
+    "sc_prior": (42, 1),
+    "sc_b": (4, 1),
+    "pixel_space": (1, 1),
+    "stable_audio_1": (1, 2048),
+    "stable_audio_3": (1, 4096),
+    "ace_audio_15": (1, 1764),
+    "yue2": (1, 1920),
+    "minimax_music3": (1, 512),
+    "qwen_image21": (16, 1),  # 本仓另有 ``vae_wan.WanVaeShape.scale`` 佐证 ✓
+}
+
+
+def case_downscale() -> None:
+    """②⁶ ⭐ 下采样比逐族与参考实现**逐值一致** ✓（2026-10-31 补 ✓✗）。
+
+    ⚠️ 这条防的是「**统一按 8 / 1**」那一整片静默错值 ✓✗：原先除 H3 外全是基类默认 ✓，
+    注释还写着「未采集、别当实测值」✓ —— 可这两格是参考实现**明文声明**的 ✓，
+    真用起来（算潜形状 / 推帧数）就是一错到底且**不报错** ✓✗。
+    """
+    got = {name: (spec.spatial_downscale_ratio, spec.temporal_downscale_ratio)
+           for name, spec in lf.LATENT_FORMATS.items()}
+    wrong = {name: (want, got.get(name)) for name, want in REF_DOWNSCALE.items()
+             if got.get(name) != want}
+    check("②⁶ 逐族下采样比与参考实现一致 ✓（少抄/抄错一格都在这里红 ✓✗）", not wrong, wrong)
+    check("②⁶′ Qwen-Image **2512** 走参考实现基类默认 **8 / 1** ✓（它在 comfy 里就是 "
+          "``LatentFormat`` 基类 ✓ —— 与 2.1 的 16× / Wan21 的 16ch 三族分开 ✓）",
+          got["qwen_image"] == (8, 1), got["qwen_image"])
+    #: 参考实现里这两对是**继承**关系 ✓ ⇒ 子类必须继承父类那两格 ✓✗（"改了一个忘了另一个" ✓✗）。
+    pairs = (("ltxav", "ltxv"), ("cogvideox_1_5", "cogvideox"))
+    drifted = {child: (got[child], got[parent]) for child, parent in pairs
+               if got[child] != got[parent]}
+    check("②⁶″ 继承族的那两格必须与父类**逐值相同** ✓（``LTXAV(LTXV)`` / ``CogVideoX1_5(CogVideoX)`` ✓）",
+          not drifted, drifted)
+    check("②⁶‴ ``Wan22(Wan21)`` 只改了**空间**那一格 ✓（时间仍 4 ✓、空间 8→16 ✓）",
+          got["wan22"][1] == got["wan21"][1] and got["wan22"][0] != got["wan21"][0],
+          (got["wan21"], got["wan22"]))
 
 
 def case_cross_source() -> None:
@@ -170,6 +231,7 @@ def case_process() -> None:
 def main() -> int:
     case_table()
     case_known_values()
+    case_downscale()
     case_cross_source()
     case_aliases()
     case_validation()

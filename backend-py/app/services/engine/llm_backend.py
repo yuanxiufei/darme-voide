@@ -191,7 +191,14 @@ class LlmBackend:
 
         import torch  # noqa: PLC0415
 
-        ids = self._hub.encode(self._build_prompt_text(prompt, system), add_special_tokens=True)
+        # ⚠️ **必须 False** ✗✗（2026-10-31 修 ✓）：本文件抬头那条铁律（「生成侧若把 EOS 拼在提示词尾部会
+        # 直接算错」）在 GGUF 词表上成立 ✓，但 HF 词表这条路原先传的是 ``True`` ✗ ⇒
+        # `TokenizerBpe.encode(add_special_tokens=True)` 会在**尾部补 EOS** ✗✗（它同时补 BOS 和 EOS ✗）。
+        # 提示词以 `<|im_start|>assistant\n` 结尾时再补一个 EOS ⇒ 模型被要求「文档已结束」⇒ 续写在 EOS 之后 ✓✗，
+        # 输出量塌、跟随变弱 ✓✗，而且**不报任何错** ✓✗。
+        # 参考口径与 ollama / HF 的 `apply_chat_template(...)` 后 `add_special_tokens=False` 一致 ✓；
+        # 提示词里的 BOS/特殊符由 chat 模板自己产出 ✓（见 :meth:`_build_prompt_text` ✓）。
+        ids = self._hub.encode(self._build_prompt_text(prompt, system), add_special_tokens=False)
         device = llm_mod.model_device(self._model)          # ⚠️ 张量必须跟模型**同设备** ✗ 否则 cuda 上直接崩 ✗✗
         ids_tensor = torch.tensor([ids], dtype=torch.long, device=device)
         out = llm_mod.generate_llm(
@@ -266,5 +273,13 @@ class LlmBackend:
             # ⚠️ ``enable_thinking`` **只在显式给定时**才定义 ✓（不给 ⇒ 模板用 ``is defined`` 自行判定 ✓，
             # 与 HF ``apply_chat_template`` 一个口径 ✓）—— 本层不替模板编默认值 ✗。
             extra = {} if self._enable_thinking is None else {"enable_thinking": bool(self._enable_thinking)}
-            return self._chat_template.render(chat_template.build_messages(prompt, system), extra=extra)
+            # ⚠️ ``bos_token``/``eos_token`` **必须真的给它** ✗✗（2026-10-31 修 ✓）：
+            # ``render`` 的这两个参数默认 ``""`` ✓，不给 ⇒ 模板里 ``{{ bos_token }}`` 渲染成空串 ✗
+            # （Llama-3 系骨架首行就是它 ✓；``{% if not bos_token %}`` 一类分支还会走错 ✓）⇒
+            # 少了 BOS、与 llama.cpp/HF 的输出对不上 ✓✗，**且不报错** ✓。参考侧是自动注入 ✓。
+            tokens = getattr(self._hub, "special_tokens", None) or {}
+            return self._chat_template.render(
+                chat_template.build_messages(prompt, system),
+                bos_token=tokens.get("bos_token", ""),
+                eos_token=tokens.get("eos_token", ""), extra=extra)
         return (system + "\n\n" + prompt) if system else prompt

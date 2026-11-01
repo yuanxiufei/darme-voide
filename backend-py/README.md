@@ -17,15 +17,19 @@
 > 本地运行时健康)** + `ai-providers`(1)、
 > **`skills`(6, 整域迁移: 含 SKILL.md 解析 / 默认绑定 / 删除保护)**、`upload`(3)、
 > `export`(**7/7** 整域: 工程账本 JSON/MD + 断点续作 stale + EDL/ZIP)。
-> **自检 3224 项全绿**（2026-09-20 全量实测；**权威清单在 `tests/run_all.py`**，本行不再逐套罗列 ——
-> 逐套数字会随套件增减而腐烂 ✗）
+> **自检全绿**（**权威清单在 `tests/run_all.py`**，本行**不写项数** —— 逐套数字会随套件增减而腐烂 ✗；
+> 要数字就跑一次，它自己会打 `SUMMARY: n/m passed` 与套件总数）
 > ⚠️ 另有 **2 套不打印 `SUMMARY`** 的套件（`route_parity_test` 打 `OK:` 行 ✓、`h3_backend_live_test` 是活体 ✓）
-> ⇒ 它们**本身通过** ✓ 但**项数未计入 3224** ✓（不是"0 项"✗ —— 汇总要打分母、并点名异常项 ✓）
+> ⇒ 它们**本身通过** ✓ 但**项数不计入总分母** ✓（不是"0 项"✗ —— 汇总要打分母、并点名异常项 ✓）
 > **+ 路径守卫 0 遮蔽 + 镜像常量 0 漂移**（含 `prompt_utils` 词表、适配器注册表与文案、
 > `text-generation` 的 9 个提示词常量与 8 张词表、**视觉图谱 41 节点逐条**、
 > 全仓 `json.dumps` 紧凑性的机械比对）。
 > ⚠️ 2026-09-15 起 **Node 后端已删除、未注册端点 0 条** ⇒ 不再有「反代兜底」这回事；
 > 未实现的路径一律 **501 + 说明**（接缝保留只为把「没实现」说清楚）。
+>
+> **想先看全貌**：功能面（七层 × 二级域 × 落点，覆盖 `app/` 下全部 300 个模块）见
+> [`docs/feature-map.md`](../docs/feature-map.md)；接口契约见 [`docs/api-contract.md`](../docs/api-contract.md)；
+> 模型格式兼容见 [`docs/compatibility-matrix.md`](../docs/compatibility-matrix.md)。
 
 ## 全量迁移路线（S1–S7，**已完成：`backend/` 已删**）
 
@@ -116,10 +120,11 @@ set PROXY_TO_NODE=1
 .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 ```
 
-自检（**唯一回归安全网，改完代码必跑**）：
+自检（改完代码必跑）：
 
 ```bash
-.venv\Scripts\python.exe tests\smoke_test.py      # 退出码 0 = 全过
+.venv\Scripts\python.exe tests\run_all.py         # 全量 · 权威清单 · 退出码 0 = 全过（首选）
+.venv\Scripts\python.exe tests\smoke_test.py      # 单跑冒烟（快，但只覆盖模式 + 契约）
 ```
 
 **进程级冒烟（可选，改动启动/静态站/兜底文案时值得跑一次）**：`smoke_test.py` 走的是
@@ -193,7 +198,7 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 > **结论：不需要再套一层**（`src/`、`assets/`、`tools/` 之类只会把「哪棵树属于哪种生命周期」重新搅浑）。
 > `Dockerfile` 的 COPY 面已经把「运行时必需」与「开发期工具」分开了 —— 这张表就是那个事实的展开。
 > 什么情况下才值得动：① `skills/` 变成**只读**（没有写端点）⇒ 才能考虑并进 `app/`；
-> ② `scripts/` 涨到远多于现在的 17 个文件 ⇒ 才值得按四类拆子目录（且要同步改 `.githooks/pre-commit`
+> ② `scripts/` 涨到远多于现在的 16 个文件 ⇒ 才值得按四类拆子目录（且要同步改 `.githooks/pre-commit`
 > 里的硬编码路径 + 守卫自检）；③ `local_services/` 长期为空（没人 clone）⇒ 才考虑删掉；
 > ④ `app/services/` 只有在「不再需要与 TS 逐条比对」之后，才谈得上按域分子目录（现在它是**迁移索引**）。
 
@@ -214,7 +219,7 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 >    `app/services/skills.py` 与 `agent/skills.py` 现在都**转发**它
 >    （2026-09-15 收口：此前三处各写一遍、靠注释互相提醒「必须一致」✗）。
 >
-> ⚠️ 反过来，`app/services/*.py` **刻意保持扁平**（65 个模块同层）：它是**迁移索引** ——
+> ⚠️ 反过来，`app/services/*.py` **刻意保持扁平**（78 个模块同层）：它是**迁移索引** ——
 > 守卫按「TS 文件 → Python 模块」逐条比对常量（如 `services/technical-qc.ts` ↔
 > `app.services.technical_qc`），重排目录会**成片打断这些映射** ⇒ 结构优化应落在
 > 「文档 / 常量收口」上，**不要动这一层**。
@@ -262,7 +267,7 @@ backend-py/
 │  │  ├─ README.md                 技能库权威约定（改 skill 前必读）
 │  │  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
 │  │  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
-│  ├─ scripts/                     工具与自检脚本（**全部 Python**，2026-09-15 从仓库根 scripts/ 搬来）
+│  ├─ scripts/                     工具与自检脚本（**15 个 .py + 本目录 README**，2026-09-15 从仓库根 scripts/ 搬来）
 │  │  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
 │  │  ├─ check_skill_refs.py       skills 引用完整性守卫
 │  │  ├─ test_guards.py            两套守卫的自检（13 例，含 ④b「步骤小节必须有锚点」）
@@ -277,13 +282,19 @@ backend-py/
 │     │  │                                      /upload/image；零依赖 = 只用标准库 ✓）
 │     │  ├─ workflow.py                         **UI 图 → API 格式**转换 + 参数注入（ComfyUI 只吃 API 格式 ✗）
 │     │  └─ workflows/                          参考 H3 工作流模板（T2V / I2V；来源与署名见该目录 README）
-│     ├─ cosyvoice/{server.py,requirements.txt} 项目自带的 CosyVoice 薄封装（端口 9880）
 │     └─ cosyvoice/{server.py,requirements.txt} 项目自带的 CosyVoice 薄封装（端口 9880；官方服务四项不兼容
 │        ⇒ 由它吸收：JSON→form/multipart、裸 PCM→WAV、如实回 format=wav；`COSYVOICE_UPSTREAM` 指官方 50000）
 │     ↑ ⚠️ 其余子目录是 `app/scripts/model_manager.py --runtime git` **clone 来的第三方服务**
 │       （机器相关，已 gitignore）；默认值三处同步：本目录 / `app/services/local_model_scan.py`
 │       / TS 侧 `local-model-scan.ts`
+│  ├─ vendor/                      **原样移植的外部源码**（`ollama/` = Ollama 官方 SDK，MIT；只改相对导入）
 │  └─ services/
+│     ├─ engine/                  ✅ **自研推理引擎**（63 个模块**同层扁平**，2026-09-17 起）
+│     │  ⚠️ 分工**不靠目录**、靠 `engine/__init__.py` 的 `MODULE_GROUPS` 登记表（`__all__` 由它拼出，
+│     │  盘上多一个模块没登记就报错 —— 判据在 `tests/structure_test.py`）；六组边界：
+│     │  `numeric`（零依赖数学/规划，顶层不许 import torch）/ `format`（容器与像素）/
+│     │  `weight`（量化与装载）/ `token`（文本入口）/ `model`（网络本体）/ `orchestration`（编排与可见面）
+│     │  ⚠️ **不再往下分箱**：搬一次要同时改 300+ 调用点与 6 套静态守卫；许可上**一行 ComfyUI 源码都不抄**
 │     ├─ adapters/                ✅ **厂商适配器层（S3）**：17 家 / 纯函数；含 jscompat.py（JS 语义垫片）
 │     ├─ era_background.py        时代背景（解析 + AI 提炼，整域）
 │     ├─ bible_ids.py             六键 Bible：STYLE_ / COST_ / LOC_ 三键
@@ -309,7 +320,7 @@ backend-py/
 │     ├─ estimate_service.py      生成前费用预估（S1）
 │     ├─ task_logger.py           任务日志 + trace 句柄 + 落盘前脱敏（S1）
 │     ├─ ai_providers.py          厂商配置解析层：所有适配器与 Agent 的入口（S1）
-│     ├─ protocol.py              Agent 输出协议契约与解析（S1）
+│     ├─ （2026-10-30 已删 protocol.py：与 `agent/protocol.py` 分叉的孤儿副本，见该模块头）
 │     ├─ prompt_utils.py          prompt-utils.ts 移植（S2 第 1–2/6 块；漂移守卫覆盖）
 │     ├─ vendor_errors.py         厂商错误归因（用户可读中文）+ 指数退避重试（S4 前置）
 │     ├─ text_generation.py       文本链路：动作建议/拆镜头/续写/优化/拆分视觉/音色打标 + 本地规则拆分器
@@ -389,6 +400,12 @@ backend-py/
    ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端 + 前端 dev 代理端口，8 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
    ├─ assets_layout_test.py     资产布局守卫（skills/scripts/local_services 在 app/ 内 + 常量权威，12 用例）
+   ├─ structure_test.py         **结构守卫**（`engine` 分组登记表 ⇄ 盘上双向相等 / `__all__` 由登记表拼出 /
+   │                            `numeric` 组顶层零依赖 / 模块头 ≥8 词 / 仓库根无空壳 / 说明里的 `app/…py` 不腐烂 /
+   │                            每个 engine 模块**有生产调用者或登记为欠账** / `docs/feature-map.md`
+   │                            点到 `app/` 每一个 `.py` / 盘上每份 `tests/*_test.py` 都进了
+   │                            `run_all.py::TESTS`；零 torch ——
+   │                            这 8 类事故原先**没有任何测试会失败**；用例数不写死，跑了就知道）
    ├─ h3_chain_test.py          本地 H3 链**接缝契约**（适配器 ↔ 8765 薄封装；含「阶段2 未接线」缺口断言，13 用例）
    ├─ local_services_live_test.py 本地服务**活体**接缝（ollama 真推理 9 用例；未启动的服务显式 SKIP）
    ├─ h3_backend_live_test.py   **H3 全栈活体**（配置 → 服务层 → 真 8765 → 落库；含「落库 task_id 被运行中的
@@ -423,7 +440,8 @@ backend-py/
    │                            **截断回报** ✓ + 注意力真的混 token ✓ + 整链 TE→DiT→VAE→真 mp4 ✓，21 用例）
    ├─ engine_segments_test.py    **自研引擎·长视频分段**（网格长度 ✓ / 重叠接缝恰好 N 帧 ✓ / ⭐ **保留帧数守恒** ✓ /
    │                            边界帧落 PNG ⇒ 走真 VAE 首帧条件 ✓ / 报错带可调量 ✓，54 用例）
-   └─ run_all.py                一次跑完以上**九十四项**（**套件权威清单就在这个文件里**，本树只是摘录）
+   └─ run_all.py                一次跑完以上**全部套件**（**套件权威清单就在这个文件里**，本树只是摘录；
+                                2026-10-31 实测 **166 套**（补登记了原漏的 `lora_train_test`）⇒ 别再把数量抄进文档 ✗）
 adapter.parse_generate_response(result)         # → {"isAsync", "taskId"/"imageUrl"}（不解析 HTTP）
 ```
 
@@ -454,7 +472,7 @@ TTS | `minimax` / `cosyvoice` |
 cd backend-py
 # 依赖：python-multipart（upload 域的 multipart 解析，Starlette 的 request.form() 必需）
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
-./.venv/Scripts/python.exe tests/run_all.py     # 九十四项一次跑完，退出码 0 = 全过
+./.venv/Scripts/python.exe tests/run_all.py     # 全部套件一次跑完，退出码 0 = 全过
 ```
 
 单项也可以单独跑（调试时更快）：
@@ -703,8 +721,10 @@ cd backend-py
 
 结果：删库后全量 **63 套件 / 2463 项 / 0 失败** ✓（**当时**的实测值；此后新增
 `frontend_api_coverage_test.py`、`contract_mirror_test.py`、`layering_test.py` 与 `assets_layout_test.py`
-⇒ 现为 **94 套件 / 3224 项**（2026-09-20 实测 ✓，权威清单以 `tests/run_all.py` 为准 ✓），
-快照 **76 条 / 674 KB** ✓。
+⇒ 当时为 **94 套件 / 3224 项**（2026-09-20 实测 ✓）。⚠️ **2026-10-30 更正**：此后引擎线又添了
+几十套（自研引擎各层 + `structure_test`）⇒ 现为 **166 套**（2026-10-31 按 `tests/run_all.py` 的 `TESTS` 实数；
+此前 165 是因为 `lora_train_test.py` **从未登记**、一直没被全量跑到）；
+**权威永远是那个文件**，本段只记历史 ✓。快照 **76 条 / 674 KB** ✓。
 
 ⚠️ 比删库前（2465）少的 **2 项**是**预先设计好的显式跳过**（各自会打印 `[skip]`，不是静默消失）：
 `freeze_snapshot_test.py` 的「自动发现的路径在真源码下确实存在」、`eval_cli_test.py` 的

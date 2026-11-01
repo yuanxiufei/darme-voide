@@ -17,7 +17,7 @@
 * ``/split`` 的 ``reference`` 分支是把格子**追加**到分镜已有 ``reference_images`` 数组末尾，
   且该列与 Node 共用 ⇒ **必须紧凑 JSON**。
 
-✅ ``runAgentWithRetry`` 等价物**已可用**（``services/agents/runtime.run_agent_with_retry``）⇒
+✅ ``runAgentWithRetry`` 等价物**已可用**（``app/agent/runtime.run_agent_with_retry``）⇒
   ``try_agent_grid_prompt`` 已按原 TS 接通（2026-09-15 校正，早先这里是「恒返回 None」的存根：
   端点此前**永远**走本地构建器，而 Node 会优先用 Agent ⇒ 曾是真行为缺口）。
   仍保留「Agent 不可用即回落」的语义：任何异常都吞掉返回 ``None`` ⇒ ``source='fallback'``。

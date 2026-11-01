@@ -262,6 +262,54 @@ def get_storyboards(conn: Connection, episode_id: int) -> list[Any]:
     ).all())
 
 
+def drama_status_of(statuses: list[str | None]) -> str:
+    """把本剧**所有集**的 status 汇总成 drama 级状态。
+
+    ⚠️ 2026-10-30 实测的真缺口：``dramas.status`` 在建剧时被写成 ``auto_generating``，
+    之后**全仓再没有一处把它改回去** ⇒ 任何跑过自动管线的剧永远显示「生成中」
+    （``/dramas/stats`` 的计数也永远糊在这一桶）。⇒ 在唯一的单集状态收口
+    :func:`set_status` 里按全集汇总回写。
+
+    优先级：**失败 > 进行中 > 全部完成 > 草稿**。失败排第一是因为「一集红了、另一集还在跑」
+    这种局面下，把红盖成「生成中」等于让唯一的失败信号消失。
+    """
+    values = [value for value in statuses if value]
+    if any(value == AUTO_STATUS["failed"] for value in values):
+        return "auto_failed"
+    if values and all(value == AUTO_STATUS["done"] for value in values):
+        return "done"
+    if any(value.startswith("auto:") for value in values):
+        return "auto_generating"
+    return "draft"
+
+
+def refresh_drama_status(conn: Connection, drama_id: int) -> str | None:
+    """按**全集**当前状态回写 ``dramas.status``，返回汇总值（剧不存在则 ``None``）。
+
+    只在真的变了时写，省掉无意义的 ``updated_at`` 抖动。单独抽出来是为了让
+    「单集已 done 直接早退」那条路径也能自愈历史数据 —— 实测 ``dramas`` 里那部
+    跑完的冒烟剧就是在早退路径上把 ``auto_generating`` 一直挂着的。
+    """
+    statuses = [item[0] for item in conn.execute(
+        select(episodes.c.status).where(and_(
+            episodes.c.drama_id == drama_id,
+            episodes.c.deleted_at.is_(None),
+        ))
+    ).all()]
+    if not statuses:
+        return None
+    summary = drama_status_of(statuses)
+    current = conn.execute(
+        select(dramas.c.status).where(dramas.c.id == drama_id)
+    ).scalar()
+    if current is None:
+        return None
+    if current != summary:
+        conn.execute(update(dramas).where(dramas.c.id == drama_id)
+                     .values(status=summary, updated_at=now()))
+    return summary
+
+
 def set_status(episode_id: int, status: str) -> None:
     """推进阶段状态并**推送 SSE 事件**（publish 永不抛，绝不拖垮管线）。"""
     with engine.begin() as conn:
@@ -269,11 +317,15 @@ def set_status(episode_id: int, status: str) -> None:
             update(episodes).where(episodes.c.id == episode_id)
             .values(status=status, updated_at=now())
         )
-        drama_id = conn.execute(
+        row = conn.execute(
             select(episodes.c.drama_id).where(episodes.c.id == episode_id)
         ).first()
-    if drama_id is not None and drama_id[0] is not None:
-        publish_pipeline_event(drama_id[0], {
+        drama_id = row[0] if row is not None else None
+        # 顺手把 drama 级状态按**全集**汇总回写
+        if drama_id is not None:
+            refresh_drama_status(conn, drama_id)
+    if drama_id is not None:
+        publish_pipeline_event(drama_id, {
             "type": "status", "episodeId": episode_id, "status": status,
         })
 
@@ -1085,6 +1137,10 @@ async def _execute_episode_pipeline_inner(episode_id: int, drama_id: int,
     if episode is None:
         raise ValueError(f"Episode {episode_id} not found")
     if episode.status == AUTO_STATUS["done"]:
+        # 早退也要把 drama 级状态对齐一次：这条路径**不经过** set_status，
+        # 历史数据里「整剧跑完、drama 还挂着 auto_generating」就是这么来的
+        with engine.begin() as conn:
+            refresh_drama_status(conn, drama_id)
         return
 
     stages = build_stages(episode_id, drama_id, opts)

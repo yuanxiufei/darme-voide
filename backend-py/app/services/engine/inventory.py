@@ -58,12 +58,40 @@ __all__ = [
 #: 本机目标显卡（A5000 24GB ✓）—— 只用于算「余量」，可覆盖 ✓
 DEFAULT_CAPACITY_GIB = 24.0
 
-#: 各阶段的必需组件筛选规则（``category`` + 是否 ``required`` ✓）
+#: 各阶段的必需组件筛选规则（``category`` ＋ **可选** ``tags`` ✓）
+#:
+#: ⚠️ ``tags`` 是 2026-10-31 加的**可选**精筛 ✗✗（不加它 ``zimage`` 就得跟 SDXL 共用
+#: ``category="image"`` ✓ ⇒ ``readiness("zimage")`` 会把 `sdxl_base` 也列进来 ✓✗，
+#: 「Z-Image 就绪」于是变成「image 分类里有东西」✓✗ —— 两条链的组件根本不是一套 ✓）。
+#: 语义：``category`` 先筛（必须一致 ✓），``tags`` 非空时再要求**交集非空** ✓。
+#: 不写 ``tags`` 的阶段行为**一字不变** ✓（``image`` 仍列全部分类件 ✓）。
 STAGE_FILTERS: dict[str, dict[str, Any]] = {
     "h3": {"category": "video"},
     "image": {"category": "image"},
     "audio": {"category": "audio"},
     "text": {"category": "text"},
+    #: ⭐ Z-Image 单列一档 ✓（2026-10-31 ✓）：三份权重是**一条链** ✓ —— DiT ＋ Qwen3-4B ＋ Flux VAE ✓，
+    #: 少一份都出不了图 ✓，而它们与 SDXL 四件套**没有交集** ✗ ⇒ 不能只按 ``category`` 筛 ✓。
+    #:
+    #: ``requireAll`` = 「本档筛到的件**全都要**」✓ —— 与清单里那三条的 ``required: false`` 配套 ✓：
+    #: ⚠️ 若清单直接把它们标 ``required: true`` ✗，``readiness("image")`` 会把 SDXL（6.94）与
+    #: Z-Image（19.27）**加在一起 = 25.73 GiB** ✓✗ —— 两套是**互斥备选** ✗（要么跑 SDXL、要么跑 Z-Image ✓），
+    #: 加出来的数没有任何一条链用得上 ✓✗，还会让 image 档在 24GB 卡上凭空"装不下" ✓✗。
+    #: ⇒ 「这条链的件必须齐」这一条判据只属于 ``zimage`` 档 ✓，与 `image` 档的必需件彻底分开 ✓。
+    "zimage": {"category": "image", "tags": ["zimage"], "requireAll": True},
+    #: ⭐ Qwen-Image **2.1** 单列一档 ✓（2026-10-31 ✓）：同样三份**一条链** ✓ ——
+    #: DiT 649 键 ＋ Qwen3.5-9B ＋ 64 通道 VAE ✓；与 Z-Image / SDXL 都**没有交集** ✗。
+    #: ⚠️ 不与 ``zimage`` 合档 ✗✗：两族三件都叫「DiT / 文本塔 / VAE」✓、形状也"看着能对上" ✓，
+    #: 但 `text_dim` 2560 vs 4096 ✓、VAE 16 vs 64 通道 ✓ ⇒ 合档会把 **19.27 + 16.5 ≈ 35.8 GiB**
+    #: 加在一起 ✓✗（没有任何一条链用得上 ✓，还会让 24GB 卡凭空报装不下 ✓✗）。
+    "qwen_image21": {"category": "image", "tags": ["qwen21"], "requireAll": True},
+    #: ⭐ **Qwen-Image 2512 / Edit 2511**（2026-10-31 加 ✓）。与 `qwen_image21` 必须**分档** ✗✗：
+    #: 两族的文本塔（Qwen2.5 **3584** vs Qwen3.5 **4096** ✓）与 VAE（**16** vs **64** 通道 ✓）
+    #: 一件都不通用 ✓ —— 合档会把 38.05 + 16.1 + 0.24 ≈ **54.4 GiB** 与 2.1 的 28.68 GiB
+    #: **加在一起** ✓✗（多报 23.7 GiB ✓，24GB 卡凭空"装不下" ✓✗，而真装的时候只装一条链 ✓）。
+    #: ⚠️ 两者族名只差一个 `21` ✗（`qwen_image` vs `qwen_image21` ✓）—— tags 用 `qwen2512` 而非
+    #: `qwen_image` ✓，避免将来有人拿 `startswith("qwen_image")` 判族把 2.1 一起卷进来 ✓✗。
+    "qwen_image": {"category": "image", "tags": ["qwen2512"], "requireAll": True},
 }
 
 
@@ -404,19 +432,45 @@ def upscale_status(*, root: Path | None = None, key: str = "", path: str = "") -
     return report
 
 
+def stage_entries(stage: str = "h3") -> list[dict[str, Any]]:
+    """某阶段该看哪些清单条目 ✓ —— **筛选口径只此一份** ✗✗。
+
+    ⚠️ 这是 2026-10-31 抽出来的单一真源 ✗：抽之前 :func:`readiness` 与
+    ``loader.plan_stage`` **各写了一遍** ``category`` 筛选 ✓✗，两份都没认 ``tags`` ——
+    加 ``zimage`` 档（靠 ``tags=["zimage"]`` 与 SDXL 区分）当场暴露：``plan_stage("zimage")``
+    会把 `sdxl_base` 也列进去 ✓，而 ``required`` 又只取清单字段（那三条是 ``false`` ✓）
+    ⇒ ``ready = all([]) = True`` ✓✗ —— **三份权重一份都没有时它说"就绪"** ✓✗，
+    比 :func:`loader.residency_plan` 里那条「必需组件全缺却 `fits: true`」更坏 ✓。
+
+    规则（与 :data:`STAGE_FILTERS` 逐条对应 ✓）：``category`` 必筛 ⇒ ``tags`` 交集非空则再筛 ⇒
+    ``requireAll`` 时把筛出来的**副本**的 ``required`` 覆盖为 ``True``（清单文件与别的档不受影响 ✓）。
+    """
+    entries = load_catalog()["models"]
+    rule = STAGE_FILTERS.get(stage)
+    if not rule:
+        return list(entries)
+    entries = [item for item in entries if item.get("category") == rule["category"]]
+    wanted_tags = set(rule.get("tags") or ())
+    if wanted_tags:
+        entries = [item for item in entries
+                   if wanted_tags & set(item.get("tags") or ())]
+    if rule.get("requireAll"):
+        entries = [{**item, "required": True} for item in entries]
+    return entries
+
+
 def readiness(stage: str = "h3", *, root: Path | None = None,
               capacity_gib: float = DEFAULT_CAPACITY_GIB,
               upscale_key: str = "", upscale_path: str = "") -> dict[str, Any]:
     """某阶段的**就绪报告** ✓：必需组件齐不齐、缺多少、显存够不够估。
 
-    ``required`` 由清单的 ``required`` 字段决定 ✓；非必需组件也会列出来（可选件 ✓），
-    但**不影响** ``ready`` 判定 ✓。
+    ``required`` 由清单的 ``required`` 字段决定 ✓（``requireAll`` 的档见 :func:`stage_entries` ✓）；
+    非必需组件也会列出来（可选件 ✓），但**不影响** ``ready`` 判定 ✓。
     """
+    entries = stage_entries(stage)
+    #: ⚠️ 报告里要带上「清单自己的错」✓（``load_catalog`` 解析失败时 ``models`` 是空表 ✓✗ ——
+    #: 不报这一栏，读者只会看到「组件一个都没有」而不知道是清单坏了 ✓✗）。
     catalog = load_catalog()
-    rule = STAGE_FILTERS.get(stage)
-    entries = catalog["models"]
-    if rule:
-        entries = [item for item in entries if item.get("category") == rule["category"]]
 
     components = [component_status(entry, root) for entry in entries]
     required = [item for item in components if item["required"]]

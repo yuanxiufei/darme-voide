@@ -142,8 +142,17 @@ class HFTokenizer:
                 f"零依赖 ✓ 离线 ✓）。") from err
         self.vocab_size = int(getattr(self._tokenizer, "vocab_size", 0) or 0)
 
-    def encode(self, text: str) -> list[int]:
-        return [int(item) for item in self._tokenizer.encode(str(text or ""))]
+    def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        """⚠️ 默认**不**加特殊符 ✗（2026-10-31）：提示词模板**自带** BOS 或 ``<|im_start|>`` ✓
+        （见 :mod:`qwen25_te` 模块头「``has_start_token=False``」✓）—— 再加一遍就是**双 BOS** ✓✗：
+        不报错、只让前几个位置的注意力歪掉 ✓✗。词表不支持这个 kwarg 时按老样子只传文本 ✓。
+        """
+        try:
+            items = self._tokenizer.encode(str(text or ""),
+                                          add_special_tokens=add_special_tokens)
+        except TypeError:      # 老词表只吃 text ✓（不认识这个 kwarg）
+            items = self._tokenizer.encode(str(text or ""))
+        return [int(item) for item in items]
 
 
 def tokenize_prompt(tokenizer: Tokenizer, text: str, *, max_length: int,

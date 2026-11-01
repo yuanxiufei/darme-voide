@@ -24,7 +24,7 @@ bypass 钩子永远不响 ✗ ⇒ 那层 LoRA 被丢掉而**不报错** ✗。�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -42,6 +42,7 @@ __all__ = [
     "choose_path",
     "coerce_spec",
     "fold_weight",
+    "kohya_module_name",
     "parse_lora",
     "read_tensors",
     "torch_ops",
@@ -54,6 +55,115 @@ _ALPHA_SUFFIXES: tuple[str, ...] = (".alpha", ".lora_alpha")
 
 #: 权重文件名里可能出现的外层前缀 ✓（参考实现的 key_map 只认 ``diffusion_model.<m>.weight`` ✓）
 _STRIP_PREFIXES: tuple[str, ...] = ("model.diffusion_model.", "diffusion_model.", "model.")
+
+#: 文本编码器侧的键 ✓ —— ``apply_to_model`` 的 ``model`` 是 **DiT** ✓，TE 的增量本来就不该
+#: 在这里对上 ✗。认出来才不算「部分生效」✗（判据见 :func:`is_text_encoder_key` ✓）。
+_TEXT_ENCODER_PREFIXES: tuple[str, ...] = (
+    "lora_te_", "lora_te1_", "lora_te2_", "te.", "te1.", "te2.", "text_encoders.",
+    "conditioner.", "text_model.", "text_encoder.", "cond_stage_model.",
+)
+
+#: 本模块**不支持**的适配器族 ✓（2026-10-31 补 ✗）—— 认得出就**必须说出来** ✓✗：
+#: 当普通 LoRA 装 ⇒ 少装一堆张量、而且**不报错** ⇒ 数值悄悄不对 ✓✗（本仓最恨的那类 ✓）。
+_UNSUPPORTED_SUFFIXES: tuple[tuple[str, str], ...] = (
+    (".dora_scale", "DoRA"),
+    (".lora_mid.weight", "LoHa"), (".hada_w1_a", "LoHa"), (".hada_w2_a", "LoHa"),
+    (".hada_t1", "LoHa"),
+    (".lokr_w1", "LoKr"), (".lokr_w2", "LoKr"), (".lokr_w1_a", "LoKr"), (".lokr_w2_a", "LoKr"),
+    (".oft_blocks", "OFT"),
+    (".lora_embedding_A", "LoRA-Embedding"), (".lora_embedding_B", "LoRA-Embedding"),
+)
+
+#: 各族**为什么不支持** ✓（报错文案要用 ✓）
+_UNSUPPORTED_REASONS: dict[str, str] = {
+    "DoRA": "幅度向量 `dora_scale` 与 A/B 因子是**乘性**关系 ⇒ 只装 A/B 会算错 ✗",
+    "LoHa": "Hadamard 积分解 ⇒ 不是一对低秩因子，`lora_mid`/`hada_*` 一个都装不了 ✗",
+    "LoKr": "Kronecker 分解 ⇒ 需要 `lokr_w1/w2` 两半，不是 A/B 对 ✗",
+    "OFT": "正交微调 ⇒ 作用在正交矩阵上，与低秩 A/B 完全不同 ✗",
+    "LoRA-Embedding": "作用在 embedding 表上（按 id 取行），不是 Linear 的权重 ✗",
+}
+
+
+#: kohya / sd-scripts 那种**下划线分层**的键，靠这张表切回点分层 ✓（2026-10-31 补 ✓）。
+#: ⚠️ 为什么必须有 ✗：kohya 出的 SD1.5/SDXL/SD3 LoRA，键长成
+#: ``lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q`` ✓ —— 整串**一个点都没有** ✓，
+#: 而模型里的模块名是点分层 ✓ ⇒ ``modules.get()`` 必然 None ⇒ 报「一层都没装上」✗。
+#: HuggingFace/diffusers 口径（``down_blocks.0.attentions.0.…``）本来就有 ⇒ 不受影响 ✓。
+_UNDERSCORE_TOKENS: tuple[str, ...] = (
+    "lora_unet", "lora_te1", "lora_te2", "lora_te",
+    "down_blocks", "up_blocks", "mid_block", "input_blocks", "middle_block", "output_blocks",
+    "single_transformer_blocks", "transformer_blocks", "joint_blocks",
+    "attentions", "self_attn", "cross_attn", "attn1", "attn2",
+    "to_add_out", "to_out", "to_q", "to_k", "to_v", "to_gate",
+    "qkv_proj", "q_proj", "k_proj", "v_proj", "o_proj", "out_proj", "gate_proj",
+    "up_proj", "down_proj",
+    "proj_in", "proj_out", "proj_mlp", "proj", "mlp",
+    "in_layers", "out_layers", "emb_layers", "skip_connection",
+    "norm_added", "norm_out", "norm1", "norm2", "norm3", "norm",
+    "layer_norm1", "layer_norm2", "layer_norm3", "final_layer_norm", "layer_norm",
+    "ff_context", "ff_net", "ff_in", "ff_out", "ff",
+    "time_embedding", "time_embed", "add_embedding", "label_emb",
+    "conv_shortcut", "conv_norm_out", "conv_in", "conv_out", "conv1", "conv2", "conv",
+    "linear_1", "linear_2", "linear", "mid",
+    "text_model", "token_embedding", "position_embedding", "text_projection",
+    "processor", "encoder", "layers", "fc1", "fc2",
+)
+
+#: 切开之后**段名 → 段名**的改写 ✓（段本身可能含点 ⇒ 拼回去才是真模块名 ✓）。
+#: ⚠️ 为什么光靠切不行 ✗：kohya 键里的下划线来自「模块名把点换成下划线」✓，模块名本身**可以含点**
+#: 之后的复合段 ✓ —— SDXL 的 GEGLU 前馈是 ``ff.net.0.proj`` ✓ ⇒ kohya 键 ``ff_net_0_proj`` ✓，
+#: 切成 ``ff_net.0.proj`` 就对不上（整份 LoRA 报「没装全」⇒ 能力等于没有 ✓✗）。
+#: 判据：:func:`kohya_module_name` 必须对**真模型**里每个模块名无损往返 ✓
+#: （`tests/engine_sdxl_backend_test.py::case_kohya_coverage` ✓）。
+_UNDERSCORE_ALIASES: dict[str, str] = {
+    "ff_net": "ff.net",
+}
+
+#: 键首那段是**模型归属**而不是模块名 ✓（``lora_unet_`` ⇒ UNet、``lora_te1_`` ⇒ 第一个文本塔 ✓）
+_UNDERSCORE_ROOTS: tuple[str, ...] = ("lora_unet", "lora_te", "lora_te1", "lora_te2")
+
+
+def _split_underscore(text: str) -> list[str]:
+    """把一串下划线名切成**已知段 + 数字段** ✓（最长优先 ✓，认不出的整段原样留 ✓ 不猜 ✗）。"""
+    tokens = sorted(_UNDERSCORE_TOKENS, key=len, reverse=True)
+    parts: list[str] = []
+    index = 0
+    while index < len(text):
+        for token in tokens:
+            end = index + len(token)
+            if text.startswith(token, index) and (end == len(text) or text[end] == "_"):
+                parts.append(token)
+                index = end + 1 if end < len(text) else end
+                break
+        else:
+            cut = text.find("_", index)
+            if cut < 0:
+                parts.append(text[index:])
+                index = len(text)
+            else:
+                parts.append(text[index:cut])
+                index = cut + 1
+    return [part for part in parts if part]
+
+
+def kohya_module_name(key: str) -> str:
+    """kohya 的下划线分层键 → **点分层**模块名 ✓（已经是点分层就原样返回 ✓）。
+
+    ``lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q``
+    ⇒ ``down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q`` ✓
+
+    ⚠️ 这是**翻译**不是**匹配** ✓：翻完还得 ``modules.get()`` 真的查到才算数 ✓ ——
+    查不到仍按「找不到」报错 ✓✗（认不出的段原样留着 ✓，不去模糊匹配 ✗：模糊配上错层
+    ⇒ 权重折进错的模块 ⇒ 图「像但不对」✓✗，比没装上更难查 ✓）。
+    """
+    if "." in key and not key.startswith(_UNDERSCORE_ROOTS):
+        return key
+    parts = _split_underscore(key)
+    if parts and parts[0] in _UNDERSCORE_ROOTS:
+        parts = parts[1:]
+    #: 段名改写（见 :data:`_UNDERSCORE_ALIASES` ✓）—— 段本身可以含点 ✓，拼回去才是真模块名 ✓。
+    parts = [_UNDERSCORE_ALIASES.get(part, part) for part in parts]
+    return ".".join(parts) if parts else key
 
 
 class LoraError(ValueError):
@@ -86,9 +196,18 @@ class LoraDelta:
     alpha: float | None = None
 
     def scale(self, strength: float = 1.0) -> float:
-        """``alpha/rank · strength`` ✓（无 alpha 时按参考实现的约定取 1.0 ✓）。"""
+        """``alpha/rank · strength`` ✓（无 alpha 时按参考实现的约定取 1.0 ✓）。
+
+        ⚠️ **``alpha == 0`` 是「不缩放」而不是「强度 0」** ✗✗（2026-10-31 修 ✓）：
+        参考实现（kohya ``LoRAUpDown`` / diffusers ``set_adapters`` ✓）一律把 ``alpha == 0``
+        抬成 ``alpha = rank`` ⇒ 缩放因子 **1.0** ✓。照字面算 ``0/rank = 0.0`` ⇒ 增量被乘成 0
+        ✗ —— **不报错、不告警、LoRA 等于没挂** ✓✗（本仓最恨的那类静默失效 ✓）。
+        """
         rank = int(self.down.shape[0]) if hasattr(self.down, "shape") else 0
-        base = (float(self.alpha) / rank) if (self.alpha is not None and rank) else 1.0
+        alpha = float(self.alpha) if self.alpha is not None else None
+        if alpha is not None and alpha == 0.0:
+            alpha = float(rank) if rank else None       # kohya 约定：alpha=0 ⇒ 取 rank ⇒ scale 1.0 ✓
+        base = (alpha / rank) if (alpha is not None and rank) else 1.0
         return base * float(strength)
 
 
@@ -116,6 +235,73 @@ class LoraReport:
         }
 
 
+def _identity_scalar(value: Any) -> bool:
+    """这个张量是不是**全 1** ✓（DoRA 里全 1 的 ``dora_scale`` 等价于「没有 DoRA」✓ ⇒ 不必拦 ✗）。"""
+    try:
+        flat = value.reshape(-1) if hasattr(value, "reshape") else value
+        items = list(flat)
+    except Exception:
+        return False
+    if not items:
+        return False
+    try:
+        return all(abs(float(item) - 1.0) <= 1e-6 for item in items)
+    except Exception:
+        return False
+
+
+def _unsupported_families(tensors: Mapping[str, Any]) -> dict[str, list[str]]:
+    """扫出**本模块装不了**的适配器族 ✓（族名 → 命中的张量名 ✓）。
+
+    唯一豁免：DoRA 的 ``dora_scale`` **全是 1.0** ✓ —— 那在语义上就是「没有 DoRA」✓，
+    拦下来只会让人白改文件 ✗（判据 :func:`_identity_scalar` ✓）。
+    """
+    found: dict[str, list[str]] = {}
+    for name in tensors:
+        for suffix, family in _UNSUPPORTED_SUFFIXES:
+            if not name.endswith(suffix):
+                continue
+            if family == "DoRA" and _identity_scalar(tensors[name]):
+                break
+            found.setdefault(family, []).append(name)
+            break
+    return found
+
+
+def is_text_encoder_key(module: str) -> bool:
+    """这个 LoRA 模块名是不是**文本编码器**侧的 ✓（DiT 上本就找不到 ✓ ⇒ 不该算「部分生效」✗）。"""
+    return str(module).startswith(_TEXT_ENCODER_PREFIXES)
+
+
+def _align_delta(delta: LoraDelta, reference: Any) -> LoraDelta:
+    """把两个因子搬到目标模块的**设备与精度**上 ✓（2026-10-31 修 ✗✗）。
+
+    ⚠️ 为什么必须有 ✗：:func:`read_tensors` 用 ``torch.frombuffer`` 出的是 **CPU** 张量 ✓，
+    而模块权重在卡上 ✓ ⇒ merge 路的 ``matmul(up, down)`` 在 CPU 算完、``add_`` 到卡上立刻
+    ``Expected all tensors to be on the same device`` ✗；bypass 路更隐蔽 —— ``F.linear`` 在
+    **首次前向**才炸 ✗（装载报告全绿 ✓✗）。``.to()`` 目标一致时返回自身 ✓ ⇒ 同设备同精度零拷贝 ✓，
+    缓存里的 CPU 主本也不会被改 ✗。
+    """
+    like = reference
+    if like is None or not hasattr(like, "dtype"):
+        return delta
+    device = getattr(like, "device", None)
+    dtype = like.dtype
+    moved: list[Any] = []
+    for value in (delta.down, delta.up):
+        move = getattr(value, "to", None)
+        if move is None:
+            moved.append(value)
+            continue
+        try:
+            moved.append(move(device=device, dtype=dtype))
+        except Exception:                       # 纯 CPU 假张量（自检）⇒ 只搬设备，不改精度 ✓
+            moved.append(move(device=device) if device is not None else value)
+    if moved[0] is delta.down and moved[1] is delta.up:
+        return delta
+    return replace(delta, down=moved[0], up=moved[1])
+
+
 def _normalize(module: str) -> str:
     """去掉外层前缀 ✓（``diffusion_model.blocks.0.mlp.fc1`` → ``blocks.0.mlp.fc1`` ✓）。"""
     for prefix in _STRIP_PREFIXES:
@@ -130,8 +316,17 @@ def parse_lora(tensors: Mapping[str, Any]) -> LoraReport:
     ⚠️ 三种"配不上"都要报出来，不能悄悄少装 ✗：
     只有 A 没有 B（或反之）⇒ ``orphans`` ✓；A/B 的 rank 不一致 ⇒ ``LoraError`` ✓；
     ``adaln_proj`` ⇒ ``runtimeInject`` ✓（它在 pruned 底模上折不进权重 ✓）。
+
+    ⚠️ **别的适配器族**（DoRA / LoHa / LoKr / OFT / LoRA-Embedding ✓）⇒ ``error`` ✗：
+    它们的分辨不了成一对低秩因子 ✓，当普通 LoRA 装等于**少装 + 不报错** ✓✗。
     """
     report = LoraReport()
+    unsupported = _unsupported_families(tensors)
+    if unsupported:
+        report.error = "；".join(
+            f"这是 {family} 适配器 ✗（{len(names)} 个张量，如 `{names[0]}` ✓）：{_UNSUPPORTED_REASONS[family]}"
+            for family, names in unsupported.items())
+        return report
     downs: dict[str, Any] = {}
     ups: dict[str, Any] = {}
     alphas: dict[str, float] = {}
@@ -304,11 +499,28 @@ class LoraApplyReport:
     missing: list[str] = field(default_factory=list)
     runtime: list[str] = field(default_factory=list)
     hooks: list[Any] = field(default_factory=list)
+    #: ``missing`` 里**本来就该对不上**的那些 ✓（文本编码器层 ✓）—— 文案照进 ``missing`` ✓（可见 ✓），
+    #: 但不参与「部分生效」判定 ✗。⚠️ **不进 ``to_dict``** ✗：``docs/engine-api.schema.json`` 里
+    #: ``lora`` 的键集是逐字快照 ✓，加键＝破坏性改动 ✓（要加得连着环境文档一起改 ✓）。
+    skipped: list[str] = field(default_factory=list)
+    #: 靠 :func:`kohya_module_name` **翻译**才对上的那些层 ✓（键是下划线分层 ✓）。
+    #: ⚠️ 同样**不进 ``to_dict``** ✗（键集是 schema 逐字快照 ✓）；它只用来回答
+    #: 「这个 LoRA 是靠翻译才装上的吗」✓ —— 全 0 说明文件本来就是点分层 ✓。
+    translated: list[str] = field(default_factory=list)
     error: str = ""
 
     @property
     def applied(self) -> int:
         return len(self.merged) + len(self.bypassed)
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+    @property
+    def unapplied(self) -> int:
+        """**真该装却没装上**的层数 ✓（扣掉文本编码器那些本来就不归这里管的 ✓）。"""
+        return max(len(self.missing) - len(self.skipped), 0)
 
     def absorb(self, other: "LoraApplyReport") -> None:
         self.merged.extend(other.merged)
@@ -316,6 +528,8 @@ class LoraApplyReport:
         self.missing.extend(other.missing)
         self.runtime.extend(other.runtime)
         self.hooks.extend(other.hooks)
+        self.skipped.extend(other.skipped)
+        self.translated.extend(other.translated)
         if other.error and not self.error:
             self.error = other.error
 
@@ -406,16 +620,41 @@ def apply_to_model(model: Any, report: LoraReport, *, strength: float = 1.0,
     result = LoraApplyReport()
     for name, delta in report.deltas.items():
         target = transform(name) if transform else name
+        #: 名字被**改写**过 ✓（不是恒等 ✓）⇒ 与下面 kohya 兜底同属「翻译」✓，找到模块后一并记账 ✓。
+        #: ⚠️ 不记的后果：全走 ``transform`` 的塔（SDXL 的 TE 层 ✓）``translated`` 恒 0 ✓✗，
+        #:    报告读起来像「一个键都没翻译」✓✗ —— 与实情相反 ✓。
+        renamed = transform is not None and target != name
         path, reason = choose_path(name, layout=layout)
         module = modules.get(target)
+        if module is None and transform is None:
+            #: ⭐ 2026-10-31 补 ✓：kohya / sd-scripts 的 SD1.5·SDXL·SD3 LoRA 键是**下划线分层** ✓
+            #: （整串无点 ✓），模型里是点分层 ⇒ 不翻译就「一层都没装上」✗。只在不传 ``transform``
+            #: 时兜底 ✓ —— 传了 ``transform`` 说明调用方**自己**有映射口径 ✓，这里不许叠加猜测 ✗✗。
+            translated = kohya_module_name(name)
+            if translated != name:
+                found = modules.get(translated)
+                if found is not None:
+                    module, target = found, translated
+                    result.translated.append(name)
         if module is None:
-            result.missing.append(f"{name}（模型里没有 {target} ✗）")
+            if is_text_encoder_key(name):
+                # 文本编码器侧的增量 ✓ —— 传进来的 `model` 是 DiT ✗ ⇒ 本来就不该在这里对上 ✓。
+                # 文案仍写进 `missing` ✓（**可见** ✓），但不参与「部分生效」判定 ✗。
+                result.skipped.append(f"{name}（文本编码器层 ⇒ 本后端只装 DiT ✗）")
+                result.missing.append(result.skipped[-1])
+            else:
+                result.missing.append(f"{name}（模型里没有 {target} ✗）")
             continue
+        if renamed:
+            result.translated.append(name)
         if path == "runtime":
             result.runtime.append(f"{name}（{reason} ✗）")
             continue
+        # ⚠️ 因子必须**先搬到目标层**再做运算 ✗✗（显存路必崩 ✓，见 :func:`_align_delta` ✓）
+        weight = getattr(module, "weight", None)
+        reference = weight if weight is not None else next(iter(module.parameters(recurse=False)), None)
+        delta = _align_delta(delta, reference)
         if path == "merge":
-            weight = getattr(module, "weight", None)
             if weight is None:
                 result.missing.append(f"{name}（要 merge 但 {target} 没有 weight ✗）")
                 continue
@@ -425,11 +664,27 @@ def apply_to_model(model: Any, report: LoraReport, *, strength: float = 1.0,
         result.hooks.append(module.register_forward_hook(
             partial(_bypass_hook, delta=delta, strength=strength, ops=ops)))
         result.bypassed.append(name)
+    reasons: list[str] = []
     if result.runtime:
-        result.error = (
+        reasons.append(
             f"{len(result.runtime)} 层 adaln 增量没有装 ✗ —— 它们活在 silu(t_emb) 的塌缩空间里，"
             f"折不进权重也钩不到 forward ✓；真要支持得在 AdalnProj 里逐 forward 注入 ✓。"
             f"（盘上现有的 minimax_h3 turbo LoRA 实测 adaln 键为 **0** ✓ ⇒ 正常不会撞到这条 ✓）")
+    if result.unapplied:
+        # ⚠️ **部分生效 = 静默错值** ✗✗（2026-10-31 补 ✓）：只装上一半的 LoRA 不报错，
+        #    画面/文本只会「像但不对」✓✗ —— 比一层都没装上更难查 ✓。
+        #    一层都没装上通常是**命名口径**问题（kohya 原生 `lora_unet_down_blocks_0_…` 用下划线分层 ✓，
+        #    模型里是 `down_blocks.0.…` ✓），必须当场说清 ✗。
+        head = (f"{result.unapplied} 个模块在 DiT 里找不到 ✗"
+                if result.applied == 0 else
+                f"只装上 {result.applied} 层、另有 {result.unapplied} 层找不到 ✗")
+        reasons.append(
+            f"{head} ⇒ 这个 LoRA **没有完整生效** ✗（如 {result.missing[0]} ✓）。"
+            f"本层认「点分层」（`down_blocks.0.…` ✓）与 kohya 下划线分层"
+            f"（`lora_unet_down_blocks_0_…` ⇒ 自动翻译 ✓，见 `kohya_module_name` ✓）；"
+            f"LoHa/LoKr/DoRA/OFT 这些**分解族**不认 ✗（见 `_UNSUPPORTED_REASONS` ✓）")
+    if reasons:
+        result.error = "；".join(reasons)
     return result
 
 

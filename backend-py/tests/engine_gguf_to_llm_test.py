@@ -46,11 +46,11 @@ def _reverse(name: str) -> str:
         return "output_norm.weight"
     if name == "lm_head.weight":
         return "output.weight"
-    m = re.match(r"blocks\.(\d+)\.attn\.(q_proj|k_proj|v_proj|o_proj)\.weight", name)
+    m = re.match(r"blocks\.(\d+)\.attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)", name)
     if m:
         suffix = {"q_proj": "attn_q", "k_proj": "attn_k",
                   "v_proj": "attn_v", "o_proj": "attn_output"}[m.group(2)]
-        return f"blk.{m.group(1)}.{suffix}.weight"
+        return f"blk.{m.group(1)}.{suffix}.{m.group(3)}"
     m = re.match(r"blocks\.(\d+)\.ffn\.(gate|up|down)\.weight", name)
     if m:
         return f"blk.{m.group(1)}.ffn_{m.group(2)}.weight"
@@ -172,6 +172,63 @@ def case_qk_norm() -> None:
         restored.blocks[0].attn.q_norm.weight.mul_(2.0)
         after = _logits(restored(ids))
     check("③⁗′ ⭐ 把 `blocks[0].attn.q_norm.weight` 乘 2 ⇒ **logits 必须变** ✓（只存不用 ⇒ 这条红 ✗✗）",
+          not torch.allclose(before, after, atol=1e-6),
+          float((before - after).abs().max()))
+
+
+def case_qkv_bias() -> None:
+    """⭐ Qwen2 / Qwen2.5 的 q/k/v **偏置**（2026-10-31 补 ✓）：每层三根 ``attn_{q,k,v}.bias`` ✓。
+
+    为什么必须单独立一条 ✗：漏掉这三族**不会报错** ✓ —— ``LlmConfig.qkv_bias`` 默认 ``False``
+    ⇒ 模型压根不建 bias 参数 ⇒ 那三根 GGUF 键被当「未知名字」跳过 ✓，键集对账也全绿 ✓✗。
+    后果只有「每层少一个常数」⇒ 提示词跟随变弱 ✓✗（静默降质）。
+    """
+    check("③⁘ `attn_q.bias` 只在 `qkv_bias=True` 时映射 ✓（Qwen3/Llama 没这三根 ⇒ 必须先看张量表 ✗）",
+          g2l.map_name("blk.0.attn_q.bias", tie_embeddings=False) is None
+          and g2l.map_name("blk.0.attn_q.bias", tie_embeddings=False, qkv_bias=True)
+          == "blocks.0.attn.q_proj.bias", None)
+    if not _torch_available():
+        print("SKIP  ③⁘′ 偏置往返：需要 torch（本机未装）⇒ 不判（≠ 通过 ✓）")
+        return
+    import torch  # noqa: PLC0415
+
+    config = llm_mod.LlmConfig(vocab_size=32, hidden=16, depth=2, heads=4, kv_heads=2,
+                               head_dim=8, ffn=32, tie_embeddings=False, qkv_bias=True)
+    model = llm_mod.build_llm(config)
+    weights = {}
+    for name, tensor in model.state_dict().items():
+        data = tensor.detach().numpy()
+        weights[_reverse(name)] = (tuple(reversed(data.shape)), data.flatten())
+
+    state = g2l.gguf_state_dict(weights, config)
+    check("③⁘ᵃ `detect_features` 按张量表把 `qkv_bias` 翻上来 ✓（装载阶段**真会**这么做，不只映射表支持 ✗）",
+          g2l.detect_features(
+              llm_mod.LlmConfig(vocab_size=8, hidden=8, depth=1, heads=1, kv_heads=1,
+                                 head_dim=8, ffn=16),
+              ["blk.0.attn_q.bias", "blk.0.attn_q.weight"]).qkv_bias
+          and not g2l.detect_features(
+              llm_mod.LlmConfig(vocab_size=8, hidden=8, depth=1, heads=1, kv_heads=1,
+                                head_dim=8, ffn=16),
+              ["blk.0.attn_q.weight"]).qkv_bias,
+          None)
+
+    check("③⁘′ 偏置往返：**三条 bias 一张不少** ✓（少装 ⇒ 每层少一个常数、静默降质 ✗✗）",
+          set(state) == set(model.state_dict())
+          and sum(name.endswith(".bias") for name in state) == 3 * config.depth,
+          sorted(set(model.state_dict()) - set(state)) or sorted(set(state) - set(model.state_dict())))
+
+    restored = llm_mod.build_llm(config)
+    restored.load_state_dict(state, strict=True)
+    ids = torch.tensor([[1, 5, 9, 17, 3]])
+
+    def _logits(out):
+        return out[0] if isinstance(out, tuple) else out
+
+    with torch.no_grad():
+        before = _logits(restored(ids)).clone()
+        restored.blocks[0].attn.q_proj.bias.add_(1.0)
+        after = _logits(restored(ids))
+    check("③⁘″ 给 `blocks[0].attn.q_proj.bias` 加 1 ⇒ **logits 必须变** ✓（建了参数却没用 ⇒ 这条红 ✗✗）",
           not torch.allclose(before, after, atol=1e-6),
           float((before - after).abs().max()))
 
@@ -408,6 +465,7 @@ def main() -> int:
     case_transpose()
     case_stream_load()
     case_qk_norm()
+    case_qkv_bias()
     case_tie()
     case_infer()
     failures = [item for item in _RESULTS if not item[1]]

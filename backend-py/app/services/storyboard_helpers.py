@@ -19,10 +19,12 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import Connection
 
 from ..core.models import (
@@ -30,12 +32,14 @@ from ..core.models import (
     continuity_states,
     episode_characters,
     episode_scenes,
+    episodes,
     image_generations,
     storyboard_characters,
     storyboard_props,
     storyboards as storyboards_table,
     video_generations,
 )
+from ..core.response import now
 from .character_match import match_character_by_speaker_name
 
 #: 这些「说话人」不是角色，是音效/环境音标记 —— 不参与 TTS 角色匹配。
@@ -180,6 +184,50 @@ _MEDIA_COLUMNS = (
 )
 
 
+def recalc_episode_duration(conn: Connection, episode_id: int) -> float:
+    """按本集所有镜头重算 ``episodes.duration``，返回总秒数。
+
+    ⚠️ 口径是**分钟**：``ceil(总秒 / 60)``（对齐原 TS 的 ``Math.ceil``）。别改成秒 ——
+    前端集卡片、目标时长核对都按分钟读这一列。
+
+    ⚠️ 镜头行是时长的**唯一真源**：整集重建、单镜改 ``duration``、单镜删除，三条路径
+    都会改变总和，**都必须回到这里**。原来只有整集重建在内部算过一次，另两条完全不碰
+    该列 ⇒ 删掉一镜或改短一镜后 ``episodes.duration`` 还是旧值（静默失真：镜头和已经
+    是 12 秒、集却还写着 2 分钟）。
+    """
+    # 不做 int() 截断：59.5 秒截成 59 与 ceil(59.5/60)=1 恰好同值，但 60.5 秒会从 2 分钟
+    # 掉成 1 分钟 —— 边界上真实存在差异。
+    total = float(conn.execute(
+        select(func.coalesce(func.sum(storyboards_table.c.duration), 0))
+        .where(storyboards_table.c.episode_id == episode_id)
+    ).scalar() or 0)
+    conn.execute(
+        update(episodes).where(episodes.c.id == episode_id).values(
+            duration=math.ceil(total / 60), updated_at=now(),
+        )
+    )
+    return total
+
+
+def delete_storyboard_children(conn: Connection, storyboard_ids: Sequence[Any]) -> None:
+    """删掉挂在若干分镜上的**全部附件行**（「分镜挂了哪些表」的唯一真源）。
+
+    三处调用方必须共用它，否则口径会漂：``save_storyboards`` 的整集重建、
+    :func:`clear_episode_storyboards`、单镜 ``DELETE`` 路由。**只删镜头级**：
+    ``continuity_states`` 里 ``storyboard_id`` 为空、只有 ``scene_id`` 的行是**场景级**状态，
+    场景本身还在 ⇒ 一行不碰。
+    """
+    ids = [int(sid) for sid in storyboard_ids if sid is not None]
+    if not ids:
+        return
+    conn.execute(delete(storyboard_characters).where(
+        storyboard_characters.c.storyboard_id.in_(ids)))
+    conn.execute(delete(storyboard_props).where(
+        storyboard_props.c.storyboard_id.in_(ids)))
+    conn.execute(delete(continuity_states).where(
+        continuity_states.c.storyboard_id.in_(ids)))
+
+
 def clear_episode_storyboards(conn: Connection, episode_id: Any) -> dict[str, Any]:
     """清空一集的全部镜头（连同角色/道具关联、镜头级连续性状态、出图/出视频记录）。
 
@@ -205,17 +253,15 @@ def clear_episode_storyboards(conn: Connection, episode_id: Any) -> dict[str, An
         # 有产物就不重建：宁可「只补缺场景」，也不静默丢掉成片
         return {"deleted": 0, "refused": True, "media": len(with_media)}
 
-    conn.execute(delete(storyboard_characters).where(
-        storyboard_characters.c.storyboard_id.in_(ids)))
-    conn.execute(delete(storyboard_props).where(
-        storyboard_props.c.storyboard_id.in_(ids)))
-    conn.execute(delete(continuity_states).where(
-        continuity_states.c.storyboard_id.in_(ids)))
+    delete_storyboard_children(conn, ids)
     conn.execute(delete(image_generations).where(
         image_generations.c.storyboard_id.in_(ids)))
     conn.execute(delete(video_generations).where(
         video_generations.c.storyboard_id.in_(ids)))
     conn.execute(delete(storyboards_table).where(storyboards_table.c.id.in_(ids)))
+    # 集时长跟着归零：否则「0 镜 / 时长还是 2 分钟」这种自相矛盾会一路带到成片信息里。
+    # 走 recalc 而不是手写 0 —— 这一列全仓只该有一个算法（清空后 sum=0，结果同样是 0）。
+    recalc_episode_duration(conn, episode_id)
     return {"deleted": len(ids), "refused": False, "media": 0}
 
 

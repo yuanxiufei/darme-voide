@@ -25,10 +25,12 @@ __all__ = [
     "TimeEmbedder", "TokenRefiner", "frame_grid_coords", "looks_like_h3_form", "mod_row",
     "packed_rows", "position_ids", "rope_angles", "video_t_grid", "AUDIO_COND_TIMESTEP",
     "H3_DEFAULTS", "H3FormTrunk", "VISUAL_COND_TIMESTEP", "audio_carry", "audio_scale",
-    "denoise_step", "mask_row_values", "mod_segments_for", "pack_audio", "patchify_video",
+    "denoise_step", "mask_row_timesteps", "mask_row_values", "mask_rows_for",
+    "mod_segments_for", "pack_audio", "pad_to_patch_size", "patchify_video",
+    "rows_unique_index",
     "sample_dual_stream", "t_vals_for", "unpack_audio", "unpatchify_video",
     "audio_grid", "packed_layout", "ref_time_span", "video_grid", "video_t_spans",
-    "assemble_blocks", "pdd_head", "curve_t_emb",
+    "assemble_blocks", "cond_noise_augment", "pdd_head", "curve_t_emb",
     "H3_VIDEO_OUT_KEY", "video_patch_dim", "head_banks_from_shape",
     "Int8Linear",
 ]
@@ -79,6 +81,13 @@ H3_FORM_PARTS: tuple[str, ...] = (
     "+ ⚠️ **两处静默错的修正** ✓：`t_vals_for` 的 text 档（应跟 video ✓ 不是 0.999 ✗）、"
     "`mod_segments_for` 的模态标签（video/cond/ref_img=0 ✓、text=1 ✓、audio 系=2 ✓ —— 初版**三点全错** ✓✗ "
     "且都**不会报错** ✓）",
+    "✅ **条件行噪声增广已补齐** ✓（2026-11-01 ✓，原「已知偏差」销账 ✓）：`cond_noise_augment` ✓ —— "
+    "``r = aug·z + (1−aug)·noise`` ✓，``aug`` 默认 ``VISUAL_COND_TIMESTEP = 0.999`` / "
+    "``AUDIO_COND_TIMESTEP = 1.0`` ✓；**每个 cond 块都重启同一 RNG 流** ✓（同形块拿到**逐位相同**的噪声 ✓ "
+    "—— 这不是巧合 ✓ 是参考的语义 ✓）；音频流的种子是 ``seed + 1`` ✓（两条流**不共用**噪声 ✓）。"
+    "入口是 `assemble_blocks` ✓（块序在那里已知 ⇒ 与参考「逐块加噪」同构 ✓；行拼完再加就**不对** ✗）。"
+    "⚠️ ``aug >= 1`` ⇒ **原样返回、且不消耗任何随机数** ✓（不是「乘 1 再算一遍」 ✗）。"
+    "另：``q/k`` 的 **norm 与 rope 先后**在 2026-10-31 前是写反的 ✗（见 `Attention.forward` ✓）。",
     "⭐⭐ **双流接进管线** ✓（2026-09-20 ✓ 同一天 ✓）：`TorchBackend` 的 "
     "`init_dual_latents` ✓（两条初始噪声 ✓，共用 seed ⇒ 逐位可复现 ✓）+ `sample_dual` ✓"
     "（**直接调本文件的 `sample_dual_stream`** ✓ —— 采样循环只有一份 ✓）+ `_decode_dual` ✓"
@@ -284,10 +293,17 @@ def _build_torch_parts() -> dict[str, Any]:
             q = q.reshape(count, self.heads, self.head_dim)
             k = k.reshape(count, self.heads, self.head_dim)
             v = v.reshape(count, self.heads, self.head_dim)
+            #: ⚠️ **顺序是 norm → rope** ✓✗（2026-10-31 改 ✓，原先是 rope → norm ✗）。
+            #:    参考实现那一步是**融合核** ``ck.rms_rope_split_half`` ✓（名字即顺序 ✓），
+            #:    纯 python 的同族实现也写死了 ``q = apply_rope_split_half1(self.norm_q(q), freqs)``
+            #:    （``comfy/ldm/ideogram4/model.py`` ✓）。RMS 因子本身对旋转不变 ✓，所以「先转后 norm」
+            #:    **只在 norm 权重逐维不等于 1 时**才露出来 ✓：旋转把相邻两维混在一起 ✓，
+            #:    先乘 ``w`` 再转 ≠ 先转再乘 ``w`` ✓✗ —— 训过的权重都不可能全 1 ✓，
+            #:    症状是视频画质整体发糊、无任何报错 ✓✗。
+            q, k = self.q_norm(q), self.k_norm(k)
             if rope_angles is not None:
                 q = self.apply_rope(q, rope_angles, rot_dim)
                 k = self.apply_rope(k, rope_angles, rot_dim)
-            q, k = self.q_norm(q), self.k_norm(k)
             # [S, heads, head_dim] → [heads, S, head_dim] ⇒ 注意力在 S 上（**无 mask** ✓）
             out = nn.functional.scaled_dot_product_attention(
                 q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1))
@@ -302,12 +318,15 @@ def _build_torch_parts() -> dict[str, Any]:
         """
 
         def __init__(self, t_dim: int, hidden: int, expand: int, modalities: int,
-                     apply_silu: bool = True) -> None:
+                     apply_silu: bool = True, dtype: Any = None) -> None:
             super().__init__()
             self.expand = int(expand)
             self.modalities = int(modalities)
+            #: ⚠️ **曲线档必须 ``False``** ✗✗（参考：``apply_silu=not use_adaln_curves`` ✓）——
+            #: 曲线档的 ``t_emb`` 是**曲线基系数**（宽 8 ✓）不是时间嵌入 ✗ ⇒ 再套 SiLU 就是把
+            #: 系数**非线性压扁** ✓ ⇒ 调制全偏 ✓ 而**不报错** ✓✗（2026-11-01 查出并修 ✓）。
             self.apply_silu = bool(apply_silu)
-            self.linear = nn.Linear(t_dim, expand * hidden * modalities, bias=True)
+            self.linear = nn.Linear(t_dim, expand * hidden * modalities, bias=True, dtype=dtype)
 
         def forward(self, t_emb: Any) -> tuple[Any, ...]:
             value = nn.functional.silu(t_emb) if self.apply_silu else t_emb
@@ -397,13 +416,15 @@ def _build_torch_parts() -> dict[str, Any]:
         """
 
         def __init__(self, hidden: int, heads: int, head_dim: int, ffn: int, t_dim: int,
-                     eps: float = 1e-5, qk_eps: float = 1e-5, modalities: int = 3) -> None:
+                     eps: float = 1e-5, qk_eps: float = 1e-5, modalities: int = 3,
+                     apply_silu: bool = True, adaln_dtype: Any = None) -> None:
             super().__init__()
             self.norm1 = RMSNorm(hidden, eps)
             self.norm2 = RMSNorm(hidden, eps)
             self.attn = Attention(hidden, heads, head_dim, qk_eps)
             self.mlp = SwiGLU(hidden, ffn)
-            self.adaln_proj = AdalnProj(t_dim, hidden, 6, modalities)
+            self.adaln_proj = AdalnProj(t_dim, hidden, 6, modalities,
+                                        apply_silu=apply_silu, dtype=adaln_dtype)
 
         def forward(self, x: Any, t_emb: Any, mod_segments: Any,
                     rope_angles: Any = None, rot_dim: int = 0) -> Any:
@@ -446,13 +467,17 @@ def _build_torch_parts() -> dict[str, Any]:
         """
 
         def __init__(self, hidden: int, t_dim: int, video_dim: int, audio_dim: int,
-            eps: float = 1e-5, head_banks: int = 1) -> None:
+            eps: float = 1e-5, head_banks: int = 1,
+            apply_silu: bool = True, adaln_dtype: Any = None) -> None:
             super().__init__()
             if int(head_banks) < 1:
                 raise ValueError(f"head_banks 必须 ≥ 1（收到 {head_banks} ✗）")
             self.head_banks = int(head_banks)
             self.norm = RMSNorm(hidden, eps)
-            self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1)
+            # ⚠️ 曲线档的 `apply_silu` 必须是 **False** ✗（理由见 `AdalnProj.__init__` ✓）——
+            #    参考对**输出层**也照传同一个 `curve` 字典 ✓（只改块不改头 ⇒ 头那一路仍是被压扁的 ✓✗）。
+            self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1,
+                                        apply_silu=apply_silu, dtype=adaln_dtype)
             self.video_out = nn.Linear(hidden, video_dim * self.head_banks, bias=True,
                                        dtype=torch.float32)
             self.audio_out = nn.Linear(hidden, audio_dim * self.head_banks, bias=True,
@@ -727,8 +752,46 @@ def _build_torch_parts() -> dict[str, Any]:
             "video_rows": latent_t * frame_rows, "audio_rows": audio_t * 2,
         }
 
+    #: 条件行的 timestep（**事实** ✓ 参考里是写死的常量 ✓；text 归到 visual 那一档 ✓）。
+    #: ⚠️ 定义必须**早于** `assemble_blocks` ✗（它的默认值在 def 时求值 ✓ —— 放到下面会
+    #: `UnboundLocalError: cannot access local variable` ✓ 实测踩过 ✓）。
+    VISUAL_COND_TIMESTEP = 0.999
+    AUDIO_COND_TIMESTEP = 1.0
+
+    def cond_noise_augment(rows: Any, aug: float, seed: int) -> Any:
+        """条件行的**噪声增广** ✓ ⇒ ``aug·rows + (1−aug)·noise`` ✓（事实来源：参考
+        ``_cond_video_rows`` / ``_cond_audio_rows`` ✓）。
+
+        ⚠️ **为什么要做** ✗？条件行（首帧 / 参考图 / 参考音轨）本来是"干净"的 ✓ ⇒ 模型在训练里从没见过
+        "干净条件" ⇒ 在推理里直接喂干净行会让它把条件当**已生成内容**来用 ✓✗（症状：首帧与后续帧接不上、
+        参考图只被"看一眼"不被驱动 ✓，**不报错** ✓）。参考的做法是把条件行**按 timestep 混一点噪声** ✓
+        （``aug`` 就是那个 timestep ✓ 同时用于 `t_vals_for` 的 cond 档 ✓ —— **两者必须用同一个数** ✗✗）。
+        ⚠️ **每个块各自重启同一 RNG 流** ✓（参考注释原话 "every condition intentionally restarts the same
+        RNG stream" ✓）：同形的两个块因此拿到**逐位相同**的噪声 ✓ —— 这不是写错 ✓，自检把这条钉住 ✓。
+        ⚠️ ``aug >= 1`` ⇒ **原样返回、不消耗随机数** ✓（不是"乘 1 再算" ✗ —— 那会白算一遍、还会把
+        `Generator` 的状态推进 ✓✗，一旦调用方复用生成器就**静默错** ✓）。
+        ⚠️ ``aug`` 越界 ⇒ **当场报错** ✗（它不是步数/σ ✓，是"保留多少原信号" ✓；给 12.0 那种会得到
+        12 倍放大的行 ✓✗ 且**不报错** ✓）。
+        """
+        aug = float(aug)
+        if not 0.0 <= aug <= 1.0:
+            raise ValueError(
+                f"条件行噪声增广的 aug 必须在 [0, 1] 内（收到 {aug} ✗）—— 它是「保留多少原信号」"
+                f"（= 参考的 ``VISUAL_COND_TIMESTEP`` / ``AUDIO_COND_TIMESTEP`` ✓），不是步数也不是 σ ✗✗")
+        if aug >= 1.0:
+            return rows
+        # ⚠️ 生成器在 **CPU** ✓、噪声算在 **fp32** ✓（参考逐字如此 ✓）—— 设备靠 ``.to`` 搬 ✓ 不是让
+        #    `randn` 直接生在卡上 ✗（那样同 seed 在不同卡/不同 torch 版本上**不保证同值** ✓✗）。
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        noise = torch.randn(tuple(rows.shape), generator=generator, dtype=torch.float32)
+        mixed = aug * rows.to(torch.float32) + (1.0 - aug) * noise.to(rows.device)
+        return mixed.to(dtype=rows.dtype)
+
     def assemble_blocks(layout: Any, video_sources: Any, audio_sources: Any,
-                        patch_size: tuple[int, int, int] = (1, 2, 2)) -> tuple[Any, Any]:
+                        patch_size: tuple[int, int, int] = (1, 2, 2), *,
+                        seed: int = 0,
+                        visual_cond_aug: float = VISUAL_COND_TIMESTEP,
+                        audio_cond_aug: float = AUDIO_COND_TIMESTEP) -> tuple[Any, Any]:
         """按**布局的块序**把条件/参考潜变量拼成行 ✓ ⇒ ``(视频行, 音频行)`` ✓（**不含目标** ✓）。
 
         ``video_sources`` / ``audio_sources``：``{("keyframe", 0): 潜变量, ("ref", 0): …}`` ✓ ——
@@ -736,8 +799,15 @@ def _build_torch_parts() -> dict[str, Any]:
         ⚠️ 这就是"行序判据"的落点 ✓：以前布局一处、拼装另一处 ⇒ 同数不同序时**总行数校验拦不住** ✗✗
         （只会"画面不对" ✓）⇒ 现在**布局说了算、这里照抄** ✓。
         ⚠️ 缺块 / 块行数对不上 ⇒ **报错** ✗（不静默跳过 ✓ —— 少一截或错位都是最难查的那种 ✓）。
+
+        ⭐ **条件行噪声增广在这里做** ✓（2026-11-01 ✓ 对齐参考 `_cond_video_rows` / `_cond_audio_rows` ✓）：
+        因为**块序只有这里知道** ✓ —— 参考是**逐块**加噪、每块重启同一 RNG 流 ✓；行拼成一整条之后
+        再加就变成"一条连续流" ✓✗（同形块不再拿到相同噪声 ✓ 而且**不报错** ✓）。
+        ``seed`` 默认 0 ✓ 与参考 ``payload.get("seed", 0)`` 同口径 ✓；**音频流的种子是 ``seed + 1``** ✓✗
+        （两条流共用种子 ⇒ 音视频条件行吃到相关噪声 ✓ 不报错 ✓）。
         """
-        def gather(blocks: Any, sources: Any, convert: Any, label: str) -> Any:
+        def gather(blocks: Any, sources: Any, convert: Any, label: str,
+                   aug: float, aug_seed: int) -> Any:
             rows: list[Any] = []
             for block, count in blocks:
                 if block[0] == "target":
@@ -750,12 +820,15 @@ def _build_torch_parts() -> dict[str, Any]:
                 if int(converted.shape[0]) != int(count):
                     raise ValueError(
                         f"块 {block} 实际 {int(converted.shape[0])} 行 ✓，布局要 {count} 行（{label}）✗")
-                rows.append(converted)
+                # ⚠️ **逐块**加噪 ✓（每次重新 `manual_seed(aug_seed)` ⇒ 同形块噪声逐位相同 ✓）
+                rows.append(cond_noise_augment(converted, aug, aug_seed))
             return torch.cat(rows, dim=0) if rows else None
 
         return (gather(layout["video_blocks"], video_sources,
-                       lambda latent: patchify_video(latent, patch_size), "视频"),
-                gather(layout["audio_blocks"], audio_sources, pack_audio, "音频"))
+                       lambda latent: patchify_video(latent, patch_size), "视频",
+                       visual_cond_aug, int(seed)),
+                gather(layout["audio_blocks"], audio_sources, pack_audio, "音频",
+                       audio_cond_aug, int(seed) + 1))
 
     def packed_rows(text_len: int, latent_t: int, latent_h: int, latent_w: int, audio_t: int,
                     keyframes: Any = None, refs: Any = None) -> dict[str, Any]:
@@ -825,9 +898,8 @@ def _build_torch_parts() -> dict[str, Any]:
     # ─────────────── 主干（2026-09-20 第 ③ 批 ✓ 模块名与参考 `__init__` 逐字对齐 ✓）───────────
     # ⚠️ 由**模块级**那份派生 ✓（**同一规则只留一处** ✗ —— 两份写死迟早漂移 ✓）
     H3_DEFAULTS: dict[str, Any] = {**H3_TRUNK_DEFAULTS, **H3_SIGMA_SHIFTS}
-    #: 条件行的 timestep（**事实** ✓ 参考里是写死的常量 ✓；text 归到 visual 那一档 ⚠️ **未逐条核过** ✗）
-    VISUAL_COND_TIMESTEP = 0.999
-    AUDIO_COND_TIMESTEP = 1.0
+    # ⚠️ ``VISUAL_COND_TIMESTEP`` / ``AUDIO_COND_TIMESTEP`` 在**上面**（`assemble_blocks` 之前）✓ ——
+    #    那是唯一一处 ✓；这里再写一遍就是第二份 ✓✗（长得一样也会漂 ✓）。
 
     def audio_carry(sigma_v: float, shift_v: float = 12.0, shift_a: float = 3.0) -> float:
         """采样器把音频按 ``σ_a/σ_v`` 缩放带着走的倍数 ✓（进出都要还原 ✓）。
@@ -842,7 +914,9 @@ def _build_torch_parts() -> dict[str, Any]:
 
     def t_vals_for(sigma_v: float, shift_v: float = 12.0, shift_a: float = 3.0,
                    visual_cond_t: float = VISUAL_COND_TIMESTEP,
-                   audio_cond_t: float = AUDIO_COND_TIMESTEP) -> tuple[Any, dict[str, int]]:
+                   audio_cond_t: float = AUDIO_COND_TIMESTEP, *,
+                   video_t: float | None = None, audio_t: float | None = None,
+                   extra: Any = ()) -> tuple[Any, dict[str, int]]:
         """各段的时间戳 ``t = 1 − σ`` ✓ ⇒ 去重成 ``t_vals`` ✓ + **段类 → 行号** 的映射 ✓。
 
         ⚠️⚠️ **档位与排序都是事实** ✓（2026-09-20 逐字核自参考 `MiniMaxH3Model.forward` 的
@@ -872,12 +946,46 @@ def _build_torch_parts() -> dict[str, Any]:
             "cond_audio": max(t_a, float(audio_cond_t)),
             "ref_audio": max(t_a, float(audio_cond_t)),
         }
-        values = sorted(set(wanted.values()))          # ⚠️ **升序** ✓（= 参考的 sorted ✓ 不是首次出现 ✓）
+        # ⚠️ **逐行档位的覆盖口** ✓（`mask_row_timesteps` 的产物 ✓）：只改 `video` / `audio` 两档 ✓，
+        #    `text` **仍跟** ``t_v`` ✓（参考 `seg_t["text"]` 从不被掩码改 ✓）。
+        if video_t is not None:
+            wanted["video"] = float(video_t)
+        if audio_t is not None:
+            wanted["audio"] = float(audio_t)
+        #: ⚠️ ``extra``：**逐行**时间戳的全部取值 ✓ —— 不进 `wanted`（那不是段档 ✗）但**必须进
+        #: `values` ✓：`AdalnProj` 的行数是「唯一时间戳 × 模态」✓ ⇒ 漏登一个取值 ⇒ 行号全错 ✓✗
+        #: （不报错 ✓）。
+        values = sorted(set(wanted.values()) | {float(value) for value in extra})
         index = {kind: values.index(value) for kind, value in wanted.items()}
         return torch.tensor(values, dtype=torch.float32), index
 
+    def rows_unique_index(t_vals: Any, rows_t: Any) -> Any:
+        """**逐行**时间戳 → **唯一时间戳序号** ✓（``[行]`` 的 ``long`` ✓；参考 ``rows_to_mod_index`` 的
+        去标签那一半 ✓）。
+
+        ⚠️ 参考在同处写的是 ``rows_to_mod_index(rows_t, 0) // 3`` ✓ —— ``3`` 是**模态数** ✓，
+        ``//3`` 就是"把 ``序号×3+0`` 还原成序号" ✓ ⇒ 这里直接出序号 ✓（少一次乘除 ✓ 语义不变 ✓）。
+
+        ⚠️ 查表口径是 **python float 精确相等** ✓（不是 ``searchsorted`` 近似 ✓）：``rows_t`` 的每个
+        取值都由 :func:`t_vals_for` 的 ``extra`` **原样**登记过 ✓（见 `mask_row_timesteps` 的调用点 ✓）
+        ⇒ 查不到就是调用方漏登 ✓ ⇒ ``KeyError`` **当场炸** ✓（不静默取近似值 ✗）。
+        """
+        levels = rows_t.unique()
+        table = {float(value): i for i, value in enumerate(t_vals.tolist())}
+        try:
+            bases = [table[float(value)] for value in levels.tolist()]
+        except KeyError as err:
+            raise ValueError(
+                f"逐行时间戳 {err.args[0]} 不在唯一时间戳表里 ✗（表 = {sorted(table)} ✓）—— "
+                "带逐行档位就必须把它的取值登记进 `t_vals_for(extra=...)` ✓（漏登会让行号整体错位 ✓ 不报错 ✗）"
+            ) from None
+        base = torch.tensor(bases, dtype=torch.long, device=levels.device)
+        return base[torch.searchsorted(levels, rows_t)]
+
     def mod_segments_for(segments: Any, index: dict[str, int],
-                         modalities: int = 3) -> Any:
+                         modalities: int = 3, video_rows_t: Any = None,
+                         audio_rows_t: Any = None, t_vals: Any = None,
+                         text_tags: Any = None) -> Any:
         """把段表变成 adaLN 的 ``mod_segments`` ✓（``row = 唯一序号 × modalities + 标签`` ✓）。
 
         ⚠️⚠️ **模态标签**（事实 ✓ 2026-09-20 逐字核自参考前向里的 ``seg_tag`` ✓）：
@@ -886,11 +994,76 @@ def _build_torch_parts() -> dict[str, Any]:
         ⚠️ 本仓初版写的是「text=0 ✓ / audio=1 ✓ / video=2」✗ —— **三档全错** ✓✗：标签只是 adaLN 的
         **行内偏移** ✓ ⇒ 错法**完全不报错** ✓，只是在真权重上把每个模态接到**别的模态**那一组参数
         （画面"就是不对" ✓✗）。⇒ 现在按"音频在视频之前"那条事实的同一份来源钉住 ✓。
+
+        ⚠️⭐ ``video_rows_t`` / ``audio_rows_t``（去噪掩码的**逐行**档位 ✓ 见
+        :func:`mask_row_timesteps` ✓）：给了就把**那一路目标段**从"整段一个整数行号"换成
+        "**逐 token** 的一串行号" ✓ —— 这正是参考 ``rows_to_mod_index`` 的用法 ✓。
+        ``t_vals`` 必须同时给 ✓（逐行取值要按它查序号 ✓ 不给就报错 ✓ 不猜 ✗）。
+
+        ⚠️⚠️ ``text_tags``（``h3_prompt.token_tags`` 的产物 ✓）**必须喂** ✓ 否则文本段里那些
+        ``IMAGE_PAD`` 会拿到 **text 那一行 adaLN** ✗（它们在参考里是 **video 行（标签 0）** ✓ ——
+        见参考 ``for i in range(1, b - a + 1)`` 那段"按标签把文本段切成若干 run"✓）。
+        错法**一个数都不错** ✓：段数、行数、形状全对 ✓，只是每个视觉占位 token 的调制参数来自
+        文本那组 ⇒ fl2va / ref2va 只要有图/帧就整段偏 ✓✗（2026-11-01 查出：本仓到那天为止
+        ``token_tags`` **没有任何消费者** ✗，H3 全线喂的一直是"整段一个 text 行" ✓）。
         """
         tags = {"video": 0, "cond": 0, "ref_img": 0, "text": 1,
                 "audio": 2, "cond_audio": 2, "ref_audio": 2}
-        return tuple((start, stop, mod_row(index[kind], tags[kind], modalities))
-                     for start, stop, kind in segments)
+        per_row = {"video": video_rows_t, "audio": audio_rows_t}
+        if any(value is not None for value in per_row.values()):
+            if t_vals is None:
+                raise ValueError(
+                    "给了逐行时间戳就必须同时给 ``t_vals`` ✗（行号要按唯一时间戳表查 ✓ 不猜 ✗）")
+
+        def text_runs(start: int, stop: int) -> list[Any]:
+            """按 ``text_tags`` 把文本段切成**标签一致的若干 run** ✓（参考原样的切法 ✓）。
+
+            ⚠️ 参考里判界用的是 ``tags[i]`` —— ``i`` 是**段内偏移** ✓ 不是 ``start + i`` ✗（原样照抄 ✓）。
+            段从 0 开始时两者相同 ✓；**段不从 0 起就不同** ✗ ⇒ 那种布局我们这里**直接拒** ✓（不猜 ✗：
+            照抄会读到别人的标签位、避开又和参考算得不一样 ✓✗，两边都是错 ⇒ 只好当场报错 ✓）。
+            """
+            count = stop - start
+            values = (list(text_tags.view(-1).tolist()) if hasattr(text_tags, "view")
+                      else list(text_tags))
+            if start != 0:
+                raise ValueError(
+                    f"文本段从第 {start} 行起 ✗ —— ``text_tags`` 的参考切法按**段内偏移**取标签 ✓，"
+                    "段不从 0 起就会读到别人的标签位 ⇒ 这里不做猜测 ✓（要么 0 起 ✓，要么改布局 ✓）")
+            if len(values) < count:
+                raise ValueError(
+                    f"``text_tags`` 只有 {len(values)} 个 ✗，而文本段是 {count} 行 ✓ —— "
+                    "标签与文本必须同源同长 ✓（短了会把后半段全当标签 0 ⇒ 静默偏 ✓✗）")
+            bad = sorted({v for v in values[:count] if v not in (0, 1)})
+            if bad:
+                raise ValueError(
+                    f"``text_tags`` 出现 {bad} ✗ —— 只允许 0（video 行 ✓）/ 1（text 行 ✓）；"
+                    "2 是 audio 行 ✗（文本段里不该有音频占位 ✓）")
+            runs: list[Any] = []
+            run_start = 0
+            for offset in range(1, count + 1):
+                #: ⚠️ 顺序不能换 ✓：``offset == count`` 必须先判 ✓（否则会越界读 ``values[count]`` ✗）
+                if offset == count or values[offset] != values[run_start]:
+                    runs.append((start + run_start, start + offset,
+                                 mod_row(index["text"], values[run_start], modalities)))
+                    run_start = offset
+            return runs
+
+        out: list[Any] = []
+        for start, stop, kind in segments:
+            if kind == "text" and text_tags is not None:
+                out.extend(text_runs(start, stop))
+                continue
+            rows_t = per_row.get(kind)
+            if rows_t is None:
+                out.append((start, stop, mod_row(index[kind], tags[kind], modalities)))
+                continue
+            if int(rows_t.numel()) != stop - start:
+                raise ValueError(
+                    f"``{kind}`` 段的逐行时间戳有 {int(rows_t.numel())} 个 ✗，"
+                    f"而该段是 {stop - start} 行 ✓ —— 一段一行 ✓ 对不上就是掩码与布局不同源 ✓（不猜 ✗）")
+            out.append((start, stop,
+                        rows_unique_index(t_vals, rows_t) * modalities + tags[kind]))
+        return tuple(out)
 
     class H3FormTrunk(nn.Module):  # noqa: D101
         """**H3 形态主干** ✓ —— 模块名与参考的 ``__init__`` **逐字对齐** ✓（可直接装它的权重 ✓）。
@@ -954,12 +1127,22 @@ def _build_torch_parts() -> dict[str, Any]:
             self.rot_dim = 6 * int(inv_freq_len)         # 3 轴 × F × 复制 2 份 ✓
             self.token_refiner = TokenRefiner(refiner_layers, hidden, heads, head_dim, ffn,
                                               norm_eps, qk_norm_eps, final_norm_eps)
+            # ⚠️⚠️ **曲线档的 adaLN 必须关 SiLU、且按 fp32 建** ✗✗（参考：`curve = {"apply_silu":
+            #    not use_adaln_curves, "adaln_dtype": float32 if curves else dtype}` ✓ 同一份字典
+            #    **同时喂块与输出层** ✓）。写错**不报错** ✓ —— 8 维曲线基系数被 SiLU 压扁 ⇒
+            #    每个块、每一层的调制全偏 ✓✗（2026-11-01 查出 ✓ 真权重 `ref2va_pruned_int8_convrot`
+            #    就是曲线档 ✓：`adaln_t_table [1025, 8]` ✓、无 `time_embedder.*` ✓）。
+            curve_style: dict[str, Any] = {
+                "apply_silu": not self.use_adaln_curves,
+                "adaln_dtype": (torch.float32 if self.use_adaln_curves else None)}
+            self.curve_style = dict(curve_style)
             self.blocks = nn.ModuleList([
-                DiTBlock(hidden, heads, head_dim, ffn, time_dim, norm_eps, qk_norm_eps, modalities)
+                DiTBlock(hidden, heads, head_dim, ffn, time_dim, norm_eps, qk_norm_eps,
+                         modalities, **curve_style)
                 for _ in range(layers)])
             self.final_layer = FinalLayer(hidden, time_dim, video_patch_dim,
                                           self.audio_latents_dim, final_norm_eps,
-                                          head_banks=self.head_banks)
+                                          head_banks=self.head_banks, **curve_style)
 
         def forward(self, video_rows: Any, audio_rows: Any, text_states: Any, sigma_v: float,
                     latent_h: int, latent_w: int, shift_v: float = 12.0, shift_a: float = 3.0,
@@ -967,12 +1150,17 @@ def _build_torch_parts() -> dict[str, Any]:
                     audio_cond_t: float = AUDIO_COND_TIMESTEP,
                     latent_t: int | None = None, audio_t: int | None = None,
                     keyframes: Any = None, refs: Any = None,
-                    sample_sigmas: Any = None) -> tuple[Any, Any]:
+                    sample_sigmas: Any = None, denoise_mask: Any = None,
+                    text_token_tags: Any = None) -> tuple[Any, Any]:
             """行级前向 ✓ ⇒ ``(视频行, 音频行)`` ✓（**已按参考的约定取负** ✓ velocity ✓）。
 
             ``video_rows``：``[行, latents_dim×pT·pH·pW]`` ✓（**含条件/参考块的行** ✓ 若有 ✓）、
             ``audio_rows``：``[行, audio_dim]`` ✓、``text_states``：``[L, text_dim]`` ✓
             （**都是 fp32 ✓、都没有 batch 维 ✓**）。
+
+            ``text_token_tags``：``h3_prompt.token_tags`` 的产物 ✓（长度**必须**等于 ``text_states`` 行数 ✓）。
+            不给 ⇒ 整段文本用 text 那一行 adaLN ✓（**纯文本提示词就是这样** ✓）；给了 ⇒ 文本段按标签
+            切成若干 run ✓（视觉占位 token 走 video 行 ✓ —— 不给而提示词里**真有**视觉块 ⇒ 静默偏 ✓✗）。
 
             ⚠️ **无** keyframes/refs 时段长从行数推出来 ✓（``latent_t = 视频行 / 每帧行数`` ✓ 除不尽报错 ✓）；
             ⚠️ **有**条件/参考块时**推不出来** ✗（那些块的行数不是每帧行数的整数倍 ✓）⇒ ``latent_t`` /
@@ -980,6 +1168,15 @@ def _build_torch_parts() -> dict[str, Any]:
             （对不上就报错 ✓ —— 这正是"行数与布局脱节"那条静默错的守卫 ✓）。
             """
             text_len = int(text_states.shape[0])
+            if text_token_tags is not None:
+                got = int(text_token_tags.view(-1).numel() if hasattr(text_token_tags, "view")
+                          else len(text_token_tags))
+                #: ⚠️ 长度不符**必须当错** ✗：``mod_segments_for`` 只判"够不够" ✓，多出来的那段标签
+                #: 会被**静默丢掉** ✓ ⇒ 文本与标签不同源（换了提示词没重算 tags ✓✗）。
+                if got != text_len:
+                    raise ValueError(
+                        f"``text_token_tags`` 有 {got} 个 ✗，而文本是 {text_len} 行 ✓ —— "
+                        "标签必须与**这一份**文本同源 ✓（换了提示词就得重算 ✓）")
             video_count = int(video_rows.shape[0])
             audio_count = int(audio_rows.shape[0])
             if audio_count % 2:
@@ -1007,9 +1204,38 @@ def _build_torch_parts() -> dict[str, Any]:
                     f"行数与布局对不上 ✗：收到 视频 {video_count} / 音频 {audio_count} ✓，"
                     f"布局要 视频 {want_video} / 音频 {want_audio} ✓"
                     f"（条件/参考块的行算上再传 ✓ —— 不猜、也不静默补齐 ✗）")
-            t_vals, index = t_vals_for(sigma_v, shift_v, shift_a, visual_cond_t, audio_cond_t)
+            # ⚠️⚠️ **去噪掩码 ⇒ 逐行时间戳** ✓✗（2026-11-01 补 ✓，口径逐字核自参考 ✓ 见
+            #    :func:`mask_row_timesteps` ✓）：此前本仓**只有采样器那半边**（缩放增量 ✓）⇒
+            #    被掩掉的行（如二采的音频流 ✓）档位仍是 ``1−σ`` ✓ ⇒ 主干把它们当**含噪**行 ✓✗
+            #    ⇒ 条件变软 ✓ 而日志全绿 ✓。``denoise_mask`` 恒 1 的路径取值**完全不变** ✓。
             segments = layout["segments"]
-            mod_segments = mod_segments_for(segments, index, self.modalities)
+            video_t = video_rows_t = audio_t_override = audio_rows_t = None
+            extra_t: tuple[float, ...] = ()
+            if denoise_mask is not None:
+                if not isinstance(denoise_mask, (tuple, list)) or len(denoise_mask) != 2:
+                    raise ValueError(
+                        "denoise_mask 要给 ``(mask_video, mask_audio)`` 两路 ✗（口径同 "
+                        "`sample_dual_stream` ✓：超清二采 = video 1 / audio 0 ✓）")
+                mask_video, mask_audio = denoise_mask
+                video_t, video_rows_t, audio_t_override, audio_rows_t = mask_row_timesteps(
+                    sigma_v, mask_video, mask_audio,
+                    shift_v=shift_v, shift_a=shift_a,
+                    visual_cond_t=visual_cond_t, audio_cond_t=audio_cond_t,
+                    latent_t=int(latent_t), latent_h=latent_h, latent_w=latent_w,
+                    # ⚠️ 声道数从**目标**音频行数反推 ✓（不能拿 `audio_count` ✗ —— 它含条件/参考块 ✓）
+                    audio_channels=want_audio // int(audio_t))
+            # ⚠️ 逐行档位里出现过的**每一个**取值都得进唯一时间戳表 ✓（否则行号整体错位 ✓ 不报错 ✗）
+            if video_rows_t is not None or audio_rows_t is not None:
+                extra_t = tuple(sorted({float(value)
+                                        for rows in (video_rows_t, audio_rows_t) if rows is not None
+                                        for value in rows.unique().tolist()}))
+            t_vals, index = t_vals_for(sigma_v, shift_v, shift_a, visual_cond_t, audio_cond_t,
+                                       video_t=video_t, audio_t=audio_t_override,
+                                       extra=extra_t)
+            mod_segments = mod_segments_for(segments, index, self.modalities,
+                                            video_rows_t=video_rows_t,
+                                            audio_rows_t=audio_rows_t,                                             t_vals=t_vals,
+                                            text_tags=text_token_tags)
 
             # 组装：文本走 refiner 那一支 ✓；视频/音频行**按段顺序**贴回去 ✓（与参考一致 ✓）
             text_embed = self.token_refiner(self.condition_proj(text_states.to(
@@ -1059,12 +1285,55 @@ def _build_torch_parts() -> dict[str, Any]:
                              for start, stop, kind in segments if kind == "video")
             audio_seg = next((start, stop, index["audio"])
                              for start, stop, kind in segments if kind == "audio")
+            # ⚠️ 逐行档位时输出层也**按行**取 ✓（参考：``(va, vb, rows_to_mod_index(rows_t, 0) // 3)`` ✓
+            #    —— 输出层的 AdalnProj 是 ``modalities=1`` ✓ ⇒ 行号就是**唯一时间戳序号** ✓，
+            #    与主干那套 ``序号×3+标签`` 差一个 ``//3`` 的除法 ✓ 这里直接出序号 ✓）
+            if video_rows_t is not None:
+                video_seg = (video_seg[0], video_seg[1], rows_unique_index(t_vals, video_rows_t))
+            if audio_rows_t is not None:
+                audio_seg = (audio_seg[0], audio_seg[1], rows_unique_index(t_vals, audio_rows_t))
             # ⚠️ σ 日程与两条 shift 都递给输出层 ✓：`head_banks > 1` 时要靠它们定位 PDD 的 span ✓
             video, audio = self.final_layer(h, t_emb, video_seg, audio_seg, sigma_v,
                                             sample_sigmas, (shift_v, shift_a))
             return -video, -audio          # ⚠️ **取负** ✓（参考的 velocity 约定 ✓，不是笔误 ✗）
 
     # ───────── 外层封装：潜帧 ⇄ 行（2026-09-20 第 ④ 批 ✓ 事实来源见模块 docstring ✓）─────────
+    def pad_to_patch_size(latent: Any, patch_size: tuple[int, int, int] = (1, 2, 2),
+                          padding_mode: str = "circular") -> Any:
+        """``[C, T, H, W]`` 尾部补到 **patch 的整数倍** ✓（口径逐字照参考 ✓ 2026-11-01 读全 ✓）。::
+
+            pad = ()
+            for i in range(img.ndim - 2):                       # 每个空间维 ✓
+                p = (patch_size[i] - img.shape[i+2] % patch_size[i]) % patch_size[i]
+                pad = (0, p) + pad                              # ⚠️ **前置**拼接 ⇒ 倒序 ✓
+            F.pad(img, pad, mode="circular")
+
+        ⚠️ 参考吃 ``[B, C, T, H, W]``（``ndim-2 == 3`` ✓），本仓没有 batch 维 ✓ 是 ``[C, T, H, W]``
+        （``ndim-1 == 3`` ✓）—— 空间维**个数一样** ✓，只是下标起点差一格 ✓。
+        ⚠️ **补边不裁**：参考在 `_forward` **末尾**才 ``video_out[:, :, :orig_t, :orig_h, :orig_w]``
+        裁回（`model.py` 781 行 ✓）⇒ 补出来的那些行**真的参与了注意力与 RoPE** ✓，
+        不是"补完就丢"✓✗ —— 只补不参与等于白补 ✓（而只裁不补则尺寸对不上 ⇒ 会当场报错 ✓）。
+        ⚠️ 这里必须 **circular** ✓（参考默认值 ✓）：replicate 会在补出来的那一列/行上把边缘
+        **整条拖出去** ⇒ 画面边缘一条竖痕 ✓✗；而 mask 那边参考**有意用 replicate** ✓
+        （`model.py` 的 mask 补齐 ✓）—— **两处模式不同，别统一** ✗。
+        ⚠️ 追踪/脚本化时 circular 不可用 ⇒ 参考降级成 ``reflect`` ✓（照抄 ✓）。
+        """
+        if not patch_size:
+            return latent
+        pads: tuple[int, ...] = ()
+        for axis in range(int(latent.dim()) - 1):
+            patch = int(patch_size[axis])
+            if patch <= 1:
+                extra = 0
+            else:
+                extra = (patch - int(latent.shape[axis + 1]) % patch) % patch
+            pads = (0, extra) + pads
+        if not any(pads[1::2]):
+            return latent
+        if padding_mode == "circular" and (torch.jit.is_tracing() or torch.jit.is_scripting()):
+            padding_mode = "reflect"
+        return torch.nn.functional.pad(latent, pads, mode=padding_mode)
+
     def patchify_video(latent: Any, patch_size: tuple[int, int, int] = (1, 2, 2)) -> Any:
         """``[C, T, H, W]`` → ``[T·h·w, C·pT·pH·pW]`` ✓（行序 = **先帧、后行列** ✓）。
 
@@ -1146,34 +1415,140 @@ def _build_torch_parts() -> dict[str, Any]:
             return None
         return values
 
+    def mask_rows_for(mask: Any, want: int, shape: tuple[int, ...], name: str) -> Any:
+        """把**可 broadcast 的**掩码归一到 ``want`` 维 ✓（``[C,T,H,W] → [T,H,W]`` ✓ / ``[C,ch,T] → [ch,T]`` ✓）。
+
+        ⚠️ 口径**照参考**：它取的是 ``denoise_mask[0, 0]`` ✓（= **第 0 条 batch 的第 0 个通道** ✓）
+        —— 即「掩码逐通道一致」是上游约定 ✓。本仓没有 batch 维 ✓ ⇒ 只剥**通道**那几维 ✓
+        （剥到 ``want`` 维为止 ✓）。``[T]`` / ``[ch]`` 这种**少一维**的写法先补 1 维 ✓。
+        剩下的「帧/高」「声道/时间」广播到 `shape` ✓（``[1,H,W]`` → ``[T,H,W]`` ✓）。
+        """
+        if not hasattr(mask, "shape"):
+            raise ValueError(f"{name} 掩码不是张量（{type(mask).__name__} ✗）")
+        value = mask
+        while int(value.dim()) > want:
+            value = value[0]
+        while int(value.dim()) < want:
+            value = value.unsqueeze(0)
+        try:
+            return torch.broadcast_to(value, shape)
+        except RuntimeError as err:
+            raise ValueError(
+                f"{name} 掩码 broadcast 不到 {tuple(shape)} ✗（收到 {tuple(int(v) for v in mask.shape)} ✓）："
+                f"{err} ✓") from None
+
+    def mask_row_timesteps(sigma_v: float, mask_video: Any = None, mask_audio: Any = None, *,
+                           shift_v: float = 12.0, shift_a: float = 3.0,
+                           visual_cond_t: float = VISUAL_COND_TIMESTEP,
+                           audio_cond_t: float = AUDIO_COND_TIMESTEP,
+                           latent_t: int, latent_h: int, latent_w: int,
+                           audio_channels: int = 2) -> tuple[Any, Any, Any, Any]:
+        """去噪掩码 → **逐行时间戳** ✓ ⇒ ``(video_t, video_rows_t, audio_t, audio_rows_t)`` ✓。
+
+        ## 为什么这一条必须做 ✗✗（口径逐字核自参考 ``MiniMaxH3Model.forward`` ✓ 2026-11-01）
+
+        参考对 ``denoise_mask`` 做了**两件事** ✓，本仓此前只做了**第二件** ✗：
+
+        ① **改行的 adaLN 时间戳** ✓ —— 掩码值 ``m`` 把该行放在 ``σ = m·σ_流`` 上 ✓ ⇒ 它的档位是
+           ``1 − m·σ`` ✓（``clamp(max=条件档)`` 管住"完全保留"的那些行 ✓）；
+        ② 把**增量**按掩码缩放 ✓（本仓 `sample_dual_stream` 早就做了 ✓）。
+
+        只做 ② 的症状是**完全不报错** ✓✗：``audio 流 mask=0`` 时那一片**数值冻结**住了 ✓（②起了作用 ✓），
+        但主干仍按 ``t_a = 1−σ_a`` 把它们当**含噪**行看待 ✗ ⇒ 二采里音频本该是「已定稿的干净音轨」
+        （参考给的档位是 ``t = 1.0`` ✓），却被当成"当前 σ 下的噪声样本" ✓✗ ⇒ 口型对齐的
+        条件信号是**软的** ✓（画质/口型都掉 ✓ 而日志全绿 ✓）。
+
+        ⚠️ ``m`` 恒 1 的路（一采主路 ✓）**取值完全不变** ✓：``1 − 1·σ = t_v`` ✓ 恰好就是原来的档 ✓
+        ⇒ 这条改动只对"真的有行被掩掉"的路径生效 ✓（= 二采 ✓）。
+        ``audio_channels`` 是音频行数的一半（``pack_audio`` 的 ``ch`` ✓）。
+        """
+        from app.services.engine import schedules  # noqa: PLC0415 —— 同 `audio_carry` ✓
+
+        sigma_a = schedules.time_shift_sigma(max(float(sigma_v), 1e-6), shift_v, shift_a)
+        t_a = 1.0 - sigma_a
+        t_pin_v = max(1.0 - float(sigma_v), float(visual_cond_t))
+        t_pin_a = max(t_a, float(audio_cond_t))
+        video_t: float | None = None
+        video_rows_t: Any = None
+        audio_t: float | None = None
+        audio_rows_t: Any = None
+        if mask_video is not None:
+            rows_mask = mask_rows_for(mask_video, 3, (int(latent_t), int(latent_h), int(latent_w)),
+                                      "视频")
+            m = mask_row_values(rows_mask.to(torch.float32), latent_t, latent_h, latent_w)
+            if m is not None:
+                # ⚠️ σ 与掩码**必须同设备** ✓（掩码在 CPU、σ 是 python float ⇒ 用一个 float 乘 ✓
+                #    天然不分设备 ✓；参考那边 σ 是张量、所以写了 ``.to(m.device)`` ✓）
+                rows_t = (1.0 - m * float(sigma_v)).clamp(max=t_pin_v)
+                if rows_t.unique().numel() == 1:
+                    video_t = float(rows_t[0])
+                else:
+                    video_rows_t = rows_t
+        if mask_audio is not None:
+            # ⚠️ 音频的每帧行数 = ``ch`` ✓、帧数 = 掩码末维 ✓（`[..., ch, T]` ✓ 同 `pack_audio` ✓）
+            frames = int(mask_audio.shape[-1])
+            rows_mask = mask_rows_for(mask_audio, 2, (int(audio_channels), frames), "音频")
+            m = rows_mask.to(torch.float32).reshape(-1)      # ⚠️ channel-major ✓ 同 `pack_audio` ✓
+            # ⚠️ 与视频那路**不对称**是参考原样 ✓：这边要显式挡「全 1」✓（视频那路的
+            #    `mask_row_values` 自己会返回 None ✓）—— 少了这个判断就多算一个无用的档 ✓（无害但不忠实 ✗）
+            if not bool((m >= 1.0 - 1e-3).all()):
+                rows_t = (1.0 - m * sigma_a).clamp(max=t_pin_a)
+                if rows_t.unique().numel() == 1:
+                    audio_t = float(rows_t[0])
+                else:
+                    audio_rows_t = rows_t
+        return video_t, video_rows_t, audio_t, audio_rows_t
+
     def denoise_step(trunk: Any, video_latent: Any, audio_latent: Any, text_states: Any,
                      sigma_v: float, *, shift_v: float = 12.0, shift_a: float = 3.0,
                      visual_cond_t: float = VISUAL_COND_TIMESTEP,
                      audio_cond_t: float = AUDIO_COND_TIMESTEP,
                      extra_video_rows: Any = None, extra_audio_rows: Any = None,
                      keyframes: Any = None, refs: Any = None,
-                     sample_sigmas: Any = None) -> tuple[Any, Any]:
+                     sample_sigmas: Any = None, denoise_mask: Any = None,
+                     text_token_tags: Any = None) -> tuple[Any, Any]:
         """**一次去噪**：潜帧进 ⇒ **两条 velocity 出** ✓（形状与输入**同形** ✓）。
 
-        ⚠️ 这个函数是"**把整条链串起来**"的那一处 ✓ —— 它一次用掉了
-        `patchify_video` ✓ / `pack_audio` ✓ / `H3FormTrunk` ✓ / `unpatchify_video` ✓ / `unpack_audio` ✓：
-        潜帧 ⇄ 行、坐标与 RoPE 在主干内部 ✓、最后**还原回潜帧形状** ✓。
+                     ⚠️ 这个函数是"**把整条链串起来**"的那一处 ✓ —— 它一次用掉了
+                     `patchify_video` ✓ / `pack_audio` ✓ / `H3FormTrunk` ✓ / `unpatchify_video` ✓ / `unpack_audio` ✓：
+                     潜帧 ⇄ 行、坐标与 RoPE 在主干内部 ✓、最后**还原回潜帧形状** ✓。
 
-        * ``video_latent``：``[C, T, H, W]`` ✓（``T`` 要能被 ``pT`` 整除 ✓、``H/W`` 能被 2 整除 ✓）；
-        * ``audio_latent``：``[C, ch, T]`` ✓（``ch`` 就是声道数 ✓ —— 只有它进 `unpack_audio` ✓）；
-        * ``text_states``：``[L, text_dim]`` ✓；
-        * ⚠️ 输出 dtype **跟随输入** ✓（主干内部那两个 `*_patch_proj` 与输出头是 **fp32** ✓ ⇒ 这里转回来 ✓，
-          与参考封装的 `.to(video_x.dtype)` 同义 ✓）；
-        * ⚠️ **双流日程的 carry**（``σ_a/σ_v`` ✓）由**采样器**负责 ✓ —— 本函数只管"一次" ✓，
-          见 :func:`audio_carry` ✓。**不做**就只是"少一个换算"✗（不会报错 ✓✗）。
-        """
-        patch_t, patch_h, patch_w = trunk.patch_size
+                     * ``video_latent``：``[C, T, H, W]`` ✓ —— ⚠️ **不必被 patch 整除** ✓：
+                      进函数先按 :func:`pad_to_patch_size`（circular）补到整数倍 ✓、出函数末尾裁回原点 ✓
+                      （与参考 606 / 781 行同义 ✓）；形状**永远**与输入一致 ✓；
+                     * ``audio_latent``：``[C, ch, T]`` ✓（``ch`` 就是声道数 ✓ —— 只有它进 `unpack_audio` ✓）；
+                     * ``text_states``：``[L, text_dim]`` ✓；
+                     * ``denoise_mask``：``(mask_video, mask_audio)`` ✓ **只用来定"逐行时间戳"** ✓ ——
+                       ⚠️ **增量**的掩码缩放**不在**这里 ✗（那是采样器的活 ✓ 见 `sample_dual_stream` ✓），
+                       两处**必须都给**才等于参考语义 ✓（只给采样器那半边 ⇒ 掩掉的行档位错 ⇒ 不报错、条件变软 ✓✗）；
+                     * ⚠️ 输出 dtype **跟随输入** ✓（主干内部那两个 `*_patch_proj` 与输出头是 **fp32** ✓ ⇒ 这里转回来 ✓，
+                       与参考封装的 `.to(video_x.dtype)` 同义 ✓）；
+                     * ⚠️ **双流日程的 carry**（``σ_a/σ_v`` ✓）由**采样器**负责 ✓ —— 本函数只管"一次" ✓，
+                       见 :func:`audio_carry` ✓。**不做**就只是"少一个换算"✗（不会报错 ✓✗）。
+                     """
+        _, patch_h, patch_w = trunk.patch_size
         channels, frames, height, width = (int(value) for value in video_latent.shape)
-        if frames % patch_t or height % patch_h or width % patch_w:
-            raise ValueError(
-                f"潜帧 {tuple(video_latent.shape)} 不能被 patch {trunk.patch_size} 整除 ✗"
-                f"（不猜、也不补零 ✗）")
-        video_rows = patchify_video(video_latent, trunk.patch_size)
+        # ⚠️ **补边** ✓（不是报错 ✗）：参考 `_forward` 头一件事就是
+        #    `pad_to_patch_size(video_x, patch_size)` ✓，末尾再 `[:, :, :orig_t, :orig_h, :orig_w]`
+        #    裁回原点 ✓（`model.py` 606 / 781 行 ✓）—— 本仓曾在这里**直接 raise** ✗
+        #    ⇒ 一样是"能跑、只是挡分辨率"✓✗：奇数 H/W 一个都进不来 ✓（而参考照跑 ✓）
+        padded = pad_to_patch_size(video_latent, trunk.patch_size)
+        lat_t, lat_h, lat_w = (int(value) for value in padded.shape[1:])
+        if denoise_mask is not None:
+            # ⚠️ 掩码要随目标**一起**补 ✓（replicate ✓ 与参考同口径 ✓）：不补的话
+            #    `mask_rows_for` 会因 H/W 与补后尺寸不同而**当场报错** ✓（这一步不静默 ✓），
+            #    但报出来的话补边就白做了 ✓✗ ⇒ 两件事必须成对 ✓
+            if not isinstance(denoise_mask, (tuple, list)) or len(denoise_mask) != 2:
+                raise ValueError(
+                    f"denoise_mask 要给 ``(mask_video, mask_audio)`` 两路 ✗"
+                    f"（收到 {type(denoise_mask).__name__} ✓）")
+            mask_video = mask_rows_for(denoise_mask[0], 3, (frames, height, width),
+                                       "denoise_mask[0]")
+            if (lat_t, lat_h, lat_w) != (frames, height, width):
+                mask_video = pad_to_patch_size(mask_video.unsqueeze(0), trunk.patch_size,
+                                               "replicate")[0]
+            denoise_mask = (mask_video, denoise_mask[1])
+        video_rows = patchify_video(padded, trunk.patch_size)
         audio_rows = pack_audio(audio_latent)
         # ⚠️ **条件/参考块的行排在目标行之前** ✓（`packed_layout` 的段序就是如此 ✓ —— 无 refs 时
         #    就是「cond* 在前 ✓」）⇒ 这里只做**前插** ✓，**不排序、不猜顺序** ✗：
@@ -1184,17 +1559,26 @@ def _build_torch_parts() -> dict[str, Any]:
         if extra_audio_rows is not None:
             audio_rows = torch.cat([extra_audio_rows, audio_rows], dim=0)
         out_video, out_audio = trunk(video_rows, audio_rows, text_states, sigma_v,
-                                     height, width, shift_v, shift_a, visual_cond_t,
+                                     lat_h, lat_w, shift_v, shift_a, visual_cond_t,
                                      audio_cond_t=audio_cond_t,
                                      # ⚠️ 段长**显式给** ✓：带 extra 行时从总行数**推不出来** ✗
                                      #    （会误判成"必须显式给"而报错 ✓ —— 这里就直接给对 ✓）
                                      # ⚠️ 布局**也得知道有 cond/ref 段** ✗：只多传行、不传结构 ⇒
                                      #    总行数校验会**当场红** ✓（2026-09-20 实测就是这样抓到的 ✓）
-                                     latent_t=frames, audio_t=int(audio_latent.shape[-1]),
+                                     # ⚠️ 这里给的是**补后**的格数 ✓（参考 613 行同样取补后值 ✓）——
+                                     #    RoPE 与行数按补后的算 ✓，末尾再裁 ✓
+                                     latent_t=lat_t, audio_t=int(audio_latent.shape[-1]),
                                      keyframes=keyframes, refs=refs,
-                                     sample_sigmas=sample_sigmas)
-        return (unpatchify_video(out_video, frames, height // patch_h, width // patch_w,
-                                 channels, trunk.patch_size).to(video_latent.dtype),
+                                     sample_sigmas=sample_sigmas,
+                                     denoise_mask=denoise_mask,
+                                     text_token_tags=text_token_tags)
+        video_out = unpatchify_video(out_video, lat_t, lat_h // patch_h, lat_w // patch_w,
+                                     channels, trunk.patch_size)
+        # ⚠️ **裁回原点** ✓（与参考 781 行同义 ✓）—— 不裁的话调用方拿到的形状会变 ✓✗
+        #    （`denoise_step` 的契约就是"与输入同形"✓），补出来的行到此为止 ✓
+        #    ⚠️ 本仓**没有 batch 维** ✓ ⇒ 少一个冒号 ✓（参考是 `[:, :, :orig_t, :orig_h, :orig_w]` ✓）
+        video_out = video_out[:, :frames, :height, :width].contiguous()
+        return (video_out.to(video_latent.dtype),
                 unpack_audio(out_audio, int(audio_latent.shape[1])).to(audio_latent.dtype))
 
     def audio_scale(shift_v: float = 12.0, shift_a: float = 3.0) -> float:
@@ -1210,7 +1594,8 @@ def _build_torch_parts() -> dict[str, Any]:
                            callback: Any = None, extra_video_rows: Any = None,
                            extra_audio_rows: Any = None, keyframes: Any = None,
                            refs: Any = None, denoise_mask: Any = None,
-                          pin: Any = None, pin_mask: Any = None) -> dict[str, Any]:
+                           pin: Any = None, pin_mask: Any = None,
+                           text_token_tags: Any = None) -> dict[str, Any]:
         """**双流欧拉采样** ✓：视频走 `sigmas` ✓、音频走**换算后**的 σ ✓（各走各的日程 ✓）。
 
         更新式（按参考**取负**的 velocity 约定 ✓ —— 见 `CONST.calculate_denoised` 是 ``x − σ·v`` ✓）::
@@ -1232,6 +1617,11 @@ def _build_torch_parts() -> dict[str, Any]:
         「video 流 mask=**1**（重采 ✓）、audio 流 mask=**0**（保持一采结果 ✓）」✓
         （⚠️ **不是**"不把音频送进主干" ✗ —— 音频照样参与前向 ✓，只是**这一步的更新量按掩码缩放** ✓）。
         ``mask=0`` ⇒ 该流**逐位不变** ✓（自检钉住 ✓）；``None`` ⇒ 与原来**逐位相同** ✓（默认路径不动 ✗）。
+
+        ⚠️⚠️ 掩码有**两半个作用** ✓，本函数只负责**后一半** ✗：① **改逐行时间戳**（在主干里 ✓ ——
+        掩掉的行按 ``1−m·σ`` 定档 ✓ 见 :func:`mask_row_timesteps` ✓）② **缩放增量**（下面这个循环 ✓）。
+        两半缺一都**不报错** ✓✗：缺 ① 时被锁住的流仍按 ``1−σ`` 被当"含噪样本"处理 ✓ ⇒ 条件信号变软 ✓。
+        本函数把这**同一份**掩码原样递给 `denoise_step` ✓ ⇒ 两半用的是同一张掩码 ✓（不会错配 ✓）。
 
         ⭐⭐ ``pin`` / ``pin_mask``（2026-09-26 补 ✓，口径**来自上游可读源码** ✓）：**掩码冻结的局部重绘** ✓
         —— 「续拍」与「重拍」共用这一个原语 ✓（`h3_edit` 那层只算窗口 ✓）。
@@ -1332,7 +1722,14 @@ def _build_torch_parts() -> dict[str, Any]:
                 extra_audio_rows=extra_audio_rows, keyframes=keyframes, refs=refs,
                 # ⚠️ **整条**视频 σ 日程递下去 ✓（PDD 头库要靠它定位 span ✓）——
                 #    只在"本条流"的语义上给 ✓（音频那条由 `time_shift_sigma` 现算 ✓）
-                sample_sigmas=video_sigmas)
+                sample_sigmas=video_sigmas,
+                # ⭐⭐ 掩码**两处都要给** ✓✗：这边只拿它定**逐行时间戳** ✓（参考的
+                #    ``seg_t/video_rows_t`` ✓），增量的缩放在下面循环里 ✓ —— 少了这一格
+                #    「掩掉的行」档位仍按 ``1−σ`` ✓ ⇒ 不报错、条件变软 ✓✗（2026-11-01 补 ✓）
+                denoise_mask=(mask_video, mask_audio) if denoise_mask is not None else None,
+                # ⚠️ 文本标签逐**步**都要给 ✓（每步的 adaLN 行号都靠它切 ✓）—— 漏了不报错 ✗，
+                #    视觉占位 token 会退回 text 那组调制 ✓✗
+                text_token_tags=text_token_tags)
             if pin_video is not None:
                 # ⭐ 冻结区那份 velocity = **它自己的噪声方向** ✓（= 上游 `KSamplerX0Inpaint` 的
                 #    ``out = out·m + z0·(1−m)`` 在「x₀ = x − σ·v」约定下的等价写法 ✓）
@@ -1438,7 +1835,7 @@ def _build_torch_parts() -> dict[str, Any]:
         "FRAME_RESCALE": FRAME_RESCALE, "frame_grid_coords": frame_grid_coords,
         "video_t_grid": video_t_grid, "packed_rows": packed_rows, "position_ids": position_ids,
         "packed_layout": packed_layout, "assemble_blocks": assemble_blocks,
-        "pdd_head": pdd_head,
+        "cond_noise_augment": cond_noise_augment, "pdd_head": pdd_head,
         "audio_grid": audio_grid, "video_grid": video_grid,
         "video_t_spans": video_t_spans, "ref_time_span": ref_time_span,
         "rope_angles": rope_angles, "mod_row": mod_row, "H3_DEFAULTS": H3_DEFAULTS,
@@ -1447,10 +1844,12 @@ def _build_torch_parts() -> dict[str, Any]:
         "mod_segments_for": mod_segments_for, "t_vals_for": t_vals_for,
         "denoise_step": denoise_step, "audio_scale": audio_scale,
         "sample_dual_stream": sample_dual_stream,
-        "mask_row_values": mask_row_values, "pack_audio": pack_audio,
+        "mask_row_values": mask_row_values, "mask_rows_for": mask_rows_for,
+        "mask_row_timesteps": mask_row_timesteps, "rows_unique_index": rows_unique_index,
+        "pack_audio": pack_audio,
         "curve_t_emb": curve_t_emb,
         "patchify_video": patchify_video, "unpack_audio": unpack_audio,
-        "unpatchify_video": unpatchify_video,
+        "unpatchify_video": unpatchify_video, "pad_to_patch_size": pad_to_patch_size,
         "Int8Linear": Int8Linear,
     }
 

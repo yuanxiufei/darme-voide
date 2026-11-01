@@ -146,6 +146,47 @@ STAGES: dict[str, StageSpec] = {
         minVersions=(("torch", "2.0.0"),),
         note="SDXL 骨架 ＋ 超清放大器（>2× 要调用方显式给 maxTile，不猜安全块）",
     ),
+    #: ⭐ Z-Image 与 ``image``（SDXL）**同为图**但**组件不通用** ✗ —— 所以单列一档 ✓（2026-10-31 ✓）。
+    #: ⚠️ ``category`` 仍写 ``image`` ✓（与 :data:`inventory.STAGE_FILTERS` 双向核要求一致 ✓），
+    #: 真正的区分靠那条规则里的 ``tags=["zimage"]`` ✓（见 ``STAGE_FILTERS`` 的说明 ✓）。
+    "zimage": StageSpec(
+        name="zimage", category="image",
+        capabilities=("image.generate",),
+        deps=("torch", "numpy", "safetensors", "pillow"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Z-Image（NextDiT ＋ Qwen3-4B 文本塔 ＋ Flux VAE，**三份权重一条链**）；"
+              "装配四格 `ditPath`/`textWeights`/`imageVaeWeights`/`tokenizerPath`，缺一格必拒（不猜路径）；"
+              "⚠️ 三份合计 ≈19.3 GiB ⇒ 24GB 卡只够 1024² 那档（实测 reserved 19.39 / 22.49，余 1.77 GiB）；"
+              "无超清放大能力（要放大走 `image` 阶段）"),
+    ),
+    #: ⭐ Qwen-Image **2.1** 同理单列 ✓（2026-10-31 ✓）：与 Z-Image 同为「DiT ＋ 文本塔 ＋ VAE」三件 ✓，
+    #: 但**三件一件都不能互换** ✗✗（`text_dim` 4096 vs 2560 ✓、VAE 64 vs 16 通道 ✓）⇒ 另立一档 ✓。
+    "qwen_image21": StageSpec(
+        name="qwen_image21", category="image",
+        capabilities=("image.generate",),
+        deps=("torch", "numpy", "safetensors", "pillow"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Qwen-Image 2.1（DiT 649 键 ＋ Qwen3.5-9B 混合文本塔 ＋ 64 通道 Wan 式 VAE，"
+              "**三份权重一条链**）；装配四格 `ditPath`/`textWeights`/`imageVaeWeights`/`tokenizerPath`，"
+              "缺一格必拒（不猜路径）；⚠️ 三份合计 ≈16.2 GiB（6.76 + 8.82 + 0.63）⇒ 24GB 卡够 1328² 那档；"
+              "⚠️ 采样 shift=0.69（**不是** Z-Image 的 3）、尺寸吸附只到 16（这一族没有 patchify）；"
+              "无超清放大能力（要放大走 `image` 阶段）"),
+    ),
+    "qwen_image": StageSpec(
+        name="qwen_image", category="image",
+        capabilities=("image.generate",),
+        deps=("torch", "numpy", "safetensors", "pillow"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Qwen-Image **2512**（DiT 1933 键 ＋ Qwen2.5-VL-7B 语言塔 3584 ＋ **16 通道** VAE，"
+              "**三份权重一条链**）；装配四格 `ditPath`/`textWeights`/`imageVaeWeights`/`tokenizerPath`，"
+              "缺一格必拒（不猜路径）；"
+              "⚠️ 与 `qwen_image21` **只差一个 21，但一件组件都不通用**：双流 vs 单流、16ch vs 64ch、"
+              "`1000·σ` 不翻转 vs 翻转、shift **3.1** vs 0.69、TE 3584 vs 4096；"
+              "⚠️ 驻留 ≈54.4 GiB（DiT 38.05 ＋ TE 16.1 ＋ VAE 0.24）⇒ **DiT 单件就超 24GB 卡**，"
+              "`auto` 会判 `split` 或 `cpu`（跨界前向慢，这是必付成本，不是可省的优化）；"
+              "⚠️ Edit 2511 权重**能装但不能跑**：参考图通路（视觉塔 + `ref_latents`）未接 ⇒ `denoise` "
+              "会明确报错，不会静默按 t2i 出图；无超清放大能力（要放大走 `image` 阶段）"),
+    ),
     "audio": StageSpec(
         name="audio", category="audio",
         capabilities=("audio.mix",),
@@ -371,7 +412,7 @@ def check_compat(stage: str, *, root: Path | None = None,
     for key in ready.get("missingRequired") or []:
         blockers.append(_blocker(
             "weights", "E_WEIGHT_MISSING", f"必需权重不在盘上：`{key}`",
-            hint=f"python -X utf8 scripts/engine_readiness.py --weights（按清单下载 {key}）",
+            hint=f"python -X utf8 app/scripts/h3_readiness.py --weights（按清单下载 {key}）",
             facts={"key": key}))
     for key in ready.get("brokenRequired") or []:
         blockers.append(_blocker(

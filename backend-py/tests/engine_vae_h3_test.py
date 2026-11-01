@@ -131,6 +131,14 @@ def case_config() -> None:
     check("配置: 默认**严格** 且默认落 **cpu**（真权重 5.2 GiB 不抢 DiT 那 19.62 GiB ✗）",
           report["strict"] is True and report["device"] == "cpu",
           (report["strict"], report["device"]))
+    # ⭐ `frame_overlap` 减的是 **`frame_pre_padding`** ✓（参考逐字 ✓），不是 `token_drop` ✗。
+    #    ⚠️ 默认档两者**都是 3** ✓ ⇒ 写错也照样算出 5 ✓ **不报错** ✓ ⇒ 只能靠换一个 clip 长度来分岔 ✓
+    #    （20 帧 ⇒ pre_padding 0 ✓、drop 仍 3 ✓ ⇒ 正解 8 ✓ / 写错给 5 ✗）。
+    odd = vae_h3_mod.H3VideoVAEConfig(clip_length=20)
+    check("配置: ⭐⭐ 帧重叠按 ``token_overlap·4 − frame_pre_padding`` ✓ 算（**不是**减 `token_drop` ✗）"
+          "—— 默认档两者同为 3 ⇒ 写错也不报错 ✓✗，换 clip=20 才分岔 ✓",
+          (odd.frame_pre_padding, odd.frame_overlap) == (0, 8),
+          (odd.frame_pre_padding, odd.frame_overlap, odd.token_drop))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

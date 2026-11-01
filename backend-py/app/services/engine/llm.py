@@ -52,6 +52,7 @@ __all__ = [
     "device_facts",
     "generate_llm",
     "model_device",
+    "primitives",
     "repeat_kv",
     "resolve_device",
     "resolve_dtype",
@@ -87,6 +88,12 @@ class LlmConfig:
     #: （见 :func:`gguf_to_llm.load_llm_from_gguf` 的自动检测 ✓，不猜 ✗）。
     #: 缺这条时：399 个张量里有 72 个映射不上 ✗（36 层 × 2 ✓）⇒ 8B/14B 一律装不进 ✗✗。
     qk_norm: bool = False
+    #: ⭐ **q/k/v 的偏置**（2026-10-31 补 ✓）：Qwen2 / Qwen2.5 的 ``q_proj`` / ``k_proj`` / ``v_proj``
+    #: 都带 ``bias`` ✓（``o_proj`` 与 MLP 三项**没有** ✗）—— 盘上 ``qwen_2.5_vl_7b_fp8_scaled``
+    #: 每层正好三根 ``*.bias``（``(3584,)`` / ``(512,)`` × 2 ✓）。
+    #: ⚠️ 漏了这条 ⇒ 那三根键**无处可放** ✓✗（装载报缺键 ✓；若强行忽略 ⇒ 全是「少一个常数」的偏差 ✓，
+    #: 形状全对、不报错、提示词跟随明显变弱 ✓✗）。Qwen3 / Llama 一律 ``False`` ✓（它们真的没有 bias ✓）。
+    qkv_bias: bool = False
     pad_id: int = 0
     eos_id: int | None = None
 
@@ -256,6 +263,18 @@ def build_llm(config: LlmConfig, *, device: Any = "cpu", dtype: Any = None) -> A
     return model.to(device=resolved_device)
 
 
+def primitives() -> dict[str, Any]:
+    """公开**积木**：``torch`` / ``RMSNorm`` / ``GQAAttention`` / ``SwiGLU`` / ``TransformerBlock`` ✓。
+
+    ⚠️ 为什么需要这个口子 ✗：别的族要的是**同一套算子**（Z-Image 的文本塔就是 Qwen3 dense ✓
+    见 :mod:`.qwen3_te` ✓），但它们的参数名得与**权重键名逐字一致**（``model.layers.0.self_attn
+    .q_proj.weight`` ✓ HF 命名 ✓）；而 :class:`LlmModel` 那层壳是 ``embed``/``blocks``/``lm_head``
+    ✗ —— 对不上，且多一个**权重里根本没有的** ``lm_head`` ✗✗（装载时会被报成缺键 ✓）。
+    ⇒ 公开积木、各层各自拼壳 ✓：算子只有一份 ✓（不复制实现 ✗）。
+    """
+    return dict(_build())
+
+
 def _build() -> dict[str, Any]:
     """造出需要 torch 的类/函数 ✓（模块级定义会强制 import torch ✗ ⇒ 放进工厂 ✓）。"""
     import math  # noqa: PLC0415
@@ -318,9 +337,11 @@ def _build() -> dict[str, Any]:
             self.head_dim = config.head_dim
             self.n_rep = config.heads // config.kv_heads
             self.qk_norm = config.qk_norm
-            self.q_proj = nn.Linear(config.hidden, config.heads * config.head_dim, bias=False)
-            self.k_proj = nn.Linear(config.hidden, config.kv_heads * config.head_dim, bias=False)
-            self.v_proj = nn.Linear(config.hidden, config.kv_heads * config.head_dim, bias=False)
+            #: ⚠️ 只有 q/k/v 吃 ``qkv_bias`` ✓ —— ``o_proj`` 在任何一族都是无偏置 ✗（Qwen2.5 亦然 ✓）
+            bias = bool(config.qkv_bias)
+            self.q_proj = nn.Linear(config.hidden, config.heads * config.head_dim, bias=bias)
+            self.k_proj = nn.Linear(config.hidden, config.kv_heads * config.head_dim, bias=bias)
+            self.v_proj = nn.Linear(config.hidden, config.kv_heads * config.head_dim, bias=bias)
             self.o_proj = nn.Linear(config.heads * config.head_dim, config.hidden, bias=False)
             # QK-norm（Qwen3 ✓）：**per-head** 归一化，weight 形状 ``(head_dim,)`` ✓
             # ⇒ 广播到最后一维即可 ✓（不加 ModuleList ✗，瓶颈在 per-head 的 RMS ✓）。

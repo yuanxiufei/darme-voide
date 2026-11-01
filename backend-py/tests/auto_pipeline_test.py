@@ -32,7 +32,7 @@ os.environ.setdefault("DARME_SKIP_SERVICE_PREFLIGHT", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, update  # noqa: E402
 
 from app.core.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
@@ -576,15 +576,20 @@ def main() -> int:  # noqa: C901
     # 2026-10-30 实测：模型读到 existingStoryboards=10 就自己 append=true ⇒ 重跑叠成 15 镜、
     # 同一场戏两遍。⇒ 阶段入口必须**先清空**（有成片产物则拒绝清理）。
     with engine.begin() as conn:
+        conn.execute(episodes.update().where(episodes.c.id == prune_ep).values(duration=9))
         first_reset = st.clear_episode_storyboards(conn, prune_ep)
         left_rows = conn.execute(
             select(storyboards.c.id).where(storyboards.c.episode_id == prune_ep)).all()
         left_links = conn.execute(
             select(storyboard_characters.c.storyboard_id)).all()
+        left_duration = conn.execute(
+            select(episodes.c.duration).where(episodes.c.id == prune_ep)).scalar()
     check("重建: 重跑前清空本集镜头（镜头 1 -> 0、关联也一起清掉）",
           first_reset == {"deleted": 1, "refused": False, "media": 0}
           and left_rows == [] and left_links == [],
           (first_reset, left_rows, left_links))
+    check("重建: 清空后集时长跟着归零（不留「0 镜却还有时长」）", left_duration == 0,
+          left_duration)
 
     # 带成片产物的镜头：**不许**为了重跑把产物扔掉，只能退化成「补缺场景」
     with engine.begin() as conn:
@@ -606,6 +611,41 @@ def main() -> int:  # noqa: C901
         empty_reset = st.clear_episode_storyboards(conn, prune_ep)
     check("重建: 本集没有镜头 -> deleted=0 且不算拒绝", 
           empty_reset == {"deleted": 0, "refused": False, "media": 0}, empty_reset)
+
+    # ================= drama 级状态汇总 =================
+    # `dramas.status` 建剧时被写成 auto_generating，之后**全仓没有一处改回去** ⇒ 跑完的剧
+    # 永远显示「生成中」。汇总规则：失败 > 进行中 > 全部完成 > 草稿。
+    check("汇总: 全部集 auto:done -> drama 是 done",
+          ap.drama_status_of(["auto:done", "auto:done"]) == "done",
+          ap.drama_status_of(["auto:done", "auto:done"]))
+    check("汇总: 有一集 auto:failed -> drama 是 auto_failed（红不许被「还在跑」盖住）",
+          ap.drama_status_of(["auto:done", "auto:failed", "auto:merging"]) == "auto_failed",
+          ap.drama_status_of(["auto:done", "auto:failed", "auto:merging"]))
+    check("汇总: 还有集在跑 -> drama 仍是 auto_generating",
+          ap.drama_status_of(["auto:done", "auto:storyboarding"]) == "auto_generating",
+          ap.drama_status_of(["auto:done", "auto:storyboarding"]))
+    check("汇总: 全是草稿 -> drama 是 draft（不是 generating）",
+          ap.drama_status_of(["draft", "draft"]) == "draft",
+          ap.drama_status_of(["draft", "draft"]))
+    check("汇总: 排队中也算「生成中」",
+          ap.drama_status_of([ap.AUTO_STATUS["queued"]]) == "auto_generating",
+          ap.drama_status_of([ap.AUTO_STATUS["queued"]]))
+
+    # 真回写：set_status 走一遍，drama.status 必须跟着变（不是只算出个值就完事）
+    with engine.begin() as conn:
+        drama_for_summary = int(conn.execute(dramas.insert().values(
+            title="汇总用剧", status="auto_generating",
+            created_at=stamp, updated_at=stamp)).lastrowid)
+        only_ep = int(conn.execute(episodes.insert().values(
+            drama_id=drama_for_summary, episode_number=1, title="唯一集",
+            content="内容", status="auto:merging",
+            created_at=stamp, updated_at=stamp)).lastrowid)
+    ap.set_status(only_ep, ap.AUTO_STATUS["done"])
+    with engine.begin() as conn:
+        after_summary = conn.execute(select(dramas.c.status).where(
+            dramas.c.id == drama_for_summary)).scalar()
+    check("汇总: 单集跑到 auto:done 后，drama.status 从 auto_generating 落到 done",
+          after_summary == "done", after_summary)
 
     # ================= 汇总 =================
     failed_items = [item for item in _RESULTS if not item[1]]

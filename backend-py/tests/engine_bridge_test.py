@@ -198,6 +198,28 @@ def case_assembly() -> None:
     check("装配: 合法取整口径归一成小写并带上",
           ok.get("audio_latent_mode") == "ceil", ok)
 
+    #: ⭐ **卡 + CPU 联合跑**（2026-10-31 ✓）：`residency` 透传 + 预算可选 ✓
+    joint = bridge.assembly_from_config(
+        {"settings": {"ditPath": "x", "residency": "PARK", "residencyBudgetMib": 1024}})
+    no_budget = bridge.assembly_from_config({"settings": {"ditPath": "x", "residency": "split"}})
+    none_set = bridge.assembly_from_config({"settings": {"ditPath": "x"}})
+    check("⭐ 装配: `residency` 归一成小写进装配 ✓、预算可选 ✓（不给 ⇒ **不带这个键** ✓，"
+          "装载时按当时空闲显存现算 ✓ —— 写死常量会在「别人占着卡」时变成骗人的数 ✓✗）；"
+          "不配 ⇒ 两个键都不出现 ✓（老路 ✓）",
+          joint.get("residency") == "park" and joint.get("residency_budget_mib") == 1024.0
+          and no_budget.get("residency") == "split"
+          and "residency_budget_mib" not in no_budget
+          and "residency" not in none_set and "residency_budget_mib" not in none_set,
+          (joint, no_budget, none_set))
+
+    wrong_mode: object = None
+    try:
+        bridge.assembly_from_config({"settings": {"ditPath": "x", "residency": "半开"}})
+    except ValueError as err:
+        wrong_mode = err
+    check("装配: `residency` 写错 ⇒ 当场报 ✗（静默退回 off ⇒ 以为在联合跑、实际整份在内存里爬 ✓✗）",
+          isinstance(wrong_mode, ValueError) and "split" in str(wrong_mode), wrong_mode)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ④ 落点 / 相对路径 / 参考素材

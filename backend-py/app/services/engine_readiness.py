@@ -49,8 +49,11 @@ def device_facts() -> dict[str, Any]:
     if not available:
         return {"device": None, "cudaAvailable": False, "deviceName": None, "totalGiB": None}
     described = tb.TorchBackend().describe()          # 轻 ✓：只探设备 ✓ 不装权重 ✓
+    #: ⚠️ **本机有没有卡**要看 `gpuAvailable` ✓✗，不是 `cudaAvailable` ✗ ——
+    #: 后者是「这台后端**现在**在不在卡上」✓：设备策略把某阶段转移到 CPU 之后它会变 False ✓，
+    #: 照它读会得出「本机无卡 / 集显 ⇒ 很慢」这种**与事实相反**的结论 ✓✗（2026-10-31 加策略时同步改 ✓）。
     facts: dict[str, Any] = {"device": described.get("device"),
-                             "cudaAvailable": described.get("cudaAvailable"),
+                             "cudaAvailable": described.get("gpuAvailable"),
                              "deviceName": None, "totalGiB": None}
     if facts["cudaAvailable"]:
         try:
@@ -157,6 +160,17 @@ def quant_plan(load_plan: dict[str, Any]) -> dict[str, Any]:
     return {"supported": supported, "unsupported": unsupported, "notChecked": not_checked}
 
 
+#: 词表互校样本 ✓ —— 刻意覆盖提示词里真会出现的形状：英文长词（要看 merge ✓）、
+#: 数字与标点（byte-level ✓）、双空格与前后空格（预分词 ✓）、中文（Qwen 系按字/词合并 ✓）
+_CROSSCHECK_SAMPLES: tuple[str, ...] = (
+    "a young swordsman in a black suit, cinematic lighting",
+    "Lingyun stands on the plaza holding a silver pistol",
+    "mixed 123, punctuation! and UPPER lower",
+    "  spaced  double  ",
+    "凌云站在广场上，手持银色手枪",
+)
+
+
 def precheck_weights(weights: str | None, tokenizer: str | None) -> dict[str, Any] | None:
     """③ 真权重预检 ✓（没给路径 ⇒ ``None`` ✓ —— **不是**"通过" ✗）。"""
     if not weights:
@@ -192,6 +206,12 @@ def precheck_weights(weights: str | None, tokenizer: str | None) -> dict[str, An
             hub = tokenizer_hub.load(tokenizer_hub.HubConfig(path=str(tokenizer)))
             report["tokenizer"] = hub.describe()
             report["tokenizerFingerprint"] = hub.fingerprint()
+            # ⚠️ 「装上了」**不等于**「切得对」✗：``describe()`` 只报 backend/vocab 规模 ✓，
+            #    自研 BPE 若与参考实现切法不同，token id 会**整体错位**而**不报错** ✗
+            #    ⇒ 出片画面与提示词无关 ✓✗（假绿里最难查的一种）。
+            #    这里当场互校；参考实现装不上时**如实报「没比成」** ✓（不写 ✓ 糊过去 ✗）。
+            crosscheck = hub.verify_against_reference(_CROSSCHECK_SAMPLES)
+            report["tokenizerCrosscheck"] = crosscheck
         except Exception as err:  # noqa: BLE001 —— 词表问题也是**结论** ✓ 不抛 ✗
             report["tokenizerError"] = f"{type(err).__name__}: {err}"
     return report
@@ -252,17 +272,29 @@ def next_steps(report: dict[str, Any]) -> list[str]:
         #     写死的断言会把"能真跑"说成"得换机器" ✓✗ —— 判据一律**实测** ✓）
         device = (report["environment"].get("device") or {})
         where = str(device.get("device") or "?")
+        # ⚠️ 词表是**出片的硬前置**：H3 形态要的是文本状态 ``[L, text_dim]``，``L``（token 数）
+        # 只有分词器知道 ⇒ 没挂 TE 时 ``_encode_text_states`` 会**当场报错** ✓（好在不是静默出假片）。
+        # 但原来这条指引不管有没有词表都让人直接去 ``run_sync`` ⇒ 照着做必然在 TE 那步失败 ✓✗。
+        if check.get("tokenizer"):
+            tokenizer_note = "词表也已装上 ✓"
+        else:
+            tokenizer_note = ("**但没装词表** ✗ ⇒ 先给 `--tokenizer <词表目录>` ✓ 再跑："
+                              "H3 的文本状态 `[L, text_dim]` 里 `L` 只有分词器知道 ✓，"
+                              "没词表 `run_sync` 会在 `_encode_text_states` **当场报错** ✓"
+                              "（引擎宁可失败也不出无意义画面 ✓）")
         if where == "cuda":
             steps.append(
                 f"⭐ 权重核对通过 ✓ ⇒ 本机就是 CUDA（{device.get('deviceName') or '?'} "
                 f"{device.get('totalGiB') or '?'} GiB ✓）⇒ **现在就能真跑** ✓："
                 f"`POST /api/v1/engine/load` ✓ → `POST /api/v1/engine/generate` ✓"
                 f"（或 `TorchBackend.load_weights(path=…)` → `pipeline.run_sync(...)` ✓）；"
+                f"{tokenizer_note}；"
                 f"⚠️ 单靠一次 simple 装载装不下 39.55 GiB 全量 ✗ ⇒ 大权重走 hybrid 计划 ✓")
         else:
             steps.append("⭐ 权重核对通过 ✓ ⇒ 下一步：`TorchBackend.load_weights(path=…)` "
                          "→ `pipeline.run_sync(...)` ✓"
-                         f"（本机实测 device={where} ✓ —— CPU 上能跑但很慢 ✗）")
+                         f"（本机实测 device={where} ✓ —— CPU 上能跑但很慢 ✗）；"
+                         f"{tokenizer_note}")
     return steps
 
 
@@ -302,6 +334,13 @@ def collect(*, weights: str | None = None, tokenizer: str | None = None,
             blockers.append("权重键名/形状核对**没通过** ✓ ⇒ 装不进去 ✓（细节见 `weightsCheck.audit` ✓）")
         if check.get("tokenizerError"):
             blockers.append(f"词表装不上：{check['tokenizerError']} ✓")
+        # ⚠️ 词表**装上**但**切法不一致** ⇒ token id 整体错位、却不报错 ⇒ 出片与提示词无关 ✗
+        #    这类「静默错」比装不上更难查 ✓ ⇒ 真不一致就阻塞 ✗（没比成只记 `unchecked` ✓）
+        crosscheck = check.get("tokenizerCrosscheck") or {}
+        if crosscheck.get("ok") is False:
+            blockers.append(
+                f"词表切法与参考实现**不一致** ✗（{len(crosscheck.get('mismatched') or {})} 例）"
+                f"⇒ token id 会错位 ✓✗：出片画面与提示词对不上，且**不会报错** ✓")
     # ⭐ 低精度权重**能不能自动还原** ✓：在盘上、但布局判不出来 ⇒ 装载会被**中止** ✗ ⇒ 也是阻塞 ✓
     #    ⚠️ 组件**没下载** ⇒ 记 `notChecked` ✓（**没查 ≠ 通过** ✗ —— 不阻塞、但也不假装绿 ✓）
     report["quantPlan"] = quant_plan(plan)
@@ -319,9 +358,22 @@ def collect(*, weights: str | None = None, tokenizer: str | None = None,
             f"⇒ 文件里**没有** `comfy_quant` 说明 ⇒ 需要外部给出 group size ✓ 本仓不猜 ✗")
     report["ready"] = bool(not blockers)
     report["blockers"] = blockers
-    report["unchecked"] = ([] if check is not None else
-                           ["**没做**真权重预检 ✓（没给权重路径 ✓ ⇒ 这一项是**没查** ✓ "
-                            "不是「通过」 ✗）"])
+    unchecked: list[str] = []
+    if check is None:
+        unchecked.append("**没做**真权重预检 ✓（没给权重路径 ✓ ⇒ 这一项是**没查** ✓ "
+                         "不是「通过」 ✗）")
+    elif not check.get("tokenizer") and not check.get("tokenizerError"):
+        # 「没查 ≠ 通过」同一口径：词表没给就没验过，别让 ready=True 被读成「词表也没问题」
+        unchecked.append("**没验**词表 ✓（没给 `--tokenizer` ✓ ⇒ 这一项是**没查** ✓ 不是「通过」 ✗；"
+                         "H3 出片**必须先有词表** ✗ —— 没它 `_encode_text_states` 会当场报错 ✓）")
+    if isinstance(check, dict) and check.get("tokenizer"):
+        crosscheck = check.get("tokenizerCrosscheck") or {}
+        if crosscheck and crosscheck.get("ok") is None:
+            note = "；".join(crosscheck.get("notes") or []) or "参考实现不可用"
+            unchecked.append(
+                f"**没比成**词表互校 ✓（{note}）✓ "
+                f"—— **装上了 ≠ 切得对** ✗：切法若与参考实现不同，token id 会整体错位且不报错 ✓")
+    report["unchecked"] = unchecked
     report["nextSteps"] = next_steps(report)
     return report
 

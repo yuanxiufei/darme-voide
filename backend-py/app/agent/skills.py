@@ -54,7 +54,7 @@ def skills_dir() -> Path:
     """``backend-py/app/skills``（可用 ``SKILLS_DIR`` 覆盖，便于测试隔离）。
 
     ⚠️ **唯一权威在 ``app/core/config.py`` 的 ``skills_dir()``**（2026-09-15 收口：此前本文件、
-    ``services/skills.py`` 的常量、守卫脚本三处各写一遍 ✗）。这里只转发 —— 保留同名函数是因为
+    services 侧 skills 扫描模块的常量（2026-10-30 已删）、守卫脚本三处各写一遍 ✗）。这里只转发 —— 保留同名函数是因为
     运行链（``load_agent_skills`` 等）与测试都按这个名字调用，且它们需要**每次调用都重读
     ``SKILLS_DIR``**（常量版做不到，测试隔离时就会失灵）。
     """
@@ -153,6 +153,35 @@ def list_core_skill_ids() -> list[str]:
         entry.name for entry in directory.iterdir()
         if entry.is_dir() and (entry / "SKILL.md").exists()
     ])
+
+
+def list_skill_ids() -> list[str]:
+    """扫描 ``skills/``，返回**全部**可用 skill id（含外部库的嵌套目录）。
+
+    ⚠️ 默认注入请用 :func:`resolve_default_skills`（只含自有 core skill）—— 外部库是
+    「按触发词独立启动」的会话式技能，绑定给常驻 Agent 只会注入半截指令。
+
+    ⚠️ 2026-10-30：本函数原先只存在于 services 侧那份 skills 扫描模块（HTTP 层的第二份实现，已删），
+    而本模块 ``__all__`` 里**早就写着**它 —— 声明有、实现无。现在收回到这里，HTTP 层改为引用本模块
+    （分层：``routers → agent`` 允许，``services → agent`` 禁止，所以去重的方向只能是这一条 ✓）。
+    """
+    directory = skills_dir()
+    if not directory.exists():
+        return []
+
+    out: list[str] = []
+
+    def scan(current: Path, prefix: str = "") -> None:
+        for entry in sorted(current.iterdir(), key=lambda p: p.name):
+            if not entry.is_dir():
+                continue
+            skill_id = f"{prefix}/{entry.name}" if prefix else entry.name
+            if (entry / "SKILL.md").exists():
+                out.append(skill_id)
+            scan(entry, skill_id)
+
+    scan(directory)
+    return out
 
 
 def resolve_default_skills(agent_type: str) -> list[str]:

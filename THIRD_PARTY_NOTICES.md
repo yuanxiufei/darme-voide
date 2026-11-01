@@ -7,10 +7,15 @@
 > 采集方式：权重行取自 `configs/models.json`；依赖许可取自**已安装包的元数据**
 > （`importlib.metadata` 的 `License-Expression` / `License` / `License ::` 分类器），不靠记忆 ✓。
 
-## 一、模型权重（16 条）
+## 一、模型权重（26 条）
 
-清单 `configs/models.json` 每条都有一个 `license` 位，**目前 16 条全为空** ⇒ 下表许可列一律「未声明」。
+清单 `configs/models.json` 每条都有一个 `license` 位，**目前 26 条全为空** ⇒ 下表许可列一律「未声明」。
 其中 6 条连落点（`filename`）都还没有，`facade.manifest_of()` 对它们无从谈起（该接口按**文件**出清单）。
+
+> 补登说明（2026-10-31）：此前本节停在 16 条，而 catalog 已长到 26 条 —— 新增的 10 条（Z-Image 三件套、
+> Qwen-Image 2.1/2512/Edit 2511 与它们的 TE·VAE）**一直在清单里、却不在本表**，`engine_licenses_test`
+> 的「权重表条目 == 清单条目」正是盯这件事。缺的后果不是"页面难看"：本表是**下游判断再分发条款的
+> 唯一入口**，漏一条就等于那件权重在合规面上不存在 ✓✗。
 
 | key | filename | category | 许可 | 依据 |
 |---|---|---|---|---|
@@ -24,6 +29,16 @@
 | vae_audio_bf16 | minimax_h3_audio_vae_bf16.safetensors | video | 未声明 | 清单无 `license` 字段 |
 | dit_fl2va_gguf_q4km | minimax_h3_fl2va_pruned-Q4_K_M.gguf | video | 未声明 | 清单无 `license` 字段 |
 | sdxl_base | sd_xl_base_1.0.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| dit_zimage_turbo | z_image_turbo_bf16.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| te_zimage_qwen3 | qwen_3_4b.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| vae_flux_ae | ae.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| dit_qwen_image21 | qwen_image_2.1_int8_convrot.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| te_qwen35_image21 | qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| vae_qwen_image21 | qwen_image_2.1_vae_bf16.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| dit_qwen_image_2512 | qwen_image_2512_bf16.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| dit_qwen_image_edit_2511 | qwen_image_edit_2511_int8_convrot.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| te_qwen25_vl_7b | qwen_2.5_vl_7b_fp8_scaled.safetensors | image | 未声明 | 清单无 `license` 字段 |
+| vae_qwen_image | qwen_image_vae.safetensors | image | 未声明 | 清单无 `license` 字段 |
 | qwen3_14b | —（无落点） | text | 未声明 | 清单行 `filename` 为空 |
 | qwen3_32b | —（无落点） | text | 未声明 | 清单行 `filename` 为空 |
 | glm4_9b | —（无落点） | text | 未声明 | 清单行 `filename` 为空 |
@@ -72,6 +87,9 @@ SDXL 官方仓），再分发条款各不相同，有「需随附许可原文」
    `wan26_i2v_14b_gguf`）连文件名都没有 ⇒ 既无清单可出，也无许可可核。
 3. **`reference/` 下的第三方源仓**（Comfy-Org 若干、diffusers、EveryDream2trainer、lora-pilot 等）
    是**阅读用的参考副本**、不进任何产物链路；它们的 LICENSE 随各自目录留在原地，本文件不重述。
+   ⚠️ **例外只有两条**：`expert-stream` 与 `airllm` 各有一小段被移植进引擎
+   （`app/services/engine/win_io.py` / `prefetch.py`）⇒ 已登记在下面第五节，
+   许可原文随代码入仓 `docs/third-party/`；除这两条外，`reference/` 仍不进产物链路。
 
 ## 四、机器判据
 
@@ -86,3 +104,23 @@ SDXL 官方仓），再分发条款各不相同，有「需随附许可原文」
 4. **依赖版本与实测一致**：§二 每一行的版本 == 本机 `importlib.metadata.version(<包>)`；
    包没装 ⇒ 该行不许写版本（写「未安装」）。依赖升级后本文件会红 —— 这是**故意的**，
    提醒刷新审计，而不是巧合。
+
+## 五、参考实现源码（移植）
+
+**只有两条**（`reference/` 下其余仓一件代码都没进来，理由见各仓审计结论）：
+
+| 上游仓 | 许可（原文入仓） | 被移植的提交 | 落在本仓 | 取了什么 | **没取什么** |
+|---|---|---|---|---|---|
+| `expert-stream`（Hemant） | MIT ⇒ `docs/third-party/expert-stream-LICENSE.txt` | `89275f1c50d2`（2026-08-16） | `backend-py/app/services/engine/win_io.py`（并由 `safetensors.py::TensorReader` 调用） | `engine/expert-stream.c` 的 Win32 三件：`CreateFileW` 的 `NO_BUFFERING\|OVERLAPPED` 标志、一次提交多笔 `ReadFile` ＋ 每槽手动复位事件、`VirtualAlloc` 槽区按扇区对齐并用 `slop` 吃掉非对齐偏移 | ggml 侧任何符号、n-gram/路由预取、`manifest` 专家表（那些绑 284B MoE ✓，与本仓 DiT 无关 ✗） |
+| `airllm`（lyogavin） | Apache-2.0 ⇒ `docs/third-party/airllm-LICENSE.txt` | `75a6bb3c41c6`（2026-10-31） | `backend-py/app/services/engine/prefetch.py`（并由 `weights.py::load_module_weights(read_ahead=)` 调用） | `airllm_base.py` 的 `_prefetch_stream` / `_materialize` / `_evict` 三处调度语义：后台读下一件、取走即作废、取不到就同步读 | 逐层 `state_dict` 挂载、`ModelPersister`、bitsandbytes 压缩路径、按 token 逐层重读整模型的范式（那是 0.1–0.4 tok/s 的来源 ✗✗） |
+
+**移植时必须一起改掉的三处上游习惯**（否则进不了本仓）：
+
+1. **错误不许静默**：上游「读失败 ⇒ 标 -1 让上层回落 mmap」在本仓不可接受（会装出半件模型还装得上）
+   ⇒ 移植件一律抛 `OSError` / `PrefetchError`；
+2. **状态必须可查**：上游靠 `print` ⇒ 移植件给 `describe()` / `snapshot()`，直接喂 `GET /engine/runtime`；
+3. **不许新增第二真源**：`win_io.py` 只读字节（偏移由 `safetensors.py` 算）、`prefetch.py` 只管调度
+   （装什么由装配线给）⇒ 两件都不许自己判断「该装哪件权重」。
+
+**怎么核**：`tests/engine_win_io_test.py`（9 组，含「三笔同时在飞 ⇒ 无事件就返回 0 字节」这条真事故回归）
+与 `tests/engine_prefetch_test.py`（9 组，含「同一件不许取两次」）。两份都是纯逻辑、不碰权重、不 import torch。

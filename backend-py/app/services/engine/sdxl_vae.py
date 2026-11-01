@@ -53,6 +53,8 @@ except ImportError:  # pragma: no cover
     F = None  # type: ignore[assignment]
     _HAS_TORCH = False
 
+from .vae_tiling import TILE_DEFAULTS, decode_latents_tiled
+
 __all__ = [
     "SDXL_VAE_FACTS",
     "SDXL_VAE_KEY_PREFIX",
@@ -111,6 +113,11 @@ class SdxlVaeConfig:
     #: 潜变量缩放（真权重同名口径 ✓ 见 ``latent_formats`` 的 ``sdxl`` 规格 ✓）。
     scaling_factor: float = 0.13025
     shift_factor: float = 0.0
+    #: 是否带 ``quant_conv`` / ``post_quant_conv`` ✓（SDXL ✓ True ✓；**Flux VAE 没有这两个** ✗ ⇒ False ✓）。
+    #: ⚠️ 2026-10-31 实测 ``vae/ae.safetensors``（Flux VAE ✓ **244** 键 ✓）与 SDXL VAE（248 键 ✓）的
+    #: **唯一结构差异**就是少了这 4 个键 ✓（其余层数 / 块数 / 通道**逐层相同** ✓）⇒ 用本开关复用同一套前向 ✓，
+    #: 而不是再抄一份 250 行的编解码器 ✓。
+    quant_conv: bool = True
 
     def __post_init__(self) -> None:
         if not self.block_out_channels:
@@ -174,7 +181,7 @@ class SdxlVaeConfig:
             "decoderBlocksPerLevel": self.decoder_blocks,
             "normNumGroups": int(self.norm_num_groups), "normEps": float(self.norm_eps),
             "scalingFactor": float(self.scaling_factor), "shiftFactor": float(self.shift_factor),
-            "spatialScale": self.spatial_scale,
+            "spatialScale": self.spatial_scale, "quantConv": bool(self.quant_conv),
         }
 
 
@@ -234,8 +241,9 @@ def sdxl_vae_key_names(config: "SdxlVaeConfig | None" = None) -> tuple[str, ...]
                           f"decoder.up.{level}.upsample.conv.bias"))
     names.extend(("decoder.norm_out.weight", "decoder.norm_out.bias",
                   "decoder.conv_out.weight", "decoder.conv_out.bias"))
-    names.extend(("post_quant_conv.weight", "post_quant_conv.bias",
-                  "quant_conv.weight", "quant_conv.bias"))
+    if spec.quant_conv:      # ⚠️ Flux VAE 没这两个 1×1 卷积 ✓（见 ``quant_conv`` 字段的注释 ✓）
+        names.extend(("post_quant_conv.weight", "post_quant_conv.bias",
+                      "quant_conv.weight", "quant_conv.bias"))
     return tuple(sorted(names))
 
 
@@ -427,19 +435,26 @@ class SdxlVae(nn.Module):
         self.config = config or SdxlVaeConfig()
         self.encoder = _Encoder(self.config)
         self.decoder = _Decoder(self.config)
-        depth = int(self.config.latent_channel_count)
-        self.quant_conv = nn.Conv2d(depth, depth, 1, stride=1, padding=0)
-        latent = int(self.config.latent_channels)
-        self.post_quant_conv = nn.Conv2d(latent, latent, 1, stride=1, padding=0)
+        # ⚠️ 这两个 1×1 卷积**只 SDXL 有** ✗（Flux VAE ✓ 无 ✓ 见 ``quant_conv`` 字段）
+        if self.config.quant_conv:
+            depth = int(self.config.latent_channel_count)
+            self.quant_conv = nn.Conv2d(depth, depth, 1, stride=1, padding=0)
+            latent = int(self.config.latent_channels)
+            self.post_quant_conv = nn.Conv2d(latent, latent, 1, stride=1, padding=0)
 
     def encode(self, images: Any) -> tuple[Any, Any]:
         """像素 ⇒ ``(mean, logvar)`` ✓（⚠️ **不**在这里采样 ✗ —— 采样策略是调用方的事 ✓）。"""
-        mean, logvar = torch.chunk(self.quant_conv(self.encoder(images)), 2, dim=1)
+        hidden = self.encoder(images)
+        if self.config.quant_conv:
+            hidden = self.quant_conv(hidden)
+        mean, logvar = torch.chunk(hidden, 2, dim=1)
         return mean, logvar
 
     def decode(self, latents: Any) -> Any:
         """潜变量 ⇒ 像素 ✓（⚠️ 调用方要**先除缩放系数** ✓ —— 走 :func:`decode_latents` 就不会漏 ✓）。"""
-        return self.decoder(self.post_quant_conv(latents))
+        if self.config.quant_conv:
+            latents = self.post_quant_conv(latents)
+        return self.decoder(latents)
 
 
 def build_sdxl_vae(config: "SdxlVaeConfig | None" = None, *,
@@ -497,14 +512,47 @@ def load_sdxl_vae_state_dict(model: Any, state_dict: "Mapping[str, Any]", *,
     return sorted(others)
 
 
-def decode_latents(model: Any, latents: Any, *, config: "SdxlVaeConfig | None" = None,
-                   to_unit: bool = True) -> Any:
-    """潜变量 ⇒ 像素 ✓ —— **按 SDXL 口径先除缩放系数** ✓（``1/0.13025`` ✓）再解码 ✓。
+def _weight_dtype(model: Any, fallback: Any) -> Any:
+    """取 ``model`` 第一个参数的 dtype ✓；没有参数（自检里的恒等桩 ✓）就回落到 ``fallback`` 的 ✓。"""
+    parameters = getattr(model, "parameters", None)
+    if callable(parameters):
+        for parameter in parameters():
+            return parameter.dtype
+    return fallback.dtype
 
-    ⚠️ 这一步**最容易漏** ✗✗：漏了**不会报错** ✓，出来的是"有形状、有颜色、但整体发灰/过曝/糊"的图 ✓✗
-    —— 正是本仓最忌讳的"看不出来"那类错 ✓。所以**解码必须走这里** ✓，别直接调 ``model.decode`` ✓。
+
+def decode_latents(model: Any, latents: Any, *, config: "SdxlVaeConfig | None" = None,
+                   to_unit: bool = True, tile: int | None = None,
+                   overlap: int = TILE_DEFAULTS["overlap"],
+                   progress: Any = None) -> Any:
+    """潜变量 ⇒ 像素 ✓ —— 先按潜格式把**模型空间**的 latent 换回 **VAE 空间** ✓ 再解码 ✓。
+
+    ## 换算只有一条式子（参考真值 ✓）
+
+    ``x_vae = x_model / scale_factor + shift_factor`` ✓
+    —— 出处：``comfy/latent_formats.py`` 的 ``Flux.process_out`` /
+    ``StableDiffusion`` 的 ``LatentFormat.process_out``（``return latent / self.scale_factor`` ✓），
+    以及与 ``KSampler`` 的配对：``comfy/samplers.py:1238``
+    ``return self.inner_model.process_latent_out(samples)`` ✓ ⇒ **采样器吐出来的已经是这个式子** ✓，
+    送进 ``VAEDecode`` 的 latent 就是 VAE 空间 ✓。
+
+    ⚠️⚠️ 我上轮写成 ``(x − shift) / scale`` ✗✗ —— 对 **SDXL 恰好等价**（``shift=0`` ✓
+    ⇒ ``(x−0)/0.13025 == x/0.13025 + 0`` ✓）⇒ **在 SDXL 上永远试不出来** ✓✗，
+    换到 **Flux 族**（``shift=0.1159`` ✗）就成了常数偏移 ``0.1159/0.3611 + 0.1159 ≈ 0.437`` ✓✗
+    ⇒ 出图**不报错**、只是整体偏色/发灰 ✓✗。这正是「一族对、另一族错」的典型陷阱：
+    **写死一族的式子当通式** ✓✗。
 
     ``to_unit=True`` ⇒ 回 ``[0, 1]`` ✓（与 ``image_ops`` 同一口径 ✓）；否则回原始 ``[-1, 1]`` ✓。
+
+    ## 分块解码（``tile``，**像素**单位 ✓，默认关 ✓）
+
+    给 ``tile`` 就走 :func:`vae_tiling.decode_latents_tiled` ✓（切块 ⇒ 拼回 ✓），单位与
+    ComfyUI 的 ``VAEDecodeTiled`` 同名同义 ✓（默认 512 / 64 ✓）。**默认 ``None`` = 整张解** ✓✗
+    —— 小图整张解更快、且与历史上的产物**逐字节相同** ✓；只有像素数顶爆显存时才该开 ✓
+    （4K 单图 8.3 MP ✓ / Wan 81 帧 720p ≈75 MP ✓，见 `vae_tiling` 模块头 ✓）。
+
+    ⚠️ 分块与整张**不可能逐像素相同** ✓✗：VAE 解码器的**感受野**在块边界只看得到块内 ✓,
+    羽化只把差异**摊平** ✓ — 这是切块的固有代价 ✓，不是本实现的缺陷 ✓。
     """
     if not _HAS_TORCH:
         raise SdxlVaeError("没装 torch ✗ ⇒ 解不了码 ✓")
@@ -513,7 +561,25 @@ def decode_latents(model: Any, latents: Any, *, config: "SdxlVaeConfig | None" =
     if scale == 0.0:
         raise SdxlVaeError("scaling_factor 为 0 ✗ ⇒ 会除以 0 ✓（配置有问题 ✓）")
     with torch.no_grad():
-        pixels = model.decode((latents - float(spec.shift_factor)) / scale)
+        #: ⚠️ **反缩放留在原精度算** ✓（先除再 cast ✓ 比先 cast 再除更准 ✓），到 ``decode`` 门口才对齐
+        #: 到 VAE 权重的精度 ✓✗：潜变量常是 **f32**（采样侧有意保持 f32 ✓ 见 `init_latents` ✓），
+        #: 而 VAE 权重多是 **bf16** ✓ —— 不对齐当场
+        #: ``Input type (float) and bias type (struct c10::BFloat16) should be the same`` ✓。
+        #: 报错指向 ``conv`` ✓，读起来像"通道不对" ✓，其实是精度没对齐 ✓✗（别在采样侧降精度 ✗）。
+        scaled = latents / scale + float(spec.shift_factor)
+
+        def _decode_one(piece: Any) -> Any:
+            return model.decode(piece.to(_weight_dtype(model, piece)))
+
+        if tile is None:
+            pixels = _decode_one(scaled)
+        else:
+            #: ⚠️ 分块时 ``scaled`` **整张都在** ✓（潜变量只有像素的 1/64 大小 ✓）：切的是解码
+            #: 的中间激活 ✓，不是潜变量本身 ✓ —— 别为了"省内存"先把 latent 切了再各自解码 ✓✗
+            #: （块边界没有上下文 ⇒ 接缝比羽化摊平的那种**粗得多** ✓）。
+            pixels = decode_latents_tiled(
+                _decode_one, scaled, spatial_scale=int(spec.spatial_scale),
+                tile=int(tile), overlap=int(overlap), progress=progress)
     if not to_unit:
         return pixels
     return ((pixels + 1.0) / 2.0).clamp(0.0, 1.0)

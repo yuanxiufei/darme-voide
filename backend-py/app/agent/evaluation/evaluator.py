@@ -15,8 +15,10 @@
    （``save_storyboards``），不归一会**提取 0 命中**，分数直接归零且不报错。
 3. **抽取口径各不相同**（别"统一"）：分镜与剧本取**最后一次**调用；角色/场景/音色是
    **跨多次调用累加**。
-4. ``cleanup`` **只删本流程造出来的东西**，漏了 ``continuity_states`` / ``storyboard_props``
-   （Agent 可能写）—— 与 TS 一致，属已知残留（临时 drama 已删，孤儿行不影响业务）。
+4. ``cleanup`` **只删本流程造出来的东西**，但**挂在分镜上的附表要删干净**：原实现照抄 TS
+   只删 ``storyboard_characters``，把 ``storyboard_props`` / ``continuity_states`` 留成孤儿行
+   （临时 drama 删了、孤儿行却永远留在库里；实测存量 39 条即由此累积）。现统一走
+   ``delete_storyboard_children``。
 """
 from __future__ import annotations
 
@@ -33,10 +35,10 @@ from app.core.models import (
     episode_scenes,
     episodes,
     scenes,
-    storyboard_characters,
     storyboards,
 )
 from app.core.response import now
+from app.services.storyboard_helpers import delete_storyboard_children
 from app.agent.runtime import run_agent_with_instructions
 from app.agent.evaluation.scorer import (
     score_extraction,
@@ -153,10 +155,9 @@ def cleanup_case(seed: dict[str, Any]) -> None:
                     select(storyboards.c.id).where(storyboards.c.episode_id == episode_id)
                 ).all()
             ]
-            if storyboard_ids:
-                conn.execute(sql_delete(storyboard_characters).where(
-                    storyboard_characters.c.storyboard_id.in_(storyboard_ids)
-                ))
+            # 挂在分镜上的附表（角色/道具/镜头级状态）走单一真源，别只删角色关联 ——
+            # 只删角色的版本会在库里攒下指向已不存在镜头的孤儿行（2026-10-30 实测存量 39 条）
+            delete_storyboard_children(conn, storyboard_ids)
             conn.execute(sql_delete(storyboards).where(storyboards.c.episode_id == episode_id))
             conn.execute(sql_delete(episode_scenes).where(
                 episode_scenes.c.episode_id == episode_id))

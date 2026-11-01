@@ -355,6 +355,14 @@ def case_optimizations(root: Path) -> None:
     check("⑲ 缓存目录指向**本仓数据根** ✓（不写用户主目录 ✓）",
           "hf-cache" in str(os.environ.get("HF_HOME")), os.environ.get("HF_HOME"))
 
+    # ⭐ 2026-10-31 补：三处「静默不一致」的钉子 ✓
+    check("⑳ᵃ `special_tokens` 对**没登记 BOS/EOS** 的词表回空 ✓（不许猜 `<s>` ✗✗）",
+          hub.special_tokens == {}, hub.special_tokens)
+    check("⑳ᵇ 词表没登记 BOS/EOS ⇒ `add_special_tokens` 加不加**结果相同** ✓"
+          "（有 added token 的分支原先直接忽略这个参数 ✗ ⇒ 与 impl 分支语义相反 ✗）",
+          hub.encode("hello world", add_special_tokens=True)
+          == hub.encode("hello world", add_special_tokens=False), None)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ⑤ 可互校 ✓（自研 ↔ 参考实现）+ 指纹随词表变 ✓
@@ -379,6 +387,31 @@ def write_reference_byte_bpe(root: Path) -> Path | None:
     return target
 
 
+def write_vocab_merges(root: Path) -> Path | None:
+    """造 GPT-2 风格 `vocab.json` + `merges.txt` + `tokenizer_config.json` ✓（参考侧**第 ② 条**通路 ✓）。
+
+    ⚠️ Qwen 系发布包（`qwen25_tokenizer` ✓ —— H3 的 TE = Qwen3-VL-32B 就该用它 ✓）就是这形态：
+    只有 vocab/merges + config ✓、**没有** `tokenizer.json` ✗ ⇒ 只认 `tokenizer.json` 的实现
+    **永远造不出参考侧** ✓✗（「互校」会一直停在「没比成」，而自研 BPE 到底切得对不对没人知道 ✓）。
+    """
+    try:
+        import transformers  # noqa: F401,PLC0415
+    except ImportError:
+        return None
+    target = root / "ref_vocab_merges"
+    target.mkdir(parents=True, exist_ok=True)
+    vocab = {char: index for index, char in enumerate(sorted(tb.bytes_to_unicode().values()))}
+    for extra, token in enumerate(("he", "ll", "hell", "hello"), start=400):
+        vocab[token] = extra
+    (target / "vocab.json").write_text(json.dumps(vocab), encoding="utf-8")
+    (target / "merges.txt").write_text("#version: 0.2\nh e\nl l\nhe ll\nhell o\n", encoding="utf-8")
+    (target / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "GPT2Tokenizer",
+        "vocab_file": "vocab.json", "merges_file": "merges.txt",
+    }), encoding="utf-8")
+    return target
+
+
 def case_verify(root: Path) -> None:
     complete = write_reference_byte_bpe(root)
     hub = hub_mod.load(hub_mod.HubConfig(path=str(complete or write_byte_bpe(root))))
@@ -398,6 +431,32 @@ def case_verify(root: Path) -> None:
           tricky.get("ok") is None
           and any("装不了这份词表" in note or "没装" in note for note in tricky["notes"]),
           tricky)
+
+    vocab_merges = write_vocab_merges(root)
+    if vocab_merges is not None:
+        vm_report = hub_mod.load(hub_mod.HubConfig(path=str(vocab_merges))
+                                 ).verify_against_reference(["hello"])
+        check("㉓′ ⭐ 只有 `vocab.json`+`merges.txt` 的词表**也能造出参考侧** ✓"
+              "（Qwen 系发布包就是这形态 ⇒ 否则互校永远「没比成」✗）",
+              vm_report.get("ok") is True and vm_report["compared"] > 0, vm_report)
+
+    # ⚠️ 自动探测的**安全边界** ✓：只认真实属于 Qwen 系的词表 ✗
+    #    —— `llama_tokenizer`（vocab=128000 ✓ Llama-3 的词表 ✗）装得上、`describe()` 也不报错 ✗，
+    #    但 token id 与 Qwen 词表**整体错位** ⇒ 出片与提示词无关 ✓✗（本轮实测踩过这条路 ✓）。
+    check("㉔ ⭐ 候选表里**不许出现 llama** ✓（它「装得上」却切得全错 ✗ —— 这类静默错最难查 ✓）",
+          not any("llama" in candidate.lower() for candidate in hub_mod.H3_TOKENIZER_CANDIDATES),
+          hub_mod.H3_TOKENIZER_CANDIDATES)
+    found = hub_mod.find_h3_tokenizer()
+    if found is None:
+        check("㉕ 没有合格词表时自动探测返回 ``None`` ✓（**不猜** ✗、**不抛** ✗）", True, None)
+    else:
+        check("㉕ 探测到的词表**确实是 Qwen 系** ✓（按词表自带的 `tokenizer_class` 判 ✓ 不是我猜的 ✗）",
+              found["tokenizerClass"] in hub_mod.H3_TOKENIZER_CLASSES
+              and "llama" not in found["source"].lower(), found)
+        probe = hub_mod.load(hub_mod.HubConfig(path=found["path"])
+                             ).verify_against_reference(["hello world"])
+        check("㉕′ 探测到的词表**真能装上并互校通过** ✓（不是「找到了但用不了」✗）",
+              probe.get("ok") is True, probe)
 
     refused = write_refused_form(root)
     if refused is not None:

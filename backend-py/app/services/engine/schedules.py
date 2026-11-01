@@ -24,7 +24,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-__all__ = ["SCHEDULES", "interpolate_sigmas", "sigmas_for", "time_shift_sigma", "timesteps_for"]
+__all__ = ["FLOW_SHIFT_DEFAULT", "SCHEDULES", "flow_shift_for_sequence", "flow_sigmas_for_steps",
+           "flow_sigmas_for_video", "interpolate_sigmas", "sigmas_for", "time_shift_sigma",
+           "timesteps_for"]
 
 #: 常用锚点（SD 系模型的经验值；**可覆盖** ✓）
 DEFAULT_SIGMA_MIN = 0.0292
@@ -105,6 +107,99 @@ def ddim_uniform_sigmas(steps: int, *, sigma_min: float = DEFAULT_SIGMA_MIN,
     """DDIM 风格：t 在 ``[0,1]`` 均匀取点，再线性映射到 σ ✓（步数少时更「粗」但稳定 ✓）。"""
     steps = max(1, int(steps))
     return [sigma_max + (sigma_min - sigma_max) * t for t in _linspace(0.0, 1.0, steps)] + [0.0]
+
+
+#: flow matching 的**默认 shift** ✓（Z-Image ✓：`supported_models.ZImage.sampling_settings` 里
+#: ``multiplier=1.0, shift=3.0`` ✓；官方 turbo 模板 `image_z_image_turbo.json` 的
+#: `ModelSamplingAuraFlow(shift=3)` 是同一条 ✓ —— 两处独立来源对得上 ✓）。
+FLOW_SHIFT_DEFAULT = 3.0
+
+
+def flow_sigmas_for_steps(steps: int, *, shift: float = FLOW_SHIFT_DEFAULT) -> list[float]:
+    """**flow matching** 的 σ 序列 ✓（``t`` 均匀取点 + ``shift`` 平移 ✓；末尾 0.0 ✓）。
+
+    公式（闭式 ✓ 纯数学 ✓ 零依赖 ✓）：
+
+    ``σ(t) = shift·t / (1 + (shift−1)·t)`` ✓，``t`` 从 **1 递减到 0** ✓；取 ``steps+1`` 个点
+    ⇒ ``σ_0 = 1`` ✓、``σ_steps = 0`` ✓、中间单调递减 ✓。
+
+    ⚠️ 这不是「karras 换个系数」✗ —— 两者**自变量域都不同** ✗：karras 的 σ 能到 **14.6** ✓，而
+    flow 的 σ **恒在 [0,1]** ✓（它本来就是「t=1 是纯噪声 ✓」的约定 ✓）。拿 karras 那条喂 Z-Image ✓✗
+    ⇒ DiT 收到 σ=14.6 ⇒ ``t = 1 − 14.6 = −13.6`` ✓✗（**不报错** ✓，图像是一团糊 ✓✗）。
+
+    ⚠️ ``shift`` 的语义也要对齐 ✗：Z-Image 的 ``multiplier = 1.0`` ✓ ⇒ **喂给模型的 timestep 就是 σ 本身** ✓
+    （不是 ``σ×1000`` ✗ —— 那是 multiplier=1000 的老档 ✓，`ModelSamplingAuraFlow.patch_aura` 明写
+    ``multiplier=1.0`` ✓ 见 `comfy_extras/nodes_model_advanced.py` ✓）。
+    DiT 内部再自己 ``(1 − σ) × time_scale(1000)`` ✓（`ldm/lumina/model.py` 的 ``t = 1.0 - timesteps`` ✓）
+    ⇒ 这一层**不要**提前乘 1000 ✓✗，否则 ``t`` 落到 −1e6 量级 ✓。
+    """
+    steps = max(1, int(steps))
+    shift = float(shift)
+    if shift <= 0:
+        raise ValueError(f"shift 必须为正（收到 {shift} ✗）")
+    sigmas = [1.0]
+    for index in range(1, steps):
+        t = 1.0 - index / steps
+        sigmas.append(shift * t / (1.0 + (shift - 1.0) * t))
+    sigmas.append(0.0)
+    return sigmas
+
+
+def flow_shift_for_sequence(seq_len: int, *, frames: int = 1, base_shift: float = 1.0,
+                           max_shift: float = 3.0, seq_min: int = 256,
+                           seq_max: int = 4096) -> float:
+    """按**序列长度**与**帧数**推一个 flow shift ✓（视频专用 ✓；闭式 ✓ 纯数学 ✓ 零依赖 ✓）。
+
+    公式（自己写的 ✓，不是抄代码 ✗）：``α = lin(seq_len) · √frames`` ✓ ——
+    ``lin`` 是过 ``(seq_min, base_shift)`` 与 ``(seq_max, max_shift)`` 的**直线** ✓，
+    **两端之外也照直走** ✗（刻意不夹断：夹断会让"很短"与"很长"两头退化成同一个常数 ✓，
+    于是调分辨率/帧数**看不出任何变化** ✓✗ —— 那种失败一声不响 ✓）。
+
+    ⚠️ 为什么视频需要一个**不是常数**的 shift ✗（写死一个 3 或 12 不是更省事吗 ✓）：
+    同一条 shift 在不同 token 数下**不是同一种噪声日程** ✗ —— 序列越长，每步要改的 token 越多，
+    固定 shift 会让**噪声占比偏小** ⇒ 运动弱、画面糊 ✓（**不报错** ✓，症状是"怎么调 cfg 都不动" ✓）。
+    ``√frames`` 那一项同理 ✓：帧数翻倍 ⇒ 时间轴 token 翻倍 ⇒ 要更大的 shift 才落回同一段分布 ✓。
+
+    不变量（`tests/engine_video_schedule_test.py` 逐条钉住 ✓）：
+    ``α(seq_min, frames=1) == base_shift`` ✓、``α(seq_max, frames=1) == max_shift`` ✓、
+    ``α(frames=4) == 2·α(frames=1)`` ✓（⇒ ``√`` 写错成线性，判据当场为假 ✓）、
+    ``α`` 恒为正 ✓（seq_len 很小时会 < ``base_shift`` ✓ 但不会 ≤ 0 ✓）。
+
+    ⚠️ ``seq_len`` 是**潜空间的 token 数** ✓（``(h_lat // patch) · (w_lat // patch)`` ✓）——
+    不是像素数、也不是潜像素数 ✗（拿像素数进来 ⇒ α 大一个量级 ⇒ σ 前几步就冲到 1 附近 ⇒ 白跑 ✓✗）。
+    """
+    seq_min, seq_max = int(seq_min), int(seq_max)
+    if seq_max == seq_min:
+        raise ValueError(f"seq_min 与 seq_max 不能相同（收到 {seq_min} ✗ —— 那样直线画不出来 ✓）")
+    if float(frames) < 1:
+        raise ValueError(f"frames 必须 ≥1（收到 {frames} ✗ —— 它只进 √ 号 ✓）")
+    slope = (float(max_shift) - float(base_shift)) / float(seq_max - seq_min)
+    alpha = float(base_shift) + slope * (float(seq_len) - float(seq_min))
+    alpha *= math.sqrt(float(frames))
+    if alpha <= 0:
+        raise ValueError(
+            f"算出的 flow shift = {alpha:.6g} ≤ 0 ✗（seq_len={seq_len} / frames={frames} ✓）"
+            "—— shift 必须为正，否则 σ(t) 的分母会翻号 ✓")
+    return alpha
+
+
+def flow_sigmas_for_video(steps: int, *, shift: float | None = None, seq_len: int | None = None,
+                          latent_frames: int = 1, base_shift: float = 1.0,
+                          max_shift: float = 3.0, seq_min: int = 256,
+                          seq_max: int = 4096) -> list[float]:
+    """视频的 flow σ 日程 ✓ —— **要么给 ``shift``**（事实值 ✓）、**要么给 ``seq_len``**（自适应 ✓）。
+
+    ⚠️ 两个都不给就**报错** ✗（不拿 ``FLOW_SHIFT_DEFAULT`` 硬凑 ✓）：图族的默认 3.0 是
+    Z-Image 的口径 ✓，视频族的 shift 是**另一个数**（本项目 H3 = 12.0 ✓，见
+    ``pipeline.H3_FLOW_SHIFT`` ✓）—— 拿错不会报错 ✓，只是运动量与清晰度一起掉 ✓✗。
+    """
+    if shift is None:
+        if seq_len is None:
+            raise ValueError(
+                "flow 视频日程要么给 shift、要么给 seq_len ✗（两个都没给 ✓ —— 不猜一个默认 shift ✓）")
+        shift = flow_shift_for_sequence(seq_len, frames=latent_frames, base_shift=base_shift,
+                                        max_shift=max_shift, seq_min=seq_min, seq_max=seq_max)
+    return flow_sigmas_for_steps(steps, shift=float(shift))
 
 
 #: 可用调度名 → 生成函数 ✓（新增调度请**同时**加自检 ✓）

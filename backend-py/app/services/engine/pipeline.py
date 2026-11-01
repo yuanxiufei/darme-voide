@@ -24,7 +24,8 @@ plan → encode → init → sample → decode → write
 ## 算法层是真用的（不是摆设 ✓）
 
 ``sample`` 阶段**真的**调 :func:`app.services.engine.sampler.sample` ✓（Euler/Heun/多阶 ✓），
-σ 序列**真的**来自 :mod:`app.services.engine.schedules` ✓（Karras 等 ✓），
+σ 序列**真的**来自 :mod:`app.services.engine.schedules` ✓（视频默认 **flow** ✓ ——
+H3 的 σ 是 flow 域 ✓，`karras` 那套 14.6 起步只留给显式要它的调用方 ✓，见 :func:`_video_sigmas` ✓），
 尺寸/帧数**真的**来自 :mod:`app.services.engine.geometry` ✓ ⇒ 换后端不换算法 ✓。
 
 ## 取消（协同式 ✓）
@@ -36,16 +37,22 @@ plan → encode → init → sample → decode → write
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace as dataclass_replace
 from typing import Any, Callable, Protocol
 
 from . import conditioning as conditioning_mod
-from . import geometry, guidance as guidance_mod, sampler as sampler_mod, schedules
+from . import geometry, guidance as guidance_mod, latent_formats, sampler as sampler_mod, schedules
 
 __all__ = [
+    "H3_FLOW_SHIFT",
     "IMAGE_STAGE",
+    "QWEN21_FLOW_SHIFT",
+    "QWEN21_STAGE",
+    "QWEN_IMAGE_FLOW_SHIFT",
+    "QWEN_IMAGE_STAGE",
     "STAGE_ORDER",
     "VIDEO_STAGE",
+    "ZIMAGE_STAGE",
     "GenerationBackend",
     "GenerationCancelled",
     "GenerationPlan",
@@ -53,7 +60,9 @@ __all__ = [
     "PipelineResult",
     "StageError",
     "build_plan",
+    "is_flow_schedule",
     "run_sync",
+    "video_flow_shift_for",
 ]
 
 #: 两条**阶段**名 ✓（= `runtime.ensure_loaded(stage=…)` 认的那两个 ✓ —— 一个概念贯穿三层 ✓）。
@@ -64,6 +73,59 @@ __all__ = [
 #: 三处对不上就会「装的是视频后端、跑的是图片 plan」✓✗（那种错**不报错** ✓ 只是结果全错 ✓）。
 VIDEO_STAGE = "h3"
 IMAGE_STAGE = "sdxl"
+#: ⭐ :data:`ZIMAGE_STAGE` ✓：Z-Image **单张图片** ✓（2026-10-31 新增 ✓）。
+#:
+#: ⚠️ 为什么**不能**并进 :data:`IMAGE_STAGE` ✗（明明都是"出一张图" ✓）：
+#: 两者的 **σ 语义根本不同** ✗✗ —— SDXL 是离散扩散 ✓（σ 到 14.6 ✓、调度器是 karras 一族 ✓），
+#: Z-Image 是 **flow matching** ✓（σ 恒在 [0,1] ✓、shift=3 ✓、timestep 就是 σ 本身 ✓）。
+#: 合流 ⇒ 谁都可能在对方那套 σ 上跑 ✓✗：**形状全对、不报错、结果是噪声** ✓✗
+#: （这正是本仓记忆里「`vae_scale` 取不到 ⇒ 静默占位」同一类错误的翻版 ✓）。
+#: 而且它们的**后端也不是同一个** ✓：SDXL 走 ``SdxlBackend`` ✓，Z-Image 走 ``TorchBackend`` ✓。
+ZIMAGE_STAGE = "zimage"
+#: ⭐ :data:`QWEN21_STAGE` ✓：Qwen-Image **2.1** 单张图片 ✓（2026-10-31 新增 ✓）。
+#:
+#: ⚠️ 为什么**又**要一个新名字 ✗（已经是第三套"出一张图"了 ✓）：
+#: 三套的**采样口径与组件全不同** ✗✗ ——
+#: * SDXL：离散扩散 ✓ σ 到 14.6 ✓；四件套（UNet + 两个 CLIP + VAE）✓；
+#: * Z-Image：flow matching ✓ shift=**3** ✓；DiT 453 键 + Qwen3-4B + Flux VAE ✓；
+#: * 2.1：flow matching ✓ 但 shift=**0.69** ✓（`supported_models.QwenImage` 的
+#:   ``sampling_settings = {shift: 0.69, multiplier: 1.0}`` ✓）＋ **64 通道**潜变量 ✓（其余两套 4/16 ✓）
+#:   ＋ 混合文本塔（Qwen3.5-9B ✓ 24 层线性注意力 + 8 层 full attention ✓）。
+#: 合流任何一对 ⇒ 在对方那套 σ / 通道上跑 ✓✗：**形状可能都对、图是噪声、一声不响** ✓✗。
+QWEN21_STAGE = "qwen_image21"
+#: Qwen-Image 2.1 的 flow shift ✓（**不是** :data:`schedules.FLOW_SHIFT_DEFAULT` 的 3 ✓✗）。
+#: 出处：comfy ``supported_models.QwenImage`` 的 ``sampling_settings`` ✓
+#: （``{"multiplier": 1.0, "shift": 0.69}`` ✓）—— 拿 3 去跑同一个 seed ⇒ 前几步就把图定死 ✓、
+#: 后几步白跑 ✓✗（**不报错** ✓，只是"怎么调都不像" ✓）。
+QWEN21_FLOW_SHIFT = 0.69
+#: ⭐ :data:`QWEN_IMAGE_STAGE` ✓：Qwen-Image **2512**（t2i）/ **Edit 2511** 单张图片 ✓（2026-10-31 新增 ✓）。
+#:
+#: ⚠️ 与 :data:`QWEN21_STAGE`（``"qwen_image21"`` ✓）只差一个 `21` ✗✗ —— 但**不是**同一族 ✓：
+#: * 结构：**双流 MMDiT**（6 组调制 ✓） vs 单流（2 行调制 ✓）；
+#: * 潜通道：**16** ✓ vs 64 ✗；
+#: * 时间口径：``1000·σ`` **不翻转** ✓ vs lumina 式翻转 ✓；
+#: * flow shift：**3.1** ✓ vs 0.69 ✗；
+#: * 文本塔：**Qwen2.5-VL-7B（3584 ✓、qkv 带 bias ✓、取最后一层 ✓）** vs Qwen3.5-9B（4096 ✓、取 -2 ✓）。
+#:
+#: ⚠️ 两族**族名比较一律 `==`** ✗ 不许 `startswith` ✓：``"qwen_image21"`` 以 ``"qwen_image"`` 开头 ✓，
+#: 前缀判族会让 2.1 被 2512 的骨架接走 ✓✗（报「缺 4 组调制」，读起来像权重没下全 ✗）。
+QWEN_IMAGE_STAGE = "qwen_image"
+#: Qwen-Image **2512** 的 flow shift ✓。
+#: 出处：官方 UI 模板 ``image_qwen_Image_2512.json`` 的 ``ModelSamplingAuraFlow`` 节点
+#: ``widgets_values`` = **3.1** ✓（不是 2.1 的 0.69 ✗，也不是 Z-Image 的 3 ✓）。
+#: ⚠️ **两处数字不一致，取模板那一格** ✗✓：comfy ``supported_models.QwenImage`` 的
+#: ``sampling_settings`` 写的是 ``{"multiplier": 1.0, "shift": 1.15}`` ✓ —— 那是**代码默认** ✓；
+#: 而官方模板在工作流里**显式挂** ``ModelSamplingAuraFlow`` 把 shift 覆盖成 **3.1** ✓
+#: ⇒ 创作者点开"官方 Qwen-Image 2512"跑的就是 3.1 ✓。取 1.15 不会报错 ✓，只是 σ 曲线不同 ✓✗。
+#: ⚠️ 拿 2.1 的 0.69 去跑 2512 ⇒ σ 曲线被压在前段 ✓✗：**能出图、不报错** ✓、
+#: 但 50 步里有一大半几乎不动 ✓，表现为"细节糊、提示词不跟" ✓✗。
+QWEN_IMAGE_FLOW_SHIFT = 3.1
+
+#: 视频族（H3 ✓）的 flow shift ✓。出处：``h3_form.H3_SIGMA_SHIFTS["sigma_shift_video"]`` ✓
+#: （σ 与音频那一路 ``sigma_shift_audio=3`` 分开 ✓ —— 两路**各在自己的噪声日程上** ✓✗）。
+#: 这里存一份是为了让 :mod:`pipeline` 保持**零 torch**（plan 阶段不 import 主干 ✓）；
+#: 两处一致由 ``tests/engine_video_schedule_test.py`` 的接线守卫钉住 ✓（只改一处 ⇒ 判据为假 ✓）。
+H3_FLOW_SHIFT = 12.0
 
 #: 阶段顺序（也是前端进度条的依据 ✓）
 #: ⚠️ 这里**只列必经阶段** ✗ —— 可选阶段（``condition`` ✓、``refine`` ✓）靠 :data:`STAGE_LABELS`
@@ -122,7 +184,12 @@ class GenerationRequest:
     megapixels: float = 0.65
     steps: int = 30
     sampler: str = "euler"
-    schedule: str = "karras"
+    #: σ 日程 ✓ —— 默认 **``flow``** ✓（视频族是 flow 域 ✓；四形见 :func:`_video_sigmas` ✓）。
+    #: ⚠️ 2026-10-31 之前默认是 ``karras`` ✗：它的首值 14.61 会被 H3 当成 flow 的 σ 用 ✓✗
+    #: ⇒ ``t = 1−σ`` 落到 −13.6 ✓、**不报错、出噪声** ✓✗（依据见 :func:`_video_sigmas` ✓）。
+    #: 注：图片三族（sdxl / zimage / qwen_image21）**不读这个字段** ✓ —— 它们的 shift 各自写死在
+    #: ``_fill_*_plan`` 里 ✓（同一个字段喂四套不同 σ 语义 = 上一次"合流"事故的翻版 ✗）。
+    schedule: str = "flow"
     temporal_compression: int | None = None   # ⚠️ 必须显式给（见 geometry 的原则 ✓）
     first_frame: str | None = None            # 图生视频的首帧 ✓
     reference_frames: tuple[str, ...] = ()
@@ -157,6 +224,16 @@ class GenerationRequest:
     #: 给单流后端尾帧会**明确失败** ✗，不静默忽略 ✓（忽略 = 产出与尾帧无关的画面且看不出来 ✗）。
     #: ⚠️ 也**追加在末尾** ✓（同 ``stage`` 的理由 ✓）。
     last_frame: str | None = None
+    #: 文本段**逐 token 的 adaLN 行号档** ✓（``0`` = video 行 ✓、``1`` = text 行 ✓）。
+    #: 由 :meth:`TorchBackend.encode_text` 里 `h3_encode.encode_condition` 算出的
+    #: ``H3Condition.tags`` 转手填进来 ✓（`pipeline` 在 encode 之后、采样之前 ✓）——
+    #: ⚠️ 为什么落**请求**而不是落 condition ✗：它是**逐 token 的整数行号** ✓ 不是特征 ✗，
+    #: 塞进特征张量就只剩"多一通道"这种暗约定 ✓✗（一改文本长度就对不上 ✓）；
+    #: ⚠️ 为什么不落 ``GenerationPlan`` ✗：plan 是"请求 → 具体数字"的**纯函数产物** ✓，
+    #: 而这里要的是**编码的副产品** ✓（依赖分词器与视觉塔有没有装 ✓）。
+    #: ``None`` ⇒ 不传 ✓（与"全 1"逐位相同 ✓ —— 纯文本提示词没有视觉占位 ✓）。
+    #: ⚠️ 追加在**末尾** ✓（同 ``stage`` / ``last_frame`` 的理由 ✓）。
+    text_token_tags: tuple[int, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -222,9 +299,19 @@ def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) 
     if stage == IMAGE_STAGE:
         _fill_image_plan(request, plan)
         return _finish_plan(request, plan, weights_bytes)
+    if stage == ZIMAGE_STAGE:
+        _fill_zimage_plan(request, plan)
+        return _finish_plan(request, plan, weights_bytes)
+    if stage == QWEN21_STAGE:
+        _fill_qwen21_plan(request, plan)
+        return _finish_plan(request, plan, weights_bytes)
+    if stage == QWEN_IMAGE_STAGE:
+        _fill_qwen_image_plan(request, plan)
+        return _finish_plan(request, plan, weights_bytes)
     if stage != VIDEO_STAGE:
         raise StageError(
-            "plan", f"未知 stage {request.stage!r} ✗；可用：{sorted((VIDEO_STAGE, IMAGE_STAGE))} ✓"
+            "plan", f"未知 stage {request.stage!r} ✗；可用："
+            f"{sorted((VIDEO_STAGE, IMAGE_STAGE, ZIMAGE_STAGE, QWEN21_STAGE, QWEN_IMAGE_STAGE))} ✓"
             "（⚠️ 别随手编一个名字 ✓ —— 它决定选哪个后端 ✓✗）")
 
     plan.width, plan.height = geometry.size_for_megapixels(
@@ -232,21 +319,119 @@ def build_plan(request: GenerationRequest, *, weights_bytes: int | None = None) 
     plan.frames = geometry.snap_frames(request.seconds, fps=plan.fps)
     plan.steps = int(request.steps)
 
-    try:
-        plan.sigmas = schedules.sigmas_for(plan.steps, str(request.schedule or "karras"))
-    except (ValueError, TypeError) as err:
-        raise StageError("plan", f"σ 调度不可用：{err}", cause=err) from err
-    plan.timesteps = schedules.timesteps_for(plan.sigmas)
-
+    # ⚠️ 潜帧数必须**先**算 ✗（``schedule="flow:auto"`` 的 shift 按它自适应 ✓）——
+    #    这个先后不是排版问题：反过来的话 `flow:auto` 只能拿到 ``None`` 而报错 ✓✗。
     if request.temporal_compression:
         plan.latent_frames = geometry.latent_frames(plan.frames,
                                                     temporal_compression=int(request.temporal_compression))
     else:
         # 诚实标注：不猜压缩比（见 geometry 的模块注释 ✓）—— 后端可以自己算 ✓
         plan.warnings.append("未给 temporalCompression ⇒ 潜空间帧数未知（不影响采样，解码时后端自行决定 ✓）")
+
+    try:
+        plan.sigmas = _video_sigmas(request, plan)
+    except (ValueError, TypeError) as err:
+        raise StageError("plan", f"σ 调度不可用：{err}", cause=err) from err
+    plan.timesteps = schedules.timesteps_for(plan.sigmas)
     plan.warnings.append(f"{plan.frames} 帧 @{plan.fps}fps ≈ {plan.frames / max(1, plan.fps):.2f}s"
                          f"（已吸附到 {geometry.H3_FRAME_GRID}k+{geometry.H3_MIN_FRAMES} 网格 ✓）")
     return _finish_plan(request, plan, weights_bytes)
+
+
+def is_flow_schedule(spec: object) -> bool:
+    """这个 ``schedule`` 字符串是不是 **flow 族** ✓（``flow`` / ``flow:<数>`` / ``flow:auto`` ✓）。
+
+    单独一个判定函数是因为**两个**消费点要问同一句话 ✓ —— video plan（:func:`_video_sigmas` ✓）
+    与二采（:func:`torch_backend._second_pass` ✓）；任何一处自己写 `startswith("flow")` ✓
+    都会在"`flow` 三个字母不带头"那几形上分叉 ✓✗。
+    """
+    text = str(spec or "").strip().lower()
+    return text in ("", "flow", "flow:", "flow:default") or text.startswith("flow:")
+
+
+def video_flow_shift_for(request: GenerationRequest, *, width: int | None = None,
+                         height: int | None = None, latent_frames: int | None = None) -> float:
+    """按 ``request`` 算视频的 flow shift ✓ —— **flow 字符串的唯一解析处** ✓。
+
+    ``schedule`` 三形（大小写不敏感 ✓）：
+    ① ``"flow"`` / ``"flow:default"`` / 空 ⇒ :data:`H3_FLOW_SHIFT`（12.0 ✓，**默认** ✓）；
+    ② ``"flow:<数>"`` ⇒ 该数 ✓（扫 shift 直接写 `flow:6` ✓）；
+    ③ ``"flow:auto"`` ⇒ 按**序列长**与**潜帧数**自适应 ✓（``width/height/latent_frames`` 给了就用 ✓，
+       没给就从 ``request`` 自己推 ✓；推不出 ⇒ **报错** ✗ —— 不猜压缩比 ✗）。
+    非 flow 族 ⇒ 抛 ``ValueError`` ✓（要不要报警由调用方决定 ✓ —— 这里**不**静默回落 ✗）。
+    """
+    spec = str(request.schedule or "flow").strip().lower()
+    if spec in ("", "flow", "flow:", "flow:default"):
+        return H3_FLOW_SHIFT
+    if not spec.startswith("flow:"):
+        raise ValueError(f"{spec!r} 不是 flow 族 ✓（可用：flow / flow:<数> / flow:auto ✓）")
+    tail = spec[len("flow:"):].strip()
+    if tail not in ("auto", "adaptive"):
+        try:
+            return float(tail)
+        except ValueError:
+            raise ValueError(
+                f"schedule={request.schedule!r} 的 shift 读不出来 ✗；可用形："
+                "flow / flow:<数> / flow:auto / karras / exponential / normal / ddim_uniform ✓") from None
+
+    if not request.temporal_compression:
+        raise ValueError(
+            "schedule=flow:auto 要按潜帧数自适应 ✓ ⇒ 必须给 temporalCompression ✓"
+            "（H3 视频是 4 ✓）；不给就说明「不知道压缩比」✓，那也没法定 shift ✓")
+    if width is None or height is None:
+        width, height = geometry.size_for_megapixels(max(0.05, float(request.megapixels)),
+                                                    request.ratio)
+    if not latent_frames:
+        fps = int(request.fps or geometry.H3_FPS)
+        latent_frames = geometry.latent_frames(geometry.snap_frames(request.seconds, fps=fps),
+                                               temporal_compression=int(request.temporal_compression))
+    seq_len = _video_token_count(int(width), int(height))
+    return schedules.flow_shift_for_sequence(seq_len, frames=int(latent_frames))
+
+
+def _video_sigmas(request: GenerationRequest, plan: GenerationPlan) -> list[float]:
+    """视频阶段的 σ 日程 ✓ —— flow 族走 :func:`video_flow_shift_for` ✓，其余走旧路（带报警 ✓）。
+
+    ⚠️ **为什么默认从 ``karras`` 改成 ``flow``**（本轮改 ✓，依据都在本仓 ✓✗）：
+    H3 采样器把 σ 当 **flow 域**用 ✓ —— ``h3_form`` 里是 ``t = 1 − σ`` ✓、欧拉步是
+    ``x += (σ_next − σ) · v`` ✓、音频那一路还要 ``time_shift_sigma(σ_v, 12, 3)`` ✓；
+    而 ``karras`` 的**首值是 14.6146** ✓（EDM 域的 σ 上界 ✓）⇒ ``t = 1 − 14.6 = −13.6`` ✗
+    ⇒ 起始噪声比模型见过的任何一档都高 ✓、音频 shift 的分母还会翻号 ✓（``12 + 14.6·(1−12) < 0`` ✓）
+    ⇒ **不报错、出噪声/糊片** ✓✗。旧判据没抓到它，是因为 ``tests`` 里各处都**手动**喂
+    ``[1.0, …, 0.0]`` ✓（``h3_edit`` 那些脚本口径 ✓）—— **plan 那一层的默认值从没被真跑过** ✓✗。
+
+    旧路（``karras`` / ``exponential`` / ``normal`` / ``ddim_uniform``）**照跑** ✓ 但会往
+    ``plan.warnings`` 写一句"域不重叠" ✓ —— 想复现旧行为就显式传，别让它静默 ✓✗。
+    """
+    spec = str(request.schedule or "flow").strip().lower()
+    if is_flow_schedule(spec):
+        return schedules.flow_sigmas_for_steps(plan.steps, shift=video_flow_shift_for(
+            request, width=plan.width, height=plan.height, latent_frames=plan.latent_frames))
+
+    sigmas = schedules.sigmas_for(plan.steps, spec)
+    if max(sigmas) > 1.0:
+        plan.warnings.append(
+            f"σ 调度 {spec!r} 的首值 {max(sigmas):.4g} 超出 flow 的 [0,1] ✓ ⇒ H3 主干会收到 "
+            f"t = 1−σ = {1.0 - max(sigmas):.4g} ✓（**不报错**但起点比训练见过的都高 ✗）。"
+            "视频族的默认已改成 flow（shift 12 ✓，见 `pipeline.H3_FLOW_SHIFT` ✓）——"
+            "这里照你要的跑，只是如实标出域不重叠 ✓")
+    return sigmas
+
+
+def _video_token_count(width: int, height: int, *, patch: int = 2) -> int:
+    """``flow:auto`` 要的**序列长**（token 数 ✓）—— ``(h_lat // patch) · (w_lat // patch)`` ✓。
+
+    ⚠️ 是 **token** 数 ✗ 不是像素数、也不是潜像素数 ✗（拿错 ⇒ α 大一个量级 ⇒ 前几步就冲到
+    σ≈1 ⇒ 等于没采 ✓✗）。两个常数各有出处 ✓：空间 16× 见 :func:`latent_formats.get_latent_format`
+    的 ``h3_video`` ✓；patch 2 见 ``h3_form.H3_TRUNK_DEFAULTS["patch_size"]``（= (1,2,2) ✓，
+    时间维不 patch ✓ ⇒ 每帧一组 token ✓）。
+    """
+    side = int(latent_formats.get_latent_format("h3_video").spatial_downscale_ratio)
+    latent_h, latent_w = height // side, width // side
+    if latent_h < patch or latent_w < patch:
+        raise ValueError(f"{width}×{height} 太小 ✓（潜空间 {latent_w}×{latent_h} 装不下一个 "
+                         f"{patch}×{patch} token ✗）")
+    return (latent_h // patch) * (latent_w // patch)
 
 
 def _fill_image_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
@@ -321,6 +506,180 @@ def _fill_image_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
         f"（σ {plan.sigmas[0]:.4g} ⇒ 0 ✓；UNet 时间步 {plan.timesteps[0]:.0f} ⇒ {plan.timesteps[-1]:.0f} ✓）")
 
 
+def _fill_zimage_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
+    """Z-Image **单张图片**的 plan ✓（flow matching ✓ 不是 SDXL 的离散格 ✗）。
+
+    五条口径都与**官方模板**对齐 ✓（``comfyui_workflow_templates_json/templates/image_z_image_turbo.json`` ✓）：
+
+    ① 尺寸 **1024×1024** 起步 ✓（模板 ``EmptySD3LatentImage(1024, 1024, 1)`` ✓）并吸附到 **16 的倍数** ✓
+       （VAE 下采样 8 ✓ × DiT patch 2 ✓ ⇒ 边长不整除 16 会在 patchify 前就被切掉一块 ✓✗）；
+    ② **帧数恒 1** ✓、``fps = 0`` ✓（图没有帧率概念 ✓）；
+    ③ σ **必须是 flow 那套** ✓（``schedules.flow_sigmas_for_steps`` ✓ ⇒ σ∈[0,1] ✓、shift=3 ✓）；
+    ④ ``timesteps = sigmas`` ✓（Z-Image 的 ``multiplier = 1.0`` ✓ ⇒ timestep 就是 σ ✓，
+       **不要**乘 1000 ✗ —— DiT 内部自己 ``(1−σ)×1000`` ✓）；
+    ⑤ **步数/引导**：模板是 ``steps=8, cfg=1.0`` ✓（turbo 8 步蒸馏 ✓）；这里**按请求走** ✓，
+       只把「与模板不同」如实写进 ``warnings`` ✓（不静默替用户改 ✗）。
+    """
+    # ⚠️ Z-Image turbo 的**官方画布就是 1024²** ✓（不是"越大越好" ✗ —— 训练档位外的尺寸是拿
+    #    没训过的区域换画质 ✓✗，症状是构图崩/多主体重复 ✓ 且**不报错** ✓）。请求没给就按 1024² ✓。
+    wanted_mp = float(request.megapixels)
+    # ⚠️ `GenerationRequest.megapixels` 的默认是 **0.65** ✓（视频档位 ✓）—— 那个数对 Z-Image
+    #    没有意义 ✓✗（它是 H3 的口径 ✓）。这里不能拿 `>0.05` 判"没给"✗（默认永远 >0.05 ✓✗），
+    #    只能拿"**等于默认值**"判 ✓，并且**如实报改** ✓（不静默换用户没要的画布 ✓）。
+    if abs(wanted_mp - 0.65) <= 0.01 * 0.65:
+        wanted_mp = 1.0
+        plan.warnings.append(
+            "像素预算仍是 `GenerationRequest` 的默认 0.65 MP ✓（视频口径 ✗）⇒ 已按 Z-Image turbo "
+            "官方模板换成 **1024×1024（1.0 MP）** ✓"
+            "（出处：`image_z_image_turbo.json` 的 `EmptySD3LatentImage(1024, 1024, 1)` ✓）；"
+            "要保持视频那档请显式传 megapixels ✓")
+    want_w, want_h = geometry.size_for_megapixels(wanted_mp, request.ratio)
+    grid = 16                       # 8（VAE）× 2（patch）✓
+    plan.width = max(grid, int(round(want_w / grid)) * grid)
+    plan.height = max(grid, int(round(want_h / grid)) * grid)
+    if (plan.width, plan.height) != (int(want_w), int(want_h)):
+        plan.warnings.append(
+            f"尺寸已吸附到 {grid} 的倍数（VAE 1/8 ✓ × patch 2 ✓）：{int(want_w)}×{int(want_h)} ⇒ "
+            f"**{plan.width}×{plan.height}** ✓（不整除会在 patchify 前被裁掉一条 ✓✗）")
+
+    plan.frames = 1
+    plan.fps = 0                    # 单张图 ✓ 没有帧率 ✓
+    plan.steps = int(request.steps)
+    shift = schedules.FLOW_SHIFT_DEFAULT
+    plan.sigmas = schedules.flow_sigmas_for_steps(plan.steps, shift=shift)
+    # ⚠️ 这里**不是** `schedules.timesteps_for` ✗（那是 σ/(σ+1) 的日志映射 ✓）——
+    #    Z-Image 的 multiplier=1.0 ✓ ⇒ 喂给 DiT 的 timestep **就是 σ** ✓。
+    plan.timesteps = [float(value) for value in plan.sigmas]
+    plan.warnings.append(
+        f"{plan.width}×{plan.height} 单张图片 ✓、{plan.steps} 步 **flow matching** ✓"
+        f"（shift={shift:g} ✓；σ {plan.sigmas[0]:.4g} ⇒ 0 ✓；timestep 即 σ ✓ 不乘 1000 ✗）")
+    # ⚠️ CFG 在**引导配置**里 ✓（`request.guidance.scale` ✓），没有 `request.cfg` ✗。
+    cfg_scale = float(getattr(request.guidance, "scale", 1.0) or 1.0)
+    if plan.steps != 8 or abs(cfg_scale - 1.0) > 1e-6:
+        plan.warnings.append(
+            f"与官方 turbo 模板的默认档不同（模板：steps=8 / cfg=1.0 ✓；本次 steps={plan.steps} / "
+            f"cfg={cfg_scale:g} ✓）—— 蒸馏模型在别的档位上**能跑但未必更好** ✓，"
+            "这里只报不改 ✗")
+
+
+def _fill_qwen21_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
+    """Qwen-Image **2.1** 单张图片的 plan ✓（flow matching ✓ 但 shift 与 Z-Image **不同** ✗✗）。
+
+    六条口径：
+
+    ① 尺寸吸附到 **16 的倍数** ✓ —— VAE 下采样 16× ✓（`latent_formats.qwen_image21`
+       ``spatial_downscale_ratio=16`` ✓）；而 2.1 的 DiT **没有 patchify** ✗
+       （``img_in = Linear(64 → dim)`` ✓，见 `dit_qwen21` 模块头 ✓）⇒ **不再乘 2** ✗✗
+       （Z-Image 那条要 16 = 8×2 ✓，这一条只要 16 就够 ✓，多乘一次只是白裁边 ✗）；
+    ② 帧数恒 1 ✓、``fps = 0`` ✓；
+    ③ σ 走 flow ✓ 但 **shift=0.69** ✓（:data:`QWEN21_FLOW_SHIFT` ✓）—— 套 3.0 ⇒
+       σ 曲线整体被推向 1 ✓✗：前几步就把构图定死 ✓、后几步几乎不动 ✓，**不报错** ✓；
+    ④ ``timesteps = sigmas`` ✓（``multiplier = 1.0`` ✓ ⇒ 喂给 DiT 的 timestep 就是 σ ✓、
+       **不乘 1000** ✗；DiT 内部自己 ``(1−σ)×1000`` ✓）；
+    ⑤ **潜变量 64 通道** ✓ —— 这一条不在 plan 里（后端按权重事实填 ✓），但记在这：
+       4/16 通道的 VAE 接上去**形状当场不对** ✓（能早报 ✓），而通道对了、**反缩放没做** ⇒
+       图发灰且不报错 ✓✗（见 `vae_wan` 模块头第 ④ 条 ✓）；
+    ⑥ 步数/引导**按请求走** ✓，只把「与官方默认档不同」如实写进 ``warnings`` ✓（不静默改 ✗）。
+    """
+    wanted_mp = float(request.megapixels)
+    # ⚠️ 与 Z-Image 同一条纪律 ✗：`GenerationRequest.megapixels` 的默认是 **0.65** ✓（视频档位 ✓），
+    #    对 2.1 没有意义 ✗ ⇒ 只能拿"**等于默认值**"判 ✓ 并**如实报改** ✓（不静默换画布 ✗）。
+    default_mp = 0.65
+    if abs(wanted_mp - default_mp) <= 0.01 * default_mp:
+        #: 2.1 官方示例档 ≈ **1.76 MP** ✓（1:1 时正是 **1328×1328** ✓；`image_qwen_image.json` 一族模板同档 ✓）。
+        #: ⚠️ 长宽比仍**跟着 `request.ratio`** 走 ✓（16:9 的 1.76 MP ⇒ 1792×1024 ✓，不是硬塞成方的 ✗）。
+        wanted_mp = 1.76
+        plan.warnings.append(
+            "像素预算仍是 `GenerationRequest` 的默认 0.65 MP ✓（视频口径 ✗）⇒ 已按 Qwen-Image 官方"
+            "示例档换成 **1.76 MP** ✓（1:1 时即官方 1328×1328 ✓；长宽比仍跟 ratio ✓）；"
+            "要保持视频那档请显式传 megapixels ✓")
+    grid = 16                       # VAE 16× ✓（**没有** patch ×2 ✗✗）
+    #: ⚠️ `size_for_megapixels` 的**默认吸附步长是 32** ✗（全局 `RESOLUTION_MULTIPLE` ✓，
+    #: 那是给有 patchify 的族用的 ✓）⇒ 这里必须**显式传 16** ✗✗：走默认会让 2.1 也被吸到 32 ✓
+    #: —— 不报错 ✓、只是每张白裁一条边 ✓（"按 16 算"就成了空话 ✓✗）。
+    want_w, want_h = geometry.size_for_megapixels(wanted_mp, request.ratio, multiple=grid)
+    plan.width = max(grid, int(round(want_w / grid)) * grid)
+    plan.height = max(grid, int(round(want_h / grid)) * grid)
+    if (plan.width, plan.height) != (int(want_w), int(want_h)):
+        plan.warnings.append(
+            f"尺寸已吸附到 {grid} 的倍数（VAE 1/16 ✓；这一族**没有** patchify ⇒ 不乘 2 ✓）："
+            f"{int(want_w)}×{int(want_h)} ⇒ **{plan.width}×{plan.height}** ✓")
+
+    plan.frames = 1
+    plan.fps = 0                    # 单张图 ✓ 没有帧率 ✓
+    plan.steps = int(request.steps)
+    shift = QWEN21_FLOW_SHIFT
+    plan.sigmas = schedules.flow_sigmas_for_steps(plan.steps, shift=shift)
+    plan.timesteps = [float(value) for value in plan.sigmas]
+    plan.warnings.append(
+        f"{plan.width}×{plan.height} 单张图片 ✓、{plan.steps} 步 **flow matching** ✓"
+        f"（shift={shift:g} ✓ **不是** Z-Image 的 3 ✓✗；σ {plan.sigmas[0]:.4g} ⇒ 0 ✓；"
+        "timestep 即 σ ✓ 不乘 1000 ✗）")
+    cfg_scale = float(getattr(request.guidance, "scale", 1.0) or 1.0)
+    if cfg_scale == 1.0:
+        # ⚠️ 2.1 是**非蒸馏**模型 ✓ ⇒ cfg=1.0（不引导）会出「糊、构图散」的图 ✓✗ 且不报错 ✓；
+        #    官方档 2.5~4.0 ✓。这里**只报不改** ✗（用户的引导配置是用户的 ✓）。
+        plan.warnings.append(
+            "引导 cfg=1.0 ⇒ **等效不引导** ✓：2.1 不是在 cfg=1 上蒸馏的 ✗，官方档 2.5~4.0 ✓ —— "
+            "不引导**能跑** ✓、但构图与细节会明显软 ✓（这里只报不改 ✗）")
+
+
+def _fill_qwen_image_plan(request: GenerationRequest, plan: GenerationPlan) -> None:
+    """Qwen-Image **2512**（t2i）/ Edit **2511** 单张图片的 plan ✓（flow matching ✓ shift=**3.1** ✓）。
+
+    与 :func:`_fill_qwen21_plan` 的**四格差别**（都对着 2512 官方模板
+    ``comfyui_workflow_templates_json/templates/image_qwen_Image_2512.json`` 核过 ✓）：
+
+    | | 2.1（2509） ✓ | **2512** ✓ |
+    |---|---|---|
+    | flow shift | **0.69** ✓ | **3.1** ✓（``ModelSamplingAuraFlow`` 的 ``shift`` 格 = 3.1 ✓） |
+    | 分辨率吸附 | 16 ✓ | **16** ✓（同一格数，但**理由不同** ✗：2.1 是 VAE 16×；2512 是 VAE 8× × DiT patch 2×2 ✓） |
+    | 潜通道 | 64 ✓ | **16** ✓（16 = 8×8 拍平前的通道 ✓，见 `dit_qwen_image` ✓） |
+    | 官方步/引导 | 2.5~4 档 ✓ | **50 步 / cfg 4.0 / euler / simple** ✓（模板 ``KSampler`` 的 ``widgets_values`` ✓） |
+
+    ⚠️ **shift 抄错这一格是"能出图、但怎么调都不像"** ✓✗：σ 曲线整体被压/被推，
+    前几步就把构图定死或后几步几乎不动 ✓；**不报错** ✓，只是提示词跟随变差 ✓✗。
+    2.1 的 0.69 与这里的 3.1 **互相不能顶替**（两族连时间口径都相反 ✓✗）。
+
+    ⚠️ 尺寸为什么是 **16 的倍数**（不是 8 ✗）：VAE 下采样 **8×** ✓ ⇒ 1328/8 = 166 ✓；
+    而 DiT 内部还要按 **2×2** 拍平（``img_in`` 吃 16×2×2 = 64 ✓，见 `dit_qwen_image` 模块头 ✓）
+    ⇒ **潜变量边长必须是偶数** ✓ ⇒ 像素必须是 16 的倍数 ✓✗。只吸到 8 ⇒ 潜边长 83（奇数）✓✗
+    ⇒ DiT 内部拍平当场形状错（这个会报 ✓），但报的是 ``img_in`` 的宽度，指不到尺寸 ✗。
+    """
+    wanted_mp = float(request.megapixels)
+    default_mp = 0.65                    # `GenerationRequest` 的默认是视频档 ✓（同 Z-Image / 2.1 的理由 ✓）
+    if abs(wanted_mp - default_mp) <= 0.01 * default_mp:
+        #: 2512 官方模板 ``EmptySD3LatentImage`` = **1328×1328** ✓ ⇒ 1.76 MP ✓（与 2.1 同一档位 ✓）。
+        wanted_mp = 1.76
+        plan.warnings.append(
+            "像素预算仍是 `GenerationRequest` 的默认 0.65 MP ✓（视频口径 ✗）⇒ 已按 Qwen-Image 2512 "
+            "官方模板换成 **1.76 MP** ✓（1:1 时即 1328×1328 ✓；长宽比仍跟 ratio ✓）")
+    grid = 16                            # VAE 8× ✓ × DiT patch 2× ✓（理由与 2.1 不同，见 docstring ✓）
+    want_w, want_h = geometry.size_for_megapixels(wanted_mp, request.ratio, multiple=grid)
+    plan.width = max(grid, int(round(want_w / grid)) * grid)
+    plan.height = max(grid, int(round(want_h / grid)) * grid)
+    if (plan.width, plan.height) != (int(want_w), int(want_h)):
+        plan.warnings.append(
+            f"尺寸已吸附到 {grid} 的倍数（VAE 1/8 ✓ × DiT patch 2 ⇒ 潜边长必须是偶数 ✓）："
+            f"{int(want_w)}×{int(want_h)} ⇒ **{plan.width}×{plan.height}** ✓")
+
+    plan.frames = 1
+    plan.fps = 0                         # 单张图 ✓
+    plan.steps = int(request.steps)
+    shift = QWEN_IMAGE_FLOW_SHIFT
+    plan.sigmas = schedules.flow_sigmas_for_steps(plan.steps, shift=shift)
+    plan.timesteps = [float(value) for value in plan.sigmas]
+    plan.warnings.append(
+        f"{plan.width}×{plan.height} 单张图片 ✓、{plan.steps} 步 **flow matching** ✓"
+        f"（shift={shift:g} ✓ **不是** 2.1 的 0.69、也不是 Z-Image 的 3 ✓✗；σ {plan.sigmas[0]:.4g} ⇒ 0 ✓；"
+        "timestep 即 σ ✓ 不乘 1000 ✗）")
+    cfg_scale = float(getattr(request.guidance, "scale", 1.0) or 1.0)
+    if cfg_scale == 1.0:
+        plan.warnings.append(
+            "引导 cfg=1.0 ⇒ **等效不引导** ✓：2512 不是在 cfg=1 上蒸馏的 ✗，官方模板档是 **cfg 4.0 / 50 步** ✓ "
+            "—— 不引导**能跑** ✓、但构图与细节会明显软 ✓（这里只报不改 ✗）")
+
+
 def _finish_plan(request: GenerationRequest, plan: GenerationPlan,
                  weights_bytes: int | None) -> GenerationPlan:
     """两条路**共用**的收尾 ✓（相对耗时系数 ✓ / 超清计划 ✓ / 显存估算 ✓）。
@@ -330,7 +689,9 @@ def _finish_plan(request: GenerationRequest, plan: GenerationPlan,
     # ── 相对耗时系数（**可精确算** ✓：步数 × 采样器 × 引导 ✓）────────────────
     # heun 每个区间调模型 2 次 ✓；CFG 让"施加引导的那些步"再翻倍 ✓ ⇒ 引导只需要按**生效比例**算 ✓：
     # cost = (步数 + 生效步数) × 采样器倍数 ✓（全程引导时正好 = 步数 × 2 × 倍数 ✓）。
-    sampler_multiplier = 2 if str(request.sampler or "").lower() == "heun" else 1
+    # ⚠️ 采样器倍数**归 `sampler` 管** ✓（唯一真源 :data:`sampler_mod.MODEL_CALLS` ✓）——
+    #    这里再手写一次 `== "heun"` 就是第二份账 ✓✗：新增 `sa_solver`/`dpmpp_2m`/`lms` 时它不会跟着变 ✓。
+    sampler_multiplier = sampler_mod.model_calls_per_step(str(request.sampler or "euler"))
     config = request.guidance
     guided_steps = sum(1 for index in range(plan.steps)
                        if guidance_mod.scale_for_step(index, plan.steps, config) != 1.0)
@@ -340,8 +701,9 @@ def _finish_plan(request: GenerationRequest, plan: GenerationPlan,
         plan.warnings.append(
             f"引导 cfg={config.scale:g}：{plan.steps} 步里有 {guided_steps} 步生效，"
             f"相对耗时约 ×{plan.cost_factor / max(1.0, float(plan.steps)):.2f}"
-            f"（heun 每步还要 ×2 ✗）" +
-            (f"（重标定 {config.rescale:g} ✓）" if config.rescale else ""))
+            + (f"（{str(request.sampler or 'euler')} 每步 ×{sampler_multiplier:g} 次模型调用 ✗）"
+               if sampler_multiplier != 1.0 else "")
+            + (f"（重标定 {config.rescale:g} ✓）" if config.rescale else ""))
     # ── 超清计划（**照调用方给的** ✓ 不自己猜倍率/分块 ✗）────────────────────────
     if request.upscale is not None:
         plan.upscale = request.upscale.to_dict()
@@ -463,6 +825,95 @@ class PipelineResult:
 CancelFn = Callable[[], bool]
 
 
+def _backend_phase(backend: GenerationBackend, phase: str) -> Any:
+    """按阶段**换装** ✓（只有登记过链的后端才动 ✓ —— 别的族没有这个方法 ⇒ 返回 None ✓）。
+
+    为什么这件事归管线 ✗（不归后端自己 ✓）：**阶段边界只有管线知道** ✓ —— 后端不知道自己
+    何时被 encode 用、何时被 sample 用 ✓✗。后端只提供「进这个阶段要哪几件在场」这一条事实 ✓
+    （`TorchBackend.PHASE_PARTS` ✓）。
+
+    ⚠️ 3 件之和装得下的机器**不受影响** ✓：`TorchBackend` 没登记链 ⇒ `enter_phase` 返回 None ✓，
+    这里连一次判断都不多付 ✓。
+    """
+    hook = getattr(backend, "enter_phase", None)
+    if not callable(hook):
+        return None
+    step = hook(phase)
+    #: ⚠️ **换装之后、回到管线这一层再清一次显存** ✓✗（2026-11-01 端到端实测 ✓）。
+    #: 为什么后端自己末尾那次不够 ✗✗：`enter_phase` 调 `load_weights` 时，**装载栈里的中转张量
+    #: 还没退** ✓ ⇒ allocator 认定「有人在用」⇒ `empty_cache()` 一个字节不还 ✓✗。
+    #: 实测：`enter_phase` 末尾自己清过一轮 ✓（已经还掉了 `text` 那份 16.2 GiB ✓），
+    #: 可 `reserved` 仍比 `allocated` 多 **16.2 GiB** ✓；等栈完全退干净、由这一层再清一次 ⇒
+    #: 20390 → **4332 MiB** ✓、`free` 1146 → **17457 MiB** ✓。
+    #: 差这一步的后果很实在 ✓：下一次 `decide_for` 量到的余量是"假的紧"✓ ⇒ 越换越保守 ✓✗。
+    trim = getattr(backend, "_trim_cuda", None)
+    if callable(trim):
+        try:
+            trim()
+        except BaseException:  # noqa: BLE001 —— 收尾清理**绝不许**把采样带崩 ✓
+            pass
+    return step
+
+
+def _backend_tick(backend: GenerationBackend, phase: str, *, step: int = 0,
+                  every: int = 4) -> None:
+    """运行期**探压** ✓（每 ``every`` 步一次 ✓）—— 没有 ``tick`` 的后端直接跳过 ✓。
+
+    ⚠️ 为什么归管线 ✗：**只有管线知道"跑到第几步了"** ✓（同 `_backend_phase` 的理由 ✓）。
+    后端只负责"读到压力之后怎么办"（`TorchBackend.tick` ✓）。
+
+    ⚠️ 为什么**吞掉异常** ✗✗：这是**观测** ✓，不是业务 ✓ —— 探压失败（驱动抽风 / 别的进程把卡
+    弄没 ✓）绝不许把一次已经跑到第 20 步的采样弄死 ✓。真实故障会在真正用卡时以它自己的样子
+    报出来 ✓，不该由观测代它发火 ✓✗。
+
+    ⚠️ 为什么每 4 步而不是每步 ✗：`cudaMemGetInfo` 本身很便宜 ✓，但 `tick` 到硬阈值时会
+    `gc.collect()` ＋ `empty_cache()` ✓ —— 那是**毫秒级到百毫秒级**的停顿 ✓，每步都做就是在给
+    采样加税 ✓✗。4 步的粒度足够在任何一步 OOM 之前看到趋势 ✓。
+    """
+    tick = getattr(backend, "tick", None)
+    if not callable(tick):
+        return
+    if every > 0 and step % every:
+        return
+    try:
+        tick(phase)
+    except Exception:  # noqa: BLE001 - 观测不许拖垮任务 ✓
+        return
+
+
+def _noise_sampler_for(backend: GenerationBackend, request: GenerationRequest,
+                       holder: dict[str, Any]) -> Callable[[float, float], Any] | None:
+    """随机采样器（``euler_ancestral`` / ``sa_solver`` ✓）每步回注的噪声 ✓。
+    （确定性采样器 ⇒ 回 ``None`` ✓ —— 它们压根不认识这个参数 ✓，给了也白给 ✗。）
+
+    ⚠️ 三条口径，都是"不报错但结果不对"那一类 ✗✗：
+
+    ① **后端没实现 ⇒ 明确报错** ✓✗：静默按 ODE 跑 = 用户选了「随机档」却拿到确定性轨迹 ✓
+       —— 同一 seed 每次一样、画面还挺正常 ✓，正是本仓最忌讳的"看不出来"✗；
+    ② **每步的噪声必须不同** ✓（``nonce`` 递增 ✓）：同一条噪声反复注入 ⇒ 画面出现**结构性条纹** ✓✗，
+       不报错、只在真机上看得见 ✓（:func:`dryrun.noise_like` 的 ``nonce`` 就为这个 ✓）；
+    ③ **形状/设备/精度一律问当前的 x** ✓（采样器只递得出 σ 两格 ✗ ⇒ 这里从 ``holder["x"]`` 取 ✓
+       —— 每步 :func:`run_sync` 的 ``on_step`` 会刷新它 ✓）。
+    """
+    name = str(request.sampler or "euler").lower()
+    if name not in sampler_mod.STOCHASTIC:
+        return None
+    hook = getattr(backend, "noise_like", None)
+    if not callable(hook):
+        raise StageError(
+            "sample",
+            f"采样器 {name} 是**随机采样器** ✗，但后端 "
+            f"{getattr(backend, 'name', type(backend).__name__)} 没实现 `noise_like` ✗ "
+            f"⇒ 退化成纯 ODE 只是「看着能跑」✓✗（刻意不静默退化 ✗）")
+    counter = {"nonce": 0}
+
+    def noise_sampler(sigma_from: float, sigma_to: float) -> Any:
+        counter["nonce"] += 1
+        return hook(holder["x"], request, nonce=int(counter["nonce"]))
+
+    return noise_sampler
+
+
 def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              cancel: CancelFn | None = None,
@@ -508,6 +959,7 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
     started = time.perf_counter()
     try:
         ensure_not_cancelled("encode")
+        _backend_phase(backend, "encode")      # 分时驻留：此时只该有 TE 在场 ✓（见 PHASE_PARTS ✓）
         condition = backend.encode_text(request)
     except BaseException as err:  # noqa: BLE001 —— 见下：取消与失败都归到这里 ✓
         result.stageMs["encode"] = int((time.perf_counter() - started) * 1000)
@@ -643,19 +1095,25 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
 
     # ── ④ sample（**真调采样器** ✓）────────────────────────────────────────
     started = time.perf_counter()
-    holder: dict[str, Any] = {"step": 0, "scale": 1.0}
+    holder: dict[str, Any] = {"step": 0, "scale": 1.0, "x": latents}
     positive, negative = _branches(condition)
     guided_counter = {"steps": 0, "calls": 0}
 
     def on_step(step: int, sigma: float, _x: Any) -> None:
         holder["step"] = step
+        holder["x"] = _x           # 随机采样器要按**当前** x 问形状/设备/精度 ✓（见 `_noise_sampler_for` ✓）
         note = f"σ={sigma:.4g}"
         if holder["scale"] != 1.0:
             note += f" / cfg={holder['scale']:.2f}"
         emit(result.event("sample", step=step, total=plan.steps, note=note))
         ensure_not_cancelled("sample", step)  # 每步都能停 ✓
+        #: ⭐ 运行期探压 ✓（GPU 优先那条规则的**运行期**一半 ✓ —— 见 `_backend_tick` ✓）
+        _backend_tick(backend, "sample", step=step)
 
     try:
+        #: ⭐ 换装点 ✓：到此 TE 已经用完 ✓（`condition` 是**张量** ✓，不占它）⇒ 让位给 DiT ✓。
+        #: 1.0 版那条「TE 与 DiT 同时驻留 28 GiB」在这里必然 OOM ✓✗（见 `PHASE_PARTS` 的账 ✓）。
+        _backend_phase(backend, "sample")
         if dual:
             # ── 双流（H3 形态 ✓）：两条流各走各的 σ ✓，采样循环**只有一份** ✓（`h3_form` ✓）──
             # ⚠️ H3 参考实现**不做 CFG** ✓（第 111 步核到的事实 ✓）⇒ 要求引导就**明确报错** ✗：
@@ -689,10 +1147,19 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
                 if states is None:
                     raise StageError(
                         "sample", "后端回的 dict 里没有 `positive`（文本状态 ✓）✗ ⇒ 双流没法跑 ✓")
+                # ⚠️⭐ **文本标签转手**（`H3Condition.tags` ✓）：编码器按 ``<|image_pad|>`` 的位置
+                #    算出"哪个 token 走 video 行 ✓"，采样时 `h3_form.mod_segments_for` 靠它把文本段
+                #    切成若干 run ✓✗。**丢了它** ⇒ 视觉块整段用错 adaLN 行 ✓、形状全对 ✓✗
+                #    （fl2va/ref2va 只要有图就必错 ✓；纯文本时标签恒全 1 ✓ 与"不给"逐位相同 ✓）。
+                tags = condition.get("tags")
+                if tags is not None:
+                    request = dataclass_replace(request, text_token_tags=tuple(
+                        int(value) for value in tags))
 
             def on_dual_step(index: int, sigma_v: float, sigma_a: float) -> None:
                 emit(result.event("sample", step=index, total=plan.steps,
                                   note=f"σv={sigma_v:.4g} / σa={sigma_a:.4g}"))
+                _backend_tick(backend, "sample", step=index)
                 ensure_not_cancelled("sample", index)   # 每步都能停 ✓
 
             sampled = sample_dual(latents, plan.sigmas, states, request, on_dual_step)
@@ -724,9 +1191,12 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
                     guided_counter["steps"] += 1
             result.guidanceSteps = int(guided_counter["steps"])
 
+            #: ⚠️ 随机采样器（`euler_ancestral` / `sa_solver`）要**真的**能把噪声注回去 ✓✗ ——
+            #: 不接这根线时它们按 η=1 缩短步长却不加噪 ✓（数学上不自洽 ⇒ 图偏灰 ✓、不报错 ✓）。
             latents, result.sampleSteps = sampler_mod.sample(
                 model_fn, latents, plan.sigmas, str(request.sampler or "euler"),
-                callback=on_step)
+                callback=on_step,
+                noise_sampler=_noise_sampler_for(backend, request, holder))
     except BaseException as err:  # noqa: BLE001
         result.stageMs["sample"] = int((time.perf_counter() - started) * 1000)
         return _fail(result, "sample", err, step=holder["step"] or None)
@@ -775,6 +1245,7 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
     decoded: dict[str, Any] = {}
     try:
         ensure_not_cancelled("decode")
+        _backend_phase(backend, "decode")      # 分时驻留：DiT 让位给 VAE ✓（2.1 的 64 通道解码 ✓）
         decoded = backend.decode(latents, plan, request)
         # ⭐ ⑤b 出片前的**交棒点** ✓：多段成片（见 app.services.engine.chain ✓）要的正是这里的
         #    **无损**张量 ✓ —— 不让它去读刚落的 mp4 ✗（那要多一次编解码 ✓，还会把 yuv420p 的

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from . import gguf as gguf_mod
 from . import gguf_dequant
@@ -38,7 +38,8 @@ from . import llm as llm_mod
 # （本该是「名字对、原因清楚」的拒绝，变成「名字都没了」的崩 ✗；真机 qwen3:8b 首次撞出来 ✓）。
 from .gguf_dequant import GgufDequantError
 
-__all__ = ["gguf_state_dict", "infer_llm_config", "load_llm_from_gguf", "map_name", "numpy_shape"]
+__all__ = ["detect_features", "gguf_state_dict", "infer_llm_config", "load_llm_from_gguf",
+           "map_name", "numpy_shape"]
 
 #: GGUF 层名 → LlmModel 层名 ✓（``{}`` 是层号 ✓）
 _LAYER_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -62,6 +63,18 @@ _QK_NORM_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"blk\.(\d+)\.attn_k_norm\.weight", "blocks.{}.attn.k_norm.weight"),
 )
 
+#: ⭐ **q/k/v 的偏置**（2026-10-31 补 ✗）：Qwen2 / Qwen2.5 每层有三根 ``attn_{q,k,v}.bias`` ✓
+#: （``o_proj`` 与 MLP 三项**没有** ✓）。⚠️ 与 QK-norm 同一纪律：``qkv_bias=False`` 的模型
+#: （Qwen3 / Llama）若也套这张表 ⇒ 多出键 ⇒ 对账当场报「映射到了模型里没有的参数」✗。
+#: 漏了这张表 ⇒ Qwen2.5 的 3×层数 根键**无处可放** ✓✗ —— 而且因为 ``LlmConfig.qkv_bias`` 默认
+#: False、模型压根不建 bias 参数 ⇒ 连「缺键」都不会报 ✓✗：**装得进、形状全对、只是每层少一个常数**
+#: ⇒ 提示词跟随明显变弱 ✓✗（本仓最恨的那类静默降质 ✓）。
+_QKV_BIAS_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"blk\.(\d+)\.attn_q\.bias", "blocks.{}.attn.q_proj.bias"),
+    (r"blk\.(\d+)\.attn_k\.bias", "blocks.{}.attn.k_proj.bias"),
+    (r"blk\.(\d+)\.attn_v\.bias", "blocks.{}.attn.v_proj.bias"),
+)
+
 #: ⚠️ 旧实现曾有一张 :data:`_TRANSPOSE_SUFFIXES`（把 2D 权重 ``.T`` 一次）✗ —— **2026-10-29 整张删掉** ✓：
 #: 它与「按 ``dims`` 正序 reshape」配对时，两条错互相抵消掉形状差、却把元素整张重排 ✗✗
 #: （见模块 docstring 第 2 条；真机 qwen3:8b 只因此就全程乱码 ✗）。现在摆法是
@@ -77,12 +90,14 @@ def numpy_shape(dims: Any) -> tuple[int, ...]:
     return tuple(int(dim) for dim in reversed(tuple(dims)))
 
 
-def map_name(gguf_name: str, *, tie_embeddings: bool, qk_norm: bool = False) -> str | None:
+def map_name(gguf_name: str, *, tie_embeddings: bool, qk_norm: bool = False,
+             qkv_bias: bool = False) -> str | None:
     """GGUF 张量名 → LlmModel 参数名 ✓（``None`` = 跳过：tie 时的 ``output.weight`` ✓）。
 
     ⚠️ 未知名字也返回 ``None`` ✗（不是抛错 ✓）—— 真正的「缺不漏」由 ``load_state_dict(strict=True)``
     兜底 ✓（漏一个 key 它就会报「missing key」✗）。
-    ``qk_norm`` 控制 ``attn_q_norm``/``attn_k_norm`` 这两族（见 :data:`_QK_NORM_PATTERNS` ✓）。
+    ``qk_norm`` 控制 ``attn_q_norm``/``attn_k_norm`` 这两族（见 :data:`_QK_NORM_PATTERNS` ✓）；
+    ``qkv_bias`` 控制 ``attn_{q,k,v}.bias`` 这三族（见 :data:`_QKV_BIAS_PATTERNS` ✓）。
     """
     if gguf_name == "token_embd.weight":
         return "embed.weight"
@@ -90,7 +105,9 @@ def map_name(gguf_name: str, *, tie_embeddings: bool, qk_norm: bool = False) -> 
         return "norm.weight"
     if gguf_name == "output.weight":
         return None if tie_embeddings else "lm_head.weight"
-    patterns = _LAYER_PATTERNS + (_QK_NORM_PATTERNS if qk_norm else ())
+    patterns = (_LAYER_PATTERNS
+                + (_QK_NORM_PATTERNS if qk_norm else ())
+                + (_QKV_BIAS_PATTERNS if qkv_bias else ()))
     for pattern, template in patterns:
         match = re.match(pattern, gguf_name)
         if match:
@@ -111,13 +128,34 @@ def gguf_state_dict(weights: dict[str, Any], config: llm_mod.LlmConfig) -> dict[
 
     state: dict[str, Any] = {}
     for gguf_name, payload in weights.items():
-        target = map_name(gguf_name, tie_embeddings=config.tie_embeddings, qk_norm=config.qk_norm)
+        target = map_name(gguf_name, tie_embeddings=config.tie_embeddings,
+                          qk_norm=config.qk_norm, qkv_bias=config.qkv_bias)
         if target is None:
             continue
         dims, flat = payload
         arr = np.reshape(np.asarray(flat), numpy_shape(dims))
         state[target] = torch.from_numpy(np.ascontiguousarray(arr))
     return state
+
+
+def detect_features(config: llm_mod.LlmConfig, tensor_names: Iterable[str]) -> llm_mod.LlmConfig:
+    """按**张量表**纠正 GGUF metadata 不给的两件事 ✓ —— ``qk_norm`` 与 ``qkv_bias`` ✓。
+
+    ⚠️ 为什么只能看张量表 ✗：GGUF 的 metadata 里**没有任何键**声明这两项 ✓（真机 qwen3:8b 实测 ✓）。
+    设错的两种后果差得很远 ✗：
+    · ``qk_norm`` 设错 ⇒ 对账能响 ✓（多 72 个张量装不进去 / 缺 72 个 key ✗）；
+    · ``qkv_bias`` 设 False 而文件里有 ⇒ 模型**压根不建** bias 参数 ⇒ 那三根键被当「未知名字」跳过 ✓✗，
+      **连 missing 都不会报** ✓✗ ⇒ 每层少一个常数、提示词跟随变弱 ✓✗（2026-10-31 修 ✓）。
+
+    这不是猜 ✓：文件里有 ``blk.N.attn_q_norm.weight`` / ``blk.N.attn_q.bias`` 就是有 ✓，没有就是没有 ✓。
+    """
+    names = list(tensor_names)
+    has_qk_norm = any(name.endswith(("attn_q_norm.weight", "attn_k_norm.weight")) for name in names)
+    has_qkv_bias = any(name.endswith(("attn_q.bias", "attn_k.bias", "attn_v.bias")) for name in names)
+    if has_qk_norm == config.qk_norm and has_qkv_bias == config.qkv_bias:
+        return config
+    import dataclasses  # noqa: PLC0415
+    return dataclasses.replace(config, qk_norm=has_qk_norm, qkv_bias=has_qkv_bias)
 
 
 def load_llm_from_gguf(path: str | Path, config: llm_mod.LlmConfig, *,
@@ -140,15 +178,7 @@ def load_llm_from_gguf(path: str | Path, config: llm_mod.LlmConfig, *,
     默认 ``device="cpu"`` ✓：择优（``auto``）属于配置层 :class:`~.llm_backend.LlmBackend` ✓，不在内核里 ✓。
     """
     info = gguf_mod.inspect(path)
-    # ⭐ QK-norm **只能由张量表判定** ✓（GGUF 没有任何 metadata 键声明它 ✗，见真机 qwen3:8b 实测 ✓）：
-    # 文件里有 ``blk.N.attn_q_norm.weight`` 就是有 ✓，没有就是没有 ✓ —— 这不是猜 ✗，是看文件 ✓。
-    # 调用方把 ``config.qk_norm`` 设错也不至于装出半套：设 True 而文件没这两项 ⇒ 对账报 missing ✗；
-    # 设 False 而文件有 ⇒ 多出 72 个张量装不进去 ✗ ⇒ 这里按文件**纠正**并把话说明白 ✓。
-    has_qk_norm = any(name.endswith(("attn_q_norm.weight", "attn_k_norm.weight"))
-                      for name in info.tensors)
-    if has_qk_norm != config.qk_norm:
-        import dataclasses  # noqa: PLC0415
-        config = dataclasses.replace(config, qk_norm=has_qk_norm)
+    config = detect_features(config, info.tensors)
     model = llm_mod.build_llm(config, device=device, dtype=dtype)
     _load_into_model(path, info, model, config)
     return model
@@ -164,7 +194,8 @@ def _load_into_model(path: str | Path, info: Any, model: Any, config: llm_mod.Ll
     unknown: list[str] = []
     with torch.no_grad():
         for name, tensor in info.tensors.items():
-            target = map_name(name, tie_embeddings=config.tie_embeddings, qk_norm=config.qk_norm)
+            target = map_name(name, tie_embeddings=config.tie_embeddings,
+                              qk_norm=config.qk_norm, qkv_bias=config.qkv_bias)
             if target is None:
                 continue
             if target not in expected:

@@ -38,6 +38,7 @@
 |---|---|---|
 | per-tensor / per-row / per-col / elementwise 布局 | **支持** ✓ | `quant.plan_dequant` 能给出反量化计划 |
 | `convrot`（带 Hadamard 反旋转的 per-row） | **支持** ✓ | `quant.convrot_group_of` ＋ `build_hadamard` ＋ 激活侧旋转搬运；两个 19.53 GiB 主 DiT 实测就是这个族 |
+| `fp8`（`float8_e4m3fn` / `float8_e5m2`） | **支持** ✓ | 带 `scale_weight` 标量 ⇒ per-tensor 乘；**无** scale ⇒ 合法直接 cast（`quant.CAST_ONLY_DTYPES`，认 safetensors 头的 `F8_E4M3` 写法）；`scale_input` 属激活侧、数学抵消后丢掉（`quant.INPUT_SCALE_SUFFIXES`）。⚠️ 反例：int8 / int4 **无** scale ⇒ 仍拒；⚠️ 本机 fp8 **装得下但不更快**（sm_86 无 fp8 硬件加速，见 §四） |
 | 4 bit **打包**（`w4a4` / `linear_dtype: int4`，每字节两个有符号 nibble） | **支持** ✓ | `quant.int4_stems_of` ＋ `unpack_int4`（低半字节=偶数列、nibble ≥ 8 减 16）＋ 逻辑列 ×2 后再判 `convrot`/布局；盘上 8 个 int4 文件实测全 `per-row+int4pack+convrot*`。⚠️ 打包形状与 per-row int8 **逐字相同** ⇒ 只有文件自述（`comfy_quant` / `_quantization_metadata`）能识破，判据**绝不许按形状猜** |
 | `nvfp4`（4 bit E2M1 打包 ＋ e4m3 块 scale[16] ＋ f32 二级 scale，AWQ 变体） | **支持** ✓ | `quant_nvfp4` 逐层还原（E2M1 高半字节在前、cuBLAS 128×4 tiled 块 scale、AWQ 折进权重列）；与 `reference` 的实现 `torch.equal` 逐位对拍；清单里 `te_nvfp4` 属这一族 |
 | `mxfp4` | **不支持** ✗ | `capabilities().quant.unsupportedFormats` 明确列出（E8M0 共享指数，解码表与 nvfp4 不同）⇒ 走 `E_UNSUPPORTED_QUANT` |

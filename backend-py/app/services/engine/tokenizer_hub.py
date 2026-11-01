@@ -163,6 +163,50 @@ def detect_form(path: str | Path) -> dict[str, Any]:
         f"{target} 里没有可识别的词表 ✗（找过 `tokenizer.json` ✓ 与 `vocab.json`+`merges.txt` ✓）")
 
 
+def added_tokens_of(path: str | Path) -> dict[str, int]:
+    """词表目录里**登记的特殊 token 字面量** → id ✓（``{"<|im_start|>": 151644, …}`` ✓）。
+
+    ⚠️ 为什么必须有这一步 ✗（2026-10-31 实测踩到 ✓）：``vocab.json`` + ``merges.txt`` **只含
+    BPE 词表本体** ✓，``<|im_start|>`` 这类**后加的特殊符**登记在 ``tokenizer_config.json`` 的
+    ``added_tokens_decoder`` 里 ✗。自研 BPE 若不做这层切分 ⇒ 它会被**当成普通文本**逐字节切 ✓✗：
+    实测 ``"<|im_start|>user\\nhi"`` 编成 ``[27, 91, 318, 62, …]`` ✓（27 个 id ✓），
+    而参考实现是 ``[151644, 872, …]`` ✓（4 个 ✓）—— **不报错、不越界、只是 id 全错** ✓✗。
+    Z-Image 的提示词模板正是靠这两个特殊符定界 ✓ ⇒ 错在这里 = 文本塔收到的不是「对话起点」✓✗。
+
+    两个来源都认 ✓（谁在就读谁 ✓）：
+    * ``tokenizer_config.json`` → ``added_tokens_decoder``：``{id: {content: …}}`` ✓；
+    * ``tokenizer.json`` → ``added_tokens``：``[{id, content}]`` ✓。
+
+    ⚠️ 前缀写法要**整串匹配** ✗（不做「前缀最长匹配 + 剩余交给 BPE」✗ 之外的花样 ✓）——
+    本函数只负责**把事实读出来** ✓，切分策略在 :class:`TokenizerHub` 里 ✓（单一职责 ✓）。
+    """
+    target = Path(path)
+    folder = target if target.is_dir() else target.parent
+    table: dict[str, int] = {}
+    cfg_path = folder / "tokenizer_config.json"
+    if cfg_path.exists():
+        try:
+            payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        decoder = payload.get("added_tokens_decoder") or {}
+        if isinstance(decoder, dict):
+            for key, entry in decoder.items():
+                content = entry.get("content") if isinstance(entry, dict) else None
+                if content:
+                    table[str(content)] = int(key)
+    json_path = folder / "tokenizer.json"
+    if json_path.exists() and not table:
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        for entry in payload.get("added_tokens") or []:
+            if isinstance(entry, dict) and entry.get("content") is not None:
+                table[str(entry["content"])] = int(entry.get("id") or 0)
+    return table
+
+
 def _normalizer_type(spec: Any) -> str:
     """取 ``normalizer.type`` ✓（`Sequence` 里多项 ⇒ 直接报 ``Sequence`` ✓ 反正自研不接 ✓）。"""
     if not spec or not isinstance(spec, dict):
@@ -196,7 +240,8 @@ class TokenizerHub:
 
     def __init__(self, backend: str, impl: Any, *, config: HubConfig,
                  vocab_size: int, required_vocab_size: int, detail: dict[str, Any] | None = None,
-                 notes: Sequence[str] = ()) -> None:
+                 notes: Sequence[str] = (),
+                 added_tokens: dict[str, int] | None = None) -> None:
         self.backend = backend
         self._impl = impl
         self.config = config
@@ -204,6 +249,10 @@ class TokenizerHub:
         self._required = int(required_vocab_size)
         self.detail = dict(detail or {})
         self.notes = list(notes)
+        #: 特殊 token 字面量 → id ✓（见 :func:`added_tokens_of` ✓）。**长串优先** ✓：
+        #: ``<|im_start|>`` 不能被更短的 ``<|im_…`` 先抢走 ✓（这里按长度降序试配 ✓）。
+        self._added = dict(added_tokens or {})
+        self._added_order = sorted(self._added, key=lambda item: (-len(item), item))
 
     # ── 协议面 ✓
     @property
@@ -230,9 +279,47 @@ class TokenizerHub:
         return list(self._cached(str(text or ""), add_special_tokens))
 
     def _encode_uncached(self, text: str, add_special_tokens: bool) -> list[int]:
+        if self._added and self.backend.startswith("own-"):
+            return self._encode_with_added(text, add_special_tokens)
         if self.backend == "own-bpe":
             return list(self._impl.encode(text, add_special_tokens=add_special_tokens))
         return [int(item) for item in self._impl.encode(text, add_special_tokens=add_special_tokens)]
+
+    def _encode_with_added(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        """按**登记的特殊 token** 切开 ✓：命中的段直接给 id ✓，其余段走词表本体 ✓。
+
+        ⚠️ 只在自研侧用 ✗（参考实现自己就会处理 added tokens ✓ 再切一遍等于重复 ✓✗）。
+        ⚠️ 词表段**一律**传 ``add_special_tokens=False`` ✗：那会让某些词表在**每段**前面补 BOS ✓✗
+        （Qwen2 没有 BOS ✓，但这条路径将来要接别的词表 ✓ ⇒ 语义定死：**片段不加特殊符** ✓）。
+
+        ⚠️ **2026-10-31 修**：原实现直接**忽略** ``add_special_tokens`` ✗✗ ⇒ 同一个方法在
+        「词表里有 added tokens」（走这里，不加 ✗）与「没有」（走 impl，**加 BOS＋EOS** ✗）两种
+        输入上行为相反 ✓✗，而调用方看不出区别 ✓ —— 静默不一致比任何一种都糟 ✓。
+        现在：``add_special_tokens=True`` ⇒ 在**首尾各加一次**（BOS/EOS 取自 impl ✓，缺就不加 ✗）。
+        """
+        if not text:
+            return []
+        ids: list[int] = []
+        index = 0
+        total = len(text)
+        while index < total:
+            hit = next((item for item in self._added_order if text.startswith(item, index)), None)
+            if hit is not None:
+                ids.append(int(self._added[hit]))
+                index += len(hit)
+                continue
+            start = index
+            index += 1
+            while index < total and not any(
+                    text.startswith(item, index) for item in self._added_order):
+                index += 1
+            ids.extend(int(value) for value in
+                       self._impl.encode(text[start:index], add_special_tokens=False))
+        if add_special_tokens:
+            head = [int(item) for item in getattr(self._impl, "bos_ids", ()) or ()]
+            tail = [int(item) for item in getattr(self._impl, "eos_ids", ()) or ()]
+            ids = head + ids + tail
+        return ids
 
     def encode_batch(self, texts: Iterable[str], *, add_special_tokens: bool = True
                      ) -> list[list[int]]:
@@ -250,6 +337,28 @@ class TokenizerHub:
 
     def decode(self, ids: Sequence[int], *, skip_special_tokens: bool = True) -> str:
         return str(self._impl.decode(list(ids), skip_special_tokens=skip_special_tokens))
+
+    @property
+    def special_tokens(self) -> dict[str, str]:
+        """``{bos_token: "<s>", eos_token: "</s>", …}`` ✓ —— 供 chat 骨架的上下文用 ✓。
+
+        ⚠️ 为什么要有 ✗：参考实现（HF ``apply_chat_template`` ✓）会把这些**自动注入**模板，
+        而本项目原先渲染骨架时没给 ✓ ⇒ 模板里的 ``{{ bos_token }}`` 直接渲染成**空串** ✗✗
+        （Llama-3 系骨架**首行**就是它 ✓；``{% if not bos_token %}`` 一类分支还会走错 ✓），
+        **而且不报错** ✓✗。空 = 这个词表确实没有 ✓（不猜 ``<s>`` ✗）。
+        """
+        out: dict[str, str] = {}
+        for name in ("bos_token", "eos_token", "unk_token", "pad_token"):
+            ids = getattr(self._impl, f"{name[:-6]}_ids", None)
+            if ids:
+                text = self.decode([int(ids[0])], skip_special_tokens=False)
+                if text:
+                    out[name] = text
+                continue
+            text = getattr(self._impl, name, "")       # transformers 侧直接是字符串 ✓
+            if isinstance(text, str) and text:
+                out[name] = text
+        return out
 
     # ── 缓存 ✓（可观测：命中数要能读出来 ✗ 否则"加了缓存"无法自证 ✓）
     def _install_cache(self) -> None:
@@ -277,6 +386,8 @@ class TokenizerHub:
         return {
             "backend": self.backend, "name": self.name,
             "vocabSize": self.vocab_size, "requiredVocabSize": self.required_vocab_size,
+            # ⭐ 特殊 token 条数 ✓（自研侧会按字面量整串切分 ✓；0 说明这份词表没登记特殊符 ✓）
+            "addedTokens": len(self._added),
             "cacheEntries": int(self.config.cache_entries), "offline": bool(self.config.offline),
             "detail": dict(self.detail), "notes": list(self.notes),
         }
@@ -365,11 +476,22 @@ def _load_from_path(cfg: HubConfig) -> TokenizerHub:
         if impl is not None:
             kind = str(getattr(impl, "name", "own"))
             backend = {"bpe": "own-bpe"}.get(kind, kind)
+            # ⚠️ 特殊 token 的 id **不在** BPE 词表里 ✗（``<|im_start|>``=151644 ✓ 而 vocab.json 只到
+            #    151642 ✓）⇒ 嵌入表至少要比 `vocab_size` 大 ✓；漏了这条，下一个真挂 TE 的人会在
+            #    `embed_tokens` 上撞 **越界** ✓✗（而且报的是 aten 的 `index out of range` ✗ 指不到这里 ✓）。
+            added = added_tokens_of(cfg.path or "")
+            required = max(int(impl.required_vocab_size), int(impl.vocab_size),
+                           max(added.values(), default=-1) + 1)
             hub = TokenizerHub(
                 backend, impl, config=cfg, vocab_size=impl.vocab_size,
-                required_vocab_size=impl.required_vocab_size,
-                detail={"form": form, **impl.describe()},
-                notes=[f"{support.reason} ⇒ **不需要 `transformers`** ✗（零依赖 ✓ 离线 ✓）"])
+                required_vocab_size=required,
+                detail={"form": form, **impl.describe(),
+                        "addedTokens": len(added),
+                        **({"addedTokenMaxId": max(added.values())} if added else {})},
+                added_tokens=added,
+                notes=[f"{support.reason} ⇒ **不需要 `transformers`** ✗（零依赖 ✓ 离线 ✓）"]
+                      + ([f"特殊 token {len(added)} 条按**字面量整串**切分 ✓"
+                          f"（最大 id {max(added.values())} ✓）"] if added else []))
             hub._source_path = str(cfg.path)                                      # noqa: SLF001
             hub._install_cache()                                                   # noqa: SLF001
             return hub
@@ -394,18 +516,98 @@ def _build_reference_encoder_from_path(path: str | None
     ``missing field `single_word` `` ✓ —— 那是"文件不完整"，不是"没装" ✓。
     """
     if not reference_available():
-        return None, "参考实现（`tokenizers`）**没装** ✓"
+        return None, "参考实现（`transformers`）**没装** ✓"
     if not path:
         return None, "没有词表路径 ✓（无从造参考侧 ✓）"
-    try:
-        from tokenizers import Tokenizer as ReferenceTokenizer  # noqa: PLC0415
+    target = Path(path)
+    if not target.exists():
+        return None, f"词表路径**不存在** ✓：{target} ✓"
+    # ① 有 `tokenizer.json`（fast 定义）⇒ 直接喂 `tokenizers` ✓
+    json_path = target if target.is_file() else target / "tokenizer.json"
+    if json_path.exists():
+        try:
+            from tokenizers import Tokenizer as ReferenceTokenizer  # noqa: PLC0415
 
-        target = Path(path)
-        json_path = target if target.is_file() else target / "tokenizer.json"
-        tokenizer = ReferenceTokenizer.from_file(str(json_path))
-        return (lambda text: [int(item) for item in tokenizer.encode(text).ids]), ""
-    except Exception as err:  # noqa: BLE001 —— 如实回报原因 ✓（不是"没装"✗）
+            tokenizer = ReferenceTokenizer.from_file(str(json_path))
+            return (lambda text: [int(item) for item in
+                                  tokenizer.encode(text, add_special_tokens=False).ids]), ""
+        except Exception as err:  # noqa: BLE001 —— 如实回报原因 ✓（不是"没装"✗）
+            return None, (f"参考实现**装不了这份词表** ✓（`tokenizer.json` 本身坏了 ✓）："
+                          f"{type(err).__name__}: {err} ✓")
+    # ② 只有 `vocab.json` + `merges.txt`（GPT-2 风格 BPE，常带 `tokenizer_config.json`）
+    #    ⇒ 交给 `AutoTokenizer` **按词表自带的 config 选类** ✓（**不猜** ✗）。
+    #    ⚠️ 这条通路是 2026-10-30 补的：原来只认 `tokenizer.json` ⇒ Qwen 系发布包（如
+    #    `qwen25_tokenizer`，H3 的 TE = Qwen3-VL-32B 就该用它）**根本进不来** ✗，
+    #    于是「互校」长期停在「没比成」✓✗。实测 `AutoTokenizer.from_pretrained(该目录)`
+    #    按 config 判成 `Qwen2Tokenizer`（与 ComfyUI `qwen3vl.py::Qwen3VLSDTokenizer` 同一实现 ✓）。
+    if not (target / "vocab.json").exists():
+        return None, (f"这份词表目录里既没有 `tokenizer.json` 也没有 `vocab.json` ✓"
+                      f"（{target} ✓ ⇒ 参考侧无从下手 ✓）")
+    try:
+        from . import tokenizers_tuning  # noqa: PLC0415
+
+        tokenizers_tuning.apply_tuning(offline=True, cache_dir=None)
+        from transformers import AutoTokenizer  # noqa: PLC0415
+
+        tokenizer = AutoTokenizer.from_pretrained(str(target))
+        return (lambda text: [int(item) for item in
+                              tokenizer.encode(text, add_special_tokens=False)]), ""
+    except Exception as err:  # noqa: BLE001 —— 如实回报原因 ✓
         return None, f"参考实现**装不了这份词表** ✓：{type(err).__name__}: {err} ✓"
+
+
+#: H3 的 TE 是 **Qwen3-VL-32B** ⇒ 词表**只认 Qwen 系** ✓（判据 = 词表自带的 ``tokenizer_class`` ✓）
+H3_TOKENIZER_CLASSES: tuple[str, ...] = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
+
+#: 词表在**模型根**下的子目录 ✓ —— 与权重同一层 ✓（部署时把词表丢进这里最省事 ✓）
+H3_TOKENIZER_SUBDIR = "tokenizers/qwen3vl_32b"
+
+#: 自动探测的落点（按顺序试 ✓）—— **相对仓根** ✓（开发机把词表放这儿就够 ✓）
+H3_TOKENIZER_CANDIDATES: tuple[str, ...] = ("models/tokenizers/qwen3vl_32b",)
+
+
+def _tokenizer_dirs() -> list[tuple[Path, str]]:
+    """候选目录 + 它的**来历** ✓（仓内 / 模型根 ✓）—— 去重后按顺序返回 ✓。"""
+    repo = Path(__file__).resolve().parents[4]      # …/darme-voide（backend-py/app/services/engine/ ✓）
+    found: list[tuple[Path, str]] = [(repo / item, item) for item in H3_TOKENIZER_CANDIDATES]
+    try:                                            # 懒导入 ✓：inventory 会拉起 h3_form/safetensors 一串 ✓
+        from . import inventory  # noqa: PLC0415
+
+        root = inventory.models_dir()
+    except Exception:  # noqa: BLE001 —— 探测失败只该「找不到」，不该炸 ✓
+        root = None
+    if root is not None:
+        found.append((root / H3_TOKENIZER_SUBDIR, f"<模型根>/{H3_TOKENIZER_SUBDIR}"))
+    return found
+
+
+def find_h3_tokenizer() -> dict[str, Any] | None:
+    """找一份**确实属于 Qwen 系**的词表 ⇒ ``{"path", "tokenizerClass", "source"}``；没有 ⇒ ``None`` ✓。
+
+    返回值带 ``source``（**落点来历**：仓内相对路径 / ``<模型根>/tokenizers/…`` ✓）⇒ 调用方能
+    **如实说**「这份词表是自动找到的 ✓」，而不是让人以为是自己传的 ✗。
+
+    ⚠️ 落点**只认两处**：仓内 ``models/tokenizers/qwen3vl_32b`` ✓ 与**模型根**下的同名子目录 ✓。
+    **不**拿开发期脚手架 `reference/` 当落点 ✗（用户 2026-09-26：那是要删的 ⇒ 写死 = 悬空引用 ✗，
+    `tests/local_models_test.py` 有静态守卫盯着 ✓）。
+
+    ⚠️⚠️ **为什么不按「装得上」找** ✗：脚手架里的 ``llama_tokenizer``（vocab=128000 ✓
+    **是 Llama-3 的词表** ✗）挂在 Qwen3-VL 的 TE 上**不会报错** ✗ —— 它满足
+    ``required <= 嵌入行数`` ✓、``describe()`` 一切正常 ✗，但 token id 与 Qwen 词表
+    **整体错位** ⇒ 出片与提示词**无关** ✓✗（这类静默错比装不上难查得多 ✓）。
+    ⇒ 判据取**词表自带的 ``tokenizer_class``** ✓（``tokenizer_config.json`` ✓ 是发布方写的事实 ✓，
+    不是我猜的 ✓）；**没有该文件的目录一律不用** ✗（宁可不自动 ✓）。
+    """
+    for directory, source in _tokenizer_dirs():
+        try:
+            declared = json.loads(
+                (directory / "tokenizer_config.json").read_text(encoding="utf-8")
+            ).get("tokenizer_class")
+        except (OSError, ValueError):
+            continue
+        if isinstance(declared, str) and declared in H3_TOKENIZER_CLASSES:
+            return {"path": str(directory), "tokenizerClass": declared, "source": source}
+    return None
 
 
 def _load_from_reference(cfg: HubConfig, target: str, *, form: dict[str, Any] | None = None,

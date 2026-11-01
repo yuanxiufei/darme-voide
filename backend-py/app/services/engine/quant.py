@@ -42,7 +42,8 @@ __all__ = ["CAST_ONLY_DTYPES", "COMPANION_SUFFIXES", "DequantResult", "INPUT_SCA
            "build_hadamard", "convrot_group_of", "convrot_of_spec", "dequantize_state",
            "dequantize_weight_rotated", "format_family", "group_for", "is_cast_only",
            "FORMAT_ALIASES", "format_alias", "GENERIC_SCALE_SUFFIXES", "INT4_PACK_TOKENS",
-           "INT4_STORAGE_DTYPES", "int4_packed_of", "int4_shape_problem", "int4_stems_of",
+           "INT4_STORAGE_DTYPES", "PACKED_WEIGHT_TOKENS", "int4_packed_of", "int4_shape_problem",
+           "int4_stems_of", "packed_weight_of", "packed_weight_stems_of",
            "is_input_scale", "is_int4_storage", "is_low_precision", "is_scaled_fp8_marker",
            "layout_of", "logical_weight_shape", "orphan_scales", "parse_format_spec",
            "plan_dequant", "precheck_dequant", "quant_report", "rotate_activations",
@@ -242,6 +243,39 @@ def int4_stems_of(specs: Any) -> frozenset[str]:
     if not isinstance(specs, MappingABC):
         return frozenset()
     return frozenset(str(stem) for stem, spec in specs.items() if int4_packed_of(spec))
+
+
+#: 「权重**每字节两个 4 bit**」的**格式 token** ✓ —— 只用来回答一个问题：
+#: **逻辑列数要不要 ×2** ✓。比 :data:`INT4_PACK_TOKENS` 宽，因为下面这几种写法同样是 4bit 权重，
+#: 只是各自的还原实现不同（nvfp4 → :mod:`quant_nvfp4`、w4a8 → 尚未实现 ✓）：
+#: ``nvfp4``（实测 ``Krea2RedMix3.0-ComfyUI-nvfp4``：``U8 [N, K/2]`` ✓）、
+#: ``w4a8``（实测 ``seedvr2_3b_w4a8``：``asym_w4a8_int8``，``[N, 1280]`` 对同源 int8 的 ``[N, 2560]`` ✓）。
+#: ⚠️ 漏一个 ⇒ 拓扑读出来的 ``hidden`` 只有真值的一半 ✗（不报错，前向维度错到底 ✗）。
+PACKED_WEIGHT_TOKENS: tuple[str, ...] = INT4_PACK_TOKENS + ("nvfp4", "w4a8")
+
+
+def packed_weight_of(spec: Any) -> bool:
+    """这一层的 **weight** 是否 4bit 打包（**形状意义上的** ✓；不判断能不能还原 ✓）。
+
+    ⚠️ 为什么不直接放宽 :func:`int4_packed_of`：那个是**还原路径**的判据 ✓（只该命中
+    `dequantize_state` 真的会去解包的那两种写法 ✓）；把它放宽会让 nvfp4/w4a8 走上 int4
+    解包分支 ✓✗ —— 这才是最坏的错（能跑、形状对、数值全错 ✗）。两件事分开判 ✓：
+    「列数要不要 ×2」看这里 ✓，「谁来还原」看 :func:`int4_packed_of` / :func:`supported_format` ✓。
+    """
+    if not isinstance(spec, MappingABC):
+        return False
+    for field in ("linear_dtype", "format"):
+        text = str(spec.get(field) or "").strip().lower()
+        if any(token in text for token in PACKED_WEIGHT_TOKENS):
+            return True
+    return False
+
+
+def packed_weight_stems_of(specs: Any) -> frozenset[str]:
+    """``{层名: 说明}`` ⇒ weight 4bit 打包的**层名集合** ✓（判据只在 :func:`packed_weight_of` ✓）。"""
+    if not isinstance(specs, MappingABC):
+        return frozenset()
+    return frozenset(str(stem) for stem, spec in specs.items() if packed_weight_of(spec))
 
 
 def logical_weight_shape(shape: Any, *, packed: bool) -> tuple[int, ...]:

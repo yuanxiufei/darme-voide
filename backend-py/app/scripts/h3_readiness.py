@@ -11,6 +11,12 @@ r"""**上机前自检（CLI 薄壳）** ✓ —— 业务在 :mod:`app.services.
     ./.venv/Scripts/python.exe app/scripts/h3_readiness.py --weights <DiT.safetensors>
     ./.venv/Scripts/python.exe app/scripts/h3_readiness.py --weights <DiT.gguf> --tokenizer <词表目录>
     ./.venv/Scripts/python.exe app/scripts/h3_readiness.py --json      # 给自动化用 ✓
+
+词表该用哪一份（2026-10-30 实测，别猜 ✓）：
+    H3 的 TE 是 Qwen3-VL-32B ⇒ 词表要用 **`qwen25_tokenizer`**（151643 词条 ✓）——
+    与 ComfyUI `comfy/text_encoders/qwen3vl.py` 里 `Qwen3VLSDTokenizer` 指向的**同一份** ✓。
+    ⚠️ **不要**用 `llama_tokenizer/tokenizer.json`（vocab=128000 ✓ 那是 Llama-3 的词表 ✗）：
+    它能装上、`describe()` 看着也正常 ✗，但 token id 与 Qwen 词表**整体错位** ⇒ 出片与提示词无关 ✓✗。
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ sys.path.insert(0, str(BACKEND_PY))
 
 from app.services import engine_readiness  # noqa: E402
 from app.services.engine import inventory as inv  # noqa: E402
+from app.services.engine import tokenizer_hub  # noqa: E402
 
 
 def render(report: dict[str, Any]) -> None:
@@ -137,6 +144,23 @@ def render(report: dict[str, Any]) -> None:
             tokenizer = check["tokenizer"]
             print(f"词表：backend={tokenizer['backend']}　name={tokenizer['name']}　"
                   f"vocab={tokenizer['vocabSize']} ✓")
+            auto = report.get("tokenizerAutoDetected")
+            if auto:
+                print(f"  ↳ 自动探测到 ✓（`{auto['source']}` ✓ `tokenizer_class={auto['tokenizerClass']}` ✓）"
+                      f" —— 只认 Qwen 系白名单 ✓，**不会**误用 Llama 词表 ✗")
+            # ⚠️ 这一行单独打：**装上了 ≠ 切得对** ✗（切法不同 ⇒ token id 整体错位、且不报错）
+            cross = check.get("tokenizerCrosscheck") or {}
+            if cross.get("ok") is True:
+                print(f"  ↳ 互校：与参考实现比了 {cross['compared']} 例，**逐 token 一致** ✓")
+            elif cross.get("ok") is False:
+                bad = cross.get("mismatched") or {}
+                print(f"  ↳ 互校：**切法不一致** ✗（{len(bad)} 例）⇒ token id 会错位，"
+                      f"出片与提示词对不上 ✓✗；样例：{list(bad)[:1]}")
+            else:
+                note = "；".join(cross.get("notes") or []) or "参考实现不可用"
+                print(f"  ↳ 互校：**没比成** ✗（{note}）⇒ 只验了往返恒等 "
+                      f"{'True ✓' if cross.get('roundTrip') else 'False ✗'}"
+                      f" —— 「装上了」不等于「切得对」✓✗")
         for problem in check.get("structureProblems") or []:
             print(f"  ⚠️ {problem}")
 
@@ -164,9 +188,20 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="输出 JSON（给自动化用 ✓）")
     args = parser.parse_args()
 
-    report = engine_readiness.collect(weights=args.weights, tokenizer=args.tokenizer,
+    # ⭐ 词表**不再必须手传** ✓（2026-10-30 ✓）：仓里本来就有 Qwen3-VL 该用的那一份 ✓。
+    #    ⚠️ 但自动探测**只认白名单** ✗（`tokenizer_class` 必须是 Qwen 系 ✓）——
+    #    `reference/.../llama_tokenizer`（vocab=128000 ✓ **Llama-3 的词表** ✗）**装得上、
+    #    也不报错** ✗，却会让 token id 与 Qwen 词表整体错位 ⇒ 出片与提示词无关 ✓✗
+    #    （判据与实测写在 `tokenizer_hub.find_h3_tokenizer` 的注释里 ✓）。
+    tokenizer, auto = args.tokenizer, None
+    if not tokenizer:
+        auto = tokenizer_hub.find_h3_tokenizer()
+        if auto:
+            tokenizer = auto["path"]
+    report = engine_readiness.collect(weights=args.weights, tokenizer=tokenizer,
                                       stage=args.stage, capacity_gib=args.capacity_gib,
                                       root=args.models_dir)
+    report["tokenizerAutoDetected"] = auto
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

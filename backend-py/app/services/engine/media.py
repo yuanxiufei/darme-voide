@@ -208,18 +208,34 @@ def load_image_tensor(path: str | Path, *, width: int, height: int,
 
 def write_image(frames: Any, path: str | Path, *, index: int = 0,
                 value_range: str = "-1..1") -> dict[str, Any]:
-    """帧张量 → **真 PNG** ✓（调试/预览用 ✓；``(B,3,T,H,W)`` 里取第 ``index`` 帧 ✓）。"""
+    """帧张量 → **真 PNG** ✓（调试/预览用 ✓）。
+
+    两种入参都认 ✓：
+    * ``(B,3,T,H,W)`` 视频帧 ✓ —— 取第 ``index`` 帧 ✓；
+    * ``(B,3,H,W)`` **单张图** ✓ —— 没有时间维 ✓，``index`` 只能是 0 ✓。
+
+    ⚠️ 2026-10-31 补 4 维 ✓：Z-Image 这类**图模型**的 VAE 解出来就是 4 维 ✓，此前这里一刀切判 5 维 ✓✗
+    ⇒ **真图落不了盘** ✓✗（而且报错指向"帧张量形状"，看不出是"这是图不是片"✓）。
+    """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
     shape = tuple(frames.shape)
-    if len(shape) != 5 or shape[1] != 3:
-        raise MediaError(f"帧张量形状应为 (B, 3, T, H, W) ✓，收到 {shape} ✗")
-    if not 0 <= int(index) < int(shape[2]):
-        raise MediaError(f"帧序号 {index} 越界（共 {int(shape[2])} 帧 ✗）")
+    if len(shape) == 5 and shape[1] == 3:
+        if not 0 <= int(index) < int(shape[2]):
+            raise MediaError(f"帧序号 {index} 越界（共 {int(shape[2])} 帧 ✗）")
+        frame = frames[0, :, int(index)]
+        height, width = int(shape[3]), int(shape[4])
+    elif len(shape) == 4 and shape[1] == 3:
+        if int(index) not in (0, -1):
+            raise MediaError(f"单张图没有第 {index} 帧 ✗（4 维张量只有一张 ✓，index 用 0 ✓）")
+        frame = frames[0]
+        height, width = int(shape[2]), int(shape[3])
+    else:
+        raise MediaError(
+            f"帧张量形状应为 (B, 3, T, H, W) 或单图 (B, 3, H, W) ✓，收到 {shape} ✗")
     kind = str(value_range or "-1..1").replace(" ", "")
-    frame = frames[0, :, int(index)]
     scaled = (frame.clamp(-1.0, 1.0) + 1.0) * 0.5 if kind in ("-1..1", "[-1,1]") \
         else frame.clamp(0.0, 1.0)
     array = (scaled.detach().to("cpu", dtype=torch.float32).permute(1, 2, 0).numpy() * 255.0)
@@ -227,7 +243,7 @@ def write_image(frames: Any, path: str | Path, *, index: int = 0,
     target.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(array.round().astype(np.uint8), "RGB").save(target)
     return {"path": str(target), "bytes": target.stat().st_size, "index": int(index),
-            "width": int(shape[4]), "height": int(shape[3])}
+            "width": int(width), "height": int(height)}
 
 
 def load_video_tensor(path: str | Path, *, value_range: str = "-1..1") -> tuple[Any, dict[str, Any]]:

@@ -117,8 +117,14 @@ class H3VideoVAEConfig:
 
     @property
     def frame_overlap(self) -> int:
-        """相邻两段在**像素域**的重叠帧数 ✓（= ``token_overlap*4 - token_drop`` = **5** ✓）。"""
-        return max(self.token_overlap * self.temporal_scale - self.token_drop, 0)
+        """相邻两段在**像素域**的重叠帧数 ✓（= ``token_overlap*4 − frame_pre_padding`` = **5** ✓）。
+
+        ⚠️ 减的是 **`frame_pre_padding`** ✓（参考逐字：``token_overlap*vae_ratio_t - frame_pre_padding`` ✓）
+        不是 `token_drop` ✗ —— 两者在 ``clip_length=17`` 时**恰好都是 3** ✓（``(-17) % 4 == 3`` ✓）
+        ⇒ 写成哪个都算出 5 ✓ **且不报错** ✓；换了 clip 长度才分岔 ✓（如 20 ⇒ pre_padding 0 ✓、
+        drop 仍 3 ✓ ⇒ 重叠帧差 3 帧 ✓ 拼出来的画面会**错位** ✓ 而所有形状校验照样过 ✓✗）。
+        """
+        return max(self.token_overlap * self.temporal_scale - self.frame_pre_padding, 0)
 
     @property
     def frame_pre_padding(self) -> int:
