@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认能力：只开 core 基础权限。fs / shell / http 插件一律不装（体积与攻击面双重考虑，全部经 Rust 命令受控实现）。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

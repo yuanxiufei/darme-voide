@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <!-- 下板 -->
+  <rect x="4" y="20" width="40" height="24" rx="3" fill="#1a1a2e" stroke="#e2e2e2" stroke-width="1.5"/>
+  <!-- 上板 -->
+  <rect x="4" y="6" width="28" height="18" rx="3" fill="#3a3a5c" stroke="#e2e2e2" stroke-width="1.5"/>
+  <!-- 上板条纹 -->
+  <line x1="4" y1="12" x2="32" y2="12" stroke="#e2e2e2" stroke-width="1.5" opacity="0.6"/>
+  <line x1="4" y1="18" x2="32" y2="18" stroke="#e2e2e2" stroke-width="1.5" opacity="0.6"/>
+  <!-- 下板条纹 -->
+  <line x1="4" y1="26" x2="44" y2="26" stroke="#e2e2e2" stroke-width="1.5" opacity="0.6"/>
+  <line x1="4" y1="32" x2="44" y2="32" stroke="#e2e2e2" stroke-width="1.5" opacity="0.6"/>
+  <line x1="4" y1="38" x2="44" y2="38" stroke="#e2e2e2" stroke-width="1.5" opacity="0.6"/>
+  <!-- 三角标记 -->
+  <polygon points="24,24 28,28 20,28" fill="#ff6b6b"/>
+</svg>

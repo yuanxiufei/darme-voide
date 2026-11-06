@@ -1,0 +1,848 @@
+<template>
+  <div class="page" v-if="drama">
+    <!-- Header -->
+    <div class="page-head">
+      <div class="head-left">
+        <button class="back-btn" @click="goBack">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+          </svg>
+          返回
+        </button>
+        <div class="head-info">
+          <h1 class="page-title">{{ drama.title }}</h1>
+          <div class="page-meta">
+            <span v-if="drama.style" class="style-chip">{{ drama.style }}</span>
+            <span v-if="drama.style" class="meta-divider"></span>
+            <span class="meta-item">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              {{ drama.characters?.length || 0 }} 角色
+            </span>
+            <span class="meta-divider"></span>
+            <span class="meta-item">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+              {{ drama.scenes?.length || 0 }} 场景
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="head-actions">
+        <button class="btn btn-ghost" @click="navigateTo(`/drama/${drama.id}/prompts`)">提示词</button>
+        <button class="btn btn-ghost" @click="openEditDrama">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+          </svg>
+          编辑剧集
+        </button>
+        <button class="btn btn-primary" @click="openAddEpisode">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          添加集
+        </button>
+      </div>
+    </div>
+
+    <!-- 开跑前体检（**事前** ✓ 不花钱 ✓）—— 只给 episodeId，后端自己取数组装 ✓ -->
+    <div class="section-label">
+      开跑前体检
+      <select
+        v-model="inspectEpisodeId"
+        style="margin-left: 10px; font-size: 12px; padding: 2px 6px; border-radius: 6px;"
+      >
+        <option :value="null">选一集体检…</option>
+        <option v-for="option in episodeOptions" :key="option.value" :value="option.value">
+          {{ option.label }}
+        </option>
+      </select>
+    </div>
+    <PreflightPanel :episode-id="inspectEpisodeId" />
+
+    <!-- Episode List -->
+    <div class="section-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <rect x="2" y="2" width="20" height="20" rx="2.5"/>
+        <line x1="7" y1="8" x2="7" y2="16"/>
+        <line x1="10" y1="8" x2="10" y2="16"/>
+        <line x1="13" y1="8" x2="13" y2="16"/>
+        <line x1="16" y1="8" x2="16" y2="16"/>
+      </svg>
+      剧集列表
+    </div>
+
+    <div class="ep-grid">
+      <div
+        v-for="(ep, i) in drama.episodes"
+        :key="ep.id"
+        class="card ep-card"
+        :style="{ animationDelay: `${i * 0.05}s` }"
+        @click="navigateTo(`/drama/${drama.id}/episode/${ep.episode_number || ep.episodeNumber}`)"
+      >
+        <div class="ep-number">E{{ String(ep.episode_number || ep.episodeNumber).padStart(2, '0') }}</div>
+        <div class="ep-body">
+          <span class="ep-title">{{ ep.title }}</span>
+          <div class="ep-status">
+            <span :class="['status-dot', hasScript(ep) ? 'dot-ready' : 'dot-pending']"></span>
+            <span class="status-text">{{ hasScript(ep) ? '已完成剧本' : '待编写' }}</span>
+            <span v-if="ep.duration" class="ep-duration">{{ ep.duration }}s</span>
+          </div>
+        </div>
+        <div class="ep-actions" @click.stop>
+          <button class="ep-action-btn" title="重命名" @click="openRenameEpisode(ep)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+          </button>
+          <button class="ep-action-btn ep-action-danger" title="删除" @click="delEpisode(ep)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+          </button>
+        </div>
+        <div class="ep-arrow">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Empty episode state -->
+      <div v-if="!drama.episodes?.length" class="card ep-empty">
+        <div class="ep-empty-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="16"/>
+            <line x1="8" y1="12" x2="16" y2="12"/>
+          </svg>
+        </div>
+        <p>点击上方「添加集」创建第一集</p>
+      </div>
+    </div>
+
+    <div v-if="addDialog" class="dialog-mask" @click.self="addDialog = false">
+      <div class="card dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Episode Setup</div>
+            <div class="dialog-title-row">
+              <div class="dialog-title">创建新集</div>
+              <span class="dialog-badge">配置将锁定</span>
+            </div>
+            <div class="dialog-sub">为这一集预先锁定图片、视频和音频生成服务。创建后，这些生成链路将始终跟随当前集配置。</div>
+          </div>
+          <button class="back-btn" @click="addDialog = false">取消</button>
+        </div>
+        <div class="dialog-summary">
+          <div class="summary-chip">图片 · {{ imageConfigs.length }} 可选</div>
+          <div class="summary-chip">视频 · {{ videoConfigs.length }} 可选</div>
+          <div class="summary-chip">音频 · {{ audioConfigs.length }} 可选</div>
+        </div>
+        <div class="dialog-body">
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">基础信息</span>
+              <span class="dialog-section-copy">这一项只影响显示名称，不影响生成配置</span>
+            </div>
+            <label class="field">
+              <span class="field-label">标题</span>
+              <input v-model="newEpisodeTitle" class="input" placeholder="默认按集数自动命名" />
+              <span class="field-hint">留空时会自动按集数命名，例如“第 3 集”。</span>
+            </label>
+          </div>
+
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">生成配置</span>
+              <span class="dialog-section-copy">创建后不可更改，建议在这里一次性选对</span>
+            </div>
+            <div class="config-grid">
+              <label class="config-card">
+                <span class="config-card-kicker">IMAGE</span>
+                <span class="field-label">图片配置</span>
+                <BaseSelect v-model="newEpisodeImageConfigId" :options="imageConfigOptions" placeholder="选择图片服务" searchable />
+              </label>
+              <label class="config-card">
+                <span class="config-card-kicker">VIDEO</span>
+                <span class="field-label">视频配置</span>
+                <BaseSelect v-model="newEpisodeVideoConfigId" :options="videoConfigOptions" placeholder="选择视频服务" searchable />
+              </label>
+              <label class="config-card">
+                <span class="config-card-kicker">AUDIO</span>
+                <span class="field-label">音频配置</span>
+                <BaseSelect v-model="newEpisodeAudioConfigId" :options="audioConfigOptions" placeholder="选择音频服务" searchable />
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy">创建后，工作台中的图片、视频、音频生成入口都会锁定到当前集。</div>
+          <button class="btn btn-primary" :disabled="creatingEpisode || !canCreateEpisode" @click="addEpisode">
+            {{ creatingEpisode ? '创建中...' : '创建并锁定配置' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Rename Episode Dialog -->
+    <div v-if="renameDialog" class="dialog-mask" @click.self="renameDialog = false">
+      <div class="card dialog rename-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Rename Episode</div>
+            <div class="dialog-title">重命名剧集</div>
+            <div class="dialog-sub">修改集标题，仅影响显示名称，不影响已生成的任何内容。</div>
+          </div>
+          <button class="back-btn" @click="renameDialog = false">取消</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">标题</span>
+            <input v-model="renameEpisodeTitle" class="input" placeholder="输入新的集标题" @keydown.enter="guardEnter($event, renameEpisode)" />
+          </label>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy"></div>
+          <button class="btn btn-primary" :disabled="renamingEpisode || !renameEpisodeTitle.trim()" @click="renameEpisode">
+            {{ renamingEpisode ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Drama Dialog -->
+    <div v-if="editDramaDialog" class="dialog-mask" @click.self="editDramaDialog = false">
+      <div class="card dialog rename-dialog edit-drama-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Drama Setup</div>
+            <div class="dialog-title">编辑剧集</div>
+            <div class="dialog-sub">修改剧集标题、视觉风格与时代背景。风格影响该剧全部角色立绘、分镜与场景图；时代背景会注入全部视觉资产生成，避免古装戏里出现现代元素这类串味。</div>
+          </div>
+          <button class="back-btn" @click="editDramaDialog = false">取消</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">标题</span>
+            <input v-model="editDramaTitle" class="input" placeholder="输入剧集标题" />
+          </label>
+          <label class="field">
+            <span class="field-label">视觉风格</span>
+            <select v-model="editDramaStyle" class="input">
+              <option v-for="o in artStyleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </label>
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">时代背景</span>
+              <span class="dialog-section-copy">全剧共享 · 可 AI 提炼</span>
+            </div>
+            <label class="field">
+              <span class="field-label">时代标签</span>
+              <input v-model="editEra.era" class="input" placeholder="如：古代仙侠 / 民国谍战 / 现代都市·赛博朋克 / 中世纪奇幻" />
+            </label>
+            <label class="field">
+              <span class="field-label">时代概述（中文）</span>
+              <textarea v-model="editEra.summary" class="textarea" rows="2" placeholder="世界观 / 地域 / 年代 / 社会风貌 / 常见场景"></textarea>
+            </label>
+            <label class="field">
+              <span class="field-label">画面指令（English，生图时自动注入）</span>
+              <textarea v-model="editEra.imageHint" class="textarea" rows="3" placeholder="Describe era-specific visual & art-direction hints for character / costume / prop / scene images"></textarea>
+            </label>
+            <div class="era-extract-row">
+              <button class="btn btn-sm btn-ghost" :disabled="eraExtracting" @click="extractEra">
+                <span v-if="eraExtracting" class="era-spinner" />
+                {{ eraExtracting ? '提炼中...' : 'AI 从剧本提炼' }}
+              </button>
+              <span class="era-extract-hint">自动读取全剧剧本并提炼上方三项，确认后仍需点击「保存」落库</span>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy"></div>
+          <button class="btn btn-primary" :disabled="savingDrama || !editDramaTitle.trim()" @click="saveEditDrama">
+            {{ savingDrama ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
+// 配置下拉显示名的唯一实现（本页没选配置时留空白，剧集页那边要「未配置」提醒）
+import { configLabel as sharedConfigLabel } from '~/utils/storyboard'
+
+// 画风下拉选项统一取自 utils/artStyles.ts（前端单一数据源）
+const artStyleOptions = ART_STYLE_OPTIONS
+import { toast } from 'vue-sonner'
+import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import { useConfirm } from '~/composables/useConfirm'
+import PreflightPanel from '~/components/PreflightPanel.vue'
+
+const { confirm } = useConfirm()
+
+const route = useRoute()
+const router = useRouter()
+const drama = ref(null)
+const dramaId = computed(() => Number(route.params.id))
+
+// 体检：**选一集**才跑 ✓（不自动全跑 ✓ —— 免得一进页面就打一堆查询 ✓）
+const inspectEpisodeId = ref(null)
+const episodeOptions = computed(() =>
+  (drama.value?.episodes || []).map((ep) => ({
+    label: `第 ${ep.episode_number ?? '?'} 集 ${ep.title || ''}`.trim(),
+    value: ep.id,
+  })),
+)
+watch(drama, (value) => {
+  if (value?.episodes?.length && inspectEpisodeId.value == null) {
+    inspectEpisodeId.value = value.episodes[0].id
+  }
+})
+
+// 返回首页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
+function goBack() {
+  const state = window.history.state
+  if (state && state.back) {
+    router.back()
+  } else {
+    router.push('/')
+  }
+}
+const addDialog = ref(false)
+const creatingEpisode = ref(false)
+const newEpisodeTitle = ref('')
+const imageConfigs = ref([])
+const videoConfigs = ref([])
+const audioConfigs = ref([])
+const newEpisodeImageConfigId = ref(null)
+const newEpisodeVideoConfigId = ref(null)
+const newEpisodeAudioConfigId = ref(null)
+const renameDialog = ref(false)
+const renamingEpisode = ref(false)
+const renameEpisodeId = ref(null)
+const renameEpisodeTitle = ref('')
+
+function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
+
+// 空值留白：本页的下拉在「还没选」时不该显示「未配置」（那里是新建剧集表单）
+function configLabel(config) {
+  return sharedConfigLabel(config, '')
+}
+
+const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
+
+async function load() {
+  try {
+    drama.value = await dramaAPI.get(dramaId.value)
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function loadConfigs() {
+  try {
+    const [imgs, vids, auds] = await Promise.all([
+      aiConfigAPI.list('image'),
+      aiConfigAPI.list('video'),
+      aiConfigAPI.list('audio'),
+    ])
+    imageConfigs.value = imgs || []
+    videoConfigs.value = vids || []
+    audioConfigs.value = auds || []
+    if (!newEpisodeImageConfigId.value && imageConfigs.value.length) newEpisodeImageConfigId.value = imageConfigs.value[0].id
+    if (!newEpisodeVideoConfigId.value && videoConfigs.value.length) newEpisodeVideoConfigId.value = videoConfigs.value[0].id
+    if (!newEpisodeAudioConfigId.value && audioConfigs.value.length) newEpisodeAudioConfigId.value = audioConfigs.value[0].id
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+function openAddEpisode() {
+  newEpisodeTitle.value = ''
+  addDialog.value = true
+}
+
+async function addEpisode() {
+  try {
+    creatingEpisode.value = true
+    await episodeAPI.create({
+      drama_id: dramaId.value,
+      title: newEpisodeTitle.value || undefined,
+      image_config_id: newEpisodeImageConfigId.value,
+      video_config_id: newEpisodeVideoConfigId.value,
+      audio_config_id: newEpisodeAudioConfigId.value,
+    })
+    toast.success('已添加新集')
+    addDialog.value = false
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    creatingEpisode.value = false
+  }
+}
+
+function openRenameEpisode(ep) {
+  renameEpisodeId.value = ep.id
+  renameEpisodeTitle.value = ep.title || ''
+  renameDialog.value = true
+}
+
+async function renameEpisode() {
+  const title = renameEpisodeTitle.value.trim()
+  if (!title || renameEpisodeId.value == null) return
+  try {
+    renamingEpisode.value = true
+    await episodeAPI.update(renameEpisodeId.value, { title })
+    toast.success('已重命名')
+    renameDialog.value = false
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    renamingEpisode.value = false
+  }
+}
+
+// ===== 编辑剧集（标题 + 视觉风格 + 时代背景）=====
+const editDramaDialog = ref(false)
+const savingDrama = ref(false)
+const editDramaTitle = ref('')
+const editDramaStyle = ref('realistic')
+// 时代背景编辑态（对应 dramas.era_background JSON 的三字段，可 AI 提炼后手工微调）
+const editEra = reactive({ era: '', summary: '', imageHint: '' })
+const eraExtracting = ref(false)
+
+function parseEraFromDrama() {
+  const raw = drama.value?.era_background || drama.value?.eraBackground
+  if (!raw) {
+    editEra.era = ''
+    editEra.summary = ''
+    editEra.imageHint = ''
+    return
+  }
+  try {
+    const o = JSON.parse(raw)
+    editEra.era = String(o.era || o.summary || '').trim()
+    editEra.summary = String(o.summary || o.raw || o.era || '').trim()
+    editEra.imageHint = String(o.image_style_en || o.imageHint || '').trim()
+  } catch {
+    editEra.era = ''
+    editEra.summary = ''
+    editEra.imageHint = ''
+  }
+}
+
+function openEditDrama() {
+  editDramaTitle.value = drama.value?.title || ''
+  editDramaStyle.value = drama.value?.style || 'realistic'
+  parseEraFromDrama()
+  editDramaDialog.value = true
+}
+
+// AI 从全剧剧本提炼时代背景：结果填入编辑区，确认后随「保存」一并落库
+async function extractEra() {
+  if (eraExtracting.value) return
+  try {
+    eraExtracting.value = true
+    const res = await dramaAPI.eraExtract(dramaId.value)
+    const o = res?.data || res || {}
+    editEra.era = String(o.era || '').trim()
+    editEra.summary = String(o.summary || '').trim()
+    editEra.imageHint = String(o.imageHint || o.image_style_en || '').trim()
+    if (!editEra.era && !editEra.summary && !editEra.imageHint) {
+      toast.error('未提炼到有效的时代背景，请确认剧本已保存后重试')
+      return
+    }
+    toast.success('已从剧本提炼时代背景，请确认后保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    eraExtracting.value = false
+  }
+}
+
+function buildEraPayload() {
+  // 字段键与 shared/contracts EraBackground 一致（era/summary/imageHint），勿再写 image_style_en
+  const parts = {}
+  if (editEra.era.trim()) parts.era = editEra.era.trim()
+  if (editEra.summary.trim()) parts.summary = editEra.summary.trim()
+  if (editEra.imageHint.trim()) parts.imageHint = editEra.imageHint.trim()
+  return Object.keys(parts).length ? JSON.stringify(parts) : ''
+}
+
+async function saveEditDrama() {
+  const title = editDramaTitle.value.trim()
+  if (!title) { toast.error('标题不能为空'); return }
+  try {
+    savingDrama.value = true
+    await dramaAPI.update(dramaId.value, { title, style: editDramaStyle.value, era_background: buildEraPayload() })
+    toast.success('剧集信息已更新')
+    editDramaDialog.value = false
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingDrama.value = false
+  }
+}
+
+async function delEpisode(ep) {
+  if (!(await confirm({ message: `确定删除「${ep.title}」？该集的剧本、分镜、配音、图片与视频都将一并不可见，且不可恢复。`, danger: true }))) return
+  try {
+    await episodeAPI.del(ep.id)
+    toast.success('已删除')
+    load()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+onMounted(() => { load(); loadConfigs() })
+watch(() => route.params.id, () => { load() })
+</script>
+
+<style scoped>
+.page {
+  padding: 28px 48px 40px;
+  overflow-y: auto;
+  height: 100%;
+  animation: fadeUp 0.35s var(--ease-out) both;
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 24px;
+  gap: 20px;
+}
+.head-left { display: flex; align-items: flex-start; gap: 12px; }
+.head-actions { display: flex; align-items: center; gap: 10px; }
+.head-info { display: flex; flex-direction: column; gap: 8px; }
+
+.back-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px; font-size: 13px; font-weight: 500;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-0); color: var(--text-2);
+  cursor: pointer; transition: all 0.18s var(--ease-out);
+  box-shadow: var(--shadow-xs);
+}
+.back-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text-0); }
+
+.page-title {
+  font-family: var(--font-display);
+  font-size: 26px; font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.page-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.style-chip {
+  font-size: 11px; font-weight: 500;
+  padding: 2px 8px;
+  background: var(--accent-bg); color: var(--accent-text);
+  border-radius: 99px; border: 1px solid rgba(13,148,136,0.18);
+}
+.meta-divider { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
+.meta-item {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-2);
+}
+
+/* Section label */
+.section-label {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; font-weight: 700;
+  color: var(--text-3); letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+/* Episode Grid */
+.ep-grid { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+
+.ep-card {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 16px;
+  cursor: pointer;
+  animation: fadeUp 0.35s var(--ease-out) both;
+  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s;
+}
+.ep-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+  transform: translateX(4px);
+}
+
+.ep-number {
+  width: 44px; height: 44px; flex-shrink: 0;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px; font-weight: 700;
+  color: var(--text-2);
+  transition: all 0.18s;
+}
+.ep-card:hover .ep-number {
+  background: var(--accent-bg);
+  border-color: rgba(13,148,136,0.25);
+  color: var(--accent);
+}
+
+.ep-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.ep-title { font-size: 14px; font-weight: 600; color: var(--text-0); }
+.ep-status { display: flex; align-items: center; gap: 6px; }
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+}
+.dot-ready { background: var(--success); }
+.dot-pending { background: var(--text-3); }
+.status-text { font-size: 11px; color: var(--text-3); }
+.ep-duration { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); margin-left: 4px; }
+
+.ep-actions {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 0.18s, transform 0.18s;
+}
+.ep-card:hover .ep-actions { opacity: 1; transform: translateX(0); }
+.ep-action-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ep-action-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ep-action-danger:hover {
+  background: rgba(239,68,68,0.08);
+  border-color: var(--error, #ef4444);
+  color: var(--error, #ef4444);
+}
+
+.ep-arrow { color: var(--text-3); flex-shrink: 0; transition: transform 0.18s; }
+.ep-card:hover .ep-arrow { transform: translateX(3px); color: var(--accent); }
+
+/* Empty */
+.ep-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 48px; text-align: center; color: var(--text-3); font-size: 13px;
+  border-style: dashed;
+}
+.ep-empty-icon {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--bg-2); display: flex; align-items: center; justify-content: center;
+}
+
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 23, 38, 0.18);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.dialog {
+  width: min(760px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 26px 26px 22px;
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at top left, rgba(20,184,166,0.14), transparent 34%),
+    radial-gradient(circle at top right, rgba(13,148,136,0.08), transparent 26%),
+    linear-gradient(180deg, rgba(255,255,255,0.98), rgba(242,247,255,0.92));
+  overflow: hidden;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  box-shadow: 0 22px 52px rgba(32, 48, 77, 0.14), 0 8px 18px rgba(32, 48, 77, 0.08);
+}
+.dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.dialog-head-copy { display: flex; flex-direction: column; gap: 8px; max-width: 520px; }
+.dialog-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.dialog-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dialog-title { font-size: 28px; font-weight: 800; color: var(--text-0); letter-spacing: -0.03em; }
+.dialog-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(13,148,136,0.1);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.dialog-sub { font-size: 14px; line-height: 1.7; color: var(--text-2); }
+.dialog-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.78);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.dialog-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(255,255,255,0.72);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.dialog-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dialog-section-title { font-size: 14px; font-weight: 700; color: var(--text-0); }
+.dialog-section-copy { font-size: 12px; color: var(--text-3); }
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.config-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(244,248,255,0.96), rgba(255,255,255,0.78));
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.config-card-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 2px;
+}
+.dialog-foot-copy {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
+.field-hint { font-size: 12px; color: var(--text-3); }
+
+.rename-dialog { width: min(440px, 100%); }
+/* 编辑剧集弹窗需容纳时代背景三字段，适度加宽 */
+.edit-drama-dialog { width: min(560px, 100%); }
+
+.era-extract-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+.era-extract-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.era-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(13, 148, 136, 0.25);
+  border-top-color: var(--accent-text, #0d9488);
+  border-radius: 50%;
+  animation: era-spin 0.7s linear infinite;
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+@keyframes era-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 860px) {
+  .dialog {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+    padding: 18px;
+    border-radius: 22px;
+  }
+
+  .dialog-title {
+    font-size: 24px;
+  }
+
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dialog-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ==========================================================================
+   手机档（≤767px）：860 档已把 config-grid 收成单列，这里只补标题层级
+   与按钮宽度，避免 12px 的辅助文案在 360 屏上被压成竖排。
+   ========================================================================== */
+@media (max-width: 767px) {
+  .dialog-title { font-size: 20px; }
+  .dialog-head { flex-direction: column; gap: 10px; }
+  .dialog-section-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .dialog-foot .btn { width: 100%; }
+  .config-card { padding: 12px; }
+}
+</style>

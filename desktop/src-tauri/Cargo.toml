@@ -1,0 +1,31 @@
+[package]
+name = "darme-voide-desktop"
+version = "0.1.0"
+description = "短剧工坊桌面端（Tauri 2 + 系统 WebView 外壳）"
+authors = ["darme-voide"]
+edition = "2021"
+rust-version = "1.77"
+
+# 三形态产物都需要 lib（Windows 静态库 / 移动端 cdylib / rlib 供 main.rs 用）
+[lib]
+name = "darme_voide_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# ⚠️ 依赖刻意保持极简 —— 这是"安装包体积"硬指标的第一道闸门：
+#   不引 reqwest / tokio / tauri-plugin-*（健康检查用 std::net 手写 HTTP，
+#   文件管理器/目录选择器用系统自带命令）。新增依赖前先看 docs/desktop-tauri-selection.md §4。
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1   # 让 LTO 能跨 crate 内联
+lto = true          # 体积换编译时间（本项目发布频率低，值得）
+opt-level = "s"     # 优化体积而非速度；WebView 才是热点，Rust 侧只是壳
+panic = "abort"     # 去掉 unwind 表（Tauri 官方模板同款口径）
+strip = true        # 剥符号表：单这一项通常省 30%~50%
+incremental = false

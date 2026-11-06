@@ -1,0 +1,18 @@
+node_modules/
+/src-tauri/target/
+/src-tauri/gen/
+
+# 前端产物由 scripts/sync-frontend.mjs 生成；只保留一个占位 index.html 让
+# `cargo check` 在未构建前端时也能通过（Tauri 编译期要 embed 这个目录）
+/dist-frontend/*
+!/dist-frontend/index.html
+
+# 后端源码由 scripts/sync-backend.mjs 生成（已排除 .venv / output / tmp / tests）
+/dist-backend/
+
+# 构建期自包含断言失败时落盘的越界模块清单（正常构建不会产生）
+/frontend/isolation-outsiders.txt
+
+/src-tauri/icons/*.png
+/src-tauri/icons/*.ico
+/src-tauri/icons/*.icns

@@ -1,0 +1,25 @@
+{
+  "name": "darme-voide-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "短剧工坊桌面端（Tauri 2 + 系统 WebView）",
+  "scripts": {
+    "dev:web": "npm --prefix frontend run dev",
+    "icons": "node scripts/gen-icons.mjs",
+    "sync": "node scripts/sync-frontend.mjs",
+    "sync:build": "node scripts/sync-frontend.mjs --build",
+    "sync:backend": "node scripts/sync-backend.mjs",
+    "budget": "node scripts/size-budget.mjs",
+    "budget:strict": "node scripts/size-budget.mjs --strict",
+    "precheck": "node scripts/gen-icons.mjs",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "predev": "node scripts/gen-icons.mjs && node scripts/sync-backend.mjs",
+    "dev": "tauri dev",
+    "prebuild": "node scripts/gen-icons.mjs && node scripts/sync-frontend.mjs --build && node scripts/sync-backend.mjs",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

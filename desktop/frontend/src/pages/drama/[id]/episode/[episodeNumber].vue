@@ -1,0 +1,7490 @@
+<template>
+  <div class="studio" v-if="drama">
+    <header class="studio-topbar">
+      <div class="studio-topbar-main">
+        <button class="back-btn topbar-back" @click="goBack">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+          </svg>
+          返回项目
+        </button>
+        <div class="studio-identity">
+          <h1 class="studio-title">{{ drama.title }}</h1>
+          <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
+          <div class="studio-meta-row">
+            <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
+            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/{{ pipelineTotal }}</span>
+            <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 镜头</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="studio-topbar-side">
+        <div class="studio-actions">
+          <EpisodePreflight :episode-id="episode?.id" />
+          <button class="btn" @click="refresh()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            刷新
+          </button>
+          <button class="btn btn-primary" @click="panel = mergeUrl ? 'export' : (sbs.length ? 'production' : 'script')">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            {{ mergeUrl ? '查看成片' : (sbs.length ? '继续制作' : '开始制作') }}
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="studio-body">
+    <!-- ========== LEFT SIDEBAR ========== -->
+    <aside class="sidebar">
+      <nav class="pipeline">
+        <div
+          v-for="section in sidebarSections"
+          :key="section.id"
+          class="pipe-section"
+        >
+          <div class="pipe-section-label">{{ section.label }}</div>
+          <button
+            v-for="item in section.items"
+            :key="item.key"
+            :class="['pipe-item pipe-item-sub', { active: activeSubStepKey === item.key, done: item.done }]"
+            @click="goSubStep(item.key)"
+          >
+            <span class="pipe-icon" :class="item.done ? 'icon-done' : activeSubStepKey === item.key ? 'icon-active' : ''">
+              <svg v-if="item.done" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+              <component v-else :is="item.icon" :size="11" />
+            </span>
+            <span class="pipe-copy">
+              <span class="pipe-label">{{ item.label }}</span>
+            </span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Bottom: Progress + Refresh -->
+      <div class="sidebar-bottom">
+        <div class="progress-wrap">
+          <div class="progress-head">
+            <span class="progress-label">制作进度</span>
+            <span class="progress-val">{{ pipelineProgress }}/{{ pipelineTotal }}</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" :style="{ width: pipelinePercent + '%' }"></div>
+          </div>
+        </div>
+        <div class="sidebar-jumper" v-if="sidebarJumpSteps.length">
+          <button
+            v-for="step in sidebarJumpSteps"
+            :key="step.key"
+            :class="['sidebar-jump-dot', { active: activeSubStepKey === step.key, done: step.done }]"
+            @click="goSubStep(step.key)"
+            :title="step.label"
+          ></button>
+        </div>
+        <button class="refresh-btn" @click="refresh()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          刷新数据
+        </button>
+      </div>
+    </aside>
+
+    <!-- ========== MAIN CONTENT ========== -->
+    <main class="main">
+      <div v-if="activeSubSteps.length" class="stage-subnav">
+        <button
+          v-for="sub in activeSubSteps"
+          :key="sub.key"
+          :class="['stage-subnav-item', { active: activeSubStepKey === sub.key, done: sub.done }]"
+          @click="goSubStep(sub.key)"
+        >
+          <span>{{ sub.label }}</span>
+          <span v-if="sub.done" class="stage-subnav-dot"></span>
+        </button>
+      </div>
+
+      <!-- ===== SCRIPT PANEL ===== -->
+      <div v-if="panel === 'script'" class="content-panel">
+        <!-- Step 0: Raw Content -->
+        <div v-if="scriptStep === 0" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">01</span>
+                <span class="step-name">原始内容</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button class="btn btn-sm" @click="continueRaw" :disabled="continueBusy">
+                <Loader2 v-if="continueBusy && continueTarget === 'raw'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                AI 续写
+              </button>
+              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                保存
+              </button>
+            </div>
+          </div>
+          <textarea
+            class="fill-textarea"
+            v-model="localRaw"
+            placeholder="粘贴小说原文、故事大纲或分镜描述..."
+          />
+        </div>
+
+        <!-- Step 1: Rewrite -->
+        <div v-else-if="scriptStep === 1" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">02</span>
+                <span class="step-name">AI 改写</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="scriptLen" class="char-count">{{ scriptLen }} 字</span>
+              <button class="btn btn-sm" @click="continueScr" :disabled="continueBusy">
+                <Loader2 v-if="continueBusy && continueTarget === 'script'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                AI 续写
+              </button>
+              <button v-if="rawContent" class="btn btn-sm" @click="skipRewrite">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/><path d="M13 18l6-6-6-6"/></svg>
+                跳过改写
+              </button>
+              <button v-if="scriptContent" class="btn btn-sm" @click="doRewrite" :disabled="rn">
+                <Loader2 v-if="rn && rt === 'script_rewriter'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                重新改写
+              </button>
+            </div>
+          </div>
+
+          <div v-if="!scriptContent && !rn" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
+              </svg>
+            </div>
+            <div class="empty-title">AI 改写为格式化剧本</div>
+            <div class="empty-desc">你可以先用 AI 把原始内容整理成格式化剧本，也可以跳过这一步，直接使用原始内容继续提取角色与场景。</div>
+            <div class="step-empty-actions">
+              <button class="btn btn-primary" @click="doRewrite">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                开始改写
+              </button>
+              <button class="btn" @click="skipRewrite">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/><path d="M13 18l6-6-6-6"/></svg>
+                跳过改写
+              </button>
+            </div>
+          </div>
+          <div v-else-if="rn && rt === 'script_rewriter'" class="step-loading">
+            <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
+            <div class="loading-text">正在改写剧本...</div>
+          </div>
+          <div v-else class="script-result">
+            <div class="script-result-head">
+              <span class="script-result-label">{{ scriptEditing ? '编辑剧本' : '剧本预览' }}</span>
+              <button class="btn btn-sm" @click="scriptEditing = !scriptEditing">
+                <svg v-if="!scriptEditing" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                {{ scriptEditing ? '预览' : '编辑' }}
+              </button>
+            </div>
+            <div v-if="!scriptEditing" class="script-preview">
+              <template v-for="(b, i) in scriptBlocks" :key="i">
+                <div v-if="b.type === 'scene'" class="sp-scene">{{ b.text }}</div>
+                <div v-else-if="b.type === 'dialog'" class="sp-dialog">
+                  <span class="sp-speaker">{{ b.speaker }}</span><span v-if="b.action" class="sp-action">（{{ b.action }}）</span><span class="sp-colon">：</span><span class="sp-line">{{ b.line }}</span>
+                </div>
+                <div v-else class="sp-narr">{{ b.text }}</div>
+              </template>
+              <div v-if="!scriptBlocks.length" class="sp-empty">剧本内容为空，点击「编辑」手动填写，或点击「重新改写」。</div>
+            </div>
+            <textarea v-else class="fill-textarea" v-model="localScript" placeholder="格式化剧本内容..." />
+          </div>
+        </div>
+
+        <!-- Step 2: Extract -->
+        <div v-else-if="scriptStep === 2" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">03</span>
+                <span class="step-name">提取角色与场景</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="chars.length" class="char-count">{{ chars.length }} 角色 · {{ scenes.length }} 场景</span>
+              <button v-if="chars.length" class="btn btn-sm" @click="doExtract" :disabled="rn">
+                <Loader2 v-if="rn && rt === 'extractor'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                重新提取
+              </button>
+            </div>
+          </div>
+
+          <div v-if="!chars.length && !rn" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </div>
+            <div class="empty-title">从剧本提取角色与场景</div>
+            <div class="empty-desc">AI 自动分析剧本，提取角色信息和场景列表，与项目已有数据智能去重合并</div>
+            <button class="btn btn-primary" @click="doExtract">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              开始提取
+            </button>
+          </div>
+          <div v-else-if="rn && rt === 'extractor'" class="step-loading">
+            <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
+            <div class="loading-text">正在提取角色和场景...</div>
+          </div>
+          <div v-else class="extract-stage">
+            <aside class="card extract-summary">
+              <div class="extract-summary-kicker">Extraction Board</div>
+              <div class="extract-summary-title">角色与场景结果</div>
+              <div class="extract-summary-desc">从剧本里提取出的角色和场景已经入库。这里先确认命名、定位和描述是否可直接进入后续制作。</div>
+              <div class="extract-summary-stats">
+                <div class="extract-summary-stat">
+                  <span>角色</span>
+                  <strong>{{ chars.length }}</strong>
+                </div>
+                <div class="extract-summary-stat">
+                  <span>场景</span>
+                  <strong>{{ scenes.length }}</strong>
+                </div>
+              </div>
+              <div class="extract-summary-note">如果角色描述过于简短，后续分配音色和生成形象时建议先补充人物特征。</div>
+            </aside>
+
+            <div class="card extract-card">
+              <div class="extract-card-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span>角色</span>
+                <span class="tag tag-accent">{{ chars.length }}</span>
+              </div>
+              <div class="extract-list">
+                <div v-for="c in chars" :key="c.id" class="extract-row">
+                  <div class="char-avatar">{{ c.name?.[0] || '?' }}</div>
+                  <div class="extract-info">
+                    <div class="extract-name-row">
+                      <div class="extract-name">{{ c.name }}</div>
+                      <span class="tag">{{ c.role || '角色' }}</span>
+                    </div>
+                    <div class="extract-meta wrap">{{ c.description || c.appearance || c.personality || '暂无描述' }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card extract-card" v-if="scenes.length">
+              <div class="extract-card-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                <span>场景</span>
+                <span class="tag tag-accent">{{ scenes.length }}</span>
+              </div>
+              <div class="extract-list">
+                <div v-for="s in scenes" :key="s.id" class="extract-row">
+                  <div class="scene-icon">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                  </div>
+                  <div class="extract-info">
+                    <div class="extract-name-row">
+                      <div class="extract-name">{{ s.location }}</div>
+                      <span v-if="s.time" class="tag">{{ s.time }}</span>
+                    </div>
+                    <div class="extract-meta wrap">{{ s.description || s.time || '等待补充场景描述' }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3: Voice Assignment -->
+        <div v-else-if="scriptStep === 3" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">04</span>
+                <span class="step-name">分配音色</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="charsVoiced" class="char-count">{{ charsVoiced }}/{{ chars.length }} 已分配</span>
+              <span v-if="voiceSampleCount" class="char-count">{{ voiceSampleCount }}/{{ charsVoiced }} 试听文件</span>
+              <button v-if="charsVoiced" class="btn btn-sm" @click="doVoice" :disabled="rn">
+                <Loader2 v-if="rn && rt === 'voice_assigner'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+                重新分配
+              </button>
+              <button v-if="charsVoiced" class="btn btn-sm" @click="batchGenSamples">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19 5v14"/></svg>
+                生成试听文件
+              </button>
+              <button v-if="charsVoiced" class="btn btn-sm" :disabled="generatingVoices" @click="generateVoicesFromCharacters">
+                <Loader2 v-if="generatingVoices" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
+                根据人物生成音色
+              </button>
+            </div>
+          </div>
+
+          <div v-if="!charsVoiced && !rn" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+            </div>
+            <div class="empty-title">为角色分配合适的音色</div>
+            <div class="empty-desc">AI 根据角色特征自动分配最匹配的 TTS 音色</div>
+            <button class="btn btn-primary" @click="doVoice">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              AI 自动分配
+            </button>
+          </div>
+          <div v-else-if="rn && rt === 'voice_assigner'" class="step-loading">
+            <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
+            <div class="loading-text">正在分配音色...</div>
+          </div>
+          <div v-else class="voice-stage">
+            <aside class="card voice-stage-panel">
+              <div class="voice-stage-kicker">Voice Casting</div>
+              <div class="voice-stage-title">角色声音分配台</div>
+              <div class="voice-stage-desc">先为每个角色选择合适音色，再生成试听。音色标签会帮助你快速区分旁白、主角、反派和配角的表达方向。</div>
+              <div class="voice-stage-stats">
+                <div class="voice-stage-stat">
+                  <span class="voice-stage-stat-label">已分配</span>
+                  <strong>{{ charsVoiced }}/{{ chars.length }}</strong>
+                </div>
+                <div class="voice-stage-stat">
+                  <span class="voice-stage-stat-label">试听文件</span>
+                  <strong>{{ voiceSampleCount }}/{{ charsVoiced }}</strong>
+                </div>
+              </div>
+              <div class="voice-library-meta">
+                <span>音色库</span>
+                <span>{{ filteredVoiceProfiles.length }} / {{ voiceProfiles.length }} 条</span>
+              </div>
+              <div class="voice-role-filter">
+                <button
+                  v-for="t in ROLE_TAGS"
+                  :key="t.label"
+                  class="role-filter-chip"
+                  :class="[t.cls, { 'role-filter-chip-active': voiceRoleFilter === t.label }]"
+                  @click="voiceRoleFilter = voiceRoleFilter === t.label ? '' : t.label"
+                >{{ t.label }}</button>
+              </div>
+              <div class="voice-library">
+                <div v-for="voice in filteredVoiceProfiles" :key="voice.id" class="voice-library-item">
+                  <div class="voice-library-head">
+                    <span class="voice-library-name">{{ voice.label }}</span>
+                    <button
+                      class="voice-preview-btn"
+                      :disabled="previewingVoiceId === voice.id"
+                      :title="voicePreviewMap[voice.id] ? '重新试听' : '试听'"
+                      @click="previewVoice(voice.id)"
+                    >
+                      <Loader2 v-if="previewingVoiceId === voice.id" :size="12" class="animate-spin" />
+                      <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></svg>
+                    </button>
+                    <span class="tag">{{ voice.gender }}</span>
+                  </div>
+                  <div v-if="(voice.roleTags || []).length" class="voice-library-tags">
+                    <span v-for="rt in voice.roleTags" :key="rt" class="role-tag" :class="roleTagCls(rt)">{{ rt }}</span>
+                  </div>
+                  <div class="voice-library-traits">{{ voice.traits }}</div>
+                  <div class="voice-library-fit">{{ voice.suitable }}</div>
+                  <audio v-if="voicePreviewMap[voice.id]" :src="mediaUrl(voicePreviewMap[voice.id])" controls preload="none" class="voice-preview-audio" />
+                </div>
+              </div>
+
+              <div class="voice-clone-box">
+                <div class="voice-clone-head">
+                  <span>声纹克隆</span>
+                  <span class="voice-clone-hint">上传参考音频，复刻为可复用音色</span>
+                </div>
+                <input
+                  v-model="cloneVoiceName"
+                  class="voice-clone-input"
+                  type="text"
+                  placeholder="音色名称（可选，默认「克隆音色」）"
+                />
+                <input
+                  v-model="clonePromptText"
+                  class="voice-clone-input"
+                  type="text"
+                  placeholder="参考音频文本（本地 CosyVoice 克隆需要，即参考音频里说的内容）"
+                />
+                <label class="voice-clone-file-label">
+                  <input
+                    type="file"
+                    class="voice-clone-file"
+                    accept="audio/mpeg,audio/wav,audio/mp4,audio/m4a,audio/mp3"
+                    @change="onCloneFileChange"
+                  />
+                  <span>{{ cloneFileName || '选择参考音频' }}</span>
+                </label>
+                <button
+                  class="voice-clone-btn"
+                  :disabled="cloningVoice || !cloneFile"
+                  @click="cloneVoiceNow"
+                >
+                  <Loader2 v-if="cloningVoice" :size="12" class="animate-spin" />
+                  <span v-else>克隆音色</span>
+                </button>
+              </div>
+            </aside>
+
+            <div class="voice-grid">
+              <div v-for="c in chars" :key="c.id" class="card voice-card">
+                <div class="voice-card-head">
+                  <div class="voice-char">
+                    <div class="char-avatar lg">{{ c.name?.[0] || '?' }}</div>
+                    <div class="voice-name">
+                      <div class="voice-name-row">
+                        <div class="extract-name">{{ c.name }}</div>
+                        <span class="tag" :class="(c.voice_style || c.voiceStyle) ? 'tag-success' : ''">{{ (c.voice_style || c.voiceStyle) ? '已分配' : '待分配' }}</span>
+                      </div>
+                      <div class="extract-meta">
+                        <span class="role-tag" :class="roleTagCls(inferCharRoleTag(c))">{{ inferCharRoleTag(c) || c.role || '角色' }}</span>
+                      </div>
+                    </div>
+                    <button
+                      v-if="hasMergeCandidates(c)"
+                      class="btn btn-ghost btn-icon voice-merge-btn"
+                      title="把本角色并入全剧已有角色（跨集重复时使用，源角色资产/关联会迁移合并）"
+                      @click.stop="openMergePicker(c)"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="voice-card-copy">
+                  <div class="voice-card-text">{{ c.description || c.personality || c.appearance || '暂无角色描述，可根据人物定位手动挑选音色。' }}</div>
+                </div>
+
+                <div class="voice-select-block">
+                  <span class="voice-block-label">选择音色</span>
+                  <BaseSelect
+                    :model-value="c.voice_style || c.voiceStyle || ''"
+                    :options="voiceSelectOptions"
+                    placeholder="选择音色"
+                    searchable
+                    style="width:100%"
+                    @update:model-value="updateCharVoice(c.id, $event)"
+                  />
+                </div>
+
+                <div v-if="getVoiceProfile(c.voice_style || c.voiceStyle)" class="voice-profile-card">
+                  <div class="voice-profile-head">
+                    <span class="voice-profile-name">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.label }}</span>
+                    <span class="tag">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.gender }}</span>
+                  </div>
+                  <div class="voice-profile-traits">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.traits }}</div>
+                  <div class="voice-profile-fit">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.suitable }}</div>
+                </div>
+
+                <div class="voice-actions-row">
+                  <button class="btn btn-sm" :disabled="!(c.voice_style || c.voiceStyle)" @click="genSample(c.id)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    {{ (c.voice_sample_url || c.voiceSampleUrl) ? '重新试听' : '生成试听' }}
+                  </button>
+                  <span class="dim" style="font-size:11px">{{ (c.voice_sample_url || c.voiceSampleUrl) ? '已生成声音样本，可直接播放' : '生成后可快速确认角色声音' }}</span>
+                </div>
+
+                <div v-if="c.voice_sample_url || c.voiceSampleUrl" class="voice-player">
+                  <audio :src="mediaUrl(c.voice_sample_url || c.voiceSampleUrl)" controls preload="none" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 跨集去重：选择并入目标角色 -->
+          <div v-if="mergeSourceChar" class="overlay" @click.self="closeMergePicker">
+            <div class="card merge-char-dialog">
+              <div class="merge-char-head">
+                <div>
+                  <div class="merge-char-title">把「{{ mergeSourceChar.name }}」并入全剧已有角色</div>
+                  <div class="merge-char-sub">目标中为空的形象/声音等资产会从源回填；本集/分镜关联与生成历史迁移到目标后，源角色将被合并删除。标有「疑似同人」的候选仅名称相近，请确认是同一人物后再合并。</div>
+                </div>
+                <button class="btn btn-ghost btn-icon" :disabled="mergeBusy" @click="closeMergePicker">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <div class="merge-char-list">
+                <button
+                  v-for="t in pickerCandidates()"
+                  :key="t.id"
+                  class="merge-char-item"
+                  :disabled="mergeBusy"
+                  @click="mergeInto(t)"
+                >
+                  <span class="char-avatar">{{ (t.name || '?')[0] }}</span>
+                  <span class="merge-char-item-name">{{ t.name }}</span>
+                  <span
+                    v-if="!isExactNameMatch(mergeSourceChar, t)"
+                    class="tag tag-warning"
+                    :title="`名称与「${mergeSourceChar?.name || '?'}」不同但疑似同一人物，请确认后再合并`"
+                  >疑似同人</span>
+                  <span class="role-tag" :class="roleTagCls(inferCharRoleTag(t))">{{ inferCharRoleTag(t) || t.role || '角色' }}</span>
+                  <span class="tag" :class="(t.voice_style || t.voiceStyle) ? 'tag-success' : ''">{{ (t.voice_style || t.voiceStyle) ? '已分配音色' : '待分配' }}</span>
+                </button>
+                <div v-if="!pickerCandidates().length" class="merge-char-empty">暂无其他可并入的角色</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 4: Storyboard -->
+        <div v-else-if="scriptStep === 4" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">05</span>
+                <span class="step-name">分镜列表</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
+              <button v-if="sbs.length" class="btn btn-sm" @click="addShot">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                添加
+              </button>
+              <template v-if="!sbs.length">
+                <select class="config-select" :value="lockedVideoConfigId" @change="switchEpisodeConfig('video', Number(($event.target as HTMLSelectElement).value))">
+                  <option v-for="c in videoConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+                </select>
+              </template>
+              <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
+                <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                {{ sbs.length ? '重新拆解' : 'AI 拆解分镜' }}
+              </button>
+              <!-- 拆镜前先对着词表写：新标签打开，不打断本页未保存的编辑 -->
+              <RouterLink
+                :to="`/visual-graph?drama_id=${dramaId}`"
+                target="_blank"
+                rel="noopener"
+                class="btn btn-sm"
+                title="景别/构图/运镜/灯光词表 + 本剧拆镜引导（新标签打开）"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                词表
+              </RouterLink>
+            </div>
+          </div>
+
+          <div v-if="sbs.length" class="split-layout">
+            <!-- Shot List -->
+            <div class="shot-list">
+              <div class="shot-list-head">
+                <div>
+                  <div class="shot-list-title">镜头序列</div>
+                  <div class="shot-list-sub">按镜头顺序检查内容与素材状态</div>
+                </div>
+                <span class="tag mono">{{ totalDuration }}s</span>
+              </div>
+              <div class="shot-list-body">
+                <div
+                  v-for="(sb, i) in sbs"
+                  :key="sb.id"
+                  :class="['shot-item', { active: selectedSb?.id === sb.id }]"
+                  @click="selectedSb = sb"
+                >
+                  <div class="shot-item-header">
+                    <div class="shot-num">#{{ String(i+1).padStart(2,'0') }}</div>
+                    <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
+                    <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
+                    <div class="shot-status">
+                      <div v-if="hasImg(sb)" class="shot-dot has-img" title="已生成图片"></div>
+                      <div v-if="sb.asset_status === 'needs_regeneration' || sb.assetStatus === 'needs_regeneration'" class="shot-dot has-asset-warn" title="资产需重新生成"></div>
+                      <div v-if="hasVid(sb)" class="shot-dot has-video" title="已生成视频"></div>
+                      <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
+                    </div>
+                  </div>
+                  <div class="shot-body">
+                    <div class="shot-desc">{{ sb.description || sb.title || '无描述' }}</div>
+                  </div>
+                  <div class="shot-meta">
+                    <span class="mono dim" style="font-size:10px">{{ sb.duration || 10 }}s</span>
+                    <span v-if="sb.location" class="shot-location">{{ sb.location }}</span>
+                    <span v-if="getStoryboardCharacterNames(sb).length" class="shot-location">{{ getStoryboardCharacterNames(sb).join(' / ') }}</span>
+                    <span v-if="sb.dialogue" class="shot-dialogue">{{ sb.dialogue }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Detail Panel -->
+            <div class="detail-panel" v-if="selectedSb">
+                <div class="detail-head">
+                  <div class="detail-head-copy">
+                    <span class="detail-head-title">镜头 #{{ sbs.indexOf(selectedSb) + 1 }}</span>
+                  <span class="detail-head-sub">{{ selectedSb.title || `镜头 ${sbs.indexOf(selectedSb) + 1}` }} · {{ selectedSb.shot_type || selectedSb.shotType || '未设置景别' }}</span>
+                  </div>
+                  <span class="tag mono">{{ (selectedSb.duration || 10) }}s</span>
+                  <div class="ml-auto flex items-center gap-2">
+                    <button class="btn btn-ghost btn-icon" :disabled="splittingShot" title="AI 拆分镜头" @click="splitShot(selectedSb)">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
+                    </button>
+                    <button class="btn btn-ghost btn-icon" style="color:var(--error)" @click="deleteShot(selectedSb)">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                    </button>
+                  </div>
+              </div>
+              <div class="detail-body">
+                <div class="detail-hero">
+                  <div class="detail-hero-copy">
+                    <div class="detail-hero-label">镜头概览</div>
+                    <div class="detail-hero-text">{{ selectedSb.description || selectedSb.title || '当前镜头还没有画面描述，建议先补充核心动作和构图。' }}</div>
+                    <div class="detail-status-row">
+                      <span class="tag">{{ getSceneName(selectedSb) }}</span>
+                      <span class="tag">{{ selectedSb.angle || '未设角度' }}</span>
+                      <span class="tag">{{ selectedSb.movement || '未设运镜' }}</span>
+                      <span class="tag" :class="getFirstFrame(selectedSb) ? 'tag-success' : ''">首帧 {{ getFirstFrame(selectedSb) ? '已生成' : '待生成' }}</span>
+                      <span class="tag" :class="getLastFrame(selectedSb) ? 'tag-success' : ''">尾帧 {{ getLastFrame(selectedSb) ? '已生成' : '待生成' }}</span>
+                      <span v-if="selectedSb.keyframe_prompt || selectedSb.keyframePrompt" class="tag" :class="getKeyframe(selectedSb) ? 'tag-success' : ''">关键帧 {{ getKeyframe(selectedSb) ? '已生成' : '待生成' }}</span>
+                      <span class="tag" :class="hasVid(selectedSb) ? 'tag-success' : ''">视频 {{ hasVid(selectedSb) ? '已生成' : '待生成' }}</span>
+                    </div>
+                  </div>
+                  <div class="detail-preview-grid">
+                    <div class="detail-preview-card">
+                      <div class="detail-preview-title">首帧</div>
+                      <div class="detail-preview-media">
+                        <img
+                          v-if="getFirstFrame(selectedSb)"
+                          :src="mediaUrl(getFirstFrame(selectedSb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getFirstFrame(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 首帧`)"
+                        />
+                        <div v-else class="detail-preview-empty">待生成</div>
+                      </div>
+                    </div>
+                    <div v-if="selectedSb.keyframe_prompt || selectedSb.keyframePrompt || getKeyframe(selectedSb)" class="detail-preview-card">
+                      <div class="detail-preview-title">关键帧</div>
+                      <div class="detail-preview-media">
+                        <img
+                          v-if="getKeyframe(selectedSb)"
+                          :src="mediaUrl(getKeyframe(selectedSb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getKeyframe(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 关键帧`)"
+                        />
+                        <div v-else class="detail-preview-empty">待生成</div>
+                      </div>
+                    </div>
+                    <div class="detail-preview-card">
+                      <div class="detail-preview-title">尾帧</div>
+                      <div class="detail-preview-media">
+                        <img
+                          v-if="getLastFrame(selectedSb)"
+                          :src="mediaUrl(getLastFrame(selectedSb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getLastFrame(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 尾帧`)"
+                        />
+                        <div v-else class="detail-preview-empty">待生成</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">版本历史</span>
+                    <span class="detail-section-copy">分镜图/视频按帧类型分组，可查看与回滚</span>
+                    <button class="btn btn-ghost btn-sm" :disabled="versionsLoading" @click="loadVersions">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                      刷新
+                    </button>
+                  </div>
+                  <div v-if="versionsLoading" class="version-list-loading">加载中…</div>
+                  <div v-else-if="versionsByType.length" class="version-list">
+                    <div v-for="group in versionsByType" :key="group.type" class="version-group">
+                      <div class="version-group-head">
+                        <span class="version-group-title">{{ group.typeLabel }}</span>
+                        <span class="version-group-count">{{ group.items.length }} 个版本</span>
+                      </div>
+                      <div class="version-item" v-for="v in group.items" :key="v.id">
+                        <div class="version-thumb" v-if="v.asset_url">
+                          <img :src="mediaUrl(v.asset_url)" alt="" loading="lazy" @click="openImageViewer(mediaUrl(v.asset_url), `版本 v${v.version}`)" />
+                        </div>
+                        <div v-else class="version-thumb version-thumb-empty">无图</div>
+                        <div class="version-info">
+                          <div class="version-info-top">
+                            <span class="version-badge" :class="{ 'is-current': v.id === currentVersionId }">v{{ v.version }}</span>
+                            <span v-if="v.id === currentVersionId" class="version-current">当前</span>
+                            <span v-else class="version-status" :class="v.status">{{ v.status }}</span>
+                          </div>
+                          <div class="version-meta">
+                            <span v-if="v.provider">{{ v.provider }}</span>
+                            <span v-if="v.model">{{ v.model }}</span>
+                            <span>{{ formatTime(v.created_at) }}</span>
+                          </div>
+                          <button
+                            v-if="v.id !== currentVersionId"
+                            class="btn btn-ghost btn-sm"
+                            :disabled="activatingVersion"
+                            @click="activateVersion(v)"
+                          >回滚到该版本</button>
+                          <button
+                            v-else
+                            class="btn btn-ghost btn-sm" disabled
+                          >已启用</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="version-list-empty">暂无版本记录（生成完成后自动记录）</div>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">镜头结构</span>
+                    <span class="detail-section-copy">景别、角度、运镜、场景绑定和时长</span>
+                  </div>
+                  <div class="field-grid field-grid-4">
+                    <label class="field">
+                      <span class="field-label">标题</span>
+                      <input :value="selectedSb.title || ''" class="input"
+                        @blur="updateField(selectedSb, 'title', formValue($event))" placeholder="如：雪地逼近" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">景别</span>
+                      <input
+                        list="shot-type-list"
+                        :value="selectedSb.shot_type || selectedSb.shotType || ''"
+                        class="input"
+                        placeholder="选择或输入景别"
+                        @change="updateField(selectedSb, 'shot_type', formValue($event))"
+                      />
+                      <datalist id="shot-type-list">
+                        <option v-for="t in shotTypes" :key="t" :value="t" />
+                      </datalist>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">角度</span>
+                      <input
+                        list="shot-angle-list"
+                        :value="selectedSb.angle || ''"
+                        class="input"
+                        placeholder="选择或输入角度"
+                        @change="updateField(selectedSb, 'angle', formValue($event))"
+                      />
+                      <datalist id="shot-angle-list">
+                        <option v-for="t in shotAngles" :key="t" :value="t" />
+                      </datalist>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">运镜</span>
+                      <input
+                        list="shot-movement-list"
+                        :value="selectedSb.movement || ''"
+                        class="input"
+                        placeholder="选择或输入运镜"
+                        @change="updateField(selectedSb, 'movement', formValue($event))"
+                      />
+                      <datalist id="shot-movement-list">
+                        <option v-for="t in shotMovements" :key="t" :value="t" />
+                      </datalist>
+                    </label>
+                  </div>
+                  <div class="field-grid field-grid-4">
+                    <label class="field">
+                      <span class="field-label">绑定角色</span>
+                      <div class="role-pills">
+                        <button
+                          v-for="char in chars"
+                          :key="char.id"
+                          type="button"
+                          :class="['role-pill', { active: isStoryboardCharacterSelected(selectedSb, char.id) }]"
+                          @click="toggleStoryboardCharacter(selectedSb, char.id)"
+                        >
+                          {{ char.name }}
+                        </button>
+                        <span v-if="!chars.length" class="dim" style="font-size:12px">当前集还没有角色</span>
+                      </div>
+                      <!-- 镜头级服装变体选择 -->
+                      <div v-if="boundChars.length" class="costume-picker">
+                        <div v-for="char in boundChars" :key="char.id" class="costume-picker-row">
+                          <span class="costume-picker-name">{{ char.name }}</span>
+                          <select
+                            class="input costume-picker-select"
+                            :value="getStoryboardCharacterCostume(selectedSb, char.id)"
+                            @change="setStoryboardCharacterCostume(selectedSb, char.id, formValue($event))"
+                          >
+                            <option value="">默认形象</option>
+                            <option v-for="c in charCostumeOptions(char)" :key="c" :value="c">{{ c }}</option>
+                          </select>
+                        </div>
+                      </div>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">绑定场景</span>
+                      <select class="input" :value="selectedSb.scene_id || selectedSb.sceneId || ''"
+                        @change="updateField(selectedSb, 'scene_id', formValue($event) ? Number(formValue($event)) : null)">
+                        <option value="">未绑定场景</option>
+                        <option v-for="scene in scenes" :key="scene.id" :value="scene.id">
+                          {{ scene.location }} · {{ scene.time || '未设时间' }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">地点</span>
+                      <input :value="selectedSb.location || ''" class="input"
+                        @blur="updateField(selectedSb, 'location', formValue($event))" placeholder="场景地点" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">时间</span>
+                      <input :value="selectedSb.time || ''" class="input"
+                        @blur="updateField(selectedSb, 'time', formValue($event))" placeholder="如：深夜 / 清晨" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">时长</span>
+                      <input :value="selectedSb.duration || 10" class="input" type="number" min="1" max="60"
+                        @blur="updateField(selectedSb, 'duration', Number(formValue($event)))" />
+                    </label>
+                  </div>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">画面语义</span>
+                    <span class="detail-section-copy">动作、结果、氛围和对白</span>
+                  </div>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">
+                        动作
+                        <button class="field-ai-btn" :disabled="aiSuggesting" @click.prevent="genActionSuggestion(selectedSb)">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.6 1.4-4 3.9.9 5.5L12 15l-4.9 2.7.9-5.5-4-3.9 5.6-1.4z"/></svg>
+                          {{ aiSuggesting ? '生成中…' : 'AI 建议' }}
+                        </button>
+                      </span>
+                      <textarea :value="selectedSb.action || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'action', formValue($event))" placeholder="谁在做什么，表情和动作细节是什么" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">结果</span>
+                      <textarea :value="selectedSb.result || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'result', formValue($event))" placeholder="镜头结束时的状态变化或画面结果" />
+                    </label>
+                  </div>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">画面描述</span>
+                      <textarea :value="selectedSb.description || ''" class="textarea" rows="4"
+                        @blur="updateField(selectedSb, 'description', formValue($event))" placeholder="描述画面内容..." />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">氛围</span>
+                      <textarea :value="selectedSb.atmosphere || ''" class="textarea" rows="4"
+                        @blur="updateField(selectedSb, 'atmosphere', formValue($event))" placeholder="光线、色调、空气感、环境氛围" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">对白 / 旁白</span>
+                    <textarea :value="selectedSb.dialogue || ''" class="textarea" rows="3"
+                      @blur="updateField(selectedSb, 'dialogue', formValue($event))" placeholder="角色名：台词内容 或 旁白：内容" />
+                  </label>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">连续性状态</span>
+                    <span class="detail-section-copy">跨镜状态衔接、逐镜禁止变化与关键物品</span>
+                  </div>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">开始状态</span>
+                      <textarea :value="selectedSb.start_state || selectedSb.startState || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'start_state', formValue($event))" placeholder="如：角色_林晚=站在门口左侧，面朝屋内" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">结束状态</span>
+                      <textarea :value="selectedSb.end_state || selectedSb.endState || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'end_state', formValue($event))" placeholder="如：角色_林晚=走到桌旁坐下" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">逐镜禁止变化</span>
+                    <textarea :value="selectedSb.constraints || ''" class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'constraints', formValue($event))" placeholder="如：服装不变、发型不变、站位不越过屏右、灯光不变、道具数量不变" />
+                  </label>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">转场动机</span>
+                      <input :value="selectedSb.transition_motive || selectedSb.transitionMotive || ''" type="text" class="input"
+                        @change="updateField(selectedSb, 'transition_motive', formValue($event))"
+                        placeholder="视线引导 / 动作匹配 / 声音引导 / 道具承接 / 情绪延续 / 信息揭示 / 空间切换 / 危险预警" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">转场方式</span>
+                      <input :value="selectedSb.transition_type || selectedSb.transitionType || 'cut'" type="text" class="input"
+                        @change="updateField(selectedSb, 'transition_type', formValue($event))"
+                        placeholder="cut / 匹配剪辑 / 叠化 / 闪切" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">关键帧（中段）</span>
+                    <textarea :value="selectedSb.keyframe_prompt || selectedSb.keyframePrompt || ''" class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'keyframe_prompt', formValue($event))"
+                      placeholder="动作进行到一半/道具状态变化/机位移动中间态的画面描述，用于生成中段关键帧锁定中间状态" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">关联物品</span>
+                    <div class="prop-chips" v-if="propsList.length">
+                      <button v-for="p in propsList" :key="p.id" type="button"
+                        class="chip-btn" :class="{ active: (selectedSb.prop_ids || selectedSb.propIds || []).includes(p.id) }"
+                        @click="toggleStoryboardProp(selectedSb, p.id)">{{ p.name }}</button>
+                    </div>
+                    <span v-else class="empty-hint">暂无物品库模板，可到「资源库 &gt; 物品库」创建</span>
+                  </label>
+                </div>
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">生成提示</span>
+                    <span class="detail-section-copy">分别服务图片、视频、配乐和音效生成</span>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">静态画面提示词</span>
+                    <textarea :value="selectedSb.image_prompt || selectedSb.imagePrompt || ''" class="textarea" rows="4"
+                      @blur="updateField(selectedSb, 'image_prompt', formValue($event))" placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">视频提示词</span>
+                    <textarea :value="selectedSb.video_prompt || selectedSb.videoPrompt || ''" class="textarea" rows="5"
+                      @blur="updateField(selectedSb, 'video_prompt', formValue($event))" placeholder="按 3 秒分段的视频提示词..." />
+                  </label>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">配乐提示词</span>
+                      <textarea :value="selectedSb.bgm_prompt || selectedSb.bgmPrompt || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'bgm_prompt', formValue($event))" placeholder="如：压抑低频弦乐，缓慢推进" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">音效提示词</span>
+                      <textarea :value="selectedSb.sound_effect || selectedSb.soundEffect || ''" class="textarea" rows="3"
+                        @blur="updateField(selectedSb, 'sound_effect', formValue($event))" placeholder="如：风雪声、脚踩积雪、衣料摩擦声" />
+                    </label>
+                  </div>
+                </div>
+                <!-- v2: 图片/视频重新生成控制 -->
+                <div class="detail-section">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">重新生成</span>
+                    <span class="detail-section-copy">模型选择 + 自定义 Prompt 覆盖</span>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">自定义图片 Prompt（留空自动生成）</span>
+                    <textarea
+                      :value="selectedSb.custom_image_prompt || selectedSb.customImagePrompt || ''"
+                      class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'custom_image_prompt', formValue($event))"
+                      placeholder="手动覆盖图片 prompt" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">反向提示词（Negative Prompt，AI 提取，可修改；留空使用默认）</span>
+                    <textarea
+                      :value="selectedSb.negative_prompt || selectedSb.negativePrompt || ''"
+                      class="textarea" rows="2"
+                      @blur="updateField(selectedSb, 'negative_prompt', formValue($event))"
+                      placeholder="排除不希望出现的内容，如：文字、水印、低清晰度、畸形手指" />
+                  </label>
+                  <div class="flex gap-2 items-center mt-2">
+                    <ModelSelector v-model="imageGenerationModel" service-type="image" label="图片模型" />
+                    <button
+                      class="btn btn-sm btn-primary"
+                      :disabled="regeneratingShotIds.includes(selectedSb?.id)"
+                      @click="regenerateShotImage(selectedSb, imageGenerationModel)">
+                      {{ regeneratingShotIds.includes(selectedSb?.id) ? '生成中...' : '重新生成图片' }}
+                    </button>
+                  </div>
+                  <div class="flex gap-2 items-center mt-2">
+                    <ModelSelector v-model="videoGenerationModel" service-type="video" label="视频模型" />
+                    <div class="aspect-selector-compact">
+                      <button
+                        v-for="opt in aspectRatioOptions"
+                        :key="opt.value"
+                        type="button"
+                        :class="['aspect-btn-compact', videoAspectRatio === opt.value && 'active']"
+                        :title="opt.label"
+                        @click="videoAspectRatio = opt.value"
+                      >
+                        <component :is="opt.icon" class="aspect-icon-compact" />
+                        <span>{{ opt.label }}</span>
+                      </button>
+                    </div>
+                    <button class="btn btn-sm" @click="openVideoEditor(selectedSb)">
+                      视频参数编辑 / 生成
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="rn && rt === 'storyboard_breaker'" class="step-loading">
+            <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
+            <div class="loading-text">{{ agentProgress || '正在拆解分镜并生成提示词...' }}</div>
+            <div v-if="agentElapsed > 0" class="loading-meta">已用 {{ agentElapsed }}s · 正常最长约 120s</div>
+          </div>
+
+          <div v-else class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+                <rect x="2" y="2" width="20" height="20" rx="2.5"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="8" x2="13" y2="16"/>
+              </svg>
+            </div>
+            <div class="empty-title">将剧本拆解为分镜序列</div>
+            <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
+            <div class="locked-config-banner">
+              当前集视频模型：
+              <select class="config-select" :value="lockedVideoConfigId" @change="switchEpisodeConfig('video', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in videoConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" @click="doBreakdown">
+              <Loader2 v-if="rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
+              <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              AI 拆解分镜
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ===== PRODUCTION PANEL ===== -->
+      <div v-else-if="panel === 'production'" class="content-panel">
+        <!-- Guard: need script -->
+        <div v-if="!scriptContent || !sbs.length" class="step-empty" style="flex:1">
+          <div class="empty-visual">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          </div>
+          <div class="empty-title">尚未准备就绪</div>
+          <div class="empty-desc">{{ !scriptContent ? '请先完成剧本编写' : '请先完成分镜拆解' }}</div>
+          <button class="btn btn-primary" @click="panel = 'script'">前往剧本</button>
+        </div>
+
+        <template v-else>
+          <div class="step-toolbar prod-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                <span class="step-name">制作工作台</span>
+              </div>
+            </div>
+            <div class="prod-tabs">
+              <button
+                v-for="t in prodTabDefs"
+                :key="t.id"
+                :class="['prod-tab', { active: prodTab === t.id }]"
+                @click="prodTab = t.id"
+              >
+                <component :is="t.icon" :size="11" />
+                {{ t.label }}
+                <span v-if="t.badge" class="prod-tab-badge">{{ t.badge }}</span>
+              </button>
+            </div>
+            <div class="toolbar-right">
+              <!-- 参数摘要：点开才占地方，收起时只是一个「生成参数」小字。
+                   内容全部现算（模型配置来自本集锁定值），不另存一份副本 ✓
+                   ⚠️ 面板必须 `position: fixed` 挂在 body 视口坐标上：`.content-panel` 是
+                   `overflow: hidden`，相对定位的下拉会被这块面板直接裁掉（点了像没反应）✓✗ -->
+              <div class="param-digest">
+                <button class="param-toggle" :class="{ open: paramsOpen }" @click="toggleParams($event)">生成参数</button>
+                <div v-if="paramsOpen" class="param-shade" @click="paramsOpen = false" />
+                <div v-if="paramsOpen" class="param-body" :style="paramsPos">
+                  <div class="param-row"><span>图片模型</span><b>{{ lockedImageConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>视频模型</span><b>{{ lockedVideoConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>配音</span><b>{{ lockedAudioConfigLabel || '未配置' }}</b></div>
+                  <div class="param-row"><span>画风</span><b>{{ dramaStyleValue || '未设置' }}</b></div>
+                  <div class="param-row"><span>本集镜头</span><b>{{ sbs.length }} 个 · {{ totalDuration }} 秒</b></div>
+                  <div class="param-row"><span>当前镜头参考</span><b>{{ selectedSbRefStrategy }}</b></div>
+                  <div v-if="selectedSbPrompt" class="param-prompt">
+                    <div class="param-prompt-head">
+                      <span>当前镜头提示词</span>
+                      <button class="param-more" @click="promptExpanded = !promptExpanded">{{ promptExpanded ? '收起' : '展开' }}</button>
+                    </div>
+                    <pre :class="{ expanded: promptExpanded }">{{ selectedSbPrompt }}</pre>
+                  </div>
+                  <!-- 预设：一季十几集重复选同样三个下拉，选漏就是那集用错模型出图 -->
+                  <div class="param-preset">
+                    <div class="param-prompt-head">
+                      <span>本集生成预设</span>
+                      <span class="dim" style="font-size:10.5px">{{ presetBusy ? '处理中…' : (genPresets.length ? `${genPresets.length} 个` : '还没有') }}</span>
+                    </div>
+                    <div v-if="genPresets.length" class="preset-list">
+                      <div v-for="p in genPresets" :key="p.id" class="preset-row">
+                        <span class="preset-name" :title="p.name">{{ p.name }}</span>
+                        <button class="preset-btn" @click="applyGenPreset(p)">套用</button>
+                        <button class="preset-btn ghost" @click="removeGenPreset(p)">删除</button>
+                      </div>
+                    </div>
+                    <div class="preset-save">
+                      <input
+                        v-model="presetName"
+                        class="preset-input"
+                        placeholder="存成预设，如「Krea2 首尾帧」"
+                        maxlength="24"
+                        @keydown.enter="guardEnter($event, saveGenPreset)"
+                      />
+                      <button class="preset-btn" :disabled="!presetName.trim() || presetBusy" @click="saveGenPreset">保存</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- 一键跑剩余步骤。差的步数直接写在按钮上，点开先看清单再决定跑不跑 ✓ -->
+              <button class="btn btn-chain" :class="{ running: chainRunning }" @click="chainOpen = true">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                {{ chainRunning ? '流水线进行中' : '继续到成片' }}
+                <span v-if="chainTodoSteps.length && !chainRunning" class="chain-count">{{ chainTodoSteps.length }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 镜头时间线总览 -->
+          <div v-if="sbs.length" class="shot-timeline">
+            <div class="shot-timeline-track">
+              <button
+                v-for="(sb, i) in sbs"
+                :key="sb.id"
+                class="shot-timeline-node"
+                :class="{ active: selectedSb?.id === sb.id, done: hasImg(sb) && hasVid(sb) }"
+                :title="`#${String(i + 1).padStart(2, '0')} ${sb.description || sb.title || '未命名镜头'}`"
+                @click="jumpToTimelineShot(sb)"
+              >
+                <div class="shot-timeline-thumb">
+                  <img v-if="getStoryboardCover(sb)" :src="mediaUrl(getStoryboardCover(sb))" alt="" />
+                  <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                  <span class="shot-timeline-num">#{{ String(i + 1).padStart(2, '0') }}</span>
+                </div>
+                <div class="shot-timeline-dots">
+                  <span class="tl-dot" :class="{ on: hasImg(sb) }" title="分镜图" />
+                  <span class="tl-dot" :class="{ on: hasVid(sb) }" title="视频" />
+                  <span class="tl-dot" :class="{ on: hasComposed(sb) }" title="合成" />
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Sub: Characters -->
+          <div v-if="prodTab === 'chars'" class="prod-content">
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+              <span class="dim" style="font-size:12px">画风</span>
+              <select class="config-select" :value="dramaStyleValue" @change="switchDramaStyle(($event.target as HTMLSelectElement).value)">
+                <option value="">跟随全局</option>
+                <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
+              </select>
+              <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="batchCharImages">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  批量生成
+                </button>
+              </div>
+            </div>
+            <AssetCardGrid
+              :items="charCards"
+              :model-value-of="c => charImageModels[c.id] || ''"
+              edit-title="编辑角色详情"
+              @open="c => $router.push(`/drama/${dramaId}/character/${c.id}`)"
+              @preview="openImageViewer"
+              @edit="c => openCharEditor(c.raw)"
+              @generate="c => genCharImg(c.id)"
+              @update:model="(c, v) => charImageModels[c.id] = v"
+            >
+              <template #name-extra="{ item }">
+                <select
+                  class="config-select char-style-select"
+                  :value="item.raw.style || ''"
+                  title="角色画风（留空跟随剧集）"
+                  @click.stop
+                  @change="switchCharStyle(item.raw, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">随剧集</option>
+                  <option v-for="(label, v) in styleLabels" :key="v" :value="v">{{ label }}</option>
+                </select>
+              </template>
+              <template #empty-icon>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              </template>
+            </AssetCardGrid>
+          </div>
+
+          <!-- Sub: Scenes -->
+          <div v-else-if="prodTab === 'scenes'" class="prod-content">
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ scenes.length }} 个场景</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="batchSceneImages">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  批量生成
+                </button>
+              </div>
+            </div>
+            <AssetCardGrid
+              :items="sceneCards"
+              wide
+              :model-value-of="s => sceneImageModels[s.id] || ''"
+              edit-title="编辑场景详情"
+              @open="s => $router.push(`/drama/${dramaId}/scene/${s.id}`)"
+              @preview="openImageViewer"
+              @edit="s => openSceneEditor(s.raw)"
+              @generate="s => genSceneImg(s.id)"
+              @update:model="(s, v) => sceneImageModels[s.id] = v"
+            >
+              <template #empty-icon>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+              </template>
+            </AssetCardGrid>
+          </div>
+
+          <!-- Sub: Dubbing -->
+          <div v-else-if="prodTab === 'dubbing'" class="prod-content">
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条可生成配音</span>
+              <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已生成</span>
+              <!-- 成本可见：原来只有模型页能看到钱，生成按钮旁没有（竞品都贴在按钮边） -->
+              <span
+                v-if="costEstimate && costEstimate.total_cost != null"
+                class="tag mono cost-est"
+                :title="estimateTitle"
+              >本集待生成 ≈ ¥{{ Number(costEstimate.total_cost).toFixed(2) }}</span>
+              <select class="config-select" :value="lockedAudioConfigId" @change="switchEpisodeConfig('audio', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in audioConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="batchShotTTS">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+                  批量生成
+                </button>
+              </div>
+            </div>
+
+            <div v-if="!ttsEligibleCount" class="step-empty" style="min-height:260px">
+              <div class="empty-visual">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+              </div>
+              <div class="empty-title">当前没有可生成的配音</div>
+              <div class="empty-desc">先在分镜里填写“角色名：台词”或“旁白：文案”，这里就会出现待生成的语音镜头。</div>
+            </div>
+
+            <DubbingPanel
+              v-else
+              :rows="dubRows"
+              :issue-count="dubIssueCount"
+              :stale-count="dubStaleCount"
+              @generate="row => genShotTTS(row.sb)"
+            />
+          </div>
+
+          <!-- Sub: Shots -->
+          <div v-else-if="prodTab === 'shots'" class="prod-content">
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
+              <span class="tag mono">{{ shotImgCount }}/{{ sbs.length }} 已有帧图</span>
+              <select class="config-select" :value="lockedImageConfigId" @change="switchEpisodeConfig('image', Number(($event.target as HTMLSelectElement).value))">
+                <option v-for="c in imageConfigs" :key="c.id" :value="c.id">{{ configLabel(c) }}</option>
+              </select>
+              <div class="ml-auto flex gap-1">
+                <BaseSelect v-model="frameMode" :options="frameModeOptions" placeholder="帧模式" searchable style="width:100px" />
+                <button v-if="gridImagePath" class="btn btn-sm" @click="reopenGridPreview">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                  查看当前宫格图
+                </button>
+                <button class="btn btn-primary btn-sm" @click="openGridTool">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                  批量生成
+                </button>
+              </div>
+            </div>
+
+            <div v-if="gridHistory.length" class="grid-history-panel">
+              <div v-if="gridImagePath" class="latest-grid-strip">
+                <button class="latest-grid-strip-thumb" @click="openImageViewer(mediaUrl(gridImagePath), '当前宫格图')">
+                  <img :src="mediaUrl(gridImagePath)" class="previewable-image" />
+                </button>
+                <div class="latest-grid-strip-copy">
+                  <div class="latest-grid-strip-head">
+                    <span class="tag mono">{{ gridActualLayout.rows }}x{{ gridActualLayout.cols }}</span>
+                    <span class="tag" v-if="gridRecoveredMode">{{ gridRecoveredMode }}</span>
+                  </div>
+                  <div class="latest-grid-strip-title">当前宫格图</div>
+                  <div class="latest-grid-strip-meta">
+                    <span v-if="gridRecoveredAt">{{ gridRecoveredAt }}</span>
+                    <span>可继续切割并分配</span>
+                  </div>
+                </div>
+                <div class="latest-grid-strip-actions">
+                  <button class="btn btn-sm" @click="reopenGridPreview">预览</button>
+                  <button class="btn btn-primary btn-sm" @click="continueGridSplit">继续切割</button>
+                </div>
+              </div>
+              <div class="grid-history-head">
+                <div>
+                  <div class="grid-history-title">历史宫格图</div>
+                  <div class="grid-history-subtitle">按需展开切换不同宫格图，不默认占用第一屏</div>
+                </div>
+                <button class="btn btn-sm" @click="showAllGridHistory = !showAllGridHistory">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline :points="showAllGridHistory ? '18 15 12 9 6 15' : '6 9 12 15 18 9'"/></svg>
+                  {{ showAllGridHistory ? '收起历史宫格图' : `展开全部 (${gridHistory.length})` }}
+                </button>
+              </div>
+              <div v-if="showAllGridHistory" class="grid-history-list">
+                <button
+                  v-for="item in gridHistory"
+                  :key="item.id"
+                  :class="['grid-history-item', { active: item.localPath === gridImagePath }]"
+                  @click="selectGridHistory(item)"
+                >
+                  <div class="grid-history-thumb">
+                    <img :src="mediaUrl(item.localPath)" class="previewable-image" />
+                  </div>
+                  <div class="grid-history-copy">
+                    <div class="grid-history-tags">
+                      <span class="tag mono">#{{ item.id }}</span>
+                      <span class="tag mono">{{ item.layout?.rows }}x{{ item.layout?.cols }}</span>
+                      <span class="tag">{{ item.modeLabel }}</span>
+                    </div>
+                    <div class="grid-history-meta">{{ item.createdAtLabel }}</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            <div class="frame-scroll">
+              <div class="frame-grid">
+                <div v-for="(sb, i) in sbs" :key="sb.id"
+                  :class="['frame-row', 'card', { active: selectedSb?.id === sb.id }]"
+                  :data-shot-id="sb.id"
+                  @click="selectedSb = sb">
+                  <!-- Info: number + type + desc -->
+                  <div class="frame-info">
+                    <div class="frame-top">
+                      <span class="frame-num">#{{ String(i+1).padStart(2,'0') }}</span>
+                      <span class="frame-badge">{{ sb.shot_type || sb.shotType || '—' }}</span>
+                    </div>
+                    <div class="frame-desc">{{ sb.description || sb.title || '—' }}</div>
+                    <div class="frame-meta">
+                      <span :class="['dot', getFirstFrame(sb) && 'ok', isPendingShotFrame(sb.id, 'first_frame') && 'pending']" />
+                      <span class="dim" style="font-size:11px">首帧</span>
+                      <span v-if="frameMode === 'first_last'" style="display:flex;align-items:center;gap:4px">
+                        <span :class="['dot', getLastFrame(sb) && 'ok', isPendingShotFrame(sb.id, 'last_frame') && 'pending']" />
+                        <span class="dim" style="font-size:11px">尾帧</span>
+                      </span>
+                    </div>
+                  </div>
+                  <!-- Thumbnails -->
+                  <div class="frame-thumbs">
+                    <div class="frame-thumb-wrap">
+                      <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'first_frame') && genShotFrame(sb, 'first_frame')">
+                        <img
+                          v-if="getFirstFrame(sb)"
+                          :src="mediaUrl(getFirstFrame(sb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getFirstFrame(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
+                        />
+                        <div v-else class="frame-thumb-empty">
+                          <Loader2 v-if="isPendingShotFrame(sb.id, 'first_frame')" :size="14" class="animate-spin" />
+                          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </div>
+                        <span v-if="getFirstFrame(sb)" class="frame-re">
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        </span>
+                      </div>
+                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'first_frame') ? '首帧生成中' : '首帧' }}</span>
+                    </div>
+                    <div v-if="frameMode === 'first_last'" class="frame-thumb-wrap">
+                      <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'last_frame') && genShotFrame(sb, 'last_frame')">
+                        <img
+                          v-if="getLastFrame(sb)"
+                          :src="mediaUrl(getLastFrame(sb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getLastFrame(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
+                        />
+                        <div v-else class="frame-thumb-empty">
+                          <Loader2 v-if="isPendingShotFrame(sb.id, 'last_frame')" :size="14" class="animate-spin" />
+                          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </div>
+                        <span v-if="getLastFrame(sb)" class="frame-re">
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        </span>
+                      </div>
+                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'last_frame') ? '尾帧生成中' : '尾帧' }}</span>
+                    </div>
+                    <div v-if="sb.keyframe_prompt || sb.keyframePrompt || getKeyframe(sb)" class="frame-thumb-wrap">
+                      <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'keyframe') && genShotFrame(sb, 'keyframe')">
+                        <img
+                          v-if="getKeyframe(sb)"
+                          :src="mediaUrl(getKeyframe(sb))"
+                          class="previewable-image"
+                          @click.stop="openImageViewer(mediaUrl(getKeyframe(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 关键帧`)"
+                        />
+                        <div v-else class="frame-thumb-empty">
+                          <Loader2 v-if="isPendingShotFrame(sb.id, 'keyframe')" :size="14" class="animate-spin" />
+                          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </div>
+                        <span v-if="getKeyframe(sb)" class="frame-re">
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        </span>
+                      </div>
+                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'keyframe') ? '关键帧生成中' : '关键帧' }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Grid Tool Dialog -->
+            <div v-if="gridDialog" class="overlay" @click.self="gridDialog = false">
+              <div class="card grid-tool">
+                <div class="grid-tool-head">
+                  <span style="font-size:15px;font-weight:600;font-family:var(--font-display)">批量生成镜头图</span>
+                  <button class="btn btn-ghost btn-icon ml-auto" @click="gridDialog = false">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  </button>
+                </div>
+
+                <!-- Step 0: Config -->
+                <div v-if="gridStep === 0" class="grid-tool-body">
+                  <div class="grid-mode-tabs">
+                    <button v-for="m in gridModes" :key="m.id"
+                      :class="['grid-mode-tab', { active: gridMode === m.id }]"
+                      @click="gridMode = m.id; gridSelected = []; gridSingleTarget = null; gridAssignmentsState = []">
+                      <span style="font-weight:600">{{ m.label }}</span>
+                      <span class="dim" style="font-size:11px">{{ m.desc }}</span>
+                    </button>
+                  </div>
+
+                  <div class="grid-config">
+                    <label class="field" style="flex:0 0 auto" v-if="gridMode !== 'multi_ref'">
+                      <span class="field-label">宫格</span>
+                      <BaseSelect v-model="gridLayout" :options="gridLayoutOptions" placeholder="宫格" style="width:90px" />
+                    </label>
+                    <div class="field" style="flex:1">
+                      <span class="field-label">
+                        {{ gridMode === 'multi_ref' ? '选择目标镜头' : '选择镜头' }}
+                        <span class="dim" v-if="gridMode !== 'multi_ref'">(已选 {{ gridSelected.length }})</span>
+                      </span>
+                    </div>
+                    <div style="align-self:flex-end" v-if="gridMode !== 'multi_ref'">
+                      <button class="btn btn-sm" @click="gridSelectAll">{{ gridSelected.length === sbs.length ? '取消全选' : '全选' }}</button>
+                    </div>
+                  </div>
+
+                  <div class="grid-pick-list">
+                    <label v-for="(sb, i) in sbs" :key="sb.id"
+                      :class="['grid-pick-item', { selected: gridMode === 'multi_ref' ? gridSingleTarget === sb.id : gridSelected.includes(sb.id) }]">
+                      <input v-if="gridMode === 'multi_ref'" type="radio" :value="sb.id" v-model="gridSingleTarget" name="grid-target" />
+                      <input v-else type="checkbox" :value="sb.id" v-model="gridSelected" />
+                      <span class="mono" style="font-size:11px;width:28px">#{{ String(i+1).padStart(2,'0') }}</span>
+                      <span class="truncate" style="flex:1;font-size:12px">{{ sb.description || sb.title || '—' }}</span>
+                    </label>
+                  </div>
+
+                  <div class="grid-tool-foot">
+                    <span v-if="gridCanStart" class="tag mono">{{ gridAutoLayout.rows }}x{{ gridAutoLayout.cols }} = {{ gridAutoLayout.rows * gridAutoLayout.cols }}格</span>
+                    <span class="dim" style="font-size:11px">{{ gridPromptLoading ? gridPromptStatus : gridSummary }}</span>
+                    <button class="btn btn-primary ml-auto" :disabled="!gridCanStart || gridPromptLoading" @click="generateGridPrompt">
+                      <Loader2 v-if="gridPromptLoading" :size="12" class="animate-spin" />
+                      <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                      {{ gridPromptLoading ? '生成中' : '生成提示词' }}
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Step 1: Prompt Preview -->
+                <div v-else-if="gridStep === 1" class="grid-tool-body">
+                  <div class="grid-prompt-summary">
+                    <div class="grid-prompt-label">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                      宫格图提示词
+                      <span v-if="gridPromptSource" class="tag ml-8">{{ gridPromptSource === 'agent' ? 'AI生成' : '模板兜底' }}</span>
+                    </div>
+                    <div class="grid-prompt-text">{{ gridPromptText || '（等待生成）' }}</div>
+                  </div>
+
+                  <div class="grid-blank-preview" :style="gridBlankStyle">
+                    <div v-for="(cell, i) in gridCellPrompts" :key="i" class="grid-blank-cell">
+                      <div class="grid-blank-cell-index">#{{ cell.shot_number }} {{ ({first_frame:'首帧',last_frame:'尾帧',reference:'参考'} as Record<string, string>)[cell.frame_type ?? ''] || '' }}</div>
+                      <div class="grid-blank-cell-desc">{{ cell.prompt }}</div>
+                    </div>
+                    <div v-for="i in Math.max(0, (gridAutoLayout.rows * gridAutoLayout.cols) - gridCellPrompts.length)" :key="'empty-'+i" class="grid-blank-cell empty">
+                      <div class="grid-blank-cell-index">空</div>
+                      <div class="grid-blank-cell-desc">—</div>
+                    </div>
+                  </div>
+
+                  <div class="grid-tool-foot">
+                    <button class="btn" @click="gridStep = 0">上一步</button>
+                    <button class="btn ml-auto" @click="generateGridPrompt" :disabled="gridPromptLoading">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                      重新生成
+                    </button>
+                    <button class="btn btn-primary" @click="startGridGen">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                      生成宫格图
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Step 2: Generating -->
+                <div v-else-if="gridStep === 2" class="grid-tool-body" style="align-items:center;justify-content:center;min-height:300px">
+                  <Loader2 :size="28" class="animate-spin" style="color:var(--accent)" />
+                  <div class="loading-text" style="margin-top:12px">宫格图生成中...</div>
+                  <div class="dim" style="font-size:11px;margin-top:6px">{{ gridStatusText }}</div>
+                </div>
+
+                <!-- Step 3: Preview -->
+                <div v-else-if="gridStep === 3" class="grid-tool-body grid-tool-body-preview">
+                  <div class="grid-preview-layout">
+                    <div class="grid-preview-pane">
+                      <div class="grid-preview-wrap">
+                        <div class="grid-preview-stage">
+                          <img
+                            :src="mediaUrl(gridImagePath)"
+                            class="grid-preview-img previewable-image"
+                            @click.stop="openImageViewer(mediaUrl(gridImagePath), '宫格图预览')"
+                          />
+                          <div class="grid-overlay" :style="gridOverlayStyle">
+                            <button
+                              v-for="(a, i) in gridAssignments"
+                              :key="i"
+                              type="button"
+                              :class="['grid-overlay-cell', activeGridCell === i && 'active']"
+                              @click="focusGridCell(i)"
+                            >
+                              <span class="grid-cell-label">{{ gridCellLabel(a) }}</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="grid-adjust-summary">
+                        <span class="tag mono">{{ gridActualLayout.rows }}x{{ gridActualLayout.cols }} = {{ gridActualLayout.rows * gridActualLayout.cols }}格</span>
+                        <span class="dim" style="font-size:12px">{{ gridAssignedCount }}/{{ gridAssignments.length }} 格已分配</span>
+                        <span class="tag" v-if="gridAssignedCount < gridAssignments.length">未分配格子会被忽略，不会写回分镜</span>
+                      </div>
+                    </div>
+                    <div class="grid-assignment-pane">
+                      <div class="grid-assign-head">
+                        <div class="grid-assign-title">格子分配</div>
+                        <div class="grid-assign-subtitle">切分后由你自己决定每格对应哪个分镜</div>
+                      </div>
+                      <div v-if="gridAssignmentTotalPages > 1" class="grid-assign-pagination">
+                        <button class="btn btn-sm" :disabled="gridAssignmentPage === 0" @click="gridAssignmentPage--">上一页</button>
+                        <span class="dim">第 {{ gridAssignmentPage + 1 }}/{{ gridAssignmentTotalPages }} 页</span>
+                        <span class="dim">{{ gridAssignmentPageStart + 1 }}-{{ gridAssignmentPageEnd }} / {{ gridAssignments.length }}</span>
+                        <button class="btn btn-sm ml-auto" :disabled="gridAssignmentPage >= gridAssignmentTotalPages - 1" @click="gridAssignmentPage++">下一页</button>
+                      </div>
+                      <div class="grid-assign-columns">
+                        <span>格</span>
+                        <span>镜头</span>
+                        <span>类型</span>
+                        <span>当前绑定</span>
+                      </div>
+                      <div class="grid-assign-info">
+                        <div v-for="item in pagedGridAssignments" :key="item.index" :class="['grid-assign-row', activeGridCell === item.index && 'active']">
+                          <span class="grid-assign-index">格{{ item.index + 1 }}</span>
+                          <BaseSelect
+                            :model-value="item.assignment.storyboard_id ?? undefined"
+                            :options="gridAssignmentShotOptions"
+                            placeholder="选择镜头"
+                            @update:model-value="updateGridAssignment(item.index, 'storyboard_id', $event)"
+                          />
+                          <BaseSelect
+                            :model-value="item.assignment.frame_type"
+                            :options="gridFrameTypeOptions"
+                            placeholder="帧类型"
+                            style="width:100%"
+                            @update:model-value="updateGridAssignment(item.index, 'frame_type', $event)"
+                          />
+                          <span class="grid-assign-bind">{{ gridCellTitle(item.assignment.storyboard_id) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="grid-tool-foot">
+                    <button class="btn" @click="gridStep = 1">返回</button>
+                    <button class="btn btn-primary ml-auto" @click="doGridSplit">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                      切分并分配
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Step 4: Done -->
+                <div v-else-if="gridStep === 4" class="grid-tool-body" style="align-items:center;justify-content:center;min-height:200px">
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  <div style="font-size:17px;font-weight:700;font-family:var(--font-display);margin-top:8px">分配完成</div>
+                  <div class="dim" style="font-size:13px;margin-top:4px">{{ gridAssignedCount }} 格已分配</div>
+                  <button class="btn btn-primary" style="margin-top:16px" @click="gridDialog = false; refresh()">关闭</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub: Videos -->
+          <ShotMediaPanel
+            v-else-if="prodTab === 'videos'"
+            :sbs="sbs"
+            mode="videos"
+            :count-label="`${shotVidCount}/${sbs.length} 已生成`"
+            :cost-estimate="costEstimate"
+            :estimate-title="estimateTitle"
+            :is-pending="isPendingVideo"
+            :fail-message="videoFailMessage"
+            @act="genVid"
+            @edit="openVideoEditor"
+            @preview="openImageViewer"
+          >
+            <template #toolbar>
+              <button class="btn btn-sm" @click="openPlaylist">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                连播预览
+              </button>
+              <button class="btn btn-sm" @click="batchVideos">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                批量视频
+              </button>
+            </template>
+            <template #empty-icon>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </template>
+            <template #action-icon>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </template>
+          </ShotMediaPanel>
+
+          <!-- Sub: Compose -->
+          <ShotMediaPanel
+            v-else-if="prodTab === 'compose'"
+            :sbs="sbs"
+            mode="compose"
+            :count-label="`${composedCount}/${sbs.length} 已合成`"
+            :cost-estimate="costEstimate"
+            :estimate-title="estimateTitle"
+            :is-pending="isPendingCompose"
+            :fail-message="composeFailMessage"
+            @act="doCompose"
+            @preview="openImageViewer"
+          >
+            <template #toolbar>
+              <button class="btn btn-sm" @click="batchCompose">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                批量合成
+              </button>
+            </template>
+            <template #empty-icon>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </template>
+            <template #action-icon>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </template>
+          </ShotMediaPanel>
+
+          <!-- Production Navigator -->
+        </template>
+      </div>
+
+      <!-- ===== EXPORT PANEL ===== -->
+      <div v-else class="content-panel">
+        <div v-if="!sbs.length" class="step-empty" style="flex:1">
+          <div class="empty-visual">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </div>
+          <div class="empty-title">尚未准备就绪</div>
+          <div class="empty-desc">请先完成分镜和制作流程</div>
+          <button class="btn btn-primary" @click="panel = 'script'">前往剧本</button>
+        </div>
+        <div v-else class="export-split">
+          <div class="export-main">
+            <template v-if="mergeUrl">
+              <video :src="mediaUrl(mergeUrl)" controls class="export-video" />
+              <div class="export-bar">
+                <span class="tag tag-success">拼接完成</span>
+                <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
+                <select class="config-select ml-auto" v-model="exportScope" :disabled="exporting">
+                  <option value="all">导出全部</option>
+                  <option value="video">仅成片</option>
+                  <option value="assets">仅素材</option>
+                </select>
+                <button class="btn" :disabled="exporting" @click="doExportZip">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+                  {{ exporting ? '打包中…' : '打包导出' }}
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportEdl">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+                  EDL 导出
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportJianying">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                  剪映草稿
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportLedger('md')" title="导出可复现工程账本（Markdown 报告）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+                  工程账本
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportLedger('json')" title="导出完整结构化账本（JSON）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  JSON
+                </button>
+                <button class="btn" :disabled="exporting" @click="doCheckStale" :title="staleSummary">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><polyline points="21 3 21 9 15 9"/></svg>
+                  {{ staleCount ? `stale×${staleCount}` : '指纹校验' }}
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportQcReport('md')" title="导出 QC 报告（每镜评分 + 问题清单 + 时间线汇总，Markdown）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                  QC 报告
+                </button>
+                <button class="btn" :disabled="exporting" @click="doExportContactSheet" title="导出联系表（每镜首尾帧缩略图 + 元信息网格，HTML）">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+                  联系表
+                </button>
+                <a :href="mediaUrl(mergeUrl)" download class="btn btn-primary" @click.prevent="downloadMerged">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  下载视频
+                </a>
+              </div>
+            </template>
+            <template v-else>
+              <div class="step-empty">
+                <div class="empty-visual">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                </div>
+                <div class="empty-title">拼接全集视频</div>
+                <div class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
+                <button class="btn btn-primary" :disabled="composedCount === 0" @click="doMerge" style="margin-top:12px">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                  开始拼接
+                </button>
+              </div>
+            </template>
+          </div>
+          <div class="export-list">
+            <div class="export-list-head">镜头概览</div>
+            <div class="export-list-body">
+              <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
+                <span class="mono dim" style="font-size:10px">#{{ String(i+1).padStart(2,'0') }}</span>
+                <span class="truncate" style="flex:1;font-size:11px">{{ sb.description || sb.title || '—' }}</span>
+                <span v-if="shotTag(sb)" class="shot-tag" :title="`景别/机位/运镜：${sb.shot_type || '—'} / ${sb.angle || '—'} / ${sb.movement || '—'}`">{{ shotTag(sb) }}</span>
+                <span v-if="routeTag(sb.route)" class="route-tag" :title="sb.route_reason || ''">{{ routeTag(sb.route) }}</span>
+                <span :class="['dot', hasComposed(sb) && 'ok']" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 统一配乐方案 -->
+        <div class="bgm-panel">
+          <div class="bgm-panel-head">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            <div class="bgm-head-text">
+              <div class="bgm-title">统一配乐方案</div>
+              <div class="bgm-sub">一条背景音乐贯穿全片，跨镜头自然过渡，避免割裂感</div>
+            </div>
+          </div>
+          <div class="bgm-controls">
+            <div class="bgm-file">
+              <span class="field-label">配乐文件</span>
+              <div class="bgm-file-row">
+                <button class="btn btn-sm" :disabled="bgmUploading" @click="triggerBgmUpload">
+                  {{ bgmUploading ? '上传中…' : (bgmUrl ? '更换配乐' : '上传配乐') }}
+                </button>
+                <span v-if="bgmUrl" class="bgm-filename truncate">{{ bgmName }}</span>
+                <span v-else class="dim" style="font-size:12px">未设置，拼接时将无背景音乐</span>
+                <button v-if="bgmUrl" class="btn btn-sm btn-ghost" @click="clearBgm">移除</button>
+              </div>
+            </div>
+            <label class="bgm-slider">
+              <span class="field-label">音量 <span class="mono">{{ Math.round(bgmVolume * 100) }}%</span></span>
+              <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" @input="markBgmDirty" />
+            </label>
+            <label class="bgm-num">
+              <span class="field-label">淡入 (秒)</span>
+              <input v-model.number="bgmFadeIn" type="number" min="0" max="10" step="0.5" class="input" @input="markBgmDirty" />
+            </label>
+            <label class="bgm-num">
+              <span class="field-label">淡出 (秒)</span>
+              <input v-model.number="bgmFadeOut" type="number" min="0" max="10" step="0.5" class="input" @input="markBgmDirty" />
+            </label>
+            <button class="btn btn-primary" :disabled="bgmSaving" @click="saveBgm">
+              {{ bgmSaving ? '保存中…' : '保存配乐方案' }}
+            </button>
+          </div>
+          <input ref="bgmInput" type="file" accept="audio/*" style="display:none" @change="onPickBgm" />
+        </div>
+      </div>
+
+      <div v-if="showBottomBubble" class="step-bubble">
+        <button class="bubble-btn" :disabled="!canBubblePrev" @click="goBubblePrev">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+          </svg>
+          {{ bubblePrevLabel }}
+        </button>
+
+        <div class="bubble-dots">
+          <button
+            v-for="step in bubbleSteps"
+            :key="step.key"
+            :class="['bubble-dot', { done: step.done, current: step.key === activeBubbleKey }]"
+            @click="goSubStep(step.key)"
+            :title="step.label"
+          ></button>
+        </div>
+
+        <button class="bubble-btn primary" :disabled="!canBubbleNext" @click="goBubbleNext">
+          {{ bubbleNextLabel }}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- 流水线清单：先让人看清「要跑哪几步、每步差几项」，再点开始。
+           未勾选的步不跑；已齐的步直接标灰跳过（不是隐藏，隐掉会让人以为漏了） -->
+      <div v-if="chainOpen" class="overlay chain-overlay" @click.self="chainRunning ? null : (chainOpen = false)">
+        <div class="card chain-dialog">
+          <div class="chain-head">
+            <div>
+              <div class="chain-title">从当前步继续到成片</div>
+              <div class="chain-sub">
+                共 {{ chainPlannedSteps.length }} 步待跑 · 每步只补缺的，已齐的自动跳过
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-icon" :disabled="chainRunning" @click="chainOpen = false">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="chain-body">
+            <div
+              v-for="(s, i) in chainSteps"
+              :key="s.id"
+              :class="['chain-row', chainState[s.id] || '', { idle: !s.todo, running: chainActiveId === s.id }]"
+            >
+              <label class="chain-check">
+                <input
+                  type="checkbox"
+                  :checked="s.todo > 0 && !chainSkips.includes(s.id)"
+                  :disabled="chainRunning || !s.todo"
+                  @change="toggleChainSkip(s.id)"
+                />
+              </label>
+              <span class="chain-idx">{{ i + 1 }}</span>
+              <span class="chain-copy">
+                <span class="chain-label">
+                  {{ s.label }}
+                  <span v-if="s.todo" class="chain-todo">差 {{ s.todo }}</span>
+                </span>
+                <span class="chain-hint">{{ s.todo ? s.hint : '本步已齐，无需执行' }}</span>
+              </span>
+              <span class="chain-state">
+                <template v-if="chainState[s.id] === 'running'">执行中…</template>
+                <template v-else-if="chainState[s.id] === 'done'">完成</template>
+                <template v-else-if="chainState[s.id] === 'failed'">未完成</template>
+                <template v-else-if="chainState[s.id] === 'skipped'">已停</template>
+                <template v-else-if="!s.todo">跳过</template>
+                <template v-else-if="chainSkips.includes(s.id)">未选</template>
+                <template v-else>待执行</template>
+              </span>
+            </div>
+            <div v-if="!chainTodoSteps.length" class="chain-empty">
+              这一集没有缺的东西了 —— 直接去「导出」看成片。
+            </div>
+          </div>
+          <div class="chain-foot">
+            <span class="chain-note">
+              停止 = 不再提交新任务；已经提交出去的生成会继续跑完（前端叫不停远端）。
+            </span>
+            <button v-if="chainRunning" class="btn" @click="chainAbort = true">停止提交</button>
+            <button
+              v-else
+              class="btn btn-primary"
+              :disabled="!chainPlannedSteps.length"
+              @click="runChain()"
+            >开始（{{ chainPlannedSteps.length }} 步）</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="imageViewer.open && imageViewer.src" class="overlay image-viewer-overlay" @click.self="closeImageViewer">
+        <div class="card image-viewer-dialog">
+          <div class="image-viewer-head">
+            <div class="image-viewer-title">{{ imageViewer.title || '图片预览' }}</div>
+            <button class="btn btn-ghost btn-icon" @click="closeImageViewer">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="image-viewer-body">
+            <img :src="imageViewer.src" :alt="imageViewer.title || '图片预览'" class="image-viewer-img" />
+          </div>
+        </div>
+      </div>
+
+      <div v-if="playlistPlayer.open" class="overlay playlist-overlay" @click.self="closePlaylist">
+        <div class="card playlist-dialog">
+          <div class="image-viewer-head">
+            <div class="image-viewer-title">连播预览（{{ playIndex + 1 }}/{{ playlist.length }}）</div>
+            <div class="playlist-head-right">
+              <label class="playlist-toggle" title="播放结束后自动切到下一个镜头">
+                <input type="checkbox" v-model="playlistAutoNext" />
+                <span>自动连播</span>
+              </label>
+              <button class="btn btn-ghost btn-icon" @click="closePlaylist">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="playlist-layout">
+            <div class="playlist-main">
+              <video
+                :key="playIndex"
+                ref="videoEl"
+                :src="mediaUrl(playlist[playIndex]?.url || '')"
+                class="playlist-video"
+                controls
+                autoplay
+                playsinline
+                @ended="onPlayEnded"
+                @play="playlistPaused = false"
+                @pause="playlistPaused = true"
+              />
+              <div class="playlist-caption dim">{{ playlist[playIndex]?.title || '' }}</div>
+              <div class="playlist-hint">← → 切换镜头 · 空格 播放/暂停 · Esc 关闭</div>
+            </div>
+            <div class="playlist-sidebar">
+              <button
+                v-for="(p, i) in playlist"
+                :key="i"
+                class="playlist-side-item"
+                :class="{ active: i === playIndex }"
+                @click="playAt(i)"
+              >
+                <span class="playlist-side-num">{{ String(i + 1).padStart(2, '0') }}</span>
+                <span class="playlist-side-title">{{ p.title }}</span>
+                <svg v-if="i === playIndex" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="playlist-bar">
+            <button class="btn btn-sm" @click="prevPlay">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+              上一个
+            </button>
+            <button class="btn btn-sm" @click="togglePlayPause">
+              <svg v-if="playlistPaused" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              {{ playlistPaused ? '播放' : '暂停' }}
+            </button>
+            <button class="btn btn-sm" @click="nextPlay">
+              下一个
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+            </button>
+            <button class="btn btn-sm btn-primary ml-auto" @click="closePlaylist">关闭</button>
+          </div>
+        </div>
+      </div>
+    </main>
+    </div>
+  </div>
+
+  <!-- ====== v2 编辑器弹窗 ====== -->
+  <CharacterEditor
+    :visible="showCharEditor"
+    :character="editingChar"
+    :episode-id="epId"
+    @close="closeCharEditor"
+    @saved="refresh"
+  />
+  <SceneEditor
+    :visible="showSceneEditor"
+    :scene="editingScene"
+    :episode-id="epId"
+    @close="closeSceneEditor"
+    @saved="refresh"
+  />
+  <VideoEditor
+    :visible="showVideoEditor"
+    :storyboard="editingVideoStoryboard"
+    :video-record="editingVideo"
+    :characters="chars"
+    :config-id="lockedVideoConfigId ?? undefined"
+    :fail-reason="editingVideoFailReason"
+    :neighbors="editingVideoNeighbors"
+    @close="closeVideoEditor"
+    @regenerated="refresh"
+  />
+  <AgentOutputDialog
+    v-model:open="agentOutputOpen"
+    :output="agentOutput"
+    :busy="rn"
+    @retry="retryAgentOutput"
+  />
+</template>
+
+<script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
+import { ART_STYLE_LABELS } from '~/utils/artStyles'
+// 分镜纯取值（帧/视频/台词判定、角色标签、配置显示名）：与本页状态无关，抽到 utils 共享
+import {
+  ROLE_TAGS, roleTagCls, inferRoleTags, inferCharRoleTag, inferVoiceGender, configLabel,
+  getFirstFrame, getLastFrame, getKeyframe, getStoryboardCover, getVideoUrl, getComposedVideoUrl,
+  hasImg, hasVid, hasComposed, getDialogueLines, getDialogueText,
+  hasDialogue, hasTTS, getTTSUrl,
+} from '~/utils/storyboard'
+import { toast } from 'vue-sonner'
+import {
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, Clapperboard, Download,
+  Loader2, Monitor, Smartphone, Square,
+} from 'lucide-vue-next'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, uploadAPI, propsLibraryAPI, assetVersionsAPI, usageAPI, generationsAPI, presetsAPI } from '~/composables/useApi'
+import { useAgent } from '~/composables/useAgent'
+import BaseSelect from '~/components/BaseSelect.vue'
+import EpisodePreflight from '~/components/EpisodePreflight.vue'
+import ShotMediaPanel from '~/components/ShotMediaPanel.vue'
+import AssetCardGrid from '~/components/AssetCardGrid.vue'
+import DubbingPanel from '~/components/DubbingPanel.vue'
+import ModelSelector from '~/components/ModelSelector.vue'
+import CharacterEditor from '~/components/CharacterEditor.vue'
+import SceneEditor from '~/components/SceneEditor.vue'
+import VideoEditor from '~/components/VideoEditor.vue'
+import { useConfirm } from '~/composables/useConfirm'
+import { mediaUrl } from '~/utils/apiBase'
+import { useTaskCenter } from '~/composables/useTaskCenter'
+
+const { confirm } = useConfirm()
+// 任务台账（右下角）：本页所有异步生成动作都要在它上面「开一条 → 报阶段 → 收尾」，
+// 这样切页回来还看得见哪条在跑、哪条失败、失败该改什么（见 composable 文件头）
+const taskCenter = useTaskCenter()
+
+// 桌面端：布局由 router/index.ts 的 `meta: { layout: 'studio' }` 声明，
+// 不使用 Nuxt 的 definePageMeta 宏（Vite 下它是未定义标识符，会直接构建失败）。
+
+const route = useRoute()
+const router = useRouter()
+const dramaId = Number(route.params.id)
+const episodeNumber = Number(route.params.episodeNumber)
+
+/**
+ * 批量配音/试听同时最多提交几条（走 `runPool`）。
+ *
+ * 声音合成在远端服务上：一集 40 个镜头一起打过去，最常见的结果是 429 **整批**失败。
+ * 3 条既不空转也不会被限流（单条几秒到十几秒，节奏刚好）。
+ * 注意这跟视频不是一回事：视频卡的是**本地显存**（见 `VIDEO_BATCH_LIMIT`）。
+ */
+const TTS_BATCH_LIMIT = 3
+
+/**
+ * 任务中心「失败 → 去处理 / 换模型」的落点：把「哪一屏 / 哪个页签 / 哪个镜头」写进 query。
+ *
+ * 为什么用 URL 而不是闭包直接设 ref：闭包只在**本页还挂着**时有效。用户切到项目页或模型页后，
+ * 再点任务中心的「去处理」，闭包把 ref 设了也没人看得见（静默无效，最难查 ✓✗）；
+ * 写进 URL 则切页、刷新、隔十分钟再点，都还能落回同一格。
+ * 例：`/drama/3/episode/1?panel=production&tab=videos&shot=12`
+ */
+function taskRoute(tab: string, shotId?: number): string {
+  const q = new URLSearchParams({ panel: 'production', tab })
+  if (shotId) q.set('shot', String(shotId))
+  return `/drama/${dramaId}/episode/${episodeNumber}?${q.toString()}`
+}
+
+/** 拼接/导出类任务的落点（导出是第三个大面板，不走 `tab`） */
+function exportRoute(): string {
+  return `/drama/${dramaId}/episode/${episodeNumber}?panel=export`
+}
+
+/**
+ * 应用任务中心带过来的落点 query（见 `taskRoute`）。
+ *
+ * ⚠️ 应用完必须把这三个参数从 URL 上摘掉：否则用户照着修好之后，再点同一条任务的
+ * 「去处理」，query 一个字都没变 ⇒ vue-router 不触发 watcher ⇒ 按钮看起来像坏了 ✓✗。
+ */
+function applyTaskRouteQuery() {
+  const q = route.query
+  if (q.panel !== 'production' && q.panel !== 'export') return
+  panel.value = q.panel === 'export' ? 'export' : 'production'
+  if (q.panel === 'export') {
+    const restExport: Record<string, any> = { ...q }
+    delete restExport.panel
+    delete restExport.tab
+    delete restExport.shot
+    void router.replace({ query: restExport })
+    return
+  }
+  const tab = typeof q.tab === 'string' ? q.tab : ''
+  if (tab && prodTabDefs.value.some(t => t.id === tab)) prodTab.value = tab
+  const shotId = Number(q.shot || 0)
+  if (shotId) {
+    const sb = sbs.value.find(s => s.id === shotId)
+    if (sb) {
+      selectedSb.value = sb
+      // 等一帧让页签内容先渲染，再滚到那个镜头（`data-shot-id` 只在「镜头图片」页签名下存在，
+      // 其它页签拿不到节点，scroll 会静默跳过 —— 那是可接受的降级）
+      setTimeout(() => {
+        document.querySelector(`[data-shot-id="${sb.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 120)
+    }
+  }
+  const rest: Record<string, any> = { ...q }
+  delete rest.panel
+  delete rest.tab
+  delete rest.shot
+  void router.replace({ query: rest })
+}
+
+// 返回项目页：有浏览历史时后退，直接访问/刷新（无历史）时兜底跳转
+function goBack() {
+  const state = window.history.state
+  if (state && state.back) {
+    router.back()
+  } else {
+    router.push(`/drama/${dramaId}`)
+  }
+}
+
+const drama = ref<any>(null), episode = ref<any>(null), chars = ref<any[]>([]), scenes = ref<any[]>([]), sbs = ref<any[]>([]), mergeData = ref<any>(null), dubMatchCache = ref<any>({})
+/**
+ * 模板里读表单值 ✓（`input` / `select` / `textarea` 都有 `value: string` ✓）
+ *
+ * ⚠️ 2026-09-21：模板里直接写 `formValue($event)` 会被类型检查拦下 ✗ ——
+ * `EventTarget` **没有** `value` 属性 ✓✗ 且 `$event.target` 可能为 `null` ✓
+ * ⇒ 本页曾因此冒出一批 TS18047 + TS2339 ✓（同一个根因 ✓）。
+ * ⇒ 统一走这里：**既不写 `as any`** ✗（那等于关掉检查 ✓），也不漏 null ✓。
+ */
+type ValueElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+function formValue(event: Event): string {
+  return (event.target as ValueElement | null)?.value ?? ''
+}
+
+const panel = ref('script')
+const { running: rn, runningType: rt, elapsed: agentElapsed, progressText: agentProgress, lastOutput: agentOutput, run: runAgent, retry: retryAgentRun } = useAgent()
+
+// AI 只「说了话」没落库时，必须让人看见它说了什么 —— 否则界面毫无变化，看着像没返回
+const agentOutputOpen = ref(false)
+watch(agentOutput, (value) => {
+  if (value && !value.acted) agentOutputOpen.value = true
+})
+function retryAgentOutput() {
+  agentOutputOpen.value = false
+  retryAgentRun()
+}
+
+const localRaw = ref(''), localScript = ref('')
+const scriptEditing = ref(false)
+const rawContent = computed(() => episode.value?.content || '')
+const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
+
+// 解析改写后的剧本为可预览的块结构（场景头 / 对白 / 叙述）
+const scriptBlocks = computed(() => {
+  const blocks = []
+  for (const raw of (localScript.value || '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('#')) {
+      blocks.push({ type: 'scene', text: line.replace(/^#+\s*/, '') })
+      continue
+    }
+    const m = line.match(/^([^：:]{1,12}?)[：:]\s*(.*)$/)
+    if (m) {
+      const speaker = m[1].trim()
+      const rest = (m[2] || '').trim()
+      const am = rest.match(/^（([^）]*)）\s*(.*)$/)
+      blocks.push(am
+        ? { type: 'dialog', speaker, action: am[1], line: am[2] }
+        : { type: 'dialog', speaker, action: '', line: rest })
+      continue
+    }
+    blocks.push({ type: 'narr', text: line })
+  }
+  return blocks
+})
+const epId = computed(() => episode.value?.id || 0)
+const rawLen = computed(() => localRaw.value.replace(/\s/g, '').length || 0)
+const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 0)
+const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
+const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
+const composedCount = computed(() => sbs.value.filter(hasComposed).length)
+const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+
+/**
+ * 「下载视频」不能只靠 `<a download>`：桌面壳里 mediaUrl 产出的是跨源地址，
+ * 浏览器会忽略 `download` 而直接导航 ⇒ 整个 SPA 被视频顶掉。取成 blob 再存。
+ */
+async function downloadMerged() {
+  const url = mediaUrl(mergeUrl.value)
+  if (!url) return
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = decodeURIComponent(url.split('/').pop() || 'merged.mp4')
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+  } catch (e) {
+    toast.error(`下载失败：${(e as Error).message}`)
+  }
+}
+
+const scriptStep = ref(0)
+const prodTab = ref('chars')
+const prodTabIdx = computed({
+  get: () => prodTabDefs.value.findIndex(t => t.id === prodTab.value),
+  set: (v) => { prodTab.value = prodTabDefs.value[v]?.id || 'chars' },
+})
+const frameMode = ref('first')
+const fallbackVoiceProfiles = [
+  { id: 'alloy', label: 'Alloy', gender: '中性', traits: '平衡、自然、克制', suitable: '通用叙述、旁白、需要稳定输出的角色', roleTags: ['旁白', '配角'] },
+  { id: 'echo', label: 'Echo', gender: '男声', traits: '低沉、稳重、冷静', suitable: '成熟男性、父辈、旁白、压迫感角色', roleTags: ['旁白', '反派'] },
+  { id: 'fable', label: 'Fable', gender: '男声', traits: '温暖、讲述感、表现力强', suitable: '男主、成长型角色、叙事担当', roleTags: ['主角'] },
+  { id: 'onyx', label: 'Onyx', gender: '男声', traits: '深沉、有力、权威', suitable: '反派、强势角色、掌控型人物', roleTags: ['反派'] },
+  { id: 'nova', label: 'Nova', gender: '女声', traits: '温柔、甜润、亲和', suitable: '女主、母亲、柔和配角', roleTags: ['主角', '配角'] },
+  { id: 'shimmer', label: 'Shimmer', gender: '女声', traits: '明亮、活泼、年轻', suitable: '少女、轻快角色、跳脱配角', roleTags: ['主角', '配角'] },
+]
+const voiceProfiles = ref(fallbackVoiceProfiles)
+
+// ====== v2: 编辑器状态 ======
+const editingChar = ref<any>(null)
+const showCharEditor = ref(false)
+const editingScene = ref<any>(null)
+const showSceneEditor = ref(false)
+const editingVideo = ref<any>(null)
+const editingVideoStoryboard = ref<any>(null)
+const editingVideoFailReason = ref('')
+const editingVideoNeighbors = ref<{ prev?: any; next?: any }>({})
+const showVideoEditor = ref(false)
+const imageGenerationModel = ref('')
+const videoGenerationModel = ref('')
+const aiSuggesting = ref(false)
+const continueBusy = ref(false)
+const continueTarget = ref<'raw' | 'script' | ''>('')
+const splittingShot = ref(false)
+const videoAspectRatio = ref('16:9')
+const aspectRatioOptions = [
+  { value: '16:9', label: '横屏', icon: Monitor },
+  { value: '9:16', label: '竖屏', icon: Smartphone },
+  { value: '1:1', label: '方形', icon: Square },
+]
+const regeneratingShotIds = ref<number[]>([])
+
+// ====== 统一配乐方案 ======
+const bgmUrl = ref('')
+const bgmVolume = ref(0.3)
+const bgmFadeIn = ref(1.5)
+const bgmFadeOut = ref(2.0)
+const bgmUploading = ref(false)
+const bgmSaving = ref(false)
+const bgmInput = ref<HTMLInputElement | null>(null)
+// 用户已手工改动但尚未保存的配乐参数，不能被 refresh 用服务端值覆盖
+const bgmDirty = ref(false)
+const bgmName = computed(() => {
+  if (!bgmUrl.value) return ''
+  const seg = bgmUrl.value.split('/').pop() || ''
+  return decodeURIComponent(seg) || '已设置配乐'
+})
+
+function openCharEditor(c: any) { useRouter().push(`/drama/${dramaId}/character/${c.id}`) }
+function closeCharEditor() { showCharEditor.value = false }
+function openSceneEditor(s: any) { useRouter().push(`/drama/${dramaId}/scene/${s.id}`) }
+function closeSceneEditor() { showSceneEditor.value = false }
+function openVideoEditor(sb: any, vr?: any) {
+  editingVideoStoryboard.value = sb
+  editingVideo.value = vr || null
+  editingVideoFailReason.value = failedVideoMessages.value[sb.id] || ''
+  editingVideoNeighbors.value = {
+    prev: getPreviousStoryboard(sb),
+    next: getNextStoryboard(sb),
+  }
+  showVideoEditor.value = true
+}
+function closeVideoEditor() { showVideoEditor.value = false }
+
+async function regenerateShotImage(sb: any, model?: string) {
+  if (!sb.id) return
+  regeneratingShotIds.value.push(sb.id)
+  try {
+    await storyboardAPI.regenerateImage(sb.id, {
+      prompt: sb.customImagePrompt || sb.custom_image_prompt || undefined,
+      negative_prompt: sb.negativePrompt || sb.negative_prompt || undefined,
+      model: model || undefined,
+    })
+    await refresh()
+  } catch (err: any) {
+    toast.error(err?.message || '生成失败')
+  } finally {
+    regeneratingShotIds.value = regeneratingShotIds.value.filter(id => id !== sb.id)
+  }
+}
+const voiceRoleFilter = ref('')
+const filteredVoiceProfiles = computed(() =>
+  voiceRoleFilter.value
+    ? voiceProfiles.value.filter(v => (v.roleTags || []).includes(voiceRoleFilter.value))
+    : voiceProfiles.value
+)
+
+// ====== 音色独立试听 ======
+const previewingVoiceId = ref<string | null>(null)
+const voicePreviewMap = ref<Record<string, string>>({})
+async function previewVoice(voiceId: string) {
+  previewingVoiceId.value = voiceId
+  try {
+    const res: any = await voicesAPI.preview(voiceId)
+    const url = res?.url
+    if (url) voicePreviewMap.value[voiceId] = url
+    else toast.error('试听生成失败，未返回音频地址')
+  } catch (e: any) {
+    console.error('Voice preview failed', e)
+    toast.error(e?.message || '试听生成失败')
+  } finally {
+    previewingVoiceId.value = null
+  }
+}
+
+// ====== 声纹克隆 ======
+const cloningVoice = ref(false)
+const cloneVoiceName = ref('')
+const clonePromptText = ref('')
+const generatingVoices = ref(false)
+const cloneFile = ref<File | null>(null)
+const cloneFileName = ref('')
+function onCloneFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0] || null
+  cloneFile.value = file
+  cloneFileName.value = file ? file.name : ''
+  if (file) input.value = ''
+}
+async function cloneVoiceNow() {
+  if (!cloneFile.value) return
+  cloningVoice.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', cloneFile.value)
+    if (cloneVoiceName.value.trim()) fd.append('voice_name', cloneVoiceName.value.trim())
+    if (clonePromptText.value.trim()) fd.append('prompt_text', clonePromptText.value.trim())
+    await voicesAPI.clone(fd)
+    toast.success('音色克隆成功，已加入音色库')
+    cloneFile.value = null
+    cloneFileName.value = ''
+    cloneVoiceName.value = ''
+    clonePromptText.value = ''
+    await loadVoices()
+  } catch (e: any) {
+    console.error('Voice clone failed', e)
+    toast.error(e?.message || '音色克隆失败')
+  } finally {
+    cloningVoice.value = false
+  }
+}
+const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({
+  label: `${v.label} · ${v.traits}${(v.roleTags || []).length ? ` · ${v.roleTags.join('/')}` : ''}`,
+  value: v.id,
+})))
+const frameModeOptions = [{ label: '仅首帧', value: 'first' }, { label: '首尾帧', value: 'first_last' }]
+const gridLayoutOptions = [
+  { label: '2x2', value: '2x2' },
+  { label: '3x3', value: '3x3' },
+  { label: '4x4', value: '4x4' },
+  { label: '5x5', value: '5x5' },
+]
+const imageConfigs = ref<any[]>([])
+const videoConfigs = ref<any[]>([])
+const audioConfigs = ref<any[]>([])
+const pendingCharImageIds = ref<number[]>([])
+const pendingSceneImageIds = ref<number[]>([])
+const pendingShotFrameKeys = ref<string[]>([])
+const pendingVideoIds = ref<number[]>([])
+const pendingComposeIds = ref<number[]>([])
+const failedVideoMessages = ref<Record<number, string>>({})
+const failedComposeMessages = ref<Record<number, string>>({})
+const imageViewer = ref({ open: false, src: '', title: '' })
+
+function isPendingCharImage(id: number) {
+  return pendingCharImageIds.value.includes(id)
+}
+
+function openImageViewer(src: string, title: string = '') {
+  if (!src) return
+  imageViewer.value = { open: true, src: mediaUrl(src), title }
+}
+
+function closeImageViewer() {
+  imageViewer.value = { open: false, src: '', title: '' }
+}
+
+// 连播预览播放器
+const playlistPlayer = ref({ open: false })
+const playlist = ref<{ title: string; url: string }[]>([])
+const playIndex = ref(0)
+const videoEl = ref<HTMLVideoElement | null>(null)
+const playlistAutoNext = ref(true)
+const playlistPaused = ref(false)
+
+function buildPlaylist() {
+  return sbs.value
+    .map((sb, i) => ({
+      title: `#${String(i + 1).padStart(2, '0')} ${sb.title || sb.description || ''}`.trim(),
+      url: getComposedVideoUrl(sb) || getVideoUrl(sb),
+    }))
+    .filter(item => !!item.url)
+}
+
+function openPlaylist() {
+  const list = buildPlaylist()
+  if (!list.length) {
+    toast.error('还没有可播放的视频')
+    return
+  }
+  playlist.value = list
+  playIndex.value = 0
+  playlistPaused.value = false
+  playlistPlayer.value = { open: true }
+}
+
+function closePlaylist() {
+  playlistPlayer.value = { open: false }
+  const el = videoEl.value
+  if (el) el.pause()
+  playlist.value = []
+  playIndex.value = 0
+  playlistPaused.value = false
+}
+
+function playAt(i: number) {
+  if (i < 0 || i >= playlist.value.length) return
+  playIndex.value = i
+}
+
+function prevPlay() {
+  if (!playlist.value.length) return
+  playAt(playIndex.value > 0 ? playIndex.value - 1 : playlist.value.length - 1)
+}
+
+function nextPlay() {
+  if (playlist.value.length <= 1) return
+  playAt(playIndex.value < playlist.value.length - 1 ? playIndex.value + 1 : 0)
+}
+
+function togglePlayPause() {
+  const el = videoEl.value
+  if (!el) return
+  if (el.paused) el.play()
+  else el.pause()
+}
+
+function onPlayEnded() {
+  if (!playlistAutoNext.value) return
+  nextPlay()
+}
+
+function handleImageViewerKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
+}
+
+function handlePlaylistKeydown(event: KeyboardEvent) {
+  if (!playlistPlayer.value.open) return
+  if (event.key === 'Escape') { closePlaylist(); return }
+  if (event.key === 'ArrowLeft') { prevPlay(); return }
+  if (event.key === 'ArrowRight') { nextPlay(); return }
+  if (event.key === ' ') { event.preventDefault(); togglePlayPause(); return }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleImageViewerKeydown)
+  window.addEventListener('keydown', handlePlaylistKeydown)
+})
+
+const isMounted = ref(true)
+
+onBeforeUnmount(() => {
+  isMounted.value = false
+  window.removeEventListener('keydown', handleImageViewerKeydown)
+  if (mergeIntervalId) clearInterval(mergeIntervalId)
+})
+
+function isPendingSceneImage(id: number) {
+  return pendingSceneImageIds.value.includes(id)
+}
+
+function framePendingKey(id: number, frameType: string) {
+  return `${id}:${frameType}`
+}
+
+function isPendingShotFrame(id: number, frameType: string) {
+  return pendingShotFrameKeys.value.includes(framePendingKey(id, frameType))
+}
+
+function isPendingVideo(id: number) {
+  return pendingVideoIds.value.includes(id)
+}
+
+function videoFailMessage(id: number) {
+  return failedVideoMessages.value[id] || ''
+}
+
+function isPendingCompose(id: number) {
+  return pendingComposeIds.value.includes(id)
+}
+
+function composeFailMessage(id: number) {
+  return failedComposeMessages.value[id] || ''
+}
+
+function isNarratorCharacter(char: any) {
+  const rt = char?.role_type || char?.roleType || ''
+  if (rt === '旁白') return true
+  const text = `${char?.name || ''} ${char?.role || ''}`.toLowerCase()
+  return text.includes('旁白') || text.includes('narrator') || text.includes('画外音')
+}
+
+const visualChars = computed(() => chars.value.filter(c => !isNarratorCharacter(c)))
+
+const lockedImageConfigId = computed(() => episode.value?.image_config_id || episode.value?.imageConfigId || null)
+const lockedVideoConfigId = computed(() => episode.value?.video_config_id || episode.value?.videoConfigId || null)
+const lockedAudioConfigId = computed(() => episode.value?.audio_config_id || episode.value?.audioConfigId || null)
+const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)?.provider || '')
+const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.find(c => c.id === lockedImageConfigId.value)))
+const lockedVideoConfigLabel = computed(() => configLabel(videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)))
+const lockedAudioConfigLabel = computed(() => configLabel(audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)))
+
+// Episode 级模型配置切换
+async function switchEpisodeConfig(type: 'image' | 'video' | 'audio', configId: number) {
+  // ⚠️⚠️ 2026-09-21 修**真 bug** ✗：这里原本是 `if (!epId) return` + `episodeAPI.update(epId, …)` ✓✗
+  //      而 `epId` 是 **ComputedRef** ✗（`epId = computed(() => episode.value?.id || 0)` ✓）⇒
+  //      ① `!epId` 恒为 `false`（对象恒真 ✓✗）⇒ 空 id 也放行 ✓；
+  //      ② 传进去的是**对象本身** ✗ ⇒ URL 拼成 `/episodes/[object Object]` ✓✗ ⇒ **这个功能从来没生效过** ✓✗
+  //      （被 catch 吞成一个 toast ✓，看起来只是"偶发失败" ✓✗）。类型检查一开就现形 ✓。
+  if (!epId.value) return
+  const field = `${type}_config_id`
+  try {
+    await episodeAPI.update(epId.value, { [field]: configId })
+    // 本地更新 episode 对象，避免全量 refresh
+    if (episode.value) {
+      if (type === 'image') episode.value.image_config_id = configId
+      else if (type === 'video') episode.value.video_config_id = configId
+      else if (type === 'audio') episode.value.audio_config_id = configId
+    }
+    // 换模型 = 换单价：生成按钮旁的「待生成 ≈ ¥X」立刻重算（不刷新整页）
+    scheduleEstimate(true)
+  } catch (e: any) {
+    toast.error(e?.message || '切换配置失败')
+  }
+}
+
+// ===== 画风切换（剧集级 / 角色级）=====
+const styleLabels = ART_STYLE_LABELS
+const dramaStyleValue = computed(() => drama.value?.style || '')
+
+async function switchDramaStyle(style: string) {
+  try {
+    await dramaAPI.update(dramaId, { style })
+    if (drama.value) drama.value.style = style || null
+    toast.success(style ? `剧集画风已切换为「${styleLabels[style] || style}」` : '剧集画风已恢复跟随全局')
+  } catch (e: any) {
+    toast.error(e?.message || '切换剧集画风失败')
+  }
+}
+
+async function switchCharStyle(c: any, style: string) {
+  try {
+    await characterAPI.update(c.id, { style })
+    c.style = style || null
+    toast.success(`${c.name} 画风：${style ? styleLabels[style] || style : '跟随剧集'}`)
+  } catch (e: any) {
+    toast.error(e?.message || '切换角色画风失败')
+  }
+}
+
+// Grid tool state
+const gridDialog = ref(false)
+const gridStep = ref(0)
+const gridLayout = ref('3x3')
+const gridMode = ref('first_frame')
+// ⚠️⚠️ 2026-09-21：这一批原来都是**裸 `ref([])` / `ref(null)`** ✗ ⇒ 推出 `never[]` / `Ref<null>` ✓✗
+//      ⇒ 元素属性访问全报 TS2339 ✓（`selectedSb?.id` 那种全变 `never` ✓✗，一趟类型检查近百条 ✓）。
+//      ⚠️ 本页其余数据是 `ref<any[]>` ✓ ⇒ 这里只把「声明处丢类型」的补上 ✓，不顺手改成大接口 ✗。
+//      字段按**界面实际消费**声明 ✓（后端是权威 ✓）。
+const gridSelected = ref<number[]>([])
+const gridSingleTarget = ref<number | null>(null)
+const gridGenId = ref<string | number | null>(null)
+const gridImagePath = ref('')
+const gridStatusText = ref('')
+const gridActualLayout = ref({ rows: 3, cols: 3 })
+const gridRecoveredAt = ref('')
+const gridRecoveredMode = ref('')
+const gridPromptText = ref('')
+/** 宫格单格提示词（`grid/prompt` 返回的元素；按界面消费的字段声明 ✓ 允许动态字段 ✓） */
+interface GridCellPrompt {
+  shot_number?: number
+  frame_type?: string
+  shot_id?: number
+  prompt?: string
+  [key: string]: unknown
+}
+const gridCellPrompts = ref<GridCellPrompt[]>([])
+const gridPromptSource = ref('')
+const gridPromptLoading = ref(false)
+const gridPromptStatus = ref('')
+/** 宫格分配项（可编辑 ✓ 故允许动态字段 ✓） */
+interface GridAssignment {
+  cell_index?: number
+  /** 未分配时为 `null` ✓（`createGridAssignments()` 会产出 `storyboard_id: null` ✓） */
+  storyboard_id?: number | null
+  frame_type?: string
+  prompt?: string
+  [key: string]: unknown
+}
+/** 宫格历史项（本地缓存的一条记录 ✓） */
+interface GridHistoryItem {
+  id: string | number
+  localPath?: string
+  generationId?: string | number | null
+  /** 宫格行列（历史条目里回显 `rows x cols` ✓） */
+  layout?: { rows?: number; cols?: number }
+  [key: string]: unknown
+}
+const gridAssignmentsState = ref<GridAssignment[]>([])
+const gridActiveShotIds = ref<number[]>([])
+const gridHistory = ref<GridHistoryItem[]>([])
+const showAllGridHistory = ref(false)
+const activeGridCell = ref(0)
+const gridAssignmentPage = ref(0)
+const gridStorageKey = computed(() => `drama:grid:${dramaId}:${epId.value || episodeNumber}`)
+
+const gridModes = [
+  { id: 'first_frame', label: '首帧', desc: '每格=一个镜头的首帧' },
+  { id: 'first_last', label: '首尾帧', desc: '每镜头占一行：左首帧，右尾帧' },
+  { id: 'multi_ref', label: '多参考', desc: '所有格子=同一镜头的参考图' },
+]
+
+const gridLayoutShape = computed(() => {
+  const [rows, cols] = String(gridLayout.value || '3x3').split('x').map(Number)
+  return {
+    rows: rows || 3,
+    cols: cols || 3,
+  }
+})
+const gridTotalCells = computed(() => {
+  return gridLayoutShape.value.rows * gridLayoutShape.value.cols
+})
+
+const gridCanStart = computed(() => {
+  if (gridMode.value === 'multi_ref') return !!gridSingleTarget.value
+  return gridSelected.value.length > 0
+})
+
+const gridSummary = computed(() => {
+  if (gridMode.value === 'multi_ref') {
+    const idx = sbs.value.findIndex(s => s.id === gridSingleTarget.value) + 1
+    return gridSingleTarget.value ? `${gridLayoutShape.value.rows}x${gridLayoutShape.value.cols} 参考图 → 镜头 #${idx}` : '请选择一个镜头'
+  }
+  if (!gridSelected.value.length) return '请选择镜头'
+  const count = gridSelected.value.length
+  if (gridMode.value === 'first_last') {
+    const { rows, cols } = gridLayoutShape.value
+    return `${count} 个镜头 → ${rows}x${cols} 宫格（按首尾帧风格生成，切分后再手动分配）`
+  }
+  const { rows, cols } = gridLayoutShape.value
+  const cells = rows * cols
+  return `${count} 个镜头 → ${rows}x${cols} 宫格（先生成宫格图，切分后再手动分配）`
+})
+
+function createGridAssignments() {
+  return Array.from({ length: gridActualLayout.value.rows * gridActualLayout.value.cols }, () => ({
+    storyboard_id: null,
+    frame_type: 'first_frame',
+  }))
+}
+
+const gridAssignments = computed(() => gridAssignmentsState.value)
+const gridAssignableShotIds = computed(() => {
+  const assignedIds = [...new Set(gridAssignments.value.map(item => item?.storyboard_id).filter(Boolean))]
+  const ids = Array.isArray(gridActiveShotIds.value) && gridActiveShotIds.value.length
+    ? gridActiveShotIds.value
+    : assignedIds.length
+      ? assignedIds
+    : gridMode.value === 'multi_ref'
+      ? (gridSingleTarget.value ? [gridSingleTarget.value] : [])
+      : gridSelected.value.length
+        ? [...gridSelected.value]
+        : sbs.value.map(s => s.id)
+  return ids.filter(id => sbs.value.some(s => s.id === id))
+})
+const gridAssignmentShotOptions = computed(() => [
+  { label: '未分配', value: null },
+  ...gridAssignableShotIds.value.map((id) => {
+    const index = sbs.value.findIndex(s => s.id === id) + 1
+    const sb = sbs.value.find(s => s.id === id)
+    return {
+      label: `#${String(index).padStart(2, '0')} ${sb?.title || sb?.description || '镜头'}`,
+      value: id,
+    }
+  }),
+])
+const gridFrameTypeOptions = computed(() => {
+  return [
+    { label: '首帧', value: 'first_frame' },
+    { label: '尾帧', value: 'last_frame' },
+    { label: '参考图', value: 'reference' },
+  ]
+})
+const gridAssignedCount = computed(() => gridAssignments.value.filter(item => !!item.storyboard_id).length)
+const gridAssignmentPageSize = computed(() => {
+  if (gridAssignments.value.length >= 25) return 8
+  if (gridAssignments.value.length >= 16) return 10
+  if (gridAssignments.value.length >= 9) return 9
+  return Math.max(1, gridAssignments.value.length || 1)
+})
+const gridAssignmentTotalPages = computed(() => Math.max(1, Math.ceil(gridAssignments.value.length / gridAssignmentPageSize.value)))
+const gridAssignmentPageStart = computed(() => gridAssignmentPage.value * gridAssignmentPageSize.value)
+const gridAssignmentPageEnd = computed(() => Math.min(gridAssignments.value.length, gridAssignmentPageStart.value + gridAssignmentPageSize.value))
+const pagedGridAssignments = computed(() => {
+  return gridAssignments.value
+    .slice(gridAssignmentPageStart.value, gridAssignmentPageEnd.value)
+    .map((assignment, offset) => ({
+      assignment,
+      index: gridAssignmentPageStart.value + offset,
+    }))
+})
+
+function resetGridAssignments() {
+  gridAssignmentsState.value = createGridAssignments()
+  activeGridCell.value = 0
+  gridAssignmentPage.value = 0
+}
+
+function gridCellLabel(a: GridAssignment) {
+  if (!a?.storyboard_id) return '未分配'
+  const idx = sbs.value.findIndex(s => s.id === a.storyboard_id) + 1
+  const suffix = ({ first_frame: '首', last_frame: '尾', reference: '参' } as Record<string, string>)[a.frame_type ?? ''] || ''
+  return `#${idx}${suffix ? ` ${suffix}` : ''}`
+}
+
+function gridCellTitle(id: number | null | undefined) {
+  if (!id) return '未分配'
+  const idx = sbs.value.findIndex(s => s.id === id) + 1
+  const sb = sbs.value.find(s => s.id === id)
+  return `#${String(idx).padStart(2, '0')} ${sb?.title || sb?.description || '镜头'}`
+}
+
+function updateGridAssignment(index: number, field: string, value: any) {
+  const next = [...gridAssignmentsState.value]
+  next[index] = { ...next[index], [field]: value }
+  gridAssignmentsState.value = next
+  activeGridCell.value = index
+  if (gridImagePath.value) persistGridImagePath(gridImagePath.value)
+}
+
+function focusGridCell(index: number) {
+  activeGridCell.value = index
+  gridAssignmentPage.value = Math.floor(index / gridAssignmentPageSize.value)
+}
+
+const gridOverlayStyle = computed(() => {
+  const { rows, cols } = gridActualLayout.value
+  return { 'grid-template-columns': `repeat(${cols}, 1fr)`, 'grid-template-rows': `repeat(${rows}, 1fr)` }
+})
+
+const gridAutoLayout = computed(() => {
+  return gridLayoutShape.value
+})
+
+const gridBlankStyle = computed(() => {
+  const { rows, cols } = gridAutoLayout.value
+  return { 'grid-template-columns': `repeat(${cols}, 1fr)`, 'grid-template-rows': `repeat(${rows}, 1fr)` }
+})
+
+// Production step helpers
+/**
+ * 制作步骤是否已完成。十二条判据都守同一条规矩：**没有输入就不算完成**。
+ *
+ * `chars` 这里原来少一个前置条件（写成 `!visualCharTotal || …`），于是「一个角色都没提取」
+ * 时侧栏的「角色形象」就带勾，而隔壁「场景图片」要求 `!!scenes.length` —— 同一函数里
+ * 两种口径并存。现在补齐前置条件，与其余十一条对齐。
+ */
+function prodStepDone(id: string) {
+  if (id === 'chars') return !!chars.value.length && (!visualCharTotal.value || charImgCount.value === visualCharTotal.value)
+  if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
+  if (id === 'dubbing') return !!sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
+  if (id === 'shots') return !!sbs.value.length && shotImgCount.value === sbs.value.length
+  if (id === 'videos') return !!sbs.value.length && shotVidCount.value === sbs.value.length
+  if (id === 'compose') return !!sbs.value.length && composedCount.value === sbs.value.length
+  return false
+}
+// 取出口放行条件原本手抄了一遍「全部合成」判据，与 `prodStepDone('compose')` 逐字相同。
+// 走同一处判定，避免哪天只改一边、按钮和勾选状态对不上。
+const canExport = computed(() => prodStepDone('compose'))
+function goNextProd() {
+  if (prodTabIdx.value < prodTabDefs.value.length - 1) {
+    prodTabIdx.value++
+  } else {
+    panel.value = 'export'
+  }
+}
+
+/**
+ * 剧本工作台五个步骤的唯一真源。
+ *
+ * 这一组事实原本散在五处手抄，彼此没有机器判据保证同步：
+ *   `stepLabels`（面板标题）／`canGoNext`（进入条件）／`activeMainStage`（用 `scriptStep <= 1`、
+ *   `<= 3` 的区间反推属于哪个主阶段）／`activeSubStepKey`（scriptStep → key 的 if 链）／
+ *   `bubbleSteps` 与侧栏 `sidebarSections`（key + 标题 + done 各写一遍）。
+ * 加一个步骤要记得改五处，漏一处就静默错 —— 上一轮修 `activeSubSteps` 时踩的就是这个。
+ *
+ * 现在一处定义：`label` 给侧栏与二级导航（完整标题），`short` 给剧本面板与底部气泡（窄标题），
+ * `stage` 说明这一步归哪个主阶段，`canGo` 是「能不能点下一步」，`done` 是「侧栏是否打勾」。
+ * 注意 `canGo` 与 `done` 不是同一件事：`canGo` 认本地编辑框里的未保存内容（`localRaw`/`localScript`），
+ * 而 `done` 只认已落盘的数据，所以第 4 步 `canGo` 是「有角色配过音」、`done` 是「角色全部配过音」。
+ */
+const scriptStages = computed(() => ([
+  { key: 'script:raw', label: '原始内容', short: '原始内容', stage: 'script', icon: FileText, canGo: !!localRaw.value.trim(), done: !!rawContent.value },
+  { key: 'script:rewrite', label: 'AI 改写', short: 'AI 改写', stage: 'script', icon: FileText, canGo: !!localScript.value.trim() || !!scriptContent.value, done: !!scriptContent.value },
+  { key: 'script:extract', label: '提取角色场景', short: '提取', stage: 'assets', icon: Users, canGo: chars.value.length > 0, done: !!chars.value.length },
+  { key: 'script:voice', label: '分配音色', short: '音色', stage: 'assets', icon: Mic2, canGo: charsVoiced.value > 0, done: !!chars.value.length && charsVoiced.value === chars.value.length },
+  { key: 'script:storyboard', label: '分镜拆解', short: '分镜', stage: 'storyboard', icon: Clapperboard, canGo: sbs.value.length > 0, done: !!sbs.value.length },
+]))
+
+// 当前剧本步骤（`scriptStep` 恒在 0..4，兜底取第一步，避免各处再写 `?.` 与各自的默认值）
+const scriptStage = computed(() => scriptStages.value[scriptStep.value] || scriptStages.value[0])
+
+const prevStepLabel = computed(() => scriptStep.value > 0 ? (scriptStages.value[scriptStep.value - 1]?.short || '') : '')
+// 最后一步的「下一步」不是下一步，而是交接给制作台。判据取表长，不再写死 `=== 4`
+// —— 制作侧一直是这么算的（`prodTabIdx < prodTabDefs.length - 1`），两半此前不对称。
+const isLastStage = computed(() => scriptStep.value >= scriptStages.value.length - 1)
+const nextStepLabel = computed(() => isLastStage.value ? '进入制作' : (scriptStages.value[scriptStep.value + 1]?.short || ''))
+const canGoNext = computed(() => !!scriptStages.value[scriptStep.value]?.canGo)
+function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
+function goNextStep() {
+  // 离开当前步之前，先把这步编辑框里的未保存内容落盘。哪一步存哪份内容按 key 认，
+  // 不再按 `0` / `1` 的下标认：下标是「位置」，key 是「这一步是谁」，加步插步时不会存错。
+  const key = scriptStage.value.key
+  if (key === 'script:raw' && localRaw.value.trim()) { saveRaw() }
+  if (key === 'script:rewrite' && localScript.value.trim()) { saveScr() }
+  if (isLastStage.value) { panel.value = 'production'; return }
+  if (canGoNext.value) scriptStep.value++
+}
+/**
+ * 按 key 跳到某个剧本步骤。
+ *
+ * 「用 key 找下标」这件事原本在四处各写一遍（`goSubStep`、`initScriptStep`、改写完成、
+ * 跳过改写），其中两处还直接写死 `scriptStep = 1` / `= 2`。收成一个函数，
+ * 顺带保证下标越界时统一回到第一步，而不是各自 `?? 0`。
+ */
+function goScriptStage(key: string) {
+  const index = scriptStages.value.findIndex(s => s.key === key)
+  scriptStep.value = index < 0 ? 0 : index
+}
+
+function gridSelectAll() {
+  if (gridSelected.value.length === sbs.value.length) gridSelected.value = []
+  else gridSelected.value = sbs.value.map(s => s.id)
+}
+
+function openGridTool() {
+  gridStep.value = 0
+  gridSelected.value = []
+  gridSingleTarget.value = null
+  gridActiveShotIds.value = []
+  gridPromptText.value = ''
+  gridCellPrompts.value = []
+  gridPromptSource.value = ''
+  gridPromptStatus.value = ''
+  gridAssignmentsState.value = []
+  gridDialog.value = true
+}
+
+function persistGridImagePath(value: string | null | undefined) {
+  if (typeof window === 'undefined') return
+  if (!value) {
+    window.localStorage.removeItem(gridStorageKey.value)
+    return
+  }
+  const current = restoreGridState() || {}
+  const entries = current.entries || {}
+  entries[value] = {
+    generationId: gridGenId.value,
+    layout: gridActualLayout.value,
+    shotIds: gridActiveShotIds.value,
+    assignments: gridAssignmentsState.value,
+    recoveredAt: gridRecoveredAt.value,
+    recoveredMode: gridRecoveredMode.value,
+  }
+  const payload = {
+    activeImagePath: value,
+    entries,
+  }
+  try {
+    window.localStorage.setItem(gridStorageKey.value, JSON.stringify(payload))
+  } catch (e) {
+    console.warn('[Grid] localStorage setItem failed:', e)
+  }
+}
+
+function restoreGridState() {
+  if (typeof window === 'undefined') return null
+  const raw = window.localStorage.getItem(gridStorageKey.value)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { activeImagePath: raw, entries: { [raw]: {} } }
+  }
+}
+
+function applyGridState(imagePath: string | null | undefined,
+                        meta: Record<string, any> = {}) {
+  gridImagePath.value = imagePath || ''
+  gridGenId.value = meta.generationId || meta.id || null
+  if (meta.layout?.rows && meta.layout?.cols) gridActualLayout.value = meta.layout
+  if (Array.isArray(meta.shotIds)) gridActiveShotIds.value = meta.shotIds
+  else gridActiveShotIds.value = []
+  if (Array.isArray(meta.assignments)) gridAssignmentsState.value = meta.assignments
+  else gridAssignmentsState.value = []
+  gridRecoveredAt.value = meta.recoveredAt || meta.createdAtLabel || ''
+  gridRecoveredMode.value = meta.recoveredMode || meta.modeLabel || ''
+}
+
+function selectGridHistory(item: GridHistoryItem) {
+  const cached = restoreGridState()
+  const cachedEntry: Record<string, any> = cached?.entries?.[item.localPath ?? ''] || {}
+  applyGridState(item.localPath, {
+    ...item,
+    ...cachedEntry,
+    generationId: cachedEntry.generationId || item.id,
+    recoveredAt: cachedEntry.recoveredAt || item.createdAtLabel,
+    recoveredMode: cachedEntry.recoveredMode || item.modeLabel,
+  })
+  if (!gridAssignmentsState.value.length) resetGridAssignments()
+  persistGridImagePath(item.localPath)
+}
+
+function reopenGridPreview() {
+  if (!gridImagePath.value) {
+    openGridTool()
+    return
+  }
+  gridDialog.value = true
+  if (!gridAssignmentsState.value.length) resetGridAssignments()
+  gridStep.value = 3
+}
+
+function parseGridLayoutFromFrameType(value: string | undefined) {
+  const match = String(value || '').match(/grid_[^_]+_(\d+)x(\d+)$/)
+  if (!match) return null
+  return { rows: Number(match[1]) || 3, cols: Number(match[2]) || 3 }
+}
+
+function continueGridSplit() {
+  if (!gridImagePath.value) {
+    toast.warning('还没有可继续切割的宫格图')
+    return
+  }
+  if (!gridAssignmentsState.value.length) resetGridAssignments()
+  gridDialog.value = true
+  gridStep.value = 3
+}
+
+function getGridPromptShotIds() {
+  if (gridMode.value === 'multi_ref') return gridSingleTarget.value ? [gridSingleTarget.value] : []
+  if (gridMode.value === 'first_last') return [...gridSelected.value]
+  return gridSelected.value.slice(0, gridTotalCells.value)
+}
+
+async function generateGridPrompt() {
+  if (!gridCanStart.value) {
+    toast.warning('请先选择镜头')
+    return
+  }
+  gridPromptLoading.value = true
+  gridPromptStatus.value = '正在调用 AI 生成宫格提示词...'
+  gridPromptText.value = ''
+  gridCellPrompts.value = []
+  gridPromptSource.value = ''
+  try {
+    const shotIds = getGridPromptShotIds()
+    const { rows, cols } = gridAutoLayout.value
+
+    const res = await gridAPI.prompt({
+      storyboard_ids: shotIds,
+      drama_id: dramaId,
+      episode_id: epId.value,
+      rows,
+      cols,
+      mode: gridMode.value,
+    })
+
+    gridPromptText.value = res?.grid_prompt || ''
+    gridCellPrompts.value = Array.isArray(res?.cell_prompts) ? res.cell_prompts : []
+    gridPromptSource.value = res?.source || ''
+
+    if (gridPromptText.value) {
+      resetGridAssignments()
+      gridPromptStatus.value = gridPromptSource.value === 'agent' ? 'AI 提示词已生成' : '已使用模板提示词'
+      gridStep.value = 1
+    } else {
+      gridPromptStatus.value = ''
+      toast.error('提示词生成失败')
+    }
+  } catch (e) {
+    gridPromptStatus.value = ''
+    toast.error(e instanceof Error && e.message ? e.message : '生成提示词失败')
+  } finally {
+    gridPromptLoading.value = false
+  }
+}
+
+async function startGridGen() {
+  let rows, cols, ids
+  if (gridMode.value === 'multi_ref') {
+    rows = gridAutoLayout.value.rows; cols = gridAutoLayout.value.cols; ids = [gridSingleTarget.value]
+  } else {
+    rows = gridAutoLayout.value.rows; cols = gridAutoLayout.value.cols; ids = gridSelected.value.slice(0, gridTotalCells.value)
+    if (gridMode.value === 'first_last') ids = [...gridSelected.value]
+  }
+  gridActiveShotIds.value = ids.filter((item): item is number => typeof item === 'number')
+  gridActualLayout.value = { rows, cols }
+  if (!gridAssignmentsState.value.length) resetGridAssignments()
+  gridStep.value = 2
+  gridStatusText.value = '提交生成请求...'
+  try {
+    const res = await gridAPI.generate({
+      storyboard_ids: ids,
+      drama_id: dramaId,
+      rows,
+      cols,
+      mode: gridMode.value,
+      custom_prompt: gridPromptText.value || undefined,
+    })
+    gridGenId.value = res.image_generation_id
+    gridActualLayout.value = res.grid || { rows, cols }
+    gridStatusText.value = '等待图片生成...'
+    pollGridStatus()
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e))
+    gridStep.value = 0
+  }
+}
+
+async function pollGridStatus() {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 3000))
+    if (!isMounted.value) return
+    // ⚠️ 2026-09-21：`gridGenId` 可能是 `string | number | null` ✗ 而 `gridAPI.status` 只收 `number` ✓
+    //    ⇒ 先取数字 ✓（拿不到就**结束轮询** ✓ 不发一个 id=NaN 的请求 ✓✗）。
+    const genId = Number(gridGenId.value)
+    if (!genId) return
+    try {
+      const res = await gridAPI.status(genId)
+      gridStatusText.value = `状态: ${res.status}`
+      if (res.status === 'completed' && res.local_path) {
+        gridImagePath.value = res.local_path
+        gridGenId.value = gridGenId.value || res.id || null
+        persistGridImagePath(res.local_path)
+        gridStep.value = 3
+        return
+      }
+      if (res.status === 'failed') {
+        toast.error(res.error_msg || '生成失败')
+        gridStep.value = 0
+        return
+      }
+    } catch {}
+  }
+  toast.error('生成超时'); gridStep.value = 0
+}
+
+async function loadLatestGridImage() {
+  try {
+    const rows = await imageAPI.list({ drama_id: dramaId })
+    const list = Array.isArray(rows) ? rows : []
+    const grids = list
+      .filter((row) => row?.status === 'completed' && String(row?.frame_type || row?.frameType || '').startsWith('grid_') && (row?.local_path || row?.localPath))
+      .sort((a, b) => Number(b?.id || 0) - Number(a?.id || 0))
+      .map((row) => {
+        const frameType = String(row?.frame_type || row?.frameType || '')
+        const parsedLayout = parseGridLayoutFromFrameType(frameType) || { rows: 3, cols: 3 }
+        return {
+          id: row.id,
+          localPath: row?.local_path || row?.localPath || '',
+          layout: parsedLayout,
+          modeLabel: frameType.replace(/^grid_/, '').replace(/_/g, ' · '),
+          createdAtLabel: row?.created_at || row?.createdAt || '',
+        }
+      })
+
+    gridHistory.value = grids
+
+    const cached = restoreGridState()
+    const preferredPath = cached?.activeImagePath && grids.some(item => item.localPath === cached.activeImagePath)
+      ? cached.activeImagePath
+      : grids[0]?.localPath
+    const current = grids.find(item => item.localPath === preferredPath)
+    if (current) {
+      const cachedEntry: Record<string, any> = cached?.entries?.[current.localPath] || {}
+      applyGridState(current.localPath, {
+        ...current,
+        ...cachedEntry,
+        generationId: cachedEntry.generationId || current.id,
+        recoveredAt: cachedEntry.recoveredAt || current.createdAtLabel,
+        recoveredMode: cachedEntry.recoveredMode || current.modeLabel,
+      })
+      if (!gridAssignmentsState.value.length) resetGridAssignments()
+      persistGridImagePath(current.localPath)
+      return
+    }
+  } catch {}
+
+  const cached = restoreGridState()
+  if (cached?.activeImagePath) {
+    const cachedEntry: Record<string, any> = cached?.entries?.[cached.activeImagePath] || {}
+    applyGridState(cached.activeImagePath, {
+      ...cachedEntry,
+      recoveredAt: cachedEntry.recoveredAt || '',
+      recoveredMode: cachedEntry.recoveredMode || '',
+    })
+  }
+}
+
+async function doGridSplit() {
+  const { rows, cols } = gridActualLayout.value
+  try {
+    const assignments = gridAssignments.value
+      .filter(item => !!item.storyboard_id)
+      .map(item => ({ storyboard_id: item.storyboard_id, frame_type: item.frame_type }))
+    if (!assignments.length) {
+      toast.warning('请至少分配一个格子')
+      return
+    }
+    await gridAPI.split({ image_generation_id: gridGenId.value, rows, cols, assignments })
+    persistGridImagePath(gridImagePath.value)
+    gridStep.value = 4
+    toast.success('切分分配完成')
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
+const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
+const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
+const ttsGeneratedCount = computed(() => sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length)
+const shotImgCount = computed(() => sbs.value.filter(hasImg).length)
+const shotVidCount = computed(() => sbs.value.filter(hasVid).length)
+const visualCharTotal = computed(() => visualChars.value.length)
+
+// 资产卡片的视图模型：把两套字段名（snake/camel）与「是否正在跑」在这里归一。
+// 组件只认「标题 + 元信息 + 图 + 是否在跑」，不必知道后端字段命名（见 AssetCardGrid.vue）
+const charCards = computed(() => visualChars.value.map(c => ({
+  id: c.id,
+  title: c.name,
+  meta: c.role || '角色',
+  imageUrl: (c.image_url || c.imageUrl) ? mediaUrl(c.image_url || c.imageUrl) : null,
+  pending: isPendingCharImage(c.id),
+  previewTitle: `${c.name} 角色形象`,
+  raw: c,
+})))
+const sceneCards = computed(() => scenes.value.map(s => ({
+  id: s.id,
+  title: s.location,
+  meta: s.time || '—',
+  imageUrl: (s.image_url || s.imageUrl) ? mediaUrl(s.image_url || s.imageUrl) : null,
+  pending: isPendingSceneImage(s.id),
+  previewTitle: `${s.location} 场景图`,
+  raw: s,
+})))
+
+/**
+ * 制作台的六个步骤表：标签页、侧栏与进度条共用。
+ *
+ * `stage` 补上了「这一步属哪个主阶段」—— 原来这条知识藏在两处手抄里
+ * （`activeMainStage` 的 `['chars','scenes'].includes(...)`、`sidebarSections` 里两张手写数组），
+ * `done` 则让侧栏与底部气泡不必各自再调一次 `prodStepDone()`。
+ */
+const prodTabDefs = computed(() => [
+  { id: 'chars', stage: 'assets', label: '角色形象', icon: Users, done: prodStepDone('chars'), badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
+  { id: 'scenes', stage: 'assets', label: '场景图片', icon: MapPin, done: prodStepDone('scenes'), badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
+  { id: 'shots', stage: 'storyboard', label: '镜头图片', icon: ImageIcon, done: prodStepDone('shots'), badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
+  { id: 'dubbing', stage: 'storyboard', label: '配音生成', icon: Mic2, done: prodStepDone('dubbing'), badge: '' },
+  { id: 'videos', stage: 'storyboard', label: '视频生成', icon: Video, done: prodStepDone('videos'), badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
+  { id: 'compose', stage: 'storyboard', label: '视频合成', icon: Layers, done: prodStepDone('compose'), badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
+])
+
+/**
+ * 侧栏导航，同时是「制作进度」的分母来源（见 `pipelineSteps`）。
+ *
+ * 结构不再手写：把两张步骤表按 `stage` 拼进对应段 —— 段内顺序是「剧本步在前、制作步在后」，
+ * 与原手写数组逐条一致（assets：提取角色场景 / 分配音色 / 角色形象 / 场景图片；
+ * storyboard：分镜拆解 / 镜头图片 / 配音生成 / 视频生成 / 视频合成）。
+ * 加一步只需在对应的表里加一行，侧栏、二级导航、底部气泡、总进度会一起跟上。
+ */
+const sidebarSections = computed(() => {
+  const itemsOf = (stageId: string) => [
+    ...scriptStages.value.filter(s => s.stage === stageId).map(s => ({ key: s.key, label: s.label, icon: s.icon, done: s.done })),
+    ...prodTabDefs.value.filter(t => t.stage === stageId).map(t => ({ key: `prod:${t.id}`, label: t.label, icon: t.icon, done: t.done })),
+  ]
+  return [
+    { id: 'script', label: '剧本', items: itemsOf('script') },
+    { id: 'assets', label: '资产', items: itemsOf('assets') },
+    { id: 'storyboard', label: '分镜', items: itemsOf('storyboard') },
+    { id: 'export', label: '导出', items: [{ key: 'export:merge', label: '拼接导出', icon: Download, done: !!mergeUrl.value }] },
+  ]
+})
+
+// 当前处于哪个主阶段，一律问步骤表里的 `stage`：原来这里手写了两处映射
+// （制作台 `['chars','scenes'].includes(...)`、剧本台 `scriptStep <= 1` / `<= 3` 的区间反推）。
+const activeMainStage = computed(() => {
+  if (panel.value === 'export') return 'export'
+  if (panel.value === 'production') return prodTabDefs.value.find(t => t.id === prodTab.value)?.stage || 'storyboard'
+  return scriptStage.value.stage
+})
+
+/**
+ * 主内容区的二级导航（`.stage-subnav`）。
+ *
+ * 这四项以前是手抄的一份：step 键、label 与 done 判定跟 `sidebarSections` 逐条重复。
+ * 而且在「空集」上两处已经漂开了 —— 侧栏 `prodStepDone('scenes')` 要求 `!!scenes.length`，
+ * 这里写的是 `!scenes.length || …`（没场景就算完成）；`prodStepDone('dubbing')` 要求
+ * `!!sbs.length`，这里同样没有。结果是同一个页面里两个导航对同一步打勾不一致。
+ *
+ * 现在只认 `sidebarSections` 一份。键与顺序完全对齐（`goSubStep` 按 key 分发，不受影响），
+ * 唯一可感知的变化：还没做过的「场景图片 / 配音生成」不会再在二级导航里提前显示成已完成。
+ */
+const activeSubSteps = computed(() => {
+  const section = sidebarSections.value.find(s => s.id === activeMainStage.value)
+  return section ? section.items : []
+})
+
+const activeSubStepKey = computed(() => {
+  if (panel.value === 'script') return scriptStage.value.key
+  if (panel.value === 'production') return `prod:${prodTab.value}`
+  return 'export:merge'
+})
+
+const sidebarJumpSteps = computed(() => {
+  const section = sidebarSections.value.find((item) => item.items.some(step => step.key === activeSubStepKey.value))
+  return section?.items || []
+})
+
+// 底部气泡导航：只取两张步骤表里的 key / 窄标题 / 完成态，不再自备一份副本。
+const bubbleSteps = computed(() => {
+  if (panel.value === 'script') return scriptStages.value.map(s => ({ key: s.key, label: s.short, done: s.done }))
+  if (panel.value === 'production') return prodTabDefs.value.map(t => ({ key: `prod:${t.id}`, label: t.label, done: t.done }))
+  return []
+})
+
+const activeBubbleKey = computed(() => {
+  if (panel.value === 'script') return activeSubStepKey.value
+  if (panel.value === 'production') return `prod:${prodTab.value}`
+  return ''
+})
+
+const showBottomBubble = computed(() => panel.value === 'script' || panel.value === 'production')
+
+/**
+ * 底部气泡栏的「上一步 / 下一步」：剧本台与制作台共用这一对按钮。
+ *
+ * 模板里原来是四个按钮、两套文案、两套禁用条件：剧本侧写死 `scriptStep === 0`、
+ * 文案走 `prevStepLabel`/`nextStepLabel`；制作侧用 `prodTabIdx === 0`、
+ * 文案内联 `prodTabDefs[...]`。两半各写一遍，改一边忘一边就是「剧本侧按钮灰着、
+ * 制作侧亮着」。现在分支只在这四个计算量里，模板只剩两个按钮。
+ *
+ * 容器只在 script / production 两个面板渲染（见 `showBottomBubble`），
+ * 所以这里不必再判一次面板，`v-else-if` 那一层也就没有存在的必要了。
+ */
+const bubblePrevLabel = computed(() => panel.value === 'production'
+  ? (prodTabDefs.value[prodTabIdx.value - 1]?.label || '上一步')
+  : (prevStepLabel.value || '上一步'))
+const bubbleNextLabel = computed(() => {
+  if (panel.value === 'production') {
+    return prodTabIdx.value < prodTabDefs.value.length - 1
+      ? (prodTabDefs.value[prodTabIdx.value + 1]?.label || '下一步')
+      : '进入导出'
+  }
+  return nextStepLabel.value || '下一步'
+})
+const canBubblePrev = computed(() => panel.value === 'production' ? prodTabIdx.value > 0 : scriptStep.value > 0)
+const canBubbleNext = computed(() => panel.value === 'production'
+  ? !(prodTab.value === 'compose' && !canExport.value)
+  : canGoNext.value)
+function goBubblePrev() {
+  if (panel.value === 'production') { prodTabIdx.value = Math.max(0, prodTabIdx.value - 1); return }
+  goPrevStep()
+}
+function goBubbleNext() {
+  if (panel.value === 'production') { goNextProd(); return }
+  goNextStep()
+}
+
+function goSubStep(key: string) {
+  if (key.startsWith('script:')) {
+    panel.value = 'script'
+    // 下标顺序即 `scriptStages` 的顺序，不用再维护一张 key → 序号的手表。
+    goScriptStage(key)
+    return
+  }
+  if (key.startsWith('prod:')) {
+    panel.value = 'production'
+    prodTab.value = key.replace('prod:', '')
+    return
+  }
+  panel.value = 'export'
+}
+
+/**
+ * 制作进度：直接数侧栏步骤的完成数，不再自己养一套判据。
+ *
+ * 旧实现有 10 个自增，分母却在模板里三处写死 `/11` —— 全做完也只到 10/11、进度条
+ * 在 90.9% 封顶，永远走不满。而且那 10 个自增跟侧栏的 12 个步骤对不上：多两个
+ * 「任意一张」判据（`some(composed_image)` / `some(video_url)`，与紧随其后的
+ * 「全部合成」重复计分），少两个真步骤（场景图片、镜头图片）。
+ *
+ * 现在分子分母都从 `sidebarSections` 来，加/删步骤只改那一处。
+ */
+const pipelineSteps = computed(() => sidebarSections.value.flatMap(s => s.items))
+const pipelineTotal = computed(() => pipelineSteps.value.length)
+const pipelineProgress = computed(() => pipelineSteps.value.filter(s => s.done).length)
+const pipelinePercent = computed(() => (pipelineTotal.value ? Math.round(pipelineProgress.value / pipelineTotal.value * 100) : 0))
+
+const currentStageLabel = computed(() => {
+  if (panel.value === 'script') return `剧本阶段 · ${scriptStage.value.short}`
+  if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
+  return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
+})
+
+const currentSubStageLabel = computed(() => {
+  const current = activeSubSteps.value.find(step => step.key === activeSubStepKey.value)
+  return current?.label || currentStageLabel.value
+})
+
+function updateCharVoice(charId: number, voiceId: string) {
+  characterAPI.update(charId, { voice_style: voiceId, voice_provider: lockedAudioProvider.value || undefined })
+  const c = chars.value.find(ch => ch.id === charId)
+  if (c) {
+    c.voice_style = voiceId
+    c.voiceStyle = voiceId
+    c.voice_provider = lockedAudioProvider.value || ''
+    c.voiceProvider = lockedAudioProvider.value || ''
+    c.voice_sample_url = ''
+    c.voiceSampleUrl = ''
+  }
+}
+function getVoiceProfile(voiceId: string) {
+  return voiceProfiles.value.find(v => v.id === voiceId) || null
+}
+const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
+
+// —— 跨集一致性修复：把本角色并入全剧已有角色（merge 按钮 + 候选选择）——
+const mergeSourceChar = ref<any>(null)
+const mergeBusy = ref(false)
+/** 规范化名称：去空白/大小写，用于判定「同一人物」的重复记录 */
+function normName(n: string) {
+  return String(n || '').replace(/\s+/g, '').toLowerCase()
+}
+// 称谓词缀：与后端 shared/character-match.ts 保持一致（前后端无共享包，此处同步维护）。
+// 后端已能用这套规则把台词说话人「阿晚/林小姐」归一到「林晚」，若合并入口只认全名相同，
+// 这类别名重复就永远没有修复入口——所以候选列表复用同一套判定。
+const ALIAS_TITLE_SUFFIX = /(?:小姐|夫人|太太|先生|公子|老爷|少爷|姑娘|师傅|师父|前辈|老师|阿姨|哥哥|姐姐|妹妹|弟弟|妈妈|爸爸|母亲|父亲|奶奶|爷爷|祖母|祖父)$/
+const ALIAS_TITLE_PREFIX = /^(?:阿|小|老)/
+function stripAliasAffixes(name: string) {
+  let out = String(name || '').trim()
+  let prev = ''
+  while (prev !== out && out.length > 0) {
+    prev = out
+    out = out.replace(ALIAS_TITLE_SUFFIX, '').replace(ALIAS_TITLE_PREFIX, '')
+  }
+  return out
+}
+/** 精确同名（高置信重复记录） */
+function sameNameCandidates(c: any) {
+  const cNorm = normName(c?.name)
+  if (!cNorm) return []
+  return (drama.value?.characters || []).filter((t: any) => t.id !== c?.id && normName(t.name) === cNorm)
+}
+/** 别名疑似同人：去称谓词缀后同名，或双向包含（单字不比较，避免误配） */
+function aliasCandidates(c: any) {
+  const cNorm = normName(c?.name)
+  if (!cNorm) return []
+  const cBase = stripAliasAffixes(cNorm) || cNorm
+  return (drama.value?.characters || []).filter((t: any) => {
+    if (t.id === c?.id) return false
+    const tNorm = normName(t.name)
+    if (!tNorm || tNorm === cNorm) return false
+    const tBase = stripAliasAffixes(tNorm) || tNorm
+    if (tBase === cBase) return true
+    return (cBase.length >= 2 && tBase.includes(cBase)) || (tBase.length >= 2 && cBase.includes(tBase))
+  })
+}
+/** 候选 = 精确同名 + 别名疑似，同名的排前面 */
+function mergeCandidates(c: any) {
+  return [...sameNameCandidates(c), ...aliasCandidates(c)]
+}
+function hasMergeCandidates(c: any) {
+  return mergeCandidates(c).length > 0
+}
+/** 是否为精确同名；否则视为「疑似同人」，列表里给出提示标签后再人工确认 */
+function isExactNameMatch(a: any, b: any) {
+  const na = normName(a?.name)
+  return !!na && na === normName(b?.name)
+}
+function openMergePicker(c: any) {
+  mergeSourceChar.value = c
+}
+function closeMergePicker() {
+  if (mergeBusy.value) return
+  mergeSourceChar.value = null
+}
+/** 当前待合并角色的候选列表（模板用） */
+function pickerCandidates() {
+  const s = mergeSourceChar.value
+  return s ? mergeCandidates(s) : []
+}
+async function mergeInto(target: any) {
+  const s = mergeSourceChar.value
+  if (!s || mergeBusy.value) return
+  const ok = await confirm({
+    danger: true,
+    message: `将角色「${s.name || '?'}」并入「${target.name || '?'}」？\n\n` +
+      `合并后：目标中为空的形象/声音等资产会从源回填，` +
+      `「${s.name || '?'}」在本集及分镜中的关联、生成历史都会迁移到目标，源角色将被合并删除。\n此操作不可逆，确定执行？`,
+  })
+  if (!ok) return
+  mergeBusy.value = true
+  try {
+    await characterAPI.merge(s.id, target.id)
+    toast.success(`已将「${s.name || '?'}」并入「${target.name || '?'}」`)
+    mergeSourceChar.value = null
+    await refresh()
+  } catch (e: any) {
+    toast.error(e?.message || '合并失败')
+  } finally {
+    mergeBusy.value = false
+  }
+}
+
+// ⚠️ 2026-09-21：原来是 `ref(null)` ✗ ⇒ `selectedSb?.id` 系列全报 TS2339（`never` ✓✗）
+//      —— 这一个 ref 解释本页绝大多数 `never` 报错 ✓（模板里 500-700 行大量读它的字段 ✓）。
+//      ⚠️ 与 `sbs`（`ref<any[]>` ✓）同口径：此处不发明接口 ✗，只补回被丢掉的类型 ✓。
+const selectedSb = ref<any | null>(null)
+
+function jumpToTimelineShot(sb: any) {
+  panel.value = 'production'
+  prodTab.value = 'shots'
+  selectedSb.value = sb
+  setTimeout(() => {
+    document.querySelector(`[data-shot-id="${sb.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, 80)
+}
+
+const shotTypes = [
+  '大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写',
+  '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
+  '过肩', '主观视角', '航拍', '运动镜头',
+]
+
+// ====== 分镜资产版本历史 ======
+const versions = ref<any[]>([])
+const versionsLoading = ref(false)
+const activatingVersion = ref(false)
+
+const versionsByType = computed(() => {
+  if (!versions.value.length) return []
+  const groups: any[] = []
+  const map = new Map<string, string>()
+  const TYPE_LABELS: Record<string, string> = {
+    first_frame: '首帧',
+    keyframe: '关键帧',
+    last_frame: '尾帧',
+    video: '视频',
+    composed: '合成图',
+  }
+  const sorted = [...versions.value].sort((a: any, b: any) => b.version - a.version)
+  for (const v of sorted) {
+    const type = v.frame_type || v.media_type || 'asset'
+    let group = groups.find(g => g.type === type)
+    if (!group) {
+      group = { type, typeLabel: TYPE_LABELS[type] || type, items: [] }
+      groups.push(group)
+    }
+    group.items.push(v)
+  }
+  return groups
+})
+
+const currentVersionId = computed(() => {
+  const current = versions.value.find((v: any) => v.status === 'current' || v.status === 'active')
+  return current?.id ?? null
+})
+
+function formatTime(ts: string) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ts
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+async function loadVersions() {
+  const sb = selectedSb.value as any
+  if (!sb?.id) return
+  versionsLoading.value = true
+  try {
+    const res = await assetVersionsAPI.list('storyboard', sb.id)
+    versions.value = res.versions || []
+  } catch (e: any) {
+    versions.value = []
+    toast.error(e?.message || '加载版本历史失败')
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+async function activateVersion(v: any) {
+  if (!confirm(`确定将「${v.frame_type || v.media_type || '资产'}」回滚到 v${v.version}？此操作会覆盖当前分镜媒体并写入版本记录。`)) return
+  activatingVersion.value = true
+  try {
+    await assetVersionsAPI.activate(v.id)
+    toast.success(`已回滚到 v${v.version}`)
+    await loadVersions()
+  } catch (e: any) {
+    toast.error(e?.message || '回滚失败')
+  } finally {
+    activatingVersion.value = false
+  }
+}
+const shotAngles = ['平视', '仰视', '俯视', '侧拍', '背拍', '斜侧', '主观视角', '过肩']
+const shotMovements = ['固定', '推镜', '拉镜', '摇镜', '移镜', '跟拍', '升降', '手持', '环绕']
+
+function updateField(sb: any, field: string, value: any) {
+  const current = sb[field] ?? sb[toCamel(field)]
+  if (current === value) return
+  sb[field] = value
+  const camelField = toCamel(field)
+  if (camelField !== field) sb[camelField] = value
+  storyboardAPI.update(sb.id, { [field]: value })
+}
+
+function toCamel(field: string) {
+  return field.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase())
+}
+
+function getStoryboardCharacterIds(sb: any) {
+  return sb?.character_ids || sb?.characterIds || []
+}
+
+function getStoryboardCharacterNames(sb: any) {
+  const ids = getStoryboardCharacterIds(sb)
+  return chars.value.filter(char => ids.includes(char.id)).map(char => char.name)
+}
+
+function isStoryboardCharacterSelected(sb: any, charId: number) {
+  return getStoryboardCharacterIds(sb).includes(charId)
+}
+
+function toggleStoryboardCharacter(sb: any, charId: number) {
+  const currentIds = getStoryboardCharacterIds(sb)
+  const nextIds = currentIds.includes(charId)
+    ? currentIds.filter((id: number) => id !== charId)
+    : [...currentIds, charId]
+  updateField(sb, 'character_ids', nextIds)
+}
+
+function toggleStoryboardProp(sb: any, propId: number) {
+  const current = sb.prop_ids || sb.propIds || []
+  const next = current.includes(propId)
+    ? current.filter((id: number) => id !== propId)
+    : [...current, propId]
+  updateField(sb, 'prop_ids', next)
+}
+
+const propsList = ref([] as any[])
+async function loadProps() {
+  try {
+    const res = await propsLibraryAPI.list(dramaId ? { drama_id: dramaId } : undefined)
+    propsList.value = Array.isArray(res) ? res : res?.items || []
+  } catch (e: any) {
+    console.error('[Episode] Failed to load props:', e?.message ?? e)
+  }
+}
+
+// —— 镜头级服装变体（每个角色可指定本镜头穿哪套造型）——
+function charCostumeOptions(char: any): string[] {
+  if (!char?.costumes) return []
+  try {
+    const arr = JSON.parse(char.costumes)
+    return Array.isArray(arr) ? arr.filter((x: any) => typeof x === 'string' && x.trim()) : []
+  } catch {
+    return []
+  }
+}
+
+function getStoryboardCharacterCostumes(sb: any): Record<number, string> {
+  return sb?.character_costumes || sb?.characterCostumes || {}
+}
+
+function getStoryboardCharacterCostume(sb: any, charId: number): string {
+  return getStoryboardCharacterCostumes(sb)[charId] || ''
+}
+
+function setStoryboardCharacterCostume(sb: any, charId: number, costume: string) {
+  const current = getStoryboardCharacterCostumes(sb)
+  const next = { ...current }
+  if (costume) next[charId] = costume
+  else delete next[charId]
+  updateField(sb, 'character_costumes', next)
+}
+
+const boundChars = computed(() => {
+  if (!selectedSb.value) return []
+  const ids = getStoryboardCharacterIds(selectedSb.value)
+  return chars.value.filter((char: any) => ids.includes(char.id) && charCostumeOptions(char).length > 0)
+})
+
+function getSceneName(sb: any) {
+  const sceneId = sb?.scene_id || sb?.sceneId
+  if (!sceneId) return '未绑定场景'
+  const scene = scenes.value.find(s => s.id === sceneId)
+  return scene ? `${scene.location} · ${scene.time || '未设时间'}` : `场景 #${sceneId}`
+}
+
+async function genActionSuggestion(sb: any) {
+  if (!sb?.id || aiSuggesting.value) return
+  aiSuggesting.value = true
+  try {
+    const res = await fetch(`/api/v1/storyboards/${sb.id}/action-suggestion`, { method: 'POST' })
+    const data = await res.json()
+    if (data.code !== 200) throw new Error(data.message || '生成失败')
+    const suggestion = data.data?.suggestion
+    if (!suggestion) throw new Error('未返回建议')
+    const merged = (sb.action || '').trim() ? `${sb.action.trim()}\n${suggestion}` : suggestion
+    updateField(sb, 'action', merged)
+    toast.success('动作建议已生成')
+  } catch (e) {
+    toast.error(e instanceof Error && e.message ? e.message : '生成失败')
+  } finally {
+    aiSuggesting.value = false
+  }
+}
+
+async function splitShot(sb: any) {
+  if (!sb?.id || splittingShot.value) return
+  if (!(await confirm({ message: 'AI 将把此镜头拆分为多个子镜头，保留原镜头并追加在其后。确定继续？' }))) return
+  splittingShot.value = true
+  try {
+    const res = await fetch(`/api/v1/storyboards/${sb.id}/split`, { method: 'POST' })
+    const data = await res.json()
+    if (data.code !== 200) throw new Error(data.message || '拆分失败')
+    const count = data.data?.subShots?.length || 0
+    if (!count) throw new Error('未返回子镜头')
+    await refresh()
+    toast.success(`已拆分为 ${count} 个子镜头`)
+  } catch (e) {
+    toast.error(e instanceof Error && e.message ? e.message : '拆分失败')
+  } finally {
+    splittingShot.value = false
+  }
+}
+
+async function deleteShot(sb: any) {
+  if (!(await confirm({ message: '确定删除此镜头？', danger: true }))) return
+  const idx = sbs.value.indexOf(sb)
+  await storyboardAPI.del(sb.id)
+  await refresh()
+  if (sbs.value.length) selectedSb.value = sbs.value[Math.min(idx, sbs.value.length - 1)]
+  else selectedSb.value = null
+}
+
+watch(rawContent, v => { localRaw.value = v }, { immediate: true })
+watch(scriptContent, v => { localScript.value = v }, { immediate: true })
+
+// 进入页面时按已有产物定位一次步骤。必须与 refresh() 解耦：
+// refresh 会被「刷新数据」按钮和所有生成/编辑操作当作完成回调反复调用，
+// 若在其中定位步骤，用户每次点生成都会被拽回别的步骤（表现为「画面跳转」）。
+function initScriptStep() {
+  const epHasContent = !!(episode.value?.content)
+  const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
+  // 落点用步骤 key 表达，不再写 `scriptStep = 4/3/2/1/0`：判定链条本身（从后往前看第一个
+  // 已有产物的步骤）一字未改，但「哪一步」不再靠下标，插步/调序时不会把人送错步骤。
+  let landed = 'script:raw'
+  if (sbs.value.length) landed = 'script:storyboard'
+  else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) landed = 'script:voice'
+  else if (epHasScript && chars.value.length) landed = 'script:extract'
+  else if (epHasScript || epHasContent) landed = 'script:rewrite'
+  goScriptStage(landed)
+}
+
+// ====== 生成前成本预估（本集待生成量 × 当前激活单价） ======
+// 后端 /usage/estimate 早就有（含「哪些模型无法定价」的 unestimatable），但前端只在
+// 模型页的费用 tab 里用过 ⇒ **生成按钮旁看不到钱** ✗。这里把它挂到批量按钮上，
+// 但必须节流：refresh 每 2.5–4 秒跑一次，跟着打会把这个接口打成热点 ✗
+const costEstimate = ref<any>(null)
+let estimateTimer: ReturnType<typeof setTimeout> | null = null
+let estimateAt = 0
+function scheduleEstimate(force = false) {
+  // force：换模型/套用预设这类「钱一定变了」的动作要立刻重算，不能等节流窗口过去
+  // （否则按钮旁会挂着上一个模型的价格，看着像预估价没生效 ✓✗）
+  if (force && estimateTimer) { clearTimeout(estimateTimer); estimateTimer = null }
+  if (estimateTimer) return
+  const wait = force ? 0 : Math.max(0, 15000 - (Date.now() - estimateAt))
+  estimateTimer = setTimeout(async () => {
+    estimateTimer = null
+    estimateAt = Date.now()
+    try {
+      costEstimate.value = await usageAPI.estimate({ drama_id: dramaId, episode_id: epId.value })
+    } catch {
+      // 预估失败**不打扰用户**（它是辅助信息，不该用 toast 抢戏）
+    }
+  }, wait)
+}
+const estimateTitle = computed(() => {
+  const e = costEstimate.value
+  if (!e) return ''
+  const parts = [
+    e.pending_images ? `图片 ${e.pending_images} 张` : '',
+    e.pending_videos ? `视频 ${e.pending_videos} 条` : '',
+    e.pending_audio_chars ? `配音 ${e.pending_audio_chars} 字` : '',
+  ].filter(Boolean)
+  const unknown = Array.isArray(e.unestimatable) && e.unestimatable.length
+    ? `；无法定价：${e.unestimatable.join('、')}`
+    : ''
+  return `本集全部待生成项（${parts.join(' · ') || '无'}）按当前激活单价估算${unknown}`
+})
+
+/**
+ * @param opts.quiet 轮询/流水线里的静默刷新：失败不弹 toast。
+ *   流水线每 3 秒刷一次，网络抖一下就会连弹十几个 toast，把真正的信息全埋掉 ✓✗
+ *
+ * 轮询器撞车时共享同一趟刷新。
+ *
+ * 一次 `refresh()` 是**六连请求**（剧本 / 角色 / 场景 / 分镜 / 最新网格图 / 合并状态），
+ * 而 `watchAsyncResult` 是「一个任务一个轮询器、每 2.5 秒各刷一次」。批量生视频时本页
+ * 同时有三条轮询器在跑（批次父任务 + 上限 2 条单镜），读的却是同一份服务器状态 ——
+ * 每 2.5 秒十八个请求换一份数据。
+ *
+ * 所以只合并 **quiet 刷新**（只有轮询器走这个口）。显式刷新（保存、上传、点了按钮之后
+ * 那一种）永远单独跑一趟、不与任何人共享结果：那种调用后面往往紧跟「我刚改的东西到底
+ * 生效没有」的判定，共享一份比它更早发出的响应会把判定带偏。
+ */
+let quietRefreshInFlight: Promise<void> | null = null
+
+function refresh(opts?: { quiet?: boolean }) {
+  if (!opts?.quiet) return doRefresh(opts)
+  if (!quietRefreshInFlight) {
+    quietRefreshInFlight = doRefresh(opts)
+    const clear = () => { quietRefreshInFlight = null }
+    void quietRefreshInFlight.then(clear, clear)
+  }
+  return quietRefreshInFlight
+}
+
+async function doRefresh(opts?: { quiet?: boolean }) {
+  try {
+    drama.value = await dramaAPI.get(dramaId)
+    const ep = drama.value.episodes?.find((e: any) => (e.episode_number || e.episodeNumber) === episodeNumber)
+    if (ep) {
+      episode.value = ep
+      try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
+      try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
+      const keepSbId = selectedSb.value?.id
+      sbs.value = await episodeAPI.storyboards(ep.id)
+      // sbs 每次都是全新对象数组，选中项必须按 id 重新绑定到新对象；
+      // 否则详情面板与选中高亮会一直指向旧对象，生成完看起来「选中态跳没了、生成的图没更新」
+      selectedSb.value = (keepSbId ? sbs.value.find(s => s.id === keepSbId) : null) || sbs.value[0] || null
+
+      // 初始化统一配乐方案（用户已手工改过且未保存时不覆盖，否则调好的参数会被生成操作重置）
+      if (!bgmDirty.value) {
+        bgmUrl.value = ep.bgm_url || ep.bgmUrl || ''
+        bgmVolume.value = Number(ep.bgm_volume ?? ep.bgmVolume ?? 0.3)
+        bgmFadeIn.value = Number(ep.bgm_fade_in ?? ep.bgmFadeIn ?? 1.5)
+        bgmFadeOut.value = Number(ep.bgm_fade_out ?? ep.bgmFadeOut ?? 2.0)
+      }
+      await loadLatestGridImage()
+
+      // 自动加载配音验证状态（异步，不阻塞 UI）
+      loadAllDubMatchCache().catch(() => {})
+    }
+  } catch (e) {
+    if (!opts?.quiet) toast.error(e instanceof Error ? e.message : String(e))
+  }
+  try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+  // 待生成量随每次生成变化 ⇒ refresh 之后（节流地）重估一次
+  scheduleEstimate()
+}
+
+function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
+function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
+
+// ====== 统一配乐：上传 / 保存 ======
+function triggerBgmUpload() { bgmInput.value?.click() }
+function markBgmDirty() { bgmDirty.value = true }
+function clearBgm() { bgmUrl.value = ''; bgmDirty.value = true }
+async function onPickBgm(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  bgmUploading.value = true
+  try {
+    const { url } = await uploadAPI.audio(file)
+    bgmUrl.value = url
+    bgmDirty.value = true
+    toast.success('配乐已上传')
+  } catch (err: any) {
+    toast.error(err?.message || '上传失败')
+  } finally {
+    bgmUploading.value = false
+    input.value = ''
+  }
+}
+async function saveBgm() {
+  if (!epId.value) { toast.warning('请先选择剧集'); return }
+  bgmSaving.value = true
+  try {
+    await episodeAPI.update(epId.value, {
+      bgm_url: bgmUrl.value || undefined,
+      bgm_volume: bgmVolume.value,
+      bgm_fade_in: bgmFadeIn.value,
+      bgm_fade_out: bgmFadeOut.value,
+    })
+    if (episode.value) {
+      episode.value.bgm_url = bgmUrl.value
+      episode.value.bgm_volume = bgmVolume.value
+      episode.value.bgm_fade_in = bgmFadeIn.value
+      episode.value.bgm_fade_out = bgmFadeOut.value
+    }
+    bgmDirty.value = false
+    toast.success('配乐方案已保存，下次拼接生效')
+  } catch (err: any) {
+    toast.error(err?.message || '保存失败')
+  } finally {
+    bgmSaving.value = false
+  }
+}
+
+async function continueRaw() {
+  const text = localRaw.value.trim()
+  if (!text) { toast.warning('请先输入内容再续写'); return }
+  continueBusy.value = true
+  continueTarget.value = 'raw'
+  try {
+    const res: any = await episodeAPI.continueScript(epId.value, { mode: 'raw', text: localRaw.value })
+    localRaw.value = localRaw.value.replace(/\s*$/, '') + '\n\n' + res.continuation
+    toast.success('已续写，确认后点击「保存」入库')
+  } catch (err: any) {
+    toast.error(err?.message || '续写失败')
+  } finally {
+    continueBusy.value = false
+    continueTarget.value = ''
+  }
+}
+
+async function continueScr() {
+  const text = localScript.value.trim()
+  if (!text) { toast.warning('请先输入或改写剧本再续写'); return }
+  continueBusy.value = true
+  continueTarget.value = 'script'
+  try {
+    const res: any = await episodeAPI.continueScript(epId.value, { mode: 'script', text: localScript.value })
+    localScript.value = localScript.value.replace(/\s*$/, '') + '\n\n' + res.continuation
+    toast.success('已续写，确认后点击「保存」入库')
+  } catch (err: any) {
+    toast.error(err?.message || '续写失败')
+  } finally {
+    continueBusy.value = false
+    continueTarget.value = ''
+  }
+}
+function doRewrite() {
+  saveRaw()
+  scriptEditing.value = false
+  runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, async () => {
+    await refresh()
+    // 改写完成后停留在 AI 改写步骤，展示改写后的剧本
+    goScriptStage('script:rewrite')
+  })
+}
+function skipRewrite() {
+  const raw = (localRaw.value || rawContent.value || '').trim()
+  if (!raw) {
+    toast.warning('请先填写原始内容')
+    return
+  }
+  localScript.value = raw
+  saveScr()
+  toast.success('已跳过 AI 改写，当前将直接使用原始内容')
+  goScriptStage('script:extract')
+}
+function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, refresh) }
+function doVoice() { runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh) }
+async function batchGenSamples() {
+  const pending = chars.value.filter(c => (c.voice_style || c.voiceStyle) && !(c.voice_sample_url || c.voiceSampleUrl))
+  if (!pending.length) {
+    toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
+    return
+  }
+  let stopped = false
+  const parent = taskCenter.start({
+    kind: 'tts',
+    key: 'batch:voiceSample',
+    title: `批量试听 · ${pending.length} 个角色`,
+    subtitle: `已有音色但还没有试听文件 · 同时最多 ${TTS_BATCH_LIMIT} 条`,
+    stage: `0 / ${pending.length}`,
+    route: taskRoute('chars'),
+    retry: () => batchGenSamples(),
+    onCancel: () => { stopped = true },
+  })
+  const res = await runPool(pending, TTS_BATCH_LIMIT, c => characterAPI.voiceSample(c.id, epId.value), {
+    shouldStop: () => stopped,
+    onSettled: (done, ok, fail, total) => taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${fail} 失败 · ${done} / ${total}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((done / total) * 100),
+    ),
+  })
+  if (res.ok) toast.success(`已生成 ${res.ok} 份试听文件`)
+  if (res.fail) {
+    const names = res.errors.slice(0, 5).map(({ item }) => (item as any).name).filter(Boolean)
+    toast.error(`${res.fail} 份试听文件生成失败${names.length ? `：${names.join('、')}` : ''}`)
+    taskCenter.fail(parent.id, res.errors[0]?.error ?? new Error(`${res.fail} 份试听文件生成失败`), { retry: () => batchGenSamples() })
+  } else if (stopped && res.skipped > 0) {
+    taskCenter.cancel(parent.id, `已停止提交：${res.ok} 成功 · 还有 ${res.skipped} 个角色没提交`)
+  } else {
+    taskCenter.done(parent.id)
+  }
+  await refresh()
+}
+async function generateVoicesFromCharacters() {
+  if (generatingVoices.value) return
+  generatingVoices.value = true
+  try {
+    const data = await voicesAPI.generateFromCharacters(dramaId)
+    const ok = data.success_count ?? data.successCount ?? 0
+    const total = data.total ?? 0
+    const skipped = (data.results || []).filter((r: any) => r.status === 'skipped').length
+    const failed = total - ok - skipped
+    if (ok) toast.success(`已为 ${ok} 个角色生成专属音色`)
+    if (skipped) toast.info(`${skipped} 个角色已有专属音色，已跳过`)
+    if (failed) toast.error(`${failed} 个角色音色生成失败`)
+    await refresh()
+    await loadVoices()
+  } catch (e: any) {
+    toast.error(e.message || '音色生成失败')
+  } finally {
+    generatingVoices.value = false
+  }
+}
+function doBreakdown() {
+  const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
+  const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
+  runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
+}
+async function genSample(id: number) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) } }
+async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * 有界并发池：同时最多跑 `limit` 个，腾出一个再上一个。
+ *
+ * 为什么要有：批量动作原来一律 `Promise.allSettled(items.map(...))` —— 40 个镜头就是
+ * 40 个请求**同时**打到声音/图像接口。远端一限流（429）就整批一起失败，而且中途
+ * 无从得知进度（只能等全完）✓✗。改成池子后：并发有上限、每完成一条报一次**数出来的**进度。
+ *
+ * `shouldStop()` 供「取消」用：只拦**还没提交**的那些；已提交的撤不回来，
+ * 所以 `skipped` 要如实报出来，不许假装撤回 ★
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<any>,
+  opts?: {
+    onSettled?: (done: number, ok: number, fail: number, total: number) => void
+    shouldStop?: () => boolean
+  },
+) {
+  const total = items.length
+  let cursor = 0
+  let done = 0
+  let ok = 0
+  let fail = 0
+  const errors: { item: T; error: any }[] = []
+  const lane = async () => {
+    while (true) {
+      if (opts?.shouldStop?.()) return
+      const i = cursor
+      cursor += 1
+      if (i >= total) return
+      const item = items[i] as T
+      try {
+        await worker(item, i)
+        ok += 1
+      } catch (e) {
+        fail += 1
+        errors.push({ item, error: e })
+      }
+      done += 1
+      opts?.onSettled?.(done, ok, fail, total)
+    }
+  }
+  const lanes = Math.max(1, Math.min(limit, total))
+  await Promise.all(Array.from({ length: lanes }, () => lane()))
+  return { total, done, ok, fail, skipped: total - done, errors }
+}
+
+/**
+ * 轮询「某个异步结果是否回填」。
+ *
+ * ⚠️ 第 4 参 `onTimeout` 是 2026-10-27 补的：此前轮询耗尽就**静默退出** ✗ ⇒ 任务中心里
+ * 那条任务会永远停在「进行中」（fab 一直转，用户以为还在跑 ✓✗）。现在收尾时回调一次，
+ * 由调用方决定标成「已停止轮询」还是「失败」（**不自己编造成功** ★）。
+ */
+function watchAsyncResult(check: () => any, attempts: number = 24, delay: number = 2500, onTimeout?: () => void) {
+  void (async () => {
+    for (let i = 0; i < attempts; i++) {
+      await sleep(delay)
+      // 这里**刻意不按 `isMounted` 提前退出**：轮询器不只是在刷进度，`check()` 里还带着
+      // `pump()` 这类**提交**动作（批量视频腾出一个槽位就交下一条）。离开剧集页就收工，
+      // 会让用户切去别的页面再回来时发现批量只跑了两条 —— 那是比多打几个请求更糟的结果。
+      // 真正的省法在 `refresh` 的合并上：同一时刻所有轮询器共用一趟六连请求，
+      // 后台待着也只花「一趟 / 2.5 秒」，不是 N 趟。
+      // 静默刷新：轮询期间网络抖一下就弹 toast，几十条任务下去会把真信息全埋掉 ✓✗
+      await refresh({ quiet: true })
+      if (check()) return
+    }
+    onTimeout?.()
+  })()
+}
+function normEpUrl(p?: string | null): string {
+  return mediaUrl(p)
+}
+
+// 角色级图片模型选择（每个角色独立）
+const charImageModels = ref<Record<number, string>>({})
+
+/**
+ * 生成一个角色的定妆板。
+ *
+ * 这里原本有**两个**几乎逐行相同的函数：`genCharImg`（不带模型）与 `genCharImgWithModel`
+ * （带模型）。差别只有三处 —— 多查一次 `charImageModels`、多一个 `指定模型：` 副标题、
+ * `generateImage` 的第三个参数。而 `genCharImg` 除它自己的 `retry` 之外**没有任何调用点**
+ * （模板走的是带模型那个），是彻底不可达的死码：别人改一处、漏一处，它就会安静地过期。
+ *
+ * 合并后保留带模型的形状。`model` 为空时传 `{ model: undefined }`，
+ * `api.post` 内部 `JSON.stringify` 会把这个键丢掉，请求体与旧的无模型版逐字节相同。
+ */
+async function genCharImg(id: number) {
+  const name = chars.value.find(c => c.id === id)?.name || `角色 #${id}`
+  const model = charImageModels.value[id] || undefined
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `charimg:${id}`,
+    title: `${name} · 定妆板`,
+    subtitle: model ? `指定模型：${model}` : '角色设定图',
+    stage: '提交中',
+    route: taskRoute('chars'),
+    retry: () => genCharImg(id),
+  })
+  try {
+    if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
+    const beforeUrl = normEpUrl(chars.value.find(c => c.id === id)?.image_url || chars.value.find(c => c.id === id)?.imageUrl)
+    await characterAPI.generateImage(id, epId.value, { model })
+    taskCenter.stage(task.id, '已提交，等待回填')
+    toast.success('角色图片生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const char = chars.value.find(c => c.id === id)
+      const cur = normEpUrl(char?.image_url || char?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
+      if (done) {
+        pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+        taskCenter.done(task.id)
+      }
+      return done
+    }, 24, 2500, () => taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）'))
+  } catch (e) {
+    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+function batchCharImages() {
+  const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
+  if (!ids.length) { toast.info('所有角色图片已生成'); return }
+  const parent = taskCenter.start({
+    kind: 'image',
+    key: 'batch:charimg',
+    title: `批量角色定妆板 · ${ids.length} 个`,
+    subtitle: '本集还没有图的角色',
+    stage: `0 / ${ids.length}`,
+    route: taskRoute('chars'),
+    retry: () => batchCharImages(),
+  })
+  pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
+  characterAPI.batchImages(ids, epId.value).then(async () => {
+    toast.success('角色图片批量生成中')
+    await refresh()
+    let lastDone = 0
+    watchAsyncResult(() => {
+      let done = 0
+      for (const id of ids) {
+        const char = chars.value.find(c => c.id === id)
+        if (char?.image_url || char?.imageUrl) {
+          done += 1
+          pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
+        }
+      }
+      lastDone = done
+      taskCenter.stage(parent.id, `${done} / ${ids.length}`, Math.round((done / ids.length) * 100))
+      if (done === ids.length) { taskCenter.done(parent.id); return true }
+      return false
+    }, 36, 2500, () => taskCenter.stage(parent.id, `前端已停止轮询：${lastDone} / ${ids.length} 已回填`))
+  }).catch(e => {
+    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
+    taskCenter.fail(parent.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  })
+}
+
+// 场景级图片模型选择（每个场景独立）
+const sceneImageModels = ref<Record<number, string>>({})
+
+/** 生成一个场景的场景卡。与 `genCharImg` 同形：合并了此前那个不可达的无模型死码。 */
+async function genSceneImg(id: number) {
+  const name = scenes.value.find(s => s.id === id)?.name || `场景 #${id}`
+  const model = sceneImageModels.value[id] || undefined
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `sceneimg:${id}`,
+    title: `${name} · 场景卡`,
+    subtitle: model ? `指定模型：${model}` : '环境设定图',
+    stage: '提交中',
+    route: taskRoute('scenes'),
+    retry: () => genSceneImg(id),
+  })
+  try {
+    if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
+    const beforeUrl = normEpUrl(scenes.value.find(s => s.id === id)?.image_url || scenes.value.find(s => s.id === id)?.imageUrl)
+    await sceneAPI.generateImage(id, epId.value, { model })
+    taskCenter.stage(task.id, '已提交，等待回填')
+    toast.success('场景图片生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const scene = scenes.value.find(s => s.id === id)
+      const cur = normEpUrl(scene?.image_url || scene?.imageUrl)
+      const done = !!cur && cur !== beforeUrl
+      if (done) {
+        pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+        taskCenter.done(task.id)
+      }
+      return done
+    }, 24, 2500, () => taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）'))
+  } catch (e) {
+    pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+function batchSceneImages() {
+  const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
+  if (!ids.length) { toast.info('所有场景图片已生成'); return }
+  const parent = taskCenter.start({
+    kind: 'image',
+    key: 'batch:sceneimg',
+    title: `批量场景卡 · ${ids.length} 个`,
+    subtitle: '本集还没有图的场景',
+    stage: `0 / ${ids.length}`,
+    route: taskRoute('scenes'),
+    retry: () => batchSceneImages(),
+  })
+  pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
+  let firstError: unknown = null
+  ids.forEach(id => {
+    sceneAPI.generateImage(id, epId.value)
+      .then(() => refresh())
+      .catch((e) => {
+        // 逐条失败的**第一个**原始错误留给归因（原来只 toast 一句，父任务无从判断类型 ✗）
+        if (!firstError) firstError = e
+        toast.error(e instanceof Error ? e.message : String(e))
+      })
+  })
+  toast.success('场景图片批量生成中')
+  let lastDone = 0
+  watchAsyncResult(() => {
+    let done = 0
+    for (const id of ids) {
+      const scene = scenes.value.find(s => s.id === id)
+      if (scene?.image_url || scene?.imageUrl) {
+        done += 1
+        pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      }
+    }
+    lastDone = done
+    taskCenter.stage(parent.id, `${done} / ${ids.length}`, Math.round((done / ids.length) * 100))
+    if (done === ids.length) { taskCenter.done(parent.id); return true }
+    return false
+  }, 36, 2500, () => {
+    if (lastDone === ids.length) return
+    if (firstError) taskCenter.fail(parent.id, firstError, { retry: () => batchSceneImages() })
+    else taskCenter.stage(parent.id, `前端已停止轮询：${lastDone} / ${ids.length} 已回填`)
+  })
+}
+
+function getDialogueSpeaker(sb: any) {
+  const lines = getDialogueLines(sb)
+  if (lines.length === 0) return '旁白'
+  if (lines.length === 1) return lines[0].speaker
+  // 多人对话时显示所有角色名
+  return [...new Set(lines.map(l => l.speaker))].join(' / ')
+}
+
+/**
+ * 获取多人对话的 TTS 音频列表（从 JSON 解析）
+ */
+function getTTSLines(sb: any) {
+  const url = sb?.tts_audio_url || sb?.ttsAudioUrl || ''
+  if (!url) return []
+  // 尝试解析为 JSON 数组（多人模式返回格式）
+  try {
+    const parsed = typeof url === 'string' ? JSON.parse(url) : null
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].speaker && parsed[0].tts_audio_url) {
+      return parsed
+    }
+  } catch (_) {}
+  // 单人模式：包装为统一格式
+  if (typeof url === 'string' && url.startsWith('static/')) {
+    return [{ speaker: getDialogueSpeaker(sb), text: getDialogueText(sb), tts_audio_url: url }]
+  }
+  return []
+}
+
+/**
+ * 批量加载所有配音分镜的验证状态
+ */
+async function loadAllDubMatchCache() {
+  const sbsWithDialogue = sbs.value.filter(hasDialogue)
+  if (!sbsWithDialogue.length) { dubMatchCache.value = {}; return }
+
+  const results = await Promise.allSettled(
+    sbsWithDialogue.map(sb => storyboardAPI.validateDialogue(sb.id).catch(() => null))
+  )
+  const cache: Record<string, any> = {}
+  sbsWithDialogue.forEach((sb, i) => {
+    const r = results[i]
+    if (r.status === 'fulfilled' && r.value) {
+      cache[sb.id] = {
+        lines: r.value.lines || [],
+        all_matched: r.value.all_matched ?? true,
+        issue_count: r.value.issue_count ?? 0,
+        tts_stale: r.value.tts_stale ?? false,
+        tts_stale_count: r.value.tts_stale_count ?? 0,
+        tts_stale_details: r.value.tts_stale_details || [],
+      }
+    } else {
+      cache[sb.id] = { lines: [], all_matched: true, issue_count: 0, tts_stale: false, tts_stale_count: 0, tts_stale_details: [] }
+    }
+  })
+  dubMatchCache.value = cache
+}
+
+/**
+ * 配音验证问题总数（用于横幅显示）
+ */
+const dubIssueCount = computed(() => {
+  let count = 0
+  for (const sbId in dubMatchCache.value) {
+    const cache = dubMatchCache.value[sbId]
+    if (!cache || !cache.lines) continue
+    count += cache.lines.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice').length
+  }
+  return count
+})
+
+/**
+ * TTS 过期角色数（voiceStyle 变更后未重新生成）
+ */
+const dubStaleCount = computed(() => {
+  let count = 0
+  for (const sbId in dubMatchCache.value) {
+    const cache = dubMatchCache.value[sbId]
+    if (!cache) continue
+    count += cache.tts_stale_count || 0
+  }
+  return count
+})
+
+/**
+ * 配音卡片的视图模型。
+ *
+ * 以前模板里一行台词要回调三次取值函数（标签、圆点、边框色），每次都得重进 `dubMatchCache`
+ * 找同一条 —— 一集几十个镜头、每个镜头多行台词，同一份查找重复上百遍。这里一次算完，
+ * 组件只认 `status` 字面量（显示成什么字、什么色属于组件的展示决定）。
+ *
+ * 成立的前提：`dubMatchCache` 是**整体替换**（`dubMatchCache.value = cache`）而非原地改字段，
+ * 所以这个 computed 能正常失效。若哪天改成原地赋值，这里会静默变滞后。
+ */
+const dubRows = computed(() => sbs.value.filter(hasDialogue).map((sb, i) => {
+  const lines = getDialogueLines(sb)
+  const cacheLines = dubMatchCache.value[sb.id]?.lines || []
+  const ttsLines = getTTSLines(sb)
+  const statusOf = (dl: any) => cacheLines.find((l: any) => l.speaker === dl.speaker && l.text === dl.text)?.match_status || null
+  const audioOf = (dl: any) => ttsLines.find((l: any) => l.speaker === dl.speaker && l.text === dl.text)?.tts_audio_url || null
+  const multi = lines.length > 1
+
+  return {
+    key: sb.id,
+    sb,
+    // 号仍按「过滤后的顺序」补零：原来模板里的 i 就是 sbs.filter(hasDialogue) 的下标
+    num: String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0'),
+    speaker: getDialogueSpeaker(sb),
+    multi,
+    peopleCount: lines.length,
+    lines: lines.map((dl: any) => ({ speaker: dl.speaker, text: dl.text, status: statusOf(dl), audioUrl: audioOf(dl) })),
+    single: multi ? null : {
+      // 单人卡沿用整镜口径：状态取验证缓存第一条、音频取 sb.tts_audio_url（不按台词行找）
+      status: cacheLines[0]?.match_status || null,
+      text: getDialogueText(sb),
+      meta: [sb.shot_type || sb.shotType || '未设景别', `${sb.duration || 10}s`, sb.location || '未设地点'],
+      hasTTS: hasTTS(sb),
+      audioUrl: hasTTS(sb) ? getTTSUrl(sb) : null,
+    },
+  }
+}))
+
+async function genShotTTS(sb: any) {
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  // 生成前验证
+  const cache = dubMatchCache.value[sb.id]
+  const issues = cache?.lines?.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
+  if (issues.length > 0) {
+    const warns = issues.map((v: any) => v.warning).filter(Boolean).join('；')
+    if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${warns}\n\n继续生成可能使用默认音色，是否继续？` }))) return
+  }
+
+  const task = taskCenter.start({
+    kind: 'tts',
+    key: `tts:${sb.id}`,
+    title: `镜头 #${shotNo} · 配音`,
+    subtitle: '对白/旁白',
+    stage: '生成中',
+    route: taskRoute('dubbing', sb.id),
+    retry: () => genShotTTS(sb),
+  })
+  try {
+    await storyboardAPI.generateTTS(sb.id)
+    toast.success(`镜头 #${shotNo} 配音已生成`)
+    taskCenter.done(task.id)
+    await refresh()
+  } catch (e) {
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+async function batchShotTTS() {
+  let stopped = false
+  const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
+  if (!pending.length) {
+    toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
+    return
+  }
+
+  // 批量生成前验证所有待生成分镜
+  const allIssues = []
+  for (const sb of pending) {
+    const cache = dubMatchCache.value[sb.id]
+    const issues = cache?.lines?.filter((l: any) => l.match_status === 'not_found' || l.match_status === 'no_voice') || []
+    if (issues.length > 0) {
+      allIssues.push({ sb, issues })
+    }
+  }
+  if (allIssues.length > 0) {
+    const detail = allIssues.map(({ sb, issues }) => {
+      const num = sb.storyboard_number || sb.storyboardNumber || sb.id
+      const warns = issues.map((i: any) => i.warning).filter(Boolean).join('；')
+      return `#${num}：${warns}`
+    }).join('\n')
+    if (!(await confirm({ message: `以下角色音色匹配存在问题：\n${detail}\n\n继续生成可能使用默认音色，是否继续？` }))) return
+  }
+
+  const parent = taskCenter.start({
+    kind: 'tts',
+    key: 'batch:tts',
+    title: `批量配音 · ${pending.length} 个镜头`,
+    subtitle: `本集有对白且还没有配音的镜头 · 同时最多 ${TTS_BATCH_LIMIT} 条`,
+    stage: `0 / ${pending.length}`,
+    route: taskRoute('dubbing'),
+    retry: () => batchShotTTS(),
+    // 停 = 不再提交下一批；已合成出来的声音片段撤不回来，文案里如实说
+    onCancel: () => { stopped = true },
+  })
+  const res = await runPool(pending, TTS_BATCH_LIMIT, sb => storyboardAPI.generateTTS(sb.id), {
+    shouldStop: () => stopped,
+    // 每落一条报一次：数字是数出来的，不是按时间折算的假进度 ✓
+    onSettled: (done, ok, fail, total) => taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${fail} 失败 · ${done} / ${total}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((done / total) * 100),
+    ),
+  })
+  if (res.ok) toast.success(`已生成 ${res.ok} 条镜头配音`)
+  if (res.fail) {
+    // 报**具体哪几个镜头**：失败多半是音色没绑或文本为空，只甩第一条错误定位不了
+    const numbers = res.errors.slice(0, 5).map(({ item }) => `#${(item as any).storyboard_number || (item as any).storyboardNumber || (item as any).id}`)
+    const more = res.fail > numbers.length ? ` 等 ${res.fail} 个` : ''
+    toast.error(`${res.fail} 条镜头配音生成失败：${numbers.join('、')}${more}`)
+    taskCenter.fail(parent.id, res.errors[0]?.error ?? new Error(`${res.fail} 条镜头配音生成失败`), { retry: () => batchShotTTS() })
+  } else if (stopped && res.skipped > 0) {
+    taskCenter.cancel(parent.id, `已停止提交：${res.ok} 成功 · 还有 ${res.skipped} 个镜头没提交`)
+  } else {
+    taskCenter.done(parent.id)
+  }
+  await refresh()
+}
+
+function getPreviousStoryboard(sb: any) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  return idx > 0 ? sbs.value[idx - 1] : null
+}
+
+function getNextStoryboard(sb: any) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  return idx >= 0 && idx < sbs.value.length - 1 ? sbs.value[idx + 1] : null
+}
+
+function getShotReferenceImages(sb: any) {
+  const refs: string[] = []
+  const pushRef = (value: any) => {
+    if (!value || refs.includes(value) || refs.length >= 6) return
+    refs.push(value)
+  }
+  const sceneId = sb?.scene_id || sb?.sceneId
+  const scene = scenes.value.find(item => item.id === sceneId)
+  pushRef(scene?.image_url || scene?.imageUrl)
+  for (const charId of getStoryboardCharacterIds(sb)) {
+    const char = chars.value.find(item => item.id === charId)
+    pushRef(char?.image_url || char?.imageUrl)
+  }
+  // 镜头连贯：上一镜头的尾帧作为当前镜头参考，让相邻镜头视觉延续
+  // （优先真实尾帧 tail_frame_image = 视频实际末帧，设计尾帧兜底）
+  const prev = getPreviousStoryboard(sb)
+  if (prev) {
+    pushRef(prev?.tail_frame_image || prev?.tailFrameImage || getLastFrame(prev))
+    pushRef(getFirstFrame(prev))
+  }
+  for (const ref of getRefs(sb)) {
+    pushRef(ref)
+  }
+  const first = getFirstFrame(sb)
+  const last = getLastFrame(sb)
+  pushRef(first)
+  pushRef(last)
+  return refs.filter(Boolean).slice(0, 6)
+}
+
+function buildShotImagePrompt(sb: any, frameType: string) {
+  const title = sb.title || ''
+  const keyframeDesc = sb.keyframe_prompt || sb.keyframePrompt || ''
+  // 关键帧生成优先用用户填写的中段关键帧描述，其次回退画面描述
+  const description = frameType === 'keyframe' && keyframeDesc
+    ? keyframeDesc
+    : (sb.image_prompt || sb.imagePrompt || sb.description || '')
+  const shotType = sb.shot_type || sb.shotType || ''
+  const angle = sb.angle || ''
+  const movement = sb.movement || ''
+  const location = sb.location || getSceneName(sb)
+  const time = sb.time || ''
+  const charactersText = getStoryboardCharacterNames(sb).join('、')
+  const action = sb.action || ''
+  const atmosphere = sb.atmosphere || ''
+  const frameHint = frameType === 'first_frame'
+    ? '生成这个镜头的起始关键帧，突出建立关系和动作开始瞬间'
+    : frameType === 'last_frame'
+      ? '生成这个镜头的结束关键帧，突出动作结束、情绪落点或结果状态'
+      : '生成这个镜头的中段关键帧，锁定动作进行到一半、道具状态变化、机位移动中间态的瞬间'
+
+  return [
+    title ? `镜头标题：${title}` : '',
+    description ? `画面描述：${description}` : '',
+    shotType ? `景别：${shotType}` : '',
+    angle ? `机位：${angle}` : '',
+    movement ? `运镜：${movement}` : '',
+    charactersText ? `角色：${charactersText}` : '',
+    location ? `地点：${location}` : '',
+    time ? `时间：${time}` : '',
+    action ? `动作：${action}` : '',
+    atmosphere ? `氛围：${atmosphere}` : '',
+    frameHint,
+  ].filter(Boolean).join('；')
+}
+
+async function genShotFrame(sb: any, frameType: string) {
+  const prompt = buildShotImagePrompt(sb, frameType)
+  const referenceImages = getShotReferenceImages(sb)
+  const key = framePendingKey(sb.id, frameType)
+  const frameLabel = frameType === 'first_frame' ? '首帧' : frameType === 'last_frame' ? '尾帧' : '关键帧'
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  // 任务中心：同 key 复用 ⇒ 「重试」不会在列表里长出第二条（见 useTaskCenter 文件头）
+  const task = taskCenter.start({
+    kind: 'image',
+    key: `frame:${key}`,
+    title: `镜头 #${shotNo} · ${frameLabel}`,
+    subtitle: '分镜关键帧',
+    stage: '提交中',
+    route: taskRoute('shots', sb.id),
+    retry: () => genShotFrame(sb, frameType),
+  })
+  try {
+    if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
+    const body = {
+      storyboard_id: sb.id,
+      drama_id: dramaId,
+      prompt,
+      frame_type: frameType,
+      reference_images: referenceImages.length ? referenceImages : undefined,
+    }
+    await imageAPI.generate(body)
+    taskCenter.stage(task.id, '已提交，等待回填')
+    toast.success(frameType === 'first_frame' ? '首帧生成中' : frameType === 'last_frame' ? '尾帧生成中' : '关键帧生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const target = sbs.value.find(s => s.id === sb.id)
+      const done = frameType === 'first_frame' ? !!getFirstFrame(target)
+        : frameType === 'last_frame' ? !!getLastFrame(target)
+          : !!getKeyframe(target)
+      if (done) {
+        pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+        taskCenter.done(task.id)
+      }
+      return done
+    }, 24, 2500, () => {
+      // 轮询停了但结果没回来：**不判成功也不判失败**，如实说「前端不看了」
+      taskCenter.stage(task.id, '前端已停止轮询（可能仍在排队，刷新可看结果）')
+      pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+    })
+  } catch (e) {
+    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function genVid(sb: any) {
+  const params = {
+    storyboard_id: sb.id,
+    drama_id: dramaId,
+    prompt: sb.video_prompt || sb.videoPrompt || '',
+    duration: Number(sb.duration || 5),
+    aspect_ratio: videoAspectRatio.value,
+  }
+  const first = getFirstFrame(sb)
+  const last = getLastFrame(sb)
+  // 镜头连贯：当前镜头无首帧时，回退用上一镜头的尾帧作参考
+  // （优先真实尾帧 tail_frame_image = 视频实际末帧，保证像素级顺接；设计尾帧兜底）
+  const prev = getPreviousStoryboard(sb)
+  const prevLast = prev ? (prev?.tail_frame_image || prev?.tailFrameImage || getLastFrame(prev)) : null
+  const prevFirst = prev ? getFirstFrame(prev) : null
+  const effFirst = first || prevLast || prevFirst
+  const refs = getRefs(sb)
+  if (first && last) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
+  else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [effFirst, ...refs].filter(Boolean) }) }
+  else if (effFirst) { Object.assign(params, { reference_mode: 'single', image_url: effFirst }) }
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  const task = taskCenter.start({
+    kind: 'video',
+    key: `video:${sb.id}`,
+    title: `镜头 #${shotNo} · 视频`,
+    subtitle: `${Number(sb.duration || 5)} 秒${first && last ? ' · 首尾帧' : refs.length ? ` · 参考图 ${refs.length}` : effFirst ? ' · 首帧' : ' · 纯文生'}`,
+    stage: '提交中',
+    route: taskRoute('videos', sb.id),
+    retry: () => genVid(sb),
+  })
+  try {
+    delete failedVideoMessages.value[sb.id]
+    if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
+    const generation = await videoAPI.generate(params)
+    taskCenter.stage(task.id, '已排队，等待渲染')
+    toast.success('视频生成中')
+    await refresh()
+    pollVideoGeneration(generation?.id, sb.id, task.id)
+  } catch (e) {
+    pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+async function pollVideoGeneration(generationId: number, storyboardId: number, taskId?: string) {
+  if (!generationId) {
+    watchAsyncResult(() => {
+      const target = sbs.value.find(s => s.id === storyboardId)
+      const done = !!(target?.video_url || target?.videoUrl)
+      if (done) {
+        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        if (taskId) taskCenter.done(taskId)
+      }
+      return done
+    }, 150, 4000, () => {
+      // 没有 generationId 只能盯分镜字段，前端最多盯 10 分钟。到点**必须结案**：
+      // 原来只改 stage 不收尾，条目会永远转圈（比报错更像坏了 ✓✗）。收成「已取消」并说清原因，
+      // 不判失败——渲染可能真的还在跑，判失败会误导用户重复提交。
+      pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+      if (taskId) taskCenter.cancel(taskId, '前端盯到 10 分钟仍未回填，已停止等待（刷新可接回，或去「生成历史」看）')
+    })
+    return
+  }
+  for (let i = 0; i < 120; i++) {
+    await sleep(4000)
+    try {
+      const res = await videoAPI.get(generationId)
+      await refresh()
+      // ⚠️ 这里**只报轮次、不报百分比**：上游不给我们渲染进度，「第 N 次查询/120」是
+      //    前端自己的等待轮次，把它换算成 50% 那种条就是假进度 ✓✗（本仓吃过的坑）。
+      if (taskId) taskCenter.stage(taskId, `渲染中 · 第 ${i + 1} 次查询（上限 120）`, null)
+      if (res?.status === 'completed') {
+        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        delete failedVideoMessages.value[storyboardId]
+        if (taskId) taskCenter.done(taskId)
+        toast.success('视频生成完成')
+        return
+      }
+      if (res?.status === 'failed') {
+        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        failedVideoMessages.value = {
+          ...failedVideoMessages.value,
+          [storyboardId]: res?.error_msg || res?.errorMsg || '视频生成失败',
+        }
+        if (taskId) taskCenter.fail(taskId, new Error(failedVideoMessages.value[storyboardId]), { route: taskRoute('videos', storyboardId) })
+        toast.error(failedVideoMessages.value[storyboardId])
+        return
+      }
+    } catch {}
+  }
+  pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+  failedVideoMessages.value = {
+    ...failedVideoMessages.value,
+    [storyboardId]: '视频生成超时',
+  }
+  if (taskId) taskCenter.fail(taskId, new Error('视频生成超时'), { route: taskRoute('videos', storyboardId) })
+  toast.error('视频生成超时')
+}
+
+/** 后端生成记录里算「还在飞」的状态（小写比对） */
+const IN_FLIGHT_STATUS = ['processing', 'pending', 'queued', 'generating', 'running']
+
+/**
+ * 从本页提交的提示词尾巴里认帧类型。
+ *
+ * 依据：`buildShotImagePrompt` 末尾固定拼一句 frameHint，三个取值各不相同
+ * （…突出建立关系和动作开始瞬间 / …突出动作结束、情绪落点或结果状态 / …锁定动作进行到一半…）。
+ * **只在恰好命中一种时采信**：0 种（不是本页提交的）或撞了两种以上（用户正文里正好有同样的字）
+ * 一律返回 null ⇒ 调用方不许标具体帧槽位。认错比认不出更糟 ✓✗
+ */
+function inferFrameType(prompt?: string | null): string | null {
+  const text = String(prompt || '')
+  const hits = [
+    text.includes('动作开始瞬间') ? 'first_frame' : '',
+    text.includes('结果状态') ? 'last_frame' : '',
+    text.includes('动作进行到一半') ? 'keyframe' : '',
+  ].filter(Boolean)
+  return hits.length === 1 ? hits[0]! : null
+}
+
+function frameFilled(sb: any, frameType: string) {
+  if (!sb) return false
+  if (frameType === 'first_frame') return !!getFirstFrame(sb)
+  if (frameType === 'last_frame') return !!getLastFrame(sb)
+  return !!getKeyframe(sb)
+}
+
+function filledFrameCount(sb: any) {
+  return ['first_frame', 'last_frame', 'keyframe'].filter(t => frameFilled(sb, t)).length
+}
+
+/**
+ * 刷新/切页回来后，把**还在飞**的生成接回任务台账。
+ *
+ * 真源是后端的生成记录（不是 localStorage）：本地存一份在换设备/清缓存后就开始骗人 ✓✗。
+ *
+ * * **视频**：记录带 `storyboard_id`，且一镜只有一条视频 ⇒ 能精确接回，分镜上的「视频生成中」也能亮。
+ * * **图片**：记录带 `storyboard_id`，但**没有帧类型**（首帧/尾帧/关键帧）✗。所以分两档：
+ *   ① 认得出类型 ⇒ 精确接回（点亮那个槽位、给「重试」）；
+ *   ② 认不出 ⇒ 只接任务台账（标题写「图片」）、**不点亮任何槽位**。
+ *      宁可少显示，也不让用户看到「首帧生成中」其实跑的是关键帧 ✓✗
+ * * 角色卡/场景卡的记录只有 `drama_id`、没有人物/场景 id，对不回具体资产 ⇒ 不接
+ *   （它们在各自页签里点一下就有反馈，刷新丢一次代价小）。
+ *
+ * 接回来的图片帧**共用一个轮询器**：每条任务各起一个 `watchAsyncResult` 就是每 3 秒
+ * 打 N 次全量 refresh（N ＝ 接回来的镜头数），页面会被自己拖死 ✓✗
+ */
+async function restoreInFlightTasks() {
+  let recs: any[] = []
+  try {
+    recs = (await generationsAPI.list({ drama_id: dramaId, limit: 40 })) || []
+  } catch {
+    // 恢复只是锦上添花，失败不打扰用户
+    return
+  }
+  const live = recs.filter((r: any) => IN_FLIGHT_STATUS.includes(String(r.status || '').toLowerCase()))
+
+  // ---- 视频 ----
+  for (const r of live) {
+    if (r.type !== 'video' || !r.storyboardId) continue
+    const sb = sbs.value.find(s => s.id === r.storyboardId)
+    if (!sb || hasVid(sb) || isPendingVideo(sb.id)) continue
+    pendingVideoIds.value.push(sb.id)
+    const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+    const t = taskCenter.start({
+      kind: 'video',
+      key: `video:${sb.id}`,
+      title: `镜头 #${shotNo} · 视频`,
+      subtitle: '刷新前已提交，接着等',
+      stage: '渲染中（页面刷新后接回）',
+      route: taskRoute('videos', sb.id),
+      retry: () => genVid(sb),
+    })
+    // 传 0 走「没有 generationId」那条支路：只盯分镜上的成片字段，
+    // 不去猜记录 id 是不是 video 表的 id（猜错会把轮询打到别的记录上）
+    pollVideoGeneration(0, sb.id, t.id)
+  }
+
+  // ---- 图片（分镜帧）----
+  type Restored = { shotId: number; target: string | null; baseline: number; taskId: string; settled: boolean }
+  const restored: Restored[] = []
+  const frameShotIds = [...new Set(
+    live.filter(r => r.type === 'image' && r.storyboardId).map(r => Number(r.storyboardId)),
+  )]
+
+  for (const shotId of frameShotIds) {
+    const sb = sbs.value.find(s => s.id === shotId)
+    if (!sb) continue
+    // 该镜头可能有不止一条在飞（首帧＋关键帧），类型按最新那条认，认不准就退回「图片」
+    const rec = live.find(r => r.type === 'image' && Number(r.storyboardId) === shotId)
+    const inferred = inferFrameType(rec?.prompt)
+    const target = inferred && !frameFilled(sb, inferred) ? inferred : null
+    if (target && isPendingShotFrame(shotId, target)) continue // 本次会话自己提交的，不重复接
+    // 认不出类型、而当前模式下该有的帧已经齐了 ⇒ 多半是陈旧记录（状态没刷干净），别接
+    if (!target) {
+      const needTypes = frameMode.value === 'first_last' ? ['first_frame', 'last_frame'] : ['first_frame']
+      if (needTypes.every(t => frameFilled(sb, t))) continue
+    }
+    const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+    const label = target === 'first_frame' ? '首帧' : target === 'last_frame' ? '尾帧' : target === 'keyframe' ? '关键帧' : '图片'
+    const t = taskCenter.start({
+      kind: 'image',
+      key: target ? `frame:${framePendingKey(shotId, target)}` : `frame:${shotId}:restored`,
+      title: `镜头 #${shotNo} · ${label}`,
+      subtitle: '刷新前已提交，接着等',
+      stage: '生成中（页面刷新后接回）',
+      route: taskRoute('shots', shotId),
+      // 认得出类型才给「重试」：认不出时瞎重试会多出一张不知道是什么的图 ✓✗
+      retry: target ? () => genShotFrame(sb, target) : undefined,
+    })
+    if (target) pendingShotFrameKeys.value.push(framePendingKey(shotId, target))
+    restored.push({ shotId, target, baseline: filledFrameCount(sb), taskId: t.id, settled: false })
+  }
+
+  if (!restored.length) return
+  const stillRunning = () => restored.filter(r => !r.settled)
+  const releaseSlot = (r: Restored) => {
+    if (!r.target) return
+    const k = framePendingKey(r.shotId, r.target)
+    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== k)
+  }
+  watchAsyncResult(() => {
+    for (const r of stillRunning()) {
+      const cur = sbs.value.find(s => s.id === r.shotId)
+      // 认得出类型就盯那个槽位；认不出就盯「帧数变多了」，不指定是哪一帧
+      const done = r.target ? frameFilled(cur, r.target) : filledFrameCount(cur) > r.baseline
+      if (!done) continue
+      r.settled = true
+      releaseSlot(r)
+      taskCenter.done(r.taskId)
+    }
+    return stillRunning().length === 0
+  }, 120, 3000, () => {
+    // 盯了 6 分钟仍没回填：不判成功也不判失败，如实收成「已停止等待」
+    for (const r of stillRunning()) {
+      r.settled = true
+      releaseSlot(r)
+      taskCenter.cancel(r.taskId, '前端盯了 6 分钟仍没回填，已停止等待（去「生成历史」看，或重新生成）')
+    }
+  })
+}
+async function doCompose(sb: any) {
+  const shotNo = sb.storyboard_number || sb.storyboardNumber || sb.id
+  const task = taskCenter.start({
+    kind: 'compose',
+    key: `compose:${sb.id}`,
+    title: `镜头 #${shotNo} · 合成`,
+    subtitle: '画面 + 配音 + 字幕',
+    stage: '合成中',
+    route: taskRoute('compose', sb.id),
+    retry: () => doCompose(sb),
+  })
+  try {
+    delete failedComposeMessages.value[sb.id]
+    if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
+    await composeAPI.shot(sb.id)
+    toast.success('合成完成')
+    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
+    taskCenter.done(task.id)
+    refresh()
+  } catch (e) {
+    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
+    failedComposeMessages.value = {
+      ...failedComposeMessages.value,
+      [sb.id]: e instanceof Error ? e.message : String(e),
+    }
+    taskCenter.fail(task.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+/**
+ * 批量视频同时最多提交几条。
+ *
+ * 原来这里是 `pendingIds.forEach(id => genVid(sb))` ⇒ 20 镜一集就是 20 条视频**同时**进引擎，
+ * 显存根本吃不下（互相挤爆 → 一排「视频生成超时」）✓✗。改成有上限的调度：
+ * 腾出一个槽位再交下一条；单条仍走 `genVid` 自己的任务与轮询，所以每条都还能各自重试。
+ */
+const VIDEO_BATCH_LIMIT = 2
+
+function batchVideos() {
+  const pendingIds = sbs.value.filter(s => !hasVid(s)).map(s => s.id)
+  if (!pendingIds.length) { toast.info('所有镜头都已有视频'); return }
+  let stopped = false
+  const submitted = new Set<number>()
+  let cursor = 0
+  // 批次父任务：报「已回填 m / 失败 k / 已提交 s / 共 n」——这几个数都是**数出来的**，
+  // 所以百分比是真进度（不是时间折算）✓
+  const parent = taskCenter.start({
+    kind: 'video',
+    key: 'batch:video',
+    title: `批量视频 · ${pendingIds.length} 个镜头`,
+    subtitle: `全部未出片的镜头 · 同时最多 ${VIDEO_BATCH_LIMIT} 条（显存）`,
+    stage: `0 / ${pendingIds.length}`,
+    route: taskRoute('videos'),
+    retry: () => batchVideos(),
+    // 停 = **不再提交下一批**；已提交的撤不回来，所以文案里说清（不许假装撤回 ✓✗）
+    onCancel: () => { stopped = true },
+  })
+  const pump = () => {
+    while (!stopped && cursor < pendingIds.length) {
+      // 上限按**全局**在飞数算（本集别处手动点的视频也占显存），不是只算本批
+      if (pendingVideoIds.value.length >= VIDEO_BATCH_LIMIT) return
+      const id = pendingIds[cursor]!
+      cursor += 1
+      if (pendingVideoIds.value.includes(id)) continue
+      const sb = sbs.value.find(item => item.id === id)
+      if (!sb) continue
+      submitted.add(id)
+      void genVid(sb)
+    }
+  }
+  pump()
+  const countSettled = () => {
+    let ok = 0
+    let bad = 0
+    // 只统计**已提交**的：还没轮到提交的镜头既没片也没失败，不能算「失败」
+    for (const id of submitted) {
+      const target = sbs.value.find(s => s.id === id)
+      if (target?.video_url || target?.videoUrl) ok += 1
+      else if (failedVideoMessages.value[id]) bad += 1
+      else if (!pendingVideoIds.value.includes(id)) bad += 1 // 已退出 pending 又没片 ⇒ 也算落定
+    }
+    return { ok, bad }
+  }
+  // 每提交一批要等几分钟，轮询上限必须跟总镜头数挂钩（固定 80 次只够 2-3 条）
+  const ticks = Math.max(80, Math.ceil(pendingIds.length / VIDEO_BATCH_LIMIT) * 45)
+  watchAsyncResult(() => {
+    const { ok, bad } = countSettled()
+    const settled = ok + bad
+    taskCenter.stage(
+      parent.id,
+      `${ok} 成功 / ${bad} 失败 · 已提交 ${submitted.size} / 共 ${pendingIds.length}${stopped ? '（已停止提交）' : ''}`,
+      Math.round((settled / pendingIds.length) * 100),
+    )
+    pendingIds.forEach(id => {
+      const target = sbs.value.find(s => s.id === id)
+      if (target?.video_url || target?.videoUrl) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
+    })
+    pump() // 腾出槽位就交下一条
+    if (settled < submitted.size) return false
+    if (!stopped && submitted.size < pendingIds.length) return false
+    if (stopped) taskCenter.cancel(parent.id, `已停止提交：${ok} 成功 / ${bad} 失败 · 还有 ${pendingIds.length - submitted.size} 个镜头没提交`)
+    else if (bad) taskCenter.fail(parent.id, new Error(`${bad} 个镜头没有出片（可见红色失败提示或未回填）`))
+    else taskCenter.done(parent.id)
+    return true
+  }, ticks, 4000, () => {
+    const { ok, bad } = countSettled()
+    taskCenter.stage(parent.id, `前端已停止轮询：${ok} 成功 / ${bad} 未回填 · 已提交 ${submitted.size} / 共 ${pendingIds.length}`)
+  })
+}
+async function batchCompose() {
+  const parent = taskCenter.start({
+    kind: 'compose',
+    key: 'batch:compose',
+    title: '批量合成',
+    subtitle: '本集全部有片镜头',
+    stage: '提交中',
+    route: taskRoute('compose'),
+    retry: () => batchCompose(),
+  })
+  try {
+    await composeAPI.all(epId.value)
+  } catch (e) {
+    taskCenter.fail(parent.id, e)
+    toast.error(e instanceof Error ? e.message : String(e))
+    return
+  }
+  pendingComposeIds.value = [...new Set(sbs.value.filter(sb => !!sb.video_url || !!sb.videoUrl).map(sb => sb.id))]
+  taskCenter.stage(parent.id, `合成中 · ${pendingComposeIds.value.length} 个`)
+  toast.success('批量合成已开始')
+  pollComposeStatus(parent.id)
+}
+let mergeIntervalId: ReturnType<typeof setInterval> | null = null
+
+const exporting = ref(false)
+const exportScope = ref<'all' | 'video' | 'assets'>('all')
+
+/**
+ * 导出按钮的统一外壳：向 API 要一个文件，存到本地。
+ *
+ * 六个导出处理函数原本各自手抄同一段十六行（导出互斥锁 → fetch → 非 2xx 取 message →
+ * 取 blob → createObjectURL → 造 `<a>` → click → remove → revoke → 成功提示 → 兜底提示），
+ * 只差 url、文件名和两句文案。抄出来的分歧已经能看见：文件名有 `ep${episodeNumber}`、
+ * `ep${epId.value}`、以及不带集号三种写法（见各调用处的 `filename`）。
+ *
+ * `failText` 只用于 HTTP 非 2xx 时的消息（`${failText} (${status})`），
+ * `fallbackText` 只用于「异常没有 message」的回落，默认同 `failText`
+ * —— 两级回落是原代码就有的，别合并成一个。
+ */
+async function exportFile(spec: {
+  url: string
+  filename: string
+  okText: string
+  failText: string
+  fallbackText?: string
+  /** 服务端回纯文本（如 EDL）时按此 MIME 包成 blob；默认按二进制取 */
+  asText?: string
+}) {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await fetch(spec.url)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `${spec.failText} (${resp.status})`)
+    }
+    const blob = spec.asText
+      ? new Blob([await resp.text()], { type: spec.asText })
+      : await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = spec.filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    toast.success(spec.okText)
+  } catch (e: any) {
+    toast.error(e?.message || spec.fallbackText || spec.failText)
+  } finally {
+    exporting.value = false
+  }
+}
+
+function doExportZip() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}?scope=${exportScope.value}`,
+    filename: `drama-${dramaId}-${exportScope.value}.zip`,
+    okText: '打包导出完成',
+    failText: '导出失败',
+    fallbackText: '打包导出失败',
+  })
+}
+
+function doExportEdl() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/edl?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}.edl`,
+    okText: 'EDL 导出完成',
+    failText: 'EDL 导出失败',
+    asText: 'text/plain;charset=utf-8',
+  })
+}
+
+function doExportJianying() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/jianying-draft?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}-jianying.zip`,
+    okText: '剪映草稿导出完成',
+    failText: '剪映草稿导出失败',
+  })
+}
+
+const staleCount = ref(0)
+const staleSummary = computed(() => staleCount.value
+  ? `${staleCount.value} 个分镜剧本指纹与当前剧本不一致（stale），可点击查看明细`
+  : '剧本内容指纹校验：分镜与剧本一致时显示 0 stale')
+
+function doExportLedger(format: 'json' | 'md') {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/project-ledger?format=${format}&episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-ep${episodeNumber}-ledger.${format === 'md' ? 'md' : 'json'}`,
+    okText: format === 'md' ? '工程账本（Markdown）导出完成' : '工程账本（JSON）导出完成',
+    failText: '工程账本导出失败',
+  })
+}
+
+async function doCheckStale() {
+  try {
+    const resp = await fetch(`/api/v1/export/dramas/${dramaId}/project-ledger/stale?episodeId=${epId.value}`)
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.message || `指纹校验失败 (${resp.status})`)
+    }
+    const j = await resp.json()
+    staleCount.value = j.staleCount || 0
+    if (j.staleCount) {
+      const list = (j.stale || []).map((s: any) => `#${s.storyboardNumber}`).join('、')
+      toast.warning(`发现 ${j.staleCount} 个 stale 分镜：${list}`)
+    } else {
+      toast.success('指纹校验通过：所有分镜与当前剧本一致')
+    }
+  } catch (e: any) {
+    toast.error(e?.message || '指纹校验失败')
+  }
+}
+
+function doExportQcReport(format: 'json' | 'md' | 'html') {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/qc-report?format=${format}&episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-qc-report.${format === 'json' ? 'json' : format}`,
+    okText: `QC 报告（${format.toUpperCase()}）导出完成`,
+    failText: 'QC 报告导出失败',
+  })
+}
+
+function doExportContactSheet() {
+  exportFile({
+    url: `/api/v1/export/dramas/${dramaId}/contact-sheet?episodeId=${epId.value}`,
+    filename: `drama-${dramaId}-episode-${epId.value}-contact-sheet.html`,
+    okText: '联系表导出完成',
+    failText: '联系表导出失败',
+  })
+}
+
+function routeTag(route: string | null): string {
+  if (!route) return ''
+  const map: Record<string, string> = {
+    text_to_video: 'T2V',
+    first_frame_to_video: 'I2V',
+    first_last_frame: 'FL2VA',
+    reference_to_video: 'R2V',
+    keyframe_to_video: 'I2V-K',
+    video_editor: 'Edit',
+    blocked: '⛔',
+  }
+  return map[route] || route.slice(0, 8)
+}
+
+/** 视觉图谱徽标：景别/机位/运镜缩略（如 中景/平视/缓慢推镜 → 中景·推） */
+const SHOT_TAG_MAP: Record<string, string> = {
+  大远景: '大远景', 远景: '远景', 全景: '全景', 中景: '中景', 中近景: '中近景',
+  近景: '近景', 特写: '特写', 大特写: '大特写',
+  平视: '平视', 仰视: '仰视', 俯视: '俯视', 侧拍: '侧拍', 过肩: '过肩',
+}
+function shotTag(sb: any): string {
+  const st = sb?.shot_type || ''
+  const mv = sb?.movement || ''
+  if (!st && !mv) return ''
+  const stLabel = SHOT_TAG_MAP[st] || st.slice(0, 2)
+  const mvLabel = mv ? (mv.includes('推') ? '推' : mv.includes('拉') ? '拉' : mv.includes('摇') ? '摇' : mv.includes('移') ? '移' : mv.includes('跟') ? '跟' : mv.includes('环绕') ? '环' : mv.includes('升降') ? '升降' : mv.includes('手持') ? '手持' : mv.slice(0, 2)) : ''
+  return mvLabel ? `${stLabel}·${mvLabel}` : stLabel
+}
+
+/* ============ 生成参数摘要：按钮旁说清「这一下会用哪个模型、发什么参考图」 ============ */
+/**
+ * 为什么要有：原来用户在同一个页签里点「生成」，并不知道吃的是哪个模型配置、会送几张参考图、
+ * 提示词到底是哪一段（只能靠记忆去别的页签翻）。这里把这几项摊在按钮旁边，
+ * 口径全部**从当前数据算**，不复制一份参数（复制就会漂 ✓✗）。
+ */
+const promptExpanded = ref(false)
+const paramsOpen = ref(false)
+const paramsPos = ref<Record<string, string>>({ top: '0px', left: '0px' })
+
+/**
+ * 把面板钉在按钮下方（视口坐标）。为什么不用相对定位：`.content-panel` 是 `overflow: hidden`，
+ * 下拉会被裁掉一半甚至整块，用户点完以为坏了 ✓✗
+ */
+function toggleParams(ev: MouseEvent) {
+  if (paramsOpen.value) { paramsOpen.value = false; return }
+  const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  // 右边留 8px 边距；面板宽 320px（与 CSS 对齐）
+  const left = Math.max(8, Math.min(r.left - 8, window.innerWidth - 328))
+  paramsPos.value = { top: `${Math.round(r.bottom + 6)}px`, left: `${Math.round(left)}px` }
+  paramsOpen.value = true
+  // 懒加载：面板不打开就不打这个接口（一次也无所谓，但没必要每次进页面都问）
+  if (!genPresetsLoaded.value) loadGenPresets()
+}
+
+/* ============ 本集生成预设：三模型 + 帧模式一键存取 ============ */
+/**
+ * 为什么要有：一季 12 集，每集都要在「图片/视频/配音」三个下拉里重新选一遍同样的三项，
+ * 集数一多必然选漏（选漏 = 那集用错模型出图，事后只能重出）。后端 `presets` 表早就有
+ * `type` 字段（调色盘在用），这里复用它存一组「集级生成设置」，不新建表 ✓。
+ * config 存 id 而不是名字：名字会改，id 不会；且套用时走 `switchEpisodeConfig` 同一条路径，
+ * 不会出现「预设里写 A、页面显示 B」的第二套真源 ✓✗。
+ */
+const genPresets = ref<{ id: number; name: string; config: any }[]>([])
+const genPresetsLoaded = ref(false)
+const presetName = ref('')
+const presetBusy = ref(false)
+
+async function loadGenPresets() {
+  try {
+    const list: any = await presetsAPI.list('generation')
+    genPresets.value = Array.isArray(list) ? list : []
+  } catch {
+    genPresets.value = []
+  } finally {
+    genPresetsLoaded.value = true
+  }
+}
+
+/** 当前生效的集级生成设置（全部从页面真源取，不缓存副本） */
+function currentGenConfig() {
+  return {
+    imageConfigId: lockedImageConfigId.value,
+    videoConfigId: lockedVideoConfigId.value,
+    audioConfigId: lockedAudioConfigId.value,
+    frameMode: frameMode.value,
+  }
+}
+
+async function saveGenPreset() {
+  const name = presetName.value.trim()
+  if (!name || presetBusy.value) return
+  presetBusy.value = true
+  try {
+    await presetsAPI.create({ type: 'generation', name, config: currentGenConfig() })
+    presetName.value = ''
+    genPresetsLoaded.value = false
+    await loadGenPresets()
+    toast.success(`已保存预设「${name}」`)
+  } catch (e: any) {
+    toast.error(e?.message || '保存预设失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function applyGenPreset(p: { id: number; name: string; config: any }) {
+  const c = p.config || {}
+  // 逐项套用：缺项的预设不该把现有设置清空（老预设可能只存了图片模型）
+  // 且**先确认这个 id 还在配置列表里** —— 模型配置被删掉后，预设里留的是死 id，
+  // 直接 PUT 上去会让这集「看着有配置、其实指向不存在的行」（出图时才报错，更难查 ✓✗）
+  const alive = (list: any[], id: any) => !!id && list.some(x => x.id === id)
+  const missing: string[] = []
+  if (c.imageConfigId) {
+    if (alive(imageConfigs.value, c.imageConfigId)) await switchEpisodeConfig('image', c.imageConfigId)
+    else missing.push('图片模型')
+  }
+  if (c.videoConfigId) {
+    if (alive(videoConfigs.value, c.videoConfigId)) await switchEpisodeConfig('video', c.videoConfigId)
+    else missing.push('视频模型')
+  }
+  if (c.audioConfigId) {
+    if (alive(audioConfigs.value, c.audioConfigId)) await switchEpisodeConfig('audio', c.audioConfigId)
+    else missing.push('配音')
+  }
+  if (c.frameMode === 'first' || c.frameMode === 'first_last') frameMode.value = c.frameMode
+  // 换模型 = 换单价 ⇒ 按钮旁那个「待生成 ≈ ¥X」必须立刻重算，否则还挂着上一个模型的钱 ✓✗
+  scheduleEstimate(true)
+  if (missing.length) toast.warning(`已套用「${p.name}」，但 ${missing.join('、')} 的配置已被删除，未切换`)
+  else toast.success(`已套用预设「${p.name}」`)
+}
+
+async function removeGenPreset(p: { id: number; name: string }) {
+  if (!(await confirm({ message: `删除预设「${p.name}」？只删这组设置，不影响已经生成的图/视频。`, danger: true }))) return
+  try {
+    await presetsAPI.del(p.id)
+    genPresetsLoaded.value = false
+    await loadGenPresets()
+    toast.success('已删除')
+  } catch (e: any) {
+    toast.error(e?.message || '删除预设失败')
+  }
+}
+
+const selectedSbRefStrategy = computed(() => {
+  const sb = selectedSb.value
+  if (!sb) return '—'
+  const first = getFirstFrame(sb)
+  const last = getLastFrame(sb)
+  const refs = getRefs(sb)
+  if (first && last) return '首帧 + 尾帧'
+  if (refs.length) return `参考图 ${refs.length} 张`
+  if (first) return '首帧'
+  return '纯文生'
+})
+
+const selectedSbPrompt = computed(() => {
+  const sb = selectedSb.value
+  if (!sb) return ''
+  return sb.video_prompt || sb.videoPrompt || sb.description || ''
+})
+
+/* ==================== 「继续到成片」：把一串生成步骤接成一条流水线 ==================== */
+
+/**
+ * 为什么要有这个东西：一集从空到成片要过 7 道手（角色板 → 场景卡 → 首帧 → 配音 → 视频 →
+ * 合成 → 拼接），每一道都要人自己去点那个页签、自己算「还差几个」。竞品那边都是**一条链**，
+ * 用户只决定「跑不跑、跑到哪停」。
+ *
+ * 设计约束（三条，都是被坑教出来的）：
+ * ① **只补缺的**：每步 `todo` 就是「当前还差几个」，差 0 的步自动跳过 —— 绝不做「一键全部重跑」
+ *    那种烧钱的假功能；
+ * ② **进度是真的**：父任务只报「第 i/n 步」与「已完成 i/n」，不报百分比猜测（步数可数）；
+ * ③ **必须能停**：`chainAbort` 每个 3 秒的轮询点检查一次，停的是「下一步不再提交」，
+ *    已经提交出去的任务老老实实跑完（前端叫停不了远端，别在文案上骗人）。
+ */
+type ChainStepId = 'chars' | 'scenes' | 'frames' | 'tts' | 'videos' | 'compose' | 'merge'
+
+interface ChainStep {
+  id: ChainStepId
+  label: string
+  /** 还差几项；0 = 本步已齐，不进流水线 */
+  todo: number
+  hint: string
+  timeoutMs: number
+  route: string
+  run: () => void | Promise<void>
+  /** 这一步到底算不算完（每 3 秒兑现一次，不去猜） */
+  settled: () => boolean
+}
+
+const chainOpen = ref(false)
+const chainRunning = ref(false)
+const chainAbort = ref(false)
+const chainActiveId = ref('')
+const chainState = ref<Record<string, 'running' | 'done' | 'failed' | 'skipped'>>({})
+const chainSkips = ref<string[]>([])
+/** 自动补首帧时同时在飞的镜头数：图片接口并发高了会被限流，2 是稳的 */
+const CHAIN_FRAME_CONCURRENCY = 2
+
+const chainSteps = computed<ChainStep[]>(() => {
+  const charsTodo = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length
+  const scenesTodo = scenes.value.filter(s => !(s.image_url || s.imageUrl)).length
+  const framesTodo = sbs.value.filter(s => !getFirstFrame(s)).length
+  const ttsTodo = sbs.value.filter(s => hasDialogue(s) && !hasTTS(s)).length
+  const videosTodo = sbs.value.filter(s => !hasVid(s)).length
+  const composeTodo = sbs.value.filter(s => hasVid(s) && !hasComposed(s)).length
+  // 拼接只在「全部合成完了、还没拼」时才算一步 —— 否则点下去必失败
+  const mergeTodo = sbs.value.length && sbs.value.every(s => hasComposed(s)) && !mergeUrl.value ? 1 : 0
+  return [
+    {
+      id: 'chars', label: '角色定妆板', todo: charsTodo,
+      hint: `${charsTodo} 个角色还没有形象图`, timeoutMs: Math.max(180_000, charsTodo * 90_000),
+      route: taskRoute('chars'),
+      run: () => batchCharImages(),
+      settled: () => visualChars.value.every(c => !!(c.image_url || c.imageUrl)),
+    },
+    {
+      id: 'scenes', label: '场景卡', todo: scenesTodo,
+      hint: `${scenesTodo} 个场景还没有设定图`, timeoutMs: Math.max(180_000, scenesTodo * 90_000),
+      route: taskRoute('scenes'),
+      run: () => batchSceneImages(),
+      settled: () => scenes.value.every(s => !!(s.image_url || s.imageUrl)),
+    },
+    {
+      id: 'frames', label: '镜头首帧', todo: framesTodo,
+      hint: `${framesTodo} 个镜头还没有首帧`, timeoutMs: Math.max(300_000, framesTodo * 75_000),
+      route: taskRoute('shots'),
+      run: () => chainFrames(),
+      settled: () => sbs.value.every(s => !!getFirstFrame(s)),
+    },
+    {
+      id: 'tts', label: '配音', todo: ttsTodo,
+      hint: `${ttsTodo} 个镜头的对白还没有配音`, timeoutMs: Math.max(120_000, ttsTodo * 30_000),
+      route: taskRoute('dubbing'),
+      run: () => batchShotTTS(),
+      settled: () => sbs.value.every(s => !hasDialogue(s) || hasTTS(s)),
+    },
+    {
+      id: 'videos', label: '镜头视频', todo: videosTodo,
+      hint: `${videosTodo} 个镜头还没有视频`, timeoutMs: Math.max(300_000, videosTodo * 180_000),
+      route: taskRoute('videos'),
+      run: () => batchVideos(),
+      settled: () => sbs.value.every(s => !!hasVid(s)),
+    },
+    {
+      id: 'compose', label: '合成', todo: composeTodo,
+      hint: `${composeTodo} 个镜头还没合成（画面+配音+字幕）`, timeoutMs: Math.max(180_000, composeTodo * 60_000),
+      route: taskRoute('compose'),
+      run: () => batchCompose(),
+      settled: () => sbs.value.every(s => !hasVid(s) || hasComposed(s)),
+    },
+    {
+      id: 'merge', label: '拼接成片', todo: mergeTodo,
+      hint: '把已合成镜头拼成整集', timeoutMs: 360_000,
+      route: exportRoute(),
+      run: () => runMergeStep(),
+      settled: () => !!mergeUrl.value,
+    },
+  ]
+})
+
+const chainTodoSteps = computed(() => chainSteps.value.filter(s => s.todo > 0))
+const chainPlannedSteps = computed(() => chainTodoSteps.value.filter(s => !chainSkips.value.includes(s.id)))
+
+function toggleChainSkip(id: string) {
+  if (chainRunning.value) return
+  chainSkips.value = chainSkips.value.includes(id)
+    ? chainSkips.value.filter(x => x !== id)
+    : [...chainSkips.value, id]
+}
+
+/** 逐条提交缺失的首帧（并发 2），提交完立刻返回 —— 回填由 `waitChainStep` 轮询 */
+async function chainFrames() {
+  const queue = sbs.value.filter(s => !getFirstFrame(s))
+  while (queue.length) {
+    if (chainAbort.value) return
+    const wave = queue.splice(0, CHAIN_FRAME_CONCURRENCY)
+    await Promise.all(wave.map(sb => genShotFrame(sb, 'first_frame').catch((e) => {
+      // 单张失败不中断整条链：由 `settled()` 判定这一波到底有没有齐，
+      // 没齐就会走超时分支，把「缺哪几张」如实报出来
+      console.warn('[chain] 首帧提交失败', sb.id, e)
+    })))
+  }
+}
+
+/** 等某一步「真的齐了」，最多等到该步的超时点；每 3 秒看一次盘上状态 */
+async function waitChainStep(step: ChainStep): Promise<'done' | 'timeout' | 'aborted'> {
+  const deadline = Date.now() + step.timeoutMs
+  for (;;) {
+    if (step.settled()) return 'done'
+    if (chainAbort.value) return 'aborted'
+    if (Date.now() > deadline) return step.settled() ? 'done' : 'timeout'
+    await sleep(3000)
+    // 静默刷新：轮询期网络抖一下不该刷一屏 toast（refresh 内部会 catch，quiet 只关掉那个 toast）
+    await refresh({ quiet: true })
+  }
+}
+
+async function runChain() {
+  if (chainRunning.value) return
+  const steps = chainPlannedSteps.value
+  if (!steps.length) {
+    toast.info('这一集没有待补的内容，可以直接去导出')
+    return
+  }
+  chainRunning.value = true
+  chainAbort.value = false
+  chainState.value = {}
+  const parent = taskCenter.start({
+    kind: 'pipeline',
+    key: `chain:${epId.value}`,
+    title: `继续到成片 · ${steps.length} 步`,
+    subtitle: '只补缺的，补完再拼',
+    stage: '准备中',
+    route: taskRoute('compose'),
+    retry: () => runChain(),
+  })
+
+  let outcome: 'done' | 'stopped' | 'failed' = 'done'
+  try {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!
+      if (chainAbort.value) { outcome = 'stopped'; break }
+      chainActiveId.value = step.id
+      chainState.value = { ...chainState.value, [step.id]: 'running' }
+      // 进度 = 已完成步数 / 总步数（真可数，不编百分比）
+      taskCenter.stage(parent.id, `第 ${i + 1}/${steps.length} 步 · ${step.label}`, Math.round((i / steps.length) * 100))
+      try {
+        await step.run()
+      } catch (e) {
+        chainState.value = { ...chainState.value, [step.id]: 'failed' }
+        taskCenter.fail(parent.id, e, { route: step.route, retry: () => runChain() })
+        outcome = 'failed'
+        break
+      }
+      const waited = await waitChainStep(step)
+      if (waited === 'aborted') {
+        chainState.value = { ...chainState.value, [step.id]: 'skipped' }
+        outcome = 'stopped'
+        break
+      }
+      if (waited === 'timeout') {
+        chainState.value = { ...chainState.value, [step.id]: 'failed' }
+        taskCenter.fail(
+          parent.id,
+          new Error(`「${step.label}」等 ${Math.round(step.timeoutMs / 60_000)} 分钟还没齐，流水线停在这里`),
+          { route: step.route, retry: () => runChain() },
+        )
+        outcome = 'failed'
+        break
+      }
+      chainState.value = { ...chainState.value, [step.id]: 'done' }
+    }
+  } finally {
+    chainRunning.value = false
+    chainActiveId.value = ''
+  }
+
+  if (outcome === 'done') {
+    taskCenter.done(parent.id, `已完成 ${steps.length} 步`)
+    toast.success(steps.some(s => s.id === 'merge') ? '已跑到成片' : '剩余步骤已全部补齐')
+  } else if (outcome === 'stopped') {
+    // 说人话：停的是「不再提交新的」，已经在飞的收不回来
+    taskCenter.cancel(parent.id, '已停止提交新任务（已提交的仍在后台跑）')
+    toast.info('已停止：已经提交出去的生成还会跑完')
+  }
+}
+
+/** 拼接成片（直接 await 到 completed/failed，调用方不需要自己起 interval） */
+async function runMergeStep() {
+  await mergeAPI.merge(epId.value)
+  const deadline = Date.now() + 360_000
+  while (Date.now() < deadline) {
+    await sleep(3000)
+    try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+    const st = mergeData.value?.status
+    if (st === 'completed') return
+    if (st === 'failed') throw new Error(mergeData.value?.error_msg || mergeData.value?.errorMsg || '拼接失败')
+  }
+  throw new Error('拼接等待超时（6 分钟）')
+}
+
+async function doMerge() {
+  const t = taskCenter.start({
+    kind: 'merge',
+    key: `merge:${epId.value}`,
+    title: '拼接成片',
+    subtitle: `${composedCount.value} 个已合成镜头`,
+    stage: '拼接中',
+    route: exportRoute(),
+    retry: () => doMerge(),
+  })
+  try {
+    await runMergeStep()
+    taskCenter.done(t.id)
+    toast.success('拼接完成')
+  } catch (e) {
+    taskCenter.fail(t.id, e, { route: exportRoute(), retry: () => doMerge() })
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function pollComposeStatus(taskId?: string) {
+  for (let i = 0; i < 120; i++) {
+    await sleep(3000)
+    if (!isMounted.value) {
+      if (taskId) taskCenter.stage(taskId, '已离开本页，前端不再轮询（进度以后端为准）')
+      return
+    }
+    try {
+      const res = await composeAPI.status(epId.value)
+      await refresh()
+      const items = Array.isArray(res?.items) ? res.items : []
+      const processingIds = items.filter((item: any) => item.status === 'compose_processing').map((item: any) => item.id)
+      pendingComposeIds.value = processingIds
+      if (taskId) taskCenter.stage(taskId, `合成中 · 剩 ${processingIds.length} 个`)
+
+      const failedItems = items.filter((item: any) => item.status === 'compose_failed')
+      if (failedItems.length) {
+        const next = { ...failedComposeMessages.value }
+        failedItems.forEach((item: any) => {
+          next[item.id] = item.error_msg || item.errorMsg || '视频合成失败'
+        })
+        failedComposeMessages.value = next
+      }
+
+      if (!processingIds.length) {
+        if (failedItems.length) {
+          toast.error(`有 ${failedItems.length} 个镜头合成失败`)
+          if (taskId) taskCenter.fail(taskId, new Error(`${failedItems.length} 个镜头合成失败：${Object.values(failedComposeMessages.value)[0] || ''}`), { route: taskRoute('compose') })
+        } else {
+          toast.success('批量合成完成')
+          if (taskId) taskCenter.done(taskId)
+        }
+        return
+      }
+    } catch {}
+  }
+  if (taskId) taskCenter.fail(taskId, new Error('批量合成超时（前端等待 120 轮已尽）'), { route: taskRoute('compose') })
+}
+function getRefs(sb: any) {
+  const raw = sb.reference_images || sb.referenceImages
+  if (!raw) return []
+  try { return JSON.parse(raw) } catch { return [] }
+}
+
+async function loadConfigs() {
+  try {
+    const [imgCfgs, vidCfgs, audCfgs] = await Promise.all([
+      aiConfigAPI.list('image'),
+      aiConfigAPI.list('video'),
+      aiConfigAPI.list('audio'),
+    ])
+    imageConfigs.value = imgCfgs || []
+    videoConfigs.value = vidCfgs || []
+    audioConfigs.value = audCfgs || []
+  } catch (e) { console.error('Failed to load AI configs', e) }
+}
+
+function mapVoiceProfile(v: any) {
+  const desc = Array.isArray(v.description) ? v.description : []
+  const backendTags = Array.isArray(v.role_tags) && v.role_tags.length ? v.role_tags : null
+  return {
+    id: v.voice_id,
+    label: v.voice_name || v.voice_id,
+    gender: inferVoiceGender(v.voice_name || v.voice_id, desc),
+    traits: desc.length ? desc.slice(0, 2).join('、') : `${v.language || '多语言'}音色`,
+    suitable: desc.length > 2 ? desc.slice(2).join('、') : `${v.language || '通用'}角色`,
+    roleTags: backendTags || inferRoleTags(v.voice_name || v.voice_id, desc),
+  }
+}
+
+async function loadVoices() {
+  try {
+    const provider = lockedAudioProvider.value || 'minimax'
+    const rows = await voicesAPI.list(provider)
+    voiceProfiles.value = rows?.length ? rows.map(mapVoiceProfile) : fallbackVoiceProfiles
+  } catch (e) {
+    console.error('Failed to load voices', e)
+    voiceProfiles.value = fallbackVoiceProfiles
+  }
+}
+
+watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
+onMounted(async () => {
+  await refresh()
+  initScriptStep()
+  applyTaskRouteQuery()
+  loadConfigs(); loadVoices(); loadProps()
+  // 刷新/切页回来后把还在飞的视频接回任务台账（不阻塞首屏）
+  restoreInFlightTasks()
+})
+// 任务中心在别的页面上点「去处理」时，路由会带上 `?panel=&tab=&shot=` —— 本页已经挂着的话
+// 不会重新 mount，只能靠 watch 接住（见 `applyTaskRouteQuery` 里「应用完要摘掉参数」的说明）
+watch(() => route.query, () => applyTaskRouteQuery())
+</script>
+
+<style scoped>
+/* ===== Studio Layout ===== */
+.studio {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  padding: 14px;
+  gap: 12px;
+  background:
+    radial-gradient(circle at top left, rgba(255,255,255,0.7), transparent 28%),
+    linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0)),
+    var(--bg-base);
+}
+
+.studio-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border-radius: 18px;
+  background: rgba(252, 253, 255, 0.84);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  box-shadow: 0 14px 36px rgba(20, 32, 54, 0.07), 0 3px 10px rgba(20, 32, 54, 0.04);
+  backdrop-filter: blur(16px);
+}
+
+.studio-topbar-main,
+.sidebar,
+.main {
+  background: rgba(252, 253, 255, 0.84);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  box-shadow: 0 18px 48px rgba(20, 32, 54, 0.08), 0 4px 14px rgba(20, 32, 54, 0.05);
+  backdrop-filter: blur(16px);
+}
+
+.studio-topbar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  background: transparent;
+  min-width: 0;
+}
+
+.topbar-back {
+  width: auto;
+  min-width: 76px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.studio-identity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.studio-overline {
+  display: none;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.studio-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.studio-title {
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
+}
+
+.studio-episode-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(19, 51, 121, 0.08);
+  color: var(--accent-text);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.studio-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.studio-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(18, 25, 42, 0.05);
+  color: var(--text-2);
+  font-size: 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.studio-meta-pill.is-stage {
+  background: rgba(19, 51, 121, 0.08);
+  color: var(--accent-text);
+}
+.studio-meta-pill.is-progress {
+  background: rgba(45, 122, 69, 0.08);
+  color: var(--success);
+}
+.studio-meta-inline {
+  font-size: 9px;
+  color: var(--text-3);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.studio-topbar-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.studio-actions {
+  display: flex;
+  gap: 6px;
+}
+.studio-topbar .btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.studio-body {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: auto;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  border-radius: 28px;
+}
+.back-btn {
+  width: 40px; height: 40px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(27, 41, 64, 0.1); border-radius: 14px;
+  background: rgba(255,255,255,0.8); color: var(--text-2);
+  cursor: pointer; transition: all 0.15s;
+  box-shadow: var(--shadow-xs);
+}
+.back-btn:hover { background: #fff; color: var(--text-0); }
+
+/* Pipeline Nav */
+.pipeline { flex: 1; overflow-y: auto; padding: 16px 14px 12px; display: flex; flex-direction: column; gap: 12px; }
+.pipe-section { display: flex; flex-direction: column; gap: 4px; }
+.pipe-section-label {
+  font-size: 10px; font-weight: 700; color: #95a1b6;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  padding: 2px 8px 3px;
+}
+.pipe-item {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
+  padding: 7px 10px;
+  border-radius: 17px;
+  font-size: 12px; font-weight: 600;
+  background: none; border: 1px solid transparent; color: var(--text-2); cursor: pointer;
+  transition: all 0.14s; width: 100%; text-align: left;
+}
+.pipe-item:hover { background: rgba(255,255,255,0.3); color: var(--text-0); }
+.pipe-item.active {
+  background: rgba(255,255,255,0.94);
+  color: var(--text-0);
+  border-color: rgba(27, 41, 64, 0.05);
+  box-shadow: 0 8px 18px rgba(19, 33, 56, 0.045);
+}
+.pipe-item.done { color: var(--success); }
+.pipe-item-sub {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  padding: 7px 10px;
+  position: relative;
+  min-height: 42px;
+}
+
+.pipe-item-sub:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 18px;
+  top: 25px;
+  bottom: -7px;
+  width: 1px;
+  background: rgba(27, 41, 64, 0.07);
+}
+
+.pipe-icon {
+  width: 17px; height: 17px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(246,248,252,0.98); border: 1px solid rgba(18,25,42,0.08);
+  color: #aab4c6; flex-shrink: 0; transition: all 0.15s;
+  position: relative;
+  z-index: 1;
+}
+.pipe-item.active .pipe-icon { background: rgba(19, 51, 121, 0.07); border-color: rgba(19, 51, 121, 0.1); color: var(--accent-text); }
+.pipe-item.done .pipe-icon { background: rgba(45, 122, 69, 0.96); border-color: rgba(45,122,69,0.18); color: #fff; }
+.icon-active { background: var(--accent-dark) !important; border-color: var(--accent-dark) !important; color: #fff !important; }
+.icon-done { background: var(--success) !important; border-color: var(--success) !important; color: #fff !important; }
+
+.pipe-label { flex: 1; font-size: 11.5px; }
+.pipe-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pipe-badge {
+  font-size: 9px; font-weight: 700; padding: 1px 5px;
+  border-radius: 99px; background: var(--bg-3); color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.pipe-badge.badge-done { background: var(--success-bg); color: var(--success); }
+.pipe-spinner { width: 10px; height: 10px; border: 1.5px solid var(--accent-bg); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+
+/* Sidebar Bottom */
+.sidebar-bottom {
+  padding: 12px 14px 14px;
+  border-top: 1px solid rgba(27, 41, 64, 0.08);
+  display: flex; flex-direction: column; gap: 8px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.72));
+}
+.sidebar-jumper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 3px 0 2px;
+}
+.sidebar-jump-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(45, 122, 69, 0.22);
+  cursor: pointer;
+  transition: transform 0.14s, background 0.14s, box-shadow 0.14s;
+}
+.sidebar-jump-dot:hover {
+  transform: scale(1.08);
+}
+.sidebar-jump-dot.active {
+  background: var(--accent-dark);
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.14);
+}
+.sidebar-jump-dot.done {
+  background: var(--success);
+}
+.sidebar-jump-dot.active.done {
+  background: #0f766e;
+}
+.progress-wrap { display: flex; flex-direction: column; gap: 5px; }
+.progress-head { display: flex; justify-content: space-between; }
+.progress-label { font-size: 10.5px; color: var(--text-3); font-weight: 500; }
+.progress-val { font-size: 10.5px; color: var(--text-2); font-family: var(--font-mono); font-weight: 600; }
+.progress-track { height: 6px; background: rgba(194, 207, 227, 0.92); border-radius: 99px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent-gradient); border-radius: 99px; transition: width 0.5s var(--ease-out); }
+.refresh-btn {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px; font-size: 11.5px; color: var(--text-2);
+  background: rgba(255,255,255,0.86); border: 1px solid rgba(27, 41, 64, 0.08); border-radius: 999px;
+  cursor: pointer; transition: all 0.15s;
+}
+.refresh-btn:hover { background: #fff; color: var(--text-0); }
+
+/* ===== Main Content ===== */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0; border-radius: 30px; }
+.content-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; }
+.stage-subnav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.86), rgba(255,255,255,0.52));
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.stage-subnav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  background: rgba(255,255,255,0.7);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.stage-subnav-item:hover {
+  background: #fff;
+  color: var(--text-0);
+}
+.stage-subnav-item.active {
+  background: rgba(19, 51, 121, 0.08);
+  border-color: rgba(19, 51, 121, 0.12);
+  color: #0f766e;
+}
+.stage-subnav-item.done {
+  color: var(--text-1);
+}
+.stage-subnav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--success);
+  box-shadow: 0 0 0 4px rgba(45, 122, 69, 0.1);
+}
+
+/* Toolbar */
+.step-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px; border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.8), rgba(255,255,255,0.42)); flex-shrink: 0;
+}
+.prod-toolbar { background: linear-gradient(180deg, rgba(255,255,255,0.8), rgba(255,255,255,0.42)); }
+.toolbar-left { display: flex; align-items: center; gap: 8px; flex: 1; }
+.toolbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.step-indicator { display: flex; align-items: center; gap: 8px; }
+.step-num {
+  width: 26px; height: 26px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(19, 51, 121, 0.08);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 800; color: var(--accent-text); letter-spacing: 0.05em;
+}
+.step-name { font-size: 13px; font-weight: 700; color: var(--text-1); font-family: var(--font-display); }
+.char-count { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+
+/* Editor Area */
+.step-editor { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.fill-textarea {
+  flex: 1; border: none; border-radius: 0; padding: 26px 28px;
+  font-size: 13.5px; line-height: 1.9; resize: none; outline: none;
+  font-family: var(--font-body); background: linear-gradient(180deg, rgba(255,255,255,0.28), rgba(255,255,255,0.12)); color: var(--text-0);
+}
+.fill-textarea:focus { box-shadow: none; }
+
+/* Script Preview */
+.script-result { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.script-result-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; border-bottom: 1px solid rgba(27, 41, 64, 0.08); }
+.script-result-label { font-size: 11px; font-weight: 700; color: var(--text-2); font-family: var(--font-mono); }
+.script-preview { flex: 1; overflow-y: auto; padding: 20px 28px 28px; }
+.sp-scene { margin: 16px 0 8px; font-weight: 800; color: var(--accent-text); font-size: 13.5px; font-family: var(--font-display); display: flex; align-items: center; gap: 8px; }
+.sp-scene::before { content: ''; width: 6px; height: 14px; border-radius: 2px; background: var(--accent-gradient); flex-shrink: 0; }
+.sp-dialog { padding: 7px 0 7px 12px; border-left: 2px solid rgba(19, 51, 121, 0.12); margin: 4px 0; font-size: 13.5px; line-height: 1.7; }
+.sp-speaker { font-weight: 700; color: var(--text-0); }
+.sp-action { color: var(--text-3); font-size: 12px; margin: 0 4px 0 2px; }
+.sp-colon { color: var(--text-3); margin-right: 4px; }
+.sp-line { color: var(--text-1); }
+.sp-narr { padding: 6px 0; color: var(--text-2); font-size: 13px; line-height: 1.8; }
+.sp-empty { color: var(--text-3); font-size: 12.5px; padding: 24px 0; text-align: center; }
+
+/* Step Empty State */
+.step-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: 1; min-height: 300px; gap: 10px; padding: 46px;
+  animation: fadeIn 0.3s var(--ease-out);
+}
+.empty-visual {
+  width: 72px; height: 72px; border-radius: 22px;
+  background: rgba(255,255,255,0.8); color: var(--accent);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  box-shadow: var(--shadow-sm);
+  display: flex; align-items: center; justify-content: center;
+  margin-bottom: 8px;
+}
+.empty-title { font-size: 22px; font-weight: 700; font-family: var(--font-display); color: var(--text-0); }
+.empty-desc { font-size: 13px; color: var(--text-2); max-width: 420px; text-align: center; line-height: 1.8; }
+.step-empty-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+/* Step Loading */
+.step-loading {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: 1; gap: 12px;
+}
+.loading-text { font-size: 13px; color: var(--text-2); }
+.loading-meta { font-size: 11px; color: var(--text-3); opacity: 0.7; margin-top: -6px; }
+
+/* Step Navigator Bubble */
+.step-bubble {
+  position: static;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px 12px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0.58));
+  border-top: 1px solid rgba(27, 41, 64, 0.08);
+  margin-top: auto;
+}
+.bubble-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 500;
+  border: 1px solid rgba(27, 41, 64, 0.08); background: rgba(255,255,255,0.84); color: var(--text-2); cursor: pointer;
+  transition: all 0.15s; white-space: nowrap;
+}
+.bubble-btn:hover:not(:disabled) { background: #fff; color: var(--text-0); }
+.bubble-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.bubble-btn.primary { margin-left: auto; background: linear-gradient(135deg, #14b8a6, #0f766e); color: #fff; box-shadow: 0 6px 16px rgba(15, 118, 110, 0.2); border-color: transparent; }
+.bubble-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.bubble-btn.primary:disabled { filter: none; box-shadow: none; opacity: 0.5; }
+.bubble-dots { display: flex; gap: 7px; padding: 0 4px; }
+.bubble-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(143, 160, 184, 0.4); cursor: pointer; transition: all 0.15s;
+  border: none;
+}
+.bubble-dot.done { background: var(--success); }
+.bubble-dot.current { background: var(--accent-dark); transform: scale(1.2); box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.14); }
+
+/* Extract grid */
+.extract-stage { flex: 1; min-height: 0; overflow: hidden; padding: 12px 16px; display: grid; grid-template-columns: 280px minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
+.extract-summary { padding: 16px; display: flex; flex-direction: column; gap: 14px; align-self: stretch; position: sticky; top: 0; max-height: 100%; }
+.extract-summary-kicker { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3); }
+.extract-summary-title { font-size: 20px; line-height: 1.05; font-family: var(--font-display); color: var(--text-0); }
+.extract-summary-desc { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.extract-summary-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.extract-summary-stat { padding: 10px 12px; border-radius: 14px; background: rgba(19, 51, 121, 0.05); border: 1px solid rgba(19, 51, 121, 0.08); display: flex; flex-direction: column; gap: 4px; }
+.extract-summary-stat span { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; }
+.extract-summary-stat strong { font-size: 18px; color: var(--text-0); font-family: var(--font-display); }
+.extract-summary-note { padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,0.56); border: 1px solid rgba(27, 41, 64, 0.08); font-size: 11px; line-height: 1.7; color: var(--text-2); }
+.extract-card { overflow: hidden; min-height: 0; display: flex; flex-direction: column; }
+.extract-card-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 14px; font-size: 12px; font-weight: 600;
+  border-bottom: 1px solid var(--border); background: var(--bg-1);
+  color: var(--text-1);
+}
+.extract-list { padding: 8px 14px; flex: 1; min-height: 0; overflow-y: auto; }
+.extract-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.extract-row + .extract-row { border-top: 1px solid var(--border); }
+.char-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent-bg); color: var(--accent-text);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; flex-shrink: 0;
+}
+.scene-icon {
+  width: 30px; height: 30px; border-radius: 6px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); flex-shrink: 0;
+}
+.extract-info { min-width: 0; }
+.extract-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.extract-name { font-size: 13px; font-weight: 600; }
+.extract-meta { font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.extract-meta.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Voice grid */
+.voice-stage { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; }
+.voice-stage-panel {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-self: start;
+  position: sticky;
+  top: 0;
+  min-height: 0;
+  max-height: calc(100vh - 210px);
+  overflow: hidden;
+}
+.voice-stage-kicker { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3); }
+.voice-stage-title { font-size: 20px; line-height: 1.05; font-family: var(--font-display); color: var(--text-0); }
+.voice-stage-desc { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.voice-stage-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.voice-stage-stat { padding: 10px 12px; border-radius: 14px; background: rgba(19, 51, 121, 0.05); border: 1px solid rgba(19, 51, 121, 0.08); display: flex; flex-direction: column; gap: 3px; }
+.voice-stage-stat-label { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; }
+.voice-stage-stat strong { font-size: 18px; color: var(--text-0); font-family: var(--font-display); }
+.voice-library-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.voice-library {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.voice-library-item { padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,0.56); border: 1px solid rgba(27, 41, 64, 0.08); display: flex; flex-direction: column; gap: 4px; }
+.voice-library-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.voice-library-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.voice-library-traits { font-size: 11px; color: var(--text-1); }
+.voice-library-fit { font-size: 10px; color: var(--text-3); line-height: 1.5; }
+.voice-preview-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); background: rgba(255,255,255,0.7); color: var(--accent); cursor: pointer; flex-shrink: 0; margin-left: auto; transition: all .15s ease; }
+.voice-preview-btn:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
+.voice-preview-btn:disabled { opacity: .5; cursor: default; }
+.voice-preview-audio { width: 100%; height: 28px; margin-top: 2px; }
+.voice-clone-box { margin-top: 12px; padding: 12px; border: 1px dashed var(--border-strong, var(--border)); border-radius: 12px; background: rgba(255,255,255,0.4); display: flex; flex-direction: column; gap: 8px; }
+.voice-clone-head { display: flex; flex-direction: column; gap: 2px; }
+.voice-clone-head > span:first-child { font-size: 12px; font-weight: 700; color: var(--text-0); }
+.voice-clone-hint { font-size: 11px; color: var(--text-3); }
+.voice-clone-input { width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; background: rgba(255,255,255,0.8); color: var(--text-0); outline: none; transition: border-color .15s ease; }
+.voice-clone-input:focus { border-color: var(--border-focus, var(--accent)); }
+.voice-clone-file-label { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.8); cursor: pointer; font-size: 12px; color: var(--text-2); overflow: hidden; }
+.voice-clone-file-label span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.voice-clone-file { display: none; }
+.voice-clone-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+.voice-clone-btn:hover:not(:disabled) { background: var(--accent-dark); }
+.voice-clone-btn:disabled { opacity: .5; cursor: default; }
+.voice-role-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+.role-filter-chip { padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: rgba(255,255,255,0.6); color: var(--text-2); transition: all .15s ease; }
+.role-filter-chip:hover { border-color: var(--border-strong); color: var(--text-0); }
+.role-filter-chip-active { color: #fff !important; border-color: transparent !important; }
+.role-filter-chip-active.role-tag-narrator { background: #0d9488; }
+.role-filter-chip-active.role-tag-protagonist { background: #3b82f6; }
+.role-filter-chip-active.role-tag-villain { background: #ef4444; }
+.role-filter-chip-active.role-tag-supporting { background: #a855f7; }
+.voice-library-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.role-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 1.5; white-space: nowrap; }
+.role-tag-narrator { color: #0f766e; background: rgba(13,148,136,0.12); border: 1px solid rgba(13,148,136,0.25); }
+.role-tag-protagonist { color: #1d4ed8; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.25); }
+.role-tag-villain { color: #b91c1c; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25); }
+.role-tag-supporting { color: #6b21a8; background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.25); }
+.role-tag-extra { color: #475569; background: rgba(100,116,139,0.12); border: 1px solid rgba(100,116,139,0.25); }
+
+.voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; align-content: start; }
+.voice-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; border-radius: 22px; min-height: 0; }
+.voice-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.voice-char { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.voice-name { min-width: 0; flex: 1; }
+.voice-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.voice-card-copy { min-height: 58px; }
+.voice-card-text { font-size: 12px; line-height: 1.7; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.voice-select-block { display: flex; flex-direction: column; gap: 6px; }
+.voice-block-label { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+.voice-profile-card { padding: 12px; border-radius: 16px; background: linear-gradient(135deg, rgba(19, 51, 121, 0.08), rgba(255,255,255,0.78)); border: 1px solid rgba(19, 51, 121, 0.1); display: flex; flex-direction: column; gap: 4px; }
+.voice-profile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.voice-profile-name { font-size: 13px; font-weight: 700; color: var(--accent-text); }
+.voice-profile-traits { font-size: 11px; color: var(--text-1); }
+.voice-profile-fit { font-size: 10px; color: var(--text-2); line-height: 1.5; }
+.voice-actions-row { display: flex; align-items: center; gap: 8px; }
+.voice-player audio { width: 100%; height: 30px; border-radius: var(--radius); }
+.char-avatar.lg { width: 38px; height: 38px; font-size: 16px; }
+.voice-merge-btn { flex-shrink: 0; color: var(--text-3); }
+.voice-merge-btn:hover:not(:disabled) { color: var(--accent); background: var(--accent-bg); }
+.merge-char-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.merge-char-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.merge-char-title { font-size: 15px; font-weight: 700; font-family: var(--font-display); color: var(--text-0); }
+.merge-char-sub { font-size: 12px; color: var(--text-2); margin-top: 4px; line-height: 1.6; }
+.merge-char-list { overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.merge-char-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,0.6); cursor: pointer; text-align: left; transition: all .15s ease; }
+.merge-char-item:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
+.merge-char-item:disabled { opacity: .6; cursor: default; }
+.merge-char-item-name { font-weight: 600; font-size: 13px; color: var(--text-0); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.merge-char-empty { padding: 28px 12px; text-align: center; color: var(--text-3); font-size: 12px; }
+
+/* Split layout (storyboard) */
+.split-layout { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+.shot-list { width: 296px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); background: var(--bg-0); }
+.shot-list-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 12px 10px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.06);
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(10px);
+}
+.shot-list-title { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.shot-list-sub { margin-top: 3px; font-size: 11px; color: var(--text-3); line-height: 1.45; }
+.shot-list-body { padding: 6px; }
+.shot-item {
+  position: relative; padding: 10px 11px; cursor: pointer;
+  border: 1px solid transparent; border-left: 3px solid transparent;
+  transition: all 0.15s;
+  display: flex; flex-direction: column; gap: 5px;
+  border-radius: 14px;
+}
+.shot-item + .shot-item { margin-top: 6px; }
+.shot-item:hover { background: var(--bg-hover); border-color: rgba(27, 41, 64, 0.06); }
+.shot-item.active {
+  background: var(--bg-0);
+  border-left-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-glow);
+  z-index: 1;
+}
+.shot-item-header { display: flex; align-items: center; gap: 8px; }
+.shot-num {
+  font-size: 11px; font-family: var(--font-mono); font-weight: 700;
+  color: var(--accent); background: var(--accent-bg);
+  padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+  letter-spacing: 0.03em;
+}
+.shot-item.active .shot-num { background: var(--accent); color: #fff; }
+.shot-status { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.shot-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--bg-3); flex-shrink: 0; }
+.shot-dot.has-img { background: var(--success); }
+.shot-dot.has-video { background: var(--info); }
+.shot-dot.has-dialogue { background: var(--warning); }
+.shot-dot.has-asset-warn { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
+.shot-body { }
+.shot-desc { font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-1); }
+.shot-item.active .shot-desc { color: var(--text-0); }
+.shot-meta { display: flex; align-items: center; gap: 6px; }
+.shot-location {
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shot-dialogue {
+  font-size: 10px; color: var(--text-3); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-left: 2px; border-left: 2px solid var(--border);
+  padding-left: 6px;
+}
+
+.detail-panel { flex: 1; display: flex; flex-direction: column; overflow-y: auto; min-width: 0; }
+.detail-head { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.detail-head-copy { display: flex; flex-direction: column; gap: 2px; }
+.detail-head-title { font-size: 14px; font-weight: 700; color: var(--text-0); }
+.detail-head-sub { font-size: 11px; color: var(--text-3); }
+.detail-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.detail-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.9fr);
+  gap: 12px;
+  padding: 12px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(20,39,82,0.08), rgba(255,255,255,0.68));
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.detail-hero-copy { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.detail-hero-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.detail-hero-text { font-size: 13px; color: var(--text-1); line-height: 1.7; }
+.detail-status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.detail-preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.detail-preview-card { display: flex; flex-direction: column; gap: 6px; }
+.detail-preview-title { font-size: 11px; font-weight: 700; color: var(--text-2); }
+.detail-preview-media {
+  position: relative; aspect-ratio: 16/9; overflow: hidden;
+  border-radius: 14px; background: rgba(18,25,42,0.08);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.detail-preview-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.detail-preview-empty {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); font-size: 12px;
+}
+.version-list { display: flex; flex-direction: column; gap: 10px; max-height: 320px; overflow-y: auto; }
+.version-list-loading { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.version-list-empty { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.version-group {
+  border: 1px solid rgba(27, 41, 64, 0.08); border-radius: 8px; padding: 8px; background: var(--bg-1);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.version-group-head { display: flex; align-items: center; justify-content: space-between; }
+.version-group-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.version-group-count { font-size: 11px; color: var(--text-3); }
+.version-item { display: flex; gap: 10px; align-items: flex-start; }
+.version-thumb {
+  width: 64px; height: 64px; flex: none; border-radius: 6px; overflow: hidden;
+  border: 1px solid rgba(27, 41, 64, 0.1); background: var(--bg-2); cursor: zoom-in;
+}
+.version-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.version-thumb-empty {
+  display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text-3);
+}
+.version-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.version-info-top { display: flex; align-items: center; gap: 6px; }
+.version-badge {
+  font-size: 11px; font-weight: 700; color: var(--text-2); padding: 1px 6px; border-radius: 4px;
+  background: var(--bg-2); border: 1px solid var(--border); font-family: var(--font-mono);
+}
+.version-badge.is-current { color: #fff; background: var(--primary, #4f7cff); border-color: var(--primary, #4f7cff); }
+.version-current { font-size: 11px; color: var(--success, #22c55e); font-weight: 600; }
+.version-status { font-size: 11px; color: var(--text-3); text-transform: capitalize; }
+.version-meta {
+  display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-3);
+  font-family: var(--font-mono, monospace);
+}
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.72);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.detail-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.detail-section-title { font-size: 12px; font-weight: 700; color: var(--text-0); }
+.detail-section-copy { font-size: 11px; color: var(--text-3); }
+
+/* Field */
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-1); display: flex; align-items: center; gap: 8px; }
+.field-ai-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px; font-weight: 500;
+  background: var(--accent-bg); color: var(--accent-text);
+  border: 1px solid transparent; border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s var(--ease-out);
+}
+.field-ai-btn:hover:not(:disabled) { border-color: var(--accent); }
+.field-ai-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.field-row { display: flex; gap: 12px; }
+.field-grid { display: grid; gap: 12px; }
+.field-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.prop-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.chip-btn {
+  padding: 5px 12px; font-size: 12px; border-radius: 999px;
+  background: var(--bg-input); border: 1px solid var(--border); color: var(--text-2); cursor: pointer;
+  transition: all 0.15s;
+}
+.chip-btn:hover { border-color: var(--accent); color: var(--text-0); }
+.chip-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-3); }
+.locked-config {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(19, 51, 121, 0.08);
+  border: 1px solid rgba(19, 51, 121, 0.12);
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 600;
+}
+.locked-config-banner {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.role-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.role-pill {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(27, 41, 64, 0.12);
+  background: rgba(255,255,255,0.86);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.role-pill:hover { border-color: var(--accent); color: var(--text-0); }
+.role-pill.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18);
+}
+.costume-picker { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.costume-picker-row { display: flex; align-items: center; gap: 8px; }
+.costume-picker-name {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 600;
+  padding: 2px 8px;
+  background: rgba(27,41,64,0.06);
+  border-radius: 6px;
+}
+.costume-picker-select { height: 30px; padding: 0 8px; font-size: 12px; min-width: 0; flex: 1; }
+
+/* Production tabs */
+/* 工具条右端多了「生成参数 + 继续到成片」两块：窄屏允许换行，
+   否则页签会被挤成两行文字（`flex-wrap` 只在真放不下时才生效） */
+.prod-toolbar { flex-wrap: wrap; row-gap: 6px; }
+.prod-toolbar .toolbar-right { flex-shrink: 0; margin-left: auto; }
+.prod-tabs { display: flex; gap: 0; background: var(--bg-2); border-radius: var(--radius); padding: 2px; }
+.prod-tab {
+  display: flex; align-items: center; gap: 4px; padding: 6px 12px; font-size: 12px;
+  border: none; background: transparent; color: var(--text-2); cursor: pointer;
+  border-radius: calc(var(--radius) - 2px); transition: all 0.15s; font-weight: 500;
+}
+.prod-tab:hover { color: var(--text-0); }
+.prod-tab.active { background: var(--bg-0); color: var(--text-0); font-weight: 600; box-shadow: var(--shadow-xs); }
+.prod-tab-badge { font-size: 10px; font-family: var(--font-mono); padding: 0 4px; background: var(--bg-3); border-radius: 99px; }
+.prod-tab.active .prod-tab-badge { background: var(--accent-bg); color: var(--accent-text); }
+
+/* Shot timeline overview */
+.shot-timeline {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow-x: auto;
+}
+.shot-timeline-track {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: max-content;
+  padding-bottom: 2px;
+}
+.shot-timeline-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  padding: 5px 4px 7px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+  min-width: 56px;
+}
+.shot-timeline-node::after {
+  content: '';
+  position: absolute;
+  top: 22px;
+  left: calc(100% + 3px);
+  width: 4px;
+  height: 1px;
+  background: var(--border);
+}
+.shot-timeline-node:last-child::after { display: none; }
+.shot-timeline-node:hover { background: var(--bg-2); border-color: var(--border); }
+.shot-timeline-node.active { border-color: var(--accent); background: var(--accent-bg); }
+.shot-timeline-thumb {
+  width: 46px;
+  height: 34px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-3);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+.shot-timeline-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.shot-timeline-num {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-size: 8px;
+  font-family: var(--font-mono);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 3px;
+  padding: 0 3px;
+  line-height: 12px;
+}
+.shot-timeline-node.done .shot-timeline-thumb { box-shadow: 0 0 0 2px #22c55e inset; }
+.shot-timeline-dots { display: flex; gap: 3px; }
+.tl-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border); }
+.tl-dot.on:nth-child(1) { background: #6366f1; }
+.tl-dot.on:nth-child(2) { background: #22c55e; }
+.tl-dot.on:nth-child(3) { background: #f59e0b; }
+
+/* Frame grid */
+.frame-grid { display: flex; flex-direction: column; gap: 8px; }
+.frame-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px; cursor: pointer;
+  border-radius: var(--radius-lg);
+  transition: all 0.15s;
+  border: 1.5px solid transparent;
+}
+.frame-row:hover { background: var(--bg-0); border-color: var(--border); }
+.frame-row.active {
+  background: var(--bg-0);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.frame-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.frame-top { display: flex; align-items: center; gap: 8px; }
+.frame-desc {
+  font-size: 12px; line-height: 1.5; color: var(--text-1);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.frame-meta { display: flex; align-items: center; gap: 6px; }
+.frame-thumbs { display: flex; gap: 8px; flex-shrink: 0; }
+.frame-thumb-wrap { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+.frame-thumb-label { font-size: 10px; font-weight: 600; color: var(--text-3); }
+.frame-thumb {
+  position: relative; width: 130px; aspect-ratio: 16/9;
+  border-radius: 6px; overflow: hidden;
+  background: var(--bg-2); cursor: pointer;
+  transition: all 0.15s; border: 1.5px solid var(--border);
+}
+.frame-thumb:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+.frame-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.frame-thumb-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.frame-re {
+  position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
+  border-radius: 50%; background: rgba(0,0,0,0.5); color: #fff;
+  display: none; align-items: center; justify-content: center;
+}
+.frame-thumb:hover .frame-re { display: flex; }
+.frame-scroll { flex: 1; overflow-y: auto; padding: 10px 12px; }
+/* 生成参数摘要（工具条右侧，收起时只占一个字宽） */
+.param-digest { font-size: 11px; }
+.param-toggle {
+  cursor: pointer; padding: 4px 9px; border-radius: 8px;
+  border: 1px solid rgba(27, 41, 64, 0.12); color: var(--text-2); background: rgba(255, 255, 255, 0.7);
+  font-weight: 600; font-size: 11px; white-space: nowrap;
+}
+.param-toggle.open { border-color: rgba(19, 51, 121, 0.35); color: var(--accent-text); }
+/* 透明遮罩：点面板外面就关掉（fixed 面板自己不接冒泡，所以遮罩要在 z 序上压住页面、低于面板） */
+.param-shade { position: fixed; inset: 0; z-index: 138; background: transparent; }
+.param-body {
+  position: fixed; z-index: 139; width: 320px;
+  /* 工具条贴着视口上沿时面板会往下长，超过 70vh 就在面板内滚动（不许顶出视口底部） */
+  max-height: 70vh; overflow-y: auto;
+  padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(27, 41, 64, 0.12);
+  background: #fff; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.param-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; }
+.param-row span { color: var(--text-3); flex-shrink: 0; }
+.param-row b { color: var(--text-1); font-weight: 600; text-align: right; word-break: break-all; }
+.param-prompt { margin-top: 4px; padding-top: 8px; border-top: 1px dashed rgba(27, 41, 64, 0.12); }
+.param-prompt-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-3); }
+.param-more { font-size: 11px; color: var(--accent-text); background: none; border: none; cursor: pointer; padding: 0; }
+.param-prompt pre {
+  margin: 6px 0 0; max-height: 64px; overflow: auto; white-space: pre-wrap;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.6; color: var(--text-2);
+  background: rgba(27, 41, 64, 0.03); border-radius: 8px; padding: 6px 8px;
+}
+.param-prompt pre.expanded { max-height: 260px; }
+
+/* 预设区（在同一个面板里，跟着「生成参数」一起开） */
+.param-preset { margin-top: 4px; padding-top: 8px; border-top: 1px dashed rgba(27, 41, 64, 0.12); display: flex; flex-direction: column; gap: 6px; }
+.preset-list { display: flex; flex-direction: column; gap: 3px; max-height: 130px; overflow-y: auto; }
+.preset-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 7px; }
+.preset-row:hover { background: rgba(19, 51, 121, 0.05); }
+.preset-name { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preset-btn {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 7px; cursor: pointer;
+  border: 1px solid rgba(19, 51, 121, 0.25); color: var(--accent-text); background: var(--accent-bg);
+}
+.preset-btn:disabled { opacity: 0.45; cursor: default; }
+.preset-btn.ghost { border-color: transparent; background: transparent; color: var(--text-3); font-weight: 500; }
+.preset-btn.ghost:hover { color: var(--danger); }
+.preset-save { display: flex; align-items: center; gap: 6px; }
+.preset-input {
+  flex: 1; min-width: 0; font-size: 11px; padding: 4px 8px; border-radius: 7px;
+  border: 1px solid rgba(27, 41, 64, 0.14); background: rgba(255, 255, 255, 0.9); color: var(--text-1); outline: none;
+}
+.preset-input:focus { border-color: rgba(19, 51, 121, 0.4); }
+
+/* 「继续到成片」按钮 + 清单 */
+.btn-chain {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 8px;
+  font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  border: 1px solid rgba(19, 51, 121, 0.25); color: var(--accent-text); background: var(--accent-bg);
+}
+.btn-chain:hover { border-color: rgba(19, 51, 121, 0.45); }
+.btn-chain.running { background: rgba(19, 51, 121, 0.12); animation: chainPulse 1.6s ease-in-out infinite; }
+@keyframes chainPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.chain-count {
+  min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-text); color: #fff; font-size: 9.5px; font-weight: 800;
+}
+.chain-overlay { z-index: 130; }
+.chain-dialog { width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
+.chain-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 18px 12px; border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+}
+.chain-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; color: var(--text-1); }
+.chain-sub { margin-top: 4px; font-size: 11px; color: var(--text-3); }
+.chain-body { padding: 8px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.chain-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; border: 1px solid transparent; }
+.chain-row.idle { opacity: 0.45; }
+.chain-row.running { background: var(--accent-bg); border-color: rgba(19, 51, 121, 0.18); }
+.chain-row.done .chain-state { color: #16a34a; }
+.chain-row.failed .chain-state { color: #dc2626; }
+.chain-check input { width: 14px; height: 14px; cursor: pointer; }
+.chain-idx { font-family: var(--font-mono); font-size: 10px; font-weight: 800; color: var(--text-3); width: 14px; }
+.chain-copy { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.chain-label { font-size: 12.5px; font-weight: 600; color: var(--text-1); display: flex; align-items: center; gap: 6px; }
+.chain-todo { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--accent-bg); color: var(--accent-text); }
+.chain-hint { font-size: 11px; color: var(--text-3); }
+.chain-state { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.chain-empty { padding: 12px; font-size: 12px; color: var(--text-3); text-align: center; }
+.chain-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 18px; border-top: 1px solid rgba(27, 41, 64, 0.08);
+}
+.chain-note { font-size: 10.5px; color: var(--text-3); line-height: 1.5; }
+
+/* Image viewer */
+.image-viewer-overlay {
+  z-index: 120;
+  padding: 28px;
+  background: rgba(18, 24, 34, 0.68);
+  backdrop-filter: blur(10px);
+}
+
+/* Playlist player */
+.playlist-overlay {
+  z-index: 130;
+  padding: 28px;
+}
+.playlist-dialog {
+  width: min(1120px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+}
+.playlist-layout {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.playlist-main {
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.playlist-video {
+  width: 100%;
+  max-height: calc(100vh - 240px);
+  background: #000;
+  border-radius: 12px;
+  display: block;
+}
+.playlist-caption {
+  font-size: 13px;
+  text-align: center;
+}
+.playlist-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: center;
+}
+.playlist-head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.playlist-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.playlist-toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.playlist-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-1);
+}
+.playlist-side-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.12s;
+  color: var(--text-2);
+}
+.playlist-side-item:hover { background: var(--bg-2); color: var(--text-0); }
+.playlist-side-item.active { background: var(--accent-bg); color: var(--accent-text); }
+.playlist-side-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.playlist-side-title {
+  font-size: 12px;
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.playlist-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+.image-viewer-dialog {
+  width: min(1100px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,251,255,0.92));
+}
+.image-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+}
+.image-viewer-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
+  font-family: var(--font-display);
+}
+.image-viewer-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  overflow: auto;
+  min-height: 0;
+}
+.image-viewer-img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 140px);
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(8, 14, 24, 0.22);
+  background: rgba(255,255,255,0.9);
+}
+
+/* Grid tool dialog */
+.grid-tool { width: min(1320px, calc(100vw - 40px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; animation: scaleIn 0.2s var(--ease-out); }
+.grid-tool-head { display: flex; align-items: center; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.grid-tool-body { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+.grid-tool-body-preview { overflow: hidden; min-height: 0; padding-bottom: 10px; }
+.grid-tool-foot { display: flex; align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 4px; }
+.grid-preview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.72fr) minmax(340px, 400px);
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+  align-items: start;
+}
+.grid-preview-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.grid-assignment-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.66);
+  overflow: hidden;
+  max-height: min(70vh, 840px);
+}
+.grid-assign-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(255,255,255,0.72));
+}
+.grid-assign-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-0);
+  font-family: var(--font-display);
+}
+.grid-assign-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.grid-assign-pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  background: rgba(255,255,255,0.86);
+}
+.grid-assign-columns {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 96px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  background: rgba(246, 248, 252, 0.92);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Prompt preview */
+.grid-prompt-summary { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.grid-prompt-label { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
+.grid-prompt-text { font-size: 12px; color: var(--text-1); line-height: 1.7; }
+
+.grid-blank-preview {
+  display: grid;
+  gap: 4px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 8px;
+  min-height: 200px;
+}
+.grid-blank-cell {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 70px;
+}
+.grid-blank-cell.empty { opacity: 0.4; }
+.grid-blank-cell-index { font-size: 10px; font-weight: 700; color: var(--accent); font-family: var(--font-mono); }
+.grid-blank-cell-desc { font-size: 11px; color: var(--text-2); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.grid-mode-tabs { display: flex; gap: 6px; }
+.grid-mode-tab { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: var(--radius); background: var(--bg-0); cursor: pointer; transition: all 0.15s; text-align: left; }
+.grid-mode-tab:hover { border-color: var(--border-strong); }
+.grid-mode-tab.active { border-color: var(--accent); background: var(--accent-bg); }
+.grid-config { display: flex; gap: 12px; align-items: flex-end; }
+.grid-pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; }
+.grid-pick-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; cursor: pointer; transition: background 0.1s; }
+.grid-pick-item:hover { background: var(--bg-hover); }
+.grid-pick-item.selected { background: var(--accent-bg); }
+.grid-pick-item input { accent-color: var(--accent); }
+.grid-preview-wrap {
+  border-radius: var(--radius);
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: rgba(14, 19, 28, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+  max-height: min(70vh, 860px);
+  padding: 10px;
+}
+.grid-preview-stage {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin: auto;
+  line-height: 0;
+}
+.grid-preview-img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: min(66vh, 820px);
+  object-fit: contain;
+}
+.grid-overlay { position: absolute; inset: 0; display: grid; }
+.grid-overlay-cell {
+  border: 1px dashed rgba(255,255,255,0.42);
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 4px 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.grid-overlay-cell.active {
+  background: rgba(255,255,255,0.08);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.28);
+}
+.grid-cell-label { font-size: 10px; font-weight: 700; color: #fff; background: rgba(0,0,0,0.5); padding: 1px 5px; border-radius: 3px; }
+.grid-adjust-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 2px; }
+.grid-assign-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 12px 10px;
+}
+.grid-assign-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 112px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(27, 41, 64, 0.08);
+}
+.grid-assign-row.active {
+  background: rgba(13, 148, 136, 0.05);
+  border-radius: 12px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.grid-assign-row:last-child { border-bottom: 0; }
+.grid-assign-index {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.grid-assign-bind {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.45;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.64));
+}
+.grid-history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.grid-history-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-0);
+  font-family: var(--font-display);
+}
+.grid-history-subtitle {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.grid-history-list {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(160px, 182px);
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.grid-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.78);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.grid-history-item:hover {
+  border-color: rgba(13, 148, 136, 0.18);
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+.grid-history-item.active {
+  border-color: rgba(13, 148, 136, 0.26);
+  background: linear-gradient(180deg, rgba(244,248,255,0.96), rgba(255,255,255,0.86));
+  box-shadow: 0 14px 28px rgba(13, 148, 136, 0.12);
+}
+.grid-history-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  background: rgba(14, 19, 28, 0.05);
+}
+.grid-history-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.grid-history-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.grid-history-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.grid-history-meta {
+  font-size: 10.5px;
+  color: var(--text-3);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.latest-grid-strip {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.62));
+}
+.latest-grid-strip-thumb {
+  width: 72px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(14, 19, 28, 0.06);
+  cursor: zoom-in;
+  box-shadow: none;
+}
+.latest-grid-strip-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.latest-grid-strip-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.latest-grid-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.latest-grid-strip-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-0);
+  font-family: var(--font-display);
+}
+.latest-grid-strip-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: var(--text-3);
+}
+.latest-grid-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Export */
+.export-split { flex: 1; display: flex; min-height: 0; }
+.export-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; }
+.export-video { max-width: 720px; width: 100%; border-radius: var(--radius-lg); background: #000; }
+.export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
+.export-list { width: 240px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
+.export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
+.exp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); }
+.exp-row:hover { background: var(--bg-hover); }
+.route-tag { flex-shrink: 0; font-size: 9px; font-weight: 700; letter-spacing: 0.02em; padding: 1px 5px; border-radius: 5px; color: #7dd3fc; background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.25); font-family: var(--font-mono); }
+.shot-tag { flex-shrink: 0; font-size: 9px; font-weight: 600; letter-spacing: 0.02em; padding: 1px 5px; border-radius: 5px; color: #fbbf24; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.22); font-family: var(--font-mono); }
+.bgm-panel {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.bgm-panel-head { display: flex; align-items: center; gap: 10px; color: var(--accent); flex-shrink: 0; }
+.bgm-head-text { line-height: 1.3; }
+.bgm-title { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.bgm-sub { font-size: 11px; color: var(--text-3); }
+.bgm-controls { display: flex; align-items: flex-end; gap: 18px; flex: 1; flex-wrap: wrap; }
+.bgm-file-row { display: flex; align-items: center; gap: 8px; }
+.bgm-filename { font-size: 12px; color: var(--text-2); max-width: 200px; }
+.bgm-slider { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+.bgm-slider input[type="range"] { width: 140px; accent-color: var(--accent); }
+.bgm-num { display: flex; flex-direction: column; gap: 4px; }
+.bgm-num .input { width: 72px; }
+
+/* Shared */
+.dim { color: var(--text-3); }
+
+@media (max-width: 1240px) {
+  .studio-body {
+    grid-template-columns: 1fr;
+  }
+
+  .studio-topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .studio-topbar-side {
+    justify-content: space-between;
+  }
+
+  .split-layout,
+  .export-split {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    max-height: 340px;
+  }
+
+  .shot-list,
+  .export-list {
+    width: 100%;
+  }
+
+  .detail-panel {
+    min-height: 420px;
+  }
+
+  .field-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .image-viewer-overlay {
+    padding: 16px;
+  }
+
+  .image-viewer-dialog {
+    width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px);
+  }
+
+  .grid-tool {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .grid-preview-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .grid-preview-wrap,
+  .grid-preview-img {
+    max-height: 42vh;
+  }
+
+  .grid-assignment-pane {
+    max-height: 42vh;
+  }
+
+  .grid-assign-columns {
+    display: none;
+  }
+
+  .grid-assign-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 860px) {
+  .studio {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .studio-topbar-main {
+    align-items: flex-start;
+  }
+
+  .studio-topbar-side,
+  .studio-actions {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-right,
+  .step-bubble,
+  .export-bar {
+    flex-wrap: wrap;
+  }
+
+  .extract-grid,
+  .voice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .voice-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .extract-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .extract-summary {
+    position: static;
+  }
+
+  .voice-stage-panel {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .frame-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .detail-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .field-grid-2,
+  .field-grid-4 {
+    grid-template-columns: 1fr;
+  }
+
+  .frame-thumbs {
+    width: 100%;
+  }
+
+  .frame-thumb {
+    width: 100%;
+  }
+
+  .latest-grid-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .grid-history-list {
+    grid-auto-columns: minmax(148px, 168px);
+  }
+
+  .latest-grid-strip-thumb {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+
+  .latest-grid-strip-actions {
+    justify-content: flex-start;
+  }
+}
+
+/* ====== v2: 弹窗 + 编辑组件样式 ====== */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.modal-panel {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(600px, 92vw);
+  max-height: 85vh;
+  display: flex; flex-direction: column;
+  box-shadow: var(--shadow-elevated);
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-0); }
+.btn-close {
+  background: none; border: none; color: var(--text-3);
+  font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
+}
+.btn-close:hover { color: var(--text-0); }
+.modal-body {
+  padding: 16px 20px; overflow-y: auto;
+  flex: 1;
+}
+.modal-body .section {
+  margin-bottom: 20px;
+}
+.modal-body .section h4 {
+  margin: 0 0 10px; font-size: 13px;
+  color: var(--accent-text); text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+.btn-save {
+  padding: 8px 20px; border-radius: 6px;
+  background: var(--accent); color: #fff;
+  border: none; font-weight: 600; cursor: pointer;
+}
+.btn-save:hover { opacity: 0.9; }
+.btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-cancel {
+  padding: 8px 16px; border-radius: 6px;
+  background: transparent; color: var(--text-2);
+  border: 1px solid var(--border); cursor: pointer;
+}
+.btn-cancel:hover { color: var(--text-0); }
+.btn-ghost {
+  background: transparent !important; border: 1px solid var(--border) !important;
+  color: var(--text-2) !important; padding: 2px 6px !important;
+  min-width: unset !important;
+}
+.btn-ghost:hover { color: var(--text-0) !important; border-color: var(--border-strong) !important; }
+.field {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
+}
+.field span { font-size: 11px; color: var(--text-3); }
+.input, .textarea {
+  padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-0);
+  font-size: 13px; font-family: inherit;
+  resize: vertical;
+}
+.input:focus, .textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.flex { display: flex; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.items-center { align-items: center; }
+.ml-auto { margin-left: auto; }
+.mt-2 { margin-top: 8px; }
+.regenerate-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px;
+}
+.btn-primary {
+  padding: 6px 14px; border-radius: 6px;
+  background: var(--accent); color: #fff;
+  border: none; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.btn-primary:hover { opacity: 0.9; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.error-msg {
+  margin-top: 6px; font-size: 12px; color: var(--error);
+}
+.detail-section {
+  padding: 12px 16px;
+  background: var(--bg-1);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+.detail-section-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+}
+.detail-section-title {
+  font-size: 13px; font-weight: 600; color: var(--accent-text);
+}
+.detail-section-copy {
+  font-size: 11px; color: var(--text-2);
+}
+.aspect-selector-compact { display: flex; gap: 6px; }
+.aspect-btn-compact {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-2); font-size: 12px; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.aspect-btn-compact:hover { border-color: var(--accent); color: var(--text-0); }
+.aspect-btn-compact.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+.aspect-icon-compact {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   手机档（≤767px）：本页已在 1240 / 860 两档做过收窄，这里只补 768 以下
+   真正会挤坏的东西——顶栏换行、触控尺寸、浮层宽度。不改任何业务信息。
+   ========================================================================== */
+@media (max-width: 767px) {
+  .studio { padding: 8px; gap: 8px; }
+  .studio-topbar { padding: 10px 12px; flex-direction: column; align-items: stretch; gap: 10px; }
+  .studio-topbar-side { justify-content: space-between; flex-wrap: wrap; }
+  .studio-actions { flex-wrap: wrap; }
+  /* 顶栏原来的 28px 高/11px 字是桌面鼠标档，触屏要放大到可点 */
+  .studio-topbar .btn { height: 34px; font-size: 12px; padding: 0 12px; }
+  .studio-body { gap: 8px; }
+  .pipeline { padding: 10px; }
+  .detail-panel { min-height: 0; }
+  .extract-stage, .voice-stage { padding: 10px; gap: 10px; }
+  .extract-summary-stats, .voice-stage-stats { gap: 6px; }
+  /* 参数浮层是 fixed 320px，手机横向会顶到屏幕外 */
+  .param-panel { width: min(320px, calc(100vw - 24px)); }
+  .bgm-slider { min-width: 0; }
+  .bgm-slider input[type="range"] { width: 100%; }
+  .bgm-filename { max-width: 132px; }
+  .modal-panel { width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+  .aspect-selector-compact { flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  .studio { padding: 6px; }
+  .studio-topbar-side { gap: 4px; }
+  .studio-topbar .btn { padding: 0 9px; }
+}
+
+/* 触屏：8px 小圆点是视觉指示器，本身不可能点得准，用伪元素把热区外扩到 26px，
+   同时拉开点间距，避免相邻两个点的热区互相覆盖（点错步骤比点不到更糟）。 */
+@media (pointer: coarse) {
+  .sidebar-jump-dot, .bubble-dot { position: relative; }
+  .sidebar-jump-dot::after, .bubble-dot::after {
+    content: '';
+    position: absolute;
+    inset: -9px;
+    border-radius: 999px;
+  }
+  .sidebar-jumper, .bubble-dots { gap: 14px; }
+}
+</style>
