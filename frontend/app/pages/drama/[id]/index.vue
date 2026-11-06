@@ -197,7 +197,7 @@
         <div class="dialog-body">
           <label class="field">
             <span class="field-label">标题</span>
-            <input v-model="renameEpisodeTitle" class="input" placeholder="输入新的集标题" @keyup.enter="renameEpisode" />
+            <input v-model="renameEpisodeTitle" class="input" placeholder="输入新的集标题" @keydown.enter="guardEnter($event, renameEpisode)" />
           </label>
         </div>
         <div class="dialog-foot">
@@ -832,5 +832,17 @@ watch(() => route.params.id, () => { load() })
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/* ==========================================================================
+   手机档（≤767px）：860 档已把 config-grid 收成单列，这里只补标题层级
+   与按钮宽度，避免 12px 的辅助文案在 360 屏上被压成竖排。
+   ========================================================================== */
+@media (max-width: 767px) {
+  .dialog-title { font-size: 20px; }
+  .dialog-head { flex-direction: column; gap: 10px; }
+  .dialog-section-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .dialog-foot .btn { width: 100%; }
+  .config-card { padding: 12px; }
 }
 </style>

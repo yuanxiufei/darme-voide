@@ -144,7 +144,7 @@
           </div>
           <div v-else class="ollama-empty">{{ ollamaStatus?.running ? '本机暂无已安装模型，可在下方输入模型名下载' : '磁盘模型库里没有模型，先点击「启动 Ollama」或在下方下载' }}</div>
           <div class="ollama-pull">
-            <input v-model="ollamaPullName" class="input" placeholder="输入模型名，如 qwen3:8b / qwen2.5:7b" @keyup.enter="pullOllamaModel" />
+            <input v-model="ollamaPullName" class="input" placeholder="输入模型名，如 qwen3:8b / qwen2.5:7b" @keydown.enter="guardEnter($event, pullOllamaModel)" />
             <button class="btn btn-primary btn-sm" :disabled="ollamaPulling || !ollamaPullName.trim()" @click="pullOllamaModel">
               <Loader2 v-if="ollamaPulling" :size="13" class="animate-spin" />
               <Download v-else :size="13" />
@@ -215,10 +215,14 @@
                 class="input"
                 type="text"
                 placeholder="如 D:\models 或 D:\code\ComfyUI\ComfyUI\models"
-                @keyup.enter="saveModelDir"
+                @keydown.enter="guardEnter($event, saveModelDir)"
               />
               <button class="btn btn-ghost btn-sm" :disabled="modelDirInput.trim().replace(/[\\/]+$/, '') === modelDir" @click="saveModelDir">
                 <Check :size="14" /> 保存
+              </button>
+              <!-- 只有桌面壳里有原生目录选择器；Web 端不显示（点不出来不如不显示） -->
+              <button v-if="isDesktop" class="btn btn-ghost btn-sm" title="选择目录" @click="browseModelDir">
+                <FolderOpen :size="14" /> 浏览
               </button>
             </div>
 
@@ -246,7 +250,7 @@
                   class="input"
                   type="text"
                   placeholder="如 Qwen/Qwen3-4B"
-                  @keyup.enter="listHfFiles"
+                  @keydown.enter="guardEnter($event, listHfFiles)"
                 />
                 <button class="btn btn-ghost btn-sm" :disabled="!hfRepo.trim() || hfListing" @click="listHfFiles">
                   <Loader2 v-if="hfListing" :size="14" class="animate-spin" />
@@ -266,7 +270,7 @@
                 <label v-for="f in hfFiles" :key="f.name" class="hf-file-row">
                   <input type="checkbox" class="scan-check" :checked="hfSelectedFiles.includes(f.name)" @change="toggleHfFile(f.name)" />
                   <span class="hf-file-name mono">{{ f.name }}</span>
-                  <span class="hf-file-size">{{ formatSize(f.size) }}</span>
+                  <span class="hf-file-size">{{ formatBytesOrDash(f.size) }}</span>
                 </label>
               </div>
 
@@ -289,10 +293,13 @@
                 class="input"
                 type="text"
                 placeholder="如 D:\models\LLM，回车或点添加"
-                @keyup.enter="addCustomRoot"
+                @keydown.enter="guardEnter($event, addCustomRoot)"
               />
               <button class="btn btn-ghost btn-sm" :disabled="!customRootInput.trim()" @click="addCustomRoot">
                 <Plus :size="14" /> 添加
+              </button>
+              <button v-if="isDesktop" class="btn btn-ghost btn-sm" title="选择目录" @click="browseCustomRoot">
+                <FolderOpen :size="14" /> 浏览
               </button>
             </div>
             <div v-if="customRoots.length" class="scan-roots-chips">
@@ -808,11 +815,14 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2, CircleDollarSign, Calculator } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, aiProvidersAPI, traceAPI, localModelsAPI, usageAPI, dramaAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
+import { formatBytesOrDash } from '~/utils/mediaFile'
+import { isDesktop, pickDirectory } from '~/composables/useDesktop'
 
 const { confirm } = useConfirm()
 
@@ -1421,9 +1431,9 @@ const hfPercent = computed(() => {
 const hfProgressText = computed(() => {
   const p = hfProgress.value
   if (!p) return ''
-  if (p.status === 'done') return `下载完成，共 ${formatSize(p.total)}`
+  if (p.status === 'done') return `下载完成，共 ${formatBytesOrDash(p.total)}`
   if (p.status === 'error') return `下载失败：${p.error || ''}`
-  return `下载中 ${formatSize(p.overall)} / ${formatSize(p.overallTotal)}${p.file ? ` · ${p.file}` : ''}`
+  return `下载中 ${formatBytesOrDash(p.overall)} / ${formatBytesOrDash(p.overallTotal)}${p.file ? ` · ${p.file}` : ''}`
 })
 
 const HF_SOURCES = [
@@ -1518,6 +1528,20 @@ function addCustomRoot() {
   customRootInput.value = ''
   saveCustomRoots()
 }
+/**
+ * 原生目录选择器（桌面壳 `pick_directory` → `IFileOpenDialog`）。
+ *
+ * 只填输入框、不自动保存：用户常常要连着挑几个目录，替他把"要不要写进配置"这一步留着，
+ * 也顺带让「浏览 → 看一眼 → 放弃」这个动作零副作用。取消时壳返回 `null`，什么都不做。
+ */
+async function browseInto(apply: (path: string) => void) {
+  try {
+    const picked = await pickDirectory('选择模型目录')
+    if (picked) apply(picked)
+  } catch (e: any) { toast.error(e?.message || '打开目录选择器失败') }
+}
+const browseModelDir = () => browseInto((p) => { modelDirInput.value = p })
+const browseCustomRoot = () => browseInto((p) => { customRootInput.value = p })
 async function removeCustomRoot(r: string) {
   customRoots.value = customRoots.value.filter((x) => x !== r)
   await saveCustomRoots()
@@ -1642,14 +1666,8 @@ async function startHfDownload() {
     await loadLocalRoots()
   } catch (e: any) { toast.error(e.message) } finally { hfDownloading.value = false }
 }
-function formatSize(bytes?: number): string {
-  if (!bytes || bytes <= 0) return '-'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = bytes
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
-}
+// 体积格式化统一走 `utils/mediaFile.ts` 的 `formatBytesOrDash` ✓
+// （原先这里有一份局部实现、画布上传提示又要写一套 —— 同一份体积在两个页面显示成两种样子 ✗）
 
 let sectionFlashTimer: ReturnType<typeof setTimeout> | null = null
 function jumpToSection(serviceType: string) {
@@ -1821,11 +1839,11 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 .token-table td { color: var(--text-1); }
 
 /* 用量与成本 */
-.cost-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+.cost-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 10px; margin-top: 12px; }
 .cost-stat-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
 .cost-stat-num { font-size: 20px; font-weight: 700; font-family: var(--font-display); color: var(--accent); }
 .cost-stat-label { font-size: 12px; color: var(--text-3); margin-top: 4px; }
-.cost-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.cost-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); gap: 8px; margin-top: 12px; }
 .cost-grid-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-1); }
 .cost-grid-num { font-size: 16px; font-weight: 700; color: var(--text-0); }
 .cost-grid-label { font-size: 11px; color: var(--text-3); margin-top: 2px; }
@@ -1840,9 +1858,9 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 .estimate-note { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
 
 /* 本地模型 & GPU 监控 */
-.local-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; }
+.local-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: 10px; margin-top: 12px; }
 .gpu-head-actions { display: flex; align-items: center; gap: 8px; }
-.gpu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }
+.gpu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 10px; margin-top: 12px; }
 .gpu-card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); }
 .gpu-label { font-size: 11px; color: var(--text-3); margin-bottom: 6px; }
 .gpu-value { font-size: 16px; font-weight: 700; color: var(--text-0); }
@@ -2019,7 +2037,7 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 }
 .runtime-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 10px;
   margin-top: 12px;
 }
@@ -2387,4 +2405,37 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
 }
 .scan-skipped-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
 .scan-skipped-item { padding: 2px 0; }
+
+/* ==========================================================================
+   平板 / 手机：196px 侧栏在 768 以下会把配置区压到 450px，改为顶部横向条；
+   手机上整页滚（不再让内部 settings-scroll 单独滚，否则手指很难滚到内容）。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .models-side { width: 156px; padding: 14px 8px; }
+  .settings-scroll { padding: 24px 24px 28px; }
+}
+
+@media (max-width: 767px) {
+  .models-page { flex-direction: column; overflow-y: auto; }
+  .models-side {
+    width: 100%; height: auto; flex-direction: row; align-items: center;
+    gap: 6px; padding: 8px 10px;
+    border-right: none; border-bottom: 1px solid var(--border);
+    overflow-x: auto; overflow-y: hidden;
+    flex-shrink: 0;
+  }
+  .models-side::-webkit-scrollbar { display: none; }
+  .side-nav { flex-direction: row; gap: 6px; }
+  .side-item {
+    width: auto; flex-shrink: 0; white-space: nowrap;
+    padding: 8px 12px; font-size: 12.5px; min-height: 34px;
+  }
+  .settings-scroll { flex: none; height: auto; overflow-y: visible; padding: 16px 14px 28px; }
+  .settings-title { font-size: 18px; }
+  .token-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .preset-grid { grid-template-columns: 1fr; }
+  .config-row { flex-wrap: wrap; gap: 6px; }
+  .config-line { flex-wrap: wrap; }
+  .setup-panel-head { flex-direction: column; gap: 10px; }
+}
 </style>

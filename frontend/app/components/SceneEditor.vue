@@ -9,7 +9,7 @@
 
         <!-- 图片预览 -->
         <div v-if="scene?.image_url || scene?.imageUrl" class="editor-preview">
-          <img :src="'/' + (scene.image_url || scene.imageUrl)" alt="场景图预览" />
+          <img :src="mediaUrl(scene.image_url || scene.imageUrl)" alt="场景图预览" />
           <span class="preview-label">当前场景图</span>
         </div>
 
@@ -98,6 +98,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue'
+import { mediaUrl } from '~/utils/apiBase'
 
 const props = defineProps<{
   visible: boolean

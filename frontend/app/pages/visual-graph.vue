@@ -288,7 +288,7 @@ onMounted(() => {
 .vg-search { width: 240px; margin-left: auto; }
 
 /* 术语卡 */
-.vg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 10px; }
+.vg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(258px, 100%), 1fr)); gap: 10px; }
 .vg-term {
   display: flex; flex-direction: column; gap: 6px;
   padding: 12px 13px;
@@ -345,4 +345,32 @@ onMounted(() => {
 .vg-empty { font-size: 12.5px; color: var(--text-3); padding: 6px 0; display: flex; align-items: center; gap: 8px; }
 .vg-spin { animation: vg-spin 0.9s linear infinite; }
 @keyframes vg-spin { to { transform: rotate(360deg); } }
+
+/* ==========================================================================
+   平板 / 手机：工具条里 240px 的搜索框会把 tabs 挤成多行，改为整行；
+   卡片网格在窄屏固定单列（auto-fill 的 258px 下限在 320 屏会顶出横向滚动）。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .settings-scroll { padding: 24px 26px 28px; }
+  .vg-search { width: 200px; }
+}
+
+@media (max-width: 767px) {
+  .settings-scroll { padding: 16px 14px 28px; }
+  .settings-title { font-size: 18px; }
+  .vg-section { padding: 14px; }
+  .vg-toolbar { gap: 8px; }
+  .vg-search { width: 100%; margin-left: 0; }
+  .vg-grid { grid-template-columns: 1fr; }
+  .vg-section-head { flex-direction: column; gap: 10px; }
+  .vg-section-actions { flex-wrap: wrap; }
+  .vg-probe-row { flex-wrap: wrap; }
+  .vg-probe-input { min-height: 64px; }
+}
+
+/* 触屏：英文术语是可以点一下就复制的 chip，原来高 20px，点不准 */
+@media (pointer: coarse) {
+  .vg-en { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+  .vg-term { padding: 12px; }
+}
 </style>

@@ -390,4 +390,24 @@ watch(openSignal, (v) => {
 .ob-enter-from, .ob-leave-to { opacity: 0; }
 .ob-enter-active .ob-panel, .ob-leave-active .ob-panel { transition: transform 0.25s var(--ease-out); }
 .ob-enter-from .ob-panel, .ob-leave-to .ob-panel { transform: translateY(12px) scale(0.98); }
+
+/* === 响应式（窄屏 / 触屏） ===
+   跳过与「稍后了解」是两个纯文字小按钮（原高 17px），既是可点元素就不该
+   低于 34px 热区；进度点只有 7px，用伪元素把热区外扩并拉开间距。
+   放在样式表末尾，才能压过上面同选择器的基础规则。 */
+@media (max-width: 767px), (pointer: coarse) {
+  .ob-skip, .ob-link {
+    min-height: var(--tap-min, 34px);
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .ob-dot { position: relative; }
+  .ob-dot::after { content: ''; position: absolute; inset: -8px; border-radius: 999px; }
+  .ob-dots { gap: 14px; margin: 14px 0 18px; }
+  .ob-body { min-height: 0; }
+  .ob-panel { max-height: calc(100vh - 20px); overflow-y: auto; }
+  .ob-highlights { gap: 10px; }
+  .ob-footer { flex-wrap: wrap; gap: 8px; }
+}
 </style>

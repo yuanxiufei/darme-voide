@@ -368,7 +368,8 @@ onMounted(load)
 }
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* 用 min() 兜住窄屏：320px 卡片在 320px 视口下也不会被撑出横向滚动 */
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 12px;
 }
 .ep-group { margin-bottom: 20px; }
@@ -385,5 +386,27 @@ onMounted(load)
   text-align: center;
   color: var(--text-3);
   font-size: 14px;
+}
+
+/* === 响应式 === */
+@media (max-width: 1023px) {
+  .page { padding: 22px 24px 32px; }
+}
+
+@media (max-width: 767px) {
+  .page { padding: 14px 14px 28px; }
+  .page-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .page-title { font-size: 21px; }
+  .head-left { align-items: center; }
+  .toolbar { gap: 10px; margin-bottom: 14px; }
+  .search-box { min-width: 0; max-width: none; width: 100%; flex: 1 1 100%; }
+  .cards { gap: 10px; }
+  .block { margin-bottom: 20px; }
+  .empty { padding: 40px 0; }
 }
 </style>

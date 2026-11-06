@@ -10,6 +10,8 @@
  * 归一在页面侧做的理由：后端同一字段有 snake/camel 两套写法（`image_url` / `imageUrl`），
  * 组件里再判一遍就是第三处重复，也会把「哪个字段算图」的知识散进组件。
  */
+import { mediaUrl } from '~/utils/apiBase'
+
 interface AssetCardItem {
   id: number
   /** 卡片主标题（角色名 / 地点名） */
@@ -63,7 +65,7 @@ function statusOf(item: AssetCardItem) {
       <div :class="['asset-cover', { wide: props.wide }]">
         <img
           v-if="item.imageUrl"
-          :src="item.imageUrl"
+          :src="mediaUrl(item.imageUrl)"
           class="previewable-image"
           @click.stop="emit('preview', item.imageUrl, item.previewTitle)"
         />

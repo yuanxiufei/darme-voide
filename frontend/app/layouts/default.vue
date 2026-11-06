@@ -2,6 +2,16 @@
   <div class="shell">
     <!-- Header -->
     <header class="header">
+      <!-- ≤1023px 才出现：导航收进右侧抽屉，避免 10 个导航项在平板/手机上挤出屏幕 -->
+      <button
+        class="nav-toggle"
+        :class="{ open: navOpen }"
+        :aria-expanded="navOpen"
+        aria-label="导航菜单"
+        @click="navOpen = !navOpen"
+      >
+        <span></span><span></span><span></span>
+      </button>
       <div class="header-left">
         <button class="brand" @click="navigateTo('/')">
           <div class="brand-mark">
@@ -15,7 +25,7 @@
         </button>
       </div>
 
-      <nav class="header-nav">
+      <nav class="header-nav" :class="{ open: navOpen }" @click="navOpen = false">
         <NuxtLink to="/" class="nav-link" :class="{ active: route.path === '/' }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
@@ -40,6 +50,14 @@
             <line x1="9" y1="17" x2="13" y2="17"/>
           </svg>
           <span>Skill</span>
+        </NuxtLink>
+        <NuxtLink to="/knowledge" class="nav-link" :class="{ active: route.path.startsWith('/knowledge') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            <path d="M9 7h7M9 11h7"/>
+          </svg>
+          <span>知识库</span>
         </NuxtLink>
         <NuxtLink to="/models" class="nav-link" :class="{ active: route.path.startsWith('/models') }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -74,6 +92,14 @@
           </svg>
           <span>视觉</span>
         </NuxtLink>
+        <NuxtLink to="/canvas" class="nav-link" :class="{ active: route.path.startsWith('/canvas') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="7" height="6" rx="1"/>
+            <rect x="14" y="12" width="7" height="6" rx="1"/>
+            <path d="M10 7h4v10h-4"/>
+          </svg>
+          <span>画布</span>
+        </NuxtLink>
         <NuxtLink to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
@@ -99,6 +125,9 @@
       </div>
     </header>
 
+    <!-- 抽屉遮罩：点击空白处关闭 -->
+    <div v-if="navOpen" class="nav-scrim" @click="navOpen = false"></div>
+
     <main class="content">
       <slot />
     </main>
@@ -110,6 +139,16 @@ import brandLogo from '~/assets/brand-logo.svg'
 
 const route = useRoute()
 const showBrandImage = ref(true)
+
+/* 移动端抽屉：路由变化必关（否则点完链接抽屉还盖在页面上） */
+const navOpen = ref(false)
+watch(() => route.path, () => { navOpen.value = false })
+
+function onKeydown(e) {
+  if (e.key === 'Escape') navOpen.value = false
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 function openHelp() {
   useState('onboarding-open', () => false).value = true
@@ -226,5 +265,58 @@ function openHelp() {
 .film-frame:nth-child(3) { opacity: 0.3; }
 
 /* Content */
-.content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.content { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+
+/* === Mobile / Tablet: hamburger + drawer === */
+.nav-toggle {
+  display: none;
+  flex-direction: column; justify-content: center; gap: 4px;
+  width: 34px; height: 34px; padding: 0 8px; flex-shrink: 0;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer;
+  position: relative; z-index: 130;   /* 必须高于 scrim，否则打开后点不到 */
+}
+.nav-toggle span {
+  display: block; height: 2px; border-radius: 2px;
+  background: var(--text-1);
+  transition: transform 0.22s var(--ease-out), opacity 0.18s;
+}
+.nav-toggle.open span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+.nav-toggle.open span:nth-child(2) { opacity: 0; }
+.nav-toggle.open span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+.nav-scrim { display: none; }
+
+@media (max-width: 1023px) {
+  .header { height: 54px; padding: 0 16px; gap: 12px; }
+  .brand-text { display: none; }
+  .film-strip { display: none; }
+  .nav-toggle { display: inline-flex; }
+  .header-nav {
+    position: fixed; z-index: 120;
+    top: 0; right: 0; bottom: 0;
+    width: min(84vw, 320px);
+    flex: none;
+    flex-direction: column; align-items: stretch; justify-content: flex-start;
+    gap: 4px; padding: 68px 14px 24px;
+    background: var(--bg-1);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-xl);
+    overflow-y: auto;
+    transform: translateX(102%);
+    transition: transform 0.24s var(--ease-out);
+  }
+  .header-nav.open { transform: translateX(0); }
+  .nav-link { padding: 11px 12px; font-size: 14px; }
+  .nav-link svg { width: 17px; height: 17px; flex-shrink: 0; }
+  .nav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 110;
+    background: rgba(35, 48, 74, 0.36);
+    backdrop-filter: blur(2px);
+    animation: fadeIn 0.18s var(--ease-out);
+  }
+}
+
+@media (max-width: 767px) {
+  .header { padding: 0 12px; }
+}
 </style>

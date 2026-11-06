@@ -37,6 +37,10 @@ export default defineNuxtConfig({
   experimental: {
     appManifest: false,
   },
+  // 路由固定 history 模式，不做形态切换。
+  // 桌面端已拆为独立 Vite 工程（`desktop/frontend/`），自带 hash 路由（Tauri 自定义协议
+  // 不保证未知路径回退到 index.html，history 模式刷新会白屏），不再需要 Web 端切换。
+  // ⚠️ 不要为了"统一"把 Web 切成 hash —— Web 端 URL 会失去可分享/可直达能力。
   app: {
     head: {
       title: '短剧工坊',

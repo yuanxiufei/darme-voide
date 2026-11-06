@@ -31,6 +31,8 @@ interface DubSingleVM {
   audioUrl: string | null
 }
 
+import { mediaUrl } from '~/utils/apiBase'
+
 interface DubRowVM {
   key: number | string
   /** 原始分镜对象，只用于回传给页面的生成动作 */
@@ -125,7 +127,7 @@ function statusBorder(status: string | null) {
             <span class="tag" :class="line.audioUrl ? 'tag-success' : ''">{{ line.audioUrl ? '已生成' : '待生成' }}</span>
           </div>
           <div class="dub-foot">
-            <audio v-if="line.audioUrl" :src="'/' + line.audioUrl" controls preload="none" class="dub-audio" />
+            <audio v-if="line.audioUrl" :src="mediaUrl(line.audioUrl)" controls preload="none" class="dub-audio" />
             <button class="btn btn-sm ml-auto" @click="emit('generate', row)">生成配音</button>
           </div>
         </div>
@@ -148,7 +150,7 @@ function statusBorder(status: string | null) {
           <span v-for="(m, mi) in (row.single ? row.single.meta : [])" :key="mi" class="dim">{{ m }}</span>
         </div>
         <div class="dub-foot">
-          <audio v-if="row.single && row.single.audioUrl" :src="'/' + row.single.audioUrl" controls preload="none" class="dub-audio" />
+          <audio v-if="row.single && row.single.audioUrl" :src="mediaUrl(row.single.audioUrl)" controls preload="none" class="dub-audio" />
           <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
           <button class="btn btn-sm ml-auto" @click="emit('generate', row)">生成配音</button>
         </div>

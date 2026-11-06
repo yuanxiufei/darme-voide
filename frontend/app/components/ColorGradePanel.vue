@@ -41,7 +41,7 @@
           <button class="cg-btn cg-btn-danger" :disabled="selectedPresetId == null" @click="deletePreset">删除</button>
         </div>
         <div class="cg-preset-row">
-          <input v-model="presetName" class="cg-input" placeholder="预设名称（保存当前参数）" @keyup.enter="savePreset" />
+          <input v-model="presetName" class="cg-input" placeholder="预设名称（保存当前参数）" @keydown.enter="guardEnter($event, savePreset)" />
           <button class="cg-btn cg-btn-primary" :disabled="!presetName.trim() || !active" @click="savePreset">保存</button>
         </div>
       </div>
@@ -50,6 +50,7 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 
 const props = defineProps<{ modelValue?: any }>()

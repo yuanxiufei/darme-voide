@@ -35,7 +35,7 @@
     <div class="card-grid" v-if="filtered.length">
       <div v-for="item in filtered" :key="item.id" class="lib-card">
         <div class="prop-thumb" :class="{ empty: !item.imageUrl }" @click="generateImage(item)">
-          <img v-if="item.imageUrl" :src="item.imageUrl" :alt="item.name" />
+          <img v-if="item.imageUrl" :src="mediaUrl(item.imageUrl)" :alt="item.name" />
           <span v-else class="thumb-placeholder">{{ propIcons[item.category] || '📦' }}</span>
           <div class="thumb-gen" v-if="!item.imageUrl">生成设定图</div>
         </div>
@@ -98,6 +98,7 @@
 import { toast } from 'vue-sonner'
 import { propsLibraryAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
+import { mediaUrl } from '~/utils/apiBase'
 
 const { confirm } = useConfirm()
 const route = useRoute()
@@ -215,9 +216,7 @@ async function generateImage(item: any) {
 onMounted(() => load())
 function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, n) + '...' : s }
 function normPUrl(p?: string | null): string {
-  if (!p) return ''
-  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
-  return p.startsWith('/') ? p : '/' + p
+  return mediaUrl(p)
 }
 </script>
 
@@ -281,4 +280,17 @@ function normPUrl(p?: string | null): string {
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .empty { text-align: center; padding: 60px 20px; color: var(--text-3); }
 .empty p { margin-bottom: 16px; font-size: 14px; }
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 767px) {
+  .page-header h2 { font-size: 19px; }
+  .lib-card { padding: 12px; gap: 10px; }
+  .prop-thumb { width: 72px; height: 72px; }
+  .card-top { flex-wrap: wrap; gap: 6px; }
+  .empty { padding: 40px 16px; }
+  .pager { gap: 10px; margin-top: 18px; }
+}
+@media (pointer: coarse) {
+  .action-btn, .btn-mini, .btn-primary, .btn-secondary, .pager button { min-height: var(--tap-min); }
+}
 </style>

@@ -57,8 +57,14 @@
         <div class="card-check">
           <input type="checkbox" :checked="selectedItems.includes(item.id)" @click.stop="toggleSelect(item.id)" />
         </div>
-        <div class="card-avatar" :style="item.imageUrl ? { backgroundImage: `url(${item.imageUrl})` } : {}">
-          <span v-if="!item.imageUrl">{{ item.name?.charAt(0) || '?' }}</span>
+        <div class="card-avatar">
+          <img
+            v-if="item.imageUrl && !brokenAvatars.has(item.id)"
+            :src="mediaUrl(item.imageUrl)"
+            :alt="item.name"
+            @error="brokenAvatars.add(item.id)"
+          />
+          <span v-else>{{ item.name?.charAt(0) || '?' }}</span>
         </div>
         <div class="card-body">
           <div class="card-top">
@@ -110,7 +116,23 @@
         <label>性格 <input v-model="form.personality" placeholder="性格描述" /></label>
         <label>服装风格 <input v-model="form.clothingStyle" placeholder="服装风格" /></label>
         <label>表情特征 <input v-model="form.expression" placeholder="表情描述" /></label>
-        <label>头像URL <input v-model="form.imageUrl" placeholder="https://..." /></label>
+        <label>头像
+          <div class="field-row">
+            <input v-model="form.imageUrl" placeholder="static/uploads/xxx.png 或图片链接" />
+            <button type="button" class="btn-mini" :disabled="uploading" @click="avatarPicker?.click()">
+              {{ uploading ? '上传中…' : '上传' }}
+            </button>
+          </div>
+          <input ref="avatarPicker" type="file" accept="image/*" hidden @change="onAvatarPicked" />
+          <img
+            v-if="form.imageUrl && !formAvatarBroken"
+            :src="mediaUrl(form.imageUrl)"
+            class="field-preview"
+            alt="头像预览"
+            @error="formAvatarBroken = true"
+            @load="formAvatarBroken = false"
+          />
+        </label>
 
         <fieldset class="voice-section">
           <legend>声音配置</legend>
@@ -122,7 +144,7 @@
           </div>
         </fieldset>
 
-        <label>标签 <input v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="输入标签后按回车" />
+        <label>标签 <input v-model="tagInput" @keydown.enter="guardEnter($event, addTag)" placeholder="输入标签后按回车" />
           <div class="chip-row">
             <span v-for="(t,i) in form.tags" :key="i" class="chip">
               {{ t }} <button @click="form.tags.splice(i,1)">×</button>
@@ -156,9 +178,11 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { toast } from 'vue-sonner'
-import { characterLibraryAPI, dramaAPI } from '~/composables/useApi'
+import { characterLibraryAPI, dramaAPI, uploadAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
+import { mediaUrl } from '~/utils/apiBase'
 
 const { confirm } = useConfirm()
 
@@ -196,6 +220,31 @@ const form = reactive({
   tags: [] as string[],
 })
 const tagInput = ref('')
+
+// 头像：本地上传（后端 /upload/image 返回 `/static/uploads/<uuid>.png`，展示时过 mediaUrl 补 origin）
+const avatarPicker = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+const formAvatarBroken = ref(false)
+/** 列表里加载失败的卡片：CSS 背景图失败无感知，改 img 后能拿到 error 并退回姓名首字 */
+const brokenAvatars = reactive(new Set<number>())
+
+async function onAvatarPicked(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // 清空才能重复选同一张
+  if (!file) return
+  uploading.value = true
+  try {
+    const { url } = await uploadAPI.image(file)
+    if (!url) throw new Error('上传返回缺少 url')
+    form.imageUrl = url
+    formAvatarBroken.value = false
+  } catch (e: any) {
+    toast.error(e?.message || '头像上传失败')
+  } finally {
+    uploading.value = false
+  }
+}
 
 function addTag() {
   const t = tagInput.value.trim()
@@ -254,6 +303,7 @@ function openCreate() {
     clothingStyle: '', expression: '', gender: '', ageGroup: '', imageUrl: '',
     voiceStyle: '', voiceProvider: '', voiceTone: '', voiceSpeed: '', tags: [],
   })
+  formAvatarBroken.value = false
   showForm.value = true
 }
 
@@ -269,6 +319,7 @@ function openEdit(item: any) {
     voiceTone: vc.tone || '', voiceSpeed: vc.speed || '',
     tags: Array.isArray(item.tags) ? [...item.tags] : [],
   })
+  formAvatarBroken.value = false
   showForm.value = true
 }
 
@@ -425,10 +476,24 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .card-avatar {
   width: 56px; height: 56px; flex-shrink: 0;
   border-radius: var(--radius); background: var(--bg-2);
-  background-size: cover; background-position: center;
   display: flex; align-items: center; justify-content: center;
   font-size: 20px; font-weight: 700; color: var(--text-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.card-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 表单里的「输入框 + 上传按钮」一行 */
+.field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.field-row > input { flex: 1; width: auto !important; margin-top: 0 !important; }
+.btn-mini {
+  flex-shrink: 0; padding: 8px 12px; background: var(--bg-2); color: var(--text-1);
+  border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px;
+  cursor: pointer; font-family: inherit; white-space: nowrap;
+}
+.btn-mini:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+.btn-mini:disabled { opacity: 0.5; cursor: default; }
+.field-preview {
+  display: block; margin-top: 8px; width: 64px; height: 64px;
+  object-fit: cover; border-radius: var(--radius); border: 1px solid var(--border);
 }
 .card-body { flex: 1; min-width: 0; }
 .card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
@@ -492,4 +557,16 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 
 .empty { text-align: center; padding: 60px 20px; color: var(--text-3); }
 .empty p { margin-bottom: 16px; font-size: 14px; }
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 767px) {
+  .page-header h2 { font-size: 19px; }
+  .lib-card { padding: 12px; gap: 10px; }
+  .card-top { flex-wrap: wrap; gap: 6px; }
+  .empty { padding: 40px 16px; }
+  .pager { gap: 10px; margin-top: 18px; }
+}
+@media (pointer: coarse) {
+  .action-btn, .btn-mini, .btn-primary, .btn-secondary, .pager button { min-height: var(--tap-min); }
+}
 </style>

@@ -260,4 +260,23 @@ function formatDate(d: string) {
   .lib-hub { grid-template-columns: 1fr; }
   .recent-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ==========================================================================
+   手机档：本页有自己的容器类 .lib-page（不走全局 .page），需单独收留白；
+   最近条目两列在 360px 下文字会被压到换行成两行，降为单列。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .lib-page { padding: 24px 22px 32px; }
+  .lib-header { margin-bottom: 22px; }
+  .lib-header h2 { font-size: 22px; }
+}
+
+@media (max-width: 767px) {
+  .lib-page { padding: 16px 14px 28px; }
+  .lib-header h2 { font-size: 19px; }
+  .lib-sub { font-size: 12.5px; }
+  .lib-hub { gap: 10px; margin-bottom: 26px; }
+  .hub-card { padding: 14px; }
+  .recent-grid { grid-template-columns: 1fr; }
+}
 </style>

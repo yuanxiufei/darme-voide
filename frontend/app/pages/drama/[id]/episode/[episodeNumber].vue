@@ -21,6 +21,7 @@
 
       <div class="studio-topbar-side">
         <div class="studio-actions">
+          <EpisodePreflight :episode-id="episode?.id" />
           <button class="btn" @click="refresh()">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             刷新
@@ -394,7 +395,7 @@
                   </div>
                   <div class="voice-library-traits">{{ voice.traits }}</div>
                   <div class="voice-library-fit">{{ voice.suitable }}</div>
-                  <audio v-if="voicePreviewMap[voice.id]" :src="'/' + voicePreviewMap[voice.id]" controls preload="none" class="voice-preview-audio" />
+                  <audio v-if="voicePreviewMap[voice.id]" :src="mediaUrl(voicePreviewMap[voice.id])" controls preload="none" class="voice-preview-audio" />
                 </div>
               </div>
 
@@ -494,7 +495,7 @@
                 </div>
 
                 <div v-if="c.voice_sample_url || c.voiceSampleUrl" class="voice-player">
-                  <audio :src="'/' + (c.voice_sample_url || c.voiceSampleUrl)" controls preload="none" />
+                  <audio :src="mediaUrl(c.voice_sample_url || c.voiceSampleUrl)" controls preload="none" />
                 </div>
               </div>
             </div>
@@ -654,9 +655,9 @@
                       <div class="detail-preview-media">
                         <img
                           v-if="getFirstFrame(selectedSb)"
-                          :src="'/' + getFirstFrame(selectedSb)"
+                          :src="mediaUrl(getFirstFrame(selectedSb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getFirstFrame(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 首帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getFirstFrame(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 首帧`)"
                         />
                         <div v-else class="detail-preview-empty">待生成</div>
                       </div>
@@ -666,9 +667,9 @@
                       <div class="detail-preview-media">
                         <img
                           v-if="getKeyframe(selectedSb)"
-                          :src="'/' + getKeyframe(selectedSb)"
+                          :src="mediaUrl(getKeyframe(selectedSb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getKeyframe(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 关键帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getKeyframe(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 关键帧`)"
                         />
                         <div v-else class="detail-preview-empty">待生成</div>
                       </div>
@@ -678,9 +679,9 @@
                       <div class="detail-preview-media">
                         <img
                           v-if="getLastFrame(selectedSb)"
-                          :src="'/' + getLastFrame(selectedSb)"
+                          :src="mediaUrl(getLastFrame(selectedSb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getLastFrame(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 尾帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getLastFrame(selectedSb)), `镜头 #${sbs.indexOf(selectedSb) + 1} 尾帧`)"
                         />
                         <div v-else class="detail-preview-empty">待生成</div>
                       </div>
@@ -705,7 +706,7 @@
                       </div>
                       <div class="version-item" v-for="v in group.items" :key="v.id">
                         <div class="version-thumb" v-if="v.asset_url">
-                          <img :src="'/' + v.asset_url.replace(/^\//, '')" alt="" loading="lazy" @click="openImageViewer('/' + v.asset_url.replace(/^\//, ''), `版本 v${v.version}`)" />
+                          <img :src="mediaUrl(v.asset_url)" alt="" loading="lazy" @click="openImageViewer(mediaUrl(v.asset_url), `版本 v${v.version}`)" />
                         </div>
                         <div v-else class="version-thumb version-thumb-empty">无图</div>
                         <div class="version-info">
@@ -1122,7 +1123,7 @@
                         class="preset-input"
                         placeholder="存成预设，如「Krea2 首尾帧」"
                         maxlength="24"
-                        @keyup.enter="saveGenPreset"
+                        @keydown.enter="guardEnter($event, saveGenPreset)"
                       />
                       <button class="preset-btn" :disabled="!presetName.trim() || presetBusy" @click="saveGenPreset">保存</button>
                     </div>
@@ -1150,7 +1151,7 @@
                 @click="jumpToTimelineShot(sb)"
               >
                 <div class="shot-timeline-thumb">
-                  <img v-if="getStoryboardCover(sb)" :src="'/' + getStoryboardCover(sb)" alt="" />
+                  <img v-if="getStoryboardCover(sb)" :src="mediaUrl(getStoryboardCover(sb))" alt="" />
                   <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                   <span class="shot-timeline-num">#{{ String(i + 1).padStart(2, '0') }}</span>
                 </div>
@@ -1304,8 +1305,8 @@
 
             <div v-if="gridHistory.length" class="grid-history-panel">
               <div v-if="gridImagePath" class="latest-grid-strip">
-                <button class="latest-grid-strip-thumb" @click="openImageViewer('/' + gridImagePath, '当前宫格图')">
-                  <img :src="'/' + gridImagePath" class="previewable-image" />
+                <button class="latest-grid-strip-thumb" @click="openImageViewer(mediaUrl(gridImagePath), '当前宫格图')">
+                  <img :src="mediaUrl(gridImagePath)" class="previewable-image" />
                 </button>
                 <div class="latest-grid-strip-copy">
                   <div class="latest-grid-strip-head">
@@ -1341,7 +1342,7 @@
                   @click="selectGridHistory(item)"
                 >
                   <div class="grid-history-thumb">
-                    <img :src="'/' + item.localPath" class="previewable-image" />
+                    <img :src="mediaUrl(item.localPath)" class="previewable-image" />
                   </div>
                   <div class="grid-history-copy">
                     <div class="grid-history-tags">
@@ -1383,9 +1384,9 @@
                       <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'first_frame') && genShotFrame(sb, 'first_frame')">
                         <img
                           v-if="getFirstFrame(sb)"
-                          :src="'/' + getFirstFrame(sb)"
+                          :src="mediaUrl(getFirstFrame(sb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getFirstFrame(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
                         />
                         <div v-else class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'first_frame')" :size="14" class="animate-spin" />
@@ -1401,9 +1402,9 @@
                       <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'last_frame') && genShotFrame(sb, 'last_frame')">
                         <img
                           v-if="getLastFrame(sb)"
-                          :src="'/' + getLastFrame(sb)"
+                          :src="mediaUrl(getLastFrame(sb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getLastFrame(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
                         />
                         <div v-else class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'last_frame')" :size="14" class="animate-spin" />
@@ -1419,9 +1420,9 @@
                       <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'keyframe') && genShotFrame(sb, 'keyframe')">
                         <img
                           v-if="getKeyframe(sb)"
-                          :src="'/' + getKeyframe(sb)"
+                          :src="mediaUrl(getKeyframe(sb))"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getKeyframe(sb), `镜头 #${String(i + 1).padStart(2, '0')} 关键帧`)"
+                          @click.stop="openImageViewer(mediaUrl(getKeyframe(sb)), `镜头 #${String(i + 1).padStart(2, '0')} 关键帧`)"
                         />
                         <div v-else class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'keyframe')" :size="14" class="animate-spin" />
@@ -1545,9 +1546,9 @@
                       <div class="grid-preview-wrap">
                         <div class="grid-preview-stage">
                           <img
-                            :src="'/' + gridImagePath"
+                            :src="mediaUrl(gridImagePath)"
                             class="grid-preview-img previewable-image"
-                            @click.stop="openImageViewer('/' + gridImagePath, '宫格图预览')"
+                            @click.stop="openImageViewer(mediaUrl(gridImagePath), '宫格图预览')"
                           />
                           <div class="grid-overlay" :style="gridOverlayStyle">
                             <button
@@ -1702,7 +1703,7 @@
         <div v-else class="export-split">
           <div class="export-main">
             <template v-if="mergeUrl">
-              <video :src="'/' + mergeUrl" controls class="export-video" />
+              <video :src="mediaUrl(mergeUrl)" controls class="export-video" />
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
@@ -1743,7 +1744,7 @@
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
                   联系表
                 </button>
-                <a :href="'/' + mergeUrl" download class="btn btn-primary">
+                <a :href="mediaUrl(mergeUrl)" download class="btn btn-primary" @click.prevent="downloadMerged">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
@@ -1943,7 +1944,7 @@
               <video
                 :key="playIndex"
                 ref="videoEl"
-                :src="'/' + (playlist[playIndex]?.url || '')"
+                :src="mediaUrl(playlist[playIndex]?.url || '')"
                 class="playlist-video"
                 controls
                 autoplay
@@ -2026,7 +2027,9 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { ART_STYLE_LABELS } from '~/utils/artStyles'
+import { mediaUrl } from '~/utils/apiBase'
 // 分镜纯取值（帧/视频/台词判定、角色标签、配置显示名）：与本页状态无关，抽到 utils 共享
 import {
   ROLE_TAGS, roleTagCls, inferRoleTags, inferCharRoleTag, inferVoiceGender, configLabel,
@@ -2204,6 +2207,27 @@ const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.vo
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(hasComposed).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+
+/**
+ * 「下载视频」不能只靠 `<a download>`：桌面壳里 mediaUrl 产出的是跨源地址，
+ * 浏览器会忽略 `download` 而直接导航 ⇒ 整个 SPA 被视频顶掉。取成 blob 再存。
+ */
+async function downloadMerged() {
+  const url = mediaUrl(mergeUrl.value)
+  if (!url) return
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = decodeURIComponent(url.split('/').pop() || 'merged.mp4')
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+  } catch (e) {
+    toast.error(`下载失败：${(e as Error).message}`)
+  }
+}
 
 const scriptStep = ref(0)
 const prodTab = ref('chars')
@@ -2384,7 +2408,10 @@ function isPendingCharImage(id: number) {
 
 function openImageViewer(src: string, title: string = '') {
   if (!src) return
-  imageViewer.value = { open: true, src, title }
+  // 收口就在这里：弹窗模板是裸 `<img :src="imageViewer.src">`，调用方送的是
+  // 根相对路径（`'/' + getFirstFrame(sb)` 等 20 余处）⇒ 统一过 mediaUrl，
+  // 否则打包端 origin 为 tauri://localhost，点开大图整片裂图（dev 同源看不出来）。
+  imageViewer.value = { open: true, src: mediaUrl(src), title }
 }
 
 function closeImageViewer() {
@@ -3157,7 +3184,7 @@ const charCards = computed(() => visualChars.value.map(c => ({
   id: c.id,
   title: c.name,
   meta: c.role || '角色',
-  imageUrl: (c.image_url || c.imageUrl) ? `/${c.image_url || c.imageUrl}` : null,
+  imageUrl: (c.image_url || c.imageUrl) ? mediaUrl(c.image_url || c.imageUrl) : null,
   pending: isPendingCharImage(c.id),
   previewTitle: `${c.name} 角色形象`,
   raw: c,
@@ -3166,7 +3193,7 @@ const sceneCards = computed(() => scenes.value.map(s => ({
   id: s.id,
   title: s.location,
   meta: s.time || '—',
-  imageUrl: (s.image_url || s.imageUrl) ? `/${s.image_url || s.imageUrl}` : null,
+  imageUrl: (s.image_url || s.imageUrl) ? mediaUrl(s.image_url || s.imageUrl) : null,
   pending: isPendingSceneImage(s.id),
   previewTitle: `${s.location} 场景图`,
   raw: s,
@@ -4033,9 +4060,7 @@ function watchAsyncResult(check: () => any, attempts: number = 24, delay: number
   })()
 }
 function normEpUrl(p?: string | null): string {
-  if (!p) return ''
-  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
-  return p.startsWith('/') ? p : '/' + p
+  return mediaUrl(p)
 }
 
 // 角色级图片模型选择（每个角色独立）
@@ -6114,7 +6139,7 @@ watch(() => route.query, () => applyTaskRouteQuery())
 .role-tag-supporting { color: #6b21a8; background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.25); }
 .role-tag-extra { color: #475569; background: rgba(100,116,139,0.12); border: 1px solid rgba(100,116,139,0.25); }
 
-.voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; align-content: start; }
+.voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; align-content: start; }
 .voice-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; border-radius: 22px; min-height: 0; }
 .voice-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .voice-char { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
@@ -7418,5 +7443,49 @@ watch(() => route.query, () => applyTaskRouteQuery())
   width: 13px;
   height: 13px;
   flex-shrink: 0;
+}
+
+/* ==========================================================================
+   手机档（≤767px）：本页已在 1240 / 860 两档做过收窄，这里只补 768 以下
+   真正会挤坏的东西——顶栏换行、触控尺寸、浮层宽度。不改任何业务信息。
+   ========================================================================== */
+@media (max-width: 767px) {
+  .studio { padding: 8px; gap: 8px; }
+  .studio-topbar { padding: 10px 12px; flex-direction: column; align-items: stretch; gap: 10px; }
+  .studio-topbar-side { justify-content: space-between; flex-wrap: wrap; }
+  .studio-actions { flex-wrap: wrap; }
+  /* 顶栏原来的 28px 高/11px 字是桌面鼠标档，触屏要放大到可点 */
+  .studio-topbar .btn { height: 34px; font-size: 12px; padding: 0 12px; }
+  .studio-body { gap: 8px; }
+  .pipeline { padding: 10px; }
+  .detail-panel { min-height: 0; }
+  .extract-stage, .voice-stage { padding: 10px; gap: 10px; }
+  .extract-summary-stats, .voice-stage-stats { gap: 6px; }
+  /* 参数浮层是 fixed 320px，手机横向会顶到屏幕外 */
+  .param-panel { width: min(320px, calc(100vw - 24px)); }
+  .bgm-slider { min-width: 0; }
+  .bgm-slider input[type="range"] { width: 100%; }
+  .bgm-filename { max-width: 132px; }
+  .modal-panel { width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+  .aspect-selector-compact { flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  .studio { padding: 6px; }
+  .studio-topbar-side { gap: 4px; }
+  .studio-topbar .btn { padding: 0 9px; }
+}
+
+/* 触屏：8px 小圆点是视觉指示器，本身不可能点得准，用伪元素把热区外扩到 26px，
+   同时拉开点间距，避免相邻两个点的热区互相覆盖（点错步骤比点不到更糟）。 */
+@media (pointer: coarse) {
+  .sidebar-jump-dot, .bubble-dot { position: relative; }
+  .sidebar-jump-dot::after, .bubble-dot::after {
+    content: '';
+    position: absolute;
+    inset: -9px;
+    border-radius: 999px;
+  }
+  .sidebar-jumper, .bubble-dots { gap: 14px; }
 }
 </style>

@@ -7,6 +7,8 @@
   <ConfirmDialog />
   <!-- 任务中心：挂在最外层，才能做到「切页不丢」（详情见 composables/useTaskCenter.ts 文件头） -->
   <TaskCenter />
+  <!-- 桌面端专用：Web 形态下 isDesktop 恒为 false，不会渲染 -->
+  <DesktopStatusBanner />
 </template>
 
 <script setup>

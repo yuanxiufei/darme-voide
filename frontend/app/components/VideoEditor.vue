@@ -9,7 +9,7 @@
 
         <!-- 图片预览 -->
         <div v-if="storyboard?.image_url || storyboard?.imageUrl" class="editor-preview">
-          <img :src="'/' + (storyboard.image_url || storyboard.imageUrl)" alt="镜头帧图预览" />
+          <img :src="mediaUrl(storyboard.image_url || storyboard.imageUrl)" alt="镜头帧图预览" />
           <span class="preview-label">镜头帧图</span>
         </div>
 
@@ -248,6 +248,7 @@
 import { ref, reactive, watch, computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { Monitor, Smartphone, Square, Sparkles } from 'lucide-vue-next'
+import { mediaUrl } from '~/utils/apiBase'
 
 const props = defineProps<{
   visible: boolean

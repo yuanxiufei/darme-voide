@@ -119,7 +119,7 @@
           </div>
         </fieldset>
         <label>图片URL <input v-model="form.imageUrl" placeholder="https://..." /></label>
-        <label>标签 <input v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="输入标签后按回车" />
+        <label>标签 <input v-model="tagInput" @keydown.enter="guardEnter($event, addTag)" placeholder="输入标签后按回车" />
           <div class="chip-row"><span v-for="(t,i) in form.tags" :key="i" class="chip">{{ t }} <button @click="form.tags.splice(i,1)">×</button></span></div>
         </label>
         <div class="modal-actions">
@@ -132,6 +132,7 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { toast } from 'vue-sonner'
 import { weaponLibraryAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
@@ -354,4 +355,16 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .empty { text-align: center; padding: 60px 20px; color: var(--text-3); }
 .empty p { margin-bottom: 16px; font-size: 14px; }
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 767px) {
+  .page-header h2 { font-size: 19px; }
+  .lib-card { padding: 12px; gap: 10px; }
+  .card-top { flex-wrap: wrap; gap: 6px; }
+  .empty { padding: 40px 16px; }
+  .pager { gap: 10px; margin-top: 18px; }
+}
+@media (pointer: coarse) {
+  .action-btn, .btn-mini, .btn-primary, .btn-secondary, .pager button { min-height: var(--tap-min); }
+}
 </style>

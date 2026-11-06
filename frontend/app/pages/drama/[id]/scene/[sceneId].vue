@@ -17,7 +17,7 @@
         <!-- 左侧：图片预览 -->
         <aside class="preview-col">
           <div class="image-card">
-            <img v-if="scene.image_url || scene.imageUrl" :src="'/' + (scene.image_url || scene.imageUrl)" :alt="scene.location" />
+            <img v-if="scene.image_url || scene.imageUrl" :src="mediaUrl(scene.image_url || scene.imageUrl)" :alt="scene.location" />
             <div v-else class="no-image">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
               <span>暂无场景图</span>
@@ -112,6 +112,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from '#app'
+import { mediaUrl } from '~/utils/apiBase'
 
 const route = useRoute()
 const router = useRouter()
@@ -139,9 +140,9 @@ const imgPollTimeoutRef = ref<ReturnType<typeof setTimeout> | null>(null)
 
 const form = reactive<any>({})
 function resolveUrl(p?: string | null): string {
-  if (!p) return ''
-  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
-  return p.startsWith('/') ? p : '/' + p
+  // 本地归一化必须委托 mediaUrl：桌面壳 origin 是 tauri://localhost，
+  // 手拼 `'/' + p` 在打包端整片 404（dev 被 Vite 的 `/static` proxy 掩盖）。
+  return mediaUrl(p)
 }
 onUnmounted(() => {
   if (imgPollRef.value) clearInterval(imgPollRef.value)
@@ -384,5 +385,28 @@ select.input { cursor: pointer; appearance: auto; }
   font-weight: 600;
   border-radius: 10px;
   transition: all .15s;
+}
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 1023px) {
+  .detail-header { padding: 14px 20px; gap: 12px; }
+  .detail-body { grid-template-columns: 260px minmax(0, 1fr); gap: 18px; padding: 20px; }
+  .preview-col { position: static; }
+}
+
+@media (max-width: 800px) {
+  .detail-body { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 767px) {
+  .detail-header { padding: 12px 14px; gap: 10px; flex-wrap: wrap; }
+  .detail-header h1 { font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+  .detail-body { padding: 14px; gap: 14px; }
+  .form-section { padding: 16px; border-radius: 14px; }
+  .header-actions { flex-wrap: wrap; gap: 8px; }
+  .header-actions :deep(.btn) { padding: 7px 14px; font-size: 12px; min-height: 34px; }
+  .quick-actions :deep(.btn) { min-height: 34px; }
+  .preview-col { position: static; top: auto; }
+  .loading, .empty-state { padding: 48px 16px; font-size: 14px; }
 }
 </style>

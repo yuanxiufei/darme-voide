@@ -1,8 +1,8 @@
 // 共享契约：字段权威在后端（Python），本文件只是前端侧镜像（见 app/types/contracts.ts）——
 // 禁止在前端各处再手工双写类型
 import type { DramaDetailDTO, DramaListResponse, DramaUpdateBody, EraBackground } from '~contracts'
-
-const BASE = '/api/v1'
+// 后端基址：Web 同源、桌面端由壳注入绝对 origin（唯一真源与理由见 `utils/apiBase.ts` 文件头）
+import { apiBase } from '../utils/apiBase'
 
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
   const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
@@ -12,14 +12,16 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
   console.log(`%c[API] %c${method} %c${path}`, 'color:#888', 'color:#2dd4bf;font-weight:bold', 'color:#ccc', body || '')
 
   try {
-    const resp = await fetch(`${BASE}${path}`, opts)
+    const resp = await fetch(`${apiBase()}${path}`, opts)
     const json = await resp.json()
     const ms = Math.round(performance.now() - start)
 
     if (!resp.ok || (json.code && json.code >= 400)) {
       console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', json.message || '')
       // 增强错误信息：包含状态码和路径，便于调试
-      const error = new Error(json.message || `请求失败 (${resp.status})`)
+      // ⚠️ `json.msg` 是 `/preset/framework` 域的失败字段（全项目只有它用 msg 而不是 message）——
+      //    不兜底就会把后端原话吞成「请求失败 (400)」，而那句 msg 恰好是唯一的病因说明
+      const error = new Error(json.message || json.msg || `请求失败 (${resp.status})`)
       ;(error as any).status = resp.status
       ;(error as any).code = json.code
       ;(error as any).path = path
@@ -46,7 +48,7 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 }
 
 async function reqForm<T = any>(path: string, formData: FormData): Promise<T> {
-  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: formData })
+  const resp = await fetch(`${apiBase()}${path}`, { method: 'POST', body: formData })
   const json = await resp.json()
   if (!resp.ok || (json.code && json.code >= 400)) {
     const error = new Error(json.message || `请求失败 (${resp.status})`)
@@ -55,6 +57,47 @@ async function reqForm<T = any>(path: string, formData: FormData): Promise<T> {
     throw error
   }
   return json.data ?? json
+}
+
+/**
+ * 带进度的 multipart 上传。
+ *
+ * 为什么不用 `reqForm`：`fetch` **报不出上传进度**（没有 upload.onprogress 那一层），
+ * 只能「转圈 → 突然完成」。大文件（几十 MB 的 docx）要几十秒，用户看不到百分比就会
+ * 再点一次，于是同一份被传两遍（后端会落成 `-2`）。
+ * 进度只表示「字节发完了」，之后还有服务端抽正文的耗时，所以界面在 100% 时改说「解析中」。
+ */
+function uploadFiles<T = any>(
+  path: string,
+  files: File[],
+  onProgress?: (pct: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const form = new FormData()
+    for (const file of files) form.append('files', file, file.name)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${apiBase()}${path}`)
+    xhr.upload.onprogress = (ev: ProgressEvent) => {
+      if (ev.lengthComputable && onProgress) onProgress(Math.round((ev.loaded / ev.total) * 100))
+    }
+    xhr.onload = () => {
+      let json: any = null
+      try {
+        json = JSON.parse(xhr.responseText)
+      } catch {
+        json = null
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && json && !(json.code >= 400)) {
+        resolve((json.data ?? json) as T)
+        return
+      }
+      const error = new Error(json?.message || `上传失败 (${xhr.status})`)
+      ;(error as any).status = xhr.status
+      reject(error)
+    }
+    xhr.onerror = () => reject(new Error('网络连接失败，请检查网络或服务器状态'))
+    xhr.send(form)
+  })
 }
 
 export const api = {
@@ -205,7 +248,7 @@ export const visualGraphAPI = {
    * 另外：`drama_id` 不存在时后端是 **404**，这里要把它变成能看懂的话。
    */
   guidance: async (dramaId?: number): Promise<string> => {
-    const resp = await fetch(`${BASE}/visual-graph/guidance${dramaId ? `?drama_id=${dramaId}` : ''}`)
+    const resp = await fetch(`${apiBase()}/visual-graph/guidance${dramaId ? `?drama_id=${dramaId}` : ''}`)
     if (!resp.ok) {
       const json = await resp.json().catch(() => null)
       const msg = json?.message || (resp.status === 404 ? '剧集不存在（可能已删除）' : `引导文本获取失败 (HTTP ${resp.status})`)
@@ -256,7 +299,7 @@ export const aiConfigAPI = {
   ollamaDelete: (name: string, baseUrl?: string) => api.post('/ai-configs/ollama/delete', { name, base_url: baseUrl }),
   /** 下载 Ollama 模型，NDJSON 流式返回进度事件 { status, completed, total, error } */
   ollamaPull: async (name: string, baseUrl?: string, onEvent?: (ev: any) => void): Promise<{ ok: boolean; error?: string }> => {
-    const resp = await fetch(`${BASE}/ai-configs/ollama/pull`, {
+    const resp = await fetch(`${apiBase()}/ai-configs/ollama/pull`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, base_url: baseUrl }),
@@ -325,7 +368,7 @@ export const localModelsAPI = {
   delFiles: (paths: string[]) => api.post('/local-models/delete', { paths }),
   /** 下载模型到「模型存储目录」（按来源），NDJSON 流式进度事件 { status, file, downloaded, total, overall, ... } */
   hfDownload: async (repo: string, files: string[], revision: string, source: string, onEvent?: (ev: any) => void): Promise<{ ok: boolean }> => {
-    const resp = await fetch(`${BASE}/local-models/hf/download`, {
+    const resp = await fetch(`${apiBase()}/local-models/hf/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repo, files, revision, source }),
@@ -351,6 +394,28 @@ export const localModelsAPI = {
     }
     return { ok: true }
   },
+}
+
+/** 画布工具域（后端只**编译** op，落盘由 `utils/canvasOps.ts` 做） */
+export const canvasAPI = {
+  /** 工具清单（function-calling 形态：22 个已迁 + 未迁的逐条理由） */
+  tools: () => api.get('/canvas/tools'),
+  /** 编译一次工具调用 ⇒ ops（不执行、不起任务） */
+  tool: (d: { name: string; input?: Record<string, any>; snapshot?: any }) =>
+    api.post('/canvas/tool', d) as Promise<{ ops: any[]; errors: string[]; needsSnapshot?: boolean }>,
+  /** 执行前整批自检：有错就整批放弃，别半批落地 */
+  validate: (d: { ops: any[]; snapshot?: any }) =>
+    api.post('/canvas/ops/validate', d) as Promise<{ ops: any[]; errors: string[]; ok: boolean }>,
+  /** 压缩快照（正文截断，只留判断所需字段） */
+  compact: (d: { snapshot: any }) => api.post('/canvas/ops/snapshot', d),
+  /** 一句话 ⇒ 一串待执行 op（`ops` 此刻**还没落地**） */
+  agent: (d: { message: string; snapshot?: any }) =>
+    api.post('/canvas/agent', d) as Promise<{
+      text: string
+      ops: any[]
+      errors: string[]
+      toolCalls: Array<{ toolName: string; args: Record<string, any> }>
+    }>,
 }
 
 export const agentConfigAPI = {
@@ -388,7 +453,7 @@ export const aiProvidersAPI = {
 async function uploadFile(file: File, endpoint: string): Promise<{ url: string; path: string }> {
   const fd = new FormData()
   fd.append('file', file)
-  const resp = await fetch(`${BASE}${endpoint}`, { method: 'POST', body: fd })
+  const resp = await fetch(`${apiBase()}${endpoint}`, { method: 'POST', body: fd })
   const json = await resp.json()
   if (!resp.ok || (json.code && json.code >= 400)) {
     throw new Error(json.message || `上传失败 (${resp.status})`)
@@ -493,6 +558,85 @@ export const presetsAPI = {
   del: (id: number) => api.del(`/presets/${id}`),
 }
 
+// ====== 预设框架 API（Variation Card → 建剧 → 批量首帧 → 批量视频） ======
+//
+// 后端 `app/routers/preset_framework.py` 的 6 条端点，此前**前端零调用**（整域只有接口没有入口）。
+//
+// ⚠️ 本域响应形态与全项目都不同：成功 `{success:true,data}`、失败 `{success:false,msg}`
+//    （不是 `message`）——`req()` 的错误分支已补 `json.msg` 兜底。
+// ⚠️ Card 里的 `THEME_FAMILY_A` / `ACTIVITY_1` 这类是后端**占位数据池**
+//    （原 Node 实现即如此，等具体领域知识替换）⇒ 界面上要如实说明，别当乱码去"修"。
+// ⚠️ 5 镜固定：`generate_variation_card()` 恒出 5 条，前端不许假设别的条数。
+
+export interface VariationShot {
+  shotIndex: number
+  themeFamily?: string
+  compositionPattern: string
+  spaceType: string
+  foregroundFrame: string
+  mainFocalPoint: string
+  thematicClue: string
+  activity: string
+  cameraPosition: string
+  windDirection: string
+  lightStructure: string
+  characterLayout: string
+  livingElement: string | null
+}
+
+export interface VariationCard {
+  themeFamily: string
+  shots: VariationShot[]
+}
+
+export interface PresetFrameworkStatus {
+  drama: { id: number; title: string; style: string | null }
+  episode: { id: number; episodeNumber: number } | null
+  storyboards: {
+    id: number
+    storyboardNumber: number | null
+    imageUrl: string | null
+    videoUrl: string | null
+    status: string
+  }[]
+  variationCard: VariationCard | null
+  summary: { totalShots: number; imagesGenerated: number; videosGenerated: number }
+}
+
+export interface PresetFullPipelineResult {
+  dramaId: number
+  episodeId: number
+  storyboardIds: number[]
+  imageGenIds: number[]
+  variationCard: VariationCard
+}
+
+export const presetFrameworkAPI = {
+  /** 随机换一张卡；`excludeFamily` 挡掉上一张的家族（连点「换一张」不会撞同一个） */
+  variationCard: (excludeFamily?: string) =>
+    api.get<VariationCard>(
+      `/preset/framework/variation-card${excludeFamily ? `?excludeFamily=${encodeURIComponent(excludeFamily)}` : ''}`,
+    ),
+  /** 只建结构：Drama + 第 1 集 + N 条分镜（不生图） */
+  create: (d: { title: string; description?: string; variationCard: VariationCard }) =>
+    api.post<{ dramaId: number; episodeId: number; storyboardIds: number[] }>('/preset/framework/create', d),
+  /** 批量生首帧（并发；**失败不中断**，失败的镜头状态置 image_failed） */
+  generateImages: (d: { dramaId: number; episodeId: number; storyboardIds: number[]; variationCard: VariationCard }) =>
+    api.post<{ dramaId: number; episodeId: number; imageGenIds: number[] }>('/preset/framework/generate-images', d),
+  /** 批量生视频（图生视频；**没有首帧的镜头会被跳过**，不计入 videoGenIds） */
+  generateVideos: (d: { dramaId: number; episodeId: number; storyboardIds: number[]; variationCard: VariationCard }) =>
+    api.post<{ dramaId: number; episodeId: number; videoGenIds: number[] }>('/preset/framework/generate-videos', d),
+  /** 管线状态与进度汇总（每镜首帧/视频/状态） */
+  status: (dramaId: number) => api.get<PresetFrameworkStatus>(`/preset/framework/status/${dramaId}`),
+  /** 一键：建剧 + 批量生首帧（`autoGenerateImages` 默认 true，**只有显式 false 才跳过**） */
+  fullPipeline: (d: {
+    title: string
+    description?: string
+    variationCard: VariationCard
+    autoGenerateImages?: boolean
+  }) => api.post<PresetFullPipelineResult>('/preset/framework/full-pipeline', d),
+}
+
 // ====== 全自动管线 API（一句话 → 整集短剧） ======
 
 export interface AutoPipelineStatus {
@@ -523,7 +667,7 @@ export const autoPipelineAPI = {
   status: (dramaId: number) => api.get<AutoPipelineStatus>(`/auto-pipeline/status/${dramaId}`),
   resume: (dramaId: number, override?: any) => api.post(`/auto-pipeline/resume/${dramaId}`, override),
   /** SSE 进度流地址（供 EventSource 订阅，替代轮询） */
-  streamUrl: (dramaId: number) => `${BASE}/auto-pipeline/stream/${dramaId}`,
+  streamUrl: (dramaId: number) => `${apiBase()}/auto-pipeline/stream/${dramaId}`,
 }
 
 export interface TokenStats {
@@ -725,6 +869,294 @@ export const promptToolsAPI = {
   }) => api.post('/prompts/resolve', payload),
   /** Mx-Shell **五段质感层**（字段一律 camelCase）；`issues` = 哪一段约束不够硬 */
   polish: (payload: Record<string, any>) => api.post('/prompts/polish', payload),
+}
+
+/** 知识库：目录树 / 文档清单 / 检索 / 翻原文（**只读**，后端故意不提供上传与重建索引） */
+export interface KnowledgeGroup {
+  path: string
+  name: string
+  documents: number
+  withText: number
+  /** 整本跑完的 OCR 份数（只认 sidecar 的 status='ocr'） */
+  ocr: number
+  /** 有 OCR 记录但只做了前几页；**计入 pending**，这里单列只为让它别消失 */
+  ocrPartial: number
+  pending: number
+  bytes: number
+  pages: number
+}
+export interface KnowledgeTree {
+  available: boolean
+  hint: string | null
+  depth: number
+  totals: Omit<KnowledgeGroup, 'path' | 'name'> | null
+  groups: KnowledgeGroup[]
+}
+export interface KnowledgeDoc {
+  name: string
+  path: string
+  size: number
+  pages: number
+  withText: boolean
+  ocr: boolean
+  /** 半成品：有 sidecar 记录但只 OCR 了前几页（仍算 pending） */
+  partial: boolean
+  /** 本仓补录库里的件（上传进来的）—— 与供应商/OCR 的件能一眼分开 */
+  extra?: boolean
+  /** 归哪个库：`curated` 供应商 / `ocr` 补出来的 / `extra` 本仓补录 */
+  source?: 'curated' | 'ocr' | 'extra'
+  /** 有覆盖层改动的块（清单上打「已修改」） */
+  edited?: boolean
+  /** 在回收站（只有 `only=buried` 才会出现） */
+  buried?: boolean
+}
+export interface KnowledgeDocs {
+  available: boolean
+  hint: string | null
+  category: string | null
+  only: string
+  total: number
+  offset: number
+  limit: number
+  items: KnowledgeDoc[]
+}
+export interface KnowledgeHit {
+  title: string
+  path: string
+  page: number | null
+  chunkNo: number | null
+  score: number
+  excerpt: string
+  from?: 'curated' | 'ocr'
+  source: 'methods' | 'playbook'
+  onDisk?: boolean
+  /**
+   * ⚠️ **同一个字段名，两条源两种语义**（2026-11-06 实测）：
+   * - 剧本库命中（`source:"methods"`）：仅 `includePartial=true` 才可能带对象
+   *   `{ pages, chunkPages }` ＝ 总页数 / 真有正文的页数；
+   * - 方法库命中（`source:"playbook"`）：恒为 **0–1 的数字**，是「命中了多少查询词」，
+   *   也就是方法库的排序主键。
+   * 直接 `hit.coverage.pages` 用在数字上会渲染出 `undefined/undefined`，务必先判类型。
+   */
+  coverage?: { pages: number; chunkPages: number } | number | null
+}
+export interface KnowledgeSearch {
+  query: string
+  results: KnowledgeHit[]
+  sources: Record<string, any>
+  fusion?: any
+  hint?: string
+}
+/** `/knowledge/facets`：六个目录维度的可选值（值 → 条数），别让调用方猜词 */
+export interface KnowledgeFacets {
+  available: boolean
+  hint?: string | null
+  entries?: number
+  dimensions: Record<string, Record<string, number>>
+  /**
+   * 方法库的技能目录名 → 小节数（就是 `skill=` 的取值，会随人加目录而变 ⇒ 由后端下发）。
+   * **是对象不是数组**：后端 `playbook_skills()` 返回 `dict[str, int]`，
+   * 当成数组 `v-for` 会去遍历「值」，渲染出几个数字下拉还查不到东西。
+   */
+  playbookSkills: Record<string, number>
+}
+/**
+ * `/knowledge/document/state`：**按钮该不该亮**。
+ *
+ * 界面先在打开文档时问一次，而不是「画满按钮、让人点了才报错」：
+ * - `editable` 恒 true（正文可改，改动落覆盖层，原库不动）；
+ * - `hardDeletable` 只对「本仓上传、且文件还在盘上」的件成立（其余只能进回收站）；
+ * - `buried` = 在回收站 ⇒ 只该有「还原」，不该再有「删除」。
+ */
+export interface KnowledgeDocState {
+  found: boolean
+  reason?: string
+  path?: string
+  name?: string
+  source?: 'curated' | 'ocr' | 'extra'
+  chunks?: number
+  onDisk?: boolean
+  editable?: boolean
+  deletable?: boolean
+  hardDeletable?: boolean
+  uploaded?: boolean
+  buried?: boolean
+  edits?: number
+}
+/** 覆盖层盘点（`/knowledge/overlay`）＋ 上传口径（同一响应下发，前端不再抄一份） */
+export interface KnowledgeOverlay {
+  available: boolean
+  hint?: string | null
+  edits: number
+  tombstones: number
+  uploads: number
+  writableSources: string[]
+  /** 已改清单（最近 50 条） */
+  edited?: Array<{ source: string; path: string; chunkNo: number; chars: number; note?: string | null; updatedNs: number }>
+  /** 回收站（最近 50 条）—— 还原用 `path`，`chunkNo` 不参与 */
+  buried?: Array<{ source: string; path: string; reason?: string | null; buriedNs: number }>
+  recentUploads?: Array<{ path: string; name: string; size: number; mime?: string; status: string; reason?: string | null;
+    documents?: number; chunks?: number; createdNs?: number }>
+  upload: {
+    accept: string[]
+    label: string
+    maxBytes: number
+    maxFiles: number
+    dir: string
+  }
+}
+/**
+ * 上传一份的结果。**三档不许合并成「失败」**：
+ * - `ingested` 正文抽出来了，立刻能搜;
+ * - `quarantined` **文件已在盘上**，只是抽不出正文（扫描件/图片型）⇒ 要走 OCR；
+ * - `rejected` 连落盘都没做（类型不支持/太大/空文件）。
+ */
+export interface KnowledgeUploadResult {
+  ok: boolean
+  status: 'ingested' | 'quarantined' | 'rejected'
+  name: string
+  path: string | null
+  size: number
+  chunks?: number
+  pages?: number
+  chars?: number
+  sha256?: string
+  engine?: string
+  printable?: number
+  reason?: string | null
+  seconds?: number
+}
+export interface KnowledgeUploadBatch {
+  results: KnowledgeUploadResult[]
+  total: number
+  ingested: number
+  quarantined: number
+  rejected: number
+  allowed: string
+  maxSize: number
+  maxFiles: number
+  hint?: string
+}
+/** 一场。`confidence` 是解析器自评（0–1），`noSource` 说明 `sceneNo` 为什么是空的 */
+export interface KnowledgeScene {
+  sceneNo: number | null
+  noSource?: string | null
+  intExt: string | null
+  location: string | null
+  time: string | null
+  cast: string[]
+  opening: string | null
+  coreEvent: string | null
+  sceneTail: string | null
+  pageFrom: number | null
+  pageTo: number | null
+  chars: number | null
+  confidence: number | null
+  heading: string | null
+}
+/** `/knowledge/scenes`：三种回执必须能区分（索引没建 / 这份没解析过 / 解析过但零场次） */
+export interface KnowledgeScenes {
+  available: boolean
+  hint: string | null
+  document: {
+    path: string
+    scenes: number
+    strategy: string
+    confidence: number | null
+    chars: number | null
+    status: string
+    hint?: string | null
+    updatedAt?: string
+  } | null
+  scenes: KnowledgeScene[]
+  total: number
+  page: number
+  limit: number
+}
+
+export const knowledgeAPI = {
+  report: () => api.get<any>('/knowledge/report'),
+  tree: (depth = 2) => api.get<KnowledgeTree>(`/knowledge/tree?depth=${depth}`),
+  documents: (p: { category?: string; q?: string; only?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (p.category) qs.set('category', p.category)
+    if (p.q) qs.set('q', p.q)
+    if (p.only && p.only !== 'all') qs.set('only', p.only)
+    qs.set('offset', String(p.offset ?? 0))
+    qs.set('limit', String(p.limit ?? 30))
+    return api.get<KnowledgeDocs>(`/knowledge/documents?${qs.toString()}`)
+  },
+  /**
+   * 检索。六个目录维度**只筛剧本库**、`skill` **只筛方法库** —— 这是后端的硬边界，
+   * 给了不适用的一侧会回 `filtersApplied=false`（页面据此提示「条件没生效」，
+   * 不能假装筛过了）。`includePartial` 才会把「只 OCR 了前几页」的半成品带出来。
+   */
+  search: (p: {
+    q: string
+    source?: string
+    limit?: number
+    path?: string
+    country?: string
+    genre?: string
+    category?: string
+    docType?: string
+    permission?: string
+    festival?: string
+    skill?: string
+    includePartial?: boolean
+  }) => {
+    const qs = new URLSearchParams({ q: p.q, limit: String(p.limit ?? 10) })
+    if (p.source && p.source !== 'all') qs.set('source', p.source)
+    if (p.path) qs.set('path', p.path)
+    for (const key of ['country', 'genre', 'category', 'permission', 'festival'] as const) {
+      if (p[key]) qs.set(key, p[key] as string)
+    }
+    //: 后端参数名是 `docType`（camelCase），URLSearchParams 里也得原样写，别顺手 snake 化
+    if (p.docType) qs.set('docType', p.docType)
+    if (p.skill) qs.set('skill', p.skill)
+    if (p.includePartial) qs.set('includePartial', 'true')
+    return api.get<KnowledgeSearch>(`/knowledge/search?${qs.toString()}`)
+  },
+  document: (path: string, offset = 0, limit = 20) =>
+    api.get<any>(`/knowledge/document?path=${encodeURIComponent(path)}&offset=${offset}&limit=${limit}`),
+  facets: () => api.get<KnowledgeFacets>('/knowledge/facets'),
+  /** 只读回派生好的场次表；没建索引 / 这份没解析过都走 `available=false` + `hint` */
+  scenes: (path: string, page = 1, limit = 200) =>
+    api.get<KnowledgeScenes>(
+      `/knowledge/scenes?path=${encodeURIComponent(path)}&page=${page}&limit=${limit}`,
+    ),
+  /** 打开文档时问一次「按钮该不该亮」（可编辑 / 可删 / 可彻底删 / 在回收站） */
+  state: (path: string) =>
+    api.get<KnowledgeDocState>(`/knowledge/document/state?path=${encodeURIComponent(path)}`),
+  /**
+   * 改一块正文（`chunkNo = -1` 改标题）。
+   *
+   * 必须走 **JSON body**：一块正文可上千字，塞进 query 会被各级代理的 URL 上限截断，
+   * 症状是「提示保存成功、但后半段没了」—— 这种错最难查，所以后端直接把 query 版删掉。
+   */
+  saveChunk: (path: string, chunkNo: number, text: string, note?: string) =>
+    api.post<{ ok: boolean; reason?: string; chunkNo?: number; source?: string }>(
+      '/knowledge/document/chunk',
+      { path, chunkNo, text, note: note || undefined },
+    ),
+  /** 撤销某块改动（回到原库正文） */
+  undoChunk: (path: string, chunkNo: number) =>
+    api.del(
+      `/knowledge/document/chunk?path=${encodeURIComponent(path)}&chunkNo=${chunkNo}`,
+    ),
+  /** 删除一份：默认进回收站（可还原）；`hard` 只对本仓上传件有效 */
+  bury: (path: string, hard = false, reason?: string) =>
+    api.del(
+      `/knowledge/document?path=${encodeURIComponent(path)}`
+      + (hard ? '&hard=true' : '')
+      + (reason ? `&reason=${encodeURIComponent(reason)}` : ''),
+    ),
+  restore: (path: string) =>
+    api.post(`/knowledge/document/restore?path=${encodeURIComponent(path)}`),
+  overlay: () => api.get<KnowledgeOverlay>('/knowledge/overlay'),
+  /** 上传语料（补录库），回执按 `ingested/quarantined/rejected` 三档分别给结果 */
+  upload: (files: File[], onProgress?: (pct: number) => void) =>
+    uploadFiles<KnowledgeUploadBatch>('/knowledge/upload', files, onProgress),
 }
 
 export const styleProfileAPI = {

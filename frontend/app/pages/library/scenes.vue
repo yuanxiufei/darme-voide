@@ -56,10 +56,13 @@
         @click="toggleSelect(item.id)"
       >
         <div class="card-check"><input type="checkbox" :checked="selectedItems.includes(item.id)" @click.stop="toggleSelect(item.id)" /></div>
-        <div
-          class="scene-thumb"
-          :style="item.imageUrl ? { backgroundImage: `url(${item.imageUrl})` } : {}"
-        >
+        <div class="scene-thumb">
+          <img
+            v-if="item.imageUrl && !brokenThumbs.has(item.id)"
+            :src="mediaUrl(item.imageUrl)"
+            :alt="item.name"
+            @error="brokenThumbs.add(item.id)"
+          />
           <div class="scene-time-badge" v-if="item.timeOfDay">{{ item.timeOfDay }}</div>
         </div>
         <div class="card-body">
@@ -114,9 +117,25 @@
         <label>光线 <input v-model="form.lighting" placeholder="如: 柔和自然光" /></label>
         <label>季节 <select v-model="form.season"><option value="">不限</option><option value="春">春</option><option value="夏">夏</option><option value="秋">秋</option><option value="冬">冬</option></select></label>
         <label>天气 <input v-model="form.weather" placeholder="如: 晴天" /></label>
-        <label>图片URL <input v-model="form.imageUrl" placeholder="https://..." /></label>
+        <label>场景图
+          <div class="field-row">
+            <input v-model="form.imageUrl" placeholder="static/uploads/xxx.png 或图片链接" />
+            <button type="button" class="btn-mini" :disabled="uploading" @click="imagePicker?.click()">
+              {{ uploading ? '上传中…' : '上传' }}
+            </button>
+          </div>
+          <input ref="imagePicker" type="file" accept="image/*" hidden @change="onImagePicked" />
+          <img
+            v-if="form.imageUrl && !formImageBroken"
+            :src="mediaUrl(form.imageUrl)"
+            class="field-preview"
+            alt="场景图预览"
+            @error="formImageBroken = true"
+            @load="formImageBroken = false"
+          />
+        </label>
         <label>生成Prompt <textarea v-model="form.prompt" rows="2" placeholder="完整图片生成prompt" /></label>
-        <label>标签 <input v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="输入标签后按回车" />
+        <label>标签 <input v-model="tagInput" @keydown.enter="guardEnter($event, addTag)" placeholder="输入标签后按回车" />
           <div class="chip-row"><span v-for="(t,i) in form.tags" :key="i" class="chip">{{ t }} <button @click="form.tags.splice(i,1)">×</button></span></div>
         </label>
         <div class="modal-actions">
@@ -145,9 +164,11 @@
 </template>
 
 <script setup lang="ts">
+import { guardEnter } from '~/utils/keyboardEvent'
 import { toast } from 'vue-sonner'
-import { sceneLibraryAPI, dramaAPI } from '~/composables/useApi'
+import { sceneLibraryAPI, dramaAPI, uploadAPI } from '~/composables/useApi'
 import { useConfirm } from '~/composables/useConfirm'
+import { mediaUrl } from '~/utils/apiBase'
 
 const { confirm } = useConfirm()
 
@@ -185,6 +206,31 @@ const form = reactive({
   imageUrl: '', prompt: '', tags: [] as string[],
 })
 const tagInput = ref('')
+
+// 场景图：本地上传（后端返回 `/static/uploads/<uuid>.png`，展示走 mediaUrl 补 origin）
+const imagePicker = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+const formImageBroken = ref(false)
+/** 列表里加载失败的缩略图：CSS 背景图失败无感知，改 img 后能拿到 error 并清掉底图 */
+const brokenThumbs = reactive(new Set<number>())
+
+async function onImagePicked(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  uploading.value = true
+  try {
+    const { url } = await uploadAPI.image(file)
+    if (!url) throw new Error('上传返回缺少 url')
+    form.imageUrl = url
+    formImageBroken.value = false
+  } catch (e: any) {
+    toast.error(e?.message || '场景图上传失败')
+  } finally {
+    uploading.value = false
+  }
+}
 function addTag() {
   const t = tagInput.value.trim()
   if (t && !form.tags.includes(t)) form.tags.push(t)
@@ -239,6 +285,7 @@ function toggleTag(t: string) {
 function openCreate() {
   editingItem.value = null
   Object.assign(form, { name: '', category: '', description: '', location: '', atmosphere: '', lighting: '', timeOfDay: '', style: '', season: '', weather: '', imageUrl: '', prompt: '', tags: [] })
+  formImageBroken.value = false
   showForm.value = true
 }
 
@@ -250,6 +297,7 @@ function openEdit(item: any) {
     timeOfDay: item.timeOfDay, style: item.style, season: item.season, weather: item.weather,
     imageUrl: item.imageUrl, prompt: item.prompt, tags: Array.isArray(item.tags) ? [...item.tags] : [],
   })
+  formImageBroken.value = false
   showForm.value = true
 }
 
@@ -346,8 +394,23 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .card-check { flex-shrink: 0; padding-top: 2px; }
 .scene-thumb {
   width: 80px; height: 60px; flex-shrink: 0; border-radius: 6px; background: var(--bg-2);
-  background-size: cover; background-position: center; border: 1px solid var(--border);
+  border: 1px solid var(--border);
   position: relative; overflow: hidden;
+}
+.scene-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 表单里的「输入框 + 上传按钮」一行 */
+.field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.field-row > input { flex: 1; width: auto !important; margin-top: 0 !important; }
+.btn-mini {
+  flex-shrink: 0; padding: 8px 12px; background: var(--bg-2); color: var(--text-1);
+  border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px;
+  cursor: pointer; font-family: inherit; white-space: nowrap;
+}
+.btn-mini:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+.btn-mini:disabled { opacity: 0.5; cursor: default; }
+.field-preview {
+  display: block; margin-top: 8px; width: 64px; height: 64px;
+  object-fit: cover; border-radius: var(--radius); border: 1px solid var(--border);
 }
 .scene-time-badge {
   position: absolute; bottom: 4px; right: 4px;
@@ -386,4 +449,16 @@ function truncate(s: string, n: number) { return s && s.length > n ? s.slice(0, 
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .empty { text-align: center; padding: 60px 20px; color: var(--text-3); }
 .empty p { margin-bottom: 16px; font-size: 14px; }
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 767px) {
+  .page-header h2 { font-size: 19px; }
+  .lib-card { padding: 12px; gap: 10px; }
+  .card-top { flex-wrap: wrap; gap: 6px; }
+  .empty { padding: 40px 16px; }
+  .pager { gap: 10px; margin-top: 18px; }
+}
+@media (pointer: coarse) {
+  .action-btn, .btn-mini, .btn-primary, .btn-secondary, .pager button { min-height: var(--tap-min); }
+}
 </style>

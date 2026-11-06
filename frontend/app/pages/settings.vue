@@ -577,4 +577,38 @@ onMounted(() => { loadStorageInfo(); loadGenerations(); loadArtStyle() })
 }
 .art-style-label { font-size: 13px; font-weight: 600; }
 .art-style-desc { font-size: 11px; color: var(--text-3); line-height: 1.5; }
+
+/* ==========================================================================
+ 平板与手机：左侧 220px 导航在 768 以下会把内容压到 <550px，改为顶部
+ 横向滚动条（信息不隐藏，只换方向），内容区占满整宽。
+ ========================================================================== */
+@media (max-width: 1023px) {
+.settings-nav { width: 168px; padding: 12px 8px; }
+.settings-scroll { padding: 24px 26px 32px; }
+}
+
+@media (max-width: 767px) {
+.settings-layout { flex-direction: column; }
+.settings-nav {
+  width: 100%; flex-direction: row; align-items: center;
+  gap: 6px; padding: 8px 10px;
+  border-right: none; border-bottom: 1px solid var(--border);
+  overflow-x: auto; overflow-y: hidden;
+  flex-shrink: 0;
+}
+.settings-nav::-webkit-scrollbar { display: none; }
+.nav-group { flex-direction: row; gap: 6px; }
+.nav-group-label { display: none; }
+.nav-item {
+  width: auto; flex-shrink: 0; white-space: nowrap;
+  padding: 8px 12px; font-size: 12.5px;
+  min-height: 34px;
+}
+.settings-content { flex: 1; min-height: 0; }
+.settings-scroll { padding: 16px 14px 28px; }
+.settings-title { font-size: 18px; }
+.history-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.art-style-grid { grid-template-columns: 1fr; }
+.history-toolbar { flex-wrap: wrap; gap: 8px; }
+}
 </style>

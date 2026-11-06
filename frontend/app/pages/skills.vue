@@ -457,4 +457,35 @@ onMounted(async () => {
 .modal { padding: 28px; width: 420px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--shadow-elevated); }
 .modal-title { font-family: var(--font-display); font-size: 18px; font-weight: 700; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 6px; }
+
+/* ==========================================================================
+ 平板与手机：200px 的 Agent 列表改为顶部横向条，与设置页保持同一形态。
+ ========================================================================== */
+@media (max-width: 1023px) {
+.skills-agent-list { width: 164px; }
+.settings-scroll { padding: 24px 26px 32px; }
+}
+
+@media (max-width: 767px) {
+.skills-layout { flex-direction: column; }
+.skills-agent-list {
+  width: 100%; flex-direction: row; align-items: center;
+  gap: 6px; padding: 8px 10px;
+  border-right: none; border-bottom: 1px solid var(--border);
+  overflow-x: auto; overflow-y: hidden;
+  flex-shrink: 0; height: auto; max-height: none;
+}
+.skills-agent-list::-webkit-scrollbar { display: none; }
+.skills-agent-title { display: none; }
+.skills-agent-item {
+  width: auto; flex-shrink: 0; white-space: nowrap;
+  padding: 8px 12px; font-size: 12.5px; border-radius: var(--radius);
+  min-height: 34px;
+}
+.skills-agent-label { flex: 0 0 auto; }
+.skill-count-badge { flex-shrink: 0; }
+.skills-main { min-height: 0; }
+.settings-scroll { padding: 16px 14px 28px; }
+.settings-title { font-size: 18px; }
+}
 </style>

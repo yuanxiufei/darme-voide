@@ -376,6 +376,7 @@ import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
 const artStyleOptions = ART_STYLE_OPTIONS
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from '#app'
+import { mediaUrl } from '~/utils/apiBase'
 
 const route = useRoute()
 const router = useRouter()
@@ -481,21 +482,20 @@ function parseVariations(variations?: string | null): Array<{ name: string; imag
 const variations = computed(() => parseVariations(char.value?.variations))
 function getVariationImage(name: string): string | null {
   const v = variations.value.find(x => x.name === name)
-  return v?.imageUrl ? ('/' + v.imageUrl) : null
+  return v?.imageUrl ? mediaUrl(v.imageUrl) : null
 }
 // 当前预览：选中变体有图则显示变体图，否则主图
 const currentPreviewUrl = computed(() => {
   const variation = selectedCostume.value ? getVariationImage(selectedCostume.value) : null
-  return variation || (char.value?.image_url || char.value?.imageUrl ? '/' + (char.value.image_url || char.value.imageUrl) : null)
+  return variation || (char.value?.image_url || char.value?.imageUrl ? mediaUrl(char.value.image_url || char.value.imageUrl) : null)
 })
 function selectVariation(costume: string) {
   selectedCostume.value = costume
 }
 
 function resolveImageUrl(p?: string | null): string {
-  if (!p) return ''
-  if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('data:')) return p
-  return p.startsWith('/') ? p : '/' + p
+  // 与桌面端同一实现（委托 mediaUrl）；轮询判定"新图已落地"也用这个口径
+  return mediaUrl(p)
 }
 // 统一图片 URL 归一化：用于轮询判定"新图已落地"，避免已存在旧图时轮询提前结束
 function normUrl(p?: string | null): string {
@@ -1192,7 +1192,7 @@ onUnmounted(() => {
   gap: 8px;
   background: linear-gradient(135deg, #f8f9fc 0%, #eef1f7 100%);
 }
-.variation-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.variation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .variation-item {
   border-radius: 12px;
   overflow: hidden;
@@ -1309,7 +1309,7 @@ onUnmounted(() => {
 
 /* 表情头像特写组（独占一行，自适应网格，批量生成独立表情特写） */
 .gen-module-expressions { padding: 14px; }
-.expressions-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.expressions-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px; }
 .expression-item { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .expression-img {
   position: relative;
@@ -1458,4 +1458,37 @@ select.input { cursor: pointer; appearance: auto; }
 .anchor-era-tag-dim { background: rgba(255,255,255,0.05); color: #999; border-color: rgba(255,255,255,0.12); }
 .anchor-era-text { font-size: 12px; color: #9c9cac; line-height: 1.5; }
 
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 1023px) {
+  .detail-header { padding: 14px 20px; gap: 12px; }
+  .detail-body { padding: 20px 20px; }
+  .variation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 767px) {
+  .detail-header { padding: 12px 14px; gap: 10px; flex-wrap: wrap; }
+  .detail-header h1 { font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+  .detail-body { padding: 14px; gap: 14px; }
+  .header-actions { flex-wrap: wrap; gap: 8px; }
+  .header-actions :deep(.btn) { padding: 7px 14px; font-size: 12px; min-height: 34px; }
+  .variation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  /* 「按钮 + 长说明」一行排不下：中文无空格，提示文字的最小宽度就是整串，
+     不换行就会被挤出容器（实测 360px 下按钮右边缘超出 128px） */
+  .split-row { flex-wrap: wrap; row-gap: 8px; }
+  .split-row .hint { flex: 1 1 100%; }
+  .btn-split { max-width: 100%; white-space: normal; text-align: left; line-height: 1.4; }
+  /* 一键重做(153px) + 模型选择器(180px) 在 320/360px 下排不满一行 */
+  .gen-toolbar { flex-wrap: wrap; row-gap: 8px; }
+  .gen-toolbar > .model-selector { flex: 1 1 100%; min-width: 0; }
+  .gen-toolbar > .btn-batch { flex: 1 1 100%; justify-content: center; }
+  .gen-anchorbar { flex-wrap: wrap; gap: 10px; padding: 10px; }
+  .anchor-info { flex: 1 1 100%; }
+  .anchor-select { min-width: 0; flex: 1 1 auto; }
+  .loading, .empty-state { padding: 48px 16px; font-size: 14px; }
+}
+
+@media (max-width: 480px) {
+  .variation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .expressions-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>

@@ -9,7 +9,7 @@
 
         <!-- 图片预览 -->
         <div v-if="character?.image_url || character?.imageUrl" class="editor-preview">
-          <img :src="'/' + (character.image_url || character.imageUrl)" alt="角色形象预览" />
+          <img :src="mediaUrl(character.image_url || character.imageUrl)" alt="角色形象预览" />
           <span class="preview-label">当前形象</span>
         </div>
 
@@ -155,6 +155,7 @@ import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
 // 画风下拉选项统一取自 utils/artStyles.ts（前端单一数据源）
 const artStyleOptions = ART_STYLE_OPTIONS
 import { ref, reactive, watch, computed } from 'vue'
+import { mediaUrl } from '~/utils/apiBase'
 
 const props = defineProps<{
   visible: boolean

@@ -216,13 +216,27 @@ function toBindings(ids: string[]) {
   return ids.map((id, i) => ({ id, enabled: true, priority: i + 1 }))
 }
 
-const agentDefs = [
-  { type: 'script_rewriter', label: '剧本改写', icon: '📝' },
-  { type: 'extractor', label: '角色场景提取', icon: '🔍' },
-  { type: 'storyboard_breaker', label: '分镜拆解', icon: '🎬' },
-  { type: 'voice_assigner', label: '音色分配', icon: '🎙' },
-  { type: 'grid_prompt_generator', label: '图片提示词生成', icon: '🖼' },
-]
+/** 纯装饰：卡片上的图标（不影响名册，缺省兜底 🤖） */
+const AGENT_ICONS: Record<string, string> = {
+  script_rewriter: '📝',
+  extractor: '🔍',
+  storyboard_breaker: '🎬',
+  voice_assigner: '🎙',
+  grid_prompt_generator: '🖼',
+  orchestrator: '🧭',
+}
+
+/** Agent 名册**只有后端一个来源**（`GET /agent-configs/defaults` ← `AGENT_SPECS`）：
+ *  这里曾经硬编码 5 条，漏了 orchestrator（总调度，`phase=None` 不进阶段表）——
+ *  于是它在「Agent 配置」页连卡片都没有、模型/提示词/Skill 一律改不了，
+ *  而运行期 `build_agent_config('orchestrator')` 照读 DB，谁也没报错。 */
+const agentDefs = computed(() =>
+  Object.entries(agentDefaults.value).map(([type, d]) => ({
+    type,
+    label: d.name || type,
+    icon: AGENT_ICONS[type] || '🤖',
+  })),
+)
 
 
 function getAgentCfg(type: string): AgentConfigVO | undefined {
@@ -261,7 +275,10 @@ async function loadAgentDefaults() {
   try {
     const list = await agentConfigAPI.defaults()
     agentDefaults.value = Object.fromEntries((list || []).map((d: AgentConfigVO) => [d.agent_type, d]))
-  } catch (e) { /* 非关键：取不到时回显为空，「恢复默认」保持原值 */ }
+  } catch (e) {
+    // 这份数据同时是**名册**（agentDefs 由它派生）：吞掉异常 ⇒ 整页一张卡片都没有、且没有任何线索。
+    toast.error(e instanceof Error ? e.message : '取不到 Agent 出厂配置')
+  }
 }
 
 /** 加载全局可用 Skill 列表（用于 Skill 绑定面板）+ 注入体量硬闸 */
@@ -439,7 +456,7 @@ async function saveAgentCfg(type: string) {
     const orderedSkills = agentSkillBindings.value.map((b, i) => ({ ...b, priority: i + 1 }))
     const data = {
       agent_type: type,
-      name: agentDefs.find(a => a.type === type)?.label || type,
+      name: agentDefs.value.find(a => a.type === type)?.label || type,
       model: agentForm.model,
       temperature: agentForm.temperature,
       max_tokens: agentForm.max_tokens,
@@ -453,7 +470,7 @@ async function saveAgentCfg(type: string) {
     }
     await loadAgents()
     agentSaved.value = type
-    toast.success(`${agentDefs.find(a => a.type === type)?.label} 配置已保存`)
+    toast.success(`${agentDefs.value.find(a => a.type === type)?.label} 配置已保存`)
     setTimeout(() => { if (agentSaved.value === type) agentSaved.value = null }, 3000)
   } catch (e) {
     toast.error(e instanceof Error ? e.message : String(e))
@@ -592,4 +609,22 @@ onMounted(() => { loadAgents(); loadCfgs(); loadAvailableSkills(); loadAgentDefa
 .field-label { font-size: 12px; font-weight: 500; color: var(--text-1); }
 .field-hint { font-size: 11px; color: var(--text-3); margin-top: 2px; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* === 响应式（平板 / 手机） === */
+@media (max-width: 1023px) {
+  .settings-scroll { padding: 24px 22px 32px; }
+}
+@media (max-width: 767px) {
+  .settings-scroll { padding: 14px 14px 28px; }
+  .settings-title { font-size: 19px; }
+  .settings-head { margin-bottom: 16px; }
+  .agent-card-head { padding: 12px; gap: 8px; }
+  .agent-card-body { padding: 0 12px 12px; padding-top: 12px; }
+  .agent-card-foot { flex-wrap: wrap; gap: 8px; }
+  .agent-card-foot .btn { min-height: var(--tap-min); }
+  .skill-bind-panel { padding: 10px; }
+  .skill-bind-usage { white-space: normal; overflow-wrap: anywhere; }
+  .skill-bind-chars { white-space: normal; }
+  .field-row { grid-template-columns: 1fr; }
+}
 </style>

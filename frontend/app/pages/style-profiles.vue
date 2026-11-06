@@ -337,7 +337,7 @@ onMounted(() => { loadProfiles(); loadDramas() })
 .setup-desc { font-size: 12px; color: var(--text-2); margin-top: 4px; }
 .config-empty { font-size: 12px; color: var(--text-3); padding: 12px 0; }
 .sp-head-actions { display: flex; align-items: center; gap: 8px; }
-.sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
+.sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 12px; margin-top: 14px; }
 .sp-card {
   padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-surface);
   display: flex; flex-direction: column; gap: 8px;
@@ -375,4 +375,24 @@ onMounted(() => { loadProfiles(); loadDramas() })
 .sp-distill-result section p { font-size: 12px; color: var(--text-2); line-height: 1.7; margin: 4px 0 0; }
 .sp-distill-sec-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .sp-distill-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ==========================================================================
+   平板 / 手机：单列内容区收敛留白；卡片网格在窄屏去掉 auto-fill 下限。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .settings-scroll { padding: 24px 26px 28px; }
+  .sp-grid { grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); }
+}
+
+@media (max-width: 767px) {
+  .sp-page { min-height: 0; }
+  .settings-scroll { padding: 16px 14px 28px; }
+  .settings-title { font-size: 18px; }
+  .setup-panel { padding: 14px; }
+  .setup-panel-head { flex-direction: column; gap: 10px; }
+  .sp-head-actions { flex-wrap: wrap; }
+  .sp-grid { grid-template-columns: 1fr; }
+  .sp-card-actions { gap: 6px; }
+  .modal-foot { flex-wrap: wrap; }
+}
 </style>

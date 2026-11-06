@@ -13,6 +13,7 @@
           </svg>
           AI 一键生成
         </button>
+        <PresetPipeline />
         <button class="btn btn-primary" @click="showCreate = true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -260,6 +261,7 @@ import { ART_STYLE_OPTIONS } from '~/utils/artStyles'
 import { toast } from 'vue-sonner'
 import { dramaAPI, autoPipelineAPI } from '~/composables/useApi'
 import BaseSelect from '~/components/BaseSelect.vue'
+import PresetPipeline from '~/components/PresetPipeline.vue'
 import { useConfirm } from '~/composables/useConfirm'
 
 const { confirm } = useConfirm()
@@ -635,7 +637,8 @@ onUnmounted(stopAutoStream)
 /* Grid */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* min(280px,100%) 是 320px 屏不产生横向滚动的关键：固定 280 下限会在窄容器里顶出去 */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 20px;
 }
 
@@ -738,7 +741,8 @@ onUnmounted(stopAutoStream)
 /* Loading Skeleton */
 .loading-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* min(280px,100%) 是 320px 屏不产生横向滚动的关键：固定 280 下限会在窄容器里顶出去 */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 20px;
 }
 .skeleton-card {
@@ -851,5 +855,22 @@ onUnmounted(stopAutoStream)
   display: flex; gap: 14px;
   margin-top: 8px;
   font-size: 11px; color: var(--text-3);
+}
+
+/* ==========================================================================
+   平板 / 手机：卡片网格靠 auto-fill 自适应，这里只收缺口间距与页头按钮，
+   保证 360px 宽下统计条能折成两行而不是横向溢出。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .grid, .loading-grid { gap: 14px; }
+}
+
+@media (max-width: 767px) {
+  .grid, .loading-grid { gap: 12px; }
+  .stats-bar { gap: 10px 16px; }
+  .dialog-head { flex-direction: column; gap: 10px; }
+  .dialog-foot { flex-wrap: wrap; }
+  .auto-ep-meta { flex-wrap: wrap; gap: 8px; }
+  .project-card .card-body { padding: 14px 14px 16px; }
 }
 </style>

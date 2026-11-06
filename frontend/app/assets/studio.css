@@ -254,3 +254,130 @@ select.input { appearance: none; cursor: pointer; background-image: url("data:im
 .stagger-3 { animation-delay: 0.15s; }
 .stagger-4 { animation-delay: 0.2s; }
 .stagger-5 { animation-delay: 0.25s; }
+
+/* ==========================================================================
+   响应式基础层（多设备适配的唯一真源，Web 与桌面端保持同一份）
+   --------------------------------------------------------------------------
+   断点（四档，均以 max-width 收敛）：
+     mobile   ≤ 767px   手机   360 / 390 / 414 / 430
+     tablet   768–1023  平板   768 竖屏 / 1024 横屏
+     laptop   1024–1439 笔电   1280 / 1366 / 1440
+     desktop  ≥ 1440    台式   1920 / 2560
+   原则：只做「收窄 → 折行 → 单列」三档收敛，**不隐藏业务信息**；
+   320px 宽下任何页面不得出现横向滚动（验收判据见 docs/responsive-adaptation.md）。
+   ========================================================================== */
+
+:root {
+  --shell-pad-x: 48px;
+  --shell-pad-y: 32px;
+  --tap-min: 34px;
+}
+
+@media (max-width: 1439px) {
+  :root { --shell-pad-x: 36px; --shell-pad-y: 28px; }
+}
+@media (max-width: 1023px) {
+  :root { --shell-pad-x: 22px; --shell-pad-y: 22px; }
+}
+@media (max-width: 767px) {
+  :root { --shell-pad-x: 14px; --shell-pad-y: 14px; }
+}
+
+/* 桌面端挂载点是 #app、Web 端是 #__nuxt，两边都写，保证根节点撑满 */
+html, body, #__nuxt, #app { height: 100%; }
+#__nuxt, #app { min-width: 0; }
+
+/* --- 1. 全局防溢出 -------------------------------------------------------- */
+img, video, canvas { max-width: 100%; }
+pre { overflow-x: auto; max-width: 100%; }
+table { max-width: 100%; }
+/* uuid / 绝对路径 / 模型名这类无空格长串是横向溢出的头号来源 */
+.mono, code, .path, .uuid, .model-name { overflow-wrap: anywhere; }
+/* flex 子项默认 min-width:auto，会被子内容顶出容器 */
+.content > *, .page > *, .page-head > *, .head-left, .head-actions { min-width: 0; }
+
+/* --- 2. 页面容器与页头 ---------------------------------------------------- */
+/* 各页面 scoped 里各写一份 .page（padding 24/32/40/48 不一），
+   故统一收敛必须带 !important；只在窄屏生效，不影响桌面原样 */
+@media (max-width: 1023px) {
+  .page { padding: var(--shell-pad-y) var(--shell-pad-x) 32px !important; }
+  /* .lib-page 是资源库五个子页（角色/场景/服装/道具/武器）自有的容器，
+     不走全局 .page，留白必须一并收敛，否则窄屏只剩一半可用宽度 */
+  .lib-page { padding: 20px var(--shell-pad-x) 32px !important; }
+  .page-header { flex-wrap: wrap !important; gap: 12px !important; }
+}
+@media (max-width: 767px) {
+  .page { padding: 14px 14px 28px !important; }
+  .lib-page { padding: 14px 14px 28px !important; }
+  .page-head, .page-header {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+    margin-bottom: 18px !important;
+  }
+  .head-actions, .page-actions, .toolbar { flex-wrap: wrap !important; gap: 8px !important; }
+  .page-title, .page-head h1 { font-size: 1.35rem !important; }
+  .page-desc { font-size: 12px !important; }
+}
+
+/* --- 3. 弹窗：宽度随视口、内容内部滚动 ------------------------------------
+   全仓弹窗类名不统一（.modal / .modal-card / .modal-panel / .dialog），
+   遮罩也有 .overlay / .modal-overlay / .modal-mask / .dialog-mask 四种，
+   组件里另有 .ao-panel（AgentOutputDialog 680px）、.confirm-panel
+   （ConfirmDialog 400px）、.ob-panel（Onboarding 480px），一并收口；
+   各页原宽度（400/460/480/520/640/680px）在窄屏一律让位给视口。 */
+@media (max-width: 1023px) {
+  .overlay, .modal-overlay, .modal-mask, .dialog-mask, .ao-overlay, .confirm-overlay, .ob-overlay { padding: 16px !important; }
+  /* dvh 渐进增强：移动浏览器地址栏伸缩时 100vh 会算进工具栏高度，弹窗底部按钮被裁；
+     不支持 dvh 的浏览器忽略第二条，退回 vh。 */
+  .modal, .modal-card, .modal-panel, .dialog, .ao-panel, .confirm-panel, .ob-panel { max-height: calc(100vh - 32px) !important; max-height: calc(100dvh - 32px) !important; overflow-y: auto !important; }
+  .ao-panel, .ob-panel { max-width: calc(100vw - 32px) !important; }
+}
+@media (max-width: 767px) {
+  .overlay, .modal-overlay, .modal-mask, .dialog-mask, .ao-overlay, .confirm-overlay, .ob-overlay { padding: 10px !important; }
+  .modal, .modal-card, .modal-panel, .dialog, .modal-sm, .ao-panel, .confirm-panel, .ob-panel {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: calc(100vh - 20px) !important;
+    max-height: calc(100dvh - 20px) !important;
+    padding: 20px 16px !important;
+    overflow-y: auto !important;
+    border-radius: var(--radius-lg) !important;
+  }
+  .modal-actions, .modal-footer, .modal-foot, .dialog-foot, .ao-actions, .confirm-actions { flex-wrap: wrap !important; gap: 8px !important; }
+  .modal-actions .btn, .modal-footer .btn, .modal-foot .btn, .dialog-foot .btn, .ao-actions .btn, .confirm-actions .btn { flex: 1 1 130px; }
+  .dialog-title { font-size: 20px !important; }
+}
+
+/* --- 4. 表单与统计网格：窄屏降列 ------------------------------------------ */
+@media (max-width: 767px) {
+  .field-row, .form-grid, .grid-2, .grid-3, .grid-4, .ob-highlights { grid-template-columns: 1fr !important; }
+  .stats-bar, .stat-row, .filter-bar { flex-wrap: wrap !important; }
+  .token-stats, .cost-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+@media (max-width: 420px) {
+  .token-stats, .cost-stats { grid-template-columns: 1fr !important; }
+}
+
+/* --- 5. 触控设备：放大可点区域，取消 hover 位移（避免误触） ---------------- */
+@media (pointer: coarse) {
+  .btn { min-height: var(--tap-min); }
+  .btn-icon { min-width: var(--tap-min); min-height: var(--tap-min); }
+  .nav-link { min-height: 38px; }
+  .btn:hover, .card:hover { transform: none; }
+}
+
+/* --- 6. 超宽屏：内容不无限拉伸 -------------------------------------------- */
+@media (min-width: 1920px) {
+  .page { max-width: 1680px; margin-left: auto; margin-right: auto; }
+}
+
+/* --- 7. 尊重「减少动效」系统偏好 ------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

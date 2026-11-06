@@ -12,6 +12,7 @@
 import {
   getComposedVideoUrl, getStoryboardCover, getVideoUrl, hasComposed, hasImg, hasTTS, hasVid,
 } from '~/utils/storyboard'
+import { mediaUrl } from '~/utils/apiBase'
 
 type MediaMode = 'videos' | 'compose'
 
@@ -115,7 +116,7 @@ function actionDisabled(sb: any): boolean {
         <div class="prod-cover">
           <video
             v-if="coverVideoOf(sb)"
-            :src="'/' + coverVideoOf(sb)"
+            :src="mediaUrl(coverVideoOf(sb))"
             class="prod-video"
             controls
             preload="metadata"
@@ -123,9 +124,9 @@ function actionDisabled(sb: any): boolean {
           />
           <img
             v-else-if="hasImg(sb)"
-            :src="'/' + getStoryboardCover(sb)"
+            :src="mediaUrl(getStoryboardCover(sb))"
             class="previewable-image"
-            @click.stop="emit('preview', '/' + getStoryboardCover(sb), `镜头 #${pad(i + 1)} 参考图`)"
+            @click.stop="emit('preview', mediaUrl(getStoryboardCover(sb)), `镜头 #${pad(i + 1)} 参考图`)"
           />
           <div v-else class="prod-cover-empty">
             <slot name="empty-icon" />
