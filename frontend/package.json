@@ -8,7 +8,9 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "typecheck": "vue-tsc --noEmit -p tsconfig.json"
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "check:responsive": "node scripts/check-responsive.mjs",
+    "check:parity": "node scripts/check-parity.mjs"
   },
   "dependencies": {
     "lucide-vue-next": "^0.511.0",

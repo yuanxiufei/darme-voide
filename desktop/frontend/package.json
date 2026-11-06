@@ -1,0 +1,33 @@
+{
+  "name": "darme-voide-desktop-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "短剧工坊桌面端界面（独立工程，不复用 frontend/ 任何源码）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "build:fast": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "check:isolation": "node scripts/check-isolation.mjs",
+    "check:deps": "node scripts/check-isolation.mjs --deps-only",
+    "check:responsive": "node scripts/check-responsive.mjs",
+    "check:parity": "node scripts/check-parity.mjs"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.511.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1",
+    "vue-sonner": "^1.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "typescript": "^5.8.3",
+    "unplugin-auto-import": "^21.1.0",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^8.3.5",
+    "vue-tsc": "^3.3.11"
+  }
+}

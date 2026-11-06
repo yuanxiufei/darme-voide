@@ -28,16 +28,25 @@ Drama Studio 是一个基于 AI 的短剧自动化生产平台，实现从剧本
 ### 🛠️ 技术架构
 
 ```
-frontend/   — Nuxt 3 + Vue 3 + TypeScript (纯 CSS，无 UI 框架)
+frontend/   — Nuxt 3 + Vue 3 + TypeScript (纯 CSS，无 UI 框架)；Web 端（3013）
+desktop/    — Tauri 2 桌面壳 + 独立 Vite 前端（3014）。前端是 frontend/app 的**拷贝**
+              （**不共享 node_modules、不跨工程 import**）：物理隔离由
+              desktop/frontend/scripts/check-isolation.mjs 守卫，逐字一致性由
+              两端各一份 scripts/check-parity.mjs 守卫（两份逐字相同，差异全部登记并写明理由）
 backend/    — ❌ 已于 2026-09-15 **删除**（Node/Hono 后端；能力全部迁至 backend-py/，
               守卫靠 backend-py/tests/frozen_ts_source.py 的 TS 快照继续做「Python vs TS 当初」比对）
-configs/    — config.yaml 配置文件
-data/       — SQLite 数据库 + 生成资源文件
+configs/    — config.yaml 配置文件 + ComfyUI 工作流/提示词资源
+data/       — 项目数据根。**两类混住，别一概当「机器数据」**：
+              · 入库、可维护的资产：`playbook/`（137 份方法原料，定位与修改纪律见其 README）
+              · 不入库的机器数据：`drama.db*`、`static/`、`traces/`、`ocr/`、`models/`
 backend-py/app/        — 后端代码包（装配 main.py + 平台层 core/ + HTTP 层 routers/ + 业务层 services/
                         + Agent 运行时 agent/ + MCP 客户端 mcp/；层间**单向依赖**由
                         backend-py/tests/layering_test.py 机械守卫）
 backend-py/app/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/app/skills/README.md）
 backend-py/app/local_services/ — 本地服务根（模型工具链 `git clone` 的第三方服务 + 项目自带 h3 8765 薄封装）
+docs/       — 设计与审计文档（分层/契约/迁移证据都落这里，不散在代码注释里）
+models/     — 模型清单与分词器等机器相关素材（大文件与 `models/tokenizers/` 不入库）
+benchmarks/ — Agent 评估基准用例（4 份 JSON）
 ```
 
 ### 🎥 作品展示 / Demo Videos
