@@ -48,6 +48,19 @@
       "note": "Qwen3-VL-32B 文本编码器，最小官方量化（nvfp4 AWQ）"
     },
     {
+      "key": "te_h3_int8_convrot",
+      "name": "H3 文本编码器 Qwen3-VL-32B int8_convrot（自研引擎）",
+      "category": "video",
+      "runtime": "darme-engine",
+      "kind": "text_encoders",
+      "filename": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "file_path": "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "size_gib": 25.28,
+      "required": false,
+      "tags": ["h3", "video", "darme-engine"],
+      "note": "自研引擎 `attach_h3_text` 唯一认的那份（25.28 GiB / 语言塔 1251 键 ＋ 视觉塔 351 键 / 350 个 int8 线性层）。⚠️ **不能拿 `te_nvfp4` 顶**：nvfp4 是**打包**形状（`q_proj` 落成 [out, in/2] ✓）⇒ `qwen3vl_te.infer_shape` 读出 hidden **2560**（真值 5120），`_check_text_encoder` 当场报「TE 配置自述 2560 ≠ 主干要 5120」，读起来像「拿错文本塔」其实是**打包没解开**；且 `attach_h3_text` 本来就要求 int8 plan，nvfp4 件没有。⚠️ `required: false`：`STAGE_FILTERS` 的 `h3` 档没有 `requireAll`，标 true 会让 `readiness` 把 nvfp4（14.61）与这份（25.28）**加在一起** = 39.89 GiB，凭空「装不下」。⚠️ **不参与自动下载**（盘上已有）"
+    },
+    {
       "key": "te_qwen3_4b",
       "name": "H3 文本编码器 Qwen3-4B（轻量裁剪）",
       "category": "video",
@@ -317,6 +330,121 @@
     },
 
     {
+      "key": "dit_krea2_turbo",
+      "name": "Krea2 Turbo 主干 int8_convrot",
+      "category": "image",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "Krea2/krea2_turbo_int8_convrot.safetensors",
+      "size_gib": 12.57,
+      "required": false,
+      "tags": ["image", "krea2", "darme-engine", "24gb"],
+      "note": "**Krea2** 主干（单流 DiT / `first` 吃 16×2×2=64 / `txtlayers` **12** × `txtdim` **2560** ⇒ 文本条件宽 **30720** / `vae_scale` **8** / flow shift **1.15**）。⚠️ **12.82B 参数**（I8 12.155B + BF16 0.665B + F32 0.002B）——按 bf16 物化是 **23.9 GiB** ✗ > 24GB 卡的 22.49，所以自研引擎 `stage=krea2` **必须**走 int8 常驻（`_build_krea2_module` 的四步：meta 建壳 ⇒ 降精度 ⇒ 换 `Int8Linear` ⇒ 才物化），驻留 **12.57 GiB**；装配回执的 `int8Ledger` 就是逐层账，一层没接管当场拒。⚠️ 另需 `te_krea2_qwen3vl4b` 与 `vae_krea2`（三件分时 ⇒ 峰值 12.57 GiB）。⚠️ `required: false` 是**有意**的：与 SDXL / Z-Image / 2.1 / 2512 都是**互斥备选**，「本档三件必须齐」归 `STAGE_FILTERS[\"krea2\"].requireAll`（见 inventory.py）。⚠️ `filename` 带子目录 `Krea2/` 是因为共享池本来就分档存放，不是猜的。⚠️ **不参与自动下载**"
+    },
+    {
+      "key": "te_krea2_qwen3vl4b",
+      "name": "Qwen3-VL-4B 语言塔（Krea2）",
+      "category": "image",
+      "runtime": "comfyui",
+      "kind": "clip",
+      "filename": "Qwen3_VL_4B/Krea2-Engineer-V1-int8-convrot.safetensors",
+      "size_gib": 5.08,
+      "required": false,
+      "tags": ["image", "krea2", "darme-engine", "text-encoder"],
+      "note": "Krea2 的提示词入口（Qwen3-VL-4B **语言塔**：36 层 / hidden **2560** / **取 12 层隐状态栈** `taps = 2,5,…,35` ⇒ 输出宽 **30720**）。⚠️ **不是取末层** ✗：写 2560 进 `text_dim` ⇒ `_check_text_encoder` 报宽度不符，读起来像「拿错文本塔」，其实差的是一个乘数。⚠️ 同一份文件里还有**视觉塔 `model.visual.*`（0.415B）**——`attach_krea2_te` 只装语言塔、视觉塔单列进 `ignoredTowerKeys`（与 `te_qwen25_vl_7b` 同一条纪律）。⚠️ 模板要套 `<|im_start|>system…<|im_start|>assistant\\n` 并在编码后把前缀裁掉（`qwen3vl_te.krea2_prompt` / `krea2_keep_from`），漏裁 ⇒ 条件里混进 43 个系统提示 token ⇒ 画面跟着系统提示走。⚠️ 驻留 ≈**7.5 GiB**（int8 反量化 ×2 后只算语言塔）。⚠️ `filename` 带子目录 `Qwen3_VL_4B/`（共享池按 4B/8B/32B 分档）。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
+    },
+    {
+      "key": "vae_krea2",
+      "name": "Krea2 VAE（16 通道，与 2512 同一文件）",
+      "category": "image",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "qwen_image_vae.safetensors",
+      "size_gib": 0.24,
+      "required": false,
+      "tags": ["image", "krea2", "darme-engine"],
+      "note": "Krea2 的 **16 通道**解码器。⚠️ **与 `vae_qwen_image` 是同一个文件**，两条声明按阶段各算各的（同 `te_qwen3_4b` / `te_zimage_qwen3` 那条惯例）。⚠️ **这一族唯一必须靠人记住的一格**：VAE **文件**跟 2512 一样，**反缩放**却要取 **`latent_formats.Wan21`** 的 mean/std（comfy `supported_models.Krea2` 写死 `Wan21`）——`attach_wan_vae(family=\"wan21\")`；给成 2512 那一档 ⇒ 解码照跑、形状全对、**图整体偏色/发灰**且不报错。⚠️ 出图是 **3 通道**（`qwen_image_vae` 的 head 不像 2.1 那样出 4 通道 RGBA）⇒ 落盘那条「丢 alpha」的逻辑按**实测通道数**判，别按族名判。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "dit_seedvr2_3b",
+      "name": "SEEDVR2 3B 主干（int8_convrot，自带条件）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "SEEDVR2/seedvr2_3b_int8_convrot.safetensors",
+      "size_gib": 3.22,
+      "required": false,
+      "tags": ["video", "seedvr2", "darme-engine", "24gb"],
+      "note": "**SEEDVR2** 视频**修复**主干（NaDiT 单流 3B / 1057 键 / 反量化 bf16 后驻留 ≈6.8 GiB）。⚠️ **这一档与同目录其它文件差在「有没有条件」** ✅：`*_int8_convrot` / `*_w4a8` 自带 `positive_conditioning`(58×5120) 与 `negative_conditioning`(64×5120)，可以直接修；而 `seedvr2_ema_*_fp16` / `*_fp8_e4m3fn` / `*_7b_*` 只有 635 / 1128 键、**不带条件** ⇒ 要 25 GiB 级 5120 宽文本塔才跑得动（本仓当场拒并说明，不静默出黑屏）。⚠️ 主干每步吃 **33** 通道 = 16 噪声 ＋ 16 退化潜变量 ＋ 1 loss mask（`latent_channels` 仍是 16，多的 17 是**条件**不是潜变量）⇒ 拿 2512/2.1 的 `_check_attached_vaes` 口径判会报「期望 33 实际 16」，那是口径问题不是挂错 VAE。⚠️ 没有文本塔 ⇒ `negative` / `cfg>1` 都不生效；官方 **1 步**、flow shift **1.0**。⚠️ 另需 `vae_seedvr2`（两件同驻 ≈7.3 GiB，**本仓唯一不分时**的一条线）。⚠️ `required: false` 是**有意**的：与 H3 是**互斥备选**，「本档两件必须齐」归 `STAGE_FILTERS[\\\"seedvr2\\\"].requireAll`。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "vae_seedvr2",
+      "name": "SEEDVR2 专用 VAE（250 键，×0.9152）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "SEEDVR2/ema_vae_fp16.safetensors",
+      "size_gib": 0.47,
+      "required": false,
+      "tags": ["video", "seedvr2", "darme-engine"],
+      "note": "SEEDVR2 的专用解码器（`vae/SEEDVR2/ema_vae_fp16.safetensors`，**250 键**、0.47 GiB）。⚠️ **没有 `quant_conv` / `post_quant_conv`**（同族 VAE 都省了这两层）⇒ 拿 `vae_wan` 那套壳装会报缺键，必须走 `attach_seedvr2_vae`。⚠️ 反缩放是 **×0.9152 一个标量**（不是 mean/std 组、更不是 Flux 的 0.3611/0.1159）⇒ 借别的族解码**不报错**、整片发灰。⚠️ 空间 **8×** / 时间 **4×**，注意力**逐帧**（不做跨帧）⇒ 像素帧必须 `4n+1`，`T=1` 走「时间核截到最后一拍」那一支。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "dit_wan22_i2v_high",
+      "name": "Wan 2.2 I2V 14B 高噪专家 fp8_scaled",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "size_gib": 13.31,
+      "required": false,
+      "tags": ["video", "wan22", "darme-engine"],
+      "note": "**Wan 2.2 I2V** 的**高噪**专家（14B / 盘上 fp8_scaled 13.31 GiB ⇒ 反量化 bf16 驻留 ≈ **26.62 GiB**）。⚠️ 主干入口 **36** 通道 = 噪声 16 ＋ 掩码 4 ＋ 首帧条件 16（`dit_wan22.I2V_LAYOUT`）—— 同目录还躺着 **T2V** 那份（入口 **16**、纯文本）⇒ 装错族 `_ensure_wan22_loaded` 当场拒并点名。⚠️ **单份就超 22.49 GiB 的卡** ⇒ 必须 `split`/`cpu`，且与文本塔/VAE **分时**（encode 文本+VAE / sample 只有 DiT / decode VAE）。⚠️ 与低噪那份**不并存**：采样中途 `load_module_weights` 原地重装（约 20~40 秒）。⚠️ flow shift **5.0**、16fps、像素帧 `4n+1`、尺寸吸附 16；⚠️ `required: false` 是**有意**的：与 H3 / SEEDVR2 是**互斥备选**，「本档三件必须齐」归 `STAGE_FILTERS[\"wan22\"].requireAll`。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "dit_wan22_i2v_low",
+      "name": "Wan 2.2 I2V 14B 低噪专家 fp8_scaled",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "size_gib": 13.31,
+      "required": false,
+      "tags": ["video", "wan22", "darme-engine"],
+      "note": "**Wan 2.2 I2V** 的**低噪**专家（与高噪同一结构、同一 36 通道入口，只有权重不同）。⚠️ 官方模板是两个 `KSamplerAdvanced` **接力**：高噪跑前一半、低噪跑后一半，切换在 **50%**（`pipeline.WAN22_SWITCH_RATIO`）—— 换装判据是 **σ 阈值**（`plan.sigmas[wanHighSteps]`），不是数 `denoise` 调用次数（引导正负各一趟、heun 再翻倍 ⇒ 会半路换）。⚠️ 只给高噪一份 ⇒ **能跑但后段细节明显掉**，装配回执如实标「不接力」（不静默补零）。⚠️ 装配格是 `ditPath2`；⚠️ `required: false` 同上（不是必需件，缺了不拦但要说清）。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "te_wan22_umt5_xxl",
+      "name": "UMT5-XXL 文本编码器（Wan 2.2）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "text_encoders",
+      "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "size_gib": 6.27,
+      "required": false,
+      "tags": ["video", "wan22", "darme-engine", "text-encoder"],
+      "note": "**Wan 2.2** 的提示词入口（UMT5-XXL：**24 层纯 encoder** / hidden **4096** / 32 头 / ffn 10240 / **不是**解码器、**不套 `<|im_start|>` 模板** / 序列长 512）。⚠️ 装盘 fp8_scaled 6.27 GiB ⇒ 反量化 bf16 驻留 ≈ **10.58 GiB**。⚠️ **`padding` 位置的条件必须置 0** ✗（UMT5 是 relative-position bias，pad token 有非零状态 ⇒ 不清零会让补位词参与 cross-attn，画面跟着补位走且不报错）。⚠️ 换错族（Qwen3-VL / Qwen2.5-VL / CLIP）报的是「宽度 ≠ 4096」。⚠️ `required: false` 同上（必需性归 `wan22` 档 `requireAll`）。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "vae_wan22",
+      "name": "Wan 2.1 VAE（16 通道，Wan 2.2 解码用）",
+      "category": "video",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "wan_2.1_vae.safetensors",
+      "size_gib": 0.24,
+      "required": false,
+      "tags": ["video", "wan22", "darme-engine"],
+      "note": "**Wan 2.2 I2V** 的解码器 —— 文件就是 **Wan 2.1** 那个 `wan_2.1_vae.safetensors`（16 通道 / 空间 **8×** / **时间 4×**）。⚠️ 时间 4 倍压缩 ⇒ 像素帧必须 `4n+1`（81 帧 ⇒ 21 潜帧）；写 80 帧会静默丢最后几帧的残差。⚠️ 反缩放取 `latent_formats.Wan21`（mean/std 两组）—— 借 2512 恒等口径 ⇒ 整片发灰且不报错。⚠️ 首帧的 20 通道条件**必须在 encode 段**用它编（那时 VAE 还在 ✓；sample 段 VAE 已退 ⇒ 再编就是「没挂 VAE」）。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
+    },
+
+    {
       "key": "cosyvoice2",
       "name": "CosyVoice 2",
       "category": "tts",
@@ -337,6 +465,45 @@
       "required": false,
       "tags": ["video", "wan", "gguf"],
       "note": "开源图生视频最强；按 ComfyUI-GGUF 官方指引下载 GGUF 到 diffusion_models，需 ComfyUI-GGUF 节点（手动核对最新地址）"
+    },
+
+    {
+      "key": "dit_music3",
+      "name": "Music3 音频 DiT（fp16）",
+      "category": "audio",
+      "runtime": "comfyui",
+      "kind": "diffusion_models",
+      "filename": "minimax_music3_dit_fp16.safetensors",
+      "size_gib": 4.58,
+      "required": false,
+      "tags": ["audio", "music3", "darme-engine", "24gb"],
+      "note": "**Music3 文生音乐**的音频主干（fp16 / 4.58 GiB / 3 维潜变量 `(b, 128, T)`）。⚠️ 这一族**输出的不是画面**：潜变量是「声道/码本维 × 时间帧」，解码出 **44.1kHz 立体声波形**，本仓产物是 `audio_seed*.wav`（不要拿 `primaryUrl` 当视频用）。⚠️ 时间轴有两把尺子，**都比像素帧密得多**：条件帧 **25 Hz**（语义塔逐帧说出音频语义）、潜帧 **≈86.13 Hz**（`44100/24000×960/512`）⇒ 两者**不能用同一个数**。⚠️ 反缩放**恒等**（`latent_formats.minimax_music3` scale_factor=1.0 / shift 0，与 Z-Image 的 0.3611 相反）—— 借错口径 ⇒ 整段音量与音色全偏且不报错。⚠️ 引导是**自回归内部**做的（官方 cfg 1.5 / top-k 50），DiT 层的 `cfg` 对条件不起作用、负向条件恒空。⚠️ 三件同驻 ≈13.35 GiB ⇒ **不分时**。⚠️ `required: false` 是**有意**的：与出图/出片族互斥备选，「本档三件必须齐」归 `STAGE_FILTERS[\"music3\"].requireAll`。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "te_music3",
+      "name": "Music3 语义塔（int8_convrot，内含词表）",
+      "category": "audio",
+      "runtime": "comfyui",
+      "kind": "text_encoders",
+      "filename": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+      "size_gib": 8.57,
+      "required": false,
+      "tags": ["audio", "music3", "darme-engine", "24gb"],
+      "note": "**Music3 的语义塔**（int8_convrot / 8.57 GiB）—— ⚠️ 它**不是文本编码器**，是**自回归生成器**：吃 `<|im_start|>caption<|im_end|><|audio_start|>` 的 token 串，按 **25 帧/秒**逐帧生成 **32768** 宽（8 码本 × 4096）的音频语义帧 ⇒ 条件长度 **＝ 时长 × 25**，所以「编条件」这一段本身就是几百上千步的生成，可能比 DiT 采样还久（算在 `encode` 段）。⚠️ **词表焊在这份权重里**（safetensors 的 `tokenizer_json` 键），盘上**没有**配套 `tokenizer.json` ⇒ 装配时从权重取、并核四个特殊符（`<|im_start|>` / `<|im_end|>` / `<|audio_start|>` / `<|audio_cfg|>`，缺一个整段 id 错位、静默出噪声）。⚠️ 别拿别族的词表顶替。⚠️ 只认 int8 常驻那份：换成 bf16 不只是 13.8 GiB 装不进，而是**逐位不同**（出的是另一段音乐，且不报错）。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
+    },
+
+    {
+      "key": "vae_music3",
+      "name": "Music3 DAV 音频解码器（fp16）",
+      "category": "audio",
+      "runtime": "comfyui",
+      "kind": "vae",
+      "filename": "minimax_music3_dav.safetensors",
+      "size_gib": 0.2,
+      "required": false,
+      "tags": ["audio", "music3", "darme-engine", "24gb"],
+      "note": "**Music3 的音频解码器**（DAV / fp16 / 0.20 GiB / 121 键）—— 潜变量 `(b,128,T)` ⇒ 波形 `(b,2,512·T)`（**两声道**、44.1 kHz）。⚠️ 它不是视频 VAE：**不许**按 `(B,T,3,H,W)` 那套 reshape，也不吃 mean/std 两组反缩放（恒等）。⚠️ 装配那一格叫 `audioVaeWeights`（**不是** `imageVaeWeights` / `videoVaeWeights`）—— 塞错口 ⇒ 报「缺 audioVaeWeights」，读起来像「清单里没有 DAV」，其实是有、插错口。⚠️ `realAudioVae=false` 对这一族**没有意义**（只有真 DAV 一种，产物就是声音）。⚠️ `required: false` 同上。⚠️ **不参与自动下载**"
     }
   ],
   "nodes": [

@@ -5,10 +5,10 @@ dist
 .vscode
 .DS_Store
 *.log
-data/drama.db*
-data/static
-data/storage
-data/*.bak*
+# 数据根（2026-11-04 收紧）：整根 `data/` 都不进上下文 —— 镜像里 `RUN mkdir -p /app/data/static`
+# 自建、`VOLUME ["/app/data"]` 挂宿主。实测本机 `data/models` 3.68 GB + `data/ocr` 1.36 GB，
+# 旧规则只挡了 drama.db / static / storage，其余照样被打进构建上下文 ✗
+data
 backend-py/app/scripts
 backend-py/app/local_services
 frontend/.nuxt
@@ -30,3 +30,20 @@ backend-py/__pycache__
 backend-py/tests
 .codebuddy
 reference
+
+# 第三方只读资料（2026-11-04）：剧本知识库 19.3 GB、方法语料 2 MB，均 gitignore、版权不明，
+# 只在**本机**做只读检索（services/script_library.py）。打镜像不需要它们 —— 缺了这两根
+# 目录时 /api/v1/knowledge/* 会如实回 available=false，不是报错。
+剧本知识库
+方法语料
+
+# 构建上下文瘦身（2026-11-04 实测）：docker 把**整个工作区**打成上下文送给 daemon，
+# 与 Dockerfile 里 COPY 什么**无关** —— 下面几处一件都不进镜像，却每次 build 都要先搬一遍：
+#   `desktop/src-tauri/target` 6.5 GB（Rust 编译产物；前端构建阶段只要 `frontend/`）
+#   `backend-py/output`（引擎真跑产物）、`backend-py/_bench`（调试草稿区）
+#   `models`（词表 16 MB，代码零引用）、`benchmarks`（评估用例 JSON）
+desktop
+backend-py/output
+backend-py/_bench
+models
+benchmarks
