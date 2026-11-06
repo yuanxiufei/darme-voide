@@ -327,10 +327,18 @@ def case_real_headers() -> None:
 
 
 class _FakeInfo:
-    """`safetensors.inspect()` 的最小替身 ✓（构建器只用 ``.tensors[*].shape`` ✓）。"""
+    """`safetensors.inspect()` 的最小替身 ✓。
 
-    def __init__(self, table: dict) -> None:
-        self.tensors = {name: type("T", (), {"shape": tuple(shape)})()
+    ⚠️ 不只 ``.shape`` ✗✗：``dit_build._shell_int8`` 的 **F32 岛** 那一段要在**物化之前**
+    逐键读 ``info.tensors[k].dtype`` ✓（`*.weight_scale`、norm 的 `.scale` 必须留 fp32 ✓），
+    而且这一段**与 path 无关** ✓ —— `path is None` 也照跑 ✓✗。替身只造 `shape` 时，
+    构建器一进来就 `AttributeError: 'T' object has no attribute 'dtype'` ✓（整套崩在
+    第一格、连 SUMMARY 都出不来 ✓✗，读起来像"构建器坏了"，其实只是替身太薄 ✓）。
+    ⇒ 真 dtype 串照 ``inspect()`` 的写法给（``BF16``/``F16``/``F32``/``I8`` ✓），默认 `BF16` ✓。
+    """
+
+    def __init__(self, table: dict, dtype: str = "BF16") -> None:
+        self.tensors = {name: type("T", (), {"shape": tuple(shape), "dtype": dtype})()
                         for name, shape in table.items()}
         self.path = "<fake>"
 
@@ -361,10 +369,17 @@ def case_backend() -> None:
 
     edit_module, edit_config = tb._build_qwen_image_module(
         _FakeInfo(_table(sentinel=True)), {"axes_dim": TINY_AXES}, dtype=torch.float32)
+    #: ⚠️ 口径跟着实现走 ✗✗（2026-11-01 ✓）：参考图通路**已接** ✓ —— 视觉塔 384² 的 `image_pad`
+    #: 槽 ＋ VAE 1024² 的 `ref_latents` 一列 ✓，`runtime` 按 `editRefWired` 这格挂 encode 段的
+    #: vision+vae ✓、`encode_text` 按它预编码 ✓。⇒ 判据从「明写未接」改成「**明写已接**且
+    #: 说得出接了什么」✓✗：仍要钉住"不许含糊"（`True` 打头 ✓、点名两条通路 ✓），
+    #: 否则接线一退回去，这一格会静默变回 `n/a` 却没人发现 ✓。
     check("⑧‴ Edit（带 `__index_timestep_zero__` ✓）⇒ 口径为 `index_timestep_zero` ✓、"
-          "且 `editRefWired` **明写未接** ✓（不静默当作 t2i 能力 ✓✗）",
+          "且 `editRefWired` **明写已接** ✓（点名视觉塔/VAE 两条通路 ✓，不静默退化 ✗）",
           edit_module.shape.ref_timestep_zero
-          and str(edit_config["configSources"]["editRefWired"]).startswith("False"),
+          and str(edit_config["configSources"]["editRefWired"]).startswith("True")
+          and "384" in str(edit_config["configSources"]["editRefWired"])
+          and "prepare_edit_references" in str(edit_config["configSources"]["editRefWired"]),
           edit_config["configSources"]["editRefWired"])
 
     try:

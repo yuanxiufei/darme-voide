@@ -93,6 +93,15 @@ GROUP_WEIGHT: tuple[str, ...] = (
     #: **什么时候**"✓。接线点是 `weights._load_streaming` 的逐张量读 ✓（作用域一次装载即止 ✓，
     #: 跨阶段预取被否掉 ✗）。它**不决定装哪件** ✗（装配线给 key 与函数 ✓）、**不 import torch** ✗。
     "prefetch",
+    #: ⚠️ ``host_cache``（2026-11-02 补登记 ✓）挂这里：三级内存里**内存那一级的配额账** ✓
+    #: （SSD → 内存 → 显存 ✓ —— `weights` 管第一段、这件管第二段的上限、`residency` 管第三段 ✓）。
+    #: 它只算"该卸谁、卸完还差多少"✓，**不碰张量** ✗（真换成 0 元素占位是 `residency` 干的 ✓）。
+    "host_cache",
+    #: ⚠️ ``foresight``（2026-11-02 补登记 ✓）挂这里：它是**显存那一侧的"什么时候"** ✓✗ ——
+    #: `device_policy` 答"落哪台设备"、`prefetch` 答"什么时候进内存"、这件答"什么时候**上卡**"✓。
+    #: 它只做判据（该不该发、落地没落地、能不能用 ✓），分配与拷贝在 `residency._SlotBook` ✓；
+    #: **不 import torch** ✗（无卡机器上也能自检 ✓）。默认 **0 槽 ＝ 不存在这一级** ✓。
+    "foresight",
 )
 
 #: ④ 文本入口（prompt ⇒ token ⇒ 向量）
@@ -104,6 +113,11 @@ GROUP_TOKEN: tuple[str, ...] = (
     #: （`token_tags` 也是它算 ✓）。它**不是** chat 模板 ✗（H3 一个 `<|im_start|>` 都不加 ✓），
     #: 更不是视觉塔 ✗（那是 `qwen3vl_vision` ✓）；放在这里与 `chat_template` 并列才说得通 ✓。
     "h3_prompt",
+    #: ⚠️ ``umt5_tokenizer``（2026-11-01 补登记 ✓）挂这里是**照它的性质** ✓：UMT5 的 sentencepiece
+    #: **unigram** 分词器（`nmt_nfkc` 归一 ＋ `add_dummy_prefix` ✓，词表 256384 ✓）—— 与 Qwen 系 BPE
+    #: 是两套东西 ✓✗，所以它与 `tokenizer_bpe` / `tokenizer_own` 并列 ✓，**不是**文本塔本体 ✗
+    #: （塔在 `umt5_te` ✓）。
+    "umt5_tokenizer",
 )
 
 #: ⑤ 网络本体（"一族模型一个骨架"）
@@ -123,18 +137,64 @@ GROUP_TOKEN: tuple[str, ...] = (
 #: ⚠️ ``vae_wan``（2026-10-31 ✓）与 `vae_flux` / `vae_h3` 同层 ✓：都是"潜变量 ⇒ 像素"的网络 ✓；
 #: 它先接住的是 Qwen-Image 2.1 那个 64 通道 VAE ✓（Wan 2.2 布局 / 238 键 ✓），
 #: **不是**容器（`latent_container` ✗）也不是规格表（`latent_formats` ✗）。
+#: ⚠️ ``dit_build``（2026-11-01 补登记 ✓）与 `dit_family` **成对而非合并** ✓：`dit_family`
+#: 回答"这份权重是哪个族" ✓（只看键名 ✓、不建网 ✓）；`dit_build` 回答"这个族怎么建" ✓
+#: （一族一行 `FamilyBuilder` ✓ + 一份公共流程 ✓）。合并会让"判族"被迫 import 全部骨架 ✗。
+#: ⚠️ ``dit_flux``（2026-11-01 补登记 ✓）与 `dit_qwen_image` 同层 ✓：都是**网络本体** ✓，
+#: 只是 Flux 那条是两段（19 双流 + 38 单流 ✓）、时间口径 `1000·σ` 不翻转 ✓。
 GROUP_MODEL: tuple[str, ...] = (
-    "dit", "dit_lumina", "dit_qwen21", "dit_qwen_image", "dit_family", "dit_generic",
+    "dit", "dit_lumina", "dit_qwen21", "dit_qwen_image", "dit_family", "dit_build",
+    #: ⚠️ ``dit_wan22``（2026-11-01 补登记 ✓）与 `dit_flux` / `dit_qwen_image` 同层 ✓：都是**网络本体** ✓。
+    #: 它是本仓唯一**五维潜变量 + 视频**的建族 ✓（40 层 / `in_dim` 36 / 文本口 umt5 4096 ✓），
+    #: 由 `dit_build` 静态 import 并登记成 `wan` 行 ✓ —— 只漏了这张登记表 ✓✗（结构守卫 ㊀ 报的就是它 ✓）。
+    "dit_wan22",
+    #: ⚠️ ``dit_seedvr2``（2026-11-01 补登记 ✓）与 `dit_wan22` / `dit_flux` 同层 ✓：都是**网络本体** ✓ ——
+    #: SEEDVR2（NaDiT）是视频修复/超分主干 ✓（32 块 ✓、前 10 块双塔后 22 块共享 ✓、`in=33` ✓）。
+    #: 它不是装配行 ✗（`dit_build` 里有没有登记成族是另一件事 ✓），也不做编排 ✗。
+    "dit_seedvr2",
+    "dit_flux", "dit_generic",
+    #: ⚠️ ``dit_music3``（2026-11-02 补登记 ✓）与 `dit_flux` / `dit_generic` 同层 ✓：都是**网络本体** ✓
+    #: （Music3 的音乐主干 ✓，`dit_build.BUILDERS` 里登记成 `music3` 行、契约 ``latent_dims=3`` ✓）。
+    #: 它**不是**编排 ✗（谁调它、怎么排阶段是 `pipeline` / `runtime` 的事 ✓），也不做量化 ✗。
+    "dit_music3",
+    #: ⚠️ ``te_music3``（2026-11-02 补登记 ✓）与 `dit_music3` 同层 ✓：都是**网络本体** ✓ ——
+    #: 它是 Music3 的 **语义塔** ✓（Qwen3-8B 形态 36 层 + RVQ 深度解码器 ✓，int8_convrot
+    #: 常驻 160 层 ✓，词表内嵌在权重文件里 ✓）。产出 ``context (1,F,8×4096)`` ✓ 正好是
+    #: `dit_music3` 契约的输入 ✓。它不是编排 ✗、不是文本编码器通用件 ✗（只服务这一族 ✓）。
+    #: ⚠️ 同日我先写过一份 ``ar_music3.py`` 的等价实现 ✓，逐项对拍后**删掉收敛到这份** ✗ ——
+    #: 两份同名实现并存是本仓最恨的那类（改一处、另一处静默漂 ✓✗）。
+    "te_music3",
     "h3_form", "h3_keys", "h3_edit", "sdxl",
     "sdxl_backend",
     "sdxl_vae", "vae_flux", "vae_wan", "vae", "vae_h3", "audio_vae", "upscale", "upscale_net",
+    #: ⚠️ ``vae_seedvr2``（2026-11-01 补登记 ✓）与 `vae_wan` / `vae_h3` 同层 ✓：都是"潜变量 ⇒ 像素"的
+    #: 网络本体 ✓（SEEDVR2 的 ``VideoAutoencoderKL``：4 级下采样块 + 4 级上采样块 ✓，空间各 3 次 ⇒ ÷8 ✓、
+    #: 时间各 2 次 ⇒ ÷4 ✓，编码器直出 32 通道 ⇒ 取前 16 均值即潜变量 ✓ 16ch ✓）。
+    #: 它**不是**容器 ✗（``latent_container``）、**不是**规格表 ✗
+    #: （``latent_formats`` 的 ``seedvr2`` 口径才是 0.9152 那个数 ✓），也不做编排 ✗。
+    #: 之前漏的只是这张登记表 ✓✗（结构守卫 ㊀ 报的就是它 ✓）。
+    "vae_seedvr2",
+    #: ⚠️ ``vae_music3``（2026-11-02 补登记 ✓）与 `audio_vae` / `vae_seedvr2` 同层 ✓：都是「潜变量 ⇒ 波形/像素」
+    #: 的网络本体 ✓（Music3 的音频 VAE ✓，3 维潜变量那一路 ✓）。它**不是**混音/编排 ✗
+    #: （`audio_mix` 在本目录 ``numeric`` 组 ✓、排阶段是 `pipeline` 的事 ✓）。
+    "vae_music3",
     "text_encoder", "clip_text", "qwen3_te", "qwen35_te", "qwen25_te", "llm", "llm_backend",
+    #: ⚠️ ``umt5_te``（2026-11-01 补登记 ✓）与 `qwen3_te` / `qwen25_te` / `qwen35_te` 并列 ✓：
+    #: Wan2.1/2.2 那座 **UMT5-XXL** 文本塔 ✓（4096 宽 / 24 层 / **双向**注意力 ✓、相对位置偏置
+    #: **每层各一份** ✓、FFN 门控 ✓）—— 与本仓其余几座（因果 + `layer_idx=-2` ✓）口径相反 ✗，
+    #: 合并会让 attention mask 方向混用 ✓✗（症状是「出图与提示词几乎无关」而不是报错 ✓）。
+    "umt5_te",
     #: ⚠️ ``qwen3vl_te`` / ``qwen3vl_vision``（2026-11-01 补登记 ✓）与 `qwen3_te` / `qwen25_te` 并列
     #: 而非合并 ✗：它们是 H3 那一座 **Qwen3-VL-32B** ✓ —— 视觉塔与语言塔在**同一个 safetensors** 里 ✓，
     #: 但两半边层型完全不同（27 层 ViT + DeepStack merger vs 语言塔 interleaved mrope ✓）、
     #: 键前缀一个 `visual.*` 一个 `model.*` ✓。拆两份是因为**装配时机不同** ✓：
     #: 视觉塔只在有图/帧时才要 ✓，语言塔每轮都要 ✓（放同一个文件就得整份常驻 ✓✗）。
     "qwen3vl_te", "qwen3vl_vision",
+    #: ⚠️ ``qwen25vl_vision``（2026-11-01 ✓）与 `qwen3vl_vision` **并列而非合并** ✓：两者都是视觉塔 ✓，
+    #: 但**尺子完全不同** ✗ —— Qwen2.5-VL 是 patch **14** / CLIP 均值方差 / 窗口注意力（4 层走全图）✓，
+    #: Qwen3-VL 是 patch **16** / 0.5 均值 / DeepStack ✓。「共用一份代码 + 一堆开关」会让口径混用
+    #: **不报错**只让整图偏色 ✓✗（这正是 `qwen3vl_pixels.process_image_with` 存在的理由 ✓）。
+    "qwen25vl_vision",
     "gguf_dequant", "gguf_to_llm", "torch_backend",
 )
 
@@ -147,6 +207,16 @@ GROUP_ORCH: tuple[str, ...] = (
     #: 每一层的前向都在 `qwen3vl_vision` / `qwen3vl_te` 里 ✓。与 `pipeline` 同性质 ✓：
     #: 都是"把别人算好的东西按顺序接起来" ✓。放 `model` 组会把"一组都是网络本体"这句话冲淡 ✗。
     "h3_encode",
+    #: ⚠️ ``canvas`` / ``profiles``（2026-11-01 新增 ✓）也挂这里，**不进** `model` 组 ✗：
+    #: 一个只做"像素 ↔ 比例 ↔ 吸附"的算术 ✓、一个只是**数据表** ✓（用途 ⇒ 画布/步数/cfg ✓，
+    #: 出处写工作流文件名 ✓）—— 两者都**不写模型数学** ✗，与 `pipeline` / `facade` 同性质 ✓。
+    #: 放 `model` 组会让人以为"画布是网络的一部分" ✓✗（它恰恰是要**脱离**具体网络才搬得动 ✓）。
+    "canvas", "profiles",
+    #: ⚠️ ``tuning``（2026-11-06 新增 ✓）挂这里：它是**参数覆盖层** ✓ ——
+    #: 读外部 JSON、白名单校验、把值换进 `GenerationRequest` ✓，不含任何模型数学 ✗、
+    #: 不碰显存 ✗、不决定跑哪一族 ✗。与 `profiles` 同性质（都是"数据决定数值" ✓），
+    #: 区别只在于它是**可写可回滚**的那一份 ✓✗（profiles 是盘上模型的说明，tuning 是人的裁决）。
+    "tuning",
 )
 
 #: 组名 ⇒ 组内模块（**登记表是唯一真源** ✓：``__all__`` 由它拼出，结构守卫按它核盘 ✓）

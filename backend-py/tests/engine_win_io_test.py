@@ -1,4 +1,4 @@
-"""无缓冲重叠读自检 ✓（移植自 `reference/expert-stream` ✓，2026-11-01 ✓）。
+"""无缓冲重叠读自检 ✓（移植自 `expert-stream` 上游 ✓，2026-11-01 ✓）。
 
 判据只认一件事：**读回来的字节与普通 `read` 逐字节相同** ✓✗（性能不进判据 ✗ —— 测速会飘 ✗）。
 
@@ -285,6 +285,12 @@ def case_tensor_reader(tmp: str) -> None:
 
 
 def main() -> int:
+    # 本机控制台默认 cp936（GBK），下面那行 `✓` 会直接 UnicodeEncodeError 崩在 print 上，
+    # 连一条判据都跑不到 —— 与其它测试统一的兜底，缺了它「直接跑本文件」就是废的。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     print(f"== 无缓冲重叠读自检（windows_available={wio.windows_available()} ✓）==")
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(tmp)

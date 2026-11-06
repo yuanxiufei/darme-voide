@@ -738,5 +738,72 @@ style_profiles = Table(
 )
 
 
+# ===== 剧本场次结构（Python 侧新增，Node schema.ts 无此表）=====
+
+#: 项目剧本（``episodes.script_content``）切出来的场次。
+#:
+#: **为什么不复用 ``scenes`` 表**：那张表是**视觉生产单位**（``image_url`` /
+#: ``storyboard_count`` / ``atmosphere`` / ``lighting`` / ``status``），被拆分镜、跑图、出片
+#: 的链路消费；而"场"是**编剧结构单位**（场号、内外景、出场角色、场尾结果）。同名不同义，
+#: 塞进一张表会让重跑解析意外改掉生产数据 —— 所以两张表、字段同形、靠归属键区分。
+#:
+#: **为什么留在 ``darme.db`` 而不是派生库**：这是**项目事实**，要跟备份走、要参与指纹门禁。
+#: 剧本一改，``source_script_hash`` 与 ``script_fingerprint.compute_script_hash()`` 对不上，
+#: 这些行就标 ``status='stale'`` —— 语义与 ``check_episode_fingerprint`` 的 ``stale_count`` 一致。
+script_scenes = Table(
+    "script_scenes", metadata,
+    _pk(),
+    _int("episode_id", nn=True),
+    _int("scene_no"),
+    #: authored（剧本原有场号）/ production-assigned（解析时按顺序补的）/ missing（没认出边界）
+    _txt("no_source", default="authored"),
+    _txt("int_ext"),
+    _txt("location"),
+    _txt("time"),
+    #: 逗号分隔的角色名（与 A 侧 ``scene_index`` 同形，便于跨两侧比对）
+    _txt("cast"),
+    #: 本场第一条非对白行的原文引用（截 120 字）—— 是引用，不是概括
+    _txt("opening"),
+    _txt("props"),
+    #: 语义字段，解析器**留空**，等模型或人填：那是"这场戏完成了什么"，正则给不出来
+    _txt("core_event"),
+    _txt("scene_tail"),
+    #: 正文偏移：对 ``episodes.script_content``（没有则 ``content``）成立，可直接切片取原文
+    _int("char_start"),
+    _int("char_end"),
+    _int("chars", default=0),
+    _real("confidence"),
+    _txt("extractor"),
+    _txt("source_script_hash"),
+    _txt("status", default="current"),
+    _txt("created_at", nn=True),
+    _txt("updated_at", nn=True),
+)
+
+#: 每一集**这一次**解析的元信息（与 A 侧 ``scene_docs`` 对称）。
+#:
+#: 单独一张表而不是挂在 ``script_scenes`` 每行上：``strategy`` / ``notes`` 是**整篇**的属性，
+#: 粘到每场会重复 N 份，改一次要改 N 行 —— 而"这篇为什么只切出一场"正是必须能读到的信息。
+script_scene_docs = Table(
+    "script_scene_docs", metadata,
+    _pk(),
+    _int("episode_id", nn=True),
+    _txt("script_hash"),
+    _txt("strategy"),
+    _int("scenes", default=0),
+    _real("confidence"),
+    _int("chars", default=0),
+    _txt("notes"),
+    #: 偏移相对的字段：scriptContent / content —— 前端切片时必须照着它取
+    _txt("source_field"),
+    _txt("status", default="current"),
+    _txt("created_at", nn=True),
+    _txt("updated_at", nn=True),
+)
+
+#: 仅 Python 侧新增、Node ``schema.ts`` 里没有的表。自检脚本比对"表数量与 Node 一致"时
+#: 必须排除它们，否则会把**有意新增**误报成"多了一张表"。
+PYTHON_ONLY_TABLES = ("script_scenes", "script_scene_docs")
+
 #: Node 侧 ``schema.ts`` 的全部表，供自检脚本比对「表数量是否与 Node 一致」。
-ALL_TABLES = tuple(metadata.tables.keys())
+ALL_TABLES = tuple(name for name in metadata.tables if name not in PYTHON_ONLY_TABLES)

@@ -21,6 +21,12 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 判据还没跑就崩在第一条打印上 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
 from app.services.engine import h3_encode as enc  # noqa: E402
 from app.services.engine import qwen3vl_te as te  # noqa: E402
 from app.services.engine import qwen3vl_vision as qv  # noqa: E402
@@ -158,7 +164,7 @@ def _report() -> int:
     for name, ok, detail in _RESULTS:
         if not ok:
             print(f"FAIL {name} —— 实际：{detail!r}")
-    print(f"SUMMARY {len(_RESULTS) - len(failed)}/{len(_RESULTS)} 通过 ✓")
+    print(f"SUMMARY: {len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed")
     return 1 if failed else 0
 
 

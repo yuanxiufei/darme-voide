@@ -124,6 +124,24 @@ def to_tool_list(value: Any) -> list[str]:
     return names
 
 
+def to_allowed_tools(front: dict[str, Any]) -> list[str]:
+    """``allowed-tools`` **及其变体键**（``allowed-tools-speech`` …）合并后的工具清单。
+
+    外部库出现过变体键：``voice-clone`` 把 ``hub_voice_prepare`` 只写在 ``allowed-tools-speech``
+    里、正文一次都没提。只读 ``allowed-tools`` 会让这条声明**静默消失** —— ``required_tools``
+    少一项 ⇒ ``missingTools`` 少一项 ⇒ 前端「缺 N 个工具」徽标不亮，而 ``foreign_tool_refs``
+    也救不了（正文没有对应的反引号 token）。那枚徽标存在的理由正是「绑定后它会教 Agent 调用
+    不存在的工具（既不报错也不生效）」，此刻却一声不响。
+    """
+    names: list[str] = []
+    for key, value in front.items():
+        if str(key).startswith("allowed-tools"):
+            for name in to_tool_list(value):
+                if name not in names:  # 跨键也要去重保序
+                    names.append(name)
+    return names
+
+
 def normalize_priority(value: Any) -> int:
     """``priority`` → 正数（缺省 / 非法 → 100，越小越靠前）。"""
     try:
@@ -177,8 +195,9 @@ def parse_skill(content: str, fallback_id: str) -> ParsedSkill:
         workflows=to_str_array(front.get("workflows")),
         agents=to_str_array(front.get("agents")),
         priority=normalize_priority(front.get("priority")),
-        # ⚠️ YAML 键是 `allowed-tools`（连字符），不是 snake_case
-        allowed_tools=to_tool_list(front.get("allowed-tools")),
+        # ⚠️ YAML 键是 `allowed-tools`（连字符），不是 snake_case；
+        # 外部库还有 `allowed-tools-speech` 这类**变体键**，见 `to_allowed_tools`
+        allowed_tools=to_allowed_tools(front),
     )
     return ParsedSkill(
         metadata=metadata,

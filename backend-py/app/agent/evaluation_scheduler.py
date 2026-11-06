@@ -31,6 +31,7 @@ from app.services.task_logger import log_task, log_task_error, log_task_success,
 
 __all__ = [
     "get_scheduler_state",
+    "iso_in",
     "next_run_delay",
     "run_evaluation_cycle",
     "start_evaluation_scheduler",
@@ -71,6 +72,12 @@ def _iso_in(delay_ms: float) -> str:
     """``new Date(Date.now() + delay).toISOString()`` —— 与 ``response.now()`` 同形。"""
     moment = datetime.now(timezone.utc) + timedelta(milliseconds=delay_ms)
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+#: 公开别名：另一个定时器（``services/knowledge_scheduler.py``）也要报"下一轮是何时"。
+#: 别各抄一份 —— ``toISOString`` 的毫秒位数/``Z`` 后缀错一位，前端 ``new Date()`` 就解析成
+#: ``Invalid Date``（不报错，只显示为空）。
+iso_in = _iso_in
 
 
 async def run_evaluation_cycle() -> list[dict[str, Any]]:

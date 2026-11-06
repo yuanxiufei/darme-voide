@@ -28,17 +28,17 @@
 
 | # | 一级层 | 目录 | 模块数 | 二级域数 | 一句话职责 |
 |---|--------|------|-------|---------|-----------|
-| L1 | 接口层 | `app/routers/` 42 + `app/` 顶层 3 | 45 | 9 | HTTP 契约：入口挂载、路由、错误码形状 |
-| L2 | 智能体层 | `app/agent/` `app/mcp/` | 23 | 5 | 协议、工具、循环、多智能体、评测闭环 |
-| L3 | 业务服务层 | `app/services/*.py` | 75 | 12 | 领域逻辑：剧本→资产→提示词→生成→合成→质检 |
+| L1 | 接口层 | `app/routers/` 43 + `app/` 顶层 3 | 46 | 9 | HTTP 契约：入口挂载、路由、错误码形状 |
+| L2 | 智能体层 | `app/agent/` `app/mcp/` | 24 | 5 | 协议、工具、循环、多智能体、评测闭环 |
+| L3 | 业务服务层 | `app/services/*.py` | 77 | 12 | 领域逻辑：剧本→资产→提示词→生成→合成→质检 |
 | L4 | 推理引擎层 | `app/services/engine/` | 64 | 6 | 自研 torch 推理：格式/量化/骨架/编排 |
 | L5 | 本地执行与厂商适配 | `services/{adapters,ollama_native,lora_train}` `app/local_services/` `app/vendor/` | 48 | 4 | 把请求落到具体后端、进程、显卡 |
 | L6 | 平台层 | `app/core/` | 6 | 3 | 配置、DB、模型表、请求/响应/CPU 预算 |
-| L7 | 开发期工具 | `app/scripts/` `tests/` | 21 | 4 | 体检、基准、结构守卫（不进运行时） |
+| L7 | 开发期工具 | `app/scripts/` `tests/` | 22 | 4 | 体检、基准、结构守卫（不进运行时） |
 
-> 模块数口径：**该目录下 `.py` 文件数，排除 `__init__.py`，含子目录**。七层相加 **282**；
+> 模块数口径：**该目录下 `.py` 文件数，排除 `__init__.py`，含子目录**。七层相加 **287**；
 > 另有 `app/skills/**/scripts/` 的 3 个技能脚本（见 L2-5：不进应用分层，但也要点名）
-> ⇒ ㊆ 实际要求全文点名 **285** 个 `.py`。
+> ⇒ ㊆ 实际要求全文点名 **290** 个 `.py`。
 > 数字是 2026-10-30 实测值；增删模块必须同时改正本表与各节标题 —— 漏改会被
 > `tests/structure_test.py` 的 ㊆ 抓出来（新模块没在本文点名即 FAIL）。
 > L7 的「166 套测试」是套件数，会随开发增长 —— 以 `tests/run_all.py::TESTS` 为准，本文不追着改
@@ -64,7 +64,7 @@
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 剧目 CRUD | `app/routers/dramas.py` | 与 Node 侧 `dramas.ts` 逐端点对齐 |
-| 分集 CRUD | `app/routers/episodes.py` | 整域 10/10 已迁 |
+| 分集 CRUD | `app/routers/episodes.py` | 12 端点：整域 10/10 已迁 ＋ 场次 2（`GET/POST /{id}/script-scenes`，读走 `get_conn`、解析走 `get_tx`，`?force=` 重算）|
 | 全自动管线 | `app/routers/auto_pipeline.py` | 4 端点；编排逻辑在 `app/agent/auto_pipeline.py` |
 | 生成历史 | `app/routers/generations.py` | 聚合视图，1 端点 |
 
@@ -97,13 +97,13 @@
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
-| 引擎体检 | `app/routers/engine.py` | 自研引擎的健康报告 |
+| 引擎体检 | `app/routers/engine.py` | 自研引擎的健康报告；另含 `GET /engine/capabilities`（**本轮补上 HTTP 口**：以前只有 `facade.capabilities()` 函数、路由落到 `not_migrated` 501 ⇒ 前端想知道"认哪些采样器/调度器/画布档位"只能读代码猜，猜错就是静默按默认跑）、`POST /engine/canvas-plan`、`POST /engine/plan` 收 `stage`/`target`/`canvas`/`denoise`/`initImage` |
 | 本地模型 | `app/routers/local_models.py` | 11 端点 + 2 自研端点，Node 侧 688 行 |
 | LoRA 训练 | `app/routers/lora_train.py` | LoRAMaster 移植 |
 | AI 供应商配置 | `app/routers/ai_configs.py` | 含 `/ai-providers` |
 | AI 音色 | `app/routers/ai_voices.py` | Node 侧 437 行 |
 
-### L1-5 智能体与技能（5）
+### L1-5 智能体与技能（6）
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
@@ -112,8 +112,9 @@
 | 技能管理 | `app/routers/skills.py` | 6 端点；目录域非数据库 |
 | MCP 客户端 | `app/routers/mcp.py` | 3 端点 |
 | 评测 | `app/routers/evaluation.py` | 5 端点 |
+| 文本流式 / 结构化 | `app/routers/text.py` | 2 端点（SSE 流式 + schema 校验+回喂）；Node 侧无对应域 ⇒ 只在 route_parity 的 EXTRA 表 |
 
-### L1-6 资产与存储（5）
+### L1-6 资产与存储（6）
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
@@ -122,13 +123,15 @@
 | 存储根切换 | `app/routers/storage.py` | 2/2 |
 | 资源库规格 | `app/routers/libraries.py` | 角色/场景/兵器/服装四类声明 |
 | 导出 | `app/routers/export.py` | 7/7 |
+| 知识库检索与写能力 | `app/routers/knowledge.py` | 7 条 GET（report/tree/documents/search/facets/document/scenes）＋ 6 条写端（`GET /document/state`、`POST|DELETE /document/chunk`、`DELETE /document`、`POST /document/restore`、`GET /overlay`、`POST /upload`）；目录维度过滤交给 `services/script_catalog`、`skill=` 交给 playbook，`/facets` 一并给 `playbookSkills`；`/tree`＋`/documents` 是前端「浏览态」的数据源（目录树带 `documents/withText/ocr/ocrPartial/pending` 五计数：`ocr` **只认 sidecar 的 `status='ocr'`**，`ocrPartial` 是「有记录但只跑了几页」且**计入 `pending`** 的子集；文档清单按 `only=all|withText|ocr|partial|pending|extra|edited|buried` 筛，`q=` 只按路径模糊匹配（与 `/search` 的正文 bm25 是两条路）；`/search` 另有 `includePartial` 才返回半成品，并逐条回 `coverage={pages,chunkPages}`）；**写操作一律落第四库覆盖层 `library-overlay.sqlite`**，三只读库（第三方预建＋本仓 OCR sidecar＋本仓补录）仍只读打开；**正文只走 `POST /document/chunk` 的 JSON body，没有 PUT**（800 字正文走 query 会被 URL 上限截断，症状是「保存成功但后半段丢了」）；`/overlay` 同时下发上传口径（`upload.accept/label/maxBytes/maxFiles/dir`），前端不抄第二份；`/scenes?path=` 读 A 侧场次派生库，三种回执分得很清：`available=false`（还没建索引）／`scenes=[]`（这一份还没解析过，属按需生成、**不是**漏做）／`document.status=no-heading`（解析过但没认出边界）；**不在端点里触发解析**（一份要读全本几百页，放端点里必超时）|
 
-### L1-7 预设与风格（3）
+### L1-7 预设与风格（4）
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 预设 CRUD | `app/routers/presets.py` | — |
-| 预设框架 | `app/routers/preset_framework.py` | 247 行 |
+| 预设框架 | `app/routers/preset_framework.py` | 247 行；6 端点此前**零前端调用**（整域孤儿），2026-11-04 起由 `PresetPipeline.vue` 全接 |
+| 预设框架入口 | `frontend/app/components/PresetPipeline.vue` + `composables/useApi.ts::presetFrameworkAPI` | 首页「框架开局」：取卡（可换一张，`excludeFamily` 挡重）→ 一键（`full-pipeline`）或只建结构（`create`）→ 面板按 `status` 逐镜显示，缺首帧时给「生成首帧」，再「生成视频」。⭐ 语义坑：`storyboards.status` 是**入队态**（`generate_image()` 返回 id 时就写 `image_ready`，异步成败不回写），完成态只看 `first_frame_image`/`video_url` 两列 —— 反过来读会得到「首帧就绪但首帧为空、0/5」；卡里的 `THEME_FAMILY_A` 是后端占位数据池，不是乱码（2026-11-04） |
 | 风格档案 | `app/routers/style_profiles.py` | — |
 
 ### L1-8 运维与观测（5）
@@ -140,8 +143,9 @@
 | 用量成本 | `app/routers/usage.py` | — |
 | Webhook | `app/routers/webhooks.py` | 123 行 |
 | 应用设置 | `app/routers/app_settings.py` | — |
+| 知识闭环 | `app/routers/knowledge_loop.py` | `/api/v1/knowledge-loop`：跑次归一 `/runs`、台账 `/entries`、蒸馏 `/distill`、投喂 `/feed`、数据集 `/datasets`＋`/datasets/resolve`（= 训练 `datasetRef` 的可选值与同一判据）、参数覆盖 `/tuning`、训练登记 `/training`（**统计坏了返回空且报 `problems`，不 500**） |
 
-## 3. L2 智能体层（`app/agent/` 22 + `app/mcp/` 1，5 个域）
+## 3. L2 智能体层（`app/agent/` 23 + `app/mcp/` 1，5 个域）
 
 这一层是「谁能自己决定下一步」的地方：上接 HTTP，下用 L3 的领域能力，自己不管数据形状。
 
@@ -154,18 +158,21 @@
 | 上下文预算与压缩 | `app/agent/context_budget.py` | 零依赖；超预算时的裁剪策略 |
 | 输出协议 | `app/agent/protocol.py` | 移植 `agents/protocol.ts`（79 行）——**唯一权威**（services 侧那份分叉副本已于 2026-10-30 删除） |
 
-### L2-2 工具集（6，`app/agent/tools/`）
+### L2-2 工具集（7，`app/agent/tools/`）
 
 工具是「Agent 能做的动作」，全部是纯函数式封装，不持有状态。
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 语料检索 | `app/agent/tools/corpus_tools.py` | 找相似片段/成法引用 |
+| 剧本/编剧知识库检索 | `app/agent/tools/library_tools.py` | 挂编剧/分镜 Agent，透传 `services/script_library` 的结果（不另造字段） |
+| 技能附件按需读取 | `app/agent/tools/skill_ref_tools.py` | `list_skill_refs`/`read_skill_ref` 两个工具，挂编剧/分镜 Agent；**只转发**，路径校验与上限全在 `services/skill_refs.py` |
 | 角色·场景·物品提取 | `app/agent/tools/extract_tools.py` | 445 行，六大工具之一 |
 | 剧本改写 | `app/agent/tools/script_tools.py` | 83 行 |
 | 分镜拆解 | `app/agent/tools/storyboard_tools.py` | 517 行，体量最大 |
 | 宫格图提示词 | `app/agent/tools/grid_prompt_tools.py` | 92 行 |
 | 角色音色分配 | `app/agent/tools/voice_tools.py` | 148 行 |
+| 既往经验检索与提案 | `app/agent/tools/knowledge_tools.py` | `search_knowledge`（只读，透出 `ranking=bm25/like/recent` 三态，不伪造分数）+ `propose_knowledge`（**只能写 `proposed`**，证据核不过整条拒） |
 
 ### L2-3 上层编排（5）
 
@@ -188,7 +195,7 @@
 | 执行器 | `app/agent/evaluation/evaluator.py` | 210 行 |
 | 确定性评分 | `app/agent/evaluation/scorer.py` | 327 行，**纯函数，不依赖 LLM/DB** |
 | 提示词优化器 | `app/agent/evaluation/optimizer.py` | 216 行，状态机闭环 |
-| 无人值守调度 | `app/agent/evaluation_scheduler.py` | 移植 `evaluation-scheduler.ts`（126 行） |
+| 无人值守调度 | `app/agent/evaluation_scheduler.py` | 移植 `evaluation-scheduler.ts`（126 行）；`iso_in`/`next_run_delay` 是**唯一**的「下一轮时间」算法（知识复盘定时器共用，别抄第二份） |
 | 命令行入口 | `app/agent/evaluation/cli.py` | 64 行 |
 
 ### L2-5 外接协议与技能库（1 + 10 个 skill 目录）
@@ -198,6 +205,7 @@
 | MCP 客户端 | `app/mcp/client.py` | 远端工具包成本地 `Tool`；只依赖 `core` |
 | 技能内容（自有） | `app/skills/` | `extractor` / `script_rewriter` / `storyboard_breaker` / `voice_assigner` / `grid_prompt_generator` / `production-tools` 等，靠 `SKILL.md` 自述绑定 |
 | 技能内容（外部库） | `app/skills/*/library.yaml` | 库由声明文件识别，库内 skill **不默认注入** |
+| 技能附件读取 | `app/services/skill_refs.py` | 加载器**只读 SKILL.md**，`references/` 下正文本来没有任何通路会去读（＝死料）。本模块给模型一只只读的手：根只能在 `skills_dir()`、只允许进 `references/`、后缀白名单＋512 KB／400 行上限，路径判据是**解析后**仍在 `references/` 内（不是字符串前缀，后者会被 `../` 绕过）；`available=false`（没有附件目录）与 `files=[]`（有但空）**分得开** |
 
 `app/skills/` 里的 `.py` **不属于应用分层**：它们是技能自带的命令行脚本，由 `SKILL.md` 指明何时调用，
 后端进程不 import 它们（改它们不需要跑 `layering_test`）。逐份点名（㊆ 要求覆盖）：
@@ -208,15 +216,20 @@
 | 能量/情绪峰值 | `app/skills/production-tools/beat-sync-editor/scripts/energy_analyze.py` | 找高张力片段与裁剪窗口 |
 | 字幕校验与纠错 | `app/skills/production-tools/subtitle-correction/scripts/subtitle_tool.py` | 对照原稿分词级差异 |
 
-## 4. L3 业务服务层（`app/services/*.py` 75 模块，12 个域）
+## 4. L3 业务服务层（`app/services/*.py` 81 模块，13 个域）
 
 L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTTP 框架、换个 Agent 循环，这段逻辑还成立吗」——
 成立就属 L3。
 
-### L3-1 剧本要素与连续性（8）
+### L3-1 剧本要素与连续性（13）
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
+| 剧本/编剧知识库检索 | `app/services/script_library.py` | 只读第三方 fts5 库（bm25）+ 切 md 小节；旧盘路径重映射、隔离目录剔除（**path 过滤一律用 `instr`，不用 `LIKE`**：这几处 SQL 打在 fts5 虚拟表 `chunks` 上、`path` 是 `UNINDEXED` 列，fts5 的 LIKE 优化对**长度恰为 3 的纯 ASCII** pattern 会静默返回 0 行——实测 `path LIKE '%doc%'` = 0 条而 `instr(path,'doc')>0` = 30923 条，同一库上 `'%Chinatown%'` 又是 184 条正常，症状是筛「BBC」「S02」「doc」永远筛出空、中文关键字却照常，看不出是过滤写错）；1–2 字回落 LIKE 并如实标 `ranking`。**扫描件有第二条命**：供应商库登记 5403 份、只有 2262 份有正文块（3139 份是扫描件，`get_text()` 全空），本仓用 `app/scripts/corpus/ocr_index.py` 逐页 OCR 进 sidecar（`data/ocr/library-ocr.sqlite`，`SCRIPT_LIBRARY_OCR_DB` 可换路径）⇒ `search` 两库各取窗口后**按秩融合**、每条带 `from: curated|ocr` 且 `parts` 分列两库秩与命中数，`open_document` 主库 0 块时自动落到 sidecar 并回 `origin`（两库分数不可比，只比秩）；**未跑完的 OCR 文档默认不进检索**——`partial`（只扫了前几页，块却已写进 fts5）与 `quarantine` 用 `NOT IN (SELECT id FROM documents WHERE status IN (...))` 排除（实测 sidecar 80 块里 49 块是这种，其中一份 920 页的书只扫了 1 页），要看得显式给 `include_partial=True` 并逐条回 `coverage={pages,chunkPages}`；参考侧的 playbook 数据在 `data/playbook/`（`README.md` 记来源/版本/许可）、**随仓库分发**（2026-11-04 起；此前在 gitignore 的 `方法语料/` 里 ⇒ 新克隆的仓库该源为空），只索引 `PLAYBOOK_DIRS` 登记的来源目录（`film-expert-bridge/`、`film-cinedance/` —— **目录名即 `skill=` 取值**；2026-11-04 扁平化删掉 `packs/`／`references/`／`library/` 三层零信息壳，最深路径从 6 层目录降到 3 层，旧写法 `skill="packs/xxx"`／`"skills/xxx"` 仍由 `_skill_arg()` 归一；根规约不进、未索引数照报），`skill=` 只筛 playbook，>1500 字小节切窗并回 `part/parts`；**切窗按句界对齐 ＋ 15% 重叠**（口径抄 RAGFlow `chunker/token.go::mergeUnits` 的三步契约：超宽单位先按句界展开、阈值按 overlap 缩小 `width*(100-pct)/100`、新窗无条件前置前窗尾巴）——不重叠时跨窗那半句只剩一半，模型会误读残句；**`source=all` 按 RRF 重排**（口径抄 txtai `embeddings/search/hybrid.py::rrf`，`k=1`、两源等权）：两源分数量纲不可比（bm25 负值／词频／LIKE 无分），排序依据落在回执 `fusion`，`score` 仍是各源原分数且明写「量纲不可比」，单源时 `fusion=None` |
+| 知识库覆盖层（编辑/删除/上传台账） | `app/services/library_overlay.py` | 第四只库 `data/library/library-overlay.sqlite`（`SCRIPT_LIBRARY_OVERLAY_DB` 可换路径）：`edits`（UNIQUE(source,path,chunk_no)）／`tombstones`／`uploads`／`edits_fts`（trigram）／`meta`；**三只读库是派生物（重跑会覆盖）⇒ 就地改会让 `onDisk=true` 变假话**，故一切写操作只落这一层，`open_document` 读时叠加、`_scan_documents`/`search_methods` 读时剔除墓碑（fts5 的 `path` 是 UNINDEXED ⇒ 窗口后内存过滤并如实报 `hidden.count`，不假装「本来就没有」）；块号对不上（原库重建过）报 `staleEdits` 而**不**静默丢弃；`hard` 物理删只对「本仓上传且文件在盘上」成立，其余只能进回收站；`_stamp()` 进程内缓存戳保证改完即时生效 |
+| 本仓补录上传 | `app/services/library_ingest.py` | 落 `00-本仓补录/`，`MAX_FILE_SIZE=64MB`／`MAX_FILES=20`／扩展名白名单；解析复用 `lib_index._build/_save`（与脚本同一口径，不另写一套），同名不覆盖改 `-2`；三档回执不许合并成「失败」：`ingested`（已入库可搜）／`quarantined`（**文件已在盘上**、只是抽不出正文 ⇒ 转 OCR）／`rejected`（未落盘，理由说清）；`limits()` 是前端校验口径的唯一真源 |
+
+| 知识库目录层 | `app/services/script_catalog.py` | 两份 CSV（主目录 **UTF-8 BOM** / 电影节标签 **GBK**）→ 内存索引；国家·类型·奖项·权限·资料类型过滤，三态分明（没给条件 / 目录不在 / 没人满足），**不建 sidecar DB** |
 | 剧本指纹门禁 | `app/services/script_fingerprint.py` | 改剧本即失效下游签名 |
 | 台词说话人匹配 | `app/services/character_match.py` | 移植 `shared/character-match.ts` |
 | 场景地点/时段匹配 | `app/services/scene_match.py` | 提取去重与陈旧关联清理共用 |
@@ -225,6 +238,10 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 分镜 → 连续性适配 | `app/services/storyboard_continuity.py` | 零依赖 |
 | 分镜关联同步 | `app/services/storyboard_helpers.py` | 含台词解析与 TTS 匹配校验 |
 | 视觉图谱 | `app/services/visual_graph.py` | 角色/场景/道具的图结构 |
+| 场次解析（纯函数） | `app/services/scene_parser.py` | 剧本正文 → 场次，**零 IO／零模型**（services 层不依赖 LLM）；同一行内按下列顺序先命中先用：`md-heading` 0.95 ＞ `cn-numbered` 0.9／裸数字 0.85 ＞ **`ep-scene` 0.85**（短剧「集-场号」`1-1`、`1-1a日外焉州-康郡`、带「场」前缀的 `场1-1 金銮殿 日 内`：`scene_no` **只取场段**，集号每集重置、schema 无 episode 列，故集号只留在 `heading` 原串里）＞ **`hash-scene` 0.85**（韩语／英语剧本的 `S#1. 치킨 집 앞 (밤)`：`S` 是 scene 首字母、`#` 只是分隔符；单独起头的 `#1` 不认 —— markdown 标题、脚注、页码都是 `#`）＞ `slug` 0.9（`INT./EXT.` 起头）＞ **`place-time` 0.6**（无场号、无 INT/EXT 字面，只有「地点＋时段+内外」黏合成一行的 `纯黑环境 夜内`／`二层客厅 日内`；判据最弱 ⇒ 整行要短、无句读与台词冒号、无 `接N-N`／`插入镜头`／`字幕` 这类注记，且**全篇 ≥3 条才采纳**，单条一律丢弃）＞ `none`（整篇一场、如实标 missing）。内外景有三条来源：`INT./EXT./内景/外景` 字面、`夜内`/`日外` 这类「时段+内外」粘合词、以及**挂在地点尾字的单字 `内`/`外`**（`民政局内 日`、`（回忆）客厅内`）；最后这条 `郊外`/`城内` 这类地名**不截字**（截完只剩一个「郊」，更难读），只补内外景。跨行还有一次仲裁：OCR 把正文按页压平后标记多埋在行中间，行内头数 > 行首头数 2 倍时改走 `inline` 重切（`cast`/`opening` 改按句读当行看）。`SCENE_STRATEGIES` 是**在册枚举**，`parse_scenes` 真会返回 `inline` ⇒ 它必须在册，否则"返回值不在枚举里"这类漂移永远查不出来。**纯空行不切**——中文剧本空行到处都有，按空行切会得到几十个假场次，假结构比没结构更坏；判不出来的如实标 `no_source`/`confidence`/`strategy`，`core_event`/`scene_tail` 一律 None（那是语义判断，不拿首句动作糊弄）。**围栏代码块整体不算**（`_fenced_lines` 返回行号集＋字符区间两份：走行结构的按行号挡、走 `inline` 的按区间挡，同一件事两处都要挡），`extract_cast`/`_opening_line` 也只吃 `_content_lines` 过滤后的行；首个场次头之前 ≥200 字单列为 `extractor="preamble"` 的一场（`scene_no=null`、不假装第 0 场、不拉低整篇置信度） |
+| 第三库：主库没登记的格式 | `app/scripts/corpus/lib_index.py` | 「盘上有、搜不到」的那批补进 `data/ocr/library-extra.sqlite`（`SCRIPT_LIBRARY_EXTRA_DB` 可换路径），**供应商库一字不写**。切块口径与 OCR sidecar 逐字对齐（800 字/块、1500 字/页、可打印率 <0.85 判 `quarantine` 且一块不写——坏文本进了 fts5 就再也分不清"书里就这么写"和"抽错了"）。**扩展名没有信用**：实测 873 份 `.doc` 里 50 份其实是 RTF、77 份是 WPS 写的 Word（antiword 一律回 `is not a Word Document`），所以按**内容签名**分派——`{\rtf` 走内置 RTF 解、`d0cf11e0` 先 antiword 再退内置 FIB 分片表（`WordDocument` 流头取 `fcClx/lcbClx`、`1Table/0Table` 里读 CLX 的 Pcdt，`fc` 的 bit30 表示 8 位压缩还是 UTF-16LE）。两处码表都是**必需**而非保险：RTF 的 `\'hh` 先按当前字体的 `\fcharset`（本库 50 份中文 RTF 里混着韩国剧本，文档头声明 `\ansicpg936`、正文用 `\f1`(129) 排韩文，只按文档级码表解就是整屏 GBK 乱码且**每个字都可打印**）；Word 的压缩分片按 FIB 的 `lid` 定码表（cp936 与 cp949 字节区间几乎重叠，两边都能"成功"解出字，只有一边是真字）。OLE 头解析一律带**按文件体积的扇区上限＋环检测**（DIFAT 链条与 FAT 链都可能指回自己，实测某份 116KB 的 Word 让纯 Python 解析器原地转死）。**可打印率里"空白算可打印"是判据本身的修正**：`str.isprintable()` 对 `U+3000`（全角空格）与 `U+00A0` 返回 `False`，而中文剧本整段靠全角空格缩进——实测《生死场》33884 字里 5833 个是这类空白，按 `isprintable` 算得 0.83 就被判隔离、一块不写，正文其实一个字没坏（一轮全量里 37 份完好剧本因此漏收）；现在空白一律算可打印，扣分项显式点名控制符与解码替换符 `U+FFFD`（后者 `isprintable` 反而是 `True`），隔离行同时报「抽出 N 字」以便区分「抽出来是垃圾」与「正文是图片/嵌入对象，该走 OCR」。入库前统一过 `_tidy_text`（`\r\n`/`\r`→`\n`、`U+00A0`→空格、删零宽空格与控制符、三行以上空行压成一行）。`--force` 重算本库已收录的（主库/OCR 覆盖的仍跳过），`--path-substr=`／`--limit=` 圈定范围，跳过原因逐条合计报出（`.pdf` 归 `ocr_index.py`、`.csv` 是登记表不是语料）；`--prune [--apply]` 清掉「口径已经变了」的旧记录（早期按文本收的 6 份 `.csv` 目录清单会被检索命中，`--all` 只增不删所以留着就是自相矛盾；默认只报清单，`--apply` 才删 `documents`+`chunks`），清完本库 880 份／31157 块与真实候选数逐一对上 |
+| 场次索引（A 侧派生） | `app/services/scene_index.py` | 库里 5403 份参考资料 → 两张表 `scene_docs`（每份一行：sha256/strategy/confidence/status/hint）＋ `scenes`（每场一行），落在 `data/ocr/library-scenes.sqlite`，**不进 `darme.db`**：A 侧纯派生（`DELETE` 后重跑即可），进项目库会被算进备份体积、被 `db_upgrade.py` 当项目结构去补列、换数据根时莫名跟着跑丢。对齐键是 `path`（相对库根）**不是** `document_id`——两库各自编号，只有 path 是共同锚。拼正文时**必须**查 `chunk_no` 连续：OCR 门禁把整页判 reject 时一块都不写，跳号处往往正是场边界，不记就会把两场粘成一场还不自知。跳过判据**两条都要对**：正文 `sha256` 与 **解析器指纹** `parser_sha`（`scene_parser.py` 源码字节的 12 位 sha1，`PARSER_SHA` 模块级算一次）——只比 sha256 的话，「解析器改了、正文没改」的旧派生行会被当成最新，`--all` 整批 `skipped` 却看起来"跑完了"；换指纹就自动重算，`--all`（不带 `--force`）因而是**可断点续跑**的，`--stats` 会单独报 `staleDocuments` |
+| 场次结构（B 侧事实） | `app/services/script_scenes.py` | 本仓剧本 → `script_scenes`（每场一行）＋ `script_scene_docs`（每集一行：strategy/confidence/notes/`source_script_hash`），进 `darme.db`、剧本一改标 stale（`stale` 用**当前正文现算**的指纹判，不读 `episodes.script_hash` 那列——列是缓存，直接改库时它是陈的，最该报 stale 的时候反而不报）；与 A 侧**共用解析器但不共用表**——混在一张表里，"重跑解析"会意外清掉项目数据。偏移契约：`char_start`/`char_end` 相对**原文未 strip**，而指纹按 strip 后内容算（既有口径不能改）⇒ 偏移以原文为准、哈希以 strip 为准，回执 `sourceField` 说明该切 `scriptContent` 还是回退 `content` |
 
 ### L3-2 提示词与镜头语言（7）
 
@@ -254,7 +271,8 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 |---|---|---|
 | 图片生成 | `app/services/image_generation.py` | 75 行级编排 |
 | 视频生成 | `app/services/video_generation.py` | 495 行，最大的一条 |
-| 文本生成 | `app/services/text_generation.py` | 556 行，可走 Ollama 或自研引擎 |
+| 文本生成 | `app/services/text_generation.py` | 556 行，可走 Ollama 或自研引擎；含 `generate_json`（schema 校验 + 回喂重试） |
+| 文本流式编排 | `app/services/text_stream.py` | 归一事件 `meta/thinking/content/usage/done/error`；三条路（自研引擎 / Ollama ndjson / OpenAI SSE） |
 | TTS 合成 | `app/services/tts_generation.py` | 140 行级 |
 | 音色快速复刻 | `app/services/voice_clone.py` | 135 行 |
 | 配音情绪/语速契约 | `app/services/voice_contract.py` | 口径来自 IndexTTS-2.5 节点面 |
@@ -270,6 +288,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 单镜头合成 | `app/services/ffmpeg_compose.py` | FFmpeg 单镜 |
 | 多镜头拼接 | `app/services/ffmpeg_merge.py` | FFmpeg 多镜 |
 | 尾帧提取 | `app/services/frame_extractor.py` | 连续性状态机 v3 的衔接链路 |
+| 视频插帧 | `app/services/video_interpolate.py`、`app/routers/video_ops.py` | FFmpeg `minterpolate` 2×/3×（输出帧率跟随源、超时杀进程、尺寸偶数化） |
 | 校色 | `app/services/color_grade.py` | **整域关闭** |
 | 剪映草稿导出 | `app/services/jianying_draft.py` | 339 行 |
 | 导出服务 | `app/services/export_service.py` | 192 行级 |
@@ -279,7 +298,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 图像连续性 QC | `app/services/consistency_qc.py` | 移植 `consistency-qc.ts` |
-| 技术维度 QC | `app/services/technical_qc.py` | 281 行 |
+| 技术维度 QC | `app/services/technical_qc.py` | 471 行；九个阈值默认值仍是 `TECH_QC_THRESHOLDS`（TS 镜像常量，`route_parity_test` 逐值核），读取统一走 `qc_thresholds()` 过 `tuning` 的 `qc` 伪档（见下方「参数覆盖层」） |
 | 镜头级打分 | `app/services/qc_scoring.py` | 272 行 |
 | QC 报告交付物 | `app/services/qc_report.py` | 515 行 |
 
@@ -294,6 +313,16 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 权重指纹 | `app/services/model_fingerprint.py` | **读文件头判架构**，不加载权重、不需要 torch |
 | 模型目录类别 | `app/services/model_folders.py` | ComfyUI 口径 + 任意目录声明解析 |
 | 运行时体检 | `app/services/runtime_doctor.py` | 「这条流水线现在能不能真跑」（2026-10-30） |
+| 修复内核 | `app/services/repair_tools.py` | 提案/应用/回滚三件套：每处替换**唯一命中**、应用前全量备份、方案过期整单拒（源 `assistant-runtime/repair-tools.mjs`，2026-11-03） |
+| 修复诊断 | `app/services/repair_diagnose.py` | 「现在缺什么、缺了堵住哪条工作流」：从工作流 loader 反推依赖 + 与本机盘面比对（源 `diagnostics.mjs` **重写**，只取摘要式设计，2026-11-03） |
+| 修复技能 | `app/services/repair_skill.py` | L0–L4 权能边界提示词，清单**从实现取值**（拒绝段/拒绝文件/可改前缀/各上限）不手抄（源 `assistant-runtime/skill.mjs` **重写**：只留纪律，剔除源项目运维手册，2026-11-03） |
+| 修复域 | `app/routers/repair.py` | `/api/v1/repair/{workspace,source,search,propose,proposals,apply,rollback,diagnose,skill}`；提案落盘只回 `proposalId`（校验基准不出网，2026-11-03） |
+| 画布工具层 | `app/services/canvas_ops.py` | LLM 工具调用 → 画布 op 的编译器（**22 工具**，源 34 个里 12 个本仓无宿主、逐条写理由）。⭐ 常量与前端 `canvasNodeSize.ts`/`useCanvas.ts` **逐项同源**，由 `canvas_ops_test.py` 交叉断言（源 `canvas-agent/src/canvas/*.ts` **重写**，2026-11-03；2026-11-06 补 `audio`：节点类型/生成模式/尺寸表三处 + `canvas_generate_audio` 从「未迁」挪进「已迁」，因为 Music3 真出 wav 之后画布才有音频卡的宿主） |
+| 画布工具域 | `app/routers/canvas.py` | `/api/v1/canvas/{tools,tool,ops/validate,ops/snapshot,next-x,agent,plugins,plugins/validate}`；**只编译 op 不碰画布**，执行在前端 `utils/canvasOps.ts`（2026-11-03） |
+| 画布 Agent | `app/services/canvas_agent.py` | 一句话 → op（`POST /api/v1/canvas/agent`）。**工具无副作用**：只往 `sink` 攒 op，回模型的是「已登记 N 条」；只读工具没快照时如实报错（防模型凭空编 id）。复用本仓 `default_generate` + `get_text_config`，不启子进程、不连 MCP（源 `canvas-agent` 的 codex 子进程层**不迁**，2026-11-03） |
+| 画布插件契约 | `app/services/canvas_plugins.py` | 5 个内置插件清单（源 6 个，`template` 起步样板不迁）+ 校验（id/type 命名空间/尺寸界/`RESERVED_METADATA_KEYS`/内置面板互斥）+ `/api/v1/canvas/plugins{,/validate}`。⭐ `hosted=true`：渲染槽已接（前端 `utils/canvasPlugins.ts` 清单 + `components/canvas/plugins/*` 五件，源 `plugins/canvas/*` **重写**，2026-11-03） |
+| 画布插件渲染 | `frontend/app/utils/canvasPlugins.ts` + `components/canvas/plugins/*` | 清单（type/title/默认尺寸/默认键/`contentComponent`）与后端 `BUILTIN_PLUGINS` **逐项对拍**（`canvas_plugins_test.py` ③b，含 `.vue` 在盘与分发器登记）；`PluginNodeBody` 三态（正常 / 缺组件 / 未安装）；HTML `sandbox="allow-scripts"`＋默认 `pointer-events:none`、SVG 走 `<img>`、Markdown 自写渲染器（先转义再拼标签、链接白名单）；插件键落 `node.values`（2026-11-03） |
+| 知识库页面 | `frontend/app/pages/knowledge.vue` + `composables/useApi.ts::knowledgeAPI` | 三栏：左目录树（`/tree` 计数，OCR/待补直接标在目录上）／中「浏览·检索」双态（浏览走 `/documents` 的 `q=` 文件名筛选 ＋ **真分页** `PAGE_SIZE=30`，检索走 `/search` 并按 `from` 标 `OCR`/`抽取`）／右抽屉翻 `/document` 分块原文（`hasMore` 续读）。**写能力**（2026-11-06 起，此前「只读」口径作废）：页签多 `已修改`/`回收站` 两档（覆盖层不在任何一份 sqlite 里，没这两档用户改完/删完就再也找不到）；抽屉里按 `GET /document/state` 决定按钮（`hardDeletable` 才画「彻底删除」，回收站里的件只留「还原」——画满按钮＝点了才报错）；块级编辑走 `POST /document/chunk`、撤销走 `DELETE`，`staleEdits` 当场明说「块号对不上、改动仍在覆盖层」；上传弹层拖拽＋点选同一件事（触屏没拖拽），本地校验口径由 `/overlay` 的 `upload` 下发，进度靠 XHR `upload.onprogress`（fetch 报不出进度）到 100% 后改说「服务器抽正文中」，逐文件三档结果分开摆（`待 OCR` 不说成失败）并注明「文件已在盘上」。检索结果为空时把 `sources.methods.parts` 的两库命中数摆出来（`0 条` 与「两库都没命中」是两件事） | 
 | 厂商连通性探测 | `app/services/provider_probe.py` | URL 拼接 + 探测描述 |
 | 视频时长探测 | `app/services/video_probe.py` | 15 行 |
 
@@ -304,7 +333,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 体检取数（DB 侧） | `app/services/preflight_source.py` | 按 episodeId 组装输入 |
 | 体检纯逻辑 | `app/services/production_preflight.py` | 零依赖，四块串一条 |
 
-### L3-9 外部执行通道（10）
+### L3-9 外部执行通道（20）
 
 「把活派出去」的三种通道：ComfyUI、Ollama、云端供应商。
 
@@ -312,6 +341,23 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 |---|---|---|
 | ComfyUI 工作流运行 | `app/services/comfyui.py` | 项目自己的一等公民能力 |
 | ComfyUI 渲染目标 | `app/services/comfyui_targets.py` | 图片记录 → target 的单一真源 |
+| ComfyUI 工作流目录 | `app/services/comfyui_catalog.py` | `configs/comfyui/workflows` 读取口：注册表 / 变体展开 / API 格式判定 / 步数估算（2026-11-02 移植） |
+| ComfyUI 提示词模板 | `app/services/comfyui_prompts.py` | `configs/comfyui/prompts` 四份（H3 增强 / 生图增强 / 两档图片反推）：参数落点声明 + **按上下文算的两格**（`输入模式` 有图=图片、`任务模式` 有图=图生图）+ 参考图接成 `LoadImage(9101+i)`；只**编译**成可提交 API 图，不提交不连上游，故离线可用；拼错的键 / 非法任务类型 / 超长提示词 / 超 8 张参考图**一律当场拒**（静默忽略=按默认值跑 ✗）；模板每次重读 ⇒ H3 的 `系统提示词` 追加语言指令与输出锁不会越叠越长；守卫 `tests/comfyui_prompts_test.py`（2026-11-03 自 `comfyui-gateway/src/prompt-optimizer.js` 迁入） |
+| ComfyUI 参数注入 | `app/services/comfyui_bindings.py` | `bindings` 语义：9 种 transform + 参考素材的三种挂法（文件名 / 连线 / 多参考） |
+| ComfyUI 参数落点推断 | `app/services/comfyui_infer.py` | **未登记**的 API 图 ⇒ `type/bindings/parameters/warnings`（与 registry 同形状，人工过目后登记）；判据优先级：顺 `positive/negative` 连线反查真文本格（含第二跳拼装节点）> 标题/顺序兜底；**图上本来是连线的格一律不绑**（拆线=产物变样且不报错）、正负向两套键（`TextEncodeQwenImage21` 是同节点两格）、负向保留原值作默认；采样器/调度器与族专用旋钮**不绑**（值域在节点定义里/只有该族知道）；端点 `POST /api/v1/comfyui/workflows/infer`（UI 格式 / 无输出节点 / `type` 别名当场 400，前缀 `[ui_format]` 等可机判）；守卫 `tests/comfyui_infer_test.py` + `tests/comfyui_infer_route_test.py`（2026-11-03 自 `comfyui-gateway/src/registry.js` 迁入，与 21 条已登记工作流逐格对拍） |
+| ComfyUI 运行保留清理 | `app/services/comfyui.py::purge_runs` + `app/scripts/comfyui_retention.py` | 过期运行记录与它们的本地产物一起清：**在跑的（`queued/processing`）一律不动**、**行与产物同生共死**（产物删不掉 ⇒ 记录留 ⇒ 线索不丢）、共享产物（同路径还被别的记录引用）不删、`static/comfyui/` 之外的路径整行留着；默认干跑只算账（记录数/文件数/字节/`missingFiles`），`--apply` 才真删；只读预演端点 `GET /api/v1/comfyui/runs/retention?days=` **恒干跑**（能真删的口子只留 CLI 一个，删是不可逆的，不做成能在地址栏里点的 GET），且该路由必须声明在 `/runs/{run_id}` **之前**（排后面会被当 id ⇒ 400「run_id 非法」）；守卫 `tests/comfyui_retention_test.py`（含 ⑫ 系列：恒干跑 / 路由顺序 / 跑完文件与记录都在 / `days=0` 一条不清） |
+| ComfyUI 模型槽位 | `app/services/comfyui_slots.py` | 节点输入 → 模型类别（18 条）+ 从 `/object_info` 动态发现 + 可用性判定 |
+| ComfyUI 模型名匹配 | `app/services/comfyui_match.py` | 七条红线（格式/角色/限定词/代次/规模/训练规格/家族）+ Dice·Jaccard 相似度；歧义不自动选 |
+| ComfyUI UI 图转换 | `app/services/comfyui_ui_workflow.py` | UI 格式（nodes+links）→ API 格式；Reroute/Primitive 穿透、旁路直连、widget 顺序表、游离节点剪枝 |
+| H3 说话人标签 | `app/services/comfyui_speaker_tags.py` | 描述段内补 `(S1)` 说话人 id（同主体复用）、画外音标 `off-screen` 且说明只加一次 |
+| 媒体尺寸换算 | `app/services/media_size.py` | `2k`/`16:9`/`auto` → 像素（预设表）、比例与档位反推、视频「短边=分辨率」+ 偶数化；已接进 `bindings.build_context` |
+| ComfyUI LoRA 链 | `app/services/comfyui_lora_chain.py` | `loras` 清单 → `LoraLoaderModelOnly` 串联（模型源按引用数选、下游全量重接、id 从 9000 起）；已接进 `comfyui._build_upstream_body` |
+| ComfyUI 进度 / 预览桥 | `app/services/comfyui_progress.py`、`app/routers/comfyui_events.py` | `progress_state` 按节点 value/max **加权**百分比 + 采样预览帧（只留最新 + 10 分钟 TTL）；`GET /api/v1/comfyui/runs/{id}/progress` 快照、`/events` SSE 增量；`websockets` 缺失时**降级**为轮询状态并如实 `progressAvailable=false`；已接进 `comfyui._process_run` 的轮询循环与取消路径 |
+| ComfyUI 注册表生成链路 | `app/services/comfyui.py`（`build_registry_graph` / `stage_reference_uploads` / `validate_workflow_body`）、`frontend/app/composables/useComfyRun.ts` | 前端只传 `workflowId`+`values`，服务层按注册表 `bindings` 生成图并注入（不让前端复刻拼图 ✗）；画布连线/同组素材先上传到 ComfyUI input 再落 `LoadImage`；提交前调上游 `/v1/workflows/validate`（缺节点包/悬空连线当场报，不占 GPU 空等）；SSE 收尾事件名 `error`→`failed`（避开 `EventSource` 连接错误同名词）；画布配置卡 = 工作流面板 + 进度条 + 采样预览 + 产物自动回卡。⚠️ **图与注入必须认同一个变体**：`load_graph(entry, variant)` 读的是变体那份，`apply_bindings` 就必须收 `resolve_variant(entry, variant)` 的结果 —— 传主 entry 会让变体自己声明的 `bindings`/`parameters` 一条都不生效，症状是「选了 inpaint 却按 t2i 跑、只给一张图也不报缺蒙版」，且**一行错都不报** ✗✗（蒙版重绘 / 扩图两个变体就是这么坏的，2026-11-03 修，守卫 `tests/comfyui_inpaint_test.py`） |
+| ComfyUI 失败归因 / 显存重试 | `app/services/comfyui.py`（`failure_hints` / `describe_failure` / `is_out_of_memory` / `_submit_and_poll`） | 上游原文**一字不改** + 追加一条能直接动手的建议（缺模型 / 缺节点包 / 缺 SageAttention / VDN 缺 stage-B / 显存不足 / 上游不可达；**认不出就只留原文**，不硬编原因 ✗）；上游报显存不足 ⇒ `POST /v1/free` 卸载后**重提交一次**，成功也落 `warnings` 并把用量 `retryCount` 如实记 1（**只重试一次**：每次重提交都是一次真 GPU 占用 ✗；`COMFYUI_OOM_RETRY_WAIT` 默认 1.5s）。另：参考素材预处理只服务 `kind=workflow`，H3 走自己的 `referenceImageUrls` 协议（否则远端取不到会在提交前自己打掉一条本来能跑的请求 ✗）（2026-11-03 自 `comfyui-gateway/src/runner.js` 迁入） |
+| ComfyUI 模型名匹配 | `app/services/comfyui_match.py` | `model-match` 语义（七条红线 + 相似度排序）：工作流里的作者文件名 ↔ 盘上另一档，`safetensors`/`gguf` 不互顶、角色与语义限定词必须同集（2026-11-02 移植） |
+| ComfyUI UI→API 转换 | `app/services/comfyui_ui_workflow.py` | `ui-workflow` 语义（自研重写）：界面导出的 `nodes[]`/`links[]`/`widgets_values` → `POST /prompt` 吃的 API 格式；`Note`/组开关/Reroute/`PrimitiveNode`/`mode`（2 静音、4 旁路）六处「转得出来但图是错的」保真点 |
+| H3 说话人标签 | `app/services/comfyui_speaker_tags.py` | `speaker-tags` 语义（自研重写）：H3 音视频同生成的 `(S1)` 主体标签校验与补齐 —— 只动描述段、不动音响/配乐段，同主体复用同一 id，`off-screen` 只加一次 |
 | Ollama 辅助 | `app/services/ollama.py` | 小工具集合 |
 | 模型清单合成 | `app/services/ollama_catalog.py` | 盘上清单 × 服务端能力 |
 | Ollama 客户端 | `app/services/ollama_client.py` | 有类型的 `/api/*` 接口 |
@@ -352,6 +398,20 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 任务日志 | `app/services/task_logger.py` | 可追踪执行 |
 | Trace 持久化 | `app/services/trace_store.py` | 只移植回放侧 |
 
+### L3-13 知识闭环（5）
+
+「跑过的活 → 可查的事实 → 能执行的判断 → 真的改行为」这条链，四段都是**派生表 + 一条回执纪律**：
+每段都能只靠盘上文件重建（A 侧），不往 `darme.db` 里塞（那是 B 侧，进备份、进 `db_upgrade`）。
+
+| 功能点 | 落点 | 说明 |
+|---|---|---|
+| 跑次归一（事实层） | `app/services/outcome_index.py` | `outcome-index.sqlite` 的 `runs` 表：把 traces / `video_quality_checks` / `comfyui_runs` / `api_usage` 归成同一形状（`run_id/kind/scope/status/score/cost`）；`index_state` 存 `(mtime,size)` 指纹增量重建；**没写 `status` 的记录直接拒收**（塞 `partial` 会稀释失败率）；生产写入点只有两个 —— `engine/runtime.py::_index_run`（引擎任务封口，锁外）与 `technical_qc.py::_index_qc_run`（质检写回后，`run_id` 确定性覆盖） |
+| 经验台账（知识层） | `app/services/knowledge_ledger.py` | `entries/entry_links/entry_usage` + FTS5 trigram；`upsert` 证据核不过**整条拒**；`search` 三态 `ranking=bm25(<3 字退 like)/recent`，命中数 vs 返回数分开报 |
+| 确定性蒸馏 | `app/services/knowledge_distill.py` | 四条信号（失败聚集 / 分数高分离 / 返工热点 / 成本离群）纯规则算，LLM 只负责「归纳成文」；无 LLM 时降级成模板条目且 `confidence` 封顶 0.5 |
+| 复盘定时器 | `app/services/knowledge_scheduler.py` | 每日 `HH:MM` 自动跑一次蒸馏（`knowledge.distill.enabled`，**默认关**）：串行 + 防重入（`skipped=running` 且不覆盖 `lastResult`）+ 失败隔离（蒸馏与 `lift` 各算一步）+ `running` 在 **`finally`** 里复位（`evaluation_scheduler` 缺这段、抛错即永久停摆）；**只写 `proposed` 且不调模型**（无人值守不花钱、不自动改结论）；`lift` 另有独立开关（它会把旧条目降级）；状态经 `GET /api/v1/knowledge-loop/scheduler` 如实透出（关着也答 `enabled=false`） |
+| 投喂与数据集 | `app/services/knowledge_feed.py` | L1 `compile_for_prompt`（1200 字预算，只给标题+首句）/ `record_injection`（`lift` 的唯一数据源）/ L3 `export_*_dataset`（负样本只进 eval 集）/ `resolve_dataset`＋`list_datasets`（`datasetRef` 的**唯一判据**：条数·角色·权利与 manifest 逐项对账，**再按 `items.jsonl` 现算 `sha256` 与 `contentSha256` 比字节** —— `fingerprint` 只对 `source` 取值，改正文它看不出来；老 manifest 无该字段时退到重算指纹并在 `integrity` 里如实标低一档），缺 `source`/`rights`、空集、被手改一律拒 |
+| 训练登记表 | `app/services/training_registry.py` | `training-registry.sqlite`：任务与产物**重启后仍可查**（运行时任务表是内存 dict）；产物一律 `candidate`，`promote` 才成默认且要 `basis`+证据，同类只留一个默认档；`problems()` 点名「默认档文件被删」「永远 running 的僵尸」「数据集样本文件不在盘上（血统断了）」；`dataset_json` 两表都存（`CREATE TABLE IF NOT EXISTS` 不改老库，靠 `_ensure_columns` 补列） |
+
 > **「整域关闭」读法**：Node 侧已停用、Python 侧实现完整保留并仍被测试钉着。
 > 它们不是死代码 —— 删掉会让「Node 停用」变成「能力消失」，将来重启时无从对照。见第 9 节。
 
@@ -370,17 +430,17 @@ Apache/MIT（torch/diffusers/safetensors）；② torch 已装且有 CUDA，但*
 
 | 功能点 | 落点 |
 |---|---|
-| 噪声调度（sigma 序列） | `app/services/engine/schedules.py` |
-| 几何数学（分辨率/帧数/潜空间形状） | `app/services/engine/geometry.py` |
+| 噪声调度（sigma 序列；`SCHEDULES` = `flow`（默认，t 等分＋shift）／`karras`／`normal`／`exponential`／`sgm_uniform`／`ddim_uniform` ＋ **`simple`**（1000 格模型梯子上等距取点，`steps` 整除 1000 时与 `flow` 逐位相同）／**`beta`**（`beta_ppf(1−i/steps)` 取点，零依赖 `_betacf`＋二分反演；`rint` 撞车合并 ⇒ 长度可 < steps+1）；两个新档都吃 `shift` ⇒ 走 flow 域梯子，不给 `shift` 才是几何梯子（σ 到 14.6，EDM 域）） | `app/services/engine/schedules.py` |
+| 几何数学（分辨率/帧数/潜空间形状；`latent_frames` 对 `frames < 1` / 非整数**当场拒**——原来 `max(1, int(frames))` 会把「没算出来帧数」和「1 帧视频」压成同一个值，下游只看到"怎么只有一拍"） | `app/services/engine/geometry.py` |
 | CFG 引导 + 重标定 + 步区间 | `app/services/engine/guidance.py` |
-| 采样器（扩散/流匹配去噪循环） | `app/services/engine/sampler.py` |
+| 采样器（扩散/流匹配去噪循环；`SAMPLERS` = `euler`／`heun`／`dpmpp_2m`／`dpmpp_2s_ancestral`／`dpmpp_sde`／`lms`／`euler_ancestral` ＋ **`res_multistep`**（φ₁/φ₂ 指数积分，`multistep_step` 是**唯一**符号真源，双流也调它）／**`er_sde`**（`scaler(v)=v(e^{v^0.3}+10)` 200 点积分＋三级 stage；`logsnr` 默认 `flow`）／**`lcm`**（每步直接取 denoised 再按 σ_next 回噪，不是 ODE）；`STOCHASTIC` 决定要不要 `noise_like`） | `app/services/engine/sampler.py` |
 | 长视频分段计划 | `app/services/engine/segments.py` |
 | 首/尾帧下标规划 | `app/services/engine/keyframes.py` |
-| 条件掩码（首帧/参考图那一半） | `app/services/engine/conditioning.py` |
+| 条件掩码（首帧/参考图那一半；**数目类参数一律走 `_as_int` 严格整数**：整值浮点 `2.0` 照收、`2.5` / `bool` 拒——截断会把「2.5 路参考」静默当成「2 路」，且 `max(0, …)` 式夹取会让紧随其后的 `if x < 0` 判据永远进不去） | `app/services/engine/conditioning.py` |
 | 段级音频合成（纯数学） | `app/services/engine/audio_mix.py` |
 | 参考素材指纹（哪段可跳过） | `app/services/engine/cache_key.py` |
 | 加速链（串成配置而非代码） | `app/services/engine/accel_chain.py` |
-| **VAE 分块缩放/解码**（`tile`/`overlap` 走**像素**单位＝`VAEDecodeTiled` 同义；权重累积＋除法归一 ⇒ 重叠带精确平均；`overlap<tile`、不足 1 潜像素、`tile` 过小都**报错**；只切空间、不切时间维） | `app/services/engine/vae_tiling.py` |
+| **VAE 分块缩放/解码**（`tile`/`overlap` 走**像素**单位＝`VAEDecodeTiled` 同义；权重累积＋除法归一 ⇒ 重叠带精确平均；`overlap<tile`、不足 1 潜像素、`tile` 过小都**报错**；只切空间、不切时间维；`decode_latents_tiled` 的 `out_channels` **必须由解码器给**——VAE 是「4 潜通道 → 3/4 像素通道」，不传就按输入通道核每块形状、当场报。「Qwen-Image 2.1 那族为什么不接分块」有实测结论：`decoder.middle` 是**全图单头注意力**，潜变量切块 ⇒ 整张都变（真权重相对差 1.35），ComfyUI 的 `WanVAE` 也没有 `decode_tiled`；要省显存只能切注意力**之后**的 up 块 —— 那一条**已做**在 `vae_wan`：`WanVAE.decode(tile=, halo=, attn_chunk=)` 两个旋钮各治一半（8× 那族峰值几乎全在全图注意力、2.1 那族几乎全在 up 链），实测 2048×1536：8× 20.96→3.94(attn)→1.03 GiB(tile)、2.1 8.69→3.21 GiB；**两条都不是逐位**（tile 5.8e-03，halo 消不掉；attn 只在 chunk 与 SDPA 内部分块对齐时才逐位）⇒ 默认全关、`TorchBackend.set_vae_tiling` 才开、OOM 兜底才自动降档，回执带 `vaeTiling`；**外部入口已开**：`POST /engine/load` 收 `vaeTiling`，归一只有 `normalize_vae_tiling` 一处，非法值 400，给了值才进装载键） | `app/services/engine/vae_tiling.py` |
 
 ### L4-2 `format` 容器与像素（9）
 
@@ -416,10 +476,13 @@ Apache/MIT（torch/diffusers/safetensors）；② torch 已装且有 CUDA，但*
 | **无缓冲重叠读**（Windows：`FILE_FLAG_NO_BUFFERING\|OVERLAPPED` ＋ 每槽手动复位事件 ＋ 扇区对齐槽区用 `slop` 吃掉非对齐偏移；非 Windows/`force_plain` 退回普通读，降级原因写进 `describe()`；越界当场拒。**已接进 `safetensors.TensorReader`**：Windows 默认走它、建不起来退回 seek+read 并报 `ioNote`；真权重 11.46 GiB/453 张量实测 2.88 ⇒ 3.43 GiB/s，逐字节相同） | `app/services/engine/win_io.py` |
 | **预取单槽**（提交永不抛、取走即作废、槽满当场拒 `busy`、`snapshot()` 报在飞/就绪/命中/错误。**已接进装载**：`weights.load_module_weights(read_ahead=2)` 边建当前张量边让后台读后面两件，作用域由 `_prefetch_scope` 管、出函数 `close(wait=True)`；单件超 `_READ_AHEAD_MAX_BYTES`(256 MiB) 一律就地读；2 GiB/64 件实测 2.7 ⇒ 3.9 GiB/s） | `app/services/engine/prefetch.py` |
 | **任务分配与压力调度**（零 torch 纯函数：**GPU 优先** ⇒ 装不下就 `gpuBytes+cpuBytes` **正好等于**需求的协同切分 ⇒ 两边都不够就 `InsufficientResources` 拒跑（不靠交换文件硬跑）；协同后**第二台设备也要核**（`host_memory`/`host_room_bytes`/`ensure_host_room`，无 `psutil` 依赖）；`Ledger` 记「谁在占、占多少」（卡/内存两栏，**不是判据**）；`LoadWatch` 三档滞回（88%/95%、连续 2 次才认 `hard`）只管**回收**不搬权重；`reclaim_for` 是纯函数（阶段表没登记 ⇒ 一个都不退）） | `app/services/engine/scheduler.py` |
-| **GPU + CPU 联合驻留**（按显存预算切连续前缀层、`split` 搬激活 / `park` 搬权重、无卡/null 如实说） | `app/services/engine/residency.py` |
-| **设备策略**（默认 GPU 优先 ✓；每次装载前现测显存 ⇒ 够就上卡 / 差一点改联合 / 差太多转 CPU；`auto`·`gpu`·`cpu`·`balanced` 四档，判据只有显存占用率、`utilPercent` 留 nvml 注入位） | `app/services/engine/device_policy.py` |
-| **四条装配线的装配前决策**（2.1 按分时账 13.26 GiB / Z-Image 按整链同驻账 19.28 GiB / **Qwen-Image 2512 按本族分时账 38.05 GiB** / SDXL 按盘上文件真字节；落不了 `split` 的线按「装不下」整份转 CPU，但「装得下只是没摊开」不算降级） | `runtime.py::_chain_device_decision` |
-| **策略的可见面**（`capabilities().devicePolicy` 报四档＋判定规则＋**三本账**（`part` 2.1 / `chain` Z-Image / `qwenImagePart` 2512 —— 族不同但键名相同的账**不能并**）、只报静态事实不读卡况；**生效账**另有 `GET /engine/runtime` 的 `devicePolicy.partNeedGiB`（声明链后就是本族那本，同时留 `defaultPartNeedGiB`）；`POST /load` 收 `policy` 三写法、拼错当场 400、回执两格 `devicePolicy`(现在状态) 与 `chainDevicePolicy`(这次为何在 CPU)；`SCHEMA_VERSION` 4） | `facade.py::capabilities` / `torch_backend.py::describe` / `routers/engine.py::load_runtime` |
+| **GPU + CPU 联合驻留**（按显存预算切连续前缀层、`split` 搬激活 / `park` 搬权重、无卡/null 如实说；**余量按件分档** `RESERVE_BY_KIND = {dit 0.25, te 0.05, vae 0.05}` —— 原先 `split` 一律留 25%、`off` 只留 1 GiB，同一张卡两套口径（空载 20.71 GiB 时 `off` 可用 19.71、`split` 只 15.53，差 4.2 GiB），老调用方不传 `kind` 仍 25% ⇒ 行为零变化） | `app/services/engine/residency.py` |
+| **内存这一级（三级内存的中段）**（`HostCache`：**按件一本**（`dit` 与 `te` 的组名都叫 `blocks.0`，合成一本会卸掉对方的层）；配额 = `min(quota_of(总内存×75%), host_room_bytes())`，读数取不到 ⇒ `None` ⇒ 这一级**不启用**（不拿假数卸层）；超配额按 **LRU 只卸层**（钉住的非层组永不动）、卸不够就**一件都不卸**；参数换 **0 元素占位**（不 `del`/不 `setattr(None)`，Parameter 对象自始至终是同一个）；`residency._host_prepare` **快照先于卸载**（否则重读拿 `(0,)` 当基准）并在 `guard` **之前**执行（guard 核的是实际要占的 `cpu_bytes`）；`weights._load_streaming` 读 `_residency_spilled` 跳过卸过的键（**单独记 `skipped`，不混进 `missing`；也不许判成 `shapeMismatch`**），装完把还原器经 `ReloadSlot` 接回 `_residency_reload`（13 处装载调用点一行不改）；前向进层前 `ensure` 重读 → 形状/dtype 对快照 → 写回 ⇒ 数值与整份常驻**逐元素相同**；重读用**第二把**句柄（装载那把随 `with` 关了 ⇒ 拿它读只会得到「读取已关闭」），`Handle.detach` 回收） | `app/services/engine/host_cache.py` |
+| **层预取上卡（`foresight_swap` ✓，默认 0 槽＝不存在这一级）**（算落在 CPU 上的第 N 层时，同时在**独立拷流**`torch.cuda.Stream` 上把第 N+1 层的权重拷进**额外槽**（`empty_like`，与常驻层分开记账）；进 N+1 层**先问落地没**（`Event.query()`）⇒ 落地了 `swap_in` 把 `param.data` 就地换成槽里那份、那层在**卡上**算（输入不往下搬）、`after` 换回 CPU 那份并 `release` 腾槽；**没落地就照原计划在 CPU 上算**——绝不等（不 `synchronize`/`wait_stream`）、绝不拿半份数据算（两批交错落地＝不报错的错数）。⚠️ 槽是**计划之外**的显存 ⇒ `place()` **先从预算里扣**（21 GiB 卡上不扣 ⇒ 计划排满＋多要一层 ⇒ 装配正常、首次预取 OOM 且报错指向 `empty_like`），扣完比预算一半还大就**不启用**并写明理由；`slots<2` 也能跑但退化成「先拷完再算」（`busy` 涨满＝没有重叠的证据）；判据（该不该发／落地没落地／能不能用／`busy`·`overBudget`·`pending`·`missed` 分账）纯逻辑不碰 torch，分配与拷贝在 `residency._SlotBook`；`mode≠split`／主设备不是卡／CPU 侧不到两层 一律不建槽；`report()["foresight"]=None`＝**没开**，字段在而 `usedLayers=0`＝开了没等到，两者必须分得开） | `app/services/engine/foresight.py` |
+| **设备策略**（默认 GPU 优先 ✓；每次装载前现测显存 ⇒ 够就上卡 / 差一点改联合 / 差太多转 CPU；`auto`·`gpu`·`cpu`·`balanced` 四档，判据只有显存占用率、`utilPercent` 留 nvml 注入位。⚠️ **`auto` 只给 `off`/`split` 两档**（`AUTO_RESIDENCIES`），**不选 `park`** ✗：park 每步单向搬 `plan.layer_bytes`＝**全部层权重**（2512 那族 ≈38 GiB、双向 76，PCIe 4.0 ~25 GB/s ⇒ 3 秒+/步），split 同一步搬的是一条**跨界激活**（MB 级），而 `Plan.transfer_bytes("split")` 明写返回 `None` —— 不知道激活多大、**不猜**。⇒ park 留手工档 `--residency park`，选 `split` 必须如实标 `degraded=True`（兜底不是优化）） | `app/services/engine/device_policy.py` |
+| **五条装配线的装配前决策**（2.1 按分时账 13.26 GiB / Z-Image 按整链同驻账 19.28 GiB / **Qwen-Image 2512 按本族分时账（`dit` 那一格**分文件**取：bf16 的 2512 是 38.05 GiB，Edit 2511 的 int8 文件走 `resident_need_gib()` ⇒ 数据区字节 19.09 GiB ⇒ `off` 整份上卡）** / **Krea2 按本族分时账 12.57 GiB** / SDXL 按盘上文件真字节；落不了 `split` 的线按「装不下」整份转 CPU，但「装得下只是没摊开」不算降级。⚠️ 前三条走 `_chain_device_decision` ✓，**2.1 与 Krea2 是另一种形状**：先构造 `TorchBackend`（此时 need 未知），装配 DiT 前再按**实测分时账** `decide_for(("dit",), need_gib=本族账)` 判一次 —— 两条都只装 DiT、其余靠 `declare_chain` 换装，所以「整链 28.68（2.1）/ 20.31（Krea2，12.57＋7.50＋0.24）GiB」都不能拿来当门槛） | `runtime.py::_chain_device_decision` |
+| **一个数回答「卡上真占多少」**（`runtime.residency_total(report)` ⇒ `POST /load` 回执的 `residencyTotal`：`gpuGiB`/`cpuGiB`/`gpuShare`/`parts`/`judgedOn:"bytes"`；挂在 `_commit_load` —— **四条装配线共用的那一个人口**，各线自己加必漏一条。⚠️ 递归找「同时带 `gpuGiB` 与 `cpuGiB`」的字典并按 `id` **去重**（同一份账可能既在 `weights.residency` 又在 `components[x].residency`，加两遍凭空翻倍）；一件都没报 ⇒ **不写这一格**（不编 0：`None`＝"这次没有联合驻留的账"、`0`＝"算了，卡上什么都没"）；分母为 0 ⇒ `gpuShare` 给 `None`（编 1.0 会被读成「整份在卡上」）；`judgedOn:"bytes"` 明写**不是速度占比**） | `runtime.py::residency_total` |
+| **策略的可见面**（`capabilities().devicePolicy` 报四档＋判定规则＋**四本账**（`part` 2.1 分时 / `chain` Z-Image 整链 / `qwenImagePart` 2512 分时 / `krea2Part` Krea2 分时 —— 族不同而键名相同的账**不能并**，并进去只会留最后写的那本；`qwenImagePart.dit` 是 **bf16 那份文件**的账，int8 文件的实际需求只在 `POST /load` 回执的 `ditNeed` 里，`capabilities()` 不读盘 ⇒ 静态值不许改成 19.09 ✗）、只报静态事实不读卡况；**生效账**另有 `GET /engine/runtime` 的 `devicePolicy.partNeedGiB`（声明链后就是本族那本，同时留 `defaultPartNeedGiB`）；`POST /load` 收 `policy` 三写法、拼错当场 400、回执两格 `devicePolicy`(现在状态) 与 `chainDevicePolicy`(这次为何在 CPU)；`SCHEMA_VERSION` 4（`needGiB` 内部加键属 nested、不动版本）） | `facade.py::capabilities` / `torch_backend.py::describe` / `routers/engine.py::load_runtime` |
 
 ### L4-4 `token` 文本入口（7）
 
@@ -429,6 +492,7 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 |---|---|
 | 自研 BPE | `app/services/engine/tokenizer_bpe.py` |
 | Unigram / WordPiece 扩充 | `app/services/engine/tokenizer_own.py` |
+| **UMT5 sentencepiece unigram**（`nmt_nfkc` 归一 ＋ `add_dummy_prefix`、词表 256384；与 `tokenizer_bpe` 是两套 ✓✗） | `app/services/engine/umt5_tokenizer.py`（⚠️ 唯一出口是 `umt5_te`，塔没接线前无人调用） |
 | GGUF 自带词表 → 分词器 | `app/services/engine/tokenizer_gguf.py` |
 | 分词器总入口（自研优先/回退/缓存） | `app/services/engine/tokenizer_hub.py` |
 | 对 transformers 的运行时改造 | `app/services/engine/tokenizers_tuning.py` |
@@ -444,9 +508,17 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | DiT 主干 | `app/services/engine/dit.py` |
 | Z-Image / Lumina 骨架（`NextDiT` 同构，已与 ComfyUI 参考实现逐层对拍；**已接进装载分支**） | `app/services/engine/dit_lumina.py` |
 | Qwen-Image 2.1 骨架（单流 + SwiGLU + 三轴 RoPE，两行调制；键集合与盘上 649 张量对账、与独立参照实现双精度一致；**已接进装载/前向分支**，TE 与 VAE 未做） | `app/services/engine/dit_qwen21.py` |
-| **Qwen-Image 2512 / Edit 2511 骨架**（双流 MMDiT：文本与图像各 6 组调制＋各一套 MLP；时间口径 `1000·σ` **不翻转**；`heads` 由 `attn.norm_q` 宽反推；Edit 侧参考图 token 串联＋`__index_timestep_zero__` 哨兵喂 σ=0 行调制；2512 与 Edit 2511 同一份，差别只在 `ref_latents`；**已接进装载分支**，Edit 的参考图通路未接 ⇒ `denoise` 明确拒跑） | `app/services/engine/dit_qwen_image.py` |
+| **Qwen-Image 2512 / Edit 2511 骨架**（双流 MMDiT：文本与图像各 6 组调制＋各一套 MLP；时间口径 `1000·σ` **不翻转**；`heads` 由 `attn.norm_q` 宽反推；Edit 侧参考图 token 串联＋`__index_timestep_zero__` 哨兵喂 σ=0 行调制；2512 与 Edit 2511 同一份，差别只在 `ref_latents`；**已接进装载分支**，且这一族的 `qwen_image` 行挂了 `adapter="int8"` ⇒ 盘上的 840 层 int8 文件**原样常驻**（19.09 GiB，不再反量化成 bf16 38.05；bf16 文件自动得到空 plan ⇒ 走老路） | `app/services/engine/dit_qwen_image.py` |
+| **Edit 2511 参考图通路**（2026-11-01 接上，**含多图**）：参考图 → 视觉塔（**384² 面积**，`<|image_pad|>` 整段替换）→ 文本塔 `image_embeds`；参考图 → VAE（**1024² 面积**、8 的倍数、Wan 族 5 维挤成 4 维）→ `ref_latents`，`denoise` **每一步**带进 DiT（`Sequence[Tensor]`，**一条一张、必须都是列表元素**）。N 张图 ⇒ 模板 `Picture i: <视觉块>` 逐图一个槽（一张走 `…ImageEdit` 口径、没有编号）、`image_embeds` 一列块、`ref_latents` 一列，**顺序即语义**；`_refLatents` 统一存列表（单图长度 1）。视觉塔**只在 encode 段在场**（`declare_chain(phase_parts=…)` ⇒ 峰值 17.69 GiB，仍判 `full`，与图数无关）；编辑口径下 `max_length` 叠加图的 token 数；Edit 权重缺 `ref_latents`（含空列表）/ Edit 请求没给 `referenceFrames` 一律当场报错 | `app/services/engine/torch_backend.py`（`encode_text` / `_edit_reference` / `prepare_edit_references` / `denoise`）、`qwen25_te.py`（`prompt_of` / `edit_prefix` / `_with_image_blocks`）、`runtime.py`（`is_edit` 分支） |
 | 按权重键名判族 + 读拓扑 | `app/services/engine/dit_family.py` |
+| **族 ⇒ 骨架的唯一装配表**（一族一行 `FamilyBuilder`：模块 / 入口 / 形状参数 / 建法 / 改名 / 同族常量 / 前缀适配器 / **前向契约**；公共流程一份：抽形状 → 剥前缀 → 推结构 → dtype → meta 建壳 → 物化 → 拼 config；加族只动本表 + `dit_family._RULES` 两处） | `app/services/engine/dit_build.py` |
+| **潜空间口径对账**（契约的 `latent_format` 必须与 `latent_formats` 表里的规范名同族；解码前比「已挂 VAE 的反缩放口径」，不同族当场拒——16ch 的 `wan21` 与 `qwen_image` 形状全同，挂错只会整体偏色而不报错；三条装配线的 `vae_family` 一律从契约读，不写族名字面量；`readout()` 连换算方式一起写出来；H3 这类非装配族由 `latent_format_of()` 单独答口径，不因不在表里就整条跳过；`meanstd` 口径的族必须在 `vae_wan.latents_stats` 里有 16 组数） | `app/services/engine/dit_build.py`、`latent_formats.py` |
 | **通用单流 DiT 前向**（维度从权重形状反推、键集合双向对账） | `app/services/engine/dit_generic.py` |
+| **Flux.1 双流＋单流 MMDiT 前向**（19 双流 + 38 单流、拼接顺序 `(txt, img)`、调制 6/3 组顺序 `(shift, scale, gate)`、时间口径 `1000·σ` **不翻转**、一根 vec 由 time+guidance+vector 三路相加；`guidance` 走默认值而非权重事实） | `app/services/engine/dit_flux.py` |
+| **SEEDVR2 / NaDiT 视频修复主干**（32 块；前 10 块双塔 / 后 22 块共享；`in=33`；四处「形状全对、只有数值错」：`ada.emb` 切片组号 / `mlp` 的 SwiGLU 门控顺序 / `attn_norm` 有没有 affine / 末块 `vid_only` 的文本分支。**已接进装配表与 `stage="seedvr2"` 装配线** ✓ 见 §10.1g） | `app/services/engine/dit_seedvr2.py` |
+| **Wan2.2 I2V 14B 单专家骨架**（40 层 / `dim` 5120 / `ffn_dim` 13824 / `in_dim` 36 / 文本口 umt5 `text_dim` 4096 / 五维潜变量 + 视频；`heads` 是**唯一查表项**、按几何取 `HEADS_BY_GEOMETRY`；时间口径由 `TIMESTEP_SCALE` 补 —— 本仓骨架收裸 σ；`split_i2v` 是出片前还欠的那段。**已接进 `dit_build` 的 `wan` 行**，能建能装能前向，不能从提示词出片） | `app/services/engine/dit_wan22.py` |
+| **Music3 音频/歌曲主干**（第十族骨架，族内三段链 `文本+歌词 → context → 本模块 → 速度 (b,128,L) → DAV → 44.1k 立体声` 的中间那段；`latents (b,128,L)` ＋ `sigma` ＋ `context (b,F,8×4096)` ⇒ `(b,128,L)`。四处「形状全对、只有歌不对」的口径：①时间步要**翻**（`1−σ`）②输出要**取负**（与①是一对，只改一边立刻崩且不报错）③latent 帧数 = 条件帧数 × **3.4453125**（25 Hz → 86.13 Hz；同帧率假设会被 pad/crop 静默吃掉）④结构上**无 ada 调制**，时间步作**第 0 个 token** 拼进序列；GLU 是 `value * silu(gate)`、RoPE 只转 head_dim 前半 32 维且 split-half **正号**、`v` 不转）。`velocity()` 与 `forward()` **分开**（σ 翻转与取负各一处，合写就分不清谁漏了）；长音频按 689 / 344 潜帧滑窗，累加后**除命中次数**、最后一次取负。**能建**（`dit_build.BUILDERS["music3"]`，`latent_dims=3`）、**接线已闭合** ✓ 2026-11-06（`stage="music3"` 装配线 ＋ 音频 plan ＋ `encode_text` 条件支 ＋ `decode` 的 `music3-real` 支 ＋ `write` 纯音频支；滑窗在 `velocity()` 内、`pipeline` 只诊断不重切）。判据 `tests/engine_music3_test.py`（46 项）＋ `tests/engine_music3_wiring_test.py`（59 项接线对账）） | `app/services/engine/dit_music3.py` |
+| **Music3 语义塔**（第十族的 **context 生产段** ✓ 2026-11-02：Qwen3-8B 形态 36 层 / GQA 32+8 头 / **QK per-head RMSNorm 在 RoPE 前** / 合并 qkv+gate_up / **剪枝版**词嵌入与输出头（`embed_tokens_prefill` 151675 ＋ `embed_tokens_audio` 16384 ＋ `lm_head_pruned` 16385，全量那份不存在 ✗）＋ 4 层 RVQ 深度解码器（无 QK-norm 无 RoPE、位置嵌入 16 帧、键名 `layers.N.self_attn/mlp` **两层嵌套** ✓）；**词表内嵌在 TE 文件里**（`tokenizer_json` 键 11.4 MB ✓）不用外置目录 ✗；160 层 int8_tensorwise+convrot(256) 常驻 ✓（装载六步序：头部核结构 → meta 建壳 → 换 Int8Linear → 物化 → 排布 → 填权重 ✓）。四处「形状全对、只有歌不对」：①CFG 非条件份只换 `[:, 1:-2]`（首尾各留两真 token ✗）②c0 引导采样的 top-k 阈值取自 **conditioned** 那份 ✗✗ ③深码本查表要加 `(index−1)×1024` 段偏移（7 个码本叠在同一张 7168 行表 ✓）④帧隐状态只收**条件份** `cat(last_hidden[:1], depth_hidden)` ✓。判据 `tests/engine_music3_keys_test.py`（10 项：键对账 327/327 ✓、int8 计划 160/160 ✓、词表特殊 token、H3 双流路由闸门 ✓）＋ `tests/engine_music3_test.py`（46 项口径）＋ `tests/engine_music3_wiring_test.py`（A6/A7/A8：两把尺子各自独立、窗口数逐值一致、潜帧换算 1..9000 与主干逐帧对拍）） | `app/services/engine/te_music3.py` |
 | H3 DiT 积木（含 **`token_tags` → adaLN 行号**：文本段按标签切成 text/video run，视觉占位 token 走 video 行；不给标签 ⇒ 整段 text 行，纯文本提示词等价；装配侧 **meta 建壳 → 降精度 → 扳 fp32 岛 → 换 int8 常驻层 → 才物化**，峰值 ≈ 19.5 GiB 而非 fp32 主干的 78 GiB） | `app/services/engine/h3_form.py` |
 | H3 检查点键名核对（torch-free） | `app/services/engine/h3_keys.py` |
 | H3 续拍 / 重拍 | `app/services/engine/h3_edit.py` |
@@ -454,26 +526,34 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | SDXL 出图后端闭环 | `app/services/engine/sdxl_backend.py` |
 | SDXL VAE | `app/services/engine/sdxl_vae.py` |
 | **Flux 族 VAE**（16 通道 / 无 `quant_conv` / 244 键；`(x−shift)/scale` 反缩放内置） | `app/services/engine/vae_flux.py` |
-| **Wan 系 VAE**（先接 Qwen-Image 2.1 的 64 通道：Wan 2.2 布局 / 238 键 / 单帧解码 / 出 RGBA 要丢第 4 通道） | `app/services/engine/vae_wan.py` |
+| **Wan 系 VAE**（先接 Qwen-Image 2.1 的 64 通道：Wan 2.2 布局 / 238 键 / 单帧解码 / 出 RGBA 要丢第 4 通道；**编码侧 `encode_latents` 已补**：`Encoder3d.forward` 原本**不存在** ⇒ `WanVAE.encode` 一直没有，取 `head` 输出的前一半（mean，不采样）再过 `process_in` 的 16 组 mean/std） | `app/services/engine/vae_wan.py` |
 | 视频 VAE | `app/services/engine/vae.py` |
 | H3 真视频 VAE（3D 因果 CNN + ViT3D 解码） | `app/services/engine/vae_h3.py` |
+| **SEEDVR2 VAE**（ByteDance `VideoAutoencoderKL` 的逐位重写：4 组因果下采样 / 4 组上采样、通道 `(128,256,512,512)`、**没有** `quant_conv`/`post_quant_conv`（编码器直出 32 通道，取前 16 均值即 latent）、空间 8× / 时间 4×、帧数铁律 `T = 4n + 1`、注意力只在 mid block 且**逐帧**、潜变量缩放 0.9152 交给 `latent_formats` 的 `seedvr2` 口径。**两半都已接线** ✓：`attach_seedvr2_vae` ＋ `decode` 的 `seedvr2-real` 支 ＋ 像素→潜变量 `encode_pixels`，见 §10.1g） | `app/services/engine/vae_seedvr2.py` |
 | H3 音频 VAE（32 kHz 立体声） | `app/services/engine/audio_vae.py` |
-| 超清规划层 | `app/services/engine/upscale.py` |
+| **Music3 DAV 音频 VAE**（潜变量 ⇄ **44.1 kHz** 立体声；与 H3 `audio_vae` 是**两个族**，数字全不同：采样率 44100 vs 32000、hop 512 vs 800、潜帧率 86.1328 vs 40 Hz、潜通道 **128 vs 32**；⚠️ 128 = 2 声道 × 64，`decode` 里 `reshape(b*2, 64, T)` 是**行主序折半** ⇒ 通道 0..63 左声道、64..127 右声道，把 128 当 128 个特征通道直接卷积＝「形状全对、声音是两声道混在一起的糊」。121 键、检查点 `weight_g/weight_v` ↔ `state_dict` 的 `parametrizations.weight.original*` **两向**互归（`_canonical_key` 与 `as_legacy_name` 各一向，少一向 ⇒ 「自证零问题」变「缺 60 / 多 60」），`shape_problems` 两种写法都收；折半的**行为判据**只许判「没动的那半**逐位不变**」✗ 不许判「清零那半恒为常数」（转置卷积在 `T` 小时整段都是边界，零输入照样解出时变波形 ⇒ 会误报）；`Snake1d.alpha` 初值必须**确定**（`torch.empty` 是未初始化内存，本机实测抽到 3.5e7 ⇒ 不装权重的壳解出假声音）） | `app/services/engine/vae_music3.py` |
+| 画布计划层（"这次出多大"的**唯一**计算处，与超清同构：**计划层定、管线只执行**。吸附步长按族给 —— H3 32 / SDXL 8 / 图族 16，全局一个数是错的；档位命中时**像素优先**，因为 `1344×768`(1.75) 与 `16:9`(1.778) 不闭合，拿 MP 重算会落到 `1360×768`；没点名用途 ⇒ 旧路径**逐位不变**） | `app/services/engine/canvas.py` |
+| 用途档位表（用途 ⇒ 画布 / 步数 / cfg / 采样器 / 调度器 / denoise，每档写**出处工作流文件名**；数值取自生产线实测而非模板文档；表里没定画布的档（H3 导演台出画布）⇒ 明确报错，**不猜**一个"看着合理"的） | `app/services/engine/profiles.py` |
+| **图生图（`denoise<1` + `initImage`）两半齐**：① σ 梯子按名义步数 `int(steps/denoise)` 算**再取尾巴** `[-(steps+1):]`（`_denoise_split`/`_denoise_slice` 是全仓唯一做这条算术处，五个图族走同一出口 `_image_flow_sigmas`、SDXL 单接）；② 起点 latent = `initImage` 像素 → `_encode_pixels` → 按 `σ0·noise + (1−σ0)·latent` 混（`noise_scaling` 逐字）。**缺任一半都当场拒** —— 只砍 σ 不换起点 = 与参考图无关的低对比图且**不报错**（本仓最恨的那类坑）。回执如实报四格 `denoise`/`totalSteps`/`startSigma`/`initFrom`；视频侧不接（接着上一段跑走 `pin`/`lastFrame`） | `app/services/engine/pipeline.py`（`_denoise_split`/`_denoise_slice`/`_finish_plan`）/ `torch_backend.py`（`init_image_latents`/`_mix_init_image`） |
+| **`normal` 调度器在 flow 域是真排程**（不是 EDM 回落）：参考实现 `normal_scheduler` 的语义是「**timestep 等距**」，而 flow 族 `multiplier=1` ⇒ `timestep` 就是 σ ⇒ 落到 σ 上是**σ 等距**（≠ flow 的 t 等距）。端点必须取模型自己那对 `flow_sigma_bounds(shift)`（`σ(1)=1` / `σ(1/1000)`），拿 EDM 的 `0.0292/14.6146` 会得 `t=1−σ<0` ⇒ 不报错、出糊图 | `app/services/engine/schedules.py`（`normal_sigmas(shift=)`/`flow_sigma_bounds`）/ `pipeline.py`（`_image_flow_sigmas`/`_video_sigmas`） |
+| 超清规划层（契约**读 + 结构核一步到位** `load_upscaler_contract`：只读不核时缺一个字段 ⇒ 计划层静默绿灯、状态接口 `KeyError`、张量层按 `H3LatentUpscalerV2` 默认值建网络 ⇒ 三处调用点一律走它） | `app/services/engine/upscale.py` |
 | 超清网络本体 | `app/services/engine/upscale_net.py` |
 | 文本编码器 | `app/services/engine/text_encoder.py` |
 | CLIP 文本塔（SDXL 那一半） | `app/services/engine/clip_text.py` |
 | **Qwen3 文本塔**（Z-Image 的提示词入口：36 层 / `layer_idx=-2` / ChatML 模板） | `app/services/engine/qwen3_te.py` |
 | **Qwen3.5 文本塔**（Qwen-Image 2.1 的提示词入口：24 层 Gated DeltaNet ＋ 8 层 full attention 混合 / `layer_idx=-2`；已与 comfy 参考块逐位对拍 `maxDiff=0`） | `app/services/engine/qwen35_te.py` |
 | **Qwen2.5-VL-7B 文本塔**（Qwen-Image 2512 / Edit 2511 的提示词入口：28 层 / 3584 / 28×128 头 / kh=4；**q/k/v 带 bias**、无 QK-norm、取**最后一层**且**不过** final norm；`system`＋`user` 两段模板按第 2 个 `<|im_start|>` 截掉系统段；只挂语言塔，同文件里的 `visual.*` 与 `lm_head` 有意不装；**已接进 `attach_qwen25_te`**） | `app/services/engine/qwen25_te.py` |
+| **UMT5-XXL 文本塔**（Wan 系提示词入口：24 层 / 4096 宽 / **双向**注意力 ＋ 每层各一份相对位置偏置 ＋ FFN 门控；与本仓其余几座塔口径**相反** ⇒ 别照抄 `qwen3_te` 的 mask 写法。**只有塔本体，装配线未接** ✗ 见 §10.1g） | `app/services/engine/umt5_te.py` |
 | decoder-only LLM 推理 | `app/services/engine/llm.py` |
 | **Qwen3-VL-32B 语言塔**（H3 文本口的本体：interleaved mrope `ropeDims=(2,1,1)` / `len_max = grid.max()//2` / **有 QK-norm、无 final norm** / DeepStack 三份 merger 在**层之后**注入；与盘上 551 语言键逐名逐形对账） | `app/services/engine/qwen3vl_te.py` |
 | **Qwen3-VL ViT 视觉塔**（27 层 / `patch_embed.proj` 2 帧时间核 / `merger` 在 **pre-shuffle**、`deepstack_merger_list` 在 **post-shuffle**；与 H3 的 TE 权重同文件、键名逐字一致） | `app/services/engine/qwen3vl_vision.py` |
+| **Qwen2.5-VL ViT 视觉塔**（Edit 2511 参考图的**语义**通路：32 层 / patch **14** / CLIP 均值方差 / 窗口注意力 112 ⇒ 合并域 4 格（块 7·15·23·31 走全图）/ 旋转位置表与 hidden **同一套窗口置换** / 融合后 `argsort(window_index)` 还原；与 `qwen3vl_vision` **并列不合并**（尺子差 patch 16 vs 14、均值 0.5 vs CLIP）；像素侧走 `qwen3vl_pixels.process_image_with` 传本族口径） | `app/services/engine/qwen25vl_vision.py` |
 | 进程内文本后端 | `app/services/engine/llm_backend.py` |
 | GGUF 反量化 | `app/services/engine/gguf_dequant.py` |
 | GGUF → LlmModel 装载 | `app/services/engine/gguf_to_llm.py` |
-| torch 后端（设备实测，不写死） | `app/services/engine/torch_backend.py` |
+| torch 后端（设备实测，不写死；**像素→潜变量只有一个口子 `_encode_pixels`**：H3 自带归一化 / Wan 走 16 组 meanstd / Flux 走 `(x−0.1159)*0.3611` 并补 `T=1` / 参考未训 VAE 走 `normalize_latents` —— 四族 `encode` 的返回口径（张量 / 二元组 / 未归一化）本来各不相同，裸调只会静默歪掉首帧条件） | `app/services/engine/torch_backend.py` |
 
-### L4-6 `orchestration` 编排与可见面（11 + CLI 入口）
+### L4-6 `orchestration` 编排与可见面（12 + CLI 入口）
 
 「谁来调度、缺什么、退到哪」。不写模型数学。
 
@@ -486,10 +566,15 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | 加载计划 | `app/services/engine/loader.py` |
 | stage 注册表 + 装载前兼容闸门 | `app/services/engine/registry.py` |
 | 权重体检 / 就绪报告 | `app/services/engine/inventory.py` |
+| **可跑档位与自动装配**（只报 `stage` 就能跑 ✓） | `inventory.assembly_for_stage()` + `GET /api/v1/engine/stages` | 清单条目按 `kind` 落槽（DiT / TE / VAE，`COMPONENT_SLOTS` 单一真源）⇒ 前端不必知道权重路径；Wan2.2 双专家按文件名 high/low 分 `dit_path`/`dit_path2`；`ready`（件齐）与 `fits`（装得下）**分开报**（`qwen_image` 件齐但 47 GiB 装不下 24 GB 卡）；词表**按档**解析（`tokenizer_hub.find_tokenizer_for_stage`：目录名/仓库名认族 + `tokenizer_class` 排错族双判据；落点 `tokenizers/<subdir>` ⇒ 仓内 `models/tokenizers/<subdir>` ⇒ HF 缓存快照；四档词表分别是 Qwen3-4B / Qwen3.5-9B / Qwen2.5-VL-7B / Qwen3-VL-4B，**绝不拿别族顶**——喂错族「装得上、编得出、id 全错且不报错」） |
+| **画布引擎通道**（本机引擎 = 默认生成方式 ✓） | `frontend/app/composables/useEngineRun.ts` + `CanvasNodeCard.vue` 双模式 + `engine._local_media` / `_with_urls` | 画布配置卡默认走 `/engine/generate`（不依赖 8765/ComfyUI ✓），ComfyUI 工作流降级为可选通道；进度只读**事件**（`{stage,step,total}` ⇒ 按阶段区间插值，8 步采样不当全程 100% ✗）；回执补 `primaryUrl`（`primaryPath` 是本机绝对路径 ✗，数据根外的产物**不硬转** URL ✗）；画布素材 URL → 本机路径（`/uploads|static/…` 严格解析、裸文件名放行、远程 URL 当场拒）；I2V 档（`wan22`/`seedvr2`）取连线第一张当首帧（`h3` 是文生视频，**不逼**首帧 ✗）；`taskId` 落 `localStorage` ⇒ 刷新可接回（恢复时**已终态只回状态文本**、不重复建卡），任务号失效（引擎重启）⇒ 忘掉并回 idle（不转假圈）；`E_ENGINE_BUSY` **不标失败**（是另一张卡在跑，人话提示稍等）；**时长留空 = 5 秒**这条默认在视频档是**重成本**（Wan2.2 16fps ⇒ 81 帧、H3 24fps ⇒ 121 帧；24 GB 卡装不下 26.62 GiB 的单份专家 ⇒ 走 split、注意力随帧数平方涨 ⇒ 实测 81 帧 @608×352 跑到 14 分钟才第 2 步，而 17 帧 @576×320 历史 155 秒落盘）⇒ 界面按时长实时算帧数并提示，`/engine/stages` 的 `fits=false` 时明说「先 1 秒验通路」；**引擎的 `plan.warnings` 必须显示**（尺寸被吸附成多少 / 参考图被忽略 / 24fps 换成 16 这类「不报错但与你以为的不同」全在那一栏，后端刻意不当 error ⇒ 界面不显示就永远没人看见）；连线图**三条去向各不同**且界面写明（I2V 首帧 / H3 全当参考图 `ref2va` / 图片档「起点图 denoise<1」→ `initImage`；都不满足 ⇒ 红字「本档不吃参考图 ⇒ 会被忽略」＋后端 `_warn_unused_references` 兜底同一句——八条线里**只有 H3 真读** `reference_frames`，其余七条一条字节都不用，静默忽略正是本仓最恨的一类）；**音频档（`music3`）自 2026-11-06 起在线** ✓：产物是 wav ⇒ `generated` 的 kind **先按后缀判**（`mp3/wav/flac/m4a/ogg`）再按档位特征 ⇒ 画布建的是**音频卡**（`<audio controls preload="metadata">` ＋ 固定 54px 高）而不是一张裂图（⚠️ 三处 `:src` 一律过 `mediaUrl()` —— `node.url` 存的正是根相对的
+`primaryUrl`，**裸绑**在桌面壳里会打到 `tauri.localhost` 整片 404，而 dev 被 Vite 的
+`/static` proxy 掩盖；守卫 `check-isolation` 的 F 段已把 `node.url` 纳入字段名并加了自检）；配置卡多一格**歌词**（`values.lyrics`，段落标签用方括号、` ^ ` 当换行）、时长那格改用 `needsSeconds`（视频与音频都要——音频同样有「留空＝5 秒」这个默认，留空只够一句）；`lyrics`/`seconds` 允许写在工具调用**顶层**（`canvas_ops._merge_top_values` 并进 `values`，显式 `values` 优先，否则模型按 `text` 直觉写在顶层时歌词会**静默消失**）；⚠️ 同轮还查到一起**静默丢档**：`useCanvas.normalizeDoc()` 重建节点是**白名单**，`engineStage` 漏在外面 ⇒ 用户选了 Music3、刷新一次档位就回落成清单第一个可用档（Z-Image），点生成跑出来的是一张图，而 `persist()` 会把清洗后的对象写回盘 ⇒ **丢是永久的**；已补 `runMode`/`engineStage`，判据 `canvas_ops_test.py`「normalizeDoc 白名单覆盖 CanvasNode 全部字段」（解析接口字段 vs 搬运字面量，实测删掉那行即红）；媒体口径 2026-11-06 已**两端统一**：`mediaUrl()` 是两端逐字同构的唯一出口（`pages/drama/*`、`pages/library/*`、6 个编辑/媒体组件、画布页与节点卡片全部改齐），`openImageViewer` 在**收口处**过格式化（模板是裸 `<img :src="imageViewer.src">`，20 余处调用方送根相对路径），成片下载改 `fetch→blob`（跨源 `<a download>` 被浏览器忽略，会把整个 SPA 顶成视频）；`check:parity` 白名单相应从 21 条收到 14 条 |
 | 干跑后端（无 torch 也能跑整条管线） | `app/services/engine/dryrun.py` |
 | 业务链路 → 进程内引擎桥 | `app/services/engine/bridge.py` |
 | **H3 文本条件编码串联**（呈现格式 → 逐段分词 → 视觉塔 → 写 embeds → 语言塔 ⇒ `H3Condition`：hidden / tags / ids / spans；`combine()` 把两座塔并成一个编码器且**不重复注册** `model.*` 键 ⇒ 与盘上权重全名空间逐字对得上；不写模型数学 ⇒ 归编排不归 `model` 组）；**装配口** ＝ `TorchBackend.attach_h3_text`（两半塔**同文件一次装**、int8 常驻、切分驻留先切再装）⇒ `_encode_h3_condition` 回执里同时给出 `hidden` 与 **`tags`**（0 = video 行 / 1 = text 行 ⇒ 采样侧 `mod_segments_for` 靠它切 run）；参考**视频**按 `videoIndex` 选路（单张量 = 单路；列表 = 一路一个，越界/缺路当场拒），每块按 2 fps 抽帧后奇数帧补末帧且**时间戳重复末值** | `app/services/engine/h3_encode.py` |
 | 导演稿 → 生成段（纯规则） | `app/services/engine/script_parse.py` |
+| **参数覆盖层**（调优结论 → 真改行为，可回滚） | `app/services/engine/tuning.py` | 外部 `configs/engine/tuning.json` + 白名单 `TUNABLES`（逐族登记 `steps` 与区间，**不通配**）；只覆盖「调用方没显式表态」的值（`request.steps == default` 才换），没有文件就**行为逐字不变**（所以不需要开关）；每次写先备份到 `configs/engine/_backups/`；`set_field` 必须给 `basis` + 可核 `evidence`，否则拒写；生效时 `plan.warnings` 写明「参数来源: tuning:<stage>.<field>（30 → 24，依据 …）」。**同一个白名单还挂了第 5 个"伪档" `qc`**：九个质检阈值（`blackMinDuration`/`blackPixThreshold`/`freezeMinDuration`/`freezeNoiseThreshold`/`truePeakDb`/`loudnessTarget`/`loudnessTolerance`/`fpsMin`/`durationToleranceSec`）不是引擎档、`GenerationRequest` 上也没有这些字段 ⇒ `apply_to_request("qc", …)` 永远换不进请求，只有 `technical_qc.qc_thresholds()` 读它；好处是**证据核验、备份、history、`report()`、`clear_field` 回滚**一套白拿，不用为质检再造一份写入口；默认值必须与 `TECH_QC_THRESHOLDS` **逐值相等**（`qc_thresholds_test.py` 的 AST + 逐值比对判据守住，常量本身不许被覆盖写回）。**读向是 `suggest()`**（`GET /api/v1/knowledge-loop/tuning/suggest`）：只读 `outcome_index` 的跑次，出「失败聚集」（某族 `failed` 过样本闸门且最大 `error_code` 占比 ≥50%）与「步数平台期」（`meta.steps` 分桶，最高档与次高档均分差 <0.01）两类候选；它**一行都不写**（AST 判「除四个写口外无人调用它们」），`canApply` **恒 false**（影子验证不在本模块），`notEvaluated` 如实列出算不了的维度（QC 命中率缺**人工复核结论**当分母 —— `technical_qc.ISSUE_CODES` 已给 issue 稳定 code、缺的是"误报/漏报"标注；sampler/schedule 不在白名单）；**两个输入侧写点也已接**（此前只有 agent trace 进索引 ⇒ 夹具一撤就"没有聚集"，`outcome_wiring_test.py` 28 条）：`runtime.py::_index_run` 在任务封口后落账（`kind` 按产物后缀、`error_code` 只取类别、meta 带 `steps/seed/cfg` 等分桶原料、写盘在 `with self._wake` 之外），`technical_qc.py::_index_qc_run` 在质检写回后落账（确定性 `run_id` 覆盖同一条、分数归一到 0–1、规则维度失败标 `cause=rule` 不编伪码），超过 500 条扫描量标 `sampled=true`，候选 `evidence` 的 run_id 要过 `check_evidence` |
 | 独立命令行（`doctor`/`plan`/`readiness`/`inspect`/`manifest`/`status`） | `app/services/engine/__main__.py` |
 
 > `__main__.py` 是**入口脚本**，不在 `MODULE_GROUPS` 的 63 个模块里（㊀ 的登记表只管模块）。
@@ -501,16 +586,53 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 - **未接线的 3 个模块**（已实现、只有测试在钉口径）：`image_ops`、`mappings`、`latent_formats`
   —— 它们该接到谁身上，登记在 `tests/structure_test.py::UNWIRED`，接了线就该删那条登记。
   （`dit_lumina` 2026-10-31 已接线 ⇒ 登记已删，见下一条。）
-- **有骨架的族有 7 个**：H3（`h3_form` `vae_h3` `audio_vae`）、SDXL（`sdxl` `sdxl_vae`）、
-  GGUF LLM（`llm` `gguf_to_llm`）、DiT 判族（`dit` `dit_family`）、**通用单流 DiT**
-  （`dit_generic`：Krea2 一族已能建结构并前向，维度全部从权重形状反推）、**Z-Image**
+- **有骨架的族有 10 个**（判族另算：`dit` `dit_family`）：H3（`h3_form` `vae_h3` `audio_vae`）、
+  SDXL（`sdxl` `sdxl_vae`）、
+  GGUF LLM（`llm` `gguf_to_llm`）、**通用单流 DiT**
+  （`dit_generic`：Krea2 一族已能建结构并前向，维度全部从权重形状反推；**TE/VAE 与采样也已接通**，
+  `stage=krea2` 从提示词一路到 PNG，见 10.1d）、**Z-Image**
   （`dit_lumina`：判族命中 `zimage` ⇒ `torch_backend` 按权重形状建 `LuminaDiT` 并接进前向，
   与盘上 453 张量逐键对账；**TE/VAE 与采样也已接通**，`stage=zimage` 从提示词一路到 PNG，
-  并已进 `runtime.ensure_loaded` 装配口，见 10.1b）、**Qwen-Image 2512 / Edit 2511**
+  并已进 `runtime.ensure_loaded` 装配口，见 10.1b）、**Qwen-Image 2.1**
+  （`dit_qwen21` ＋ `qwen35_te`：族 `qwen_image21`、盘上 649 键、与 comfy 逐位对拍；
+  `stage=qwen_image21` 是第四条装配线，见 10.1c）、**Qwen-Image 2512 / Edit 2511**
   （`dit_qwen_image` 双流 MMDiT ＋ `qwen25_te`：结构与前向都写了、装配线也接了
-  `stage=qwen_image`，与盘上 1933 张量逐键对账；**但还差一次真权重实跑出图**，Edit 2511 的
-  参考图通路明确拒跑，见 10.1c）。Flux.1-dev / Wan2.2 / SEEDVR2 目前**只有格式与量化支持，
-  没有前向**。见第 9 节。
+  `stage=qwen_image`，与盘上 1933 张量逐键对账；Edit 2511 的参考图通路 2026-11-01 已接
+  （含**多张**参考图），**但还差一次真权重实跑出图**，见 10.1c）、**Flux.1-dev**
+  （`dit_flux` 双流 19 + 单流 38：判族命中 `flux` ⇒ 按 `dit_build` 表建网并接进装载/前向，
+  与盘上 780 张量逐键对账、与独立双精度参照一致；**条件靠外部注入**（盘上无 T5-XXL/CLIP-L），
+  见 10.1e）、**Wan2.2 I2V 14B**
+  （`dit_wan22`：40 块 / 5120 / 40 头、真头 1095 键与 14 288 901 184 参数双向对账、与独立 fp64 参照
+  同一前向；**I2V 36 通道拼接未接、26.62 GiB 装不进卡** —— ⚠️ 原写的「文本塔（umt5）无实现」已于
+  2026-11-01 **更新**：塔本体 `umt5_te` 与分词器 `umt5_tokenizer` 都已写出、与 comfy 逐位对拍已过，
+  **但装配线还没接** ✗，见 10.1f / 10.1g）、**SEEDVR2**
+  （`dit_seedvr2` ＋ `vae_seedvr2`：骨架形状反推 ＋ 前向口径 ＋ 真实 3B 权重头对账，
+  2026-11-01 **已接进 `dit_build` 与 `stage="seedvr2"` 装配线并真权重出片跑通**
+  （720×480 / 8fps / 49 帧 ⇒ 1.27 MB mp4、715 秒、`ok=True`），唯一短板是**解码慢**
+  （单段 336 秒、峰值 47.6 GiB，潜帧分块已被实测否掉）见 10.1g）。
+  Music3 **已不再是「只有格式」** ✓（2026-11-02）：`dit_music3` 骨架 ＋ 前向口径（σ 翻转取负、
+  RoPE split-half 正号 / 只转 q/k 前 `rotary` 维、潜帧率 86.1328 Hz、689/344 滑窗）与
+  `vae_music3` 的 DAV 解码（121 键两套写法两向互归、128 = 2 × 64 行主序折半）都写完并自检过
+  （`engine_music3_test` 46 项）。**2026-11-06 接线已闭合** ✓：`stage="music3"` 装配线
+  （`runtime._ensure_music3_loaded` 三格同驻 13.34 GiB、不分时）＋ 音频 plan（`_fill_music3_plan`：
+  秒 →×25 条件帧 →×3.4453125 潜帧、`width/height` 恒 0）＋ 歌词-文本塔（`encode_text` 的
+  `music3-ar` 支）＋ 解码（`decode` 的 `music3-real` 支）＋ 出盘（`write` 的纯音频支 → 44.1k 立体声 wav），
+  长音频滑窗仍在 `velocity()` 里（`pipeline` 只诊断窗数、绝不重切 ✓）。逐处对账 56 项
+  （`engine_music3_wiring_test`）全绿，**2026-11-06 真权重已出歌** ✓（5 秒档 ⇒ 4.99 s / 880 684 B / 2 声道 / 44.1 kHz / 峰值 −6.6 dBFS、全链 73.6 s；20 秒档 ⇒ 19.99 s / 3 526 700 B / 881 664 样本 / RMS −20.5 dBFS、编码 249.2 s ＋ 采样 9.3 s ＋ 解码 0.35 s、全链 268.9 s；谱形不是噪声（谱平坦度 0.14、主峰 258/86/433 Hz），逐秒 RMS 有起伏）。首跑连抓**四处**「前面几环全绿、最后一步才炸」的接线坑：DAV 键名两套写法（`shape_problems` 归一了而装载器没归）、条件留在 CPU（塔有意腾卡）、解码入口 dtype 未对齐、解码分支误引不存在的 `vae_music3.SAMPLE_RATE` —— 四处都补了成对判据（A9–A16）。接线对 ≠ 出歌对。
+  **对参考实现逐处对账又抓到一处真差异** ✓✗（同日第二轮）：σ 日程。本族是 `ModelType.FLOW` ⇒
+  `ModelSamplingDiscreteFlow` 取 `shift=1.0`（`sampling_settings` 只写了 `multiplier: 1.0`）＋
+  `KSampler` 默认 `scheduler="normal"` ⇒ 落到 σ 上是**σ 等距**、端点 `(1.0, 0.001)`、末尾 0；
+  原先走的是 `_image_flow_sigmas`（**t** 等分、端点 `(1.0, 0.0)`）—— 30 步时末段是
+  `0.0333 → 0` 对 `0.001 → 0`，**噪声跳幅差 33 倍**，症状只是「尾巴那点残噪没清」，不报错、
+  不看波形发现不了。改 `schedules.normal_sigmas(steps, shift=MUSIC3_FLOW_SHIFT)`，判据 A17a/b/c
+  （逐值对拍 ＋ 端点 ＋ 源码不许走回 `_image_flow_sigmas`），本套 59 项。
+  **2026-11-06 又走通了 HTTP 通道**（`_bench/music3_api.py`，`POST /api/v1/engine/generate` ＋ `wait`）：
+  5 秒档 HTTP 200、74.0 s、`primaryUrl='/static/engine/audio_seed777.wav'` ⇒ 前端音频卡拿得到可播放地址。
+  ⚠️ 任务成功态是 **`done`**（不是 `succeeded`）—— 拿错名字会让跑成功的任务在收尾那一刻被判失败。
+  画布侧同轮补齐：`canvas_ops.NODE_TYPES`/`GENERATION_MODES`/`DEFAULT_NODE_SIZE` 三处加 `audio`、
+  `canvas_generate_audio` 从「未迁」挪进「已迁」（22＋12=34），`CanvasNodeCard` 真渲染 `<audio>`。
+  F5-TTS 仍是**只有格式与量化支持，没有前向** ✗。
+  见第 9 节。
 
 ## 6. L5 本地执行与厂商适配（48 模块，4 个域）
 
@@ -583,7 +705,7 @@ L5 是唯一允许「知道某家厂商的怪癖」的地方。
 |---|---|---|
 | 打标 | `app/services/lora_train/dataset/caption.py` | 生成/写回 caption |
 | 字段定义 | `app/services/lora_train/dataset/fields.py` | 素材任务的数据形状 |
-| 文件操作 | `app/services/lora_train/dataset/files.py` | 改名/复制/转格式 |
+| 文件操作 | `app/services/lora_train/dataset/files.py` | 改名/复制/转格式；备份目录在**素材目录同级**（在里层会自己抄自己）；转格式回执里的 `backup` 就是**这次真用的那个路径**（旧写法收尾再调一次 `backup_directory()`，跨秒会报出不存在的目录） |
 | 提示词模板 | `app/services/lora_train/dataset/prompts.py` | 打标用的 prompt 与选项映射 |
 | 素材运行时 | `app/services/lora_train/dataset/runtime.py` | 串行排队、日志可增量取、可取消 |
 
@@ -623,7 +745,7 @@ L5 是唯一允许「知道某家厂商的怪癖」的地方。
 | 请求工具 | `app/core/request_utils.py` | 分页/过滤/幂等键 |
 | CPU 预算 | `app/core/cpu_budget.py` | 并发度与线程数控制 |
 
-## 8. L7 开发期工具（`app/scripts/` 21 = 顶层 15 + `corpus/` 6，4 个域；另有 `tests/` 166 套）
+## 8. L7 开发期工具（`app/scripts/` 29 = 顶层 16 + `corpus/` 13，4 个域；另有 `tests/` 231 套）
 
 **不进运行时**。判据：删了它，线上功能一条都不少；但删了它，下次事故就没人拦。
 
@@ -651,16 +773,24 @@ L5 是唯一允许「知道某家厂商的怪癖」的地方。
 | SD-H3 兼容探针 | `app/scripts/sd_h3_compat_probe.py` | — |
 | SD-H3 管线 | `app/scripts/sd_h3_pipeline.py` | — |
 
-### L7-3 数据库与语料（1 + 语料 6）
+### L7-3 数据库与语料（1 + 语料 7）
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 库升级 | `app/scripts/db_upgrade.py` | 迁移执行器 |
 
-`app/scripts/corpus/` 是**外部 prompt 语料的四步流水线**（采集 → 归一 → 检索 → 统计，各步可单独重跑）：
+`app/scripts/corpus/` 是**外部 prompt 语料的四步流水线**（采集 → 归一 → 检索 → 统计，各步可单独重跑），外加两条支线：**扫描件 OCR**（`ocr_*` 四件＋`text_clean`，只服务 `script_library` 的第二条命）与 **场次索引**（`scene_index`，把库里的剧本切成场次写进独立 sidecar，只服务 A 侧 `kb_scenes`）：
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
+| 知识库检索（CLI） | `app/scripts/corpus/library.py` | 复用 `services/script_library`，与 Agent 工具同一打分口径；`--q-file` 按 `utf-8-sig` 读防 PS 写 BOM |
+| 场次索引（CLI） | `app/scripts/corpus/scene_index.py` | A 侧建库：一份要读全本正文（几百页 OCR 文本），5403 份是小时级 ⇒ **做成批处理而不是 HTTP 端点**（藏在端点后面既超时又没法续跑），可 Ctrl-C、`--limit` 试跑、`--force` 重算，与 `ocr_index.py` 的断点纪律一致。**不重复实现解析**：切场／角色提取／置信度在 `services/scene_parser`、落库与读回在 `services/scene_index`，HTTP 端点与 Agent 工具读的是同一份派生库 ⇒ 三者不会给出三种答案。参数 `--stats`／`--path=P`／`--path-file=F`（一行一个，绕开 PowerShell 传中文路径乱码）／`--all`／`--limit=N`／`--force`／`--json` |
+| 扫描件 OCR 入库（CLI） | `app/scripts/corpus/ocr_index.py` | 引擎两档（`OCR_ENGINE=auto` 优先新档 `rapidocr` 3.x／PP-OCRv6，回退 `rapidocr-onnxruntime` 1.4.x／PP-OCRv4），新档 0.32 s/页 vs 老档 1.75 s/页（同页同机实测，识别字数 417 vs 410）；`--stats`／`--plan`／`--run`；**`--only=partial` 只补「跑了没跑完」的那批**（它们的块已进 fts5、默认被检索层挡着，混在 3135 份待办里按体积排序根本轮不到；拼错的值当场退 2，不许静默跑全量）；只做供应商库**登记了但没正文**的四种形态——PDF 扫描件（pymupdf 按 dpi 渲染）、散图（多帧 TIFF 按帧算页）、**纯文本 `txt`/`md`**（`_ocr_text`：`utf-8-sig→gb18030→big5→cp1252` 按可疑度选址解码、按 1500 字切伪页、`plain=True` 跳掉「跨页页眉剔除/整页重排」并把判废口径收成「只有解码失败才判废」，因为这两步与「符号段判废」都是为 OCR 碎行/表格准备的，用在作者排好的对白与目录上就是删真内容；主库那 80 份纯文本件本来就有正文块，这条路是「万一某份的块丢了」的出口，不是补一个不存在的坑）、**整页图贴进 Word 的 docx**（docx 就是 zip，按 `word/document.xml` 里 `a:blip` 的顺序取 `word/media/*` 再 OCR，不需要 python-docx；实测《撕夜》43 页图/开端 49 页图，原先当「坏文件」跳过 ⇒ 永远补不上）；默认剔除 `90-隔离与待审`、期刊排最后，`signature=size:mtime` 幂等可续跑，`--pages=N` 试跑标 `partial` 不当完成；★速度三处口径（都量过，见函数文档串）：**先读 PDF 自己的文字层**（约 1 ms/页，有字就不 OCR）、`rec_batch_num=16`（默认 6 时 7.68 s/页 → 2.02 s/页，识别字数 2816→2811 不变）、`intra_op_num_threads=预算÷进程数`（预算改由 `cpu_budget()` 给：先减 `OCR_CPU_RESERVE`（默认留 2）得硬件余量，再按本机**外部占用**收缩，见行末「资源调度」；CPU 档单进程封顶 16——32 线程反而 3.29 s/页，GPU 档只给 2 条因为 CPU 只剩解码/后处理；`OCR_THREAD_CAP` 只能收紧，表头逐次打印「`6 进程 ×（2 识别 + 3 渲染）＝ 30（预算 30 / 硬件 32 逻辑线程）`」便于当场核对不超订）；★**渲染与识别流水**（2026-11-04 第二处修正，起因是创作者指出「只用 GPU、CPU 没充分使用」）：原先一页一页「渲染 → 识别 → 渲染」，实测 4 进程 × 2 线程只占 32 条逻辑线程的 **~20%**，而 GPU 利用率在 25–82% 之间抖（GPU 每页都在等 PyMuPDF 渲染）。现改法两条：① **渲染线程也算进线程配额**——`worker_threads()` 把每进程配额切成 `(ORT 线程, 渲染线程)`，`workers ×（ort+render）≤ cpu_room()`，渲染不再算「白送」；GPU 档 ORT 只留 2 条、其余全给渲染（3–5 条），CPU 档 ORT 拿 `share−1`；② `_ocr_one` 用 `ThreadPoolExecutor` 按 `2×渲染线程` 的窗口预取后续页（连「先读 PDF 文字层」也搬到渲染线程），主线程连续喂 GPU。渲染任务**每页自己 open/close PDF**：PyMuPDF 的 `Document` 不保证跨线程并发安全，线程本地缓存在长批次里又会攒下几百个句柄（主线程无法安全回收别的线程的对象），open 是惰性 mmap、相对一页渲染是 1% 量级开销。进程数由显存封顶 `GPU_MAX_WORKERS=4`（每个 CUDA 会话驻留 ≈4.2 GiB；第 5 个会话把 `memory.used` 顶到 22489 MiB、每页反从 0.44 s 劣化到 0.88 s ⇒ 会话之间抢显存比抢算力更致命），**加进程提吞吐有物理上限**；`OCR_RENDER_THREADS` 可手钉做对照。★**页级切分**（2026-11-04 第三处修正）：进程池按**文件**分发，真跑到最后只剩一两份大书时（实测「只剩一份 920 页的《纪录电影文献》」）4 个进程里 3 个空转 —— GPU 掉到 18%、CPU 只占 ~22%，等于把并发白扔。现由 `plan_segments()` 在「份数 < 进程数」时把大文件切成 `(lo,hi)` 页区间并行（门槛 `MIN_SPLIT_PAGES=120`／单段 `MIN_SEG_PAGES=40`，只给「当前单段页数最多」的文件加段，切到补齐进程数为止；`--pages` 试跑不切；docx/图片数不出页不切，页数一律现场 `fitz.open` 数而**不信主库 `pages`**——报小了会静默丢页）：各段只做「渲染＋识别」并回传原始页文本，`_merge_segments()` 在主进程按页号排序后**统一清洗一次**（跨页版头剔除、碎行合并必须看全文档，这是切分不伤质量的前提），`seconds` 取最大段而非相加（段并行，相加＝把同一段时间数 N 遍）。实测 920 页切 1–230／231–460／461–690／691–920 四段：GPU 100%、显存 12.2 GiB、**180.0 s 跑完 = 5.11 页/秒（0.20 s/页）**，同一份书单进程不切段实测 0.44 s/页（60 页 26.3 s，推算 920 页要 403 s）⇒ **2.25×**。⚠️ 加速比不是 4× 的原因：4 段并行时每段掉到 0.78 s/页，GPU 已 100% 饱和，多出来的进程在排队而不是白算 ⇒ 想再快只能减少每页的 GPU 计算量（det 输入尺寸／rec batch），不是加线程。**CPU 占用低的正确解读**：这是扫描件 PDF，CPU 只做 150 dpi 渲染＋前后处理（≈0.15 s/页当量），GPU 满速出 5 页/秒时 CPU 需求本来就小；4 进程 28 条线程实测只用到 ~3 核 ≠ 没用上 CPU，而是这个任务的 CPU 占比就这么低；★GPU 档（2026-11-04）：`OCR_DEVICE=auto|cuda|cpu`，`pip install onnxruntime-gpu` 后仍会**静默回落 CPU** —— ORT 的 provider DLL 在**建会话那一刻**才 LoadLibrary，缺 CUDA 13/cuDNN 9 的 `cublasLt64_13.dll`／`cudnn64_9.dll` 只往 stderr 吐一行；本仓 torch cu130 轮子自带这两件，`prepare_cuda_dlls()` 把它们加进 `os.add_dll_directory` 并前置 `PATH`（每个子进程各自挂一遍，spawn 不继承 DLL 目录）。真正的门禁是**预检**：主进程真建一次引擎、跑一张带字 224×72 小图（rapidocr 3.x 的 det/rec 模型**懒加载**，不跑一次就没有 session 可问，`device_report` 只会如实回「无法确认」）、再遍历引擎对象取 `get_providers()`；显式要 cuda 却拿不到 `CUDAExecutionProvider` 就**退 3 中止**，绝不整批跑在 CPU 上还报成功；节流/`--stats` 的均速只能读**主进程墙钟账** `runSeconds÷runPages`（逐份秒数相加在并发下把同一段时间数了 N 遍，实测把 5 s/页报成 42.3 s/页、剩余 2058 小时）；★**口径重烧入口 `--only=done`**（2026-11-04 新开）：切块/清洗/门禁规则改了口径、要按新规则重烧存量时，只给 `--redo` **不够用** —— 它会把 3000+ 份待办一起排进 plan，`--limit` 默认 20，真正要重跑的老份可能一份都轮不上（实测就因此白烧了三份大书的前 1000 页）。`--only=done` ＝「只留 sidecar 里有记录的份」并**隐含 redo**（`ocr`／`partial`／`quarantine` 都算跑过），与 `--only=partial`（只补没跑完的）互补。★**参数形式守卫**：取值型参数（`limit`／`dpi`／`pages`／`path-substr`／`only`／`workers`／`verdict`／`vlm-*`）**只认 `--name=值`** —— 写成 `--name 值` 时 `_arg()` 取不到值会**静默**退回默认，对 `--path-substr` 而言「退回默认」就是「不筛、按优先级跑前 N 份」（实测一条本该只重跑 1 份的 `--redo --path-substr 某书名` 变成前 20 份全量重烧，白跑十几分钟）；现由 `_split_value_args()` 在 `main()` 最前把这种写法**当场退 2** 并给改写示例，`VALUE_ARGS` 是与各 `_arg` 调用点一一对应的清单（新增取值参数必须同步登记，`tests/ocr_index_test.py` ⑪ 六条锁住：空格写法／等号写法／值缺失／`--only` 同型／纯开关不受影响）。★**块页口径＝起始页**（2026-11-04 第五处修正）：`chunks.page` 原记**块收尾页**（`_chunks_of_page` 返回的 `tail_page`），而同一个 `_page_chunks` 里最后那条尾巴缓冲落的却是 `buffer_page`（**起始页**）—— 同一份书两套口径，症状是「按页跳」整体后移约一页、第一页永远没有块指着自己（实测 920 页那份 `page` 最小值是 4，1/2/3 页无块，全篇 25 页无块）。现统一记**块起始页**：检索命中后用户要做的是「翻原文」，从块首页往下读必然读到命中处，从块尾页打开往往要往回翻一页，而 `chunks` 表只有一列、只能选一边。守卫：`page` 在 `chunk_no` 顺序下**必然非降**（掉下去即首尾记反），`tests/ocr_index_test.py` ⑩ 四条用例锁住（跨页块记 1 不记 2、`_chunks_of_page` 两个页号必须分开给、短尾巴块记自己那页）。⚠️ **已入库的 19 份／2893 页是旧口径**，改口径只能 `--redo` 重跑（块文本里不含页号，无法用 SQL 回填）；`coverage.chunkPages`（`count(DISTINCT page)`）本来就是**近似**（跨页块只贡献一个页号），两套口径都低估真实覆盖页数，别拿它当「扫了多少页」。★**并发识别 `page_threads`**（2026-11-04 第六处修正，起因是创作者看「CPU 只用了 20% 多」）—— 真相是**瓶颈不在线程数**：200 DPI 一页渲染只 0.034 s（3234×4981 的大页），CPU 侧几乎不花时间，剩下的全是 GPU 上的 det/rec，而它们是一串**浅请求**、一次只有一个在飞 ⇒ 4 进程跑批时实测 GPU 只忙 53%、CPU 20%、内存 8 GiB/96 GiB。进程数又被显存封在 4（5 会话实测顶到 22489 MiB 且每页 0.5→0.88 s），于是唯一还能加吞吐的地方是**同一引擎实例被多线程重入**（ORT 的 `session.run` 线程安全、预处理只读）：`_ocr_one` 把识别也投进线程池，队列深度＝页线程×2，与渲染预取窗口并存。实测同进程、同一份前 40 页（当时后台 4 进程仍占着卡）：串行 20.2 s＝0.504 s/页、2 线程 11.6 s＝0.291、**4 线程 7.4 s＝0.184（2.74×）**，三次块数都是 34 ⇒ 结果等价。默认 `GPU_PAGE_THREADS=2`（4 进程×2＝8 个请求在飞已够填深；`OCR_PAGE_THREADS=4` 能再快，但会与渲染/后处理挤核，自己权衡），CPU 档默认 1（那边 ORT 已吃 16 条线程、实测 0.870 s/页，本就不是瓶颈端），非法值退回默认。★**并发必然乱序** ⇒ 新增 `_digest_pages()` 显式按页号收（顺序一乱，页眉剔除就会把正文首行当页眉剔掉），短页计入 `blank` 的口径与串行逐字一致；VLM 升级器不是线程安全的，`_page_text` 里的 `consider` 用 `_ESCALATE_LOCK` 串起来（只在可疑页触发，占比很小）。守卫：`tests/ocr_index_test.py` ⑫ 七条（默认 2／显式覆盖／给 0 夹到 1／非法值退回／CPU 档 1／乱序按页序收／短页与留痕不串页），全套 **153 条**。★**资源调度**（2026-11-04 第四处修正，起因是创作者要求「CPU 要吃满、GPU 按**实时空闲显存**分、别人占多了要提示或自动调」）—— 一整批开几个进程、每进程几条线程**不再由硬件常量决定**，改由跑批前一次 :func:`resource_snapshot` 决定、:func:`apply_snapshot` 落进 `OCR_CPU_BUDGET`／`OCR_DEVICE` 环境变量（`spawn` 子进程唯一能继承的口径；必须由主进程算一次而不是各进程自采，否则各进程预算不同、渲染线程数会漂）：① **CPU 预算按外部占用收缩** —— `psutil.cpu_percent(interval=0.25)` 采样（用 `interval=None` 首次恒返 0.0，会把「机器空着」写进预算，必须带区间），`cpuBudget=min(硬件余量, 逻辑线程×(1−busy))`；外部占用 ≥`CPU_BUSY_HINT=50%` 即告警「本批只按剩余算线程数，要独占先停掉它们或用 `--workers=1`」；② **GPU 会话数只按实时 free 显存算** —— `nvidia-smi --query-gpu=memory.total,memory.free`（`CREATE_NO_WINDOW`＋5 s timeout；拿不到就当不知道、按 `GPU_MAX_WORKERS` 不猜），`sessions=min(4,(free−1024)//4200)`；free 连「一个会话 4200 + 给人留 1024」都不够时 `gpu_session_cap` 返 0；③ **开不起会话就降级或告警，绝不硬上到 OOM** —— 自动档（`OCR_DEVICE` 未显式指定）改 `OCR_DEVICE=cpu` 并告警「空闲显存不够开一个 OCR 会话 ⇒ 自动回落 CPU 档（慢 3–5 倍），等占卡任务结束再跑 GPU 版」（改环境变量是唯一能让 `engine_device()`／`worker_threads()`／子进程**同时**按 CPU 档配线程的做法）；用户显式 pin `cuda` 则只告警不降级；`0<sessions<4` 另告警「显存被占 N MiB，只能开 X 会话，吞吐低于满配」；④ 进程数 `default_workers(snap)`：GPU 档 `min(sessions, 4, 预算//7)`、开不起会话或 CPU 档则 `min(8, 预算//4)`；⑤ **跑批前那一行抬头就是决策依据**（实测）：「`资源：CPU 预算 30/32 条线程（全机占用 4% ⇒ 可用 ≈31/32，硬件余量上限 30）｜GPU 空闲显存 21138/23028 MiB ⇒ 4 会话`」；⑥ **批内 5 s 采样** `_ResourceSampler`（daemon 线程，只读、不参与决策）：`report()` 按份触发，一份 900 页跑三分钟才报一次、批内峰谷全被抹平 ⇒ 收尾另打「`资源实测：CPU 平均 11%（峰值 11%）｜GPU 平均 34%（峰值 34%）｜显存最低空闲 18.4 GiB`」＋ :func:`verdict` 一句结论（GPU≥85% ⇒ 瓶颈在算力，扫描件 OCR 的 CPU 占比本来就低、数字上不去不是线程没配上；CPU≥85% ⇒ 加进程只会互抢；两边<40% ⇒ 卡在磁盘 IO/单线程段，再加线程也不会更快；CPU<60% ⇒ 可加 `--workers`，注意别超过显存能开的会话数），免得白调参；采样期显存跌破 `2×GPU_HEADROOM_MIB` 只告警一次（会话不能中途缩，只能让人知道谁在抢卡）。⚠️ 采样线程的 Event **绝不能叫 `_stop`** —— 那是 `threading.Thread` 的私有方法，同名属性覆盖后 `join()` 内 `self._stop()` 调到 Event ⇒ `TypeError`，且**只在真跑完 join 时**炸（纯逻辑单测发现不了，已配真 start/join 回归用例）。实测：`tests/ocr_index_test.py` **134 条全绿**；20 页真跑抬头如上、`0.4 s/页`、`引擎实报：CUDAExecutionProvider,CPUExecutionProvider`。依赖见 `requirements-ocr.txt`（**不进服务端镜像**）。★**长批抗锁**（2026-11-04 真实事故）：整批跑到 2739/2988 时被一次**只读**探测查询（整库备份／大范围 `LIKE`）顶掉，`_save` 抛 `database is locked` 直接冲出 `main()`，9 小时的活儿当场结束（已入库的没丢，剩下 249 份要重跑）。根因是「长任务没给余地」：`sqlite3.connect` 默认只等 5 秒，而 `_save` 是全批唯一没有兜底的调用点。三道防线：① `_open_sidecar` 一律 `timeout=SIDECAR_BUSY_MS/1000`＋`PRAGMA busy_timeout=60000`（`timeout=` 只管第一条语句，整条连接要靠 pragma）；② `_save_atomic` 在**写锁**上退让重试（`LOCK_RETRIES=4`、第 n 等 n×5 s；**非锁**的 `OperationalError` 立刻抛，不把真 bug 埋进等待里）；③ `report` 再兜一层——单份存不进去只记一条失败并继续，该份在 sidecar 里没登记 ⇒ 下一轮自动重来，既不丢也不假绿。纪律：批次在跑时别对它做整库备份／全表扫描；要核对就「先取有正文的 id 集合、再在内存里做差集」，别写 `NOT EXISTS (SELECT 1 FROM chunks …)`（`chunks.document_id` 是 fts5 UNINDEXED 列，那是每份扫一遍全表）。`tests/ocr_index_test.py` 170→**174 条**（busy_timeout／锁错误重试 3 次后成功／重试用尽必抛／非锁错误只试 1 次）。★**整份保底与「隐形空书」**（同日终局对账抓到的真缺陷）：终局对账查出 1 份 `status=ocr` 却 0 块 —— `8 波琳_凯尔_美国影评家_.pdf` 只有 1 页、574 字中文清清楚楚，判废理由是「符号连续段占 20%（3 处）＋有效字符占比偏低 79%」（期刊装饰线被识别成一排制表符，**字本身认得对**），于是整页丢弃、0 块，而 `status` 仍是 `ocr`：`--stats` 报「已 OCR」、检索页页 0 命中、`--audit` 只多一行 reject，没有任何一处能把它指出来。修法＝`_salvage_all_rejected`：**判据是「有没有一页带着正文活下来」，不是「是不是每页都标了 reject」**（空白页判定是 `ok`+0 字，按后者会漏掉「封面空白＋正文判废」的件），触发后把**软性**判废（符号段密集／表格页／短行）降为存疑留正文，**硬伤**（乱码／`maxRun` 超线＝整块被认成符号）照旧丢。★软性判据刻意用「**实打实的有效字符够多**」（`validChars ≥ 120` 或 `validRatio ≥ 0.6`）而**不是**「有效字符占比够高」：占比是比例判据，而期刊「总目录」那种篇名＋点线的页占比天生只有 45–58%、去重比 7–9%（实测 `26 本刊一九八一年总目录.pdf` 有效字 1291 个），字一个没错——按占比会把整本判废，而那本书就再也搜不到了。同理也**不**用「去重比／不同字符数」拦保底：重复页也是书里真实的一页（页眉被刷几十遍、清版页），在「整本否则全丢」的处境下留成 suspect 比彻底消失划算；另在 `_status_of` 加一条「0 块且 `rejectedChars ≥ MIN_PAGE_CHARS` ⇒ 隔离」，让真丢光的件至少出现在隔离清单里而不是消失。隔离语义随之收窄：只管「读出来的东西不能用」（硬伤），「排版被认成符号但字是对的」一律留内容——与「假阳性丢内容比留一点噪声严重得多」同口径。★**`--reaudit`**（只重判「有存疑页」的件，隐含 `--redo`）：门禁判据改了（如「去重比」加中文门槛）之后，旧判据留下的存疑行会一直挂在 `--audit` 里当噪声，而这些页一个字都没丢（`suspect` 照常写块），不值得全书重烧 CPU；`_suspect_paths()` 取件集合、`_keep_suspects()` 收缩候选并**如实打收缩比例**（`--limit` 默认 20，收缩后可能一份不剩，不打出来就像"跑了 0 份"）。`tests/ocr_index_test.py` 174→**192 条**（⑭ 整份保底：软废留正文／空白页+软废也触发／**点线目录页（有效字符占比 47%、有效字 1291 个）必须保底放行**／硬伤不放行（乱码、`maxRun` 超线）／有效字太少（<120 且占比 <60%，插图页口径）不放行／0 块有字被丢判隔离／全空白页不判隔离／成片软废不整份隔离／`--reaudit` 只认 suspect 件／`--run --reaudit` 自动带 redo／`--limit=0` 不被夹成 1）。★`--limit` 专用 `_limit_arg`：`_count` 会把 0 夹成 1（对 `--dpi`／`--workers` 正确，对 `--limit` 错）—— 实测 `--run --reaudit --limit=0` 本意"368 份全做完"，实际只做 1 份而日志像正常收尾，差 367 份一声不响，故 `--limit` 改走 `_limit_arg`（0＝全部，与 `_run` 里 `plan[:limit] if limit else plan` 的本意对齐）。★**第三库的「抽不出字」件在这里接一手**（`_extra_quarantined_docx()`）：主库是供应商清单、**不包含** `05-…/短剧待精筛/` 这批盘面，而 `lib_index.py` 收到图画型 docx 只能记成 `quarantine` 一块不写 —— 两条通道各自都"没做错"，合起来那本书就消失了（实测 1 份：`…/188-短剧剧本+微短剧项目写作基础/短剧编剧和剧本资源/基础知识.docx`，3.95 MB 里 `word/document.xml` 只有 7.9 KB、其余全是 6 张 jpeg）。只接 `status='quarantine'` 且扩展名在 `SUPPORTED_SUFFIXES` 的件：正常收下的（`extra`）已有正文块，排进 OCR 队列是白烧算力；`.pdf`／散图本来就由本库自己扫主库，不从第三库进。`tests/ocr_index_test.py` 192→**194 条**（图画型 docx 进待办／第三库正常件不进队列） |
+| OCR 校对机制 | `app/scripts/corpus/text_clean.py` | 入库前的清洗＋质量门禁（2026-11-04）。原先唯一门槛是 `MIN_PAGE_CHARS=12`，引擎把整页认成一排符号或把一行刷几十遍时字数轻松过 12 ⇒ 脏文本进 fts5 且**事后看不出来**。三层：①**清洗**——控制字符/零宽、孤字与纯标点碎行并回上一行（实测 79% 有文字层的页都有这种碎行；两字以上的行一律不动，合并「雨水」「他说」会把两句并成一句）、跨页重复的页眉页脚（同一归一形在 ≥3 页且 ≥50% 页的页首/页尾出现才删，**且只删 ≤24 字、不带句读**的行——初版用 40 字上限，实测把 34 字的剧本收尾句当页脚删了）；②**门禁** `judge_page` → `ok|suspect|reject`，只盯结构上不可能正常的信号（替换符/私用区/控制字符、同字符连续 8 次、有效字符占比 < 60%、整页去重字符 < 4 且 ≥60 字）；**CJK 占比不参与判定**（英文原版剧本 CJK 恒 0，拿它判会误杀整批）；③**隔离** reject 占比 ≥50% 且判定页 ≥3 ⇒ `documents.status='quarantine'`，整份不写块但**留审计行**（含理由与原文预览），且算"已处理"不会被下次批处理重烧 CPU，重试须显式 `--redo`。`--audit [--verdict=reject|suspect] [--limit=N]` 出复核清单；`tests/ocr_clean_test.py` 77 条。★同日真跑抓出三处只有接真实语料才露头的错，都已修并配反证：ⓐ **三步顺序不能换**——`clean_document` 必须「规整+碎行合并 → 跨页剔版头 → **最后**才整页重排」。原先重排在前，页尾水印被当正文续接拼到上一行（碎行合并把 `)` 粘在句号后、行尾不再是句号，重排继续吞下整条水印）⇒ 水印行从 45 字变 46/76/136/189 字**每页不同**，且粘连行含句号被"正文保护"跳过 ⇒ 一页都数不到、`剔除=0` 而水印照旧进 fts5（实测《世界电影》1984-02 八页，改成新顺序后 `版头=14`、水印清零）；水印常印成「花纹+商号」两行，OCR 把花纹认成 `· ((&)`/`一((+/` ⇒ 剔版头时连带删同侧 `_is_decoration`（≤8 字、真字符 ≤1、含符号、**不含句末标点**，最后一条防误删 `一。` 这种正文）。ⓑ **`judged` 没透传** ⇒ `_status_of` 读 `int(None or 0) >= 3` 恒假 ⇒ **整份隔离在真跑路径永不触发**（单测直接喂 `outcome` 所以看不出来）；现已两条扫描路都透传，并加 AST 守卫扫回执字典字面量必须含 `judged`/`droppedHeads`。ⓒ **符号连续段「1 处即判废」是假阳性丢内容**：764 字的正常评论页因一处表格线整页不写块；改按占比分档（`JUNK_RUN_SHARE_REJECT=0.15`、`JUNK_RUN_MAX_REJECT=200`），零星几处只记 suspect 并写进 `--audit` 预览；顺带修 `_JUNK_RUN` 的捕获组（带括号量化时 `findall` 只回单字符，长度永远量不出来）。ⓓ **正文保护的判据要看"行的实质"而非"整行"**：水印框被 OCR 认成两个句号 ⇒ 整行成「。。实惠图书之家…」⇒「含句读就是正文」把十页里唯一这一页放行（其余九页都删了，症状是"删得挺干净、就漏一页"）；改为 `_body_of()` 先剥掉**行首**装饰符号再判 `_PROSE_PUNCT`（正文不会以句号开头；句中断句仍是正文证据）。短文档（<3 页）做不了跨页统计 ⇒ 水印洗不掉，`--run` 当场打「⚠ 页数不足，未做跨页版头剔除」、`--audit` 单列 `shortDocs`，不假装已清理。★**「去重比」只对中文页成立**（2026-11-04 批次实证）：1500 字的英文页去重字符只有 30–60 个（26 个字母天然反复），去重比恒在 2–6% ⇒ 每本英文书**页页判存疑**，《Monsters, Inc.》改编本 170 页全进 `page_audit`，把真正要看的坏页埋掉。现要求本页 `cjkRatio ≥ DISTINCT_CJK_MIN=0.3` 这条判据才算数；另一头「整页只有 <4 个不同字符」**不设门槛**（拉丁文刷屏照样拦），`"他把信放在桌上…"*30` 反证中文重复页仍判存疑。既有 `page_audit` 里的英文噪声行是旧判据产物（终局对账实测量化：**8458 页／368 份**，最集中的 12 份全是英文剧本 `Once Upon A Time In America`／`Magnolia`／`Butch Cassidy…`；这些件总页数 48576 ≈ 51 分钟 @16 页/秒）——用 `--run --reaudit` 按新判据重判（页文本没单独存，重判只能重跑；`suspect` 页本来照常入库，重判只为把 `--audit` 的噪声清掉，不是补内容） |
+| 版面分栏重排 | `app/scripts/corpus/ocr_layout.py` | 双栏页按「栏序 → 栏内 y」重排（纯几何、零模型、零依赖）。单栏页是**恒等变换**（`ocr_index` 默认开，`--no-layout` 可关）：不重排时双栏页的左右两栏会被逐行交叉，句子读起来半句左半句右——字全认得，就是读不通，且这种「脏」骗得过字数门槛 |
+| VLM 升级通道 | `app/scripts/corpus/ocr_vlm.py` | 只把本地判定为 `suspect`／`reject` 的页交给 VLM 重跑（`--vlm` 开，默认关）。local＝进程内 transformers，http＝环回服务；判据是「升级后仍要过同一套门禁」——VLM 也可能认错，不能因为换了模型就免检 |
+| VLM 权重取用 | `app/scripts/corpus/ocr_vlm_fetch.py` | 一次性把 PaddleOCR-VL 权重拉到 `data/models/`（先跑 `--fetch` 才有 local 档） |
+| VLM 进程内装载 | `app/scripts/corpus/ocr_vlm_local.py` | local 后端：transformers 直接吃本地权重，不起外部服务（远端正跑着的 ComfyUI 机器不受影响） |
 | 采集 | `app/scripts/corpus/fetch_raw.py` | 只下载原始字节并记账，不解析（网络最易波动，必须能重跑） |
 | 归一化 | `app/scripts/corpus/normalize.py` | 各源 → 统一 JSONL；只抽可检索的最小字段集 |
 | 检索 | `app/scripts/corpus/search.py` | 「找相似镜头」最小闭环；全量读内存打分，暂不上向量库 |
@@ -673,7 +803,7 @@ L5 是唯一允许「知道某家厂商的怪癖」的地方。
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | 全量回归 / 权威套件清单 | `tests/run_all.py` | 新套件必须登记进 `TESTS`（漏登记由 ㊇ 拦下） |
-| 结构守卫（8 类事故） | `tests/structure_test.py` | 登记表/`__all__`/零依赖/模块头/空壳/路径腐烂/**接线状态**/**地图覆盖**/**清单完整** |
+| 结构守卫（10 类事故） | `tests/structure_test.py` | 登记表/`__all__`/零依赖/模块头/空壳/路径腐烂/**接线状态**/**地图覆盖**/**清单完整**/**收尾口径**/**生成物不入库** |
 | 分层守卫 | `tests/layering_test.py` | `top → routers → agent → services → core` 单向 |
 | 引擎数值核对 | `tests/engine_*.py` | 每族一个数值基线 |
 | 功能分类地图 | `docs/feature-map.md` | 本文 |
@@ -803,7 +933,7 @@ plan_stage("zimage")  → 列出 sdxl_base + 三条 Z-Image 件（不认 tags）
 ⇒ `readiness("image")` 变 25.73 GiB，`⑦‴` 红；把 `stage_entries` 的 filename 换成不存在的 ⇒
 `plan_stage("zimage").ready` 变 `False`、`residency.missing` 列出三件。
 
-### 10.1c Qwen-Image **2512 / Edit 2511**：骨架、前向与装配线已接，**还差一次真权重实跑**
+### 10.1c Qwen-Image **2512 / Edit 2511**：骨架、前向、装配线**与真权重实跑**都已闭合
 
 `stage="qwen_image"` 是第四张出图档（与 `image` / `zimage` / `qwen_image21` 并列）。它和 2.1
 **族名只差一个 `21`**（`qwen_image` vs `qwen_image21`），但五格事实件件不同 —— 双流 MMDiT vs 单流、
@@ -832,12 +962,15 @@ plan_stage("zimage")  → 列出 sdxl_base + 三条 Z-Image 件（不认 tags）
 - `declare_chain(vae_family="wan21")` ⇒ 解码阶段按 16 通道装 VAE；反缩放是**恒等**
   （`latent_formats.Wan21` 没覆写 `scale_factor`/`shift_factor`），已按族显式登记在
   `vae_wan.latents_stats` 的 `wan21` 一行 —— 这 16 个 0/1 是**族事实**，不是「取不到就回退成恒等」；
-- `part_need_gib=TorchBackend.QWEN_IMAGE_PART_NEED_GIB`（38.05 / 16.1 / 0.24）。**账不许混**：
-  拿 2.1 的 13.26 判 38.05 ⇒ 结论"装得下"、`residency` 留 `off`、装到 20 GiB 才 OOM。以本机
-  22.49 GiB 卡为例：2.1 判「整件上卡不降级」，2512 必须判 `split`（余量连 0.5 GiB 都没有时才整份转 CPU）。
-  这本账在**三个可见面**上都得是生效值：`capabilities().devicePolicy.needGiB.qwenImagePart`（静态，
-  单开一格，不能并进 `part` —— 两族键名相同会互相覆盖）、`describe().devicePolicy.partNeedGiB`
-  （声明链后就是 38.05，类缺省另存 `defaultPartNeedGiB`）、以及 `declare_chain` 回执的 `partNeedGiB`/`peakGiB`。
+- `part_need_gib=` **按文件精度校正过的**本族账（`QWEN_IMAGE_PART_NEED_GIB` 的 `dit` 那一格当 fallback，
+  过一遍 `resident_need_gib()`：bf16 的 2512 ⇒ 38.05 / Edit 2511 的 int8 ⇒ 数据区 19.09；TE 16.1 / VAE 0.24 不动）。
+  **账不许混**：拿 2.1 的 13.26 判 38.05 ⇒ 结论"装得下"、`residency` 留 `off`、装到 20 GiB 才 OOM。
+  以本机 22.49 GiB 卡为例：2.1 判「整件上卡不降级」，2512 bf16 必须判 `split`（余量连 0.5 GiB 都没有时才
+  整份转 CPU），Edit 2511 int8 则 `off`（19.09 < 19.71 可用）。这本账在**三个可见面**上都得是生效值：
+  `capabilities().devicePolicy.needGiB.qwenImagePart`（静态，单开一格，不能并进 `part` —— 两族键名相同会
+  互相覆盖）、`describe().devicePolicy.partNeedGiB`（声明链后就是本次生效值，类缺省另存
+  `defaultPartNeedGiB`）、以及 `declare_chain` 回执的 `partNeedGiB`/`peakGiB`；`POST /load` 的回执另加
+  `ditNeed`（这次按几 GiB 判、是 int8 常驻还是 bf16 1:1）。
 
 清单与就绪档：`configs/models.json` 三条（`dit_qwen_image_2512` / `te_qwen25_vl_7b` / `vae_qwen_image`，
 `tags` 含 `qwen2512`、`required: false`），`STAGE_FILTERS["qwen_image"]` 用 `requireAll` 定必需性，
@@ -845,25 +978,493 @@ plan_stage("zimage")  → 列出 sdxl_base + 三条 Z-Image 件（不认 tags）
 **47.03 GiB（盘上字节）**，三件全必需，与驻留账 54.4 GiB 是**两个数**（fp8/int8 装进来要还原成 bf16）。
 Edit 2511 **故意不打 `qwen2512` tag**：它与 t2i 互斥，进 tag 会让 `requireAll` 把两代都算必需、就绪档假红。
 
-**Edit 2511 = 能装不能跑（显式拒跑，不静默）**：那份权重靠 `__index_timestep_zero__` 哨兵把参考图
-token 与目标 token 拼在一条序列里、并给参考图行喂 σ=0 的调制行。`QwenImageDiT.forward` 已经收
-`ref_latents`，但**参考图通路没接**（Qwen2.5-VL 视觉塔 + 参考图 VAE 编码），`denoise` 也没有这个口
-⇒ 照装照跑会画出"像提示词"的图、参考图那一路整段缺席、0 报错。所以 `TorchBackend.denoise` 在
-**前向之前**就抛（`reason="pending"`），并给两条出路：先接视觉塔与 `ref_latents`，或换 2512 的 t2i 权重。
+**Edit 2511 = 能装也能跑（2026-11-01 接上参考图通路）**：那份权重靠 `__index_timestep_zero__` 哨兵把
+参考图 token 与目标 token 拼在一条序列里、并给参考图行喂 σ=0 的调制行。参考图走两路：
+视觉塔（**384² 面积**）⇒ `<|image_pad|>` 整段替换进文本序列；VAE（**1024² 面积**、8 的倍数）⇒
+`ref_latents`，`denoise` **每一步**带进 DiT（`Sequence[Tensor]`，单图也要包一层列表）。
+多张参考图同样成立：模板按图数二选一 —— 一张走 `TextEncodeQwenImageEdit` 口径（模板自带一个视觉块），
+多张走 `…ImageEditPlus` 口径（正文前 `Picture i: <视觉块>` 逐图一个槽），`ref_latents` 一列、
+**顺序即语义**（`Picture 1` ↔ `embeds[0]` ↔ `ref_latents[0]`）。两处「能力凭空消失」都当场报错：
+Edit 权重没给 `referenceFrames`、Edit 权重缺 `ref_latents`（含空列表）。编辑口径下 `max_length`
+会把图的 token 数**加到文本预算之上**（一张 384² 图约 196 token，三张就 588 > 512，直接用 512
+截断掉的正好是尾部那句指令）。视觉塔只在 encode 段在场 ⇒ 峰值 17.69 GiB 仍判 `full`。
 
-⚠️ **当前状态别读成"已闭合"**：结构与前向写了、键集与盘上 1933 张量逐键对账过、装配线也接了，
-但**还没有一次真权重实跑出图**（无 PNG 证据）。验收口径是 `engine_qwen_image_test.py`（48 项：
-σ 的 3.1、吸附 16 与偶数潜边、四格点名、三个按族参数、三本账分隔与三个可见面、Edit 拒跑位置），
-它**不装真权重**；
-真装真出图是下一步（DiT 38.05 GiB 单件超卡 ⇒ 必然 `split`/`cpu`，跨界前向慢是必付成本）。
+**2026-11-01 真权重实跑已闭合（两档都出了图）**。2512 t2i：`qwen_image_2512_bf16` ＋
+`qwen_2.5_vl_7b_fp8_scaled` ＋ `qwen_image_vae` ＋ Qwen 分词器，1328×1328 / 4 步 / cfg 1.0（先用小步数
+验链路）—— 装配 **20.8 s**（`residency=split`：卡上 25 层 15.9 GiB ＋ 内存 35 层 22.15 GiB，71 个跨界
+hook）、`init` 37.3 s（换装：退 TE、DiT 上卡切层）、4 步 **290 s**（**72.5 s/步**，跨界搬激活的代价）、
+`decode` ≈19 s、PNG **2 780 264 字节**。判图不吃"看起来像"：低频方差保留 **92.6%**（4×4 下采样后
+方差 / 原方差）、相邻像素差 std **9.2**、**36 979** 种颜色、8×8 亮度格上亮下暗分层 ⇒ 是照片结构、
+不是高频噪声也不是灰块（噪声图的下采样方差保留会掉到 10% 以下）。
 
-### 10.2 有格式支持、无前向骨架的模型族
+**三个"真权重才暴露"的缺陷**，全部已修并配判据（这三条的共同点见下方小结）：
+
+1. **前向入口缺精度对齐**（`dit_qwen_image.DiT.forward`）：潜变量有意保 f32（`randn` 默认、逐步累积更准），
+   权重是 bf16/fp16 ⇒ `img_in` 当场 `mat1 and mat2 must have the same dtype, but got Float and BFloat16`。
+   报错落在 `nn.Linear` 上、读起来像"权重坏了"，其实是精度没对齐（与 `dit_lumina.forward` 同一条口径：
+   **在模型内部 cast 输入**，不是把采样侧的潜变量降精度——后者会丢掉累积精度）。现按
+   `self.img_in.weight.dtype` 统一 cast `latents` / `context` / 每个 `ref_latents`。
+2. **0 元素张量装不进**（`weights._tensor_from_bytes`）：Edit 2511 的 `__index_timestep_zero__` 在
+   `int8_convrot` 那份里是 `shape=[0]`，`torch.frombuffer(b"")` 直接抛
+   `both buffer length (0) and count (-1) must not be 0`——字节数本来就该是 0，它的意义只在"键存在"。
+   现 numel 为 0 时返回同形状空张量（`engine_weights_streaming_test` ⑤/⑤′ 守：能装、且不算缺键）。
+3. **`config` 收不到 `@property`**（`dit_build`）：`config = dict(vars(shape))` 只收 dataclass 字段，
+   而 `ref_timestep_zero` 是 property ⇒ 装配线 `config.get("ref_timestep_zero")` 永远 `None` ⇒
+   **Edit 被当 t2i 装**（encode 段不挂 vision/vae、`encode_text` 整段跳过参考图），一路无报错，
+   直到 `denoise` 才报"Edit 权重缺 `ref_latents`"——**报错落点与病因差了三层**。修法是给
+   `FamilyBuilder` 加 `derived` 栏（声明"这一格是从 shape 的属性取值的"），拼错当场 `BuildError`、
+   不许把 `None` 写进 config（`engine_dit_build_test` ⑧ 三条守：登记、t2i 为 False / Edit 为 True、拼错即报）。
+
+★小结：三条都是**"装得进、跑得动、没有任何报错，但功能整块消失或图不对"**的同一族 —— 真权重是唯一
+能照出来的镜子。`engine_qwen_image_test.py`（66 项）与 `engine_qwen_image_edit_test.py`（50 项）里
+⑨ 系列组装真权重的判据仍保留；上面三条新判据在 `engine_dit_build_test`（48 项）与
+`engine_weights_streaming_test`（16 项）。
+
+#### int8 常驻 + 按文件取需求（2026-11-01，回答「显存那么大为什么还是 CPU 在算」）
+
+原来这一族**只有 bf16 一条路**：`dit_build` 的 `qwen_image` 行没有 `adapter`，1933 键一律物化成 bf16
+⇒ 2512 占 38.05 GiB、Edit 2511 占 ≈35.5 GiB，两个都超 22.49 GiB 卡 ⇒ `auto` 只能判 `split`
+（实测卡上 25 层 15.9 GiB ＋ 内存 35 层 22.15 GiB、71 个跨界 hook、**72.5 s/步**）。三处改动：
+
+1. **`_Int8Adapter`（`dit_build._ADAPTERS["int8"]`）**：`qwen_image` 行加 `adapter="int8"` ⇒
+   `prepare()` 不剥前缀（键名 840/840 逐字就是模块名）、`shell()` 走与 Krea2 **同一个** `_shell_int8`
+   （F32 岛 ＋ int8 换壳）。bf16 文件自动得到**空 plan** ⇒ `_shell_int8` 空 plan 不换壳 ⇒ **老路零变化**
+   （所以同一行同时服务两种文件，不用按文件名分支）。实测 Edit 2511：`int8Plan.layers=840`、
+   驻留 **19.09 GiB**（≈20.4B 参数 × 1 字节 ＋ scale，与盘上数据区一致）、`kinds` 里出现 `Int8Linear`。
+2. **需求数按文件取 `resident_need_gib()`**（`torch_backend`）：文件侧 `.weight` 是 `I8` 且有配套 scale
+   ⇒ 这一层原样常驻 ⇒ 该件驻留＝**数据区字节**；否则退回表值（**不在这里编倍率**：`fp8_scaled` 是 2×、
+   bf16 是 1×，两者都叫"低精度文件"）。⚠️ 只改 `decide_for` 一处不够：`declare_chain(part_need_gib=)`
+   也读它，否则装配报"整份上卡"、一进 `sample` 段又按 38.05 重判成 `split`（症状：回执与跑起来的驻留不一致）。
+3. **余量按件分档**（`residency.RESERVE_BY_KIND = {dit 0.25, te 0.05, vae 0.05}`）：原先是 `split` 一律留
+   25%、`off` 只留 1 GiB ⇒ 同一张卡两套口径（空载 20.71 GiB 时 `off` 可用 19.71、`split` 只 15.53，差 4.2 GiB）。
+   DiT 留 25%（显存碎片与 1328² 激活），文本塔/VAE 留 5%（25.44 GiB 的 H3 文本塔从"只放 61%"变成 ≥75%）。
+   老调用方不传 `kind`/`reserve` ⇒ 仍 25% ⇒ 行为零变化。
+
+判据：`engine_dit_build_test` ⑫（只有 `qwen_image` 的 adapter 是 `int8`、`prepare` 不剥前缀、
+空 plan 不换壳、与 Krea2 共用 `_shell_int8`）、`engine_qwen_image_test` ⑩ 系列（读不到文件退回表值且
+`int8=None`、假头部 int8 取数据区 19.09、无 int8 层照旧用表、**同一张卡上 19.09⇒`off` / 38.05⇒`split`**、
+两条调用口都吃校正后的表、只动 `dit` 一格、回执有 `ditNeed`）、`engine_residency_test` / 
+`engine_device_policy_test` 的按件余量与 `reserve`/`reserveKind`/`gpuShare` 三格。
+
+**实测（Edit 2511 int8 / auto / 1328²·3 步·cfg 4）**：装配 **14.2 s**，`ditNeed={"gib":19.09,
+"table":38.05,"int8":true,"layers":840}`、`weights.int8Resident=840`、`dequant.count=0`、
+`devicePolicy.lastDecision={"device":"cuda","residency":"off","degraded":false,"needGiB":19.09,
+"reason":"装得下 ✓：余 21.28 GiB ≥ 需 19.09 GiB ＋ 1 GiB 余量 ⇒ 上卡"}`、`cache.reserved=19.56`
+—— 改前同一份文件 `int8Resident=0 / dequant.count=840 / partNeedGiB.dit=38.05 / residency=split`
+（卡上 15.9 + 内存 22.15、71 个跨界 hook、**72.5 s/步**）。
+
+### 10.1d Krea2 端到端**已闭合**（2026-11-01 实测，`stage=krea2`）
+
+第五张出图档（与 `image` / `zimage` / `qwen_image21` / `qwen_image` 并列），「提示词 → PNG」在自研引擎里
+跑通、不依赖 ComfyUI。真跑实测：装配 9.2 s（`int8Ledger = 224/224` 常驻、`int8OnCpu = 0`）、
+1040×1040 / 8 步全部 **51.4 s**（encode 23.9 + sample 26.3 + decode 1.1 + write 0.1）、PNG 1 104 711 字节。
+
+| 环节 | 本族口径 | 别族的数（套过来不报错、图不对） |
+|---|---|---|
+| DiT | 单流 12.82B（I8 12.155B + BF16 0.665B），**224 层 `Int8Linear` 常驻** | bf16 物化 23.9 GiB ⇒ 装不进 22.49 GiB 卡 |
+| 文本 | Qwen3-VL-4B **12 层隐状态栈**（`taps=range(2,36,3)`）⇒ 宽 **30720** | 2.1 的 4096 末层 / 2512 的 3584 |
+| σ | flow，**`1.15` 是 μ** ⇒ 底数 `e^1.15≈3.158` | 把 1.15 当底数 ⇒ 曲线几乎不弯 |
+| 潜变量/VAE | `Wan21` **16 通道 / 8×**，文件却是 `qwen_image_vae.safetensors` | 2.1 那份同文件走 64 通道 `QwenImage21` |
+| 官方步 / 引导 | **8 / 1.0**（turbo 蒸馏） | cfg=1 在 2.1/2512 上要告警，这里**是正解** |
+
+装配口四格（`ditPath` / `textWeights` / `imageVaeWeights` / `tokenizerPath`），缺一格当场拒、首行只列真缺的
+那几格、说明段点名 `12.82B` 与「反缩放取 **Wan21**」。清单三件（`dit_krea2_turbo` / `te_krea2_qwen3vl4b` /
+`vae_krea2`，`tags:["krea2"]` + `required:false`，必需性归 `STAGE_FILTERS["krea2"].requireAll`）⇒
+`readiness("krea2")` = **17.88 GiB** 三件全必需，且**不并进** `image` 档（互斥备选相加会凭空报装不下）。
+驻留有本族账 `TorchBackend.KREA2_PART_NEED_GIB`（12.57 / 7.5 / 0.24），与 2.1 的 13.26 / 14.79 是两个数。
+
+⚠️ **本轮抓到的四处「形状自洽、键名全对、只有数值错」**（都会出图、都不报错，靠对拍才抓得住）：
+
+1. **注意力闸门位置**：参考是 `wo(out·sigmoid(gate))`，写成 `wo(out)·g` 形状一样、结果不同
+   （`wo` 无 bias ⇒ 两式分别是「逐输入通道加权后混合」与「混合后按输出通道加权」）。症状：换一条完全
+   不同的提示词，输出相关 **0.9998**（图是一团纹理）。
+2. **文本融合的序列轴**：`layerwise_blocks` 的序列维是**层**（`(b·token, layers, dim)`），
+   写成「批 = 层、序列 = token」形状完全自洽，但逐层混合变成逐 token 混合 ⇒ 同样是「提示词几乎不生效」。
+3. **μ 当底数**（见上表 σ 行）：σ 曲线几乎不弯，先几步没把噪声压下去。
+4. **VAE 单帧 + `temporal_kernel=3`**：`T==1` 时 comfy 走 `autopad="causal_zero"`，把时间核**截到最后一拍**；
+   旧写法「T==1 就不补零」直接抛 `kernel(3) > input(1)`，读起来像尺寸算错。
+
+判据：`engine_krea2_test.py`（31 项：五名互斥、μ ⇒ `e^μ`、尺寸吸 16、1040≠1024 的回执、四格点名、
+换 TE/VAE 即换装载键、就绪档三件、`run_sync` 三处换装顺序）、`engine_dit_generic_test.py`（闸门与融合两处
+各配「参考公式对拍 + 反验有区分力」）、`engine_vae_wan_test.py`（单帧截核 ≡ 左补 2 帧零、`temporal_kernel=3`
+的 VAE 能解单帧）。这三份**都不装真权重**，真装真出图是人为验收那一步（上面那组数是实测的）。
+
+⭐ **业务层已接五档**（2026-11-01 收尾）：`bridge.assembly_from_config` 现在认 **五条**出图 stage
+（`sdxl` 四件套 ＋ `zimage` / `qwen_image21` / `qwen_image` / `krea2` 四条三件套链）＋ `h3`，
+业务侧出图链路（`image_generation.py`）的 `engineStage` 白名单与它**同一份**。三条纪律：
+
+1. **`engineStage` 显式给了就听它的，绝不降级** —— 要的那档装不上就当场报，不偷偷换成"能跑的那一档"；
+   没给才走老路（装得上 SDXL 走 SDXL、装不上 H3 兜底，并把原因记进 `fallbackReason`）。
+2. **`assembly_from_config` 不认识就当场拒**，报错文案**列全五档**（原先这里是 `else:` ⇒ 任何没认过的
+   stage 都被静默改写成 `h3` ＋ 一份探测出来的**视频** DiT，装得进去、跑得出「视频首帧」而调用方以为在出图）。
+3. **桥的 stage 清单与 `runtime.ensure_loaded` 的装配线由测试对账**（AST 扒 `runtime` 的分派分支，
+   逐条比对桥的 `_chain_stages() ∪ {sdxl}`、业务层 `allowed` 元组、报错文案三处）——
+   漏一档的症状是「用户选了它、报错说"不认识"、而 runtime 明明装得下」，属于"支持但没接线"，
+   比"不支持"难查得多。本轮就是这么抓出 `qwen_image`(2512) 漏接的。
+
+### 10.1e Flux.1 DiT 骨架已建（2026-11-01；条件靠外部注入）
+
+「按书序」补的第八族骨架：`dit_flux.py`。**能建、能装、能前向**，但**不能从提示词出图** ——
+卡住的不是骨架，是盘上根本没有它的文本塔（见下面「如实标的三条」）。
+
+| 环节 | 落点 | 实测／口径 |
+|---|---|---|
+| 判族 | `dit_family._RULES` | `double_blocks` / `single_blocks` / `img_in` / `txt_in` / `vector_in` ⇒ `flux` |
+| 装配 | `dit_build.BUILDERS["flux"]` | `ForwardContract(latent_dims=4, sigma_form="batch", latent_format="flux")`；`vae_scale=8` |
+| 建网 | `torch_backend.load_weights` → `_build_via_table` | meta 建壳 → `to_empty` → 物化，峰值只一份 |
+| 条件 | `torch_backend.attach_flux_conditioning(vector=…, guidance=…)` | 挂 `default_vector` / `default_guidance`，**不进 `denoise` 的位置参数** |
+| 潜变量 | `latent_formats.Flux` | 16ch / 8× / 仿射 `x/0.3611 + 0.1159` |
+
+**结构事实全部读自真权重**（`unet/flux1-dev.safetensors`，780 张量、**11.90 G 参数**、bf16 ≈ 22.17 GiB）：
+19 双流 + 38 单流、`heads=24` / `head_dim=128` / `hidden=3072` / `context=4096`（T5）/ `vec=768`（CLIP-L 池化）/
+`mlp=12288`。六条口径缺一条就是「形状全对、图是噪声」：
+
+1. 联合注意力拼接顺序是 **(txt, img)**，单流出口按 `[:, txt_len:]` 切回 —— 拼反了不报错，只是每步都错；
+2. 三轴 RoPE `axes_dim=(16,56,56)`、`t` 位置号恒 **0**、**h/w 不居中**（0…H−1）—— 与 Qwen-Image 族的居中口径**相反**；
+3. 时间嵌入吃 `1000·σ`，**σ 不翻转**（与 Z-Image 族的 `1000·(1−σ)` **相反**）；
+4. 调制三元组顺序 **(shift, scale, gate)**：双流出 6 组、单流出 3 组；
+5. 块内 pre-norm 是 **LayerNorm**（减均值 / 总体方差），只有 `query_norm`/`key_norm` 是 **RMSNorm**（权重即 scale、不 `+1`，与 `dit_generic` 的偏移口径**不同**）；
+6. 一根 `vec` = time 嵌入 + guidance 嵌入 + pooled 向量**三路相加**，decoder 前的 `final_layer` 出 `patch²·16` 通道。
+
+**自检 32 条全绿**（`tests/engine_dit_flux_test.py`）：① 真权重逐键对账（780 键**完全相等**）；
+② 形状 → 模块 → `strict=True` 装载；③ 与**刻意换写法**的独立双精度参照对拍；④ 掩码只落前 `n_txt` 列；
+⑤ 三路 vec 各自可辨；⑥ `1000·σ`、不居中位置号、**`t_scale` 是活字段**（详见下面第 8 条）；
+⑦ bf16 进 bf16 出 + 换序反验（1.1e-1）；
+⑨ `default_axes` 对任意偶数 `head_dim` 都给三个**非零偶数**且和为 `head_dim`（详见下面第 7 条）；
+⑩ `attach_flux_conditioning` 的回执报**真在生效**的值（详见下面第 9 条）。
+
+**真权重整份装载也已实证**（⑧，默认跳过：吃 22 GiB 内存 ⇒ 不能进 `run_all`；
+`ENGINE_FLUX_REAL=1` 开 ⇒ 37/37）：`dit_build` 真建 0.1 秒、**780/780 装载**
+（missing 0 / unexpected 0 / shapeMismatch 0）、**驻留 22.17 GiB**、CPU bf16 真尺寸前向
+1×16×32×32 一次 1.5 秒、guidance 3.5→7.0 输出变化 **4.480**（`generator(20261101)` 固定才可复现；
+早先记的 2.25 是裸 `torch.randn` 的一次观测 ✗）。★① 只比键名形状、② 只在小配置闭环 ——
+**只有真文件那一条能证明装配表那一行接对了**，三条都要有。
+
+⚠️ **③ 的阈值是 1e-7 不是 1e-9，别当成"放松判据"**：实现里有**两处刻意的 fp32** —— `rope_freqs` 出的
+旋转矩阵按 ComfyUI 口径降 fp32 ✓、时间/guidance 的正弦角度在 fp32 里算 ✓（guidance 3.5 ⇒ 3500 rad，
+fp64 算角度会与实现差到 1e-1）。纯 fp64 参照因此有 **≈2.1e-9 的下限**（把 `_RMSNorm` 的 fp32 工作精度也
+去掉后仍是 2.1e-9 ⇒ 残差**全部**来自那两处）。1e-7 仍比 bf16 分辨率（2⁻⁸ ≈ 4e-3）紧四个数量级。
+
+**按需激活已通**：`residency._LAYER_RES` 本来就含 `double_blocks.N` / `single_blocks.N` ⇒ 22.17 GiB 可以
+按层切上卡；`dit_build` 一行声明让 `load_weights` / `latent_shape` / `_latent_mode` / `denoise` 四处自动跟上。
+
+⚠️ **如实标的三条**（都不加修饰地写在这里，避免下次误读成"Flux 全通"）：
+
+1. **文本塔盘上没有**：`text_encoders/` 只有 `umt5_xxl`（Wan 用的）、`clip/` 只有 Qwen3-VL-4B 系 ——
+   **T5-XXL (4096) 与 CLIP-L (768) 都不存在** ⇒ 条件只能由 `attach_flux_conditioning()` 外部注入；
+   不挂则走**零向量 + 默认 guidance（3.5）**，那是**结构验证、不是语义**（出图有意义必须等文本塔）。
+   也正因为此，**故意不给 Flux 单开 `STAGE_FILTERS`/`registry.STAGES` 档** —— 空开一档只会让
+   `readiness("flux")` 报出一个假就绪。
+2. **VAE 有本体、未接产品入口**：`vae_flux.py`（16ch / 244 键）在，Z-Image 那条线正用它；
+   Flux 自己的 `stage` 装配线没有（同上：缺文本塔就不该有装配线）。
+3. **两处"变体/尺寸边界"（诚实拒绝，不静默降级）**：① 有些 Flux 衍生权重在 `txt_in` 前多一层
+   `txt_norm.scale`（ComfyUI 参数表里的开关），`flux1-dev` 没有这层、本骨架也不建 ⇒ 换上去会把该键
+   报成 `unexpected`；② latent 边长必须是 patch(2) 的整数倍，参考实现会 `pad_to_patch_size` 先补边再切回，
+   本仓**不补**（补边＝悄悄改构图），奇数边长直接抛 `ShapeError` —— 1024² 档恒为 128×128，正常路径碰不到。
+
+**本轮顺手修的三处判据自伤**（都是「实现没错、测试自己错」那类，记下来别再犯）：
+
+- `_ref_ln`：参照里把块内 pre-norm 也写成 RMS（不减均值）⇒ 相对误差 0.35，看着像骨架坏了；
+- `axes_dim` 不能硬套 `(16,56,56)`：小配置 `head_dim=8` 会算成 1/3.5/3.5（奇数轴 ⇒ RoPE 配对直接抛）
+  ⇒ 新增 `default_axes()`，128 ⇒ `(16,56,56)` ✓、8 ⇒ `(2,4,2)` ✓；
+- `_RMSNorm` 原来**无条件** `x.float()`，把 fp64 自检悄悄降成 fp32（6.1e-9 → 2.1e-9 后才看清残差来源）。
+
+**第 7 条（2026-11-01 复查新抓，实现侧真缺陷，不是判据）**：`default_axes()` 的分支判据错了两轮 ——
+第一版按 `head_dim % 16 == 0` 走 1:3.5:3.5，`16 ⇒ (2, 7, 7)`、`48 ⇒ (6, 21, 21)`；改成 `% 4` 走 ¼½¼ 后
+`12 ⇒ (3, 6, 3)`、`20 ⇒ (5, 10, 5)` 仍出奇数轴。两次的症状都是**建得成、跑不动**（`infer_shape` 通过、
+`rope_freqs` 抛「轴 1 的维度 7 必须是偶数」），而**报错点落在 axes 上**，读起来像调用方传错轴 ✗。
+现在改成三级回落（32 的倍数走真比例 / 8 的倍数走 ¼½¼ / 其余偶数保底 `t∈{2,4}`），并新增 ⑨ 三条判据：
+任意偶数 `head_dim` 都给三个非零偶数且和为 `head_dim`、关键档位与文档一致、`head_dim=16` 能真建出 RoPE。
+
+**第 8 条（2026-11-01 复查第二轮，实现侧真缺陷）**：`FluxShape.t_scale` 是**没人读的写死字段** ——
+前向写的是 `timestep_embedding(sigma, s.t_freq)`，而 `timestep_embedding` 的 `time_factor`
+**默认值恰好也是 1000** ⇒ 行为与正确实现一模一样（自检全绿），但改 `t_scale` 不生效、只有改默认值才生效
+✗。这类「配置项是摆设」比算错更难查：它不报错、也不影响默认路径。修法＝两处显式传
+`time_factor=s.t_scale`（时间与 guidance 各一处，同族 `dit_qwen_image` 一直这么写），并在 ⑥ 补一条判据
+「`t_scale` 1000→1 必须改输出」（拿同一份 `state_dict`、只换 `t_scale` 跑两次）。
+
+**第 9 条（2026-11-01 复查第三轮，回执会说谎）**：`attach_flux_conditioning` 的挂载是**写进模型属性**
+（`default_vector` / `default_guidance`），但回执的 else 分支一律报 `guidance_default`、vector 一律报
+「零向量」⇒ **第二次只传 vector 时，回执说 3.5、模型里还挂着上一次的 7.0** ✗。这类缺陷不影响出图，
+只影响「人看着回执判断挂了什么」—— 而本仓全部报告都是拿回执当事实的。修法＝回执读**活属性**
+（`getattr(model, "default_guidance", None)`），并另起一条说明「沿用上次、本次没给不回落默认」；
+判据 ⑩ 三连用 `__new__` 轻量替身验（不动显存、不装 22 GiB）。
+
+**第 10 条（2026-11-01 复查第四轮，两处"看着在管、其实没管"）**：
+① `FluxShape.__post_init__` 里对单流 `linear1`/`linear2` 宽度的两条校验是**恒真**的 —— 期望宽本来就是
+`3·features+mlp_hidden` / `features+mlp_hidden`，`if x != 同一个表达式` 永不成立 ✗，却带着「错误归因留给这里」
+的注释，让人以为这里管着（真校验在 `infer_shape` 对着权重形状做）。已删掉，并留注释说明为什么不能在这里校验。
+② 键数分解式写成 `19×24 + 38×8 + 14`：14 加起来只有 **774**、与同句的「780 键」自相矛盾 ✗。对着盘上
+`flux1-dev.safetensors` 头数出来是 **19×24 + 38×8 + 顶层 16 + guidance 4 = 456+304+20 = 780** ✓，
+`expected_keys()` 的两处说明一并改正（schnell 系按此推定 776，盘上无该文件 ⇒ 标注未验）。
+
+### 10.1f Wan2.2 I2V 14B **端到端已接线**（2026-11-02；骨架 2026-11-01）
+
+第九族：`dit_wan22.py`。**判得出、建得出、装得进、前向跑得动**，2026-11-02 起
+**plan → 首帧条件 → 双专家接力 → 解码**四段也接上了 ✓（这条线的三处「不报错但错」写在
+`tests/engine_wan22_test.py` 的文件头 ✓）。
+
+#### 真跑出片（2026-11-02 首次 ✓）
+
+`_run_qwen_image.py --stage wan22`，真权重四件（high/low 两份 fp8_scaled ＋ UMT5-XXL ＋
+`wan_2.1_vae`），首帧用 §10.1d 那张 `output/engine_run/image_seed20261101.png`：
+
+| 项 | 实测 |
+|---|---|
+| 装配 | 32.0 s；`mode=split`（`onGpu=33 / onCpu=17`、`gpuGiB=15.49 / cpuGiB=11.13`、`gpuShare=0.5819`、`fits=true`） |
+| plan | **576×320** / **17 帧** / 16 fps / 4 步 / `wanHighSteps=2` / flow `shift=5.0` / `latent_frames=5` |
+| 装配后到落盘 | **155 s**（encode 段换 UMT5＋VAE ⇒ 采样 4 步含两次专家**原地重装** ⇒ decode 段换 VAE） |
+| 产出 | `output/wan22_i2v/video_seed20261102.mp4`，**79 292 字节**、576×320、17 帧、16 fps、h264 |
+| 画面核验 | 首帧与条件图 L1 **0.0399**（VAE 往返量级 ⇒ 首帧确实被吃进去了 ✓）；相邻帧 L1 0.017~0.04（有运动且不跳）；高频残差占比 **0.08**（噪声会是 0.4+ ⇒ 不是噪点片 ✓） |
+
+**这一跑连抓八处「形状/字段全对、跑起来才炸」**（①~④ 上一轮修，判据在
+`engine_wan22_test.case_wiring_attributes`；⑤~⑧ 收尾这轮修，判据在
+`engine_vae_wan_test.case_temporal` 与 `engine_wan22_test.case_real_run_truth`）：
+
+1. `TorchBackend.WAN22_PART_NEED_GIB` 只写在文档里 ⇒ 装配第一步 `AttributeError`；
+2. 入口通道读 `config["in_channels"]` ⇒ 它按契约短路到**潜宽 16** ⇒ 盘上 36 通道的真文件照拒
+   （修：优先 `in_dim`，两者都无则当场拒）；
+3. `text_kind="umt5"` 落到 `qwen35` 兜底 ⇒ 报「缺 `model.embed_tokens.weight`」指不到真因；
+4. `self._device()` 把**字符串属性**当方法调 ⇒ `TypeError` 报在「文本编码失败」里；
+5. ⭐ **Wan 2.1 VAE 从未跑 `time_conv`** ⇒ 时间维一动不动 ⇒ `encode` 报「参考 latent 时间维 17 ✗
+   ≠ 潜变量 5 ✓」，解码侧则是「5 潜帧出 5 帧而不是 17 帧」且**不报错**。修在
+   `vae_wan.Resample`（两条 3D 分支真跑 `time_conv`，首帧按参考的 `'Rep'` 分支不过卷积 ⇒
+   `4k+1` 对 `4(T−1)+1`）；判据 `engine_vae_wan_test.case_temporal`（10 条）＋
+   `engine_wan22_test.case_real_run_truth` 的 4× 不变量；
+6. ⭐ 首帧条件的潜帧数**只**问请求的 `temporalCompression` ⇒ wan22 请求不带它（那是族常量 4）
+   ⇒ 报「首帧条件需要 temporalCompression」，读起来像用户少填字段。修：`pipeline.run_sync`
+   先取 `plan.latent_frames`、没有才按请求压缩比现算；
+7. ⭐ `dit_wan22.WanDiT.forward` 旧写法 `conv(latents.to(pw.dtype)).to(latents.dtype)` ⇒ conv 走
+   bf16、紧接着的 `Linear` 吃回 fp32 ⇒ 采样第 1 步 `mat1 Float / mat2 BFloat16`。修：计算精度
+   **跟权重走**且整条前向只留一种（与 `dit_qwen21` 同口径）；
+8. `UpResidualBlock.forward` 一把 `self.upsamples(x)` ⇒ `nn.Sequential` 只传位置参数 ⇒ 里面的
+   `Resample` 收不到 `first_chunk`，按 `2T` 吐帧而 `DupUp3D` 按 `2T−1` 吐 ⇒ `out + avg_shortcut`
+   当场尺寸不符。修：逐层传 `first_chunk`。
+
+**教训**：这条线当时的 52 条静态判据（源码结构 / 报错文本 / plan 口径）一条也没拦住上面 8 处 ——
+它们全是「两段独立正确的东西在交界处对不上」（类属性 vs 文档、契约短路 vs 权重事实、
+浮点精度 vs 权重精度、「形状刚好对上」vs 真做了时间压缩、开关只传到一半）。
+交界处的判据只能靠**真跑**（现在 58 条里的 ⑤ 那 6 条就是照真跑倒推出来的回归钉 ✓），
+静态判据只能防回归。
+
+接线落点（一张表看全，避免下次又把「已接」读成「没接」✓✗）：
+
+| 段 | 落点 | 关键判据 |
+|---|---|---|
+| plan | `pipeline._fill_wan22_plan` | **必带 `firstFrame`** ✓；尺寸吸 **16** ✓；像素帧吸 **4k+1** ✓；`fps` 24 ⇒ **16** ✓；`steps` 30 ⇒ **4** ✓；`wanHighSteps = round(steps×0.5)` ✓；σ 走 flow **shift=5.0** ✓（`WAN22_FLOW_SHIFT` ✓） |
+| `initImage` | `pipeline.build_plan` 的 `elif init_image` 分支 | 与 `firstFrame` **互斥** ⇒ **当场拒** ✓✗（不是「静默忽略」✓ —— 静默丢掉会让用户以为起点是他那张图 ✓） |
+| 文本塔 | `torch_backend._encode_wan22_text` | UMT5-XXL **4096** 宽 / 序列 512 ✓；**`padding` 位置的条件清零** ✓（不清零会让补位词进 cross-attn ✓ 不报错 ✓） |
+| 首帧条件 | `torch_backend._wan_i2v_condition` | 像素过 VAE ⇒ 校验 **16 通道** ＋ 时间维 == `t` ✓；**只存两段** ✓（拼接交给 `i2v_concat`，单一真源 ✓） |
+| 36 通道拼接 | `torch_backend._wan_concat_latents` → `dit_wan22.i2v_concat` | 没编过首帧条件就 `denoise` ⇒ **拒跑** ✓✗（零填充凑 36 会出「与首帧无关」的片 ✓、不报错 ✓） |
+| 双专家换装 | `register_wan_experts` ＋ `_wan_expert_tick` | 判据是 **σ 阈值** `sigmas[wanHighSteps]` ✓、边界 **`<=`** ✓（写 `<` ⇒ 4 步退化成 3/1 ✓）；`bind_plan` 每轮**复位** high ✓ |
+| 装配 | `runtime._ensure_wan22_loaded` | 三格必给 ✓；装完核 **36 通道** ✓（同族 T2V 是 16 ✓）；`ditPath2` **进装载键** ✓；`declare_chain` 三件**分时** ✓ |
+
+⚠️ 2026-11-01 的旧结论已作废 ✓：`umt5_te` ＋ `umt5_tokenizer` 当时「有实现、没接线」✗，
+现在装配线收 `textWeights` ✓、`_encode_wan22_text` 直接调它 ✓（见 10.1g 的 UMT5 段 ✓）。
+
+| 环节 | 落点 | 实测／口径 |
+|---|---|---|
+| 判族 | `dit_family._RULES` | `blocks.N.self_attn` + `cross_attn` + `modulation`（6 路）⇒ `wan` |
+| 装配 | `dit_build.BUILDERS["wan"]` | `ForwardContract(latent_dims=5, sigma_form="batch", latent_format="wan21")`；`in_channels=16`、`vae_scale=8` |
+| 建网 | `torch_backend.load_weights` → `_build_via_table` | meta 建壳 → `to_empty` → 物化；`patch` 从 `patch_embedding`（Conv3d）权重读，不用默认值 |
+| VAE | `torch_backend.attach_wan_vae` | 已有（Krea2 线在用它）；`wan21` 口径 = 16ch / 8× / meanstd |
+| 文本塔 | `umt5_te` ＋ `umt5_tokenizer` **已接线** ✓（`_encode_wan22_text`） | 盘上有 `umt5_xxl_fp8_e4m3fn_scaled`；塔与分词器都过了 `engine_umt5_test`，装配线收 `textWeights` ✓ |
+| I2V 拼接 | **已接线** ✓（`_wan_i2v_condition` ＋ `i2v_concat`） | 骨架吃**拼好的** 36 = 16 + 16 + 4 ✓；`dit_wan22.split_i2v()` 只切不造 ✓（反查用 ✓） |
+
+**结构事实全部读自真权重**（`diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors`，
+头里 1908 条 = 真权重 **1095** + fp8 伴生 **813**；F8 406 / F16 689；**14 288 901 184 参数**
+⇒ bf16 常驻 **≈26.62 GiB（≈28.59 GB）**，大于 22.49 GiB 的卡 ⇒ **本机装不下**）：
+40 块 / `dim=5120` / `ffn_dim=13824` / `heads=40`（`head_dim=128`）/ `in_dim=36` / `out_dim=16` /
+`text_dim=4096` / `freq_dim=256` / `patch=(1,2,2)`。六条口径缺一条就是「形状全对、图是噪声」：
+
+1. **六路调制的位置与形态**：`time_projection` 出 `6·dim` → `unflatten(2, (6, dim))` ⇒ `[B,1,6,dim]`，
+   块内 `(modulation.unsqueeze(0) + e).unbind(2)` 切出 6 路 `[B,1,dim]` —— **不是** Flux 的
+   `chunk(6, dim=1)`（那样切出来还是 `[B,1,6,dim]`，形状一直到 `addcmul` 才炸，报错点看着像 e 没算对）；
+2. 自注意力用三路 `0·1·2`、FFN 用 `3·4·5`；**交叉注意力不受门控**且前置 `norm3` 是**带权带偏**的 LayerNorm；
+3. 门控残差三连都是 `addcmul(e, norm(x), 1 + e')` / `addcmul(x, y, e'')` —— 那个 **`1 +`** 缺了不报错，
+   只是整支近似乘以 0（自检④专盯这一项，反向参照把 `1+e` 写成 `e` 会差 **1.86e-1** 被抓住）；
+4. **时间口径 `1000·σ` 在骨架里**：参考实现把这次乘法放在采样器 `ModelSamplingDiscreteFlow.multiplier`，
+   本仓收裸 σ ⇒ `dit_wan22.TIMESTEP_SCALE` 补（自检⑧用 spy 抓 `time_embedding` 的输入，漏乘差 1.72）；
+5. **3D RoPE 三轴宽度不等分**：`axes_dim = [d−4(d//6), 2(d//6), 2(d//6)]`（128 ⇒ **44/42/42**），
+   位置号**从 0 起、不居中**，`theta=10000`，只转 q/k（v 不转）；写成等分 `(128/3…)` 或居中都会整条偏；
+6. `heads` **读不出来**（q/k/v 是单条 `[dim,dim]`、`norm_q` 宽 = `dim`）⇒ 只能查
+   `dit_wan22.HEADS_BY_GEOMETRY[(dim, ffn_dim, layers)]`（盘上只有 `(5120,13824,40) ⇒ 40` 一条），
+   表外几何必须显式给 `heads`，**不猜 `dim//128`**。
+
+**自检 46 条全绿**（`tests/engine_dit_wan22_test.py`）：① 真权重逐键对账（1095 缺 0 / 813 余项**全部**是
+fp8 伴生 / 参数量与头里 numel 之和互核）；② 形状反推 → 建 → `strict=True` 装载无缺无余；③ 与**刻意换写法**的
+独立 fp64 参照前向差 **5.3e-16**；④ 门控 `1+` 项 + 反向反验；⑤ RoPE（1×1×1 恒等 ⇒ 不居中；三轴宽度；
+保范数；只转 q/k）；⑥ `heads` 只许查表；⑦ 五条具名拒绝（4 维 latent / 通道 16 / context 宽错 /
+非 patch 倍数 **不补边** / sigma 个数）+ bf16 进 bf16 出；⑧ `1000·σ`；⑨ 36 通道布局只切不造；⑩ `param_count`
+公式（每加一层的增量必须等于该层实测）；⑪ 装配表一行接对（契约、`in_channels=16` 不是 36、`configSources` 如实）。
+
+⚠️ **③ 的残差只剩 5.3e-16，靠的是两处"精度交接点"照实现镜像**（`rope_freqs` 出的旋转矩阵按 ComfyUI 口径
+降 fp32、时刻正弦按 `sinusoidal_embedding_1d` 降回入参精度）。不镜像这两步，纯 fp64 参照恒定停在
+**≈6.5e-9** —— 那个量级不是逻辑错（真缺陷在这轮实测都是 1.9e-3 ～ 1.9e-1），只是 fp32 落地差，
+但足够把「< 1e-9」这条判据钉死成假失败。⚠️ 别为了让判据过就把阈值放宽到 1e-6：
+6.5e-9 与 1.9e-3 之间差五个数量级，一旦真错，放宽的阈值照样能抓 —— 但镜像之后 5e-16 能把
+「多路调制顺序、unpatchify 通道序、交叉注意力不带门控」这三件事一起钉住。
+
+**如实标的一条边界**（**不是**代码缺口 ✓，别写回 `codeGaps` 里报「没实现」✗）：
+
+1. **单份 bf16 26.62 GiB > 卡 22.49 GiB**：`fp8_scaled` 只省盘不省卡（反量化到 bf16 才是驻留量）⇒ 必须
+   `split`/`cpu`，并**按件分时**（`declare_chain` 的 `encode`/`sample`/`decode` ⇒ 峰值只有一份 DiT）；
+   两份专家**不并存** ⇒ 采样中途 `load_module_weights` 原地重装（约 20~40 秒 ✓，算进耗时 ✓）。
+   本机 sm86 无 fp8 硬件加速 ⇒ 「装得下」不等于「跑得快」✓。就绪档 `readiness("wan22")` 如实报
+   **33.14 GiB / `fits=false`** ✓（四件全是必需 ✓；`tags` 用 `wan22` 而**不是** `wan` ✓，
+   否则会把 `wan26_i2v_14b_gguf` 也卷进来 ✓✗）。
+
+**本轮顺手修的三处判据自伤**（都是「实现没错、测试自己错」，记下来别再犯）：
+
+- 参照的 `_ln` **漏了 bias**：`norm3` 是带权**带偏**的 LayerNorm，只乘权重差 **1.9e-3**，
+  症状看着像「RoPE 没对齐」（实测 `norm3.bias` 那一项单独就贡献 0.5947）；
+- 参照 `_rope` 的 `even/odd` 是 `out` 的**视图**：第一行赋值后就被就地改写，第二行读的是脏值
+  （跨轴差 `0.84147` vs `0.4546`，读起来像「角度算错」）⇒ 必须 `clone()`；
+- ④ 的 `zero_gate` 把**合并后的 slot**（含时间 `e`）整支清零，语义变成「连时间条件也不要了」
+  ⇒ 只能清 `modulation` 这个**参数**、`e` 照留（与实现里把参数置零是同一件事）。
+
+### 10.1g SEEDVR2 修复线（**端到端已接线**）＋ UMT5 文本塔（**已接线**，2026-11-02 起）（2026-11-01）
+
+**SEEDVR2 这条线从「能装」走到了「能修」** ✓（2026-11-01 当天三步一起接完 ✓）：
+
+| 格 | 落点 |
+|---|---|
+| 主干 | `dit_build.BUILDERS["seedvr2"]` ✓ ＋ 契约（5 维潜变量 / σ 批形态 / 口径 `seedvr2`）✓ ＋ **真实 3B fp16 权重与参考实现逐位对拍 `maxdiff == 0`** ✓（89 键逐名逐形状 ✓，反推的形状没有一项是出厂常量 ✓） |
+| VAE | `torch_backend.attach_seedvr2_vae` ✓／`decode` 的 `seedvr2-real` 支 ✓／**像素→潜变量** `encode_pixels` ✓（编码器直出 32 通道取前 16 均值 ＋ `×0.9152` ✓）；`_check_attached_vaes` 对「**33 = 16 ＋ 17**」单独放行 ✓（拿一个全局「主干通道 == VAE 通道」的判据去卡，会把这条唯一合法的加法路径卡死 ✗） |
+| 装配 | `runtime.ensure_loaded(stage="seedvr2", ditPath=…, imageVaeWeights=…)` ✓ —— **只两格**：这一族**没有文本塔** ✓ ⇒ 要 `textWeights` 就是把图片/视频那几族的清单照抄过来 ✗（多一个必填格 = 这条线永远装不上 ✓） |
+| 修复支路 | `pipeline._fill_seedvr2_plan`（尺寸/帧数**只认源视频** ✓、步数 30→**1** ✓、`cfg>1` 只报不拒 ✓）＋ `_encode_seedvr2_conditioning`（`cat(vae_latent 16, mask 1)` ⇒ **17** ✓）＋ `denoise` 的条件位 ✓ ＋ `pipeline` 的 `bind_plan` 钩子 ✓ |
+
+**`bind_plan` 为什么必须存在** ✗✗：`encode_text(request)` 的契约里**没有 plan** ✓（出图族确实不需要 ✓：
+提示词编码与画布/帧数无关 ✓✗）；**修复族不成立** ✗ —— 它的"条件"**就是**源视频编码出的 16 通道 ✓，
+而「编多少帧、编成多大」正是 plan 说了算 ✓ ⇒ 两边必须看**同一份** ✓。两处各算一遍的症状：plan 说 94 帧、
+条件编出 121 帧 ✓ ⇒ 采样第 1 步 33 通道拼不上 ✓，而报错指不到「算了两遍」✓✗。
+
+**三处「不报错、只是结果不对」的口径**（都已入判据 ✓）：
+
+- ① **`positive` 必须回 17 通道张量** ✓，不能塞文本状态位 ✗，也不能回 `None` 让 `_branches` 把整个 dict
+  当条件 ✓（后者会让 `denoise` 的 `context` 位收到一个 dict ⇒ `_resolve_context` 报「要 (B,L,D)」，
+  读起来像"提示词坏了"✓✗）；`negative=None` ⇒ **单次前向** ✓（本族官方 cfg=1 ✓）；
+- ② **`mask` 通道数只能是 1** ✓：写成 3 或 16 会得 19 / 32 通道 ✓ ⇒ 主干 `vid_in` 的 Conv3d 当场抛
+  「期望 33、实际 N」✓（还算清楚 ✓）；但**拼接在主干里做** ✓ —— 这里若先拼成 33 ✗，
+  主干再拼一次就是「16 ＋ 17 ＋ 17 = 50」✓✗；
+- ③ **落盘回执不许把真 VAE 的成品叫"噪声"** ✓✗：`write` 的 5 维分支曾把 `synthetic=True` ＋
+  「未训练 VAE」写死 ✓（接这条线**当场踩到**的假证 ✓）⇒ 现由 `outputs["synthetic"]` 说了算 ✓。
+
+| 模块 | 是什么 | 断在哪 |
+|---|---|---|
+| `dit_seedvr2` | SEEDVR2 / NaDiT 视频修复主干（32 块；前 10 块双塔、后 22 块共享；`in=33`） | **已闭合** ✓ —— 装配表 ＋ 契约 ＋ `stage="seedvr2"` 装配线（只两格）＋ 修复支路全通 ✓ ＋ **真 3B 权重出片跑通** ✓（720×480 / 8fps / 49 帧 ⇒ 1.27 MB mp4，715 秒，`ok=True`）；唯一短板是**解码慢**（整段解码单独量 336 秒、分配器峰值 47.6 GiB，见本节末） |
+| `umt5_te` | UMT5-XXL 文本塔（Wan2.1/2.2 的提示词入口：24 层 / 4096 / **双向**注意力 ＋ 每层各一份相对位置偏置 ＋ FFN 门控） | `ensure_loaded(stage="wan22")` 还不收 `textWeights` ✗ ⇒ 生产 0 处 import。⚠️ 它与本仓其余几座塔（因果 ＋ `layer_idx=-2`）**口径相反** ✗，照抄 `qwen3_te` 的 mask 写法会「装得上、算得出、出图与提示词几乎无关」🤐 |
+| `umt5_tokenizer` | UMT5 的 sentencepiece **unigram** 分词器（`nmt_nfkc` ＋ `add_dummy_prefix`、词表 256384） | 唯一出口是 `umt5_te` ⇒ 塔不接线它就没有调用口；接线顺序是**先塔后分词器** |
+
+**判据**：`tests/engine_seedvr2_test.py`（82 项：小号合成几何钉形状反推 ＋ 前向守门 ＋ 装配族表 ＋
+真实 3B 权重**只读头**核几何与参数量 ＋ ⑮ 修复 plan 口径（`seedvr2_target` 的吸附算术；帧率**只抄源视频**
+——盘上那份真 mp4 是 **8fps**，写死 24 会让 6.125 秒的片子变成 2.04 秒且不报错；`nbFrames` 缺失才按时长估、
+超 121 帧如实截断、不足 5 帧当场拒；`build_plan` 无 `referenceVideos` 拒、给两路拒、路径不存在拒；
+plan 的 `width/height/frames/latent_frames/fps` 五个字段全部来自源视频；默认 30 步换 1 步并如实报；
+显式 `steps=4` 照跑只报不改；无文本塔 ⇒ `negative` 与 `cfg>1` 各有告警）＋ ⑯ 条件通路（没挂
+`attach_seedvr2_vae` 拒且点名、缺 `referenceVideos` 拒、无条件不许造噪声、噪声形状**跟着条件走**
+`(1,16,3,2,2)` 而不是按 plan 猜、plan 被**真解码**帧数校正且留告警、同 seed 逐位复现、
+`latent_channels` 缺则拒**不猜 16**）、`tests/engine_seedvr2_vae_test.py`（105 项：250 真键反推
+`(128,256,512,512)`／时间 ÷4／空间 ÷8／16 通道，四种坏权重各一条人话判据，帧数铁律 `4n+1`，
+**因果性双侧**——扰动末帧不许改首潜帧／首像素帧，三处口径的反向验证（时间 padding 换零填、
+`remove_head` 恒等、组归一化跨帧 ⇒ 判据必须红），与 ComfyUI `comfy/ldm/seedvr/vae.py` 对拍得到的
+**黄金数值**，以及⑪ `TorchBackend` 接线 13 条：`encode_pixels` 必须回**模型空间**潜变量、
+Wan/Flux 的 VAE 顶替要当场拒 ✓；⑫ 时间分块 22 条（×2/×4 × 块 1/2/4/6 ＝ 帧数 ＋ 逐位，
+真权重 250 键，外加「掐掉缓存 ⇒ 数值必崩」的反向判据）；⑬ OOM 兜底 8 条（降到
+`SUGGESTED_TEMPORAL_CHUNK`／标 `exact`／非 OOM 原样抛／`fallback=false` 真报错／降完仍 OOM 给人话／
+显式配置照办））、`tests/engine_seedvr2_pipeline_test.py`（21 项修复支路：
+11 帧真 mp4 ⇒ **修 9 帧**、`(1,17,3,4,6)` 条件、mask 全 1、主干入维 **33**、`condition=None` 回落、
+`write` 的 `synthetic` 说真话）、`tests/engine_umt5_test.py`（五条坏法各一条判据：键名错一个字 /
+相对位置偏置**只写第 0 层** / 掩码方向反 / FFN 写成单支 / RMSNorm 写成 LayerNorm）。
+
+SEEDVR2 这三份里，主干与 VAE 的**逐位对拍已经入册**（VAE 走黄金数值 ✓）、修复通路的**接线**也已入册 ✓；
+**真 3B 权重出片已于 2026-11-01 跑通** ✓（`seedvr2_3b_int8_convrot` ＋ `ema_vae_fp16`、`horse.mp4`
+720×480 / **8fps** / 49 帧 ⇒ 修完仍是 720×480 / 8fps / **6.125 秒**、mp4 **1 270 000 字节左右**，
+`ok=True`；全程 715 秒 ＝ 装载 11 ＋ 编码 95 ＋ 采样 34 ＋ **解码 571** ＋ 写盘 ✓）。
+
+⚠️ 真卡首跑逼出**三个只在真卡/真权重下才露头**的坑 ✓，都已修并各自配了判据：
+① `SeedVR2DiT.forward` 原来拿 `latents.dtype` 当 `dtype` ✓ —— 采样侧潜变量是 **f32**（故意 ✓，
+逐步累积更准 ✓）、权重是 bf16 ⇒ 第一个 `nn.Linear`（`emb_in`）当场
+`mat1 and mat2 must have the same dtype, but got Float and BFloat16` ✓，报错指向 Linear、
+读起来像"权重装错档"✗；现在改成**在模块入口对齐到权重精度** ✓，口径与 `dit_qwen_image` 逐字相同
+（判据 ④′，含"条件给 float64 也要被对齐 ⇒ `cat` 不炸"✓）。
+② `_flatten` 把逐样本 `vid_shape` 建在 **CPU** 上 ✓ —— 它下游是当**索引张量**用的
+（`_window_idx` → `index_select`）⇒ CUDA 上 `Expected all tensors to be on the same device,
+but got index is on cpu` ✓；CPU 小尺寸测试**永远试不出来** ✗；现在跟随数据设备 ✓。
+③ `_repeat_concat_idx` 里 `txt_len * txt_repeat` 跨设备 ✓（`_window_count_tensor` 建在 CPU）⇒
+同款报错；现在入口把 `txt_repeat` 搬到 `vid_len` 的设备 ✓。
+**解码是唯一的大瓶颈** ✓：720p/49 帧整段解码 **336 秒**（这是**单独量**解码那一次的账 ✓；端到端那次
+落在解码段的是 **571 秒**，两次差值的归因**尚未做** ✗ 别把两个数混起来引 ✓）、分配器峰值 **47.60 GiB**（卡 22.49 ✓），
+单笔最大 ≈17.3 GiB，来自"时间 ×2 上采样之后"的 512/1024 通道重排张量 ⇒ 全程在 OOM 重试里打滚
+（片子仍是对的 ✓）。**潜帧分块（时间维）现已接通且与整段相等** ✓：真根因**不是**丢帧数
+（「`_remove_head` 首帧特例让块内相位少 3 帧」那条是猜的、2026-11-02 已否 ✗）——是
+`_InflatedCausalConv3d` 的 `_extend_head` 把**块首帧**复制 2 份当左 padding ⇒ 块首帧自己就错了，
+因果链把它送到块内**全部后续帧**，补多少上文都救不回来（四个变体 `4k-3`/`4k`/跳过 `_remove_head`/
+±8 帧平移扫描全差 1.8~2.8）✓✗。正解抄自 comfy 的 `MemoryState` ＋逐层 `memory_cache`：块首接
+**块外真实帧**、`ACTIVE` 时时间 ×2 不丢第 2 帧、逐层显式下传；外部旋钮 `vaeTiling.temporalChunk`
+（**潜帧**单位，**默认关** ✓）；**OOM 兜底在同一族也降它**（阶梯 `chunk_ladder()` ＝ `4→2→1`，回执多
+一格 `"exact": true` —— 这条兜底**不换画质**，与 Wan 那族降 tile 换字节不是一回事，读回执别混）✓。
+验收：`engine_seedvr2_vae_test` ⑫⑬ 105/105 —— ×2/×4 × 块 1/2/4/6 帧都「帧数 `4T-3` 相同 ＋
+`max|Δ| ≤ 1e-5`」，**真权重 250 键也在内** ✓，另有「掐掉缓存 ⇒ 数值必崩」的反向判据 ✓，兜底侧
+「非 OOM 不许降档／`fallback=false` 必须真报错／**整条阶梯试遍**仍 OOM 才给人话／自动降的档如实标
+`reason="auto"`」也各一条 ✓。组归一化改写成**不拷贝**的 5D 版本（数值与黄金值一致 ✓）也没能降峰值
+⇒ 别把它当性能成果汇报 ✗。
+
+**真跑实测（720×480 / 49 帧 / A5000 22.49 GiB，2026-11-06，每档单开进程）**：整段 496.2 s；
+`chunk=4` 231.1 s / 一块 19.51 GiB；`chunk=2` 154.3 s / 11.94 GiB；`chunk=1` **8.3 s / 8.15 GiB**。
+三条只有真跑才露头的事实：① 这档**不报 OOM 而是溢出到主机内存**（`reserved` 86.67 GiB ≫ 卡，
+`allocated` 只有 19.51）⇒ 只慢 28 倍、不崩，只认 `_is_oom` 的兜底**永远等不到** ✗✗；
+② 自建缓存原用 `.detach()` 的**视图** ⇒ 钉住整块激活 ⇒ 分块比整段还费（22.62 vs 13.48 GiB），
+改 `.clone()` 后 11.90 GiB，判据改量**存储字节数**；③ `shrink_for_peak()` 按「峰值÷卡容量」
+一次跳到该降的档（4 → 1），别一档一档疼；溢出后下一轮开跑前 `_trim_cuda()`（不清就在碎片里再颠簸：
+已降到 1 档仍 200.3 s，清了 13.3 s）。真通路两轮实证：整段 496.2 s ⇒ `spilled/nextTemporalChunk=1`
+⇒ 第二轮 13.3 s、`reason="auto"`。详见 `docs/reference-audit.md` §六.8 与 §六.8.1。
+
+### 10.1h 图生图（`initImage` ＋ `denoise`）真跑实证 · 2026-11-02
+
+**这是「公式对、单测绿、真跑斜」的标本** ✓ —— 修之前 `init_latents` 在单测里拿到的 VAE 是
+**常驻替身**，而真装配线是分时的（2512：`encode`→text / `sample`→dit / `decode`→vae）⇒
+「起点由参考图编码而来」这条路**从来没被真走过** ✗。
+
+真跑两档（`qwen_image` 2512 bf16 38.05 GiB、卡 22.49 ⇒ `split`：25 层上卡 15.9 GiB ＋ 35 层留
+CPU 22.15 GiB；`_run_qwen_image.py --stage qwen_image --target storyboard-last --init <1344×768>`）：
+
+| denoise | 起点 σ | 实跑步数 | 产物字节 | 与参考图 MAE | PSNR | 64×64 相关 |
+|---|---|---|---|---|---|---|
+| 0.55 | 0.7949 | 20 | 1 612 329 | 0.0506 | 23.49 dB | **0.9133** |
+| 0.05 | 0.1403 | 6 | 1 593 819 | 0.0267 | 29.24 dB | **0.9982** |
+
+相关 **0.9982** ⇒ 起点 latent 就是参考图本身 ✓（若起点仍是纯噪声，两档都会 ≈0 ✗）；
+0.55 档退到 0.9133 ⇒「保结构、允许改」的量级正确 ✓，且与 `denoise` 单调 ✓。
+
+**踩到并已修的真缺陷**：`TorchBackend.PHASE_PARTS` 原本只有三段 ⇒ `init` 这一拍手上只有 TE、
+VAE 要到 decode 才装 ⇒ 图生图必报「没挂 VAE ✗ ⇒ 没法把图片编码成潜变量」（文生图永远走不到）。
+修法：新增 `"init": ("text", "vae")` —— **text 必须一起写进去** ✗（`enter_phase` 会退掉不在
+`wanted` 里的件，只写 `vae` 就把刚 encode 完的 16.1 GiB TE 退掉、`sample` 又得从盘重读一遍）；
+两者同驻 16.34 GiB < 22.49 ✓ 装得下。`pipeline` 侧只在 `if request.init_image:` 时申请
+（纯文生图不多跑一趟换装）。判据：`engine_pipeline_test` ⑰''''（表里有这段且含 `text`）与
+⑰'''''（AST 认定那句调用被 `if request.init_image:` 包住）；反向验证过两种坏法（删段 / 段名写错）。
+
+**成本**（同卡同权重、`cfg=1`）：装载 19.9 秒 ⇒ encode 段（换装 TE ＋ 编码）37.7 秒 ⇒ `init` 段
+VAE 编码本身 **88 毫秒**（换装另算）⇒ 换回 DiT 约 70 秒 ⇒ 每步 18 秒（`cfg=4` 时每步 55 秒：
+两遍前向 ＋ split 跨界）⇒ **分时驻留族做图生图，代价在两趟换装、不在 VAE 编码**。
+
+两条会让人误判的真事实：① `split` 装载要求「DiT 的 CPU 那一半整份进内存」＝ 22.79 GiB ⇒
+宿主只剩 7.02 GiB 时**直接拒装**（那次被误读成「权重有问题」，实际是上一次会话残留的探针进程
+吃了 50 GiB 内存）；② `_run_qwen_image.py` 曾把 `write()` 返回里的 `note`（一句中文说明）当路径
+去 `exists()` ⇒ 每次真跑都以「声明了但盘上没有」收尾、把真异常埋掉，已按**键名**跳过。
+
+### 10.2 前向骨架的覆盖进度与剩下几族的缺口
 
 格式与量化层（L4-2 / L4-3）对所有盘上权重都通用：safetensors、GGUF、fp8、int8、int4 打包、convrot、
-NVFP4 都能读能还原。但**网络本体**（L4-5）只有七个族有骨架：H3、SDXL、GGUF LLM、DiT 通用（Krea2）、
+NVFP4 都能读能还原。但**网络本体**（L4-5）只有十一个族有骨架：H3、SDXL、GGUF LLM、DiT 通用（Krea2）、
 Z-Image（`dit_lumina`）、Qwen-Image 2.1（`dit_qwen21` + `qwen35_te`）、Qwen-Image 2512/Edit
-（`dit_qwen_image` + `qwen25_te`）——后两族都由 `torch_backend` 按权重形状建起来。
-Flux.1-dev / Wan2.2 / SEEDVR2 / Music3 / F5-TTS **暂无前向**。
+（`dit_qwen_image` + `qwen25_te`）、Flux.1（`dit_flux`）、Wan2.2 I2V（`dit_wan22`，见 §10.1f）、
+SEEDVR2（`dit_seedvr2`，**已接线** 见 §10.1g）、Music3 音频主干（`dit_music3` ＋ `te_music3` ＋ `vae_music3`，
+**已接线并真权重出歌** ✓ 2026-11-06、`stage="music3"` 全链见 §10.1 末段）——
+除 H3 / SDXL 外的几族都由 `torch_backend` 按权重形状建起来。F5-TTS **暂无前向** ✗。
+文本塔侧补了 **UMT5-XXL**（`umt5_te` ＋ `umt5_tokenizer`）—— 2026-11-02 起**已接线** ✓：
+Wan2.2 I2V 装配线收 `textWeights`、`_encode_wan22_text` 直接调它（见 §10.1f / §10.1g）。
 这是当前最大的功能缺口，也与 L4 的既定目标（跑通共享池里的全部族）直接相关。
 
 Z-Image 那条 2026-10-31 的实测证据（`unet/z_image_turbo_bf16.safetensors`，11.46 GiB / 453 张量）：

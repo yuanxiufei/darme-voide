@@ -275,6 +275,12 @@ def main() -> int:  # noqa: C901
           and "search_reference_prompts" in ids_by_type["grid_prompt_generator"]
           and "search_reference_prompts" not in ids_by_type["voice_assigner"],
           ids_by_type["storyboard_breaker"])
+    check("工具: 改编/分镜/提示词三条线都挂知识库检索（extractor/voice 不挂）",
+          all("search_script_library" in ids_by_type[t]
+              for t in ("script_rewriter", "storyboard_breaker", "grid_prompt_generator"))
+          and not any("search_script_library" in ids_by_type[t]
+                      for t in ("extractor", "voice_assigner")),
+          {t: ("search_script_library" in ids_by_type[t]) for t in ids_by_type})
     check("工具: orchestrator -> **subagent 两件套**（2026-09-15 起已迁，不再是空占位）",
           sorted(ids_by_type["orchestrator"]) == ["list_available_agents", "run_subagent"],
           ids_by_type["orchestrator"])

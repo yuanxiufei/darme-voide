@@ -226,7 +226,11 @@ def _build_specs() -> tuple[LatentFormatSpec, ...]:
         S("cogvideox_1_5", scale_factor=0.7, latent_channels=16, latent_dimensions=3,
           temporal_downscale_ratio=4,  # CogVideoX1_5 **继承** CogVideoX ✓
           aliases=("cog_video_x_1_5",)),
-        S("seedvr2", scale_factor=1.0, latent_channels=16, latent_dimensions=3,
+        # SEEDVR2：ByteDance VideoAutoencoderKL ✓ —— 潜变量 16 通道 ✓、时间 ÷4 ✓、
+        # 缩放 **0.9152**（参考实现 BYTEDANCE_VAE_SCALING_FACTOR，偏移恒 0）✓；
+        # 写成 1.0 不会报错，只会让解码整体偏色 ✗（见 vae_seedvr2 模块头 ✓）。
+        S("seedvr2", scale_factor=0.9152, latent_channels=16, latent_dimensions=3,
+          temporal_downscale_ratio=4,
           aliases=("seed_vr2",)),
         # ── 音频（1 维 ✓）───────────────────────────────────────────────
         S("h3_audio", scale_factor=1.0, latent_channels=H3_AUDIO_LATENT_CHANNELS,

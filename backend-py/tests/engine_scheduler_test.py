@@ -312,6 +312,65 @@ def case_backend() -> None:
           {"kept": len(events), "tail": events[-1].get("i")})
 
 
+def case_working_set() -> None:
+    """⑦ 进程工作集压帽 ✓✗（2026-11-02 加 ✓，机制取自 `windows/serve/mem_budget.h`）。
+
+    ## 为什么这条必须**真压一次** ✓✗
+
+    它是让「降级到 SSD」在测试里**走得到**的唯一开关 ✓：不压帽，工作集/页缓存会把整份权重兜住 ✓
+    ⇒ 测出来的"三级分层"其实还是内存速度 ✓✗（这是假绿 ✓）。而「设了个上限数」与「页真被挤出去」
+    是两回事 ✗✗ ⇒ 判据必须看**读数**，不看返回值里的 ``ok`` ✓。
+
+    ## 另外两条纪律 ✓
+
+    * 这类工具**不许**出现在正常装载路径上 ✓✗（每次权重访问都回盘 ⇒ 慢一个数量级 ✓）；
+    * 返回值里 ``supported`` / ``ok`` / ``requestedBytes`` 必须齐 ✓（调用方要能判"没压成"vs"压了没效果"✓）。
+    """
+    import ast  # noqa: PLC0415 —— 只在扫"不许进正常路径"时用 ✓
+
+    if sys.platform.startswith("win"):
+        before = s.working_set()
+        check("⑦ 工作集读数可读（Windows ⇒ GetProcessMemoryInfo）",
+              before is not None and int(before.get("workingSetBytes") or 0) > 0, before)
+        squeezed = s.limit_working_set(-1)
+        check("⑦ 返回值字段齐全（supported/ok/requestedBytes ⇒ 调用方能判成败）",
+              {"supported", "ok", "requestedBytes"} <= set(squeezed), sorted(squeezed))
+        check("⑦ 挤空 ⇒ ok=True 且带前后读数", squeezed.get("ok") is True
+              and squeezed.get("afterBytes") is not None, squeezed)
+        check("⑦ 挤空之后读数**真的**变小（不是只设了个上限数）",
+              int(squeezed["afterBytes"]) < int(squeezed["beforeBytes"]), squeezed)
+        tiny = s.WORKING_SET_FLOOR_BYTES // 4
+        floor = s.limit_working_set(tiny)
+        check("⑦ 压到下限以下也照压（不替调用方放宽 ⇒ 「已压到 X」不会变成假话）",
+              floor.get("ok") is True and floor.get("requestedBytes") == tiny, floor)
+    else:  # pragma: no cover - 本机是 Windows
+        plain = s.limit_working_set(1 << 20)
+        check("⑦ 非 Windows ⇒ supported=False 且如实说明（不抛、不假装成功）",
+              plain.get("supported") is False and bool(plain.get("note")), plain)
+
+    rejected: BaseException | None = None
+    try:
+        s.limit_working_set(-5)
+    except ValueError as exc:  # noqa: PERF203 —— 就是要抓它 ✓
+        rejected = exc
+    check("⑦ 负数只认 -1（-5 当场拒，不静默当成挤空）",
+          isinstance(rejected, ValueError), rejected)
+
+    #: ⚠️ 纪律判据：正常装载路径一个都不许调它 ✗✗（调了就是"每步都回盘"✓）
+    engine = REPO_ROOT / "app" / "services" / "engine"
+    offenders: list[str] = []
+    for name in ("torch_backend.py", "runtime.py", "pipeline.py", "weights.py", "loader.py"):
+        path = engine / name
+        if not path.exists():
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "limit_working_set"):
+                offenders.append(name)
+    check("⑦ 压帽不许出现在正常装载路径（torch_backend/runtime/pipeline/weights/loader）",
+          offenders == [], offenders)
+
+
 def case_module_selftest() -> None:
     problems = s.selftest()
     check("模块自检全绿（够 / 切 / 拒 / 没卡 / gpu / cpu / 滞回 / 账本）",
@@ -327,6 +386,7 @@ def main() -> int:
     case_watch()
     case_reclaim()
     case_backend()
+    case_working_set()
     case_module_selftest()
     width = max(len(name) for name, _, _ in _RESULTS)
     fails = 0

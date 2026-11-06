@@ -1,8 +1,9 @@
 """S7 自检：请求日志中间件（``app/http_logger.py``，移植 ``middleware/logger.ts``）。
 
-锁四件事：**格式与配色**（请求行/响应行同一时间戳、状态码按类别着色、耗时带 ms）、
+锁五件事：**格式与配色**（请求行/响应行同一时间戳、状态码按类别着色、耗时带 ms）、
 **body 截断规则**（仅 POST/PUT/PATCH，>500 字符加 ``...``）、**读完 body 后路由仍能取到**
-（Starlette 缓存），以及 ``HTTP_LOG=0`` 开关。
+（Starlette 缓存）、**编码安全**（控制台编码打不出的字符不许把请求炸成 500），
+以及 ``HTTP_LOG=0`` 开关。
 
 运行::
 
@@ -64,6 +65,47 @@ def run_middleware(method: str, path: str, body: bytes = b"", status: int = 200,
     return buffer.getvalue()
 
 
+def run_middleware_stream(method: str, path: str, body: bytes = b"",
+                          headers: dict[str, str] | None = None,
+                          stream: object | None = None) -> tuple[BaseException | None, str]:
+    """用**真会撞倒的** stdout 跑一遍中间件，返回 ``(抛出的异常, 输出文本)``。
+
+    与 ``run_middleware`` 的区别只有 stdout：这里用 ``gbk + errors="strict"``
+    （Windows 控制台的真实形状），``print`` 遇到 GBK 外字符会**真的抛**
+    ``UnicodeEncodeError`` —— 这正是把上传请求炸成 500 的那个洞。
+    ``StringIO`` 从不挑字符，所以老判据一直看不到它。
+    """
+    async def call_next(_request):
+        return JSONResponse({"ok": True}, status_code=200)
+
+    buffer = io.BytesIO()
+    target = stream or io.TextIOWrapper(buffer, encoding="gbk", errors="strict", newline="")
+    raised: BaseException | None = None
+    with contextlib.redirect_stdout(target):  # type: ignore[arg-type]
+        try:
+            asyncio.run(http_logger.request_logger(
+                _FakeRequest(method, path, body, headers), call_next))
+        except BaseException as exc:  # noqa: BLE001 —— 这里要的就是「有没有炸」
+            raised = exc
+        try:
+            target.flush()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+    return raised, buffer.getvalue().decode("gbk", errors="replace")
+
+
+class _BrokenConsole:
+    """write 一律 OSError 的 stdout（控制台被关掉／管道已断）—— 日志也不许把请求带崩。"""
+
+    encoding = "gbk"
+
+    def write(self, *_args: object, **_kwargs: object) -> int:
+        raise OSError("console gone")
+
+    def flush(self, *_args: object, **_kwargs: object) -> None:
+        raise OSError("console gone")
+
+
 def main() -> int:  # noqa: C901
     # ── 1. 格式与配色 ──
     out = run_middleware("GET", "/api/v1/dramas")
@@ -101,6 +143,31 @@ def main() -> int:  # noqa: C901
     out = run_middleware("POST", "/api/v1/x", b'{"a":1}', headers={"content-length": "7"})
     check("body: Content-Length 正常 -> 照常打 body（加固不影响常规请求）",
           "body:" in out and '{"a":1}' in out, out)
+
+    # ── 2b. multipart 不打 body ──
+    multipart_body = (b"--b\r\nContent-Disposition: form-data; name=\"files\"; filename=\"a.txt\""
+                      b"\r\n\r\n\xef\xbb\xbfhello\r\n--b--\r\n")
+    out = run_middleware("POST", "/api/v1/knowledge/upload", multipart_body,
+                         headers={"content-type": "multipart/form-data; boundary=b"})
+    check("body: multipart 请求**不打** body（文件内容是二进制噪音，还专藏 BOM/emoji）",
+          "body:" not in out and len(out.splitlines()) == 2, out[:120])
+
+    # ── 2c. 编码安全（本轮实测事故）──
+    #   真机：上传一份记事本存的 UTF-8-BOM txt ⇒ 500。栈顶只是「打日志」那一行，
+    #   根因是 cp936 控制台编不出 \ufeff ⇒ print 抛 ⇒ 中间件是必经之路 ⇒ 整请求炸。
+    raised, text = run_middleware_stream(
+        "POST", "/api/v1/x", '{"t":"\ufeff😀生僻字𠀋"}'.encode("utf-8"),
+        headers={"content-type": "application/json"})
+    check("编码: body 含 BOM/emoji/GBK 外字符时**不抛**（否则整个请求 500、路由一行没跑）",
+          raised is None, type(raised).__name__ if raised else "")
+    check("编码: 打不出的字符降级成 `?`，能打出的中文照常显示（不是整行丢掉）",
+          "生僻字" in text and "?" in text, text[-160:])
+    raised, _ = run_middleware_stream(
+        "GET", "/api/v1/knowledge/tree?dir=剧本知识库")
+    check("编码: 纯中文路径在 cp936 下本来就没问题（加固不误伤）", raised is None, raised)
+    raised, _ = run_middleware_stream("GET", "/api/v1/dramas", stream=_BrokenConsole())
+    check("编码: stdout 整个坏掉（OSError）也不许把请求带崩（日志不是业务的一部分）",
+          raised is None, type(raised).__name__ if raised else "")
 
     # ── 3. 读完 body 后路由仍能取到（Starlette 缓存）──
     os.environ.pop("HTTP_LOG", None)

@@ -136,12 +136,20 @@ def case_sigmas() -> None:
 
 
 def case_plan() -> None:
-    """③ 尺寸吸附 **16** ✓（VAE 8× × DiT patch 2×2 ✓）＋ 单帧 ＋ 默认像素预算被如实换掉 ✓。"""
+    """③ 尺寸吸附 **16** ✓（VAE 8× × DiT patch 2×2 ✓）＋ 单帧 ＋ 默认像素预算被如实换掉 ✓。
+
+    ⚠️ 画布数字跟着**尺寸口径**走 ✗✗：`zimage` / `krea2` 用 ComfyUI ``ResolutionSelector``
+    （``√(MP × 1024²)`` ✓），而 **2512 / 2.1 仍走** :func:`geometry.size_for_megapixels`
+    （≈``1e6`` 基数 + 向上吸 ✓）—— 官方模板 ``EmptySD3LatentImage`` 就是 **1328×1328** ✓，
+    换 selector 会给 1360 ✓、与工作流 `#7.width/height` 对不上 ✓✗。判据认本族口径 ✓，
+    并要求回执**写出真数** ✓✗（不许一边写 1328 一边画别的 ✓）。
+    """
     plan = _plan(ratio="1:1")
     check("③ 默认像素预算（0.65 MP 的**视频口径** ✗）⇒ 换 2512 官方模板档 ✓ 且**如实告警** ✓"
-          "（1:1 时正是官方 **1328×1328** ✓）",
+          "（1:1 正是官方 **1328×1328** ✓，回执点名这个数 ✓）",
           (plan.width, plan.height) == (1328, 1328)
-          and any("0.65" in text and "1.76" in text for text in plan.warnings),
+          and any("0.65" in text and "1.76" in text for text in plan.warnings)
+          and any("1328×1328" in text for text in plan.warnings),
           ((plan.width, plan.height), plan.warnings[:2]))
     check("③′ 单张图 ⇒ `frames=1` ✓、`fps=0` ✓（不是视频 ✓）",
           plan.frames == 1 and plan.fps == 0, (plan.frames, plan.fps))
@@ -313,8 +321,12 @@ def case_phased() -> None:
         tokenizer_path="tok/", vae_path="v.safetensors",
         vae_family="qwen_image", text_kind="qwen25",
         part_need_gib=tb.TorchBackend.QWEN_IMAGE_PART_NEED_GIB)
+    #: ⭐ 2026-11-01 起这本账多一格 ``vision`` ✓（Edit 2511 的视觉塔 1.35 GiB ✓）——
+    #: 断言只比**三件主件** ✓✗：写成整字典等值会把"以后再加一格"变成假红 ✓。
     check("⑥ 登记回执带**本族的账** ✓✗（缺省是 2.1 的 13.26 ⇒ 判「装得下」⇒ 装到一半 OOM ✓）",
-          chain["partNeedGiB"] == {"dit": 38.05, "text": 16.1, "vae": 0.24},
+          {key: chain["partNeedGiB"].get(key) for key in ("dit", "text", "vae")}
+          == {"dit": 38.05, "text": 16.1, "vae": 0.24}
+          and abs(float(chain["partNeedGiB"]["vision"]) - 1.35) < 1e-6,
           chain["partNeedGiB"])
     check("⑥′ `peakGiB` 由**本族的账**算 ✓（写死 14.79 会让读者按 2.1 的峰值估余量 ✗）",
           abs(float(chain["peakGiB"]) - 38.05) < 1e-6, chain["peakGiB"])
@@ -417,7 +429,7 @@ def case_two_accounts() -> None:
 
 
 def case_vae_and_edit() -> None:
-    """⑧ 2512 的 VAE 反缩放是**恒等**（族事实 ✓）、Edit 权重**拒绝按 t2i 出图** ✓✗。"""
+    """⑧ 2512 的 VAE 反缩放是**恒等**（族事实 ✓）、Edit 权重在**缺 `ref_latents` 时拒跑** ✓✗。"""
     from app.services.engine import torch_backend as tb  # noqa: PLC0415
     from app.services.engine import vae_wan  # noqa: PLC0415
 
@@ -449,13 +461,24 @@ def case_vae_and_edit() -> None:
 
     #: ⚠️ 结构性断言：Edit 的**拒跑必须在向前之前** ✗✗ —— 写在 ``prediction = self._model(``
     #: 之后就等于「先按 t2i 画完再报错」✓✗（能力凭空消失、还白算一遍 ✓）。
+    #: ⭐ 2026-11-01 起拒跑的门槛从「参考图通路没接」变成「`ref_latents` 不在」✓
+    #: （视觉塔与 VAE 都已接上 ✓，见 `engine_qwen_image_edit_test` ✓）—— 但**必须在向前之前**不变 ✓✗。
     source = inspect.getsource(tb.TorchBackend.denoise)
     guard = source.find("ref_timestep_zero")
     forward = source.find("prediction = self._model(")
     check("⑧⁵ Edit 的拒跑**在 `self._model(` 之前** ✓✗（放到后面 = 白算一遍再报 ✓）",
           guard > 0 and forward > 0 and guard < forward, {"guard": guard, "forward": forward})
-    check("⑧⁶ 拒跑的文案点名**两条出路** ✓（先接视觉塔 / 换 t2i 权重 ✓ —— 用户能据此行动 ✓）",
-          "视觉塔" in source and "t2i" in source, "")
+    check("⑧⁶ 拒跑的文案点名**上游三处** ✓（`encode_text` / `referenceFrames` / `_refLatents` ✓ "
+          "—— 光说「没参考图」读者仍不知道去哪修 ✓）",
+          all(word in source for word in ("encode_text", "referenceFrames", "_refLatents")), "")
+
+    check("⑧⁷ 采样时 `ref_latents` 走**关键字**、且由 `list(...)` 包成**列表** ✓✗"
+          "（`Sequence[Tensor]` ⇒ 传裸张量会按 batch 遍历 ✓）；**多图**逐条搬 ✓",
+          "ref_latents=list(edit_refs)" in source
+          and "for item in stored" in source, "")
+    check("⑧⁸ `_refLatents` 统一成**列表** ✓✗（单图存裸张量、多图存列表那种写法 ⇒ "
+          "`denoise` 要分叉、且「换回 t2i 没清空」更难发现 ✓）",
+          "list(edit[\"latents\"])" in inspect.getsource(tb.TorchBackend.encode_text), "")
 
 
 def _tiny_shape(**kwargs) -> Any:
@@ -486,6 +509,98 @@ def case_ref_methods() -> None:
           "REF_NEGATIVE" in source, "")
 
 
+def case_per_file_need() -> None:
+    """⑩ 需求数按**文件精度**取 ✓✗（38.05 的 bf16 与 19.09 的 int8 是两份账 ✓）。
+
+    ## 这一条抓的那个真缺陷（2026-11-01 ✓）
+
+    装配线原先把 ``QWEN_IMAGE_PART_NEED_GIB["dit"] = 38.05`` **无条件**当需求 ✓✗ ——
+    对 bf16 的 2512 完全正确 ✓，但对 **int8 的 Edit 2511** 多报 19 GiB ✓✗ ⇒ `decide()` 判
+    `split` ⇒ 实测 ``gpu 15.9 / cpu 22.15 GiB`` ⇒ **58% 的权重在内存里逐层爬** ✓✗，
+    而卡其实整份装得下（19.09 < 19.71 可用 ✓）。判据没错 ✗，错在**需求数** ✓。
+    """
+    from app.services.engine import device_policy as dp  # noqa: PLC0415
+    from app.services.engine import runtime as rt  # noqa: PLC0415
+    from app.services.engine import safetensors as st  # noqa: PLC0415
+    from app.services.engine import torch_backend as tb  # noqa: PLC0415
+
+    fallback = tb.TorchBackend.QWEN_IMAGE_PART_NEED_GIB["dit"]
+    gib, why = tb.resident_need_gib("no_such_file.safetensors", fallback=fallback)
+    check("⑩ 读不到文件 ⇒ **退回表值 38.05** ✓（不猜、不炸 ✓；且 `int8` 报 None 而不是 False ✓✗"
+          "—— `False` 会被读成「查过了，没有 int8」✓）",
+          abs(gib - fallback) < 1e-9 and why.get("int8") is None, why)
+
+    class _Entry:
+        def __init__(self, dtype: str, shape: tuple[int, ...]) -> None:
+            self.dtype, self.shape, self.begin, self.end = dtype, shape, 0, 0
+
+        @property
+        def nbytes(self) -> int:
+            return 0
+
+        @property
+        def element_count(self) -> int:
+            total = 1
+            for dim in self.shape:
+                total *= dim
+            return total
+
+    class _Info:
+        """一份**假头部** ✓（只喂 `resident_need_gib` 读的那几格 ✓）。"""
+
+        def __init__(self, tensors: dict[str, Any]) -> None:
+            self.tensors = tensors
+            self.ok = True
+            self.problems: list[str] = []
+            self.total_tensor_bytes = int(19.09 * dp.GIB)
+            self.file_bytes = self.total_tensor_bytes + 2048
+
+    int8_info = _Info({
+        "blocks.0.attn.to_q.weight": _Entry("I8", (4, 8)),
+        "blocks.0.attn.to_q.weight_scale": _Entry("F16", (4, 1)),
+        "blocks.0.norm.weight": _Entry("BF16", (8,)),
+    })
+    plain_info = _Info({"blocks.0.attn.to_q.weight": _Entry("BF16", (4, 8))})
+    real = st.inspect
+    try:
+        st.inspect = lambda path: int8_info   # noqa: ARG005
+        by_int8, why_int8 = tb.resident_need_gib("x.safetensors", fallback=fallback)
+        st.inspect = lambda path: plain_info   # noqa: ARG005
+        by_plain, why_plain = tb.resident_need_gib("x.safetensors", fallback=fallback)
+    finally:
+        st.inspect = real
+
+    check("⑩′ 文件侧有 int8 层 ⇒ 驻留取**数据区字节**（19.09 ✓ 不是 38.05 ✓✗），且报出层数 ✓",
+          abs(by_int8 - 19.09) < 0.01 and why_int8.get("int8") is True
+          and why_int8.get("layers") == 1, why_int8)
+    check("⑩″ 没有 int8 层的文件 ⇒ **照旧用表值** ✓✗（`fp8_scaled` 是 2×、bf16 是 1× ✓ —— "
+          "在这里编一个「低精度文件统一乘 1」会把 fp8 那份少算一半 ✓✗）",
+          abs(by_plain - fallback) < 1e-9 and why_plain.get("int8") is False, why_plain)
+    #: ⚠️ 判据连着看才成立 ✓：19.09 那份该判 `off`（整份上卡 ✓）、38.05 那份该判 `split` ✓✗
+    pressure = dp.Pressure(totalBytes=int(22.49 * dp.GIB), freeBytes=int(20.71 * dp.GIB))
+    small = dp.decide(need_bytes=int(by_int8 * dp.GIB), pressure=pressure)
+    big = dp.decide(need_bytes=int(fallback * dp.GIB), pressure=pressure)
+    check("⑩‴ 同一张卡：19.09 ⇒ `off`（整份上卡 ✓）/ 38.05 ⇒ `split`（按层切 ✓✗）——"
+          "这就是「需求数错 19 GiB」的全部后果 ✓",
+          small.residency == "off" and not small.degraded and big.residency == "split", 
+          {"int8": small.to_dict(), "bf16": big.to_dict()})
+
+    #: ⚠️ 接线 ✗✗：算对了却只在回执里写、决策仍读原表 ⇒ 白改 ✓（两条调用口都得吃校正后的表 ✓）。
+    source = inspect.getsource(rt.EngineRuntime._ensure_qwen_image_loaded)
+    check("⑩⁴ 装配线**真的**按文件精度取需求 ✓✗（`part_need_gib(...)` ✓ —— 2026-11-02 起它涵盖 "
+          "int8 / int4 / plain 三档 ✓，旧 `resident_need_gib` 只认 int8 ⇒ 装配线不许再用它 ✗），"
+          "且 `decide_for` 与 `declare_chain` **两处都吃校正后的表** ✓✗"
+          "（只改一处 ⇒ 装配报整份上卡、`sample` 段又切 ✓）",
+          "part_need_gib(" in source and "resident_need_gib(" not in source
+          and "need_gib=part_need)" in source
+          and "part_need_gib=part_need)" in source, "")
+    check("⑩⁵ 校正只动 `dit` 一格 ✓（TE 16.1 / VAE 0.24 / 视觉塔 1.35 三项一个都不许被顺手改 ✗）",
+          "part_need = dict(TorchBackend.QWEN_IMAGE_PART_NEED_GIB)" in source
+          and 'part_need["dit"] = float(dit_need_gib)' in source, "")
+    check("⑩⁶ 回执里写清「这次按什么数判的」✓✗（只报 `devicePolicy` ⇒ 读者看不出 38.05 还是 19.09 ✓）",
+          '"ditNeed"' in source and "dit_need_why" in source, "")
+
+
 def main() -> int:
     case_stage_names()
     case_sigmas()
@@ -496,6 +611,7 @@ def main() -> int:
     case_two_accounts()
     case_vae_and_edit()
     case_ref_methods()
+    case_per_file_need()
 
     failed = [row for row in _RESULTS if not row[1]]
     for name, ok, detail in _RESULTS:

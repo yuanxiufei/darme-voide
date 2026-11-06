@@ -6,8 +6,9 @@
 - **为什么现在必须定**：这不是「多支持一种格式」的加分项 —— 它是**当前唯一挡住 H3 视频全链路**的东西（见 §1 实测）。
 
 > **落地结论（2026-10-30）**：A 已实现 —— 新模块 `app/services/engine/quant_nvfp4.py`（解码表 · 128×4 swizzled
-> 块 scale · f32 二级 scale · AWQ 折列），判据 `tests/engine_quant_nvfp4_test.py` **35 条**（与
-> `reference/lora/musubi-tuner/.../nvfp4_utils.py` `torch.equal` 逐位对拍 ＋ 跑 `comfy.float::to_blocked` 往返 ＋
+> 块 scale · f32 二级 scale · AWQ 折列），判据 `tests/engine_quant_nvfp4_test.py` **30 条 ＋ 1 处可选**
+> （配 `MUSUBI_TUNER_ROOT` 时多跑"与 `musubi-tuner/.../nvfp4_utils.py` `torch.equal` 逐位对拍"这层，
+> 没配如实 skip —— 2026-11-04 起本仓不再持有该副本；其余为跑 `comfy.float::to_blocked` 往返 ＋
 > 真 350 层权重实测与错解反证 ＋ **`weights.load_module_weights` 端到端**：合成文件与真权重两层都是 `torch.equal`）；
 > `quant` 拆出 `SUPPORTED_FORMATS`（nvfp4）/ `UNSUPPORTED_FORMATS`（仅 mxfp4）；
 > `loader.dequant_plan_of()` 成为**唯一口径**（`plan_component` 与 `facade.inspect_weights` 都走它）。
@@ -133,8 +134,9 @@
 
 1. **公开规格**：E2M1 值表 `0,.5,1,1.5,2,3,4,6` ＋ 符号；一字节两值、**高半字节存元素 0**；
    块 scale 每 16 元素一个；cuBLAS 128×4 tiled 布局。
-2. **参考实现**：`reference/lora/musubi-tuner/src/musubi_tuner/modules/nvfp4_utils.py`（抬头写明已对该 32B 文本
+2. **参考实现**：`musubi-tuner/src/musubi_tuner/modules/nvfp4_utils.py`（抬头写明已对该 32B 文本
    编码器做过 BF16 逐位核对）—— 用 `ast` 抽其函数原文执行，`torch.equal` 对拍，含三种 padding 情形。
+   定位口径是 `MUSUBI_TUNER_ROOT`（指向 musubi-tuner 仓库根）；没配则该层 skip，不臆造证据。
 3. **写文件那一方**：`d:/code/voide/comfy-studio/ComfyUI/comfy/float.py::to_blocked` —— 直接用它的输出做
    `from_blocked` 往返（含真实 `(2560,160)` 形状），证明布局不是"我们跟参考实现一起错"。
 

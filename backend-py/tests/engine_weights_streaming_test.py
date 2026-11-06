@@ -112,12 +112,14 @@ def case_bitwise_equal(root: Path) -> None:
           "与 `consumedScales` ✓（后者数的是 `scale_weight` / `scale_input` / `scaled_fp8` 这一类"
           "**权重侧与激活侧** scale ✓ —— 不吃掉它们就会全落进 `unexpected` ✓✗，"
           "而吃掉了不计数就是**静默** ✓✗）—— 四个都是**只读计数** ✓，且都只统计"
-          "「被吃掉的配套张量」✗ 不是权重 ✓）",
+          "「被吃掉的配套张量」✗ 不是权重 ✓；2026-11-02 再增 `int4Resident` ✓"
+          "（4bit 打包常驻层的子计数 ✓ —— 它的参数也是 int8 ✓，合计数里看不出「说好 4bit、实际按 int8 乘」✓✗））",
           set(report.to_dict()) == {
               "path", "complete", "loadedKeys", "sourceKeys", "targetKeys", "missing",
               "missingCount", "unexpected", "unexpectedCount", "shapeMismatch",
               "shapeMismatchCount", "renamed", "dtypeCasts", "dequant", "error",
-              "consumedQuantMeta", "int8Resident", "consumedNvfp4", "consumedScales"},
+              "consumedQuantMeta", "int8Resident", "int4Resident", "consumedNvfp4",
+              "consumedScales"},
           sorted(report.to_dict()))
 
 
@@ -227,32 +229,58 @@ def case_peak_is_single_tensor(root: Path) -> None:
                 self.register_parameter(name.replace(".", "_"),
                                         torch.nn.Parameter(torch.zeros_like(tensor)))
 
-    module = Wide()
+    #: ⚠️ 这里**不预造模块** ✗：两档各造一份（在 ``_peak`` 里 ✓）—— 预造一份会被 ⑤′ 误当成
+    #: 「装好的那份」✓✗（旧版就在这一行的 ``module`` 上核 state_dict ✓ ⇒ 改成两档后恒红 ✓）
     names = {key: key.replace(".", "_") for key in tensors}
     # 用 key_map 把 `w0.weight` 映射成 `w0_weight` ✓（顺带验证改名仍在流式路径上生效 ✓）
     # ⚠️ 必须 `re.escape` ✗：键里的 `.` 是**字面点** ✓，当通配符用会「恰好也能过」✓✗
     key_map = {re.escape(key): target for key, target in names.items()}
 
-    tracemalloc.start()
-    try:
-        baseline = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        report = weights_mod.load_module_weights(module, path, key_map=key_map)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    def _peak(read_ahead: int) -> tuple[weights_mod.WeightLoadReport, int, Any]:
+        """重新造一份空模块再装一遍 ⇒ 返回（报告, 峰值增长字节, **装进去的那份模块**）✓。
 
-    growth = peak - baseline
-    budget = each * 2                            # 同时最多两个张量（当前层 + 小对象 ⇒ 8 MiB ✓）
-    check("⑤ ⭐⭐ 峰值 ≈ **单个张量** ✓ 不是整份（8 × 4 MiB = 32 MiB ✗）"
+        ⚠️ ``Wide()`` 必须在 ``tracemalloc.start()`` **之前**造 ✓（它自己就要 8 × 4 MiB ✗，
+        算进 baseline 之外会把"流式"的账全冲掉 ✓✗）。
+        ⚠️ 模块要**随报告一起返回** ✗✗：⑤′ 要核"参数真被写入" ✓，而每次 ``_peak`` 造的都是新模块 ✓
+        ⇒ 拿外面那个没装过的 ``module`` 去核 ⇒ 恒红 ✓（第一次改完就是这样 ✓✗）。
+        """
+        fresh = Wide()
+        tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            report = weights_mod.load_module_weights(fresh, path, key_map=key_map,
+                                                     read_ahead=read_ahead)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        return report, peak - baseline, fresh
+
+    #: ⚠️ 分两档量 ✗✗（旧的单档 8 MiB 断言**一直红** ✓，而它看起来像"流式坏了" ✓✗）：
+    #: 装载默认开**读前置**（``weights._READ_AHEAD = 2`` ✓）⇒ 峰值本来就是「当前件 + 2 个预取件」
+    #: ＝ 3 × 4 MiB ＝ 12.03 MiB ✓（实测 ✓）—— 那是预取的**设计** ✓，不是"把整份读进来了" ✗。
+    #: 单档断言把两件事混成一条 ⇒ 要么把预取关掉（等于不测真默认路径 ✗），要么把预算放宽到
+    #: 32 MiB（那样"整份读进来"也过 ✗✗）⇒ 只能拆开 ✓。
+    report, growth, _loaded = _peak(0)
+    budget = each * 2                            # 关预取：只允许「当前件 + 落地副本」
+    check("⑤ ⭐⭐ 关掉预取时峰值 ≈ **单个张量** ✓ 不是整份（8 × 4 MiB = 32 MiB ✗）"
           "—— 「小内存」要靠这条断言证明 ✓ 不能靠「感觉变快了」✓",
           report.complete and growth < budget,
           {"growthMiB": round(growth / 1048576, 2), "budgetMiB": budget // 1048576,
            "totalMiB": count * each // 1048576})
+
+    ahead = int(getattr(weights_mod, "_READ_AHEAD", 0))
+    report_ahead, growth_ahead, loaded = _peak(ahead)
+    limit = each * (ahead + 1) + each // 2        # 当前件 + ahead 个预取件 + 半件的余量
+    check("⑤″ 开预取（默认档）时峰值 ≤ **（1 + read_ahead）件** ✓✗ —— 预取只在**件**级别叠加 ✓，"
+          "不是「多读一整份」✗（真整份 = 32 MiB ⇒ 这条会红 ✓）",
+          report_ahead.complete and growth_ahead < limit,
+          {"growthMiB": round(growth_ahead / 1048576, 2), "readAhead": ahead,
+           "limitMiB": limit // 1048576, "totalMiB": count * each // 1048576})
     check("⑤′ 改名在流式路径上仍生效 ✓（`renamed` 有值 + 参数真被写入 ✓）",
-          report.renamed == count and all(
-              bool((module.state_dict()[target] != 0).any()) for target in names.values()),
-          report.renamed)
+          report_ahead.renamed == count and all(
+              bool((loaded.state_dict()[target] != 0).any()) for target in names.values()),
+          report_ahead.renamed)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -336,6 +364,37 @@ def _tensor_model() -> Any:
     return One()
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑤ 0 元素张量（哨兵）不许炸
+# ══════════════════════════════════════════════════════════════════════════
+def case_zero_element(root: Path) -> None:
+    """⚠️ **0 元素张量**是「键存在即真」的哨兵 ✓（Edit 2511 的 `__index_timestep_zero__`
+    在 int8_convrot 那份里就是 `shape=[0]` ✓、TE 的 `scaled_fp8` 同物种 ✓）。
+
+    2026-11-01 真权重首跑就在这里崩 ✓：`torch.frombuffer(b"")` 抛
+    `both buffer length (0) and count (-1) must not be 0` ✓ —— **报错落在 torch 上** ✓，
+    读起来像「文件坏了 / 权重是空的」✓✗，而真相是「它本来就该有 0 个字节」✓。
+    """
+    torch = _torch()
+
+    class Sentinel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.w = torch.nn.Linear(2, 2)
+            self.register_buffer("sentinel", torch.zeros(0), persistent=True)
+
+    model = Sentinel()
+    path = _save(root, "sentinel.safetensors", model.state_dict())
+    fresh = Sentinel()
+    report = weights_mod.load_module_weights(fresh, path)
+    check("⑤ ⭐ 0 元素张量（哨兵 ✓）能装 ✓（`frombuffer(b\"\")` 会当场抛 ✗ —— 真权重踩过 ✓✗）",
+          report.complete and fresh.sentinel.numel() == 0, report.to_dict()["error"][:200])
+
+    #: 反过来：0 元素**不能**被当成「缺键」✓（缺键会让整份判不完整 ✓✗，Edit 2511 就装不起来 ✗）
+    check("⑤′ 0 元素张量**不算缺键** ✓（`missing` 里出现它 ⇒ 整份判不完整 ✗）",
+          not [k for k in report.missing if "sentinel" in k], report.missing)
+
+
 def main() -> int:
     skips = _skips()
     if skips:
@@ -350,6 +409,7 @@ def main() -> int:
             case_peak_is_single_tensor(root)
             case_precheck_no_pollution(root)
             case_errors(root)
+            case_zero_element(root)
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

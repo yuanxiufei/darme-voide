@@ -95,6 +95,19 @@ def _payload_from(body: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _dataset_ref_from(body: dict[str, Any]) -> str | None:
+    """请求里的 ``datasetRef`` ✓。
+
+    ⚠️ 它**不是训练参数**（不在 ``values`` 里）：``values`` 要逐键过
+    :func:`options.merge`，未知键当场报错 —— 把 ``datasetRef`` 塞进去只会让所有
+    训练链都多一个"未知参数"。所以它走独立字段、独立核验，见
+    :func:`lora_train.runtime.check_dataset_ref`。
+    """
+    raw = body.get("datasetRef") if "datasetRef" in body else body.get("dataset_ref")
+    text = str(raw or "").strip()
+    return text or None
+
+
 # ── 训练：目录 / 参数 ─────────────────────────────────────────────────────
 
 
@@ -146,17 +159,21 @@ async def preview_train(request: Request) -> Any:
     ``values`` 省略 ⇒ 用盘上的 ``settings.toml`` ✓；给了 ⇒ 覆盖 ✓（逐键校验 ✓）。
     ⚠️ 要出样图时会往 ``<数据根>/lora-train/previews/<模型>/prompt.txt`` 写一个文件 ✓
     （**固定位置** ✗ 不随任务变 ✓）—— ``promptFile`` 里会给出来 ✓。
+    ``datasetRef`` 给了就**在这里也核一遍** ✓（和 :func:`start_train` 同一个判据 ✓）——
+    "预览能过、真跑 400"是最没用的预览 ✓✗。
     """
     body = await read_json(request)
     model = _model_from(body)
     values = _payload_from(body)
+    dataset_ref = _dataset_ref_from(body)
     preview_dir = train_config.data_dir() / PREVIEW_SUBDIR / model
     preview_dir.mkdir(parents=True, exist_ok=True)
     from ..services.lora_train.commands import build_plan  # noqa: PLC0415 - 只在这个端点用 ✓
-    from ..services.lora_train.runtime import resolve_values  # noqa: PLC0415
+    from ..services.lora_train.runtime import check_dataset_ref, resolve_values  # noqa: PLC0415
 
     def _run() -> dict[str, Any]:
         resolved = resolve_values(model, values)
+        dataset = check_dataset_ref(dataset_ref)
         plan = build_plan(model, resolved, workspace=preview_dir)
         return {
             "model": model,
@@ -165,6 +182,8 @@ async def preview_train(request: Request) -> Any:
             "trainCommand": list(plan.train),
             "tools": dict(plan.tools),
             "promptFile": None if plan.prompt_file is None else str(plan.prompt_file),
+            "datasetRef": None if dataset is None else dataset.get("ref"),
+            "dataset": dataset,
         }
 
     return _guard(_run)
@@ -183,7 +202,7 @@ async def start_train(request: Request) -> Any:
     body = await read_json(request)
     model = _model_from(body)
     values = _payload_from(body)
-    task_id = lora_train_runtime.submit(model, values)
+    task_id = lora_train_runtime.submit(model, values, dataset_ref=_dataset_ref_from(body))
     poll = {"taskId": task_id, "pollUrl": f"/api/v1/lora-train/tasks/{task_id}"}
     if not bool(body.get("wait")):
         return success({**poll, "status": "queued", "waited": False})

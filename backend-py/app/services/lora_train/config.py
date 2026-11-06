@@ -1,6 +1,6 @@
 """LoRA 训练参数配置层：``settings.toml`` 的读写与校验 ✓（LoRAMaster 移植 ✓）。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/<模型>_lora_train.py`` 里的
+出处（参考实现 ✓）：``LoRAMaster/<模型>_lora_train.py`` 里的
 ``load_settings()`` / ``save_settings()`` ✓ —— 参数表**平铺**在 ``<模型>_settings.toml`` ✓
 （键名 = 训练参数名 ✓，值以**字符串**为主 ✓，只有少量 ``true``/``false`` 是真布尔 ✓）。
 

@@ -50,8 +50,18 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 __all__ = ["WanVaeShape", "FlatBlock", "infer_shape", "WanVAE", "build", "patchify", "unpatchify",
-           "latents_stats", "decode_latents", "QWEN21_LATENT_MEAN", "QWEN21_LATENT_STD",
-    "WAN21_LATENT_MEAN", "WAN21_LATENT_STD", "WAN22_LATENT_MEAN", "WAN22_LATENT_STD"]
+           "latents_stats", "family_title", "FAMILY_TITLES", "decode_latents", "encode_latents",
+           "QWEN21_LATENT_MEAN", "QWEN21_LATENT_STD",
+    "WAN21_LATENT_MEAN", "WAN21_LATENT_STD", "WAN22_LATENT_MEAN", "WAN22_LATENT_STD",
+           "SUGGESTED_ATTN_CHUNK", "SUGGESTED_TILE"]
+
+#: 显存真的不够时**建议**喂给 :meth:`WanVAE.decode` 的两个值 ✓（**默认不生效** ✓✗）。
+#: 为什么只是「建议」而不做默认：两条都会改数值（见 :class:`AttentionBlock` / :class:`Decoder3d` ✓），
+#: 而本仓对「同 seed 同文本逐像素复现」有硬要求 ✓ ⇒ 只有调用方**明确知道**要换内存、且愿意
+#: 接受产物字节变化时才打开 ✓。``attn`` 取 1024：8× 那份从 20.96 GiB 降到 3.94 GiB ✓，
+#: 再小只省一点、白丢并行度 ✓。``tile`` 取 512（像素）：2.1 的 2048×1536 从 8.69 降到 3.21 GiB ✓。
+SUGGESTED_ATTN_CHUNK = 1024
+SUGGESTED_TILE = 512
 
 
 @dataclass(frozen=True)
@@ -281,7 +291,7 @@ def unpatchify(x: Tensor, patch_size: int) -> Tensor:
 
 
 class CausalConv3d(nn.Conv3d):
-    """因果 3D 卷积 ✓ —— ``padding[0] == 0``（本族全部情形 ✓）时就是普通 ``Conv3d``。"""
+    """因果 3D 卷积 ✓ —— ``padding[0] == 0``（``temporal_kernel == 1`` 那族 ✓）时就是普通 ``Conv3d``。"""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -289,7 +299,26 @@ class CausalConv3d(nn.Conv3d):
         self.padding = (0, self.padding[1], self.padding[2])
 
     def forward(self, x: Tensor, cache_x: Tensor | None = None) -> Tensor:
-        if self._pad_t and x.shape[2] > 1:
+        """时间维**只在左边**补零 ✓（因果 ✓、输出帧数与输入相同 ✓）。
+
+        ⚠️ **单帧（``T == 1``）走另一条** ✗（2026-11-01 Krea2 单图解码实测 ✓）：
+        ``temporal_kernel == 3`` 的族（``qwen_image_vae`` ✓）喂 ``T=1`` 时，左边补 2 帧虽然
+        长度算得通（``1+2-3+1 = 1`` ✓），但 comfy 走的是**另一条等价路径** ——
+        ``autopad="causal_zero"``：``weight = weight[:, :, -x.shape[2]:, :, :]`` ✓
+        （见 ``comfy/ops.py:615`` ✓），即**把时间核截到最后一拍**、时间上**不补** ✓。
+        两者在 ``T>=3`` 时逐位相同 ✓、在 ``T==1`` 时也**恰好**相同 ✓（左补 2 个零后只剩最后一拍
+        非零 ✓）；差别在 ``T==2`` ✓ —— 截核会让输出掉成 1 帧 ✗，补零才保住 2 帧 ✓
+        ⇒ 判据取 ``T == 1`` ✓（与 comfy 的 ``x.shape[2] == 1`` 同一条件 ✓）。
+
+        不这么写会当场
+        ``Calculated padded input size per channel: (1 x 66 x 66). Kernel size: (3 x 3 x 3)`` ✓
+        —— 报错说"核比输入大" ✓，读起来像"尺寸算错了" ✓，其实是**单帧没走截核那条路** ✓✗。
+        """
+        if self._pad_t:
+            if x.shape[2] == 1:
+                weight = self.weight[:, :, -1:, :, :]
+                return F.conv3d(x, weight, self.bias, self.stride, self.padding,
+                                self.dilation, self.groups)
             x = F.pad(x, [0, 0, 0, 0, self._pad_t, 0])
         return super().forward(x)
 
@@ -307,7 +336,31 @@ class RMSNorm(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    """单头自注意力 ✓（在 ``h*w`` 上做，无位置编码 ✓）。"""
+    """单头自注意力 ✓（在 ``h*w`` 上做，无位置编码 ✓）。
+
+    ⭐ ``chunk``（2026-11-02 加 ✓）：**按 query 分块**调 SDPA ✓，把 ``n²`` 那个矩阵从
+    「整张一次建」变成「一次一块」✓。
+
+    ⚠️ **它不保证逐位相同** ✓✗ —— 同一批 key 的 softmax 每行独立 ✓ 是**数学上**成立的，
+    但 SDPA 的 math 后端内部也会按 query 再切块（归约顺序随块大小变 ✓），所以我们外部切的块
+    与它内部的块**对不上**时就会有差异 ✓。实测（fp32、真权重、2048×1536）：
+
+    | VAE | n | chunk | 与整量比 |
+    |---|---|---|---|
+    | 2.1 | 12288 | **4096** | **0.000e+00（逐位 ✓）** |
+    | 2.1 | 12288 | 1024 | 相对 8.55e-03 |
+    | 8× | 49152 | 4096 | 相对 1.81e-03 |
+    | 8× | 49152 | 1024 | 相对 3.66e-03 |
+
+    ⇒ 「逐位」是**某个 chunk 恰好与内部块对齐**的巧合 ✓✗，**不是**这条路的性质 ✓。
+    所以默认**关** ✓；开了就必须在回执里如实报 ✓（见 `docs/reference-audit.md` ✓）。
+
+    为什么需要它（实测 2026-11-02）：``head_dim = c``（384/1152）远超 efficient 后端上限
+    ⇒ SDPA 只能走 **math** 后端 ⇒ 显式建 ``[b*t, 1, n, n]`` 的 fp32 矩阵 ✓。
+    8× 那份 VAE 在 2048×1536 画布下 ``n = 192*256 = 49152`` ⇒ 整次解码峰值 **20.96 GiB**
+    （卡 22.49 ✓）；按 query 切成 1024 ⇒ **3.94 GiB** ✓ —— 这才是「VAE 解码爆显存」的真因 ✓✗，
+    与 ``upsamples`` 的卷积无关 ✓（探针实证：只切 up 链，该峰值**一点不降** ✓）。
+    """
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -315,15 +368,24 @@ class AttentionBlock(nn.Module):
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, chunk: int | None = None) -> Tensor:
         identity = x
         b, c, t, h, w = x.shape
         flat = self.norm(x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w))
         q, k, v = self.to_qkv(flat).chunk(3, dim=1)
         q, k, v = (e.view(b * t, 1, c, h * w).transpose(2, 3) for e in (q, k, v))
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = _attend(q, k, v, chunk)
         out = self.proj(out.transpose(2, 3).reshape(b * t, c, h, w))
         return out.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4) + identity
+
+
+def _attend(q: Tensor, k: Tensor, v: Tensor, chunk: int | None) -> Tensor:
+    """``chunk`` 个 query 一次 ✓；``None``/``0``/``≥n`` ⇒ 整量 ✓（与旧路径逐位不变 ✓）。"""
+    n = q.shape[2]
+    if not chunk or chunk <= 0 or chunk >= n:
+        return F.scaled_dot_product_attention(q, k, v)
+    return torch.cat([F.scaled_dot_product_attention(q[:, :, i:i + chunk], k, v)
+                      for i in range(0, n, chunk)], dim=2)
 
 
 def conv3(in_dim: int, out_dim: int, temporal_kernel: int) -> CausalConv3d:
@@ -331,7 +393,7 @@ def conv3(in_dim: int, out_dim: int, temporal_kernel: int) -> CausalConv3d:
 
 
 class Resample(nn.Module):
-    """2D/3D 上下采样 ✓ —— 无 ``feat_cache`` 时 ``time_conv`` 不执行（参考实现同样 ✓）。"""
+    """2D/3D 上下采样 ✓ —— 3D 两条分支**必须真跑 ``time_conv``** ✓（否则时间维一动不动 ✓✗）。"""
 
     def __init__(self, dim: int, mode: str, temporal_kernel: int = 3,
                  *, out_dim: int | None = None) -> None:
@@ -362,11 +424,66 @@ class Resample(nn.Module):
         else:
             raise ValueError(f"未知 resample 模式：{mode}")
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _per_frame(self, x: Tensor) -> Tensor:
+        """逐帧 2D 采样 ✓（``[b,c,t,h,w]`` ⇒ ``[b,c',t,h',w']`` ✓，时间维**原样不动** ✓）。"""
         b, c, t, h, w = x.shape
         flat = self.resample(x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w))
         #: ★ 新通道数只能从 ``flat`` 读 ✗ 不能用输入的 ``c``（会换通道时它是旧的 ✓✗）。
         return flat.reshape(b, t, flat.shape[1], flat.shape[-2], flat.shape[-1]).permute(0, 2, 1, 3, 4)
+
+    def forward(self, x: Tensor, first_chunk: bool = False) -> Tensor:
+        """2D / 3D 采样 ✓ —— **3D 那两个分支必须真跑 ``time_conv``** ✗✗。
+
+        ## 为什么这条是硬缺陷（2026-11-02 真跑撞出来的 ✓）
+
+        旧实现**从头到尾没调过 ``time_conv``** ✓✗ ⇒ ``downsample3d`` / ``upsample3d`` 退化成纯空间
+        采样 ✓，时间维**一动不动** ✓ ⇒ Wan 2.2 I2V 的首帧条件在 ``encode`` 段
+        ``参考 latent 时间维 17 ✗ ≠ 潜变量 5 ✓`` ✓（读起来像"帧数填错了" ✗，其实是**VAE 没做时间压缩** ✓）。
+        反向更要命：``decode`` 出片会得到 **T 帧而不是 4(T-1)+1 帧** ✓✗ —— 而且不报错 ✓。
+
+        ## 本实现的口径：**无 ``feat_cache`` 的整段因果等价形** ✓
+
+        参考实现（``comfy/ldm/wan/vae.py::WanVAE.encode``）是把像素按 ``1, 4, 4, …`` 切块、
+        每块带 ``feat_cache`` 跑同一套卷积 ✓。逐层看，缓存只是"把上一块的尾巴接回来" ✓ ⇒
+        **整段跑一遍**与它**逐窗口相同** ✓（每个输出窗口仍是 3 帧、步长 2 ✓）。
+
+        唯一的差别在**首帧** ✓：参考里第一块只有 1 帧 ⇒ ``time_conv`` 那一步被跳过 ✓
+        （``feat_cache[idx] = x`` 直接返回 ✓）。所以本实现也**让首帧不过时间卷积** ✓：
+
+        * ``downsample3d``：``[首帧的纯空间采样] ＋ conv(整段) 的全部输出`` ✓
+          ⇒ ``17 → 1+8 = 9`` ✓、再一级 ``9 → 1+4 = 5`` ✓（＝ 4 倍压缩 ＋ 1 ✓）；
+        * ``upsample3d``：``time_conv`` 出 ``2c`` ⇒ 交错重排成 ``2T`` 帧 ✓，``first_chunk`` 时
+          **丢掉头两份、换上首帧的纯空间采样** ✓ ⇒ ``2T−1`` ✓（``5 → 9 → 17`` ✓）。
+
+        ``T == 1`` 时两条时间分支都**一个窗口都凑不出** ⇒ 只剩空间采样 ✓，与旧行为**逐位相同** ✓
+        （所有单帧解码 / 单图编码不受影响 ✓，这条是硬要求 ✓）。
+        """
+        if self.mode == "downsample3d":
+            flat = self._per_frame(x)
+            if flat.shape[2] < 3:                      # 凑不出 (3 帧 / 步长 2) 的窗口
+                return flat
+            return torch.cat([flat[:, :, :1], self.time_conv(flat)], dim=2)
+        if self.mode == "upsample3d":
+            if x.shape[2] <= 1:
+                return self._per_frame(x)
+            doubled = self._duplicate(self.time_conv(x))     # [b, c, 2T, h, w]
+            if not first_chunk:
+                return self._per_frame(doubled)
+            #: 首帧不过时间卷积 ✓（参考的 ``'Rep'`` 分支 ✓）；``doubled`` 的头两份属于第 0 帧 ✓。
+            return torch.cat([self._per_frame(x[:, :, :1]), self._per_frame(doubled[:, :, 2:])], dim=2)
+        return self._per_frame(x)
+
+    @staticmethod
+    def _duplicate(y: Tensor) -> Tensor:
+        """``time_conv`` 吐的 ``2c`` 交错重排成两倍帧数 ✓（comfy ``stack(...,3).reshape`` 同义 ✓）。
+
+        ``y.reshape(b, 2, c, T, h, w)`` ⇒ 后半段（第 2 个 ``c``）落在**奇数帧** ✓
+        （``out[2j]`` 取半 0、``out[2j+1]`` 取半 1 ✓）。
+        """
+        b, c2, t, h, w = y.shape
+        c = c2 // 2
+        y = y.reshape(b, 2, c, t, h, w)
+        return y.permute(0, 2, 3, 1, 4, 5).reshape(b, c, t * 2, h, w)
 
 
 class ResidualBlock(nn.Module):
@@ -481,14 +598,29 @@ class UpResidualBlock(nn.Module):
         )
 
     def forward(self, x: Tensor, first_chunk: bool = False) -> Tensor:
-        out = self.upsamples(x)
+        #: ★ 必须**逐层**传 ``first_chunk`` ✗ 不能 ``self.upsamples(x)`` 一把过 ✗✗：
+        #: ``nn.Sequential`` 只传位置参数 ⇒ 里面那个 ``Resample`` 收不到 ``first_chunk`` ✓、
+        #: 按 ``2T`` 吐帧 ✓，而 ``DupUp3D`` 按 ``first_chunk`` 吐 ``2T−1`` ✓ ⇒
+        #: ``out + self.avg_shortcut(...)`` 当场
+        #: ``RuntimeError: The size of tensor a (10) must match the size of tensor b (9)`` ✓
+        #: （报得像尺寸算错 ✗，其实是**同一个开关只传到了一半** ✓）。
+        out = x
+        for layer in self.upsamples:
+            out = layer(out, first_chunk=first_chunk) if isinstance(layer, Resample) else layer(out)
         if self.avg_shortcut is None:
             return out
         return out + self.avg_shortcut(x, first_chunk=first_chunk)
 
 
 class Encoder3d(nn.Module):
-    """只做 ``decode`` 时用不到，但权重里有一半是它 ✓ —— 建出来才能整份 ``load_state_dict`` ✓。"""
+    """编码器 ✓ —— 权重里**一半是它** ✓（不建就装不满 ``state_dict`` ✓），且编码路径也要用它 ✓。
+
+    ⚠️ 2026-11-01 前这个类**只有 ``__init__``、没有 ``forward``** ✗✗ —— 于是
+    :meth:`WanVAE.encode` 也**不存在** ✓✗ ⇒ 任何"图 → 潜变量"的路（单流首帧条件 /
+    参考图 / img2img）在 Wan 族上都只能撞 ``AttributeError: 'WanVAE' object has no attribute 'encode'`` ✓
+    （报得像"调错方法" ✓，其实是**这条能力没接** ✓）。``head`` 输出 **2×z_dim** ✓
+    （``mean‖logvar`` ✓，与 :class:`Decoder3d` 的输入侧对称 ✓）就是最硬的证据 ✓。
+    """
 
     def __init__(self, dim: int, z_dim: int, image_channels: int, patch_size: int,
                  dim_mult: tuple[int, ...], num_res_blocks: int,
@@ -529,9 +661,69 @@ class Encoder3d(nn.Module):
         self.head = nn.Sequential(RMSNorm(dims[-1]), nn.SiLU(),
                                   CausalConv3d(dims[-1], z_dim * 2, (temporal_kernel, 3, 3),
                                                padding=(temporal_kernel // 2, 1, 1)))
+        #: ★ ``z_dim`` **存下来** ✓：编码后要 ``chunk(2)`` 取均值半 ✓（不靠猜 ``head`` 的输出通道 ✓）。
+        self.z_dim = int(z_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """``[B, C_in, T, H, W]`` ⇒ ``[B, 2·z_dim, T, h, w]``（``mean‖logvar`` ✓）。
+
+        与 :meth:`Decoder3d.forward` **同一条骨架** ✓（conv1 → 逐级 → middle → head ✓）；
+        ⚠️ 收 ``first_chunk`` 的层只有 :class:`Resample` ✓（且它收下即弃 ✓），
+        :class:`DownResidualBlock` / :class:`ResidualBlock` **不收** ✗ ⇒ 这里不能无脑透传 ✗。
+        """
+        x = self.conv1(x)
+        for layer in self.downsamples:
+            x = layer(x)
+        x = self.middle(x)
+        return self.head(x)
+
+
+def _upsamples_spatially(layer: nn.Module) -> bool:
+    """该层的**出口空间边长**是否 ×2 ✓（只判结构、不跑数据 ✓）。
+
+    两种挂法都要认 ✓：平铺代把 :class:`Resample` 直接挂在 ``upsamples`` 上 ✓；
+    嵌套代是 :class:`UpResidualBlock` 把它藏在内部 ✓（``up_flag`` ⇔ ``avg_shortcut`` 非空 ✓）。
+    """
+    if isinstance(layer, Resample):
+        return layer.mode.startswith("upsample")
+    if isinstance(layer, UpResidualBlock):
+        return layer.avg_shortcut is not None
+    return False
 
 
 class Decoder3d(nn.Module):
+    """Wan 式解码器 ✓。
+
+    ⭐ **空间分块**（``tile`` / ``halo`` ✓，2026-11-02 补）：这项与「按输出张量重叠平均」
+    （:mod:`.vae_tiling`）是**两件不同的事** ✓ —— 后者要求算子全程局部，而本类的
+    ``middle.1`` 是**全图单头注意力** ✓✗ ⇒ 在 latent 上切块再拼，整张都会变（实测相对差 1.35 ✓）。
+
+    正确的切法只有一种 ✓：**``conv1`` ＋ ``middle``（含注意力）在整张上跑** ✓，
+    之后的 ``upsamples`` ＋ ``head``（全 3×3 卷积 ＋ 逐点 RMSNorm/SiLU ＋ 逐点上采样）**分块跑** ✓。
+    块之间留 ``halo``（latent 单位）⇒ 块内靠内圈计算，只裁掉外圈 ✓。
+    halo 的下限由 :meth:`receptive_latent` 解析算出（不是拍脑袋 ✓）：不够就有接缝、而且**不报错** ✗✗。
+
+    ⚠️ **它不是逐位不变的** ✓✗（2026-11-02 实测纠正）：接缝算术是精确的 ✓，但 conv 对**不同窗口
+    尺寸**会选不同 cuDNN 算法 ⇒ 浮点归约顺序变 ✓。fp32、2048×1536 实测相对差 ``5.8e-03``，
+    而且**加 halo 消不掉**（halo 从 16 加到 24 仍有 ``5e-2`` ✗✗）⇒ 这不是「halo 不够」✓。
+    另一个量测陷阱：逐级看，绝对差一路放大（``5e-2 → 3e+02``），但**相对差稳定在 1e-4~6e-4**
+    （因为残差链本身把幅值放大到 1e5+ ✓）⇒ 判「接缝」必须看**相对**差 ✗ 绝对值 ✓。
+
+    为什么非做不可（2026-11-02 实测，bf16、单帧、卡 22.49 GiB ✓）：
+
+    | VAE | 画布 | 整张解码峰值 | ``attn_chunk=1024`` | 再加 ``tile=512`` |
+    |---|---|---|---|---|
+    | 2.1（16×，64ch 潜） | 2048×1536 | **8.69 GiB** | 8.69（**没用** ✗） | **3.21 GiB** |
+    | 2.1 | 3072×2304 | **18.75 GiB** | 18.75（没用 ✗） | **3.28 GiB** |
+    | 2.1 | 4096×3072 | 32.73 GiB（超卡，靠系统内存回落 ⇒ 极慢） | — | — |
+    | 2512（8×，16ch 潜） | 2048×1536 | **20.96 GiB**（顶到 93% 卡） | **3.94 GiB** | **1.03 GiB** |
+    | 2512 | 3072×2304 | **OOM** | — | — |
+
+    ⇒ 两个旋钮**各治一半** ✓：2.1 的峰值几乎全在 ``upsamples``（它那份注意力 ``n=12288`` 只 ~0.6 GiB ✓），
+    8× 的峰值几乎全在注意力（只切 up 链**一点不降** ✓）。「几百 MB」是错的 ✓✗：
+    8× 那份在**现行主力画布**上就已经把卡吃满 ✓。
+    """
+
     def __init__(self, dim: int, z_dim: int, out_channels: int, patch_size: int,
                  dim_mult: tuple[int, ...], num_res_blocks: int,
                  temperal_downsample: tuple[bool, ...], temporal_kernel: int,
@@ -571,13 +763,92 @@ class Decoder3d(nn.Module):
                                                (temporal_kernel, 3, 3),
                                                padding=(temporal_kernel // 2, 1, 1)))
 
-    def forward(self, x: Tensor, first_chunk: bool = False) -> Tensor:
-        x = self.middle(self.conv1(x))
+    def receptive_latent(self) -> int:
+        """``upsamples`` ＋ ``head`` 折回 latent 坐标的**感受野半径** ✓（latent 像素 ✓）。
+
+        解析算、不跑数据 ✓：逐级累加「该级 3×3 卷积的像素半径 ÷ 该级相对 latent 的倍数」✓。
+        ``Resample`` 里那个 conv 算在**升级前**的倍数上 ⇒ 偏**保守**（更大）✓ —— 宁可多算，
+        少算就是接缝 ✓✗。时间维核为 1 的（``CausalConv3d(…,1)`` / ``time_conv``）不计数 ✓
+        （空间核仍是 ``(1,3,3)`` 的要看最后一维 ✓）。
+        """
+        total = 0.0
+        level = 1
+        for layer in self.upsamples:
+            for module in layer.modules():
+                if isinstance(module, (nn.Conv2d, nn.Conv3d)):
+                    kernel = int(module.kernel_size[-1])
+                    if kernel > 1:
+                        total += (kernel // 2) / level
+            if _upsamples_spatially(layer):
+                level *= 2
+        total += 1 / level                      # head 的 3×3 在最高分辨率
+        return int(math.ceil(total)) + 1        # ＋1：把 Resample/边界补零的半步也兜住
+
+    def _run_ups(self, hidden: Tensor, first_chunk: bool) -> Tensor:
+        """``middle`` 之后的整条链 ✓（``upsamples`` ＋ ``head`` ✓）。"""
+        x = hidden
         for layer in self.upsamples:
             #: 平铺代这里的元素是裸 ``ResidualBlock`` ✓（不收 ``first_chunk``）⇒ 按类型分派 ✓；
             #: 嵌套代是 ``UpResidualBlock`` / ``Resample`` ✓ 两者都收 ✓。
             x = layer(x, first_chunk=first_chunk) if isinstance(layer, (UpResidualBlock, Resample)) else layer(x)
         return self.head(x)
+
+    def _run_middle(self, x: Tensor, attn_chunk: int | None) -> Tensor:
+        """``middle`` 三段 ✓，只把 ``attn_chunk`` 递给 :class:`AttentionBlock` ✓。
+
+        按**类型**分派 ✓、不按索引 ✗ —— 盘上两种 VAE 的 ``middle`` 都是
+        ``ResidualBlock → AttentionBlock → ResidualBlock`` ✓，但索引写死就等于
+        把「这个结构恰好如此」当契约 ✓✗（换一族就静默跳过注意力 ✓）。
+        """
+        for layer in self.middle:
+            x = layer(x, chunk=attn_chunk) if isinstance(layer, AttentionBlock) else layer(x)
+        return x
+
+    def forward(self, x: Tensor, first_chunk: bool = False, *,
+                tile: int | None = None, halo: int | None = None,
+                attn_chunk: int | None = None) -> Tensor:
+        """``tile``＝每块在 **latent** 空间的边长 ✓（``None`` ＝整张 ✓）。
+
+        ``halo`` 也按 latent 算 ✓；给不够会被**抬到** :meth:`receptive_latent` ✓（不是信调用方 ✓）——
+        这一条是关键：halo 差一点就是一条**看不见报错**的接缝 ✓✗。
+
+        ``attn_chunk`` 透给注意力 ✓（见 :class:`AttentionBlock` 的 ``chunk`` 注 ✓）：
+        与 ``tile`` 是**两件独立**的事 ✓ —— 只切 up 链治不了注意力的 ``n²`` 峰值 ✓✗，
+        只切注意力也治不了 up 链的峰值 ✓✗（两张表见类头 ✓）。
+        """
+        #: ⚠️ ``conv1`` ＋ ``middle`` 里的**注意力**必须看整张 ✓✗ —— 切了它每个 query 就只看块内。
+        #: （把 query 分块只是「怎么算」，key/value 仍是全量 ✓ ⇒ 数值不变 ✓。）
+        hidden = self._run_middle(self.conv1(x), attn_chunk)
+        if tile is None:
+            return self._run_ups(hidden, first_chunk)
+        return self._forward_tiled(hidden, int(tile), halo, first_chunk)
+
+    def _forward_tiled(self, hidden: Tensor, tile: int, halo: int | None,
+                       first_chunk: bool) -> Tensor:
+        height, width = hidden.shape[-2:]
+        pad = self.receptive_latent() if halo is None else max(int(halo), self.receptive_latent())
+        tile = max(int(tile), 1)
+        if tile >= max(height, width):
+            return self._run_ups(hidden, first_chunk)
+        out: Tensor | None = None
+        span = 0
+        for y0 in range(0, height, tile):
+            y1 = min(y0 + tile, height)
+            for x0 in range(0, width, tile):
+                x1 = min(x0 + tile, width)
+                wy0, wy1 = max(0, y0 - pad), min(height, y1 + pad)
+                wx0, wx1 = max(0, x0 - pad), min(width, x1 + pad)
+                piece = self._run_ups(hidden[..., wy0:wy1, wx0:wx1], first_chunk)
+                if out is None:
+                    #: ★ 比例**从第一块实测** ✓（各级 up 是否 ×2 由权重结构定 ✓，不靠假设 ✓）。
+                    span = piece.shape[-1] // (wx1 - wx0)
+                    out = piece.new_empty(piece.shape[0], piece.shape[1], piece.shape[2],
+                                          height * span, width * span)
+                #: 只把「非 halo 的内圈」写进画布 ✓ —— 外圈带着真实上下文算出来的，裁掉即弃 ✓。
+                out[..., y0 * span:y1 * span, x0 * span:x1 * span] = piece[
+                    ..., (y0 - wy0) * span:(y0 - wy0) * span + (y1 - y0) * span,
+                    (x0 - wx0) * span:(x0 - wx0) * span + (x1 - x0) * span]
+        return out
 
 
 class WanVAE(nn.Module):
@@ -595,19 +866,102 @@ class WanVAE(nn.Module):
                                  shape.dim_mult, shape.num_res_blocks, shape.temperal_downsample,
                                  shape.temporal_kernel, flat=shape.flat, levels=shape.decoder_flat)
 
+    @property
+    def weight_dtype(self) -> Any:
+        """参数所在 dtype ✓ —— **第一个参数**为准 ✓（``shape`` 是 dataclass、不带 dtype ✗）。
+
+        没有参数（自检里的恒等桩 ✓）就回 ``float32`` ✓。
+        """
+        for parameter in self.parameters():
+            return parameter.dtype
+        return torch.float32
+
+    # ---------------------------------------------------------------- 编码
+    def encode(self, x: Tensor) -> Tensor:
+        """``[B, 3, T, H, W]``（``[-1,1]`` 像素 ✓）⇒ ``[B, z_dim, T, H/S, W/S]`` ✓（**未归一化** ✗）。
+
+        ⚠️ 这里返回的是 **VAE 模型空间**的潜变量 ✓✗ —— 喂给 DiT 之前**必须**过
+        :func:`encode_latents`（它做 ``process_in`` ✓）；直接用的人会得到「形状全对、
+        首帧条件几乎不起作用、一个错都不报」✓✗（与 :func:`decode_latents` 是同一类坑 ✓）。
+
+        取 ``mean`` **不取 logvar** ✓（推理是确定性的 ✓ 后验均值 ✓ 不采样 ✓）。
+        """
+        target = self.weight_dtype
+        if x.dtype != target:
+            x = x.to(target)
+        squeeze = x.ndim == 4
+        if squeeze:
+            x = x.unsqueeze(2)
+        #: ⚠️ 与 :meth:`decode` 的 ``unpatchify`` **对称** ✓（少了这一步，ps>1 的族形状就错 ✗）。
+        #: 这里**不**复用模块级的 :func:`patchify` ✓：它只吃 ``[B,C,H,W]`` ✓，而这一层是 5 维 ✓
+        #: （T=1 时硬 ``squeeze(2)`` 能过、T>1 时直接炸 ✗ ⇒ 显式按 5 维折叠 ✓）。
+        patch = self.shape.patch_size
+        if patch != 1:
+            b, c, t, h, w = x.shape
+            x = x.reshape(b, c, t, h // patch, patch, w // patch, patch)
+            x = x.permute(0, 1, 4, 6, 2, 3, 5).reshape(
+                b, c * patch * patch, t, h // patch, w // patch)
+        hidden = self.conv1(self.encoder(x))
+        mean = hidden.chunk(2, dim=1)[0]
+        return mean.squeeze(2) if squeeze else mean
+
     # ---------------------------------------------------------------- 解码
-    def decode(self, z: Tensor) -> Tensor:
+    def decode(self, z: Tensor, *, tile: int | None = None, halo: int | None = None,
+               attn_chunk: int | None = None) -> Tensor:
         """``[B, z_dim, H, W]`` → ``[B, image_channels, H*scale, W*scale]`` ✓（RGBA ✓）。
+
+        **两个省显存的旋钮，默认全关 ✓（关着 ⇒ 逐位等于旧路径 ✓）**：
+
+        * ``tile``（**像素**单位、与 ComfyUI 的 ``VAEDecodeTiled`` 同口径 ✓）：``upsamples`` ＋
+          ``head`` 按块跑 ✓。**改数值** ✓✗：实测 fp32 相对差 5.8e-03（2048×1536 ✓），
+          且**与 halo 够不够无关** ✓ —— halo 加到 24 仍有 ``5e-2`` ✓（cuDNN 对不同窗口尺寸
+          选不同卷积算法 ✓）。裁接缝是精确的 ✓，差的是浮点归约 ✓。
+        * ``attn_chunk``：注意力按 query 分块 ✓。**也改数值** ✓✗（见 :class:`AttentionBlock`
+          的表 ✓）；只在 ``n > chunk`` 时真的分块 ✓。
+        两者**治的毛病不同** ✓：8× 那份的峰值几乎全在注意力（只切 up 链 **一点不降** ✓），
+        2.1 的峰值全在 up 链（注意力只 ~0.6 GiB ✓）。
+        ``halo`` 给不够会被抬到感受野下限 ✓（见 :meth:`Decoder3d.forward` ✓）。
+        
 
         ``z`` 的单帧形状 (4 维) 就走 comfy 的 ``decode`` 分支：``unsqueeze(2)`` 后
         ``first_chunk=True`` ✓；返回时再 ``squeeze(2)`` ✓，与 comfy 逐位一致 ✓。
+
+        ⚠️ **入口先把 ``z`` 对齐到权重精度** ✓（2026-11-01 Krea2 端到端实测 ✓）：
+        采样侧的潜变量**有意保 f32** ✓（见 ``init_latents`` ✓），而这族的 VAE 权重在卡上
+        多是 **bf16** ✓ —— 不对齐当场
+        ``Input type (float) and bias type (struct c10::BFloat16) should be the same`` ✓，
+        报错指向 ``conv`` ✓、读起来像"通道/权重坏了" ✓，其实是**精度没对齐** ✓✗。
+        对齐**只能在这里**（模型内部）✗：在采样侧把潜变量降成 bf16 会连带毁掉
+        逆过程的数值 ✓✗（同 `sdxl_vae.decode_latents` / `dit_lumina.forward` 的教训 ✓）。
         """
+        target = self.weight_dtype
+        if z.dtype != target:
+            z = z.to(target)
         squeeze = z.ndim == 4
         if squeeze:
             z = z.unsqueeze(2)
-        out = self.decoder(self.conv2(z), first_chunk=True)
+        latent_tile, latent_halo = self._tile_in_latent(tile, halo)
+        out = self.decoder(self.conv2(z), first_chunk=True,
+                           tile=latent_tile, halo=latent_halo, attn_chunk=attn_chunk)
         out = unpatchify(out.squeeze(2), self.shape.patch_size)
         return out
+
+    def _tile_in_latent(self, tile: int | None, halo: int | None) -> tuple[int | None, int | None]:
+        """像素口径 → latent 口径 ✓（不足一格按一格、并对齐到 ``patch_size`` ✓）。
+
+        ``patch_size>1`` 时块边界必须落在 patch 网格上 ✓，否则 ``unpatchify`` 会把接缝
+        整条 patch 挪位 ✓✗；``halo`` 同样要对齐 ✓（它决定块的**起点偏移** ✓）。
+        """
+        if tile is None:
+            return None, None
+        scale = max(1, int(self.shape.spatial_scale))
+        patch = max(1, int(self.shape.patch_size))
+
+        def align(value: int) -> int:
+            steps = max(1, int(round(value / patch)))
+            return steps * patch
+
+        return align(int(tile) // scale), (None if halo is None else align(int(halo) // scale))
 
     def decode_to_image(self, z: Tensor) -> Tensor:
         """解到可直接落盘的 RGB ✓：``[-1,1] → [0,1]``、丢 alpha ✓。
@@ -706,12 +1060,53 @@ WAN22_LATENT_STD: tuple[float, ...] = (
 )
 
 
+#: 族名 → **人话标题** ✓（只给回执/报错用 ✓，不参与任何数学 ✓）。
+#: ⚠️ 为什么要这张表 ✗（2026-11-01 补 ✓）：回执里只写 ``qwen_image21`` ✓ 对机器够用 ✓、
+#: 对人不够 ✓ —— 创作者读到的应该是「Qwen-Image 2.1」✓，而**不是** `H3` ✗（历史缺陷：
+#: 老文案写死「否则 H3」，挂 2.1 也报 H3 ✓✗）。查不到就**原样回显族名** ✓（不猜族 ✓）。
+FAMILY_TITLES: dict[str, str] = {
+    "qwen_image21": "Qwen-Image 2.1",
+    "qwen_image_2_1": "Qwen-Image 2.1",
+    "qwen_image_21": "Qwen-Image 2.1",
+    "wan21": "Wan 2.1",
+    "wan_2_1": "Wan 2.1",
+    "wan2_1": "Wan 2.1",
+    "wan22": "Wan 2.2",
+    "wan_2_2": "Wan 2.2",
+    "wan2_2": "Wan 2.2",
+    "qwen_image": "Qwen-Image 2512",
+    "qwen_image_2512": "Qwen-Image 2512",
+}
+
+
+def _family_key(family: str) -> str:
+    """族名 → **查表键** ✓：大小写、``-``、``.``、空格一律折成 ``_`` ✓，多余 ``_`` 压成一个 ✓。
+
+    ⚠️ 为什么要这么折 ✗（2026-11-01 审出来的真缺陷 ✓）：本模块原先只折 ``-`` ✓
+    ⇒ ① 表里刻意登记的 ``wan2.1`` 这种点号写法**永远命中不了** ✓✗（登记了却是死配置 ✓）；
+    ② ``qwen-image-2.1`` 这种「连字符 ＋ 点号」组合谁都不命中 ✓ ⇒ 回执里回显一串机器名 ✓✗。
+    两项都不是「错图」级 ✓，但都是「写了等于没写」✓✗ —— 表与折法必须是同一套口径 ✓。
+    """
+    key = str(family or "").strip().lower()
+    for ch in ("-", ".", " "):
+        key = key.replace(ch, "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
+def family_title(family: str) -> str:
+    """族名 → 人话标题 ✓；没登记 ⇒ **原样回显** ✓（绝不猜成别族 ✗✗）。"""
+    title = FAMILY_TITLES.get(_family_key(family))
+    return title if title is not None else str(family or "").strip()
+
+
 def latents_stats(family: str, z_dim: int | None = None) -> tuple[tuple[float, ...], tuple[float, ...]]:
     """族名 → ``(mean, std)`` ✓；**没有就报错** ✗（**不猜、不回退成恒等** ✗✗）。
 
     ⚠️ 回退成 ``(0, 1)`` 是最贵的省事法 ✗：解码照跑 ✓、形状全对 ✓、图发灰 ✓、不报错 ✓✗。
     """
-    key = str(family or "").strip().lower().replace("-", "_")
+    key = _family_key(family)
     table: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = {
         "qwen_image21": (QWEN21_LATENT_MEAN, QWEN21_LATENT_STD),
         "qwen_image_2_1": (QWEN21_LATENT_MEAN, QWEN21_LATENT_STD),
@@ -739,6 +1134,13 @@ def latents_stats(family: str, z_dim: int | None = None) -> tuple[tuple[float, .
         "qwen_image": ((0.0,) * 16, (1.0,) * 16),
         "qwen_image_2512": ((0.0,) * 16, (1.0,) * 16),
     }
+    #: ⚠️ **两张表的键口径不同** ✗✗（2026-11-01 实测撞出来的 ✓）：本表既有 ``wan_2_1`` 也有
+    #: ``wan2.1``（点号**不折** ✓），而 :data:`FAMILY_TITLES` 全是折后写法 ✓ ⇒ 归一后查不到时
+    #: **按原样再查一次** ✓（只折 ``-`` 与大小写 ✓）。两把钥匙都试过才判「没登记」✗ ——
+    #: 只试一把会把本来能命中的族判死 ✓✗（``latents_stats("wan2.1")`` 曾因此直接抛错 ✓）。
+    if key not in table:
+        raw = str(family or "").strip().lower().replace("-", "_")
+        key = raw if raw in table else key
     if key not in table:
         raise ValueError(
             f"没有 {family!r} 的 ``latents_mean/std`` ✗ —— 这一族还没登记的数是**口径事实** ✓，"
@@ -754,13 +1156,28 @@ def latents_stats(family: str, z_dim: int | None = None) -> tuple[tuple[float, .
 def decode_latents(module: WanVAE, latents: Tensor, *, family: str = "qwen_image21",
                    mean: tuple[float, ...] | list[float] | None = None,
                    std: tuple[float, ...] | list[float] | None = None,
-                   to_unit: bool = False) -> Tensor:
+                   to_unit: bool = False,
+                   tile: int | None = None, halo: int | None = None,
+                   attn_chunk: int | None = None) -> Tensor:
     """**归一化潜变量** → 像素 ✓（先反缩放，再解码 ✓）。
 
     ⚠️ 顺序是硬的 ✗：``decode(反缩放(z))`` ✓；反过来或省掉 ⇒ 形状全对、图是灰噪、不报错 ✓✗。
 
     ``to_unit=True`` ⇒ 返 ``[0,1]`` 的 3 通道 ✓（丢 alpha ✓）；否则返 ``[-1,1]`` 的 4 通道 ✓
     （与 ``torch_backend.decode`` 的 ``value_range="-1..1"`` 口径一致 ✓）。
+
+    ``tile`` / ``halo`` / ``attn_chunk`` 原样转给 :meth:`WanVAE.decode` ✓（**默认全关** ✓，
+    关着逐位等于旧路径 ✓；开着**改数值** ✓✗，见那个方法的表 ✓）。
+
+    ⚠️ **整段按 latent 切块是错的** ✓✗（2026-11-02 实测 ✓）：解码器 ``middle.1`` 是**全图
+    单头注意力** ✓ ⇒ 潜变量一切块，注意力就只看得到自己那块 ✓，拼回来的**整张**都变了 ✓✗
+    （真 2.1 权重实测：10×10 潜变量切 6×6 块 ⇒ 相对差 **1.35** ✓，不是接缝问题 ✓，是全局
+    重排 ✓）。ComfyUI 的 ``WanVAE`` 同样**没有** ``decode_tiled`` ✓。
+    ⇒ 本仓的 ``tile`` 只切「注意力**之后**的那几级 up 块」✓（那之后才是纯局部卷积 ✓），
+    注意力那一拍另由 ``attn_chunk`` 按 query 分块 ✓ —— **两个旋钮治两半，缺一不可** ✓：
+    2048×1536(fp32) 整张解 8× 那份峰值 **20.96 GiB** ✓（卡 22.49 ✓ ⇒ 3072×2304 直接 OOM ✓），
+    ``attn_chunk=1024`` ⇒ **3.94 GiB** ✓，再叠 ``tile=512`` ⇒ **1.03 GiB** ✓；
+    2.1(16×) 峰值几乎全在 up 链 ✓（``tile=512`` ⇒ 8.69 → **3.21 GiB** ✓）。
     """
     from app.services.engine import latent_formats as latent_formats_mod  # noqa: PLC0415
 
@@ -784,7 +1201,39 @@ def decode_latents(module: WanVAE, latents: Tensor, *, family: str = "qwen_image
     mean_t = torch.tensor(list(mean), dtype=latents.dtype, device=latents.device).view(view)
     std_t = torch.tensor(list(std), dtype=latents.dtype, device=latents.device).view(view)
     scaled = latent_formats_mod.process_out(family, latents, mean=mean_t, std=std_t)
-    pixels = module.decode(scaled)
+    #: ⚠️ 三个旋钮只在调用方**明确**给了才往下传 ✓（``tile=None`` ⇒ `decode` 走旧路径 ✓，
+    #:    逐位不变 ✓）—— 不在这里替它挑默认值 ✗（见 :data:`SUGGESTED_TILE` ✓）。
+    pixels = module.decode(scaled, tile=tile, halo=halo, attn_chunk=attn_chunk)
     if not to_unit:
         return pixels
     return ((pixels[:, :3].float() + 1.0) / 2.0).clamp(0.0, 1.0)
+
+
+def encode_latents(module: WanVAE, frames: Tensor, *, family: str = "qwen_image21",
+                   mean: tuple[float, ...] | list[float] | None = None,
+                   std: tuple[float, ...] | list[float] | None = None) -> Tensor:
+    """像素 → **归一化潜变量** ✓（:func:`decode_latents` 的对称面 ✓：先编码，再正向缩放 ✓）。
+
+    ⚠️ 2026-11-01 前**没有这一层** ✓✗：``latent_formats.process_in`` 写好了却**全仓零调用** ✓，
+    编码侧于是直接把 **VAE 模型空间**的潜变量当 DiT 输入 ✓✗ —— Flux 族差 0.3611 倍、
+    Wan 族差 16 组 mean/std ✓ ⇒ 首帧条件/参考图**数值全歪**、形状全对、一个错不报 ✓（
+    与 :mod:`latent_formats` 抬头警告的"编码侧没接"完全一致 ✓）。
+
+    ⚠️ 顺序同样是硬的 ✗：``process_in(encode(x))`` ✓；省掉正向缩放 ⇒ 上面那个静默错 ✓。
+    """
+    from app.services.engine import latent_formats as latent_formats_mod  # noqa: PLC0415
+
+    shape = getattr(module, "shape", None)
+    z_dim = int(getattr(shape, "z_dim", 0) or 0)
+    if mean is None or std is None:
+        mean, std = latents_stats(family, z_dim=z_dim or None)
+    encoded = module.encode(frames)
+    if len(mean) != int(encoded.shape[1]):
+        raise ValueError(
+            f"编码出的潜通道 {int(encoded.shape[1])} 与 ``mean/std`` 的 {len(mean)} 对不上 ✗"
+            f"（{family!r} 登记的是 {len(mean)} 个 ✓）—— ``family`` 大概填成了别的一族 ✓"
+            f"（``wan21``/``qwen_image`` 16 ✓、``qwen_image21`` 64 ✓）")
+    view = (1, -1) + (1,) * max(0, encoded.ndim - 2)
+    mean_t = torch.tensor(list(mean), dtype=encoded.dtype, device=encoded.device).view(view)
+    std_t = torch.tensor(list(std), dtype=encoded.dtype, device=encoded.device).view(view)
+    return latent_formats_mod.process_in(family, encoded, mean=mean_t, std=std_t)

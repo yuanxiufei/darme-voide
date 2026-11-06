@@ -63,16 +63,20 @@ from .routers.libraries import (
 )
 from .routers.presets import router as presets_router
 from .routers.agent import router as agent_router
+from .routers.text import router as text_router
 from .routers.auto_pipeline import router as auto_pipeline_router
 from .routers.local_models import router as local_models_router
 from .routers.engine import router as engine_router
 from .routers.lora_train import router as lora_train_router
+from .routers.knowledge import router as knowledge_router  # 知识库只读检索口（7 端点）
+from .routers.knowledge_loop import router as knowledge_loop_router  # 跑次归一+知识台账（13 端点）
 from .routers.prompt_tools import router as prompt_tools_router
 from .routers.asset_gate import router as asset_gate_router
 from .routers.continuity import router as continuity_router
 from .routers.doctor import router as doctor_router  # 运行时体检（四类 AI 服务连通性）
 from .routers.preflight import router as preflight_router  # 开跑前体检（四块串成一次调用）  # 连续性表体检（事前）  # 资产验收门（付费生成前）  # 占位符解析 + 五段质感层  # 自研引擎体检（权重就绪/头部）
 from .routers.comfyui import router as comfyui_router
+from .routers.comfyui_events import router as comfyui_events_router
 from .routers.compose import router as compose_router
 from .routers.grid import router as grid_router
 from .routers.images import router as images_router
@@ -83,10 +87,14 @@ from .routers.preset_framework import router as preset_framework_router
 from .routers.evaluation import router as evaluation_router
 from app.agent.auto_pipeline import recover_auto_pipeline_on_startup
 from app.agent.evaluation_scheduler import start_evaluation_scheduler
+from app.services.knowledge_scheduler import start as start_knowledge_scheduler
 from app.services.comfyui import recover_runs_on_startup as recover_comfyui_runs_on_startup
 from .routers.mcp import router as mcp_router
+from .routers.repair import router as repair_router  # 修复域（提案/应用/回滚，源 assistant-runtime）
+from .routers.canvas import router as canvas_router  # 画布工具域（工具调用→op，源 canvas-agent）
 from .routers.props import router as props_router
 from .routers.videos import router as videos_router
+from .routers.video_ops import router as video_ops_router
 from .routers.scenes import router as scenes_router
 from .routers.skills import router as skills_router
 from .routers.upload import router as upload_router
@@ -111,6 +119,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 评测→优化 无人值守调度器（**默认关闭**，仅 evaluation.auto_optimize.enabled=true 时启动；
     # 关闭时只打一条 warn —— 与原 TS 的 index.ts 行为一致）
     start_evaluation_scheduler()
+    # 知识蒸馏的每日复盘（**默认关闭**，仅 knowledge.distill.enabled=true 时启动；
+    # 它只写 proposed 且不调模型 —— 无人值守时不做"会花钱/会改结论"的动作）
+    # 这行 print 刻意保持 ASCII（原因见本函数开头）；中文原因在 log_task 里，不在这里。
+    knowledge_scheduler_receipt = start_knowledge_scheduler()
+    print(f"[knowledge] distill scheduler: started={knowledge_scheduler_receipt['started']} "
+          f"enabled={knowledge_scheduler_receipt['scheduler']['enabled']}")
     # 全自动管线**崩溃恢复**：扫描中间态 episode 自动续跑（幂等，空库时直接返回）
     recover_auto_pipeline_on_startup()
     # ComfyUI 工作流运行**崩溃恢复**：把中断的运行收尾（**绝不重提交** ✓ 避免重复占卡）
@@ -194,8 +208,12 @@ app.include_router(props_router)
 app.include_router(preset_framework_router)
 app.include_router(storyboards_router)
 app.include_router(videos_router)
+app.include_router(video_ops_router)
 app.include_router(compose_router)
 app.include_router(agent_router)
+# 注：文本域（/api/v1/text/*）是本仓**新增**的（2026-11-01，P0-1 流式 / P0-3 结构化），
+# 原 Node 后端没有对应路由 ⇒ 它只会出现在 route_parity 的「EXTRA（Python 多出）」表里 ✓ 不会判红 ✓。
+app.include_router(text_router)
 app.include_router(auto_pipeline_router)
 app.include_router(local_models_router)
 app.include_router(engine_router)
@@ -205,7 +223,10 @@ app.include_router(continuity_router)
 app.include_router(preflight_router)
 app.include_router(doctor_router)
 app.include_router(comfyui_router)
+app.include_router(comfyui_events_router)
 app.include_router(mcp_router)
+app.include_router(repair_router)
+app.include_router(canvas_router, prefix="/api/v1/canvas", tags=["canvas"])
 app.include_router(evaluation_router)
 app.include_router(merge_router)
 app.include_router(grid_router)
@@ -231,6 +252,8 @@ app.include_router(skills_router)
 app.include_router(upload_router)
 app.include_router(export_router)
 app.include_router(lora_train_router)
+app.include_router(knowledge_router)
+app.include_router(knowledge_loop_router)
 # 下一个域迁完后在这里 include（ai-configs / 本地模型 / evaluation / ...）
 
 

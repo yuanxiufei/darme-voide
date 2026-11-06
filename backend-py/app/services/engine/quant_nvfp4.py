@@ -9,7 +9,7 @@
 
 ## 规格（逐位对齐，不靠猜 ✓）
 
-参照实现：``reference/lora/musubi-tuner/src/musubi_tuner/modules/nvfp4_utils.py`` ✓
+参照实现：``musubi-tuner/src/musubi_tuner/modules/nvfp4_utils.py`` ✓
 （抬头明写 “verified bit-level against the BF16 reference of the MiniMax-H3 Qwen3-VL text encoder” ✓，
 且与 ComfyUI 侧 `comfy/float.py::stochastic_round_quantize_nvfp4_block` 的量化口径互逆 ✓）。
 

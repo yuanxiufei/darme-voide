@@ -51,6 +51,7 @@ __all__ = [
     "SAMPLERS", "STOCHASTIC", "MODEL_CALLS", "sample", "model_calls_per_step",
     "sample_euler", "sample_heun", "sample_multistep",
     "sample_dpmpp_2m", "sample_lms", "sample_euler_ancestral", "sample_sa_solver",
+    "sample_res_multistep", "sample_er_sde", "sample_lcm",
 ]
 
 ModelFn = Callable[[Any, float], Any]
@@ -544,6 +545,212 @@ def sample_sa_solver(model: ModelFn, x: Any, sigmas: list[float], *,
     return x_pred, steps
 
 
+def _phi1(value: float) -> float:
+    """``φ₁(t) = (e^t − 1)/t`` ✓（``t→0`` ⇒ 1 ✓，参考 ``phi1_fn`` ✓）。"""
+    return math.expm1(value) / value if value else 1.0
+
+
+def _phi2(value: float) -> float:
+    """``φ₂(t) = (φ₁(t) − 1)/t`` ✓（``t→0`` ⇒ 1/2 ✓，参考 ``phi2_fn`` ✓）。"""
+    return (_phi1(value) - 1.0) / value if value else 0.5
+
+
+def multistep_step(state: Any, denoised: Any, previous: Any, *,
+                   sigma: float, next_sigma: float,
+                   earlier: float, previous_down: float) -> Any | None:
+    """``res_multistep`` 的**一步**指数积分 ✓（参考 ``sample_res_multistep`` 的 else 支 ✓）。
+
+    参考原式（``t = −log σ`` ✓）::
+
+        h  = t_next − t ✓
+        c₂ = (t_prev − t_prev,down) / h ✓          ← **恒为负** ✓
+        b₁ = φ₁(−h) − φ₂(−h)/c₂ ✓，b₂ = φ₂(−h)/c₂ ✓
+        x' = e^{−h}·x + h·(b₁·denoised + b₂·previous) ✓
+
+    **退化返回 ``None``** ✓（首步没有 ``previous`` ✓、``σ' = 0`` ✓、σ 链条断 ✓）——
+    调用方据此退回一阶 Euler ✓（参考实现同样退化 ✓）。
+
+    ⚠️ 这个函数存在的唯一理由是**只有一份符号约定** ✗✗：``sample_res_multistep`` 与
+    ``h3_form.sample_dual_stream``（双流每步只有"一拍" ✓，没法调整个循环 ✓）都要用它 ✓，
+    两处各抄一遍的结果是**双流那侧把 c₂ 写成 ``(log σ_prev − log σ_down)`` ✓、正负号反了** ✓✗
+    （2026-11-01 抓到 ✓：不报错、b₂ 变号、非线性模型结局差一倍以上 ✓）。
+    """
+    if previous is None:
+        return None
+    if not (sigma > 0.0 and next_sigma > 0.0 and earlier > 0.0 and previous_down > 0.0):
+        return None
+    h = math.log(sigma) - math.log(next_sigma)
+    if not h > 0.0:
+        return None
+    ratio = (math.log(previous_down) - math.log(earlier)) / h
+    first, second = _phi1(-h), _phi2(-h)
+    if not math.isfinite(ratio) or ratio == 0.0:
+        # 参考 `torch.nan_to_num(...)` ⇒ 两权重置 0 ⇒ 只剩 `e^{−h}·x` ✓（不是"退回 Euler" ✓）
+        weight_now = weight_old = 0.0
+    else:
+        weight_now, weight_old = first - second / ratio, second / ratio
+        if not math.isfinite(weight_now):
+            weight_now = 0.0
+        if not math.isfinite(weight_old):
+            weight_old = 0.0
+    return state * math.exp(-h) + (denoised * (h * weight_now) + previous * (h * weight_old))
+
+
+def sample_res_multistep(model: ModelFn, x: Any, sigmas: list[float], *,
+                         callback: ProgressFn | None = None,
+                         noise_sampler: NoiseFn | None = None,
+                         eta: float = 0.0, s_noise: float = 1.0) -> tuple[Any, int]:
+    """残差指数多步（ComfyUI ``res_multistep`` ✓）—— H3 / Z-Image / Qwen-2512 官方档的默认采样器 ✓。
+
+    为什么它与 ``dpmpp_2m`` 不是同一个东西 ✗：``dpmpp_2m`` 用"间隔比"做线性外推 ✓，
+    本式用 **``e^{−h}`` 的指数积分 + 两个 φ 函数** ✓（``h = λ_next − λ`` 在对数 σ 空间 ✓），
+    外推权重由**上一拍的 σ_down 位置**决定 ✓ ⇒ 首步没有历史、只能退化成 Euler ✓（参考实现同样如此 ✓）。
+
+    ⚠️ 与参考实现的差别（都是"看起来能跑、只是数值不同"那类 ✗）：
+
+    1. 参考在 ``torch.float64`` 里累加 ✓，这里用 Python ``float``（＝双精度 ✓）算**标量系数** ✓，
+       张量只剩 ``x·e^h`` 与两项线性组合 ✓（系数精度不降 ✓）；
+    2. ``b1``/``b2`` 为 NaN 时置 0 ✓（参考 ``torch.nan_to_num`` ✓）—— 触发场景是
+       ``t_prev == t_old``（间隔退化 ✓），不置 0 会**一路 NaN 到底** ✗；
+    3. ``eta`` 默认 **0.0** ✓（＝参考的默认档 ✓，纯 ODE ⇒ 本采样器**不**进 :data:`STOCHASTIC` ✓）；
+       ``noise_sampler=None`` 时即使给了 ``eta`` 也强制 0 ✓（见 :func:`_stochastic_strength` ✓）。
+    """
+    times = [_sigma_float(sigma) for sigma in sigmas]
+    strength = _stochastic_strength(noise_sampler, eta, s_noise)
+
+    previous: Any = None
+    previous_down = 0.0
+    steps = 0
+    for index in range(len(times) - 1):
+        sigma, sigma_next = times[index], times[index + 1]
+        denoised = _denoised(model, x, sigma)
+        sigma_down, sigma_up = _ancestral_step(sigma, sigma_next, strength)
+        step = multistep_step(x, denoised, previous, sigma=sigma, next_sigma=sigma_down,
+                              earlier=times[index - 1] if index else 0.0,
+                              previous_down=previous_down)
+        if step is None:
+            # 首拍 / 末拍（σ_next=0 ⇒ 一步落到 denoised 的方向上 ✓）⇒ 一阶 Euler ✓
+            x = x + _direction(x, denoised, sigma) * (sigma_down - sigma)
+        else:
+            # ⚠️⚠️ 更新式里必须是 ``e^{−h}`` ✗（参考 `sigma_fn(h) = t.neg().exp()` ✓）——
+            # 写成 ``e^{+h}`` 时**形状/系数全对**、只有 x 被放大 ``(σ/σ_next)²`` 倍 ✓✗：
+            # 常数方向 ODE 上实测 209.45 vs 解析解 3.792（2026-11-01 抓到 ✓），
+            # 少步出图会直接变成一团过曝的糊 ✓，而日志全绿 ✓。符号口径见 `multistep_step` ✓。
+            x = step
+        if strength > 0 and sigma_up > 0:
+            x = x + noise_sampler(sigma, sigma_next) * (sigma_up * s_noise)
+        previous, previous_down = denoised, sigma_down
+        steps += 1
+        if callback:
+            callback(index + 1, sigma_next, x)
+    return x, steps
+
+
+def sample_er_sde(model: ModelFn, x: Any, sigmas: list[float], *,
+                  callback: ProgressFn | None = None,
+                  noise_sampler: NoiseFn | None = None,
+                  s_noise: float = 1.0, logsnr: str = "flow",
+                  max_stage: int = 3) -> tuple[Any, int]:
+    """扩展逆向 SDE（VP ER-SDE-Solver-3 ✓，arXiv:2309.06169）—— Krea2 4 步蒸馏档的原配 ✓。
+
+    它相对 ``euler`` 的全部意义在**第 2、3 阶** ✓：用 λ 空间的历史曲率修正首阶解 ✓，
+    再按 ``noise_scaler(λ) = λ·(e^{λ^0.3} + 10)`` 加权的 200 点折线积分补两项 ✓。
+    少步（4–8 步）时这是"能把步数砍一半还不糊"的那一档 ✓。
+
+    ⚠️ 三处口径必须照抄 ✗（每一条写错都**不报错**、只是图糊或发灰 ✓✗）：
+
+    1. ``r = noise_scaler(λ_t)/noise_scaler(λ_s)`` ✓ —— 是 **λ 的函数**，不是 σ 比值 ✓；
+    2. ``alpha = σ/er_lambda`` ✓（flow 下恰好 ＝1−σ ✓，但**必须按这个式子算** ✓，
+       直接写 ``1−σ`` 在 snr 口径下就错了 ✗）；
+    3. ``λ`` 必须先过 :func:`_offset_first_sigma` ✓ —— 否则首 σ=1.0 ⇒ ``λ₀ = −inf`` ⇒
+       ``er_lambda = +inf`` ⇒ 首拍全 NaN ✗。
+
+    ``noise_sampler=None`` ⇒ **不加噪声项**（第 1–3 阶是合法 ODE ✓，明确写在此处不假装等价 ✓）。
+    """
+    if len(sigmas) <= 1:
+        return x, 0
+    values = _offset_first_sigma(sigmas, logsnr)
+    lambdas = _half_log_snr(values, logsnr)
+    er_lambdas = [math.exp(-value) if math.isfinite(value) else (0.0 if value > 0 else math.inf)
+                  for value in lambdas]
+    gate = 1.0 if (noise_sampler is not None and float(s_noise) > 0) else 0.0
+
+    def scaler(value: float) -> float:
+        """参考实现的 ``x·(exp(x^0.3)+10)`` ✓（只吃 λ 标量 ⇒ 用 ``math`` 就够 ✓）。"""
+        return value * (math.exp(float(value) ** 0.3) + 10.0)
+
+    points = 200
+    previous: Any = None
+    previous_d: Any = None
+    steps = 0
+    for index in range(len(values) - 1):
+        sigma, sigma_next = values[index], values[index + 1]
+        denoised = _denoised(model, x, sigma)
+        stage = min(int(max_stage), index + 1)
+        if sigma_next == 0:
+            x = denoised
+        else:
+            er_s, er_t = er_lambdas[index], er_lambdas[index + 1]
+            alpha_s, alpha_t = sigma / er_s, sigma_next / er_t
+            ratio_alpha = alpha_t / alpha_s
+            ratio = scaler(er_t) / scaler(er_s)
+            # 第 1 阶（Euler ✓）
+            x = x * (ratio_alpha * ratio) + denoised * (alpha_t * (1.0 - ratio))
+            if stage >= 2:
+                dt = er_t - er_s
+                stride = -dt / points
+                positions = [er_t + k * stride for k in range(points)]
+                scaled = [scaler(value) for value in positions]
+                first_sum = sum(1.0 / value for value in scaled) * stride
+                slope = (denoised - previous) * (1.0 / (er_s - er_lambdas[index - 1]))
+                x = x + slope * (alpha_t * (dt + first_sum * scaler(er_t)))
+                if stage >= 3:
+                    second_sum = sum((value - er_s) / weight
+                                     for value, weight in zip(positions, scaled)) * stride
+                    curve = (slope - previous_d) * (2.0 / (er_s - er_lambdas[index - 2]))
+                    x = x + curve * (alpha_t * (0.5 * dt * dt + second_sum * scaler(er_t)))
+                previous_d = slope
+            if gate > 0:
+                renoise = max(er_t ** 2 - er_s ** 2 * ratio ** 2, 0.0) ** 0.5
+                x = x + noise_sampler(sigma, sigma_next) * (alpha_t * gate * float(s_noise) * renoise)
+        previous = denoised
+        steps += 1
+        if callback:
+            callback(index + 1, sigma_next, x)
+    return x, steps
+
+
+def sample_lcm(model: ModelFn, x: Any, sigmas: list[float], *,
+               callback: ProgressFn | None = None,
+               noise_sampler: NoiseFn | None = None,
+               parameterization: str = "flow") -> tuple[Any, int]:
+    """Latent Consistency 采样（ComfyUI ``lcm`` ✓）—— 每步**直接取 denoised** ✓，再按下一步 σ 回噪 ✓。
+
+    ⚠️ ``noise_sampler=None`` ⇒ 只剩 ``x = denoised``（逐步贪心 ✓，不报错也不加噪 ✓）——
+    那**不是** LCM 的原义 ✗：原义每步都要按 ``σ_next`` 重新注入一次噪声 ✓，
+    所以本采样器登记在 :data:`STOCHASTIC` ✓。
+
+    ⚠️ 回噪式按参数化分两支 ✗（别混用 ✓）：``flow`` ⇒ ``σ·n + (1−σ)·x`` ✓；
+    ``discrete`` ⇒ ``x + σ·n`` ✓（参考 ``ModelSamplingDiscrete.noise_scaling`` ✓）。
+    """
+    kind = str(parameterization or "flow").lower()
+    if kind not in ("flow", "discrete"):
+        raise ValueError(f"未知参数化 {parameterization!r}；可用：['flow', 'discrete']")
+    times = [_sigma_float(sigma) for sigma in sigmas]
+    steps = 0
+    for index in range(len(times) - 1):
+        sigma, sigma_next = times[index], times[index + 1]
+        x = _denoised(model, x, sigma)
+        if sigma_next > 0 and noise_sampler is not None:
+            noise = noise_sampler(sigma, sigma_next)
+            x = (x * (1.0 - sigma_next) + noise * sigma_next) if kind == "flow" \
+                else (x + noise * sigma_next)
+        steps += 1
+        if callback:
+            callback(index + 1, sigma_next, x)
+    return x, steps
+
+
 #: 可用采样器 ✓（新增请同时加自检 ✓）
 SAMPLERS: dict[str, Callable[..., tuple[Any, int]]] = {
     "euler": sample_euler,
@@ -553,10 +760,15 @@ SAMPLERS: dict[str, Callable[..., tuple[Any, int]]] = {
     "lms": sample_lms,
     "euler_ancestral": sample_euler_ancestral,
     "sa_solver": sample_sa_solver,
+    "res_multistep": sample_res_multistep,
+    "er_sde": sample_er_sde,
+    "lcm": sample_lcm,
 }
 
 #: 需要 ``noise_sampler`` 才**真有随机性**的那些 ✓（其余传了也会被忽略 ✓）
-STOCHASTIC: frozenset[str] = frozenset({"euler_ancestral", "sa_solver"})
+#: ``er_sde``／``lcm`` 的噪声是**采样式本身的一部分** ✓（不是可选的 η 档 ✓）——
+#: 少了它：er_sde 退化成低阶 ODE、lcm 退化成逐步贪心 ✓，两者都"看着能跑" ✗。
+STOCHASTIC: frozenset[str] = frozenset({"euler_ancestral", "sa_solver", "er_sde", "lcm"})
 
 #: 每步**模型调用次数** ✓ —— 相对耗时系数（:func:`app.services.engine.pipeline._finish_plan` ✓）
 #: 的**唯一真源** ✓✗。

@@ -114,11 +114,15 @@ def main() -> int:  # noqa: C901
     ok = client.post("/api/v1/agent/voice_assigner/chat", json={
         "message": "给角色配音", "drama_id": 7, "episode_id": 9})
     body = ok.json()
+    # ⚠️ `thinking` 是 2026-11-01 新增键（思考模型 `message.thinking` / `reasoning_content`
+    # 原来被**直接丢弃** ✗）：它与 `text` **并列**给 ✓ 绝不拼进正文 ✗ ✓ 键集合在这里显式登记 ✓
     check("chat: 成功信封 `{code, data, message}` 且 data.type 固定 done",
           ok.status_code == 200 and body["code"] == 200 and body["message"] == "success"
-          and set(body["data"]) == {"type", "text", "toolCalls", "toolResults", "usage"}
+          and set(body["data"]) == {"type", "text", "thinking", "toolCalls", "toolResults", "usage"}
           and body["data"]["type"] == "done",
           sorted(body.get("data") or {}))
+    check("chat: 非思考模型 ⇒ thinking 是空串（不是 None ✗ 前端不必判空类型）",
+          body["data"]["thinking"] == "", body["data"]["thinking"])
     check("chat: 回执把入参透传给运行时（type / episode / drama / message）",
           _CALLS == [{"type": "voice_assigner", "episodeId": 9, "dramaId": 7,
                       "message": "给角色配音", "options": {"maxSteps": 20}}],

@@ -121,27 +121,36 @@ def case_sigmas() -> None:
 
 
 def case_plan() -> None:
-    """③ 尺寸只吸附到 **16** ✓（这一族**没有** patchify ✗）＋ 单帧 ＋ 默认像素预算被如实换掉 ✓。"""
+    """③ 尺寸只吸附到 **16** ✓（这一族**没有** patchify ✗）＋ 单帧 ＋ 默认像素预算被如实换掉 ✓。
+
+    ⚠️ 画布数字跟着**尺寸口径**走 ✗✗：`zimage` / `krea2` 用 ComfyUI ``ResolutionSelector``
+    （``√(MP × 1024²)`` ✓），而 **2.1 / 2512 仍走** :func:`geometry.size_for_megapixels`
+    （≈``1e6`` 基数 + 向上吸 ✓）—— 因为官方模板 ``EmptySD3LatentImage`` 就是 **1328×1328** ✓，
+    换 selector 会给 1360 ✓、与工作流 `#7.width/height` 对不上 ✓✗（理由见 `_resolution_selector_size` ✓）。
+    判据认**本仓这三族各自的口径** ✓，并要求回执**写出真数** ✓✗（不许一边写 1328 一边画别的 ✓）。
+    """
     plan = _plan(ratio="1:1")
     check("③ 默认像素预算（0.65 MP 的**视频口径** ✗）⇒ 换 Qwen-Image 官方示例档 ✓ 且**如实告警** ✓"
-          "（1:1 时正是官方 **1328×1328** ✓）",
+          "（1:1 正是官方 **1328×1328** ✓，回执点名这个数 ✓）",
           (plan.width, plan.height) == (1328, 1328)
-          and any("0.65" in text and "1.76" in text for text in plan.warnings),
+          and any("0.65" in text and "1.76" in text for text in plan.warnings)
+          and any("1328×1328" in text for text in plan.warnings),
           ((plan.width, plan.height), plan.warnings[:2]))
     check("③′ 单张图 ⇒ `frames=1` ✓、`fps=0` ✓（不是视频 ✓）",
           plan.frames == 1 and plan.fps == 0, (plan.frames, plan.fps))
 
     #: ⚠️ 反向：**16 的倍数、但不必是 32 的倍数** ✗✗ —— 2.1 的 `img_in` 是 `Linear` ✓
     #: （`dit_qwen21` 模块头 ✓），多乘一次 patch 2 只是白裁边 ✓、不报错 ✓。
-    #: 3:2 的 1.0 MP ⇒ √1.5M = **1225** ⇒ 吸 16 ⇒ **1232**（77×16 ✓、**不是** 32 的倍数 ✓）——
-    #: 走默认 `RESOLUTION_MULTIPLE=32` 会得到 1248 ✓✗，这一档才分得出来 ✓。
+    #: 3:2 @ 1.0 MP ⇒ √1.5M = **1225** ⇒ 吸 16 ⇒ **1232**（77×16 ✓、**不是** 32 的倍数 ✓）——
+    #: 走默认 `RESOLUTION_MULTIPLE=32` 会得 1248 ✓✗，这一档分得出来 ✓。
     odd = _plan(megapixels=1.0, ratio="3:2")
     check("③″ 宽高都吸附到 **16** 的倍数 ✓", odd.width % 16 == 0 and odd.height % 16 == 0,
           (odd.width, odd.height))
-    #: ⚠️ 判据是「**至少一边**不是 32 的倍数」✗：高这边 832 恰好也是 32 的倍数 ✓（巧合 ✓），
-    #: 要求"两边都不是"会把正确实现判红 ✓✗。
+    #: ⚠️ 判据是「**至少一边**不是 32 的倍数」✗（高这边 832 恰好也是 32 的倍数 ✓ 巧合 ✓，
+    #: 要求两边都不是会把正确实现判红 ✓✗）。3:2 这一档才真能区分"吸 16"与"吸 32" ✓。
     check("③‴ ⭐ **不**被额外吸到 32 ✓✗（有 patchify 的族才需要 16 = 8×2 ✓；2.1 多裁一刀会白掉边 ✓）",
-          odd.width % 32 != 0 or odd.height % 32 != 0, (odd.width, odd.height))
+          (odd.width, odd.height) == (1232, 832)
+          and (odd.width % 32 != 0 or odd.height % 32 != 0), (odd.width, odd.height))
 
     steps = _plan(steps=30, megapixels=1.0, ratio="1:1")
     check("③⁗ `timesteps` **就是 σ** ✓（multiplier=1.0 ✓，不乘 1000 ✗）",
@@ -263,14 +272,27 @@ def case_phased() -> None:
     """
     from app.services.engine import torch_backend as tb  # noqa: PLC0415
 
-    #: ⑥ 三件**互不重叠** ✓✗ —— 只要有一件出现在两个阶段，"峰值 = max(单件)"这条账就假了 ✓✗
-    #: （那件会跟另一件同住 ✓，28 GiB 又回来了 ✓）。
-    all_parts = [part for parts in tb.TorchBackend.PHASE_PARTS.values() for part in parts]
-    check("⑥ `PHASE_PARTS` 三件**互斥** ✓✗（一件出现在两个阶段 ⇒ 峰值不再是单件 ✓）",
-          sorted(all_parts) == ["dit", "text", "vae"], tb.TorchBackend.PHASE_PARTS)
-    check("⑥′ 三个阶段名就是管线的三段 ✓（encode / sample / decode ✓）",
-          sorted(tb.TorchBackend.PHASE_PARTS) == ["decode", "encode", "sample"],
-          sorted(tb.TorchBackend.PHASE_PARTS))
+    #: ⚠️ 2026-11-02 改判：原先守的是「一件**只许**出现在一个阶段」（`sorted(all_parts) ==
+    #: ["dit","text","vae"]` ✓）。但管线上多了**可选**的 `init` 一拍（图生图要把参考图编成
+    #: 潜变量 ⇒ `"init": ("text", "vae")` ✓）⇒ 那条断言会把一个**合法**的加法判红 ✓✗。
+    #: 真正要守的是**装得下** ✓✗：本族 dit 13.26 ＋ text 14.79 ＝ 28.05 GiB > 22.49 ⇒
+    #: `dit` 与 `text` **绝不许同拍**（同拍 ⇒ 峰值超卡 ✓）；`text` ＋ `vae`（0.63）＝ 15.42 ✓ 可以。
+    parts = tb.TorchBackend.PHASE_PARTS
+    all_parts = [part for ps in parts.values() for part in ps]
+    bad: list[tuple[str, object]] = []
+    for phase, resident in parts.items():
+        held = set(resident)
+        unknown = held - {"dit", "text", "vae"}
+        if unknown:
+            bad.append((phase, sorted(unknown)))
+        if {"dit", "text"} <= held:
+            bad.append((phase, "dit+text = 28.05 GiB > 22.49"))
+    check("⑥ `PHASE_PARTS` 每一拍都在**装得下**的范围里 ✓✗（dit 与 text 同拍 = 28.05 GiB 超卡 ✓）",
+          not bad and set(all_parts) == {"dit", "text", "vae"},
+          {"parts": parts, "坏": bad, "覆盖": sorted(set(all_parts))})
+    check("⑥′ 三个阶段名就是管线的三段 ✓（encode / sample / decode 都在；`init` 是可选拍 ✓）",
+          {"encode", "sample", "decode"} <= set(parts) and set(parts) - {"encode", "sample", "decode"} <= {"init"},
+          sorted(parts))
 
     class Fake(tb.TorchBackend):        # noqa: D401 —— 只覆盖装载，不碰盘 ✓
         def __init__(self) -> None:     # noqa: D107

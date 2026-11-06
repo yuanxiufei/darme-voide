@@ -57,6 +57,16 @@ ENGINE_STATE: dict[str, str] = {
     "sdxl": "已实现（`sdxl.py`，UNet 专用）",
     "krea2": "前向骨架已实现（`dit_generic.py`：维度全从权重形状反推、键集合与盘上 878 张量逐键对账；"
              "**未做**参考图分支与端到端 TE/VAE 接线）",
+    "flux": "**前向骨架已实现 + 已接进后端装载/前向**（`dit_flux.py`：双流 19 + 单流 38、"
+            "联合注意力拼 `(txt, img)`、单流出口按 `[:, txt_len:]` 切回、三轴 RoPE(16,56,56) **不居中**、"
+            "调制 (shift, scale, gate)、σ 走 `1000·σ`（**不翻转**，与 Z-Image 那族相反）；"
+            "键集合与盘上 `flux1-dev.safetensors` 780 键逐键对账 ✓、与独立双精度参照实现一致 ✓；"
+            "`torch_backend` 按 `dit_build` 表建网（22.17 GiB bf16 / 11.9 G 参数）并按需激活，"
+            "**真权重整份装载已实证**：780/780（missing/unexpected/shapeMismatch 全 0）、驻留 22.17 GiB、"
+            "CPU bf16 真尺寸前向 1.5 秒（`ENGINE_FLUX_REAL=1` 跑 ⇒ 37/37 ✓，默认 32/32 跳过因吃 22 GiB 内存）；"
+            "⚠️ **两条如实标**：①文本塔（T5-XXL + CLIP-L）盘上没有 ⇒ 条件靠 "
+            "`attach_flux_conditioning(vector=…, guidance=…)` 外部注入，不挂则走零向量+默认 guidance（结构验证，不是语义）；"
+            "②VAE 有 `vae_flux.py` ✓ 但尚未接进产品入口",
     "zimage": "**端到端已闭合 + 已进产品入口**（`dit_lumina.py` 骨架 + `attach_qwen3_te` / `attach_flux_vae`；"
               "`runtime.ensure_loaded(stage=\"zimage\", ditPath/textWeights/imageVaeWeights/tokenizerPath)` 单独一条装配线 ✓，"
               "2026-10-31 实测装配 40.5 秒、1024² / 8 步出图 12.9 秒、同 seed 逐字节可复现 ✓ 且与手动 attach 那条路**逐字节相同** ✓）；"
@@ -102,11 +112,53 @@ ENGINE_STATE: dict[str, str] = {
                     "⚠️ `describe().gpuAvailable`（本机有没有卡 ✓）与 `cudaAvailable`（这台后端**现在**在不在卡上 ✓）"
                     "是两格 ✗✗ —— 拿后者判「本机无卡」会读出「集显 ⇒ 很慢」这种反向结论 ✓✗（`engine_readiness` 已改读前者 ✓）；"
                     "`pipeline.run_sync(stage=\"qwen_image21\")` 整链（σ shift=**0.69** ✓，尺寸只吸附 16 —— 没有 patchify ✗）",
+    #: ⭐ **Wan2.2 I2V 14B**（2026-11-01 骨架 + 装配表一行 ✓）—— 九族里唯一的**五维 + 视频**真建族 ✓。
+    #: 三处如实标（都不许读成「Wan 全通」✗）：I2V 拼接未接 / 文本塔无实现 / 26.62 GiB 装不进卡 ✓✗。
+    "wan": (
+        "**有骨架 + 有前向 + 已进 `dit_build` 表** ✓，但**不能出片** ✓✗（`dit_wan22.py` ✓；"
+        "盘上 `wan2.2_i2v_high_noise_14B_fp8_scaled` 头里 **1908 条 = 真权重 1095 + fp8 伴生 813** ✓，"
+        "**14 288 901 184 参数** ✓；40 块 / `dim=5120` / `ffn_dim=13824` / **40 头**（`head_dim=128`）/ "
+        "`in_dim=36` / `out_dim=16` / `text_dim=4096` / `freq_dim=256` / `patch=(1,2,2)` ✓）。"
+        "六条「不报错只是图不对」：① 六路调制是 `(modulation.unsqueeze(0) + e).unbind(2)` ✓✗"
+        "**不是** Flux 的 `chunk(6, dim=1)` ✓（那样到 `addcmul` 才炸）；② 自注意力用 0·1·2、FFN 用 3·4·5，"
+        "**交叉注意力不受门控**且前置 `norm3` 带权**带偏** ✓；③ 门控残差三连都含 **`1 +`** ✓✗（缺了不报错、"
+        "整支近似乘 0）；④ `1000·σ` 在**本仓骨架里** ✓（参考实现放在 `ModelSamplingDiscreteFlow.multiplier`）；"
+        "⑤ 三轴 RoPE 宽度**不等分** `[d−4(d//6), 2(d//6), 2(d//6)]`（128 ⇒ **44/42/42**）+ 位置号**从 0 起、不居中** ✓✗、"
+        "只转 q/k ✓；⑥ `heads` **读不出来**（q/k/v 单条 `[dim,dim]`、`norm_q` 宽 = `dim` ✓）⇒ 只许查 "
+        "`HEADS_BY_GEOMETRY`（盘上只有 `(5120,13824,40) ⇒ 40`），表外必须显式给、**不猜 `dim//128`** ✓✗。"
+        "契约 `ForwardContract(latent_dims=5, sigma_form=\"batch\", latent_format=\"wan21\")` ✓、"
+        "`in_channels=16`（**潜宽不是主干的 36** ✓）、`vae_scale=8` ✓。"
+        "⚠️ **三条缺口（如实标）**：① **I2V 的 36 = 16+16+4 拼接未接** —— 骨架只吃**拼好的** 36 通道 ✓，"
+        "`denoise` 现在只喂 16ch 噪声 ⇒ 真出片前必须补这一段（`split_i2v()` 只切**不造掩码** ✓）；"
+        "② **文本塔无实现** —— 盘上有 `umt5_xxl_fp8_e4m3fn_scaled` ✓ 但引擎里没有 umt5 那座塔 ⇒ 条件只能外部注入 ✓；"
+        "③ **装不进卡** —— 反量化到 bf16 常驻 **≈26.62 GiB（≈28.59 GB）** ✓ > 22.49 ✓✗（`fp8_scaled` 只省盘不省卡 ✓），"
+        "真跑要按层切（`residency._LAYER_RES` 已含 `blocks.N` ✓）—— 本机 sm86 无 fp8 硬件加速 ⇒ 「装得下」≠「跑得快」✓。"
+        "自检 `engine_dit_wan22_test` **46 条** ✓（真头逐键 / 形状反推→建→`strict` 装 / 与独立 fp64 参照前向差 **5.3e-16** / "
+        "门控 `1+` 反向可辨 / RoPE 恒等与三轴 / `heads` 只许查表 / 五条具名拒绝 + bf16 进 bf16 出 / `1000·σ` / "
+        "36 通道布局 / `param_count` 逐层增量 / 装配表一行接对 ✓）"),
     #: ⭐⭐ **2512 / Edit 2511** ✓（2026-10-31 ✓）—— 与 `qwen_image21` **族名只差一个 `21`** ✗✗，
     #: 但件件不同 ✓：族名比较一律 `==` ✓（`startswith` 会让 2.1 被这条线的 shift 接走 ✓✗）。
+    #: ⭐ **第十族 Music3**：骨架已进 `BUILDERS` ✓、`vae_music3` 也写完了 ✓ —— **但 pipeline 没接** ✗。
+    #: ⚠️ 只补这一行**等于宣布它能跑** ✗✗（`blocked()` 原先只判"键在不在表里"）⇒ 必须同时进
+    #: :data:`PIPELINE_UNWIRED` ✓，否则真缺口会被这次补登记**藏起来**。
+    "music3": "**结构能建、歌还出不来** ✓✗：`dit_music3` 骨架已接 `dit_build.BUILDERS[\"music3\"]` ✓"
+              "（σ 翻转取负、RoPE split-half 正号、潜帧率 **86.1328 Hz**、689/344 滑窗）；"
+              "`vae_music3` 的 DAV 解码也写完并自检过 ✓（121 键两套写法互归、**128 = 2 × 64 行主序折半**）；"
+              "**但没接进 `pipeline`** ✗：没有 `stage=\"music3\"` 装配线 ✗、没有歌词-文本塔接线 ✗、"
+              "没有滑窗采样循环 ✗ ⇒ 能判族、能建壳，**出不了音频** ✗",
+    #: ⭐ **SEEDVR2**：文档长期只写「未实现」✗，实际 2026-11-01 就端到端跑通了 ✓（真 3B 权重出片）。
+    "seedvr2": "**端到端已接线** ✓（`dit_seedvr2.py` ＋ `runtime.ensure_loaded(stage=\"seedvr2\", "
+               "ditPath/imageVaeWeights)` —— **只两格** ✓：这一族**没有文本塔** ✗✗，照图片那几族抄一份清单"
+               "多要 `textWeights` ⇒ 这条线**永远装不上** ✓✗）；修复支路 `_fill_seedvr2_plan`"
+               "（尺寸/帧数**只认源视频** ✓）＋ 条件 `cat(vae_latent 16, mask 1)` ⇒ **17** ✓ ＋ `bind_plan` 钩子 ✓"
+               "（编码与采样必须看**同一份** plan ✗✗：各算一遍 ⇒ 条件 121 帧 vs plan 94 帧 ⇒ 采样第 1 步拼不上 ✓）；"
+               "真权重出片实证：720×480 / 8 fps / 49 帧 ⇒ 1.27 MB mp4、**715 秒** ✓；"
+               "⚠️ 唯一短板是**解码慢**（整段 336 秒、分配器峰值 47.6 GiB，潜帧分块已被实测否掉 ✗）",
     "qwen_image": (
-        "**有骨架 + 有前向 + 装配线已接** ✓，`stage=\"qwen_image\"` 一张图从提示词到 PNG ✓；"
-        "⚠️ 但**还没有一次真权重实跑出图** ✗（无实测 PNG ✓ 证据 ⇒ 别当成「已闭合」✗）。"
+        "**端到端已跑通** ✓：`stage=\"qwen_image\"` 一张图从提示词到 PNG ✓；"
+        "真权重首图 2026-11-01（`output/engine_run/image_seed20261101.png` ✓），"
+        "图生图 2026-11-02 两档真跑 ✓（denoise 0.55 / 0.05 ⇒ PSNR 23.49 / 29.24 dB、64×64 相关 "
+        "**0.9133 / 0.9982** ⇒ 起点 latent 就是参考图本身 ✓，若起点仍是纯噪声两档都该 ≈0 ✗）。"
         "结构：双流 MMDiT ✓（`dit_qwen_image` ✓，盘上 **1933 键** ✓；Edit 2511 是 **3614 键** ✓，"
         "多出来的正是参考图那一路 ✗）—— `img_in` 吃 16×2×2＝**64** ✓ ⇒ **像素必须吸到 16 的倍数** ✓✗"
         "（只吸 8 ⇒ 潜边 83 是奇数 ⇒ 拍平当场形状错 ✓）；潜通道 **16** ✓（2.1 是 64 ✓），"
@@ -144,11 +196,22 @@ ENGINE_STATE: dict[str, str] = {
 #: 拿通用口径去判就会把"已实现"报成"拓扑读不全" ✓✗（本脚本第一版就是这么误报的 ✓）。
 DEDICATED_FAMILIES: frozenset[str] = frozenset({"h3", "sdxl"})
 
+#: **骨架在表里、但通路没接进 `pipeline`** 的族 ✓✗ —— 与「骨架未写」是**两件事** ✗。
+#:
+#: ⚠️⚠️ 这张名单存在的理由：``blocked()`` 原先只判「``key not in ENGINE_STATE``」，
+#: 于是**补一行登记就等于宣布它能跑** ✓✗ —— Music3 的骨架建得出、装配线却不存在 ✓，
+#: 补完描述后它会从「阻塞」列表里消失 ✓ ⇒ 真缺口被这次补登记**藏起来** ✗✗。
+#: 结论：**表里有键 ≠ 能跑**，两问必须分开答 ✓（问「能不能建壳」看 `BUILDERS` ✓；
+#: 问「能不能出成品」看这里 ✓）。
+PIPELINE_UNWIRED: frozenset[str] = frozenset({"music3"})
+
 
 def blocked(report: dict[str, Any]) -> list[str]:
-    """``--strict`` 要拦的族 ✓ —— **两条**：没有通路 ✓ / 配套件缺 ✓（拓扑读不全不算：那是"还没判" ✓✗）。"""
+    """``--strict`` 要拦的族 ✓ —— **三条**：没有通路 ✓ / 通路没接进 pipeline ✓ / 配套件缺 ✓
+    （拓扑读不全不算：那是"还没判" ✓✗）。"""
     return sorted(key for key, bucket in report["families"].items()
-                  if key not in ENGINE_STATE or bucket["companions"]["missing"])
+                  if key not in ENGINE_STATE or key in PIPELINE_UNWIRED
+                  or bucket["companions"]["missing"])
 
 
 def _roots(explicit: str = "") -> list[Path]:
@@ -245,6 +308,10 @@ def summarise(files: list[dict[str, Any]], *, root: Path,
         gaps: list[str] = []
         if key not in ENGINE_STATE:
             gaps.append("前向骨架未实现 ⇒ 只能判族、不能前向 ✗")
+        elif key in PIPELINE_UNWIRED:
+            # ⚠️ 与上一条**分开说** ✓✗：这里骨架是好的 ✓，缺的是装配线/文本塔/采样循环 ✓
+            gaps.append("通路没接进 `pipeline` ⇒ 建得出壳、出不了成品 ✗"
+                        "（差哪几段见该族 `engine` 描述 ✓）")
         # ⚠️ 专用族**不拿通用口径判** ✗：H3/SDXL 的 depth/hidden 本来就"读不出来" ✓，
         #    它们走各自的实现与键名核对（`h3_keys` / `sdxl.py`）✓ —— 报"拓扑读不全"是假警报 ✓✗。
         if not bucket["dedicated"] and bucket["buildable"] < len(bucket["files"]):

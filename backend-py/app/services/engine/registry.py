@@ -184,8 +184,71 @@ STAGES: dict[str, StageSpec] = {
               "`1000·σ` 不翻转 vs 翻转、shift **3.1** vs 0.69、TE 3584 vs 4096；"
               "⚠️ 驻留 ≈54.4 GiB（DiT 38.05 ＋ TE 16.1 ＋ VAE 0.24）⇒ **DiT 单件就超 24GB 卡**，"
               "`auto` 会判 `split` 或 `cpu`（跨界前向慢，这是必付成本，不是可省的优化）；"
-              "⚠️ Edit 2511 权重**能装但不能跑**：参考图通路（视觉塔 + `ref_latents`）未接 ⇒ `denoise` "
-              "会明确报错，不会静默按 t2i 出图；无超清放大能力（要放大走 `image` 阶段）"),
+              "⭐ Edit 2511 权重**已能跑编辑**（2026-11-01 ✓，**含多张参考图** ✓）：参考图 ⇒ 视觉塔"
+              "（`<|image_pad|>` 注入 ✓）＋ VAE（`ref_latents` ✓）两路都接上 ✓，请求必须带"
+              "`referenceFrames`；多张按 `referenceFrames` 的**顺序**编号 `Picture 1..N` ✓✗（乱序不报错）；"
+              "视觉塔 1.35 GiB **只算进 encode 段**（峰值 17.69 GiB ✓ ⇒ `auto` 仍判 `full` ✓）；"
+              "⭐ 两档都**真权重出过图**（2026-11-01 ✓）：2512 t2i 1328² / 4 步 / cfg 1.0 ⇒ 装配 20.8 s、"
+              "每步 72.5 s、PNG 2 780 264 字节 ✓；Edit 2511 单参考图同尺寸 ⇒ 装配 39.1 s、每步 ≈135 s ✓"
+              "（int8_convrot 每层现反量化 ＋ 35 层在 CPU 上算 ✓，慢是必付成本 ✗ 不是可省的优化 ✗）；"
+              "cfg=1.0 只作链路验证 ✓，官方档是 **cfg 4.0 / 50 步** ✓（不引导能跑、但图会明显软 ✓）；"
+              "无超清放大能力（要放大走 `image` 阶段）"),
+    ),
+    #: ⭐ **Krea2** 单列一档 ✓（2026-11-01 ✓）。与另四套图**看上去最像 2512** ✓✗（16 通道 ✓、
+    #: 8× ✓、VAE 同一个文件 ✓），错在另外两件：DiT 是 **12.82B 参数的单流** ✓、文本塔要取
+    #: **12 层隐状态栈**（30720 宽）✓。⚠️ 这一档唯一"必须照做否则装不下"的一条：DiT **走 int8 常驻** ✓✗
+    #: （按 bf16 物化 23.9 GiB > 卡 22.49 ✓）—— 所以 `note` 里把这条写在最前面 ✓。
+    "krea2": StageSpec(
+        name="krea2", category="image",
+        capabilities=("image.generate",),
+        deps=("torch", "numpy", "safetensors", "pillow"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Krea2（单流 DiT **12.82B 参数** ＋ Qwen3-VL-4B **语言塔** 12 层隐状态栈 ＋ "
+              "**16 通道** VAE，**三份权重一条链**）；装配四格 "
+              "`ditPath`/`textWeights`/`imageVaeWeights`/`tokenizerPath`，缺一格必拒（不猜路径）；"
+              "⚠️ **DiT 必须走 int8 常驻** ✓✗：I8 12.155B ＋ BF16 0.665B ⇒ 常驻 **12.57 GiB**，"
+              "按 bf16 物化是 **23.9 GiB > 卡 22.49**（那会 OOM 在采样第 1 步、看着像「卡太小」✗）；"
+              "⚠️ 三件**分时**驻留（12.57 ＋ 7.5 ＋ 0.24 ＝ 20.31 GiB 挤得进但没余量）⇒ 峰值 12.57 GiB；"
+              "⚠️ 采样 shift=**1.15**（不是 2512 的 3.1 / 2.1 的 0.69）、尺寸吸附 16（VAE 8× × patch 2）；"
+              "⚠️ **跨族组合**：VAE 文件用 2512 那个 `qwen_image_vae`，反缩放却取 **Wan21** 的 mean/std"
+              "（给成 2512 的 ⇒ 图偏色、不报错）；无超清放大能力（要放大走 `image` 阶段）"),
+    ),
+    #: ⭐ **SEEDVR2** 单列一档 ✓（2026-11-01 接线 ✓）：`category` 写 **`video`** ✓（与
+    #: :data:`inventory.STAGE_FILTERS` 双向核 ✓），但**不是 H3** ✗✗ —— 差别是「修」vs「生」✓：
+    #: 它没有文本塔 ✓、主干吃 **33** 通道（16 噪声 ＋ 16 退化 ＋ 1 mask）✓、shift **1.0** ✓、
+    #: 官方 **1 步** ✓。⚠️ 两件同驻 ≈7.3 GiB ✓ ⇒ **本仓唯一不需要分时换装**的一条线 ✓。
+    "seedvr2": StageSpec(
+        name="seedvr2", category="video",
+        capabilities=("video.restore",),
+        deps=("torch", "numpy", "safetensors"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("SEEDVR2 视频**修复**（NaDiT 3B ＋ 自带条件的 17 通道 ＋ 专用 250 键 VAE，"
+              "**两件权重一条链**）；装配两格 `ditPath`/`imageVaeWeights`，缺一格必拒（不猜路径）；"
+              "⚠️ **不是文生视频** ✗：请求必须带 `referenceVideos`（第一路即被修素材），"
+              "没有就当场拒（不退化成凭空生成）；⚠️ 没有文本塔 ⇒ `negative` 与 `cfg>1` 都不生效；"
+              "⚠️ 带条件的是新档（`*_int8_convrot` / `*_w4a8`），`*_fp16` / `*_fp8` / `*_7b` 这几种不带"
+              "`positive_conditioning` ⇒ 装进去也生成不出（需 25 GiB 级 5120 宽文本塔）；"
+              "⚠️ 尺寸吸附 16（VAE 8× × patch 2）、帧数必须是 `4n+1`（向下吸，不补帧）；"
+              "⚠️ flow shift **1.0**、一步蒸馏（多步不会更好）；无放大能力（超分走 `image.up_scale`）"),
+    ),
+    #: ⭐ **Wan 2.2 I2V** 单列一档 ✓（2026-11-02 接线 ✓）：`category` 写 **`video`** ✓（与
+    #: :data:`inventory.STAGE_FILTERS` 双向核 ✓），但与 H3 / SEEDVR2 **一件都不通用** ✗✗：
+    #: 主干入口 **36** 通道（噪声 16 ＋ 掩码 4 ＋ 首帧条件 16 ✓）、文本塔是 **UMT5-XXL** ✓、
+    #: 双专家（高噪 → 低噪）**接力** ✓ —— 三条都是别的视频链没有的。
+    "wan22": StageSpec(
+        name="wan22", category="video",
+        capabilities=("video.generate",),
+        deps=("torch", "numpy", "safetensors", "pillow"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Wan 2.2 **I2V**（首帧 ⇒ 视频）：`ditPath` 高噪 ＋ `ditPath2` 低噪（可选）＋ "
+              "UMT5-XXL 文本塔 ＋ Wan2.1 16 通道 VAE；装配三格必给 "
+              "`ditPath`/`textWeights`/`imageVaeWeights`，缺一格必拒（不猜路径）；"
+              "⚠️ 请求**必须**带 `firstFrame`（I2V 入口 36 通道拼不出来 ⇒ 当场拒，不退化成文生视频）；"
+              "⚠️ 单份 DiT 反量化 bf16 ≈ **26.62 GiB** > 卡 22.49 ⇒ **必须** `split`/`cpu`，"
+              "且与文本塔/VAE **分时**（encode 文本+VAE / sample 只有 DiT / decode VAE）；"
+              "⚠️ 双专家**不并存**：换装是采样中途原地重装（约 20~40 秒）；"
+              "⚠️ flow shift **5.0**（不是 Wan2.1 的 8.0）、16fps、帧数必须 `4n+1`、尺寸吸附 16；"
+              "无修复/放大能力（修复走 `seedvr2`）"),
     ),
     "audio": StageSpec(
         name="audio", category="audio",

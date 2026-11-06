@@ -214,6 +214,41 @@ def case_select_task() -> None:
           and _raises(lambda: cond.select_h3_task(primary_model_kind=""), "不猜") is not None)
 
 
+def case_strict_counts() -> None:
+    """⑩ **数目类参数不许被静默截断 / 夹取** ✓（2026-11-01 补 ✓ —— 三条都是真缺陷 ✗）。"""
+    check("⑩ 潜帧数 0 ⇒ **报错** ✗✗（以前 ``max(1, …)`` 夹成 1 ⇒ 返回长 1 的掩码，"
+          "与真潜变量长度对不上 ⇒ 后端报「掩码长度不符」，看着像后端坏了 ✓✗）",
+          _raises(lambda: cond.first_frame_mask(0), "潜帧数") is not None)
+    check("⑩′ ⭐ 负 ``fade`` / 负 ``keep`` ⇒ **报错** ✗✗（以前 ``max(0, …)`` 先夹成 0，"
+          "紧跟着那句 ``if fade < 0`` **永远进不去** ✓✗ —— 写了判据却判不到任何东西 ✗）",
+          _raises(lambda: cond.first_frame_mask(5, cond.ConditioningConfig(fade=-2)), "fade") is not None
+          and _raises(lambda: cond.first_frame_mask(5, cond.ConditioningConfig(keep=-1)), "keep") is not None)
+    check("⑩″ ``2.0`` 这种**整数值浮点**照收 ✓（前端 JSON 常见 ✓）、``2.5`` 拒 ✗ —— "
+          "「有值 ≠ 是对的类型」✓ 且截断会把「2.5 路参考」静默当成「2 路」✗✗",
+          cond.first_frame_mask(5, cond.ConditioningConfig(keep=1, fade=2.0))
+          == cond.first_frame_mask(5, cond.ConditioningConfig(keep=1, fade=2))
+          and _raises(lambda: cond.first_frame_mask(5, cond.ConditioningConfig(fade=1.5))) is not None)
+    check("⑩‴ ⭐ 参考音频编号 ``1.5`` / ``True`` ⇒ 报错 ✗✗（否则拼出 ``<Audio 1.5>`` ✓✗："
+          "不是合法标签 ⇒ 模型忽略这路参考 ✓，而提示词里**看着像声明过** ✓✗）",
+          _raises(lambda: cond.audio_declaration([cond.AudioReference(1.5, "fully_copy")]), "index")
+          is not None
+          and _raises(lambda: cond.audio_declaration([cond.AudioReference(1, "fully_copy", True)]),
+                      "speaker") is not None)
+    check("⑩⁴ 视频路数 / 声轨路数 ``2.5`` ⇒ 报错 ✗✗（``int()`` 截断会声明成「2 路」✓✗）；"
+          "``2.0`` 照收 ✓",
+          _raises(lambda: cond.video_declaration(2.5)) is not None
+          and _raises(lambda: cond.video_declaration(2, soundtracks=1.5), "声轨") is not None
+          and "<Video 2>" in cond.video_declaration(2.0))
+    check("⑩⁵ ⭐ ``declaration_plan(video_count=0.5)`` ⇒ 报错 ✗✗"
+          "（以前 ``int(0.5) <= 0`` ⇒ **静默不声明** ✓✗ —— 素材给了却没进提示词 ✓✗）",
+          _raises(lambda: cond.declaration_plan("x", video_count=0.5), "参考视频路数") is not None
+          and cond.declaration_plan("x", video_count=0).video_needed is False)
+    check("⑩⁶ 编号对照表 / 提交前核对也走同一套严格整数 ✓（``images=2.5`` / ``pictures=2.5`` ⇒ 报错 ✗）",
+          _raises(lambda: cond.picture_slots(tail=False, images=2.5), "上传图数量") is not None
+          and _raises(lambda: cond.audio_slots(segment_audio=False, voices=1.5), "音色槽") is not None
+          and _raises(lambda: cond.validate_markup("<Picture 1>", pictures=2.5), "参考图数量") is not None)
+
+
 def main() -> int:
     case_protocol()
     case_audio_declaration()
@@ -224,6 +259,7 @@ def main() -> int:
     case_validate_markup()
     case_slots()
     case_select_task()
+    case_strict_counts()
     failures = [(name, detail) for name, passed, detail in _RESULTS if not passed]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

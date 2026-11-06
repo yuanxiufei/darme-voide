@@ -237,7 +237,10 @@
 - character-library：`POST /:id/apply`（应用到项目）、`POST /from-character/:characterId`（从项目保存到库）
 - scene-library：`POST /:id/apply`、`POST /from-scene/:sceneId`
 
-### 2.18 预设框架 preset-framework —— `/api/v1/preset/framework`（⚠️ 全孤儿）
+### 2.18 预设框架 preset-framework —— `/api/v1/preset/framework`
+
+> 2026-11-04 起前端已接（`components/PresetPipeline.vue` + `presetFrameworkAPI`），此前长期零调用。
+> 本域失败体是 `{success:false,msg}`（**不是** `message`），`req()` 已补 `json.msg` 兜底。
 
 | Method | Path |
 |---|---|
@@ -275,6 +278,7 @@
 | `aiProvidersAPI` | list | `GET /ai-providers` |
 | `uploadAPI` | image | `POST /upload/image` |
 | 资源库 4 个 API | list/get/create/update/del/batchDelete/categories/tags(/filterOptions/apply/fromX) | 见 §2.17 |
+| `presetFrameworkAPI` | variationCard/create/generateImages/generateVideos/status/fullPipeline | 见 §2.18（2026-11-04 接入，6/6） |
 | `useAgent()` | `run(type, message, ...)` | `POST /agent/:type/chat` |
 
 ## 4. 本次审计发现的问题
@@ -286,7 +290,9 @@
 - `GET /dramas/stats` — 剧目统计（前端未接，历史已知）
 - `PUT /dramas/:id/characters` / `PUT /dramas/:id/episodes` — 批量保存（前端改用单条 update）
 - `GET /agent/:type/debug` — 开发调试端点
-- preset-framework 6 端点 — 前端页面已删除，后端骨架保留
+
+> 更正（2026-11-04）：preset-framework 6 端点曾被记作「前端页面已删除，后端骨架保留」，
+> 已由 `components/PresetPipeline.vue` 接入（首页「框架开局」），从孤儿清单移出。
 
 ## 5. 孤儿端点清单（后端有、前端从不调用）
 
@@ -296,7 +302,8 @@
 | `PUT /dramas/:id/characters` | 疑似废弃（有单条替代） |
 | `PUT /dramas/:id/episodes` | 疑似废弃（有单条替代） |
 | `GET /agent/:type/debug` | 开发调试 |
-| preset-framework 6 端点 | 疑似废弃（前端页面已删） |
+
+preset-framework 6 端点已于 2026-11-04 移出本表（前端 `PresetPipeline.vue` 全接，见 §2.18）。
 
 ## 6. 前端独有调用清单（前端调用但后端无路由）
 

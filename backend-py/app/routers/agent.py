@@ -95,6 +95,8 @@ async def agent_chat(
         return success({
             "type": "done",
             "text": result.text,
+            # 思考流水与正文**并列**给（前端想展示就展示 ✓，不展示也不影响老字段 ✓ —— 新增键不破坏兼容 ✓）
+            "thinking": result.thinking,
             "toolCalls": result.tool_calls,
             "toolResults": result.tool_results,
             "usage": usage,

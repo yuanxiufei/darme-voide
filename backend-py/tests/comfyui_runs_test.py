@@ -42,9 +42,12 @@ from app.core.response import now  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
 #: stub 上游计数（**反套套逻辑** ✓）
-SEEN: dict[str, Any] = {"workflow_runs": 0, "h3_runs": 0, "polls": 0, "files": 0}
-#: 让 stub 按需返回失败 / 带 warnings ✓
-MODE: dict[str, Any] = {"fail": False, "warnings": []}
+SEEN: dict[str, Any] = {"workflow_runs": 0, "h3_runs": 0, "polls": 0, "files": 0, "free": 0}
+#: 让 stub 按需返回失败 / 带 warnings / 先来 N 次显存不足 ✓
+MODE: dict[str, Any] = {"fail": False, "warnings": [], "oom": 0,
+                        "failMsg": "缺少节点包：ComfyUI-MiniMaxH3-Easy ✗"}
+#: 这一次提交「注定显存不足」的任务 id（模拟上游 alloc 失败 ✓）
+OOM_TASKS: set[str] = set()
 ARTIFACT = b"STUB-MP4-ARTIFACT-BYTES"
 
 
@@ -59,20 +62,37 @@ def build_stub() -> FastAPI:
     async def run_workflow(payload: dict[str, Any]) -> JSONResponse:  # noqa: D103
         SEEN["workflow_runs"] += 1
         SEEN["workflow_body"] = json.dumps(payload, ensure_ascii=False)
-        return JSONResponse({"task_id": f"wf-{SEEN['workflow_runs']}", "status": "queued"})
+        task = f"wf-{SEEN['workflow_runs']}"
+        if MODE["oom"] > 0:  # 前 N 次提交注定 alloc 失败（模拟「卸载后重试就过」✓）
+            MODE["oom"] -= 1
+            OOM_TASKS.add(task)
+        return JSONResponse({"task_id": task, "status": "queued"})
 
     @stub.post("/v1/video_generation")
     async def run_h3(payload: dict[str, Any]) -> JSONResponse:  # noqa: D103
         SEEN["h3_runs"] += 1
         SEEN["h3_body"] = json.dumps(payload, ensure_ascii=False)
-        return JSONResponse({"task_id": f"h3-{SEEN['h3_runs']}", "status": "queued"})
+        task = f"h3-{SEEN['h3_runs']}"
+        if MODE["oom"] > 0:
+            MODE["oom"] -= 1
+            OOM_TASKS.add(task)
+        return JSONResponse({"task_id": task, "status": "queued"})
+
+    @stub.post("/v1/free")
+    def free_upstream() -> dict[str, Any]:  # noqa: D103
+        SEEN["free"] += 1
+        return {"ok": True}
 
     @stub.get("/v1/workflows/task/{task_id}")
     @stub.get("/v1/video_generation/task/{task_id}")
     def poll(task_id: str) -> dict[str, Any]:  # noqa: D103
         SEEN["polls"] += 1
+        if task_id in OOM_TASKS:
+            return {"status": "failed", "video_url": None, "warnings": [],
+                    "error_msg": "CUDA error: allocation on device 0 out of memory. "
+                                 "Tried to allocate 2.00 GiB"}
         if MODE["fail"]:
-            return {"status": "failed", "error_msg": "缺少节点包：ComfyUI-MiniMaxH3-Easy ✗",
+            return {"status": "failed", "error_msg": MODE["failMsg"],
                     "video_url": None, "warnings": []}
         if SEEN["polls"] < 2:  # 先给一次 processing ⇒ 证明轮询真的在跑 ✓
             return {"status": "processing", "video_url": None, "error_msg": None, "warnings": []}
@@ -240,6 +260,89 @@ async def case_failure_and_h3() -> None:
           empty_body)
 
 
+async def case_oom_retry_and_hints() -> None:
+    """⑬ 显存不足 ⇒ 卸载 + **重试一次**（不是硬失败、也不是无限重刷 ✓）；失败原因带可执行建议 ✓。
+
+    2026-11-03 自 ``comfyui-gateway/src/runner.js`` 迁入的两条行为：
+    ① ``isOOM`` ⇒ ``/free`` ⇒ 重提交一次（第二次仍不足才判失败 ✓）；
+    ② ``failureHint`` ⇒ 上游英文堆栈 + 一句「据此改什么」（模型/节点包/SageAttention/VDN/显存 ✓）。
+    """
+    MODE["fail"] = False
+    MODE["warnings"] = []
+    os.environ["COMFYUI_OOM_RETRY_WAIT"] = "0"
+
+    # ① 第一次 alloc 失败、卸载后第二次成功 ✓
+    MODE["oom"] = 1
+    before_runs, before_free = SEEN["workflow_runs"], SEEN["free"]
+    with engine.begin() as conn:
+        run_id = await svc.submit_run(conn, {"kind": "workflow", "prompt": "显存重试用例",
+                                            "workflow": {"1": {"class_type": "X", "inputs": {}}}})
+    result = await wait_terminal(run_id)
+    with engine.begin() as conn:
+        usage = [u for u in conn.execute(select(api_usage)).all()
+                 if f'"comfyuiRunId":{run_id}' in str(u.meta or "")]
+    check("⑬ 显存不足 ⇒ 自动 /v1/free 后**重提交一次**并成功 ✓（不是直接判失败 ✗）",
+          result.get("status") == "succeeded" and SEEN["free"] == before_free + 1
+          and SEEN["workflow_runs"] == before_runs + 2,
+          (result.get("status"), result.get("errorMsg"), SEEN["free"], SEEN["workflow_runs"]))
+    check("⑭ 重试成功也要**记账**：warnings 写明「已卸载重试」✓、用量 retryCount 如实 +1 ✓",
+          any("重试一次" in w for w in result.get("warnings") or [])
+          and any(int(u.retry_count or 0) == 1 for u in usage),
+          (result.get("warnings"), [(u.units, u.retry_count) for u in usage]))
+
+    # ② 两次都 alloc 失败 ⇒ failed，但原因里必须写明**已经重试过**（否则使用者会误判 ✗）
+    MODE["oom"] = 5
+    before_runs, before_free = SEEN["workflow_runs"], SEEN["free"]
+    with engine.begin() as conn:
+        run_id2 = await svc.submit_run(conn, {"kind": "workflow", "prompt": "显存重试仍失败",
+                                             "workflow": {"1": {"class_type": "X", "inputs": {}}}})
+    result2 = await wait_terminal(run_id2)
+    msg2 = str(result2.get("errorMsg") or "")
+    check("⑮ 重试一次仍不足 ⇒ failed，原因保留上游原文**且**写明已重试 + 给出降档建议 ✓",
+          result2.get("status") == "failed" and "out of memory" in msg2
+          and "已自动卸载上游模型并重试一次" in msg2 and "建议：" in msg2,
+          msg2)
+    check("⑯ **只重试一次**：上游总共被提交 2 次、free 1 次（绝不无限重刷占 GPU ✗）",
+          SEEN["workflow_runs"] == before_runs + 2 and SEEN["free"] == before_free + 1,
+          (SEEN["workflow_runs"] - before_runs, SEEN["free"] - before_free))
+
+    # ③ 其它失败 ⇒ 同类建议（模型名对不上 / 缺节点包 ⇒ 各自点名该去哪改 ✓）
+    MODE["oom"] = 0  # ← 上一段把接下来 5 次提交都标成「注定 alloc 失败」，这里要清干净 ✓
+    MODE["fail"] = True
+    MODE["failMsg"] = ("Prompt outputs failed validation: Value not in list: unet_name: "
+                       "'qwen_image_2512_fp8.safetensors' not in [...]")
+    with engine.begin() as conn:
+        run_id3 = await svc.submit_run(conn, {"kind": "workflow", "prompt": "缺模型用例",
+                                             "workflow": {"1": {"class_type": "X", "inputs": {}}}})
+    msg3 = str((await wait_terminal(run_id3)).get("errorMsg") or "")
+    check("⑰ 模型名对不上 ⇒ 原文照留 + 提示「到模型页核对/换本机已有那档」✓",
+          "Value not in list" in msg3 and "建议：" in msg3 and "模型" in msg3, msg3)
+
+    MODE["failMsg"] = "缺少节点包：ComfyUI-MiniMaxH3-Easy ✗"
+    with engine.begin() as conn:
+        run_id4 = await svc.submit_run(conn, {"kind": "workflow", "prompt": "缺节点用例",
+                                             "workflow": {"1": {"class_type": "X", "inputs": {}}}})
+    msg4 = str((await wait_terminal(run_id4)).get("errorMsg") or "")
+    check("⑱ 缺节点包 ⇒ 提示装插件并重启 ComfyUI ✓（原文一字不改 ✓）",
+          msg4.startswith("RuntimeError: 缺少节点包") and "节点插件" in msg4, msg4)
+    MODE["fail"] = False
+
+    # ④ 纯函数判据：认得出就认、认不出**不许编原因** ✓
+    silent = "something odd happened"
+    check("⑲ describe_failure：认不出的失败**只留原文**（不硬编原因 ✗）",
+          svc.describe_failure(silent) == silent and svc.failure_hints(silent) == [], silent)
+    sage = "Memory efficient sage attention is not new enough."
+    check("⑳ H3 全族都挂该补丁 ⇒ SageAttention 一句要点明「没有可绕的变体」✓",
+          any("SageAttention" in hint and "没有可绕" in hint for hint in svc.failure_hints(sage)),
+          svc.failure_hints(sage))
+    vdn = "ApplyVDNH3Advanced: stage-B adapter missing"
+    check("㉑ VDN 适配器缺失 ⇒ 点名 video-h3-*-novdn 退路 ✓",
+          any("novdn" in hint for hint in svc.failure_hints(vdn)), svc.failure_hints(vdn))
+    check("㉒ is_out_of_memory 只看显存原文（英文/中文两种都认 ✓，业务失败不误判 ✓）",
+          svc.is_out_of_memory("CUDA error: allocation on device 0 out of memory")
+          and svc.is_out_of_memory("显存不足") and not svc.is_out_of_memory("缺少节点包 ✗"))
+
+
 async def case_recovery() -> None:
     """④ 崩溃恢复：在途运行**绝不重提交**，只收尾并说明 ✓。"""
     ts = now()
@@ -256,13 +359,13 @@ async def case_recovery() -> None:
     with engine.begin() as conn:
         row_a = svc.get_run(conn, int(submitted))
         row_b = svc.get_run(conn, int(pending))
-    check("⑬ 恢复：两条在途运行都收尾为 failed（不留「永远 processing」✗）",
+    check("㉓ 恢复：两条在途运行都收尾为 failed（不留「永远 processing」✗）",
           row_a.status == "failed" and row_b.status == "failed",
           (row_a.status, row_b.status))
-    check("⑭ 恢复说明区分「已提交（可查上游）」与「未提交（未占 GPU）」✓",
+    check("㉔ 恢复说明区分「已提交（可查上游）」与「未提交（未占 GPU）」✓",
           "已提交上游" in str(row_a.error_msg) and "提交前即中断" in str(row_b.error_msg),
           (row_a.error_msg, row_b.error_msg))
-    check("⑮ 恢复**没有重提交**（绝不重复占用 GPU/算力 ✓）",
+    check("㉕ 恢复**没有重提交**（绝不重复占用 GPU/算力 ✓）",
           SEEN["workflow_runs"] == runs_before, (runs_before, SEEN["workflow_runs"]))
 
 
@@ -270,12 +373,12 @@ async def case_listing() -> None:
     """⑤ 查询是**我们自己的**（不是转发 ComfyUI 历史 ✗）✓。"""
     with engine.begin() as conn:
         rows = [svc.run_to_dict(r) for r in svc.list_runs(conn, limit=50)]
-    check("⑯ 能按自己的 DB 列出运行（含状态/产物/耗时 ✓ 不依赖上游 history ✓）",
+    check("㉖ 能按自己的 DB 列出运行（含状态/产物/耗时 ✓ 不依赖上游 history ✓）",
           len(rows) >= 4 and all({"status", "outputs", "elapsedMs"} <= set(r) for r in rows),
           len(rows))
     with engine.begin() as conn:
         succeeded = svc.list_runs(conn, status="succeeded")
-    check("⑰ 能按状态过滤 ✓", all(r.status == "succeeded" for r in succeeded), len(succeeded))
+    check("㉗ 能按状态过滤 ✓", all(r.status == "succeeded" for r in succeeded), len(succeeded))
 
 
 async def main() -> int:
@@ -286,6 +389,7 @@ async def main() -> int:
     try:
         await case_happy_path()
         await case_failure_and_h3()
+        await case_oom_retry_and_hints()
         await case_recovery()
         await case_listing()
     finally:

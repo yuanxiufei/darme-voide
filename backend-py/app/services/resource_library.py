@@ -201,13 +201,21 @@ def _parse_library_query(q: dict[str, str]) -> dict[str, Any]:
 
 
 def _decorate(row: dict[str, Any], spec: LibrarySpec) -> dict[str, Any]:
-    """按 spec 解析 JSON 列并补 camelCase 别名（原地改 + 加别名，与原 TS 一致）。"""
+    """按 spec 解析 JSON 列并补 camelCase 别名（原地改 + 加别名，与原 TS 一致）。
+
+    ⚠️ 别名必须覆盖**所有可写列**，不能只补 `out_aliases` 那几个：
+    写入侧 `create_item` / `update_item` 一律按 `camel(column)` 取 body，
+    读出侧若只回 snake_case，前端 `item.imageUrl` / `item.clothingStyle` 这类键
+    就恒为 undefined —— 症状是「图片存得进、界面上永远空着」，编辑表单也被清空。
+    原 snake 列一律保留，旧调用方（读 `row["image_url"]`）不受影响。
+    （2026-11-04 补齐；素材库「图片上传」在界面上完全不显示，根因就是这一行。）
+    """
     for col in spec.json_columns:
         if col in row:
             row[col] = safe_parse_json(row[col])
-    for col in spec.out_aliases:
+    for col in (*spec.columns, *spec.out_aliases):
         if col in row:
-            row[col if col in ("tags", "metadata") else camel(col)] = row[col]
+            row[camel(col)] = row[col]
     return row
 
 

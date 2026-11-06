@@ -57,11 +57,14 @@ model.norm.weight                 **不存在** ✗ ⇒ 截断模型**没有 fin
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 __all__ = [
     "QWEN3VL_32B", "ROPE_DIMS", "ROPE_THETA", "build_text_tower", "deepstack_layers_of",
     "freqs_cis", "infer_shape", "mrope_position_ids", "rotary_dim_of", "shape_problems",
+    "KREA2_TAPS", "KREA2_SYSTEM_PROMPT", "KREA2_IM_START", "krea2_prompt", "krea2_keep_from",
+    "build_krea2_stack", "Krea2TeRuntime",
 ]
 
 #: 盘上那套 32B 的尺子 ✓（:func:`infer_shape` 会从**真形状**再核一遍 ✓，常量只作缺省 ✓）
@@ -87,6 +90,55 @@ ROPE_DIMS = (24, 20, 20)
 
 #: mrope 基频 ✓
 ROPE_THETA = 5e6
+
+#: ⭐ Krea2 的**条件取法**（2026-11-01 抄 `comfy/text_encoders/krea2.py` ✓）：它要的不是最后一层 ✗
+#: 而是 36 层里**等距的 12 层**（2,5,…,35 ✓ 0 基 ✓）⇒ 摊平成 ``12 × 2560 = 30720`` 宽 ✓
+#: （与盘上 DiT 的 ``txtlayers=12 / txtdim=2560`` 逐数吻合 ✓）。
+KREA2_TAPS: tuple[int, ...] = tuple(range(2, 36, 3))
+
+#: Krea2 的系统提示词（参考逐字 ✓ —— 换成别的话不报错，但画面会偏离这族训练时的分布 ✓✗）
+KREA2_SYSTEM_PROMPT = (
+    "Describe the image by detailing the color, shape, size, texture, quantity, text, "
+    "spatial relationships of the objects and background:")
+
+#: ``<|im_start|>`` 的 id ✓（参考的 ``template_end`` 扫描就是认它 ✓）
+KREA2_IM_START = 151644
+
+#: **用户消息**在模板里的最后一个 token 之后的位置靠它认 ✓（``user`` + ``\n`` ✓）
+_KREA2_USER_ID = 872
+_KREA2_NEWLINE_ID = 198
+
+
+def krea2_prompt(text: str, system: str | None = None) -> str:
+    """Krea2 的提示词模板（chat 模板 ＋ generation prompt ✓ 参考 ``apply_chat_template`` 的产物 ✓）。"""
+    return ("<|im_start|>system\n" + (KREA2_SYSTEM_PROMPT if system is None else system)
+            + "<|im_end|>\n<|im_start|>user\n" + str(text)
+            + "<|im_end|>\n<|im_start|>assistant\n")
+
+
+def krea2_keep_from(tokens: Sequence[int]) -> int:
+    """条件**从第几个 token 起算** ✓（把 ``<|im_start|>system…`` 那段裁掉 ✓ 参考逐字 ✓）。
+
+    参考的规则：扫 ``<|im_start|>``，**第二个**出现处就是 user 段起点 ✓；
+    若紧跟 ``user`` ＋ 换行 ⇒ 再往后挪 3 个 ✓（于是留下的正是**提示词本身**往后 ✓）。
+    ⚠️ 不裁也能跑 ✗（DiT 只是多看几个模板 token ✓），但那几个 token 会**占条件预算** ✓
+    且分布与参考不同 ✓ ⇒ 画面偏 ✓ 且一个错都不报 ✓✗。
+    """
+    kept_from = 0
+    seen = 0
+    for position, token in enumerate(tokens):
+        if int(token) != KREA2_IM_START:
+            continue
+        if seen < 2:
+            kept_from = int(position)
+            seen += 1
+        else:
+            break
+    if seen >= 2 and len(tokens) > kept_from + 2 \
+            and int(tokens[kept_from + 1]) == _KREA2_USER_ID \
+            and int(tokens[kept_from + 2]) == _KREA2_NEWLINE_ID:
+        kept_from += 3
+    return kept_from
 
 
 def rotary_dim_of(head_dim: int) -> int:
@@ -307,7 +359,8 @@ def freqs_cis(position_ids: Sequence[Sequence[int]] | None, shape: Mapping[str, 
     return cos, sin
 
 
-def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any = None) -> Any:
+def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any = None,
+                     taps: Sequence[int] = ()) -> Any:
     """建**空壳**语言塔（权重另行装载 ✓ —— 结构与盘上键名一一对应 ✓）。
 
     ``forward(ids=None, embeds=None, spans=None, deepstack=None)`` ✓：
@@ -315,6 +368,13 @@ def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any
     * ``ids`` 或 ``embeds`` 二选一 ✓（``embeds`` 是**已拼好视觉特征**的 ``(1, seq, hidden)`` ✓）；
     * ``spans`` = ``[{"index", "size", "grid"}]`` ✓（imgpad 段起点/长度/patch 网格 ✓）；
     * ``deepstack`` = 视觉塔那三份 ``(total_vision_tokens, hidden)`` ✓。
+
+    ⭐ ``taps``（2026-11-01 加 ✓）：**取中间层隐状态的层号列表** ✓（0 基 ✓）——
+    Krea2 的 DiT 吃的不是最后一层 ✗ 而是 ``(2,5,…,35)`` 那 12 层的**栈** ✓
+    （参考 `comfy/text_encoders/krea2.py` 的 ``layer_indexes`` ✓）。
+    ``taps`` 非空时 ``forward`` 出 ``(b, seq, len(taps)·hidden)`` ✓（**层在外、宽在内** ✓ ——
+    与 ``Krea2DiT._unpack_context`` 的 ``reshape(b, seq, layers, dim)`` 同一口径 ✓）；
+    为空 ⇒ 仍出 ``(b, seq, hidden)`` ✓（H3 那条一字未改 ✓）。
     """
     parts = _torch_parts()
     torch = parts["torch"]
@@ -412,6 +472,9 @@ def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any
             self.model.embed_tokens = nn.Embedding(vocab, hidden)
             self.model.layers = nn.ModuleList([_Block() for _ in range(layers)])
             self.shape = dict(shape)
+            #: ⭐ 要取隐状态的层号（0 基 ✓、已去重排序 ✓）；空 = 只要最后一层 ✓
+            self.taps = tuple(sorted({int(value) for value in taps}))
+            self.output_dim = hidden * (len(self.taps) or 1)
 
         def forward(self, *, ids: Any = None, embeds: Any = None,
                     spans: Sequence[Mapping[str, Any]] | None = None,
@@ -457,8 +520,13 @@ def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any
                         f"（对不上 ⇒ 注入会错位 ✓ 且不报错 ✗）")
 
             target = deepstack_layers_of(deepstack_count)
+            #: ⭐ 取到的中间层隐状态 ✓（只有 `taps` 非空时才收 ✓，H3 那条一点额外开销都没有 ✓）
+            tapped: list[Any] = []
+            wanted = set(self.taps)
             for index, block in enumerate(self.model.layers):
                 x = block(x, cos, sin)
+                if index in wanted:
+                    tapped.append(x)
                 # ⚠️ 注入在**层之后** ✓（参考 `llama.py::Llama2_.forward` ✓）；挪到层之前 ⇒ 视觉段
                 #    之前的 token 也会被波及 ✓ 但**形状全对、不报错** ✓✗
                 if masks is not None and deepstack and index in target and index < len(deepstack):
@@ -472,7 +540,19 @@ def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any
                         x[:, start:start + size, :] = x[:, start:start + size, :] + chunk.to(
                             device=x.device, dtype=x.dtype)
                         cursor += size
-            return x
+            if not self.taps:
+                return x
+            if len(tapped) != len(self.taps):
+                #: 层号越界（``taps`` 里有 ≥ ``layers`` 的值 ✓）⇒ 少收了一层 ✓✗：直接报，
+                #: 否则条件宽会少一段、DiT 那边报"宽度不等于 layers×dim"✓，指向的是条件而不是这个层号 ✓。
+                raise ValueError(
+                    f"要取的层号 {self.taps} 超出实际层数 {len(self.model.layers)} ✗"
+                    f"（只收到 {len(tapped)} 层 ✓）")
+            #: ★ **层在外、宽在内** ✓：``stack(dim=2)`` ⇒ ``(b, seq, taps, hidden)`` ⇒ 摊平成
+            #: ``(b, seq, taps·hidden)`` ✓ —— 摊平顺序必须与 DiT 的 ``reshape(b, seq, layers, dim)`` 一致 ✓
+            #: （写成 ``cat(dim=-1)`` 也对 ✓，但 ``stack`` 更不容易在层数变化时错位 ✓）。
+            return torch_.stack(tapped, dim=2).reshape(x.shape[0], x.shape[1],
+                                                       len(self.taps) * hidden)
 
     #: ⚠️⚠️ **`device="meta"` 必须在构造时生效** ✗✗：先按 CPU 建再 ``.to("meta")`` 的话，
     #: 62 GiB 的 bf16 骨架已经**真分配 + 真 `uniform_` 填过**了 ✓（`reset_parameters` 逐元素写 ✓）
@@ -487,3 +567,79 @@ def build_text_tower(shape: Mapping[str, Any], *, dtype: Any = None, device: Any
     if dtype is not None or device is not None:
         model = model.to(device=device, dtype=dtype)
     return model
+
+
+@dataclass(frozen=True)
+class Krea2TeRuntime:
+    """Krea2 文本编码器的**配置壳** ✓（后端要 ``output_dim`` / ``max_length`` / ``prompt`` ✓）。
+
+    ``output_dim`` 是 **``len(taps) × hidden``** ✓ 不是 ``hidden`` ✗ —— 主干吃的是 12 层栈 ✓
+    （``txtlayers × txtdim = 12 × 2560 = 30720`` ✓）；写错 ⇒ ``_check_text_encoder`` 报
+    「文本塔宽度 ≠ 主干 textDim」✓，看着像拿错了 TE ✗，其实是这里少乘了层数 ✓✗。
+    """
+
+    shape: Mapping[str, Any]
+    taps: tuple[int, ...] = KREA2_TAPS
+    max_length: int = 512
+
+    @property
+    def output_dim(self) -> int:
+        return int(self.shape["hidden"]) * len(self.taps)
+
+    @property
+    def vocab_size(self) -> int:
+        return int(self.shape["vocab"])
+
+    @property
+    def vocab(self) -> int:
+        """别名 ✓：``TorchBackend._te_tokenizer`` 按 ``shape.vocab`` 核嵌入表 ✓（口径统一 ✓）。"""
+        return int(self.shape["vocab"])
+
+    def prompt(self, text: str) -> str:
+        """套 chat 模板 ✓（**唯一**加模板的地方 ✓ —— 后端不要在别处再拼一次 ✓✗）。"""
+        return krea2_prompt("" if text is None else str(text))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "krea2-te",
+            "family": "Qwen3-VL-4B 语言塔（Krea2 文本塔 ✓：12 层栈 ✓）",
+            "outputDim": self.output_dim, "vocabSize": self.vocab_size,
+            "maxLength": int(self.max_length), "taps": list(self.taps),
+            "hidden": int(self.shape["hidden"]), "depth": int(self.shape["layers"]),
+            "heads": int(self.shape["heads"]), "kvHeads": int(self.shape["kvHeads"]),
+            "headDim": int(self.shape["headDim"]),
+            "template": "krea2（system ＋ user ＋ assistant ✓，条件从 user 段起算 ✓）",
+            "note": ("取第 2,5,…,35 层隐状态叠成 12 层栈 ✓（**不过** final norm ✓）"
+                     "—— 与参考 `comfy/text_encoders/krea2.py` 逐项一致 ✓"),
+        }
+
+
+def build_krea2_stack(shape: Mapping[str, Any], *, dtype: Any = None, device: Any = None,
+                      taps: Sequence[int] = KREA2_TAPS) -> Any:
+    """Krea2 的**文本条件器** ✓：语言塔 ＋ 「12 层栈 ＋ 裁掉模板前缀」✓ 合成一个模块 ✓。
+
+    为什么要包一层 ✗：编码侧（`torch_backend.encode_text`）只把 ``ids`` 丢给
+    ``self._textEncoder`` ✓ 就取条件 ✓ —— 裁前缀要**看 token**（:func:`krea2_keep_from` ✓），
+    所以裁剪必须发生在**拿到 ids 之后** ✓，只能放在模块里 ✓，不能放在建壳时 ✓。
+    """
+    parts = _torch_parts()
+    nn = parts["nn"]
+    tower = build_text_tower(shape, dtype=dtype, device=device, taps=taps)
+    keep_all = list(taps)
+
+    class Krea2TextStack(nn.Module):
+        """``ids (b, seq)`` ⇒ 条件 ``(b, seq - 模板前缀, len(taps)·hidden)`` ✓。"""
+
+        def __init__(self, inner: Any) -> None:
+            super().__init__()
+            self.tower = inner
+            self.taps = tuple(keep_all)
+            self.output_dim = inner.output_dim
+
+        def forward(self, ids: Any, **kwargs: Any) -> Any:
+            states = self.tower(ids=ids, **kwargs)
+            rows = ids[0].tolist() if ids.ndim == 2 else list(ids)
+            kept = krea2_keep_from(rows)
+            return states[:, kept:] if kept else states
+
+    return Krea2TextStack(tower).to(device=device, dtype=dtype)

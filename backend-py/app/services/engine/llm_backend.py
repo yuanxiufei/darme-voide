@@ -60,6 +60,23 @@ class LlmBackendUnavailable(RuntimeError):
     """后端不可用 ✓（权重/词表没就绪、或没装载 ✓）—— ``reason`` 说明缺什么 ✓。"""
 
 
+class _StopHit(Exception):
+    """内部哨兵 ✓：文字级停用词命中 ⇒ 借「回调抛异常=中止采样」收尾 ✓（不对外 ✓ 不进 ``__all__`` ✓）。"""
+
+    def __init__(self, mark: str) -> None:
+        super().__init__(mark)
+        self.mark = mark
+
+
+class _Aborted(Exception):
+    """内部哨兵 ✓：调用方要求中止（客户端断开 ✓）⇒ 与 ``_StopHit`` 同一手法，但**不**再补发文本 ✗。
+
+    ⚠️ 为什么必须有这个哨兵 ✗✗：``asyncio.to_thread`` 包住的同步推理**取消不了** ✗ —— 任务被
+    ``task.cancel()`` 之后线程仍在把 ``max_new_tokens`` 烧完 ✓✗（本地 CPU/GPU 推理尤其明显 ✗）。
+    真正的止损只能在**采样循环内部**判一个 ``threading.Event`` ✓。
+    """
+
+
 class LlmBackend:
     """自研文本后端 ✓（``describe`` / ``load`` / ``generate`` ✓）。"""
 
@@ -210,6 +227,87 @@ class LlmBackend:
         # 用 **token 数**裁 ✓（不按文本找 ⇒ 不受空白/特殊 token 解码差异影响 ✓）。
         new_tokens = out[0][len(ids):].tolist()
         return self._hub.decode(new_tokens, skip_special_tokens=True).strip()
+
+    # ── 流式生成 ✓（2026-11-01 补）
+    def generate_stream(self, prompt: str, *, system: str | None = None,
+                       temperature: float = 1.0, max_new_tokens: int = 256,
+                       top_p: float = 1.0, top_k: int = 0, seed: int | None = None,
+                       stop: Any = (), on_event: Any = None, abort: Any = None) -> str:
+        """**同步**流式生成 ✓ —— 每出一段就 ``on_event("delta", {"text": ...})`` ✓，返回值是**整段**文本 ✓。
+
+        ⚠️ 本方法**仍是同步阻塞**的 ✗（CPU 推理会占满线程 ✓）：调用方用 ``asyncio.to_thread`` 包住 ✓，
+        回调里**只许做线程安全的事**（放到 ``asyncio.Queue`` 要经 ``loop.call_soon_threadsafe`` ✓）。
+
+        三条口径（漏一条就会「看着在流、其实整段才出来」✓✗）：
+
+        1. **增量按"解码全文前缀"算** ✗✗：BPE 的词边界上逐 token 解码会出半个字符（``\\ufffd`` ✓），
+           所以每步解**累积 id** 的全文 ✓，只在「本轮全文以上一轮已发文本为前缀」时才切增量 ✓
+           （不满足就这一轮不发 ✓、下一轮自然对齐 ✓ —— 宁可晚一字也不许吐半个字节 ✗）；
+        2. **文字级 ``stop`` 是本层的事** ✗（``llm.generate_llm`` 的 ``stop_ids`` 只管整 token 哨兵 ✓）：
+           停用词可能跨若干 token ✓ ⇒ 命中后**只把命中点之前的部分发出去** ✓，再用内部异常中止采样 ✓；
+        3. **``on_event`` 为 ``None`` 时等价于「带 stop 裁剪的 generate」** ✓（便于无流式需求时复用 ✓）；
+        4. **``abort``**（任意带 ``is_set()`` 的对象，通常是 :class:`threading.Event` ✓）：每一步先看一眼，
+           已置位就**立刻跳出采样循环** ✓ 并返回**已生成的那半段** ✓（不再补发、不再解后续 token ✗）。
+           这是「客户端断开 ⇒ 别再烧卡」的**唯一**有效通路 ✗✗：外层 ``task.cancel()`` 只能停掉
+           ``asyncio`` 那边 ✓，线程里的采样循环照跑到底 ✗ ⇒ 由 :mod:`..text_stream` 在取消时置位 ✓。
+        """
+        if self._model is None or self._hub is None:
+            raise LlmBackendUnavailable(self.describe()["reason"] or "模型/词表未装载 ✗（先 load() ✓）")
+
+        import torch  # noqa: PLC0415
+
+        stops = tuple(str(item) for item in (stop or ()) if str(item))
+        ids = self._hub.encode(self._build_prompt_text(prompt, system), add_special_tokens=False)
+        device = llm_mod.model_device(self._model)
+        ids_tensor = torch.tensor([ids], dtype=torch.long, device=device)
+
+        new_ids: list[int] = []
+        sent = ""            # 已经发出去的前缀（含被 stop 截断后的那一段 ✓）
+
+        def _emit(text: str) -> None:
+            nonlocal sent
+            if len(text) <= len(sent):
+                return
+            chunk = text[len(sent):]
+            sent = text
+            if on_event is not None:
+                on_event("delta", {"text": chunk})
+
+        def _on_token(token_id: int) -> None:
+            # ⚠️ 中止判定必须在**一切都之前** ✗（append 之后再抛，那一个 token 已经进 new_ids ✓ 会被
+            # 最后那段 decode 补发出去 ✗ —— 客户端都走了还多发字 ✓✗）
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            new_ids.append(token_id)
+            text = self._hub.decode(new_ids, skip_special_tokens=True)
+            if not text.startswith(sent):
+                return          # 边界不稳（半个 UTF-8 / 特殊 token 拼接）⇒ 本轮不发 ✓
+            for mark in stops:
+                at = text.find(mark)
+                if at >= 0:
+                    _emit(text[:at])
+                    raise _StopHit(mark)
+            _emit(text)
+
+        try:
+            llm_mod.generate_llm(
+                self._model, ids_tensor, max_new_tokens=max_new_tokens, temperature=temperature,
+                top_p=top_p, top_k=top_k, eos_id=self._config.eos_id, seed=seed, on_token=_on_token,
+            )
+        except _StopHit:
+            pass
+        except _Aborted:
+            # 客户端已走 ⇒ **不许**再 ``_emit``（那份 emit 会经 call_soon_threadsafe 落到一个
+            # 已经没人读的队列里 ✓）；直接返回已生成的那半段 ✓（调用方那边是取消路径，值会被丢弃 ✓）。
+            return self._hub.decode(new_ids, skip_special_tokens=True).strip()
+        full = self._hub.decode(new_ids, skip_special_tokens=True)
+        for mark in stops:
+            at = full.find(mark)
+            if at >= 0:
+                full = full[:at]
+                break
+        _emit(full)
+        return full.strip()
 
     # ── 词表来源 ✓（2026-10-29 补 ✓）
     def _tokenizer_source(self) -> tuple[str | None, str]:

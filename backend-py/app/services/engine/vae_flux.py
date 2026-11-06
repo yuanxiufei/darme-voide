@@ -5,7 +5,7 @@
 Z-Image 的 DiT 能装、能前向 ✓（``dit_lumina`` ✓），但潜变量是 **16 通道** ✓；本仓此前只有
 SDXL VAE（4 通道 ✓ 带 ``quant_conv`` ✓）和 H3 视频 VAE（3D ✓）⇒ **16 通道这一档解不出来** ✗。
 参考实现里 Z-Image **直接继承 Lumina2** ✓，而 ``Lumina2.latent_format = latent_formats.Flux`` ✓
-（``reference/comfy-org/ComfyUI/comfy/supported_models.py`` 的 ``class ZImage(Lumina2)`` ✓）
+（``ComfyUI/comfy/supported_models.py`` 的 ``class ZImage(Lumina2)`` ✓）
 ⇒ 它用的就是 **Flux 的 ae.safetensors** ✓，不是 ``qwen_image_vae`` ✗（那条属 Qwen-Image 家族 ✗）。
 
 ## 结构事实（从**本机真权重头**逐键量出 ✓ —— 不是猜的 ✗）
@@ -45,7 +45,9 @@ from .sdxl_vae import SdxlVaeConfig, SdxlVaeError, has_torch
 __all__ = [
     "FLUX_VAE_FACTS",
     "build_flux_vae",
+    "config_problems",
     "decode_latents",
+    "encode_latents",
     "flux_vae_config",
     "flux_vae_key_names",
     "load_flux_vae_state_dict",
@@ -88,15 +90,48 @@ def flux_vae_key_names(config: SdxlVaeConfig | None = None) -> tuple[str, ...]:
     return sdxl_vae.sdxl_vae_key_names(config or flux_vae_config())
 
 
+def config_problems(config: SdxlVaeConfig) -> list[str]:
+    """核 ``config`` 的**缩放口径**是否就是 Flux 那一套 ✓（结构问题归 :func:`shape_problems` ✓）。
+
+    ⚠️ 为什么要在**建模型时**就查 ✗✗：``scaling_factor`` / ``shift_factor`` **不体现在键名或形状上** ✓
+    ⇒ 权重装得上 ✓、前向跑得通 ✓、形状全对 ✓，只是**每张图都偏色/发灰** ✓✗（与模块头那个
+    ``0.1159`` 陷阱同一个病 ✓）。默认配置由 :func:`flux_vae_config` 给 ✓；这条只拦"自己拼了个
+    :class:`SdxlVaeConfig` 却忘了改缩放"的人 ✓（例如从 SDXL 那套复制过来 ✓）。
+    """
+    problems: list[str] = []
+    want_latent = int(FLUX_VAE_FACTS["latentChannels"])
+    if int(config.latent_channels) != want_latent:
+        problems.append(f"latent_channels={config.latent_channels} ≠ {want_latent} ✗（那是 SDXL 的 4 ✗）")
+    if bool(config.quant_conv):
+        problems.append("quant_conv=True ✗（Flux VAE 没有这两个 1×1 卷积 ✓）")
+    want_scale = float(FLUX_VAE_FACTS["scalingFactor"])
+    if abs(float(config.scaling_factor) - want_scale) > 1e-9:
+        problems.append(
+            f"scaling_factor={config.scaling_factor} ≠ {want_scale} ✗"
+            f"（用 SDXL 的 0.13025 ⇒ 图整体偏色且**不报错** ✓✗）")
+    if abs(float(config.shift_factor) - float(FLUX_VAE_FACTS["shiftFactor"])) > 1e-9:
+        problems.append(
+            f"shift_factor={config.shift_factor} ≠ {FLUX_VAE_FACTS['shiftFactor']} ✗"
+            f"（丢了这 0.1159 ⇒ 常数偏移 ✓✗）")
+    return problems
+
+
 def build_flux_vae(config: SdxlVaeConfig | None = None, *,
                    device: Any = None, dtype: Any = None) -> Any:
     """建一个 Flux VAE 壳（**随机初始化** ⇒ 出图前必须 :func:`load_flux_vae_state_dict` ✓）。
 
     ⚠️ 没装 torch ⇒ **报错** ✗（不静默降级 ✗，同 ``build_sdxl_vae`` ✓）。
+    ⚠️ 传进来的 ``config`` 要过 :func:`config_problems` ✓：缩放口径错了**建模型时**就该拦 ✓，
+    而不是等出图发灰再回头查 ✓（那时已经看不出是配置还是权重的问题 ✓）。
     """
     if not has_torch():
         raise SdxlVaeError("没装 torch ✗ ⇒ 建不了 Flux VAE ✓")
     spec = config or flux_vae_config()
+    problems = config_problems(spec)
+    if problems:
+        raise SdxlVaeError(
+            "Flux VAE 配置与族口径不符 ✗：\n  - " + "\n  - ".join(problems)
+            + "\n⇒ 用 `flux_vae_config()` ✓（只在测试里缩小 `block_out_channels` ✓）")
     return sdxl_vae.build_sdxl_vae(spec, device=device, dtype=dtype)
 
 
@@ -165,3 +200,15 @@ def decode_latents(model: Any, latents: Any, *, config: SdxlVaeConfig | None = N
     spec = config or getattr(model, "config", None) or flux_vae_config()
     return sdxl_vae.decode_latents(model, latents, config=spec, to_unit=to_unit,
                                    tile=tile, overlap=overlap, progress=progress)
+
+
+def encode_latents(model: Any, images: Any, *, config: SdxlVaeConfig | None = None) -> Any:
+    """像素 ⇒ 潜变量 ✓ —— :func:`decode_latents` 的**对称面** ✓：``(z - 0.1159) * 0.3611`` ✓。
+
+    ⚠️ 千万别直接调 ``model.encode`` ✗：它返回 ``(mean, logvar)`` **二元组** ✓ 且是**模型空间** ✓✗
+    —— 调用方若把元组当张量（``[0]`` 之外的下标 / ``.shape`` ✓）当场 ``AttributeError`` ✓；
+    若只取 ``[0]`` 就直接当潜变量用 ⇒ 差一个 ``0.3611`` 缩放 + ``0.1159`` 偏移 ✓、
+    **形状全对、不报错** ✓✗（Flux / Z-Image 两族都吃这一条 ✓）。
+    """
+    spec = config or getattr(model, "config", None) or flux_vae_config()
+    return sdxl_vae.encode_latents(model, images, config=spec)

@@ -14,6 +14,7 @@ Node 侧全局 ``app.use('*', requestLogger)``：**请求前**打一行（``POST
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -62,6 +63,34 @@ def _enabled() -> bool:
     return os.environ.get("HTTP_LOG", "1") != "0"
 
 
+def _console_text(value: str) -> str:
+    """把要打印的文本降级到**当前 stdout 能编码的字符集**（编不出的替换成 ``?``）。
+
+    ⚠️ 这不是洁癖，是修一个真实事故：Windows 控制台默认 cp936，日志里一旦出现
+    GBK 之外的字符（上传文件的 BOM ``\\ufeff``、emoji、生僻字…），``print`` 会抛
+    ``UnicodeEncodeError``。而中间件是**所有请求的必经之路** ⇒ 它一抛，请求直接 500，
+    路由一行都没执行。实测症状：上传一份记事本存的 UTF-8-BOM txt ⇒ 500，而服务端堆栈
+    指向的只是「打日志」这一行，完全看不出是编码问题。
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        value.encode(encoding)
+        return value
+    except (UnicodeEncodeError, LookupError):
+        return value.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def _emit(line: str) -> None:
+    """打印一行日志；**任何**写失败都不许冒泡（日志不是业务的一部分，不能反过来弄坏请求）。"""
+    try:
+        print(_console_text(line))
+    except Exception:  # noqa: BLE001 —— 连编码都失败的极端情况，退回纯 ASCII
+        try:
+            print(line.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def request_logger(request: Request, call_next: Any) -> Any:
     """请求前 + 响应后各打一行（对齐原 TS 的格式与配色）。"""
     if not _enabled():
@@ -79,19 +108,21 @@ async def request_logger(request: Request, call_next: Any) -> Any:
             declared = request.headers.get("content-length")
             oversized = (declared is not None and declared.isdigit()
                          and int(declared) > _BODY_READ_LIMIT)
-            text = "" if oversized else (await request.body()).decode("utf-8", errors="replace")
+            #: multipart 是二进制（文件内容混着分段头），打出来是噪音、还专藏 BOM 与 emoji
+            multipart = "multipart/form-data" in (request.headers.get("content-type") or "").lower()
+            text = "" if (oversized or multipart) else (await request.body()).decode("utf-8", errors="replace")
             if text:
                 truncated = text if len(text) <= _BODY_LIMIT else text[:_BODY_LIMIT] + "..."
                 body_info = f"\n  {_DIM}body: {truncated}{_RESET}"
         except Exception:  # noqa: BLE001 —— 与 TS 的空 catch 等价
             body_info = ""
 
-    print(f"{_DIM}{stamp}{_RESET} {_CYAN}{method}{_RESET} {path}{body_info}")
+    _emit(f"{_DIM}{stamp}{_RESET} {_CYAN}{method}{_RESET} {path}{body_info}")
 
     response = await call_next(request)
 
     elapsed_ms = int((datetime.now() - started).total_seconds() * 1000 + 0.5)
     color = status_color(response.status_code)
-    print(f"{_DIM}{stamp}{_RESET} {_CYAN}{method}{_RESET} {path} "
+    _emit(f"{_DIM}{stamp}{_RESET} {_CYAN}{method}{_RESET} {path} "
           f"{color}{response.status_code}{_RESET} {_DIM}{elapsed_ms}ms{_RESET}")
     return response

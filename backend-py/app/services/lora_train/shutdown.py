@@ -1,6 +1,6 @@
 """**训练完成后自动关机** ✓（LoRAMaster ``auto_shutdown.py`` 移植 ✓）。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/auto_shutdown.py`` 的 ``is_admin()`` ✓ 与
+出处（参考实现 ✓）：``LoRAMaster/auto_shutdown.py`` 的 ``is_admin()`` ✓ 与
 ``shutdown(delay_seconds=300, restart=False)`` ✓；调用点见 ``wan_lora_train.py`` 第 458~467 行 ✓
 ——**只在返回码为 0 且 ``auto_shutdown`` 开着时**才调 ✓，GUI 上写着「训练完成5分钟后，自动关机」✓
 ⇒ 那个 5 分钟就是 ``delay_seconds=300`` 这个默认值 ✓。

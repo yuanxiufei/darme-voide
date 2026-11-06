@@ -33,7 +33,12 @@ from ..core.config import skills_dir
 from ..core.db import get_conn
 from ..core.models import agent_configs
 from ..core.response import bad_request, internal_error, js_truthy, success
-from ..services.agent_registry import AGENT_PHASES, get_default_name, get_host_tool_names
+from ..services.agent_registry import (
+    AGENT_PHASES,
+    VALID_AGENT_TYPES,
+    get_default_name,
+    get_host_tool_names,
+)
 from ..services.skill_parser import ParsedSkill, parse_skill, render_skill
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
@@ -207,7 +212,12 @@ def _load_skill_bindings(conn: Connection) -> dict[str, list[str]]:
         if agent not in current:
             current.append(agent)
 
-    for agent in AGENT_PHASES:
+    # 名册用 ``VALID_AGENT_TYPES``（**能运行的** Agent 全集），不是 ``AGENT_PHASES``。
+    # ``AGENT_PHASES`` 是「挂在流水线哪个阶段」的**展示表**：orchestrator 不参与阶段展示，
+    # 故不在其中。拿它当名册 ⇒ 一个 skill 只要写了 ``agents: [orchestrator]``（合法：它 ∈
+    # VALID_AGENT_TYPES，运行期 ``load_agent_skills`` 真会注入）在本页就永远显示「未绑定」，
+    # 且 ``inGroup()`` 把它放进任何分组都放不进 —— 展示表与真名册的差集被静默吞掉。
+    for agent in VALID_AGENT_TYPES:
         for skill_id in resolve_default_skills(agent):
             add(skill_id, agent)
 
@@ -329,13 +339,16 @@ def skills_meta():
                 core_count += 1
 
         agents = []
-        for agent_type, phase in AGENT_PHASES.items():
+        # 名册取自 ``VALID_AGENT_TYPES``（能运行的 Agent 全集，与 ``/agent-configs/defaults``
+        # 同源），``AGENT_PHASES`` 只提供可选的「阶段」文案。见 ``_load_skill_bindings`` 里的
+        # 同款说明：拿展示表当名册会把「不在阶段里的 Agent」整族静默漏掉。
+        for agent_type in VALID_AGENT_TYPES:  # 声明顺序 = AGENT_SPECS 顺序，侧栏照此排列
             ids = resolve_default_skills(agent_type)
             agents.append(
                 {
                     "type": agent_type,
                     "label": get_default_name(agent_type),
-                    "phase": phase,
+                    "phase": AGENT_PHASES.get(agent_type, ""),
                     "skillCount": len(ids),
                     # 默认绑定的实际注入体量合计（与 charBudget 对比即可看出余量/超预算风险）
                     "charCount": sum(_injected_chars_of(i) for i in ids),

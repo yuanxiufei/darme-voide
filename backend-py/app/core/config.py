@@ -77,6 +77,8 @@ _SERVER: dict[str, Any] = _RAW.get("server") or {}
 _DATABASE: dict[str, Any] = _RAW.get("database") or {}
 _EVALUATION: dict[str, Any] = _RAW.get("evaluation") or {}
 _AUTO_OPTIMIZE: dict[str, Any] = _EVALUATION.get("auto_optimize") or {}
+_KNOWLEDGE: dict[str, Any] = _RAW.get("knowledge") or {}
+_KNOWLEDGE_DISTILL: dict[str, Any] = _KNOWLEDGE.get("distill") or {}
 
 
 def _resolve_path(value: Any) -> Path | None:
@@ -184,6 +186,33 @@ evaluation = {
         ),
         "run_on_startup": os.environ.get("AUTO_OPTIMIZE_RUN_ON_STARTUP") == "true"
         or _AUTO_OPTIMIZE.get("run_on_startup") is True,
+    }
+}
+
+#: 知识蒸馏的**定时复盘**（P2 交付物里的"定时任务"）。
+#:
+#: 默认**关**：它会在无人看着的时候往台账写 ``proposed`` 条目、并可能把
+#: ``lift<0`` 的旧经验降级。这类"自动改事实"的开关与 ``evaluation.auto_optimize``
+#: 同级 —— 一律由创作者逐项打开，代码不许替人决定。
+#:
+#: ``lift`` 单独一格（默认也关）是因为它比蒸馏更"有力"：蒸馏只**增加待审条目**，
+#: lift 会**把已有条目降级**（``deprecated``）。两件事不该绑在一个开关上。
+knowledge = {
+    "distill": {
+        "enabled": os.environ.get("KNOWLEDGE_DISTILL_ENABLED") == "true"
+        or _KNOWLEDGE_DISTILL.get("enabled") is True,
+        #: 避开 03:00 的评测优化（两条定时任务同时跑会抢 SQLite 写锁）
+        "hour": int(os.environ.get("KNOWLEDGE_DISTILL_HOUR")
+                    or _KNOWLEDGE_DISTILL.get("hour") or 4),
+        "minute": int(os.environ.get("KNOWLEDGE_DISTILL_MINUTE")
+                      or _KNOWLEDGE_DISTILL.get("minute") or 30),
+        #: 每轮最多写几条（候选按信号强度排序，宁可少写几条也不要把台账灌满）
+        "limit": int(os.environ.get("KNOWLEDGE_DISTILL_LIMIT")
+                     or _KNOWLEDGE_DISTILL.get("limit") or 3),
+        "lift": os.environ.get("KNOWLEDGE_DISTILL_LIFT") == "true"
+        or _KNOWLEDGE_DISTILL.get("lift") is True,
+        "run_on_startup": os.environ.get("KNOWLEDGE_DISTILL_RUN_ON_STARTUP") == "true"
+        or _KNOWLEDGE_DISTILL.get("run_on_startup") is True,
     }
 }
 

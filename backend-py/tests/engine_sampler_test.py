@@ -22,7 +22,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 判据还没跑就崩在第一条打印上 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
 from app.services.engine import sampler as sm  # noqa: E402
+from app.services.engine import schedules  # noqa: E402
 
 _FAILS: list[str] = []
 _PASSED = 0
@@ -193,6 +200,163 @@ def main() -> int:
                 ok = False
                 detail.append((name, f"{type(err).__name__}: {err}"))
         check(f"⑧ {label} 调度下四个新采样器都不炸且命中解析解 ✓", ok, detail)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⑨ `res_multistep` 与参考实现的**逐位对拍**（2026-11-01 ✓）
+    #
+    # 为什么不能只靠 ④ 的解析解 ✗✗：常数方向的模型上 ``x0_i ≡ x0_{i−1}`` ✓ ⇒
+    # ``b₁ + b₂ = φ₁`` ✓，``ratio``（＝"上一拍的 σ_down 在哪" ✓）**整个被消掉** ✓ ——
+    # 于是"``ratio`` 取错""``h`` 符号取反"这类错**照样命中解析解** ✓✗（本轮真栽在
+    # ``e^{−h}`` 写成 ``e^{+h}`` 上 ✓，④ 抓不到 ✓，是下面这份对拍抓到的 ✓）。
+    # ═══════════════════════════════════════════════════════════════════════════
+    import math as _math
+
+    def _phi1(value: float) -> float:
+        # ⚠️ `φ₁(t) = (eᵗ − 1)/t` ✓（参考 `phi1_fn` ✓）—— 写成 `(1 − e^{−t})/t` 是**镜像** ✓✗：
+        #    两边都喂 `−h` 时它算的是 `φ₁(+h)` ✓，与实现差一个符号位、而形状看着都对 ✓。
+        return _math.expm1(value) / value if value else 1.0
+
+    def _phi2(value: float) -> float:
+        return (_phi1(value) - 1.0) / value if value else 0.5
+
+    def _reference_res_multistep(model, x0, sigmas):
+        """**逐行转写** ``comfy/k_diffusion/sampling.py::sample_res_multistep``（eta=0 ✓）。"""
+        old_denoised = None
+        old_sigma_down = 0.0
+        x = x0
+        for i in range(len(sigmas) - 1):
+            sigma, sigma_next = sigmas[i], sigmas[i + 1]
+            denoised = model(x, sigma)
+            sigma_down = sigma_next                     # get_ancestral_step(eta=0) ✓
+            if sigma_down == 0 or old_denoised is None:
+                d = (x - denoised) / sigma
+                x = x + d * (sigma_down - sigma)
+            else:
+                t = -_math.log(sigma)
+                t_next = -_math.log(sigma_down)
+                t_old = -_math.log(old_sigma_down)
+                h = t_next - t
+                c2 = (-_math.log(sigmas[i - 1]) - t_old) / h
+                b1 = _phi1(-h) - _phi2(-h) / c2
+                b2 = _phi2(-h) / c2
+                x = _math.exp(-h) * x + h * (b1 * denoised + b2 * old_denoised)
+            old_denoised, old_sigma_down = denoised, sigma_down
+        return x
+
+    def _nonlinear(x, sigma):
+        # 刻意**非线性** ✓：``x0`` 随 σ 变 ✓ ⇒ ``ratio``/``b₂`` 有没有接对才看得出来 ✓。
+        return x * 0.82 - 0.35 * float(sigma) ** 1.5
+
+    grid = [1.0, 0.93, 0.81, 0.62, 0.44, 0.27, 0.13, 0.05, 0.0]   # ← 递减 ✓、末位 0 ✓
+    got, _steps = sm.sample(_nonlinear, 2.5, grid, "res_multistep")
+    want = _reference_res_multistep(_nonlinear, 2.5, list(grid))
+    check("⑨ `res_multistep` 与参考实现逐位对拍 ✓（非线性模型 ✓ —— 常数模型下 `ratio` 会被消掉 ✗）",
+          abs(float(got) - want) < 1e-12, (float(got), want))
+
+    # 反证：把指数符号改回去（`e^{+h}` ✓）**必须**被同一条判据抓到 ✓
+    broken = 2.5
+    previous = previous_down = None
+    for index in range(len(grid) - 1):
+        sigma, sigma_next = grid[index], grid[index + 1]
+        denoised = _nonlinear(broken, sigma)
+        if sigma_next == 0 or previous is None:
+            broken = broken + (broken - denoised) / sigma * (sigma_next - sigma)
+        else:
+            h = _math.log(sigma) - _math.log(sigma_next)
+            ratio = (_math.log(previous_down) - _math.log(grid[index - 1])) / h
+            broken = (_math.exp(h) * broken
+                      + h * ((_phi1(-h) - _phi2(-h) / ratio) * denoised
+                             + (_phi2(-h) / ratio) * previous))
+        previous, previous_down = denoised, sigma_next
+    check("⑨′ 反证：指数写成 `e^{+h}` 会被 ⑨ 抓到 ✓（否则那条判据是假绿 ✓✗）",
+          abs(broken - want) > 0.05, (broken, want))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⑩ `lcm` 的语义 = **每步直接取 denoised** ✓，再按 σ_next 回噪 ✓（不是 ODE 求解器 ✗）
+    # ═══════════════════════════════════════════════════════════════════════════
+    lcm_grid = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+    # 模型给**恒定的 denoised=1.0** ✓ ⇒ 贪心档每一步都直接落到 1.0 ✓，
+    # 而任何 ODE 求解器会把它当成"方向 d=(x−1)/σ"去积分 ✓ ⇒ 结局绝不是 1.0 ✓（两者可分辨 ✓）。
+    const = lambda x, s: 1.0                                   # noqa: E731
+    greedy, _steps = sm.sample(const, START, lcm_grid, "lcm")
+    check("⑩ `lcm` 不给噪声 ⇒ 结局**恰好等于 denoised** ✓（逐步贪心 ✓、不是欧拉 ✓）",
+          abs(float(greedy) - 1.0) < 1e-12, float(greedy))
+
+    # 反证：同一条 σ 表喂 `euler` ⇒ **中途**状态整体不同 ✓（末步都收敛到 denoised ✓，
+    # 所以判据只能看中途 ✓ —— 只看结局会得出"两者一样"的假结论 ✓✗）
+    euler_seen: list[float] = []
+    sm.sample(const, START, lcm_grid, "euler",
+              callback=lambda index, sigma, value: euler_seen.append(float(value)))
+    check("⑩″ 同一模型同一条 σ 表 ⇒ `euler` 的**中途**状态与 ⑩ 差得很远 ✓（⑩ 不是恒真判据 ✓）",
+          max(abs(a - b) for a, b in zip(euler_seen, [1.0] * len(euler_seen))) > 0.1,
+          euler_seen)
+
+    seen: list[float] = []
+    sm.sample(const, START, lcm_grid, "lcm", noise_sampler=lambda a, b: 2.0,
+              callback=lambda index, sigma, value: seen.append(float(value)))
+    # flow 支回噪式 `x = denoised·(1−σ_next) + n·σ_next` ✓（参考 `ModelSamplingFlux.noise_scaling` ✓）
+    want_states = [1.0 * (1.0 - s) + 2.0 * s for s in lcm_grid[1:]]
+    check("⑩′ `lcm` + 常量噪声 2.0 ⇒ 每拍状态 = `1−σ_next + 2σ_next` ✓（末步 σ=0 ⇒ 回到 1.0 ✓）",
+          len(seen) == len(want_states)
+          and max(abs(a - b) for a, b in zip(seen, want_states)) < 1e-12,
+          (seen, want_states))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⑪ `er_sde`：确定性 + 阶数（步数翻倍 ⇒ 误差显著下降 ✓）
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _flow_grid(steps):
+        return schedules.flow_sigmas_for_steps(steps, shift=3.0)
+
+    def _soft(x, sigma):
+        return _math.tanh(0.6 * x) + 0.2 * float(sigma)
+
+    twice = [sm.sample(_soft, 1.0, _flow_grid(12), "er_sde")[0] for _ in range(2)]
+    check("⑪ `er_sde` 不给噪声 ⇒ 两次结果**逐位相同** ✓（确定性 ✓ —— 否则就是偷偷加了噪 ✓✗）",
+          twice[0] == twice[1], twice)
+
+    with_noise = sm.sample(_soft, 1.0, _flow_grid(12), "er_sde",
+                                noise_sampler=lambda sigma, sigma_next: 0.05)[0]
+    check("⑪′ `er_sde` + 噪声 ⇒ 结局**改变** ✓（登记在 STOCHASTIC 里就必须真会加噪 ✓）",
+          float(with_noise) != float(twice[0]), (float(with_noise), float(twice[0])))
+
+    fine = sm.sample(_soft, 1.0, _flow_grid(16384), "euler")[0]      # ← 细网格当真值 ✓
+    err_coarse = abs(float(sm.sample(_soft, 1.0, _flow_grid(8), "er_sde")[0]) - float(fine))
+    err_fine = abs(float(sm.sample(_soft, 1.0, _flow_grid(64), "er_sde")[0]) - float(fine))
+    check("⑪″ 步数 8 ⇒ 64：误差**至少减半** ✓（阶数没接对时这条会红 ✓）",
+          err_fine < err_coarse * 0.5, (err_coarse, err_fine))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⑫ 注册表：三档新采样器都进了 `SAMPLERS`，随机档只在 `STOCHASTIC` 里 ✓
+    # ═══════════════════════════════════════════════════════════════════════════
+    for name in ("res_multistep", "er_sde", "lcm"):
+        check(f"⑫ `{name}` 已注册进 `SAMPLERS` ✓（工作流参数名可直接透传 ✓）",
+              name in sm.SAMPLERS, sorted(sm.SAMPLERS))
+    check("⑫′ `res_multistep` **不是**随机档 ✓（eta=0 / s_noise=1 的默认档不接噪声 ✓）；"
+          "`er_sde` / `lcm` **是** ✓（它们的更新式里本来就有随机项 ✓）",
+          "res_multistep" not in sm.STOCHASTIC
+          and {"er_sde", "lcm"} <= set(sm.STOCHASTIC), sorted(sm.STOCHASTIC))
+    check("⑫″ 三档都是**每步一次**模型调用 ✓（双流才套得上 ✓）",
+          all(sm.model_calls_per_step(name) == 1.0
+              for name in ("res_multistep", "er_sde", "lcm")), None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⑬ 双流的逐拍更新式**不许另抄一份** ✓（2026-11-01 抄出来的那份把 `c₂` 符号写反了 ✓✗）
+    #
+    # 双流每步只有"一拍" ✓、调不了整个 `sample_res_multistep` ✓，所以最容易的写法就是
+    # 把公式再抄一遍 ✓ —— 抄的代价是一次**不报错**的符号错 ✓（`b₂` 变号、结局差一倍 ✓）。
+    # 这里钉住"只有一份"：源码里必须出现 `multistep_step(` ✓，且不出现 φ 的本地实现 ✓。
+    # ═══════════════════════════════════════════════════════════════════════════
+    try:
+        from app.services.engine import h3_form  # noqa: PLC0415 —— 要 torch 才拿得到这个属性 ✓
+        dual_src = inspect.getsource(h3_form.sample_dual_stream)
+    except Exception as problem:                                    # noqa: BLE001
+        dual_src = ""
+        check("⑬ 取不到 `sample_dual_stream` 源码 ⇒ 跳过结构判据 ✓", True, problem)
+    if dual_src:
+        check("⑬ ⭐ 双流调的是**同一个** `multistep_step` ✓（另抄一份 ⇒ 符号错没人拦 ✗✗）",
+              "multistep_step(" in dual_src, dual_src[:0])
+        check("⑬′ 双流源码里**没有**本地 φ/指数实现 ✓（`expm1`、`math.exp(-h)` 都不该出现 ✗）",
+              "expm1" not in dual_src and "exp(-h)" not in dual_src, None)
 
     total = _PASSED + len(_FAILS)
     print(f"\nSUMMARY: {_PASSED}/{total} passed")

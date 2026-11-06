@@ -49,6 +49,8 @@ __all__ = [
     "component_path",
     "component_status",
     "estimate_vram",
+    "COMPONENT_SLOTS",
+    "assembly_for_stage",
     "load_catalog",
     "readiness",
     "resolve_component",
@@ -92,6 +94,48 @@ STAGE_FILTERS: dict[str, dict[str, Any]] = {
     #: ⚠️ 两者族名只差一个 `21` ✗（`qwen_image` vs `qwen_image21` ✓）—— tags 用 `qwen2512` 而非
     #: `qwen_image` ✓，避免将来有人拿 `startswith("qwen_image")` 判族把 2.1 一起卷进来 ✓✗。
     "qwen_image": {"category": "image", "tags": ["qwen2512"], "requireAll": True},
+    #: ⭐ **Krea2**（2026-11-01 加 ✓）。必须**单列** ✗✗：三件里有两件与既有档**同文件不同族** ✓✗ ——
+    #: VAE 就是 2512 那个 ``qwen_image_vae`` ✓（16 通道 ✓），DiT 却是 **12.82B 参数的单流**
+    #: ✓（2512 是 38.05 GiB 双流 ✓），文本塔是 **Qwen3-VL-4B 的 12 层栈** ✓（2512 是 Qwen2.5-VL-7B 末层 ✓）。
+    #: ⚠️ 合进 ``qwen_image`` 档 ⇒ ``readiness("qwen_image")`` 会把 12.57 + 5.08 加进 2512 那条
+    #: **38.05 GiB** 的账里 ✓✗（多报 17.6 GiB ✓，24GB 卡凭空"装不下" ✓✗，而真装时只装一条链 ✓）。
+    #: ⚠️ ``krea2`` 与 ``qwen2512`` 的 tags **不许互相包含** ✓（同 ``qwen_image`` 那条注释的理由 ✓）。
+    "krea2": {"category": "image", "tags": ["krea2"], "requireAll": True},
+    #: ⭐ **SEEDVR2**（2026-11-01 加 ✓）。``category`` 是 **`video`** ✓（与 H3 同类 ✓），但它与 H3
+    #: **一件都不通用** ✗✗：H3 三件（DiT ＋ Qwen3-VL 文本塔 ＋ 视频/音频双 VAE ✓），SEEDVR2 两件
+    #: （NaDiT ＋ 250 键专用 VAE ✓、**没有文本塔** ✗）✓。
+    #: ⚠️ 并进 ``h3`` 档 ⇒ ``readiness("h3")`` 会多算一份 6.8 GiB ✓✗，且「H3 就绪」会被 SEEDVR2 的
+    #: VAE 冒充 ✓✗（两条链各自有 VAE ✓，体积与键数都不同 ✓）。
+    #: ⚠️ ``tags`` 用 ``seedvr2`` ✓（**不**用 ``video`` ✓ —— 那个词被 H3 的三件占了 ✓✗）。
+    "seedvr2": {"category": "video", "tags": ["seedvr2"], "requireAll": True},
+    #: ⭐ **Wan 2.2 I2V**（2026-11-02 加 ✓）。``category`` 是 **`video`** ✓（与 H3 / SEEDVR2 同类 ✓），
+    #: 但三件都不通用 ✗✗：H3 是 16 通道文生视频 ＋ Qwen3-VL 文本塔 ✓、SEEDVR2 没有文本塔 ✓；
+    #: 这一族是 **36 通道**（首帧条件）＋ **UMT5-XXL** ＋ **Wan2.1 VAE** ＋ 双专家 ✓。
+    #: ⚠️ 并进 ``h3`` / ``seedvr2`` 档 ⇒ ``readiness`` 会把 26.62 ＋ 10.58 ＋ 0.24 三笔加到别的链上
+    #: ✓✗（24GB 卡凭空"装不下" ✓，而真装时只装一条链 ✓）。
+    #: ⚠️ ``tags`` 用 ``wan22`` ✓（**不**用 ``wan`` ✗ —— 清单里 `wan26_i2v_14b_gguf` 那条也带 ``wan`` ✓，
+    #: 那是 GGUF 另走 ``text`` 那条路 ✓，卷进来会多算 15 GiB ✓✗）。
+    "wan22": {"category": "video", "tags": ["wan22"], "requireAll": True},
+    #: ⭐ **Music3 文生音乐**（2026-11-06 加 ✓）—— 本仓唯一一条**输出不是画面**的线 ✓✗。
+    #:
+    #: ``category`` 是 **`audio`** ✓（清单里那一类此前**一条都没有** ✓）。
+    #: ⚠️ 本档的「三件必须齐」**只能**靠 ``requireAll`` ✓✗：``STAGE_FILTERS["audio"]`` 只有
+    #: ``category`` ✓，而三件的 ``required`` 是 ``false`` ✓（与 zimage 同套路 ✓）⇒
+    #: 走 ``audio`` 档问就绪**仍然是**"空必需集 ⇒ `ready=True`" ✓✗（那是 ``audio`` 档既有的口径 ✓，
+    #: 本轮**不**顺手改它 ✗ —— 改它会把"audio 档到底指什么"这个更大的问题卷进来 ✓）。
+    #: 「Music3 齐不齐」**只从 ``music3`` 档问** ✓：``stage_entries("music3")`` 按
+    #: ``tags:["music3"]`` 挑三件 ＋ ``requireAll`` 把它们全判成必需 ✓。
+    #:
+    #: ⚠️ **三件都不许与别的档合并** ✗✗：
+    #: · DiT 4.58 GiB ✓ 是**音频** 3 维潜变量 ``(b,128,T)`` ✓，与任何出图/出片族维度都不同 ✓；
+    #: · 语义塔 8.57 GiB ✓ **不是编码器** ✗（自回归生成器 ✓，`output_dim` 32768 ＝ 8×4096 ✓）；
+    #: · DAV 0.20 GiB ✓ 是**音频**解码器 ✓（128ch ⇒ 44.1k 立体声 ✓，反缩放**恒等** ✓）。
+    #: 合档会多报 13.34 GiB 到别的链上 ✓✗（24GB 卡凭空"装不下" ✓）。
+    #:
+    #: ⚠️ ``requireAll: True`` 与清单里三件的 ``required: false`` **必须配套** ✓（同 zimage 那条注释 ✓）：
+    #: 直接标 ``required: true`` 会让 ``readiness("audio")`` 把它们当"audio 档的必需件"✓，
+    #: 而 audio 档的口径本来就是"本族三件齐不齐"✓ ⇒ 由 ``requireAll`` 表达才对 ✓。
+    "music3": {"category": "audio", "tags": ["music3"], "requireAll": True},
 }
 
 
@@ -414,7 +458,10 @@ def upscale_status(*, root: Path | None = None, key: str = "", path: str = "") -
     report["present"] = True
     try:
         metadata, _header = st.read_header(target)
-        contract = upscale_mod.read_upscaler_contract(metadata)
+        # ⚠️ 读 + **结构核** ✓（``load_upscaler_contract``）：原先只读不核 ✗ ⇒ 缺字段的契约会走到
+        #    下面那句 ``contract['base_config']['in_channels']`` 上**直接 KeyError** ✓✗
+        #    （本接口的职责是"具名拒绝"✓，不是把异常抛给它自己的调用方 ✗）。
+        contract = upscale_mod.load_upscaler_contract(metadata)
     except Exception as err:  # noqa: BLE001 —— 读不了/契约不合法 ⇒ **具名拒绝** ✓ 不猜 ✓
         contract = None
         report["contractError"] = f"{type(err).__name__}: {err}"
@@ -457,6 +504,247 @@ def stage_entries(stage: str = "h3") -> list[dict[str, Any]]:
     if rule.get("requireAll"):
         entries = [{**item, "required": True} for item in entries]
     return entries
+
+
+#: 清单 ``kind`` → **装配槽位** ✓（一份表，装配 / 前端选档都读它 ✓）
+#:
+#: ⚠️ 不能靠"文件名里有没有 dit"猜 ✗：``ae.safetensors``（VAE）、``qwen_3_4b``（TE）都不带族名 ✓，
+#: 而 ``wan_2.1_vae`` 既像 wan 又像 vae ✓ —— 唯一可靠的是**清单自己写的 kind** ✓。
+COMPONENT_SLOTS: dict[str, str] = {
+    "diffusion_models": "dit",
+    "unet": "dit",
+    "text_encoders": "text",
+    "clip": "text",
+    "vae": "vae",
+    "checkpoints": "checkpoint",
+}
+
+#: ⚠️⚠️ **只有 H3** 的 VAE 进 ``video_vae_weights`` ✓✗ —— 别按"这档出视频"归 ✗✗：
+#: Wan2.2 / SEEDVR2 虽然也出 mp4 ✓，但它们的装配线上那一格**就叫** ``image_vae_weights`` ✓
+#: （实测：按"视频档"塞 ``video_vae_weights`` ⇒ 装载当场报「还没给 `imageVaeWeights`」✓✗，
+#: 而 ``video_vae_weights`` 在 runtime 里只服务 ``real_video_vae`` ＝ H3 真视频 VAE 那一条 ✓）。
+#: H3 本身走 :func:`bridge.assembly_from_config`（上面早返回 ✓），这张表只是把口径钉住 ✓。
+_VIDEO_VAE_STAGES = ("h3",)
+
+#: ⭐ **"这一档的『VAE』那一格叫什么参数"** ✓（2026-11-06 接 Music3 时把口径从"两选一"改成表 ✓）。
+#:
+#: ⚠️ 原来是 ``key = "video_vae_weights" if stage in _VIDEO_VAE_STAGES else "image_vae_weights"``
+#: ✗ —— **两个分支都不是** Music3 要的那一格 ✓✗：它的解码器是 **DAV**（音频 ✓），
+#: 装配线认的参数名是 ``audioVaeWeights`` ✓ ⇒ 按老写法会塞成 ``image_vae_weights`` ✓✗，
+#: 而 ``_ensure_music3_loaded`` 缺 ``audio_vae_weights`` ⇒ 报「缺 `audioVaeWeights`」✓，
+#: 读起来像"清单里没有 DAV"✓✗ —— 其实清单里**有** ✓，是**插错了口** ✓。
+#: 这与 ``realAudioVae`` 那个坑**同形** ✓：同一个文件、两个名字、塞错不报错 ✓✗。
+_SLOT_BY_STAGE_VAE: dict[str, str] = {
+    "h3": "video_vae_weights",
+    "music3": "audio_vae_weights",
+}
+#: 缺省仍回 ``image_vae_weights`` ✓（图族四档 ＋ seedvr2 / wan22 ✓ 都用这一格 ✓）。
+_DEFAULT_VAE_SLOT = "image_vae_weights"
+
+
+#: H3 自动装配除 DiT 之外**必须**补的两件 ✓（key 是清单里的 key ✓；词表不入清单 ✓）
+#:
+#: ⚠️ 文本塔这里要的是 ``int8_convrot`` 那份（**25.28 GiB** ✓），**不是** `te_nvfp4` ✗✗ ——
+#: 两者都是 Qwen3-VL-32B ✓、文件名也几乎一样 ✓，但：
+#: ① ``attach_h3_text`` 只认 **int8 常驻**（350 个线性层 ＋ 逐层 scale），nvfp4 件里**一个 int8
+#:    权重都没有** ⇒ 装载当场拒 ✓；
+#: ② 更要命的是 nvfp4 的**形状是打包的**（``q_proj`` 落成 ``[out, in/2]`` ✓）⇒
+#:    `qwen3vl_te.infer_shape` 读出 hidden **2560**（真值 5120 ✓）⇒ `_check_text_encoder`
+#:    报「TE 配置自述 2560 ✗ ≠ 主干要的 5120」✓ —— 读起来像"拿错文本塔"✓✗，
+#:    其实是**打包没解开**（2026-11-03 实测就是这么报的 ✓）。
+_H3_TEXT_KEY = "te_h3_int8_convrot"
+_H3_VIDEO_VAE_KEY = "vae_video_fp16"
+#: H3 的**音频** VAE ✓（`vae_audio_fp32` = 0.56 GiB 那份 ✓）——它与视频 VAE **毫无关系** ✗✗
+#: （DAC 血统编码 ＋ BigVGAN 解码 ✓，见 `vae.H3_AUDIO_VAE_FACTS` ✓），不能互相顶替 ✓✗。
+_H3_AUDIO_VAE_KEY = "vae_audio_fp32"
+
+
+def _h3_real_parts(assembly: dict[str, Any], root: Path | None) -> tuple[list[str], list[str]]:
+    """把 H3 的「真文本塔 ＋ 真视频 VAE ＋ 词表」补进 ``assembly`` ✓ ⇒ ``(notes, missing)`` ✓。
+
+    ## 为什么必须在**装配参数**这一层补 ✗✗
+
+    H3 原来只从清单拿 **DiT** ✓（``bridge.assembly_from_config`` 只管主干 ✓）⇒ 另外三格
+    （``text_weights`` / ``tokenizer_path`` / ``real_video_vae``）**一个都不带** ✓✗
+    ⇒ 运行时按"没给就挂桩"的纪律挂上**未训练**的参考 TE / VAE ✓ —— 装载、采样、写盘
+    **全部成功** ✓、文件也是真 mp4 ✓，但：
+
+    ① 画面是噪声 ✓✗；
+    ② **参考 VAE 的时间压缩比是 1** ✗ ⇒ 4 倍时间压缩**不展开** ✓✗ ⇒ 计划 39 帧只写出
+       **10 帧**（＝潜帧数 ✓）、时长 0.42 秒而音频 1.63 秒 ✓✗（音画不同步 ✓）。
+
+    2026-11-03 实测就是这样：``/engine/generate`` 走 ``stage=h3``（画布点"视频"）拿到的
+    mp4 只有 10 帧、note 写着"画面来自未训练参考 VAE" ✓。所以这里按清单把三格补上 ✓；
+    缺件**如实**记进 ``missing`` ✓（不塞盘上不存在的路径 ✗ —— 那是"装到一半才炸" ✗）。
+    """
+    notes: list[str] = []
+    missing: list[str] = []
+    if not str(assembly.get("text_weights") or "").strip():
+        entry = catalog_entry(_H3_TEXT_KEY)
+        path, source = resolve_component(entry, root) if entry else (None, "")
+        if path is not None and path.is_file():
+            assembly["text_weights"] = str(path)
+            notes.append(f"文本塔用 {path.name}（{source}）")
+        else:
+            missing.append(f"text:{_H3_TEXT_KEY}（清单落点没有这份文件）")
+    if not str(assembly.get("tokenizer_path") or "").strip():
+        from . import tokenizer_hub  # 局部 import ✓（避开循环 ✓）
+
+        found = None
+        try:
+            found = tokenizer_hub.find_h3_tokenizer()
+        except Exception as err:  # noqa: BLE001 —— 词表缺 ⇒ 运行时点名，这里不拦 ✓
+            notes.append(f"词表探测出错：{str(err)[:80]}")
+        if found and found.get("path"):
+            assembly["tokenizer_path"] = str(found["path"])
+            notes.append(f"词表用 {found.get('source')}（{found.get('tokenizerClass')}）")
+        else:
+            missing.append(
+                "tokenizer（Qwen3-VL-32B 的词表 —— 放一份到 "
+                f"<模型根>/tokenizers/{tokenizer_hub.H3_TOKENIZER_SUBDIR.split('/')[-1]}/ 即可自动识别）")
+    if not assembly.get("real_video_vae"):
+        entry = catalog_entry(_H3_VIDEO_VAE_KEY)
+        path, source = resolve_component(entry, root) if entry else (None, "")
+        if path is not None and path.is_file():
+            #: ⚠️ 这一格**同时**打开 `real_video_vae` ✓✗：只塞 `video_vae_weights` 而不开这面旗
+            #: ⇒ 运行时仍挂参考族 ✓（`_attach_video_vae(real=False)` 会把路径忽略掉 ✓✗）。
+            assembly["real_video_vae"] = True
+            assembly["video_vae_weights"] = str(path)
+            notes.append(f"视频 VAE 用 {path.name}（{source}；装配期落 cpu、decode 前搬上卡）")
+        else:
+            missing.append(f"vae:{_H3_VIDEO_VAE_KEY}（清单落点没有这份文件）")
+    #: ⭐ **音频 VAE**（2026-11-04 补 ✓✗）：H3 是**双流** ✓（视频 ＋ 音频 ✓），而上面的三格只管
+    #: 画面 ⇒ 音轨仍由 `attach_audio_vae()` 挂**参考实现**（未经训练 ✗）⇒ 出来是噪声 ✓✗。
+    #: 症状极隐蔽 ✓✗：mp4 是真的、时长也对、`ffprobe` 甚至能看到 aac 流 ✓ ——
+    #: 只有**听**才发现是噪声，而回执原先只报 `vaeKind` 一个字段 ✓✗（音频侧无处可查 ✓）。
+    #: ⚠️ 与视频侧**同一条纪律**：这一格必须**同时**打开 `real_audio_vae` ✓✗（只塞路径不开旗
+    #: ⇒ `_attach_reference_audio_vae` 仍走参考分支 ✓）。
+    if not assembly.get("real_audio_vae"):
+        entry = catalog_entry(_H3_AUDIO_VAE_KEY)
+        path, source = resolve_component(entry, root) if entry else (None, "")
+        if path is not None and path.is_file():
+            assembly["real_audio_vae"] = True
+            assembly["audio_vae_weights"] = str(path)
+            notes.append(f"音频 VAE 用 {path.name}（{source}；BigVGAN 解码 ✓ 0.56 GiB ✓）")
+        else:
+            missing.append(f"audioVae:{_H3_AUDIO_VAE_KEY}（清单落点没有这份文件）")
+    return notes, missing
+
+
+def assembly_for_stage(stage: str = "h3", *, root: Path | None = None) -> dict[str, Any]:
+    """某档的清单条目 → ``ensure_loaded`` 的装配参数 ✓（**盘上没有的件一律不塞** ✗）。
+
+    为什么要有它：``/engine/generate`` 原来只吃**显式路径** ✓（``ditPath`` / ``textWeights`` …），
+    于是画布想跑一张图，得先知道 ``qwen_image_2.1_int8_convrot.safetensors`` 在哪 ✓✗ ——
+    那是让前端复刻一遍清单解析 ✗。这里按 ``STAGE_FILTERS`` 把件挑出来，
+    路径仍由 :func:`component_path` **单一真源**算 ✓。
+
+    ⚠️ 缺件**不报错、不塞期望路径** ✗：塞一个盘上不存在的路径 ⇒ 运行时读文件时才炸 ✓✗，
+    报错读起来像"权重坏了"✓；不塞 ⇒ ``_ensure_*_loaded`` 当场点名缺哪一格 ✓（含期望落点 ✓）。
+
+    ``note`` 里回报"这一档挑到了什么、缺什么"✓ —— 前端不必再问一次清单 ✓。
+    """
+    # ⚠️ H3 **不在这里挑** ✗✗：它的 ``STAGE_FILTERS`` 只有 ``category=video`` ✓，
+    #    会把 SEEDVR2 / Wan2.2 的件一起列出来（同一 category ✓）—— 按 kind 挑必然挑错主干 ✓✗。
+    #    H3 的口径是「fl2va 主件 + 双流 VAE」，那是 :func:`bridge.assembly_from_config` 的活 ✓。
+    if stage == "h3":
+        try:
+            from . import bridge  # 局部 import ✓（避开循环 ✓）
+
+            assembly = dict(bridge.assembly_from_config({}, stage="h3"))
+            notes, missing = _h3_real_parts(assembly, root)
+            if notes or missing:
+                assembly["note"] = "；".join(
+                    notes + ([f"缺 {len(missing)} 件：" + "、".join(missing)] if missing else []))
+            return assembly
+        except Exception as err:  # noqa: BLE001 —— 探不到就如实说 ✓（不让它变成 500 ✗）
+            return {"stage": "h3", "note": f"H3 自动装配没成：{str(err)[:160]}"}
+
+    picked = [item for item in stage_entries(stage)
+              if COMPONENT_SLOTS.get(str(item.get("kind") or ""))]
+    # 一档里既有必需件又有可选件时**只挑必需的** ✓：``image`` 档把五条链的件全列了 ✓✗，
+    # 照单全挑会得到"六个 dit"（那不是在装配一条链 ✗）。
+    entries = [item for item in picked if item.get("required", True)] or picked
+    assembly: dict[str, Any] = {"stage": stage}
+    notes: list[str] = []
+    missing: list[str] = []
+    dits: list[Path] = []
+    slot_paths: dict[str, Path] = {}
+
+    for entry in entries:
+        slot = COMPONENT_SLOTS[str(entry.get("kind"))]
+        path = component_path(entry, root)
+        if path is None:
+            missing.append(f"{slot}:{entry.get('key')}（清单没落点）")
+            continue
+        if not path.is_file():
+            missing.append(f"{slot}:{entry.get('key')}（{path.name} 不在盘上）")
+            continue
+        if slot == "dit":
+            dits.append(path)
+        else:
+            slot_paths.setdefault(slot, path)
+
+    # DiT：单件档直接给 dit_path ✓；Wan2.2 是**双专家** ✓（高噪 / 低噪各一份 ✓）
+    if len(dits) == 1:
+        assembly["dit_path"] = str(dits[0])
+    elif len(dits) > 1:
+        high = next((p for p in dits if "high" in p.name.lower()), None)
+        low = next((p for p in dits if "low" in p.name.lower()), None)
+        if high and low:
+            assembly["dit_path"] = str(high)
+            assembly["dit_path2"] = str(low)
+        else:
+            # 分不出高/低就按名字排序取前两件 ✓，并在 note 里**说清是猜的** ✗（不装作确定 ✓）
+            ordered = sorted(dits, key=lambda p: p.name.lower())
+            assembly["dit_path"] = str(ordered[0])
+            assembly["dit_path2"] = str(ordered[1])
+            notes.append("DiT 有两件但文件名分不出高/低 ⇒ 按名字排序取前两件（不确定 ✓）")
+
+    if "text" in slot_paths:
+        assembly["text_weights"] = str(slot_paths["text"])
+    if "vae" in slot_paths:
+        assembly[_SLOT_BY_STAGE_VAE.get(stage, _DEFAULT_VAE_SLOT)] = str(slot_paths["vae"])
+    if "checkpoint" in slot_paths:
+        # SDXL 走 ``dit_path``（它的"主干"就是 checkpoint ✓，见 ``bridge.resolve_sdxl_path`` ✓）
+        assembly.setdefault("dit_path", str(slot_paths["checkpoint"]))
+
+    # 词表：Qwen 系四档都要 ✓（不是权重 ✗ ⇒ 清单里没有 ✓）
+    #
+    # ⚠️ **按档问** :func:`tokenizer_hub.find_tokenizer_for_stage` ✓（目录名/仓库名认族 ✓
+    # ＋ ``tokenizer_class`` 排错族 ✓ 双判据 ✓）。第一版这里**拿 H3 的 Qwen3-VL-32B 词表
+    # 顶过所有档** ✗✗：四档文本塔分别是 Qwen3-4B / Qwen3.5-9B / Qwen2.5-VL-7B / Qwen3-VL-4B ✓，
+    # 喂错族「装得上、编得出、id 全错」且**一条报错都没有** ✗✗。
+    # 同理不许用 ``bridge.resolve_tokenizer_path`` ✗✗（那是 CLIP-BPE ✓，只有 SDXL 吃它 ✓）。
+    # 找不到就**不塞** ✗ ⇒ 运行时点名缺词表 ✓，并把"该往哪放"写进 note ✓。
+    #: ⚠️ ``music3`` **必须**在跳过名单里 ✗✗（2026-11-06 ✓）：它的词表**焊在语义塔权重里** ✓
+    #: （safetensors 的 ``tokenizer_json`` 键 ✓），盘上**没有** ``tokenizer.json`` ✓ ——
+    #: 让它去找词表 ⇒ 永远"缺一件" ✓✗，而那一件**根本不该存在** ✓（用户会去下载一份别族的 ✓✗，
+    #: 装是装得上 ✓、id 语义全错 ✓ —— 见 :meth:`torch_backend.TorchBackend.attach_music3_te` ✓）。
+    if stage not in ("h3", "sdxl", "seedvr2", "wan22", "music3"):
+        from . import tokenizer_hub  # 局部 import ✓（避开循环 ✓）
+
+        found = None
+        probe_error = ""
+        try:
+            found = tokenizer_hub.find_tokenizer_for_stage(stage)
+        except Exception as err:  # noqa: BLE001 —— 词表缺 ⇒ 运行时点名，这里不拦 ✓
+            probe_error = str(err)[:80]
+        if found and found.get("path"):
+            assembly["tokenizer_path"] = str(found["path"])
+            notes.append(f"词表用 {found.get('source')}（{found.get('tokenizerClass')}）")
+        elif probe_error:
+            missing.append(f"tokenizer（探测出错：{probe_error}）")
+        else:
+            spec = tokenizer_hub.STAGE_TOKENIZERS.get(stage, {})
+            where = spec.get("subdir") or "该档"
+            missing.append(
+                f"tokenizer（{spec.get('why', '该档')}——放一份到 "
+                f"<模型根>/tokenizers/{where}/ 或仓内 models/tokenizers/{where}/ 即可自动识别）")
+
+    if notes or missing:
+        assembly["note"] = "；".join(notes + ([f"缺 {len(missing)} 件：" + "、".join(missing)] if missing else []))
+    return assembly
 
 
 def readiness(stage: str = "h3", *, root: Path | None = None,

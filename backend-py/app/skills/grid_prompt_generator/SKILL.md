@@ -78,3 +78,20 @@ consistent lighting and color palette, no merged panels, no missing panels, no t
 - ✅ 借鉴**光线 / 构图 / 质感**的写法
 - ❌ **不要照抄原文**（合规红线）；也不要把参考里的主体 / 品牌搬进来
 - ⚠️ 返回 `available: false` 表示本机没装语料 ⇒ 改用已有词表，**不要编造**
+
+## 要成体系的写法时：查专项库（可选，`search_script_library`）
+
+`search_reference_prompts` 是「约 9000 条真实视频提示词」，强在**质感与光感**；
+要**角色造型 / 场景模板 / 运镜实例 / 情绪外化 / 特效**这类成体系的写法，查专项库：
+
+| 要什么 | 检索词举例 | 收窄 |
+|---|---|---|
+| 古风/现代人物的身份设定、造型、发型 | `古风男性角色 设定`／`女性造型 提示词` | `path_contains="library/general"` |
+| 场景模板（古风 / 都市 / 跨题材） | `古风场景 三镜头 模板` | 同上 |
+| 运镜实例（低空穿梭 / 权谋 / 虫视 / 鹰视） | `运镜 俯冲 实例` | 同上 |
+| 情绪怎么写成可拍的画面 | `情绪表达 克制` | 同上 |
+| 特效与施法手势 | `粒子 特效`／`施法 手势` | `library/general` 或 `library/ultimate` |
+
+- `source="playbook"` = 专项方法（137 份）；`source="methods"` = 剧本与写作著作（**结构与节奏**问题查它）。
+- 与上一节同样的纪律：只借鉴写法、**不照抄原文**；一次问一个具体维度；`available: false` 时改用
+  本 skill 与 `prompt-style-library` 的已有词表，**不要编造**。宫格布局仍以上面的模板为准。

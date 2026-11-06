@@ -31,7 +31,7 @@ from typing import Any
 __all__ = [
     "MAX_PIXELS", "MERGE_SIZE", "MIN_PIXELS", "PATCH_SIZE", "PIXEL_MEAN", "PIXEL_STD",
     "TEMPORAL_PATCH_SIZE", "pad_frames_even", "patchify", "process_image",
-    "process_video_block", "resize_plan",
+    "process_image_with", "process_video_block", "resize_plan",
 ]
 
 PATCH_SIZE = 16
@@ -88,15 +88,25 @@ def _torch() -> Any:
     return torch
 
 
-def _resize_normalize(planes: Any, height: int, width: int) -> Any:
-    """``(n, C, H, W)`` ⇒ 双线性 resize ⇒ ``(x - 0.5) / 0.5`` ✓。"""
+def _resize_normalize(planes: Any, height: int, width: int, *,
+                      mean_values: tuple[float, ...] | None = None,
+                      std_values: tuple[float, ...] | None = None,
+                      patch_size: int = PATCH_SIZE,
+                      merge_size: int = MERGE_SIZE) -> Any:
+    """``(n, C, H, W)`` ⇒ 双线性 resize ⇒ ``(x - mean) / std`` ✓。
+
+    ``mean_values`` / ``std_values`` 省略 ⇒ **本模块口径**（Qwen3-VL 的 0.5/0.5 ✓）；
+    Qwen2.5-VL 传 CLIP 均值方差 ✓（见 :mod:`.qwen25vl_vision` ✓ —— 混用**不报错**、只让整图偏色 ✗）。
+    """
     torch = _torch()
     functional = torch.nn.functional
-    plan = resize_plan(height, width)
+    plan = resize_plan(height, width, patch_size=patch_size, merge_size=merge_size)
     resized = functional.interpolate(planes, size=(plan["height"], plan["width"]),
                                      mode="bilinear", align_corners=False)
-    mean = torch.tensor(PIXEL_MEAN, device=resized.device, dtype=resized.dtype).view(1, 3, 1, 1)
-    std = torch.tensor(PIXEL_STD, device=resized.device, dtype=resized.dtype).view(1, 3, 1, 1)
+    mean_tuple = PIXEL_MEAN if mean_values is None else tuple(mean_values)
+    std_tuple = PIXEL_STD if std_values is None else tuple(std_values)
+    mean = torch.tensor(mean_tuple, device=resized.device, dtype=resized.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(std_tuple, device=resized.device, dtype=resized.dtype).view(1, 3, 1, 1)
     return (resized - mean) / std, plan
 
 
@@ -125,11 +135,37 @@ def process_image(pixels: Any, *, patch_size: int = PATCH_SIZE,
         raise ValueError(f"单图必须是 ``(H, W, C)`` 三维 ✗（收到 {tuple(pixels.shape)}）")
     height, width = int(pixels.shape[0]), int(pixels.shape[1])
     planes = pixels[..., :3].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
-    normalized, plan = _resize_normalize(planes, height, width)
+    #: ⚠️ ``patch_size`` / ``merge_size`` **必须**传给 resize ✓✗ —— 不传就是「按 16/2 定网格、
+    #:    再按 14 切 patch」✓（网格与 patch 不同源 ⇒ 下标全错 ✓、还不报错 ✗）
+    normalized, plan = _resize_normalize(planes, height, width,
+                                         patch_size=patch_size, merge_size=merge_size)
     grid_h, grid_w = int(plan["gridH"]), int(plan["gridW"])
     doubled = normalized[0].unsqueeze(0).repeat(TEMPORAL_PATCH_SIZE, 1, 1, 1)
     return patchify(doubled, grid_h, grid_w, patch_size=patch_size, merge_size=merge_size), \
         (1, grid_h, grid_w)
+
+
+def process_image_with(pixels: Any, *, mean_values: Any, std_values: Any,
+                       patch_size: int, merge_size: int) -> tuple[Any, tuple[int, int, int]]:
+    """单图 ``(H, W, C)`` ⇒ ``(patches, (1, grid_h, grid_w))``，**归一化口径由调用方给**。
+
+    与 :func:`process_image` 只差「均值方差 / patch 尺寸」两件事 —— Qwen2.5-VL（Edit 2511 的
+    参考图）是 **CLIP 均值方差 + patch 14**，Qwen3-VL（H3）是 0.5 均值 + patch 16。
+    独立成函数而不是加默认参数：**混用不报错**，只会让整张参考图偏色 / 网格错位。
+    """
+    torch = _torch()
+    if pixels.dim() != 3:
+        raise ValueError(f"单图必须是 ``(H, W, C)`` 三维（收到 {tuple(pixels.shape)}）")
+    height, width = int(pixels.shape[0]), int(pixels.shape[1])
+    planes = pixels[..., :3].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
+    normalized, plan = _resize_normalize(planes, height, width,
+                                         mean_values=tuple(mean_values),
+                                         std_values=tuple(std_values),
+                                         patch_size=patch_size, merge_size=merge_size)
+    grid_h, grid_w = int(plan["gridH"]), int(plan["gridW"])
+    doubled = normalized[0].unsqueeze(0).repeat(TEMPORAL_PATCH_SIZE, 1, 1, 1)
+    return patchify(doubled, grid_h, grid_w, patch_size=patch_size,
+                    merge_size=merge_size), (1, grid_h, grid_w)
 
 
 def process_video_block(frames: Any, *, patch_size: int = PATCH_SIZE,
@@ -144,7 +180,8 @@ def process_video_block(frames: Any, *, patch_size: int = PATCH_SIZE,
             f"参考的 ``grid_t`` 恒为 1 ✓：多给的帧会被当成时间维 ✓ 位置表就对不上了 ✗）")
     height, width = int(frames.shape[1]), int(frames.shape[2])
     planes = frames[..., :3].permute(0, 3, 1, 2).to(_torch().float32)
-    normalized, plan = _resize_normalize(planes, height, width)
+    normalized, plan = _resize_normalize(planes, height, width,
+                                         patch_size=patch_size, merge_size=merge_size)
     grid_h, grid_w = int(plan["gridH"]), int(plan["gridW"])
     return patchify(normalized, grid_h, grid_w, patch_size=patch_size,
                     merge_size=merge_size), (1, grid_h, grid_w)

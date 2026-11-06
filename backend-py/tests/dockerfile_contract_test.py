@@ -63,8 +63,17 @@ def main() -> int:
     check("布局: FRONTEND_DIST == <仓库根>/frontend/dist（与 COPY 目标一致）",
           os.path.normcase(str(frontend_dist)) == os.path.normcase(str(REPO / "frontend" / "dist")),
           frontend_dist)
-    check("前端构建产物存在（`COPY --from` 的源 /app/frontend/.output/public）",
-          (REPO / "frontend" / ".output" / "public" / "index.html").is_file())
+    # ②b 前端静态产物：**镜像里是现场生成的**（`RUN npm run generate`，再由 `COPY --from` 搬进
+    #     `./frontend/dist`）⇒ 本地有没有产物**不影响** `docker build` 的成败，拿它当硬判据会让
+    #     从没在本地跑过 generate 的机器长期红（2026-11-04 实测：`.output/public/` 在、`_nuxt/` 在，
+    #     只缺 `index.html`——那说明上次跑的是 `nuxt build` 的 SSR 产物，不是 `generate`）。
+    #     真会坏的路径是「Dockerfile 不再生成」，所以判据盯**那一行**；本地产物只在存在时核非空 ✗
+    check("Dockerfile 里 `RUN npm run generate` 必须在（镜像内静态生成；删掉它 ⇒ `COPY --from` 搬空目录 ✗）",
+          "npm run generate" in code)
+    idx = REPO / "frontend" / ".output" / "public" / "index.html"
+    check("前端静态产物：本地未构建不判（镜像内现场生成 ✓）；有就核非空",
+          True if not idx.exists() else idx.stat().st_size > 0,
+          "本地无产物" if not idx.exists() else f"{idx.stat().st_size} 字节")
 
     # ③ 每个 COPY 源都得真实存在（否则 `docker build` 直接失败）
     for relative in ("backend-py/requirements.txt", "configs/config.example.yaml",
@@ -102,6 +111,20 @@ def main() -> int:
     # ⑦ .dockerignore 必须排除 venv / __pycache__（否则构建上下文白拖几百 MB）
     check("dockerignore: 排除 backend-py/.venv", "backend-py/.venv" in ignore)
     check("dockerignore: 排除 __pycache__", "**/__pycache__" in ignore)
+
+    # ⑦b 构建上下文里的大目录（2026-11-04 实测）：docker 把**整个工作区**打成上下文送 daemon，
+    #     与 `COPY` 什么**无关** ⇒ 不排除就等于每次 build 先搬十几 GB（`desktop/src-tauri/target`
+    #     6.5 GB、`data/models` 3.68 GB、`data/ocr` 1.36 GB）。
+    #     ⚠️ 判**整行规则**而不是子串：`"data" in ignore` 会被「数据根… data/ocr」这类注释行或
+    #     `data/static` 半条规则满足 ⇒ 看着绿、其实整根没挡 ✗（这正是本轮修掉的那处）
+    rules = {ln.strip() for ln in ignore.splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")}
+    for big, why in (("desktop", "Rust 编译产物 6.5 GB；前端阶段只要 frontend/"),
+                     ("data", "媒体与模型 5 GB（VOLUME 挂宿主，镜像里只 mkdir）"),
+                     ("models", "词表 16 MB"), ("benchmarks", "评估用例 JSON"),
+                     ("backend-py/output", "引擎真跑产物"),
+                     ("backend-py/_bench", "调试草稿区")):
+        check(f"dockerignore: 整根排除 {big}（{why}）", big in rules, sorted(rules))
 
     # ⑧ 编排文件（docker-compose）必须与镜像同口径 —— 它是**独立手写**的，最容易漏改
     #    （本项目真实发生过：Dockerfile 改完了、compose 还写着 5789/NODE_ENV）

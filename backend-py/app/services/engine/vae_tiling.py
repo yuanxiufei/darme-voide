@@ -242,12 +242,18 @@ def latent_tile(pixel_tile: int, pixel_overlap: int, spatial_scale: int) -> tupl
 def decode_latents_tiled(decode_fn: Callable[[Any], Any], latents: Any, *,
                          spatial_scale: int, tile: int = TILE_DEFAULTS["tile"],
                          overlap: int = TILE_DEFAULTS["overlap"],
+                         out_channels: int | None = None,
                          progress: Callable[[int, int], None] | None = None) -> Any:
     """潜变量 ⇒ 像素，按**像素**尺寸切块 ✓（``decode_fn`` 只负责一块 ⇒ 不含缩放系数 ✓）。
 
     ⚠️ 只切**空间** ✓✗：5 维（``(b,c,t,h,w)``）也照样只切末两维 ✓ —— 时间维带因果卷积 ✓，
     切了接缝**在帧间闪** ✗（见模块头 ✓）。
+
+    ⚠️ ``out_channels`` **解码器必须给** ✓✗：不传就按**输入**通道数核每块的形状 ✓，而 VAE 解码
+    是「4 个潜通道 → 3/4 个像素通道」✓ ⇒ 形状校验当场报「预期 (1,4,…) 实际 (1,3,…)」✓
+    （报错指向"检查 upscale 与通道数"✓ —— 那句话就是给这个参数用的 ✓）。
     """
     tile_latent, overlap_latent = latent_tile(tile, overlap, spatial_scale)
     return tiled_scale(latents, decode_fn, (tile_latent, tile_latent), overlap_latent,
-                       upscale=int(spatial_scale), progress=progress)
+                       upscale=int(spatial_scale), out_channels=out_channels,
+                       progress=progress)

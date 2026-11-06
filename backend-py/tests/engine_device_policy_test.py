@@ -16,6 +16,11 @@ import re
 import sys
 from pathlib import Path
 
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 第一条打印就崩，判据一条都跑不到 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.engine import device_policy as dp  # noqa: E402
@@ -641,6 +646,344 @@ def case_hand_copies() -> None:
           {"报的": peak.get("peakGiB"), "常量": tb.TorchBackend.PART_NEED_GIB})
 
 
+def case_residency_kind() -> None:
+    """⑪ 余量档的**件类型归一** ✓✗（2026-11-01 加 ✓）—— 这一层漏了，改动白做。
+
+    ## 抓的是什么 ✗
+
+    `_place_with_residency(what=...)` 的 ``what`` 是**报告名** ✓，H3 那两件写的是
+    ``"h3"`` / ``"h3-te"`` ✓（grep `_place_int8_module` 可证 ✓）。余量表只认
+    ``dit``/``te``/``vae`` ✓ ⇒ 少了归一这一步，**最需要省余量的那件**（25.44 GiB 的 H3 文本塔 ✓）
+    查表查不到、退回 25% ✓✗ —— 而报告里 ``reserve`` 那一格还会显示 0.25，看起来"生效了" ✓✗。
+    """
+    from app.services.engine import residency as r  # noqa: PLC0415
+
+    got = {name: tb._residency_kind(name)
+           for name in ("dit", "h3", "te", "h3-te", "h3-audio-vae", "vae", "text", "text-te")}
+    check("⑪ `what` ⇒ 件类型：DiT 两侧（dit / h3）都归 dit ✓",
+          got["dit"] == "dit" and got["h3"] == "dit", got)
+    check("⑪ `what` ⇒ 件类型：文本塔两侧（te / h3-te）都归 te ✓✗",
+          got["te"] == "te" and got["h3-te"] == "te", got)
+    check("⑪ `what` ⇒ 件类型：含 vae 的归 vae（h3-audio-vae ✓）", got["h3-audio-vae"] == "vae", got)
+    check("⑪ `what` ⇒ 件类型：认不出**返回 None** ✓（不许瞎猜一个类型 ✗）",
+          tb._residency_kind("unknown-part") is None
+          and tb._residency_kind(None) is None
+          and tb._residency_kind("") is None,
+          [tb._residency_kind(n) for n in ("unknown-part", None, "")])
+    #: ⭐ 顺序判据 ✗✗：``"h3-te"`` 同时含 ``h3`` ✓ —— 归一里 te 必须**先判** ✓，
+    #: 否则文本塔被判成 DiT、余量从 5% 变 25% ✓✗（这条断言就是那次踩坑的锚 ✓）。
+    check("⑪ 归一顺序：`h3-te` 不许被 `h3` 抢走（先判 te 再判 dit）",
+          r.reserve_for(tb._residency_kind("h3-te")) < r.reserve_for(tb._residency_kind("h3")),
+          {"h3-te": r.reserve_for(tb._residency_kind("h3-te")),
+           "h3": r.reserve_for(tb._residency_kind("h3"))})
+    check("⑪ 认不出件类型 ⇒ 余量退回 25%（保守侧）",
+          r.reserve_for(tb._residency_kind("unknown-part")) == r.DEFAULT_RESERVE,
+          r.reserve_for(tb._residency_kind("unknown-part")))
+
+
+def case_reserve_report() -> None:
+    """⑪′ **报告里要看得见**「按哪一档余量算的」与「GPU 承担了多少」✓✗（2026-11-01 加 ✓）。
+
+    ## 为什么这两格值得占一条测试 ✗
+
+    用户的问题原话是「为什么绝大部分计算由 CPU 承担」✓ —— 而改动前**报告里根本没有能回答它的数** ✓✗：
+    ``budgetMib`` / ``layersOnGpu`` 都只说明"切成了什么样" ✓，不说明"按什么口径切的" ✓
+    （同一个 15.53 GiB 预算，可能是 25% 余量算出来的、也可能是显式给的 ✓✗，读者分不出 ✓），
+    也不说明"GPU 到底吃下几成" ✓（``layersOnGpu`` 是**层数**不是字节 ✓ —— 各层大小不等时它和
+    字节占比不是一回事 ✓✗）。
+
+    ⇒ 判据三格：``reserve`` 报对 ✓、``reserveKind`` 报对 ✓、``gpuShare`` 分母算对 ✓。
+    这里刻意用**默认预算**（现算、远大于小塔 ⇒ 整份上卡 ✓）⇒ ``gpuShare`` 必须正好 1.0 ✓✗
+    （写成 ``cpu/(gpu+cpu)`` 或漏了分母为 0 的分支，这里立刻现形 ✓）。
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        _SKIPS.append("⑪′ 报告里的余量/GPU 占比（本机没装 torch ✓）")
+        return
+    if not torch.cuda.is_available():
+        _SKIPS.append("⑪′ 报告里的余量/GPU 占比（本机没有可用 CUDA ✓）")
+        return
+    from torch import nn  # noqa: PLC0415
+
+    class _Tower(nn.Module):
+        def __init__(self, hidden: int = 32, depth: int = 3) -> None:
+            super().__init__()
+            self.embed = nn.Embedding(16, hidden)
+            self.layers = nn.ModuleList([nn.Linear(hidden, hidden) for _ in range(depth)])
+            self.norm = nn.LayerNorm(hidden)
+
+    torch.manual_seed(11)
+    backend = tb.TorchBackend(device="cuda")
+    backend._residency = "split"            # noqa: SLF001 —— 走联合那条路才会算余量 ✓
+    backend._residencyBudgetMib = None      # noqa: SLF001 —— 刻意让预算**现算** ✓
+    report = backend._place_with_residency(_Tower(), what="h3-te")  # noqa: SLF001
+    check("⑪′ 报告写明**按哪一档余量**算的（`what=h3-te` ⇒ 5% ✓，不是默认 25%）",
+          report is not None and report.get("reserve") == 0.05
+          and report.get("reserveKind") == "te", report)
+    check("⑪′ 报告写明 **GPU 承担的字节占比**（默认预算 ⇒ 整份上卡 ⇒ 正好 1.0 ✓✗）",
+          report is not None and report.get("gpuShare") == 1.0
+          and int(report.get("layersOnCpu") or 0) == 0, report)
+    #: ⚠️ 反向：DiT 那件**不许**跟着降到 5% ✓✗（它的激活真能到十几 GiB ✓）
+    backend2 = tb.TorchBackend(device="cuda")
+    backend2._residency = "split"           # noqa: SLF001
+    backend2._residencyBudgetMib = None     # noqa: SLF001
+    report2 = backend2._place_with_residency(_Tower(), what="dit")  # noqa: SLF001
+    check("⑪′ 反向：`what=dit` 仍是 25% 余量 ✓（小件不许把 DiT 的尺子借走）",
+          report2 is not None and report2.get("reserve") == 0.25
+          and report2.get("reserveKind") == "dit", report2)
+
+
+def case_residency_total() -> None:
+    """⑫ 跨件汇总成**一个数** ✓✗（`runtime.residency_total` ✓）。
+
+    ## 为什么这条值得占一格 ✗
+
+    创作者的原问题就是「显存那么大，为什么绝大部分计算由 CPU 承担」✓ —— 而报告里此前
+    **没有一处能一眼回答** ✓✗：每件各报各的，而且**深度不统一**（DiT 在 `weights.residency`、
+    TE/VAE 在 `components[x].residency`、`phased` 的件根本没有 ✓、`components["dit"]`
+    常常只是路径字符串 ✓✗）⇒ 要人自己加五六个小数 ✓，加错也看不出来 ✓✗。
+
+    ⇒ 判据四件事：**深度**（两处都要找到 ✓）、**去重**（同一份账挂两处不许翻倍 ✓✗）、
+    **空账不编 0**（`None` ≠ `0` ✓✗）、**分母为 0 不给 `gpuShare`**（编 1.0 会被读成"全在卡上"✓✗）。
+    """
+    from app.services.engine import runtime as rt  # noqa: PLC0415
+
+    check("⑫ 一件驻留账都没有（全是路径字符串 / `phased: true`）⇒ **`None`** ✓✗"
+          "（编成 `0` 会把「这次没有联合驻留的账」读成「卡上什么都没」✓）",
+          rt.residency_total({"components": {"dit": "img.safetensors",
+                                             "textEncoder": {"phased": True, "loaded": False}}}) is None,
+          "")
+
+    #: 刻意照**实测那份**摆（2512 bf16：DiT 卡上 15.9 / 内存 22.15，VAE 0.24 在卡上 ✓）
+    dit = {"gpuGiB": 15.9, "cpuGiB": 22.15}
+    report = {"weights": {"path": "dit.safetensors", "residency": dit},
+              "components": {"dit": "dit.safetensors",
+                             "vae": {"kind": "qwen_image", "residency": {"gpuGiB": 0.24, "cpuGiB": 0.0}},
+                             "textEncoder": {"phased": True}}}
+    total = rt.residency_total(report)
+    check("⑫′ **两处深度都找到** ✓（`weights.residency` ＋ `components[x].residency` ⇒ 16.14 / 22.15）",
+          total is not None and total["gpuGiB"] == 16.14 and total["cpuGiB"] == 22.15
+          and total["parts"] == 2, total)
+    check("⑫″ **按字节**给占比 ✓（16.14 / 38.29 ⇒ 0.4215），且写明「不是速度占比」✓✗",
+          total is not None and total["gpuShare"] == 0.4215
+          and total.get("judgedOn") == "bytes" and "速度" in str(total.get("note")), total)
+
+    same = {"gpuGiB": 15.9, "cpuGiB": 22.15}
+    twice = rt.residency_total({"weights": {"residency": same},
+                                "components": {"dit": {"residency": same}}})
+    check("⑫‴ 同一份账挂在两处 ⇒ **只算一次** ✓✗（按 `id` 去重；不去重会凭空翻倍成 31.8 / 44.3）",
+          twice is not None and twice["gpuGiB"] == 15.9 and twice["parts"] == 1, twice)
+
+    empty = rt.residency_total({"components": {"x": {"residency": {"gpuGiB": 0.0, "cpuGiB": 0.0}}}})
+    check("⑫⁴ 分母为 0 ⇒ **`gpuShare` 给 `None`** ✓✗（编 1.0 会被读成「整份在卡上」—— "
+          "而那恰好是 `fits=False` 那一档的反面 ✓）",
+          empty is not None and empty["gpuShare"] is None and empty["gpuGiB"] == 0.0, empty)
+
+    #: ⚠️ 真跑才露头的那一格 ✗✗（2026-11-01 ✓）：Edit 2511 走 int8 常驻后 `residency="off"`
+    #: ⇒ **一次 split 都没发生** ⇒ 报告里没有任何逐件驻留账 ⇒ 只看字节汇总会得 `None` ✓✗，
+    #: 而 `None` 恰好落在最该被夸的那一次（整份上卡 ✓）上 ⇒ 必须退回**决策**读 ✓。
+    off_report = {"devicePolicy": {"lastDecision": {"device": "cuda", "residency": "off"}}}
+    cpu_report = {"devicePolicy": {"lastDecision": {"device": "cpu", "residency": "off"}}}
+    off_total = rt.residency_total(off_report)
+    cpu_total = rt.residency_total(cpu_report)
+    check("⑫⁶ 一次 `split` 都没有 ⇒ 退回**决策**：`gpuShare=1.0`、`gpuGiB=None`（字节数**就是不知道** ✓✗"
+          "—— 编一个数比空着更坏 ✓）、`judgedOn=\"residency\"` ✓",
+          off_total is not None and off_total["gpuShare"] == 1.0
+          and off_total["gpuGiB"] is None and off_total["judgedOn"] == "residency", off_total)
+    check("⑫⁷ `device=cpu` ⇒ `gpuShare=0.0` ✓（**降级** ✓，note 里不许写成已优化 ✓✗）",
+          cpu_total is not None and cpu_total["gpuShare"] == 0.0
+          and "降级" in str(cpu_total.get("note")), cpu_total)
+    check("⑫⁸ 连决策都没有 ⇒ 仍是 `None` ✓✗（`None` 只留给「这次什么都不知道」✓）",
+          rt.residency_total({"components": {"dit": "x.safetensors"}}) is None, "")
+
+    #: ⚠️ 接线 ✗✗：算得再对，不挂到**四条线共用的那一个人口** ⇒ 回执里永远没有这一格 ✓✗
+    source = inspect.getsource(rt.EngineRuntime._commit_load)
+    check("⑫⁵ 汇总挂在 `_commit_load`（四条装配线的**唯一**人口 ✓）—— 各线自己加必漏一条 ✓✗",
+          "residency_total(report)" in source and 'report["residencyTotal"]' in source, "")
+
+
+def case_no_park_in_auto() -> None:
+    """⑬ `auto` **不选** `park` ✓✗（2026-11-01 裁定 ✓）。
+
+    ## 判据不是"我这么想"，是两条可算的数 ✓
+
+    * ``park`` 每步单向搬 ``plan.layer_bytes`` ＝ **全部层的权重** ✓（2512 那族 ≈38 GiB ✓、双向 76 ✓）；
+    * ``split`` 每步搬 **一条跨界激活** ✓（`Plan.transfer_bytes("split")` 明写**返回 None** ✓
+      —— 它不知道激活多大，且**不猜** ✓）。
+
+    ⇒ 同样的模型同样的卡，自动选 park 只会更慢一个量级 ✓✗。它留在手工档 ✓，
+    并且 `split` 必须继续标 ``degraded=True`` ✓（"卡装不下但还得用卡"的兜底 ✓，不是优化 ✓✗）。
+    """
+    from app.services.engine import device_policy as dp  # noqa: PLC0415
+    from app.services.engine import residency as res  # noqa: PLC0415
+
+    check("⑬ `AUTO_RESIDENCIES` 里**没有** `park` ✓✗，但 `park` 仍在 `residency.MODES` 里 ✓"
+          "（手工档要留 ✓ —— 收成「删掉 park」是把工具也一起删了 ✓✗）",
+          "park" not in dp.AUTO_RESIDENCIES and "park" in res.MODES
+          and set(dp.AUTO_RESIDENCIES) <= set(res.MODES), (dp.AUTO_RESIDENCIES, res.MODES))
+
+    total = int(22.49 * dp.GIB)
+    seen: set[str] = set()
+    bad: list[str] = []
+    for free_gib, need_gib in ((20.0, 13.26), (6.0, 38.05), (0.2, 38.05),
+                               (20.0, 0.0), (0.5, 0.0), (0.9, 13.26)):
+        for name in ("auto", "balanced"):
+            decided = dp.decide(policy=name, need_bytes=int(need_gib * dp.GIB),
+                                pressure=dp.Pressure(totalBytes=total,
+                                                     freeBytes=int(free_gib * dp.GIB)))
+            seen.add(decided.residency)
+            if decided.residency not in dp.AUTO_RESIDENCIES:
+                bad.append(f"{name}@free{free_gib}/need{need_gib}⇒{decided.residency}")
+    check("⑬′ 六种压力 × 两档策略 ⇒ 只出现 `off`/`split` ✓✗（`park` 一次都不许冒头 ✓）",
+          not bad and seen <= set(dp.AUTO_RESIDENCIES), {"seen": sorted(seen), "bad": bad})
+
+    split = dp.decide(policy="auto", need_bytes=int(38.05 * dp.GIB),
+                      pressure=dp.Pressure(totalBytes=total, freeBytes=int(6.0 * dp.GIB)))
+    check("⑬″ 联合是**兜底不是优化** ✓✗：`split` 必须 `degraded=True`（写成 `False` ⇒ "
+          "报告会读成「已经安排好了」✓✗，而它其实每步都在跨界搬 ✓）",
+          split.residency == "split" and split.degraded, split.to_dict())
+
+
+def case_need_by_file() -> None:
+    """⑭ 需求数**跟着文件走** ✓✗（2026-11-02 ✓）：同一族的 int8 / int4 / bf16 三档分别算 ✓。
+
+    ## 抓的那个真缺陷
+
+    Krea2 那条线的驻留账 ``{dit 12.57, text 7.5, vae 0.24}`` 是**int8 档**量的 ✓
+    （``krea2_turbo_int8_convrot.safetensors`` ✓、224 层 ``Int8Linear`` 常驻 ✓）。同族还有
+    **int4 档**（5.98 GiB ✓）—— 它**没有** int4 常驻壳 ⇒ 装起来要反量化成 bf16 ＝
+    **23.89 GiB** ✓✗。拿 12.57 判「装得下」⇒ `auto` 判 `off` ⇒ 整份上卡 ⇒ 采样第 1 步 OOM ✓，
+    而报错落在 ``alloc`` 上 ✓（读起来像"显存不够"，其实**需求数用错了档** ✗）。
+
+    ## 反向的那一半
+
+    表值也**不能**被精算覆盖成小值 ✗：Qwen-Image 2512 的 ``38.05`` 就是 bf16 那份的真驻留 ✓
+    ⇒ 把 ``residency_total`` 的"看谁小用谁"搬到这里 ⇒ int8 那份的 19.09 会被 38.05 顶掉 ✓✗
+    （反过来也会：拿 19.09 判 2512 ⇒ 装到 20 GiB 才 OOM ✓）。所以判据是**档位对不对** ✓，
+    不是**谁大谁小** ✓✗。
+    """
+    from app.services.engine import safetensors as st  # noqa: PLC0415
+    from app.services.engine import torch_backend as tb  # noqa: PLC0415
+
+    class _Entry:
+        """假头部里的一格 ✓ —— ``nbytes`` 必须**真算**（精算是逐张量乘的 ✓，返回 0 就测不出差 ✓）。"""
+
+        def __init__(self, dtype: str, shape: tuple[int, ...]) -> None:
+            self.dtype, self.shape = dtype, shape
+
+        @property
+        def element_count(self) -> int:
+            total = 1
+            for dim in self.shape:
+                total *= dim
+            return total
+
+        @property
+        def nbytes(self) -> int:
+            return self.element_count * tb._DTYPE_BYTES.get(self.dtype.upper(), 1)  # noqa: SLF001
+
+    class _Info:
+        def __init__(self, tensors: dict[str, Any]) -> None:
+            self.tensors, self.ok, self.problems = tensors, True, []
+            self.total_tensor_bytes = sum(item.nbytes for item in tensors.values())
+            self.file_bytes = self.total_tensor_bytes + 2048
+            self.metadata: dict[str, Any] = {}
+
+    rows = (1_000_000, 1000)            #: 1e9 参 ⇒ int8 档占 0.93 GiB、反量化后 1.86 GiB ✓
+    int8_info = _Info({"b.0.w.weight": _Entry("I8", rows),
+                       "b.0.w.weight_scale": _Entry("F32", (1_000_000, 1))})
+    plain_info = _Info({"b.0.w.weight": _Entry("BF16", rows)})
+    int4_info = _Info({"b.0.w.weight": _Entry("I8", (1_000_000, 500)),   #: 打包列＝逻辑列÷2 ✓
+                       "b.0.w.weight_scale": _Entry("F32", (1_000_000, 1))})
+    int4_specs = {"b.0.w": {"format": "convrot_w4a4", "convrot_groupsize": 256}}
+
+    real_inspect, real_specs = st.inspect, tb.loader.quant_specs_of
+
+    def _fake(info: Any, specs: dict[str, Any]) -> None:
+        st.inspect = lambda path: info                                    # noqa: ARG005
+        tb.loader.quant_specs_of = lambda path, info=None: dict(specs)    # noqa: ARG005
+
+    try:
+        _fake(plain_info, {})
+        gib_match, why_match = tb.part_need_gib(
+            "x.safetensors", fallback=7.5, adapter="int8", assume="plain")
+        check("⑭ 文件档 == 表值的出处档（bf16 文件 ＋ `assume=\"plain\"`）⇒ **用表值** ✓✗"
+              "（表值是**实测驻留**、含骨架自建参数 ✓ ⇒ 比只算数据区更准 ✓）",
+              abs(gib_match - 7.5) < 1e-9 and why_match.get("source") == "table", why_match)
+
+        _fake(int8_info, {})
+        gib_shell, why_shell = tb.part_need_gib(
+            "x.safetensors", fallback=7.5, adapter="krea2", assume="plain")
+        gib_noshell, why_noshell = tb.part_need_gib(
+            "x.safetensors", fallback=7.5, adapter=None, assume="plain")
+        check("⑭′ 档不匹配 ⇒ **按文件精算** ✓✗：int8 层**有常驻壳**（`adapter=\"krea2\"` ✓）"
+              "⇒ 数据区 0.93 GiB ✓；**没有壳**（`adapter=None` ✓）⇒ 反量化成 bf16 ＝ "
+              "**1.86 GiB**（1 B/参 → 2 B/参 ✓，按字面换算、不是拍的倍率 ✓）",
+              abs(gib_shell - 0.93) < 0.02 and abs(gib_noshell - 1.86) < 0.03
+              and why_shell.get("source") == "file"
+              and why_noshell.get("source") == "file", (why_shell, why_noshell))
+
+        _fake(int4_info, int4_specs)
+        #: ⭐ 4bit 档的**两个方向都要钉住**（2026-11-02 补壳后 ✓）：
+        #:   有壳（`adapter="krea2"` ✓）⇒ **打包字节** 0.47 GiB ✓；
+        #:   无壳（`adapter=None` ✓）⇒ 反量化成 bf16 ＝ 1.86 GiB ✓（逻辑参 × 2 B ✓）。
+        #: ⚠️ 无壳那一支**不能**拿打包形状乘（那样只有一半 ✓✗）—— 就是 `Krea2 int4` 真身
+        #: 23.89 GiB 与「表里 12.57」之间那 2 倍差距的同一条算错 ✓。
+        gib_int4, why_int4 = tb.part_need_gib(
+            "x.safetensors", fallback=12.57, adapter="krea2", assume="int8")
+        gib_int4_bare, why_int4_bare = tb.part_need_gib(
+            "x.safetensors", fallback=12.57, adapter=None, assume="int8")
+        check("⑭″ **int4 档**：有 4bit 常驻壳 ⇒ **打包字节 0.47 GiB** ✓；没有壳 ⇒ 反量化 bf16 "
+              "＝ **1.86 GiB** ✓（逻辑参 × 2 B ✓，按字面换算 ✓）—— 两条都必须是 `source=file` ✓",
+              why_int4.get("mode") == "int4" and abs(gib_int4 - 0.47) < 0.02
+              and abs(gib_int4_bare - 1.86) < 0.03
+              and why_int4.get("int4ShellLayers") == 1
+              and why_int4_bare.get("int4ShellLayers") == 0,
+              (why_int4, why_int4_bare))
+
+        plan_raw = tb.int8_scale_plan(int4_info, int4_stems=quant_int4_stems(int4_specs))
+        plan_bad = tb.int8_scale_plan(int4_info)
+        check("⑭‴ 4bit 打包层**不进** int8 常驻计划 ✓✗（它存成 `I8` ＋ 带 `weight_scale`，"
+              "与 per-row int8 **逐字同形** ✓）—— 传了 `int4_stems` ⇒ 计划空 ✓；不传 ⇒ "
+              "**会被当成 int8 换壳**（形状全对、数值全错 ✓✗），这条留作反证 ✓",
+              plan_raw == {} and plan_bad != {}, {"排除": plan_raw, "不排除": plan_bad})
+
+        def _boom(path: Any) -> Any:
+            raise OSError("模拟读不出头部")
+
+        st.inspect = _boom
+        gib_miss, why_miss = tb.part_need_gib(
+            "no_such_file.safetensors", fallback=12.57, adapter="krea2", assume="int8")
+        check("⑭⁴ 读不到头部 ⇒ **退回表值** ✓（不猜、不炸 ✓），且写明「为什么是表值」✓",
+              abs(gib_miss - 12.57) < 1e-9 and why_miss.get("source") == "table"
+              and "读不出头部" in str(why_miss.get("why") or ""), why_miss)
+    finally:
+        st.inspect, tb.loader.quant_specs_of = real_inspect, real_specs
+
+    #: ⚠️ 接线 ✗✗：算得再对，装配线不调它 ⇒ 白改 ✓（五条线逐条查，一条都不许漏 ✓✗）。
+    from app.services.engine import runtime as rt  # noqa: PLC0415
+    sources = {
+        "h3": inspect.getsource(rt.EngineRuntime._ensure_loaded_internal),  # noqa: SLF001
+        "zimage": inspect.getsource(rt.EngineRuntime._ensure_zimage_loaded),
+        "qwen21": inspect.getsource(rt.EngineRuntime._ensure_qwen21_loaded),
+        "krea2": inspect.getsource(rt.EngineRuntime._ensure_krea2_loaded),
+        "qwen_image": inspect.getsource(rt.EngineRuntime._ensure_qwen_image_loaded),
+        "sdxl": inspect.getsource(rt._image_device_decision),
+    }
+    missing = [name for name, text in sources.items() if "part_need_gib(" not in text]
+    check("⑭⁵ 六条装配线（h3 / zimage / qwen21 / krea2 / qwen_image / sdxl）**都**按文件取需求 ✓✗"
+          "（漏一条 ⇒ 那条换量化档时仍按旧表判 ✓，症状是 OOM 或白白切一半到内存 ✓✗）",
+          not missing, {"缺": missing})
+
+
+def quant_int4_stems(specs: dict[str, Any]) -> frozenset[str]:
+    """测试用：把假 specs 翻成「4bit 层集合」✓（判据只走 `quant.int4_stems_of` 一处 ✓）。"""
+    from app.services.engine import quant  # noqa: PLC0415
+
+    return quant.int4_stems_of(specs)
+
+
 def main() -> int:
     print(f"== 设备策略自检（{dp.POLICIES} ✓）==")
     case_decide()
@@ -652,6 +995,11 @@ def main() -> int:
     case_zimage()
     case_residency_te()
     case_split_forward()
+    case_residency_kind()
+    case_reserve_report()
+    case_residency_total()
+    case_need_by_file()
+    case_no_park_in_auto()
     case_hand_copies()
     for note in _SKIPS:
         print(f"SKIP  {note}")

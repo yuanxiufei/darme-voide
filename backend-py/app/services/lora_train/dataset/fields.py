@@ -1,6 +1,6 @@
 """**素材工具的参数体系** ✓ —— 改名 / 转格式 / 自动打标 三个工具的取值口径 ✓。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/dataset_manager/`` 下的
+出处（参考实现 ✓）：``LoRAMaster/dataset_manager/`` 下的
 ``image_rename_settings.toml`` ✓、``image_convert_settings.toml`` ✓、``caption_settings.toml`` ✓，
 以及 ``image_rename.py`` / ``image_convert.py`` / ``AutoCaptioning.py`` 里读这些键的代码 ✓。
 形状与 :mod:`app.services.lora_train.options` **完全一致** ✓（同样是

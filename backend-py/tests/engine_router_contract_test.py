@@ -329,12 +329,65 @@ def case_assembly_keys() -> None:
     #: 只写「装齐引擎」时，前端与人都不知道有 `policy` 可传 ✓，也不知道该读
     #: `chainDevicePolicy` 才能回答「为什么这次整条链在 CPU」✓✗（只看 `device` 会把一次
     #: 降级读成能力缺失 ✓✗）。这条判据盯的是**字面量**，不是文风 ✓。
+    #: ⭐ **VAE 解码省显存旋钮**（2026-11-02 ✓）：对象形 ✓、两种键写法 ✓、`0`/负数 = 关 ✓、
+    #: **不认识的键当场 400** ✓✗ —— 拼错的键被静默忽略就「以为开了、其实全程整张解」✓✗
+    #: （3072×2304 上照样 OOM，而回执里查不到任何线索 ✓✗）。
+    tilt_camel = engine_router._assembly_from(  # noqa: SLF001
+        {"vaeTiling": {"tile": 512, "attnChunk": 1024}})
+    tilt_snake = engine_router._assembly_from(  # noqa: SLF001
+        {"vae_tiling": {"tile": "768", "attn_chunk": "512"}})
+    tilt_off = engine_router._assembly_from({"vaeTiling": {"tile": 0, "attnChunk": -1}})  # noqa: SLF001
+    tilt_absent = engine_router._assembly_from({})  # noqa: SLF001
+    check("⑪¹³ ⭐ `vaeTiling` 透到 `ensure_loaded` ✓、两种键写法都收 ✓、`0`/负数 = **关** ✓、"
+          "全关 ⇒ **键不出现** ✓（走装配默认 ✓，不塞一个「假配置」进装载键 ✓✗）",
+          tilt_camel.get("vae_tiling", {}).get("tile") == 512
+          and tilt_camel["vae_tiling"]["attnChunk"] == 1024
+          and tilt_snake["vae_tiling"]["tile"] == 768
+          and tilt_snake["vae_tiling"]["attnChunk"] == 512
+          and "vae_tiling" not in tilt_off and "vae_tiling" not in tilt_absent,
+          {"camel": tilt_camel, "snake": tilt_snake, "off": tilt_off, "absent": tilt_absent})
+
+    bad_tile: Exception | None = None
+    try:
+        engine_router._assembly_from({"vaeTiling": {"tile_size": 512}})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        bad_tile = err
+    except Exception as err:  # noqa: BLE001 —— 漏成 500 的那条路要能被抓到 ✓
+        bad_tile = err
+    not_num: Exception | None = None
+    try:
+        engine_router._assembly_from({"vaeTiling": {"tile": "big"}})  # noqa: SLF001
+    except pipe_mod.StageError as err:
+        not_num = err
+    except Exception as err:  # noqa: BLE001
+        not_num = err
+    check("⑪¹⁴ ⚠️ 拼错的键 / 非数字 ⇒ **400（`StageError`）** ✓✗，不是 500 ✓"
+          "（静默忽略＝「以为分块了、其实整张解」✓✗）",
+          isinstance(bad_tile, pipe_mod.StageError) and isinstance(not_num, pipe_mod.StageError),
+          (repr(bad_tile)[:150], repr(not_num)[:150]))
+
+    #: ⭐ **时间维**档（2026-11-02 晚 ✓）：只对 SEEDVR2 有效 ✓、单位是**潜帧** ✓、**默认关** ✓。
+    #: 单独一条判据 —— 它和上面两个不是一类 ✓（那两个换字节、它只降峰值 ✓），混在一条里
+    #: 读不出「到底哪个开关动过数值」✓✗。
+    tchunk = engine_router._assembly_from({"vaeTiling": {"temporalChunk": 8}})  # noqa: SLF001
+    tchunk_snake = engine_router._assembly_from({"vaeTiling": {"temporal_chunk": "4"}})  # noqa: SLF001
+    tchunk_off = engine_router._assembly_from({"vaeTiling": {"temporalChunk": 0}})  # noqa: SLF001
+    check("⑪¹⁵ ⭐ `vaeTiling.temporalChunk`（**潜帧**单位）两种写法都通 ✓、`0` = 关 ✓"
+          "（关＝不进装载键 ⇒ 与整段同一条代码路径 ✓）",
+          tchunk.get("vae_tiling", {}).get("temporalChunk") == 8
+          and tchunk_snake.get("vae_tiling", {}).get("temporalChunk") == 4
+          and "vae_tiling" not in tchunk_off,
+          {"camel": tchunk, "snake": tchunk_snake, "off": tchunk_off})
+
     doc = engine_router.load_runtime.__doc__ or ""
-    check("⑪¹² `/load` 的文档写全四档策略 + 两格回执 ✓✗（文档不写＝这个开关等于不存在 ✓）",
+    check("⑪¹² `/load` 的文档写全四档策略 + 两格回执 + `vaeTiling` ✓✗"
+          "（文档不写＝这个开关等于不存在 ✓）",
           all(word in doc for word in ("auto", "gpu", "cpu", "balanced"))
-          and "chainDevicePolicy" in doc and "devicePolicy" in doc,
+          and "chainDevicePolicy" in doc and "devicePolicy" in doc
+          and "vaeTiling" in doc and "attnChunk" in doc and "temporalChunk" in doc,
           [word for word in ("auto", "gpu", "cpu", "balanced",
-                             "chainDevicePolicy", "devicePolicy") if word not in doc])
+                             "chainDevicePolicy", "devicePolicy",
+                             "vaeTiling", "attnChunk", "temporalChunk") if word not in doc])
 
     flag_bad: Exception | None = None
     try:
@@ -456,12 +509,83 @@ def case_cancel_verdict() -> None:
           '"cancel"' not in code and "'cancel'" not in code, code)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⑬ 画布素材 → 本机路径（引擎只读本地文件 ✗ 不吃 URL ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_media_paths() -> None:
+    """画布连线上来的素材是**本仓 URL** ✓，引擎要的是**绝对路径** ✓ —— 换错就是
+    「参考图明明在盘上，却报 No such file」✓✗（用户会以为上传失败 ✓）。
+    """
+    from pathlib import Path
+
+    from app.core.config import get_storage_root
+    from app.routers import engine
+    from app.services.engine import pipeline as pipe
+
+    storage = Path(get_storage_root()) / "uploads"
+    storage.mkdir(parents=True, exist_ok=True)
+    sample = storage / "media-path-contract.png"
+    sample.write_bytes(b"png")
+    try:
+        check("⑬ 绝对路径原样用（不重新拼）",
+              engine._local_media(str(sample)) == str(sample), engine._local_media(str(sample)))
+        resolved = Path(engine._local_media("/uploads/media-path-contract.png"))
+        check("⑬ /uploads/… 解析到真实文件（前导斜杠不许把 base 顶掉）",
+              resolved.resolve() == sample.resolve(), str(resolved))
+        # ⭐ 画布上传回来的 URL 实际是 `/static/uploads/…`（后端 `url = "/" + saved_path` ✓）
+        #    ⇒ 这条前缀也得认，否则「连线选了一张刚上传的图」会被判"不在盘上" ✗✗
+        both = Path(engine._local_media("/static/uploads/media-path-contract.png"))
+        check("⑬ /static/… 与 /uploads/… 指到同一个文件（两种前缀都要认）",
+              both.resolve() == sample.resolve(), str(both))
+        for value, why in (("https://example.com/a.png", "远程地址"),
+                           ("/uploads/media-path-missing.png", "不在盘上")):
+            try:
+                engine._local_media(value)
+                check(f"⑬ {why}必须拒（不猜、不悄悄下载）", False, "没抛")
+            except pipe.StageError as exc:
+                check(f"⑬ {why}必须拒（不猜、不悄悄下载）", True, str(exc)[:70])
+    finally:
+        sample.unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⑭ 回执 URL（`primaryPath` 是本机绝对路径 ✗，前端只吃 URL ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_primary_url() -> None:
+    """任务回执必须给 ``primaryUrl`` ✓ —— 否则前端只能拿到 ``D:\\…\\x.png`` ✗（`<img>` 用不了 ✓✗）。"""
+    from pathlib import Path
+
+    from app.core.config import get_storage_root
+    from app.routers import engine
+
+    inside = Path(get_storage_root()) / "engine" / "url-contract.png"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_bytes(b"png")
+    outside = Path(tempfile.mkdtemp(prefix="engine_url_out_")) / "outside.png"
+    outside.write_bytes(b"png")
+    try:
+        got = engine._with_urls({"primaryPath": str(inside)})
+        check("⑭ 数据根下的产物换成 /static/… URL",
+              got.get("primaryUrl") == "/static/engine/url-contract.png", got.get("primaryUrl"))
+        # ⚠️ 数据根**外**的产物不许硬转 ✗：静态挂载只覆盖数据根 ✓，转了就是 404 ✓✗（比不给更误导 ✓）
+        check("⑭ 数据根外的产物不硬转 URL（转了只会 404）",
+              "primaryUrl" not in engine._with_urls({"primaryPath": str(outside)}),
+              engine._with_urls({"primaryPath": str(outside)}).get("primaryUrl"))
+        check("⑭ 没有 primaryPath（还在排队）⇒ 原样返回",
+              engine._with_urls({"status": "queued"}) == {"status": "queued"},
+              engine._with_urls({"status": "queued"}))
+    finally:
+        inside.unlink(missing_ok=True)
+
+
 def main() -> int:
     case_single_entry()
     case_error_codes()
     case_schema()
     case_assembly_keys()
     case_cancel_verdict()
+    case_media_paths()
+    case_primary_url()
 
     failed = 0
     for name, ok, detail in _RESULTS:

@@ -1,0 +1,18 @@
+# 知识库 OCR **离线批处理**依赖 —— 不是服务端依赖，别混进 requirements.txt
+#
+# 谁需要：`backend-py/app/scripts/corpus/ocr_index.py`（把扫描件 OCR 进 data/ocr/*.sqlite）
+# 谁不需要：FastAPI 服务本身 —— 它只**只读** sidecar 的 sqlite，不需要渲染 PDF、不需要 OCR 模型
+#
+# 为什么不写进 requirements.txt：OCR 会拖进 onnxruntime（约 200 MB），
+# 而 99% 的部署根本不跑 OCR 批处理；本仓对引擎依赖也是同一条纪律（见 requirements.txt 末尾）。
+#
+# 安装（本机 PyPI 慢，走清华源）：
+#   backend-py/.venv/Scripts/python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-ocr.txt
+#
+# 装完先 `--stats` 看还剩多少、再 `--run --limit=1 --pages=12` 试一本确认中文识别质量。
+#
+# 两代引擎都装：`ocr_index` 默认用新档（PP-OCRv6，实测 0.32 s/页），装不上/想对照就退回老档
+# （PP-OCRv4，1.75 s/页）—— 档位由 `OCR_ENGINE=auto|rapidocr|rapidocr-onnxruntime` 决定。
+pymupdf>=1.24.0
+rapidocr>=3.0.0
+rapidocr-onnxruntime>=1.3.0

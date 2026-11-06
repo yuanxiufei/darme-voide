@@ -25,7 +25,7 @@
   },
   "catalog": {
     "path": "D:\\code\\voide\\darme-voide\\configs\\models.json",
-    "models": 26,
+    "models": 39,
     "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models"
   },
   "pipCheck": "No broken requirements found.",

@@ -31,6 +31,15 @@
 ㊇ :func:`test_list_gaps` —— 盘上每份 ``tests/*_test.py`` 都要进 ``run_all.py::TESTS`` ✓
    （漏登记不是少跑一次，是**永远不跑还没人知道** ✗ —— 2026-10-31 实测
    ``lora_train_test.py``（85 项）在清单外待了一个多月 ✓）
+㊈ :func:`summary_gaps` —— 登记进清单的套件，收尾行必须是 ``SUMMARY: n/m passed`` ✓
+   （``run_all`` 只认这个字面量；写成 ``SUMMARY 12/12 通过 ✓`` / 「全部通过」⇒
+   全量表里这套的**项数恒为 0**、退出码却仍 0 ✗ —— 2026-11-01 实测 9 套中招 ✓）
+㊉ :func:`hygiene_problems` —— **生成物不许入库**：``.gitignore`` 必须**整目录**挡住
+   ``backend-py/output/``（真跑产物）、``backend-py/_bench/``（草稿区）、
+   ``models/tokenizers/``（16 MB 词表）✓；``backend-py/`` **包根只许**有
+   ``README.md`` / ``requirements*.txt`` / ``_run_qwen_image.py`` ✓
+   （2026-11-04 实测：根上躺着 5 个「跑完就删」的探针 ✗、三处生成区 36+95+9 件全在忽略之外
+   ⇒ 一次 ``git add -A`` 就整片入库 ✗ —— 这类坑不报错、只是**悄悄变胖** ✓）
 
 运行::
 
@@ -63,6 +72,21 @@ HEAVY_ROOTS = ("torch", "torchvision", "transformers", "safetensors", "numpy", "
 #: 模块头的**职责下限** ✓（8 词以下＝没写 ✓，不是「写得简洁」✗）
 MIN_DOC_WORDS = 8
 
+#: ㊉ 仓库里**允许长大的生成区**（不是代码、不是配置 ⇒ 必须被 ``.gitignore`` 整目录挡住 ✓）。
+#: 2026-11-04 实测三处都在忽略之外：``output/`` 36 件真跑产物 ✓、``_bench/`` 95 件草稿 ✓、
+#: ``models/tokenizers/`` 16 MB 词表（代码零引用 ✓）⇒ 一次 ``git add -A`` 就整片入库 ✗。
+GENERATED_DIRS = {
+    "backend-py/output/": "引擎真跑产物（PNG / MP4 / 一次性 JSON 快照）",
+    "backend-py/_bench/": "调试草稿区（一次性 probe 脚本与其账）",
+    "models/tokenizers/": "下载的分词器词表（约 16 MB，代码零引用）",
+}
+
+#: ㊉ ``backend-py/`` **包根只许**这几个松散文件 ✓。
+#: ``.py`` 落在包根＝既不在 ``app/scripts/``（工具链）、也不在 ``_bench/``（草稿区）⇒
+#: 没人知道它该不该跑 ✗；2026-11-04 实测根上正躺着 5 个「跑完就删」的探针 ✗。
+PKG_ROOT_FILES = frozenset({"README.md", "requirements.txt", "requirements-ocr.txt",
+                            "_run_qwen_image.py"})
+
 #: 说明里**故意**点名的路径（本来就不该存在 ✓ —— 只有「讲历史」与「造夹具」两种正当理由 ✓）
 #:
 #: ⚠️ 这条清单本身是个诚实的妥协 ✓：本判据**分不清**「腐烂的旧路径 ✗」与「讲历史必须点名 ✓」——
@@ -89,6 +113,21 @@ def check(name: str, condition: object, detail: object = "") -> None:
 UNWIRED: dict[str, str] = {
     "image_ops": "图像算子库（重采样/裁剪/贴回）；预期接入 SDXL 与 DiT 的解码后处理 ⇒ 等通用骨架前向落地再接",
     "mappings": "权重键名映射表；预期接入 loader / hybrid_load 的跨族命名转换 ⇒ 等第二族骨架接入时用",
+    # ⚠️ 2026-11-06 **已删** Music3 那条欠账（`te_music3` 与 `vae_music3` ✓）：
+    #    第十族的装配线（`runtime._ensure_music3_loaded`）、音频 plan（`pipeline._fill_music3_plan`）、
+    #    条件编码（`torch_backend._encode_music3_condition`）、解码（`decode` 的 `music3-real` 支）
+    #    与出盘（`write` 的纯音频支）都已接通 ✓ —— 三处都由 `pipeline` 真 import ✓。
+    #    守它们的判据换成了 `engine_music3_wiring_test`（A–G 七组：两把时间尺子 / 秒→帧三档 /
+    #    引导散文 / 清单口径 / 接线顺序 / 装配拒绝面 / 路由键表 ✓）。
+    # ⚠️ 同族的 `dit_music3` **不在**这张表 ✓ —— 它接在 `dit_build` 的 `music3` 行上
+    #    （`BUILDERS` 静态 import ⇒ 建壳与前向口径都走那一行 ✓）；写进来就会被反向判
+    #    「该删条目」✗（白名单只增不减就成谎话 ✗）。
+
+    # ⚠️ 2026-11-01 **已删** `qwen25vl_vision` 那条欠账 ✓ —— 它就是「Edit 2511 通路动工时
+    #    第一件事」✓：`torch_backend.encode_text` 里参考图过视觉塔 ⇒ `image_embeds` ⇒
+    #    `<|image_pad|>` 整段替换 ✓；`denoise` 每一步带 `ref_latents` ✓；`phase_parts` 让
+    #    视觉塔只在 encode 段在场 ✓（`runtime._ensure_qwen_image_loaded` 的 `is_edit` 分支 ✓）。
+    #    守它的判据换成了 `engine_qwen25vl_vision_test` ⑪ 组（接线点源码级核对 ✓）。
     # ⚠️ 2026-11-01 **已删** `win_io` 那条欠账 ✓：它现在接在 `safetensors.TensorReader` 上 ✓
     #    （`_open_raw` 建无缓冲读口、`read` / `read_many` 走它、建不起来就退回 seek+read ✓）；
     #    真权重 A/B：`z_image_bf16.safetensors` 11.46 GiB / 453 张量，2.88 ⇒ 3.43 GiB/s ✓，
@@ -109,6 +148,26 @@ UNWIRED: dict[str, str] = {
     #    上 ✓（判族 ⇒ `zimage` ⇒ `LuminaDiT` ✓；前向口径按 `_ditFamily` 分 ✓）。
     # ⚠️ 2026-10-31 已删 `latent_formats` 那条欠账 ✓：`vae_wan.py` 接线时按族取规格 ✓
     #    （`latent_formats.QwenImage21` 的 mean/std ⇒ 解码前反缩放 ✓）⇒ 它不再是「0 处 import」✓。
+    # ⚠️ 2026-11-01 **已删** `dit_seedvr2` 那条欠账 ✓：它现在接在 `dit_build.BUILDERS["seedvr2"]` 上 ✓
+    #    （`SKELETON_MODULES` 静态 import ⇒ 拼错当场 ImportError ✓；契约 = 5 维 / σ 批形态 /
+    #    口径 `seedvr2` ✓）。接线的门票是**真实 3B fp16 权重前向 `maxdiff == 0`** ✓
+    #    （`engine_seedvr2_test` ⑫ 形状反推、⑬ 族表接线、⑭ 真装载 ✓）。
+    #    ⚠️ 2026-11-01 当天**那条通路也做完了** ✓：`stage="seedvr2"` 装配线在
+    #    `runtime._ensure_seedvr2_loaded` ✓、17 通道条件在
+    #    `torch_backend._encode_seedvr2_conditioning`（退化 16 ＋ mask 1 ✓）里成形 ✓、
+    #    plan 在 `pipeline._fill_seedvr2_plan` ✓、`denoise` 按 `_ditFamily` 走条件分支 ✓
+    #    ⇒ 这一族现在**端到端可跑** ✓（判据：`engine_seedvr2_test` 的装配/条件/编解码三组 ✓）。
+    # ⚠️ 2026-11-01 **已删** `vae_seedvr2` 那条欠账 ✓：这一族的**两半一起接上了** ✓✗
+    #    （`attach_seedvr2_vae` ✓ ＋ `derive latent` 走 `_encode_pixels` ✓ ＋ `decode` 的
+    #    `seedvr2-real` 分支 ✓ ＋ `runtime._ensure_seedvr2_loaded` 装配线 ✓ ＋
+    #    `pipeline._fill_seedvr2_plan` ✓ ＋ 17 通道条件在 `_encode_seedvr2_conditioning` 里成形 ✓）。
+    #    前向口径与 ComfyUI `comfy/ldm/seedvr/vae.py` 逐位对拍过（fp32/CPU，encode/decode maxdiff 0.0 ✓，
+    #    见 `tests/engine_seedvr2_vae_test.py` ⑧ 黄金数值 ✓）。⇒ 接线时**别**只补 decode ✗：
+    #    编码侧取「前 16 通道（均值）」✓、反缩放 **×0.9152** 一个标量 ✓（不是 mean/std 组 ✓）。
+
+    # ⚠️ `umt5_te` / `umt5_tokenizer` 两条欠账已删（2026-11-02 ✓）：UMT5 塔与其 unigram 分词器
+    #    已经接进 `torch_backend` 的 Wan 装配线 ✓ ⇒ 再留在这张表里就是「白名单只增不减」✗
+    #    （结构测试的 ㊅ 会当场报「已经接上线 ⇒ 该删条目」✓）。
 }
 
 
@@ -162,6 +221,32 @@ def root_problems(root: Path, empties: list[str] | None = None) -> list[str]:
     ]
     for name in found:
         problems.append(f"仓库根有**空目录** `{name}/`（空壳只会让人误会「这里该放东西」✗）")
+    return problems
+
+
+def hygiene_problems(gitignore: str, pkg_root: Path,
+                     allowed: frozenset[str] = PKG_ROOT_FILES,
+                     required: dict[str, str] = GENERATED_DIRS) -> list[str]:
+    """㊉ 生成物不许入库 + 包根不许散落脚本 ✓（两个入参都可注入 ⇒ 反向验得动 ✓）。
+
+    ⚠️ 判 ``.gitignore`` 时**先剔注释行**再逐字比对 ✓：否则「把规则注释掉、注释里还留着路径」
+    也会被判成合格 ✗ —— 那正是最像修好的坏法 ✓。
+    """
+    problems: list[str] = []
+    rules = {ln.strip() for ln in gitignore.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")}
+    for rule, why in sorted(required.items()):
+        if rule not in rules:
+            problems.append(f"`.gitignore` 少了 `{rule}` 这条（{why} ⇒ "
+                            f"下次 `git add -A` 就把它整片入库 ✗）")
+    for path in sorted(pkg_root.iterdir()):
+        if path.is_dir() or path.name in allowed:
+            continue
+        if path.suffix in {".log", ".err"}:  # 运行日志：`*.log` 已挡，留在根上不碍事 ✓
+            continue
+        problems.append(f"`backend-py/{path.name}` 散在包根（工具链进 `app/scripts/`、"
+                        f"一次性草稿进 `_bench/`、真跑入口才留根；包根只许 "
+                        f"{sorted(allowed)} ✗）")
     return problems
 
 
@@ -481,6 +566,25 @@ def test_list_gaps(tests_dir: Path, listed: list[str],
     return unlisted, missing, duplicated, stale
 
 
+def summary_gaps(tests_dir: Path, listed: list[str]) -> list[str]:
+    """㊈ 登记的套件里**收尾行口径**不对的（``run_all`` 只认 ``SUMMARY: n/m passed`` ✓）。
+
+    ⚠️ 这类的坑是**静默丢账** ✗✗（2026-11-01 实测 9 套中招 ✓）：收尾写成
+    ``SUMMARY 12/12 通过 ✓`` / ``全部通过`` / ``12/12 通过`` 都**不是** `run_all` 认的那个字面量
+    ⇒ 全量表里这些套件的项数**恒为 0** ✓✗（"少一套就是凭空消失"✓，而且退出码还是 0，
+    看起来一切正常 ✗）。判据故意只盯**字面量** ✓：`SUMMARY:` 是 `run_all` 解析的那一段 ✓，
+    别的写法无论多漂亮都进不了账 ✓。
+    """
+    gaps: list[str] = []
+    for name in listed:
+        path = tests_dir / name
+        if not path.exists():
+            continue
+        if "SUMMARY:" not in path.read_text(encoding="utf-8", errors="replace"):
+            gaps.append(name)
+    return gaps
+
+
 def _unregistered_fixture() -> list[str]:
     """反验夹具：盘上两份、清单只写一份 ⇒ 必须报出另一份 ✓。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -509,6 +613,52 @@ def case_test_list() -> None:
           test_list_gaps(TESTS_DIR, listed, {**NOT_IN_RUN_ALL,
                                             unlisted[0]: "反验用"})[0] == unlisted[1:]
           if unlisted else True, None)
+    # ── ㊈ 收尾口径：`run_all` 只认 `SUMMARY: n/m passed` ────────────────────
+    gaps = summary_gaps(TESTS_DIR, listed)
+    check(f"㊈ 清单里 {len(listed)} 套的收尾行都打成 `run_all` 认的口径 "
+          f"`SUMMARY: n/m passed`（写别的 ⇒ 总表里**项数恒为 0** ✗✗）", not gaps, gaps)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "bad_test.py").write_text('print(f"SUMMARY {n}/{m} 通过 ✓")\n', encoding="utf-8")
+        (root / "ok_test.py").write_text('print(f"SUMMARY: {n}/{m} passed")\n', encoding="utf-8")
+        check("㊈ 反验：`SUMMARY 12/12 通过 ✓`（缺冒号 / 不是 passed）⇒ 必须报 ✗"
+              "（2026-11-01 实测 9 套就栽在这个写法上，退出码仍是 0 ✓✗）",
+              summary_gaps(root, ["bad_test.py"]) == ["bad_test.py"], None)
+        check("㊈ 反验：`SUMMARY: n/m passed` ⇒ 不报（判据不许见谁都喊 ✗）",
+              summary_gaps(root, ["ok_test.py"]) == [], None)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⑩ 生成物不许入库、包根不许散落脚本
+# ══════════════════════════════════════════════════════════════════════════
+def case_hygiene() -> None:
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    problems = hygiene_problems(gitignore, BACKEND_PY)
+    check(f"㊉ 三处生成区（`output/` `_bench/` `models/tokenizers/`）都被 `.gitignore` 整目录挡住、"
+          f"`backend-py/` 包根没有散落脚本 ✓", not problems, problems)
+
+    stripped = "\n".join(ln for ln in gitignore.splitlines()
+                         if ln.strip() != "backend-py/output/")
+    leaked = hygiene_problems(stripped, BACKEND_PY)
+    check("㊉ 反验：把 `backend-py/output/` 这条规则删掉 ⇒ 必须报"
+          "（36 件真跑产物下一次 `git add -A` 就入库 ✗）",
+          len(leaked) == 1 and "backend-py/output/" in leaked[0], leaked)
+    commented = gitignore.replace("backend-py/output/", "# backend-py/output/", 1)
+    check("㊉ 反验：规则被**注释掉**（注释里还留着路径）⇒ 仍必须报（最像修好的坏法 ✗）",
+          bool(hygiene_problems(commented, BACKEND_PY)), None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "README.md").write_text("", encoding="utf-8")
+        (root / "requirements.txt").write_text("", encoding="utf-8")
+        (root / "_run_qwen_image.py").write_text("", encoding="utf-8")
+        (root / "backend.err.log").write_text("", encoding="utf-8")
+        check("㊉ 反验：白名单内的文件 + 运行日志 ⇒ 不报（判据不许见谁都喊 ✗）",
+              hygiene_problems(gitignore, root) == [], hygiene_problems(gitignore, root))
+        (root / "_probe_real_chunk.py").write_text("", encoding="utf-8")
+        stray = hygiene_problems(gitignore, root)
+        check("㊉ 反验：包根多出一个一次性探针 ⇒ 必须报（2026-11-04 实测根上有 5 个 ✗）",
+              len(stray) == 1 and "_probe_real_chunk.py" in stray[0], stray)
 
 
 def main() -> int:
@@ -520,6 +670,7 @@ def main() -> int:
     case_wiring()
     case_coverage()
     case_test_list()
+    case_hygiene()
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n      ↳ {detail}"))

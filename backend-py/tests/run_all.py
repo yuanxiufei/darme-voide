@@ -5,6 +5,18 @@
 规模：**以本文件下面的 `TESTS` 为唯一权威** ✓（⚠️ 不再在这里写死总数 ✗ —— 逐项罗列会随
 增删而腐烂 ✓，本文件自己就被它咬过：下面那行曾是 **82 套 / 2911 项** ✗，早过期好几轮 ✓）。
 
+⚠️ **2026-11-01 · 收尾口径收口（只核各套的收尾行 ✓，**没跑全量** ✗ ⇒ 不推算总数 ✓）**：
+   实测 **10 套**的收尾行不是本文件认的那个字面量 ✗（`route_parity_test` 只印 `OK:` / `FAIL:` ✓；
+   `engine_vae_wan_test` / `engine_qwen35_te_test` 印「全部通过」✓；`engine_h3_prompt_test` /
+   `engine_h3_encode_test` / `engine_h3_te_weights_test` / `engine_qwen3vl_pixels_test` /
+   `engine_qwen3vl_te_test` / `engine_lora_patch_test` / `engine_dit_flux_test` 印
+   `SUMMARY 12/12 通过 ✓` 或 `12/12 通过` ✓✗）⇒ 下面那句 `startswith("SUMMARY:")` 一个都匹配不上 ✓
+   ⇒ **这些套件在全量表里项数恒为 0**（"少一套就是凭空消失"✓，而退出码仍是 0 ⇒ 看起来一切正常 ✗）。
+   已全部改成 `SUMMARY: n/m passed` ✓，失败明细统一加 `FAIL  ` 前缀 ✓（本文件失败时只转贴
+   `FAIL` / `  DRIFT` / `  SHADOW` 开头的行 ✓ —— 写成 `  - name` / `  · name` 等于没写 ✗）；
+   并在 `structure_test` 增 **㊈ `summary_gaps()`**（登记进 `TESTS` 的套件源码里必须有
+   `SUMMARY:` 字面量 ✓，带两条反验 ✓）把这一类**永久摁住** ✓。
+
 ⭐⭐ **最近一次全量实测见本文件**最后一条 ⚠️（**㉒ · 2026-10-28 ✓ 148 套 / OK 134 / FAIL 14**
    （实录 `tmp/run_all_fp.log`）✓ —— 14 条红里 **1 条是本轮的（请求体守卫逮到新端点里的
    `isinstance` 死代码，已删 ✓ 单跑 10/10）**、**11 条是「本机 `.venv` 没装 torch」的既有崩溃** ＋
@@ -217,10 +229,13 @@
    **本服务目录里的副本** ✓ 不指脚手架 ✓）。
    ⚠️ 顺带清掉根目录两个 `_tmp_*.ps1` ✓（上一轮的临时克隆脚本 ✓ 内容是 Comfy-Org 全量 84 仓库清单 ✓
    **取自 GitHub API、随时可重取** ✓ ⇒ 无长期价值 ✗）。
-   ⚠️ **核实过一件事** ✓（免得留错印象 ✗）：脚手架克隆 `reference/comfy-org/ComfyUI/models` **确实存在** ✓（实测 True ✓）
+   ⚠️ **核实过一件事** ✓（免得留错印象 ✗）：脚手架克隆 `ComfyUI/models` **确实存在** ✓（实测 True ✓）
    ⇒ 它**够格**被 `detect_comfyui_roots()` 命中（名字含关键词 + 有 `models/` ✓）；但**默认探测够不到** ✓
    （`COMFYUI_BLANKET_DEPTH = 2` ⇒ 名字**不沾关键词**的目录只进 **1 层** ✓：盘根 → `code` 就到头 ✗，
    `reference` / `comfy-org` 都不含 hint ✗）⇒ 删不删**都不影响探测结果** ✓。
+   ⚠️ **2026-11-04 后这句话要这样读**：那棵脚手架克隆**已经被删了**（`reference/` 整棵清掉 ——
+   先删 45 个仓，后来连当时留下的 `lora/` 也一并删 ✓，全仓已零运行时依赖 ✓）⇒ 上面
+   「确实存在（实测 True）」是当天的实测记录 ✓，现在盘上没有了 ✓；结论不变 —— 探测本来就没指望它 ✓。
 ⚠️ 本轮**纳入版本库的**改动 = `tests/local_models_test.py`（守卫）+ 本文件 ✓；⚠️ 台账里**我自己**上一版
    把**出处**写成 `D:\\…\\ComfyUI\\…`（机器路径 ✗）**已改掉** ✓ ⇒ 现在只说「`detect_comfyui_roots()` 扫出来的那台」✓。
 
@@ -266,11 +281,11 @@
 ⚠️ **出处写法口径（2026-09-26 ✓ 用户定的 ✓）**：**不许把机器布局写进出处** ✗✗ —— 写 `D:\\…\\ComfyUI\\…`
    这类**本机路径**换台机器就是废字 ✓（本仓 `local_model_scan.py:106` 早立了「**不许写死路径**」的口径 ✓，
    我上一版台账**自己就违规** ✗ ⇒ 本版改成「**扫出来的那台**」✓）。⚠️ 同一道理，`reference/ComfyUI/…` 那批注释
-   也是**写死** ✗ —— 那是本仓**不存在**的路径（真实是 `reference/comfy-org/ComfyUI/…` ✓）且被
+   也是**写死** ✗ —— 那是本仓**不存在**的路径（真实是 `ComfyUI/…` ✓）且被
    `.gitignore:71` 整目录忽略 ✓ ⇒ 谁（包括未来的我 ✓ 当初就**扑空**了 ✓）都点不到 ✓。
    ⇒ **正确写法 = 上游项目 + 文件 + 符号** ✓（如 `ComfyUI/comfy/model_base.py` 的 `SDXL.encode_adm` ✓
    机器无关 ✓ 谁拿自己那份副本都能核 ✓）。
-   ✅ **已执行扫改（2026-09-26 ✓ 用户点头 ✓）：26 处 / 19 文件** ✓ —— `reference/comfy-org/ComfyUI/`
+   ✅ **已执行扫改（2026-09-26 ✓ 用户点头 ✓）：26 处 / 19 文件** ✓ —— `ComfyUI/`
    与 `reference/ComfyUI/` 两种写法**一并**抹成 `ComfyUI/…` ✓；做法是**字节级**替换 ✓（替换串纯 ASCII
    ⇒ 换行 / 编码 / BOM **零变动** ✓，比文本模式重写稳 ✓）；⚠️ **排除** `frozen_ts_source.py`
    （**逐字生成物** ✗ 动它 = 伪造快照 ✓）与**本台账**（先 dry-run 打印 26 行清单 ✓ 再 `--apply` ✓）。
@@ -284,11 +299,12 @@
    ⚠️ `engine_sdxl_backend_test` 里「**完整装配**」仍是**显式 SKIP** ✓（要 `SDXL_BACKEND_FULL_LOAD=1`
    + 6.9 GiB ✓ **没跑 ≠ 绿** ✗）—— 它 41 项走的是**缩小版前向** ✓，与本次注释改动无关 ✓。
 ✅ **同类残留也一并收了（2026-09-26 ✓ 用户第二次「继续」= 放行 ✓）：15 文件 / 16 处** ✓ ——
-   4 个前缀（`reference/short-drama-agent` / `reference/Mini-Agent` / `reference/ollama` /
+   4 个前缀（`short-drama-agent` / `Mini-Agent` / `ollama` /
    `reference/minimax-h3-comfyui`）**字节级**抹掉 `reference/` ✓ ⇒ 全变成「**上游项目 + 路径 + 符号**」
    （如 `short-drama-agent` 的 `production-plan-contract.md` §6-§11 ✓、`ollama/fs/gguf/gguf.go` ✓、
    `minimax-h3-comfyui/workflows/` ✓）。逐行 dry-run 核对过 ✓ 无一行误伤 ✓。
-   ⚠️ **有意留了 3 类裸 `reference/` 未动** ✓：① **收录说明**（`workflows/README.md:14`「`reference/`
+   ⚠️ **有意留了 3 类裸 `reference/` 未动** ✓（2026-11-04 起该目录**整棵已删** ✓、仓内零依赖 ✓，
+   下面三类说的都是**当时的处置** ✓）：① **收录说明**（`workflows/README.md:14`「`reference/`
    是开发期资料、不进镜像」✓、`h3_comfyui_test.py:49`「随 `reference/` 收录；服务目录里也存了副本」✓）
    —— 它们说的**就是那个目录本身** ✓ 不是出处 ✗；② **技能目录内**的另一个 `reference/`
    （`prompt_blocks.py:72` 的 `skills/grid_prompt_generator/reference/…` ✓ 与顶层**同名不同物** ✗）；
@@ -521,7 +537,9 @@ ModelScope / LM Studio / GPT4All / Jan / llama.cpp 里躺着的模型**扫不到
 Qwen3/Llama 这类 LLM 的架构 ✓；架构参数**全显式** ✓（`LlmConfig` 不写死 Qwen3 ✗）；缩小版走同一条前向 ✓。
 ② 新建 `engine/gguf_dequant.py` ✓ —— GGUF 权重**反量化**（F32/F16/BF16/Q8_0/Q4_K ✓ 公式照 llama.cpp ggml-quants.c ✓ MIT ✓；
 Q4_K 的 6-bit 解包逐字节核过 ✓）；⚠️ 其余 k-quant（Q2_K/Q3_K/Q5_K/Q6_K）**具名拒绝** ✗ 未实现 ✓
-（⟶ 现状见 ㉕/㉖：Q6_K 已补 ✓、Q4_K/Q6_K 均已向量化 ✓；仍拒绝的是 Q2_K/Q3_K/Q5_K/Q8_K ✓）。
+（⟶ 现状见 ㉕/㉖：Q6_K 已补 ✓、Q4_K/Q6_K 均已向量化 ✓；**2026-11-01 再补 Q5_K** ✓
+（真因：`Krea2/krea2_turbo-Q4_K_M.gguf` 里 63 张是 Q5_K ⇒ 「M 后缀只含 Q4_K+Q6_K」是错口径 ✗）；
+仍拒绝的是 Q2_K/Q3_K/Q8_K ✓）。
 ③ 新建 `engine/gguf_to_llm.py` ✓ —— GGUF 权重 → LlmModel 的**装载**（ggml 命名映射 ✓ + 线性层转置 ✓ + tie embeddings ✓ +
 `infer_llm_config` 从 GGUF 元数据读架构 ✓）；⭐⭐ 往返恒等验证：state_dict → GGUF → 映射回 ⇒ 逐张量相等 ✓。
 ④ 新建 `engine/llm_backend.py` ✓ —— 自研文本后端（`describe` 如实报缺 / `load` 装载 / `generate` encode→生成→decode ✓；
@@ -960,7 +978,7 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
    ⑧ 与 ⑰ 的 **4983** 差 **+2** ✓ = `videos_route_test` **+3** ＋ `video_generation_test` **−1** ✓
       **一分不差**；冒烟 **477** 两跑**一致** ✓。
   ⑲ **新增 `ollama_native_test`（+1 套 / **56** 项）**：`app/services/ollama_native/` 是把
-     `reference/ollama`（Go）里**可对等**的原生能力移植过来的包（模板引擎 / harmony 流协议 /
+     `ollama`（Go 上游）里**可对等**的原生能力移植过来的包（模板引擎 / harmony 流协议 /
      `OLLAMA_*` 环境变量 / 人类可读单位与进度速率 / OpenAI 与 Anthropic 两个兼容层的纯转换）。
      这套自检守的**不是「能 import」**，而是上游那些容易照抄错的语义：Go `text/template` 的
      `and/or` 返回操作数本身、`range` over map 按 key 排序、Jinja 认族靠 Levenshtein、
@@ -1034,7 +1052,7 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
      ㉒ **新增 `model_fingerprint_test`（+1 套 / **135** 项，套数 147 → 148）：把「模型是什么」从
      **文件名启发式**升级成**读权重本体** ✓。**真能力**，不是引用 ——
      * `services/model_fingerprint.py`：只读文件头（safetensors：`u64 头长 + JSON`；GGUF：kv 表 +
-       **tensor info**），拿张量名与形状判架构/模态/变体。判据移植自 `reference/comfy-org/ComfyUI`
+       **tensor info**），拿张量名与形状判架构/模态/变体。判据移植自 `ComfyUI`
        的 `model_detection.py`，但**逐条在本机 52 份权重上核过**：实测 26 份视频权重全对、耗时
        **0.12 秒 / 52 个（~2ms 一个）** ⇒ 可以扫全盘，不是玩具 ✗；
      * ⭐ 抓到的真错（**改名/量化标签写错的实例，只有读权重才能发现**）：`Krea2/krea2_turbo-Q4_K_M.gguf`
@@ -1550,7 +1568,7 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
       32 GiB，须创作者点头）、C 明确不支持（E5.2/E3.5 全作废）。⚠️ 清单里**没有**第二选择：
       `te_qwen3_4b` 是**另一个模型**（4B vs 32B），换它等于换条件编码器 ⇒ 掉质量，不许当省事方案 ✓✗。
     * ㉞ **2026-10-30·NVFP4 解码落地（A 路，已实现）** —— 创作者裁定「按 `.reference` 的代码实现」✓，
-      于是照 `reference/lora/musubi-tuner/.../nvfp4_utils.py`（抬头写明已对齐 MiniMax-H3 的
+      于是照 `musubi-tuner/.../nvfp4_utils.py`（抬头写明已对齐 MiniMax-H3 的
       Qwen3-VL 文本编码器 BF16 参考 ✓）＋ `comfy-studio/ComfyUI/comfy/float.py`（**写文件那一方** ✓）
       把 nvfp4 真正解出来 ✓：
       ⓐ 新模块 ``quant_nvfp4``：E2M1 值表（`0,.5,1,1.5,2,3,4,6` × 符号 ✓）、**高半字节在前** ✓、
@@ -1769,6 +1787,83 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
       ⓔ 本轮测试：`router_contract` 25/25（⑪¹⁰ ⑪¹¹ ⑪¹² ＋ ⑨ 快照）、`env_docs` 31/31（①′ ①″）、
       `runtime` 59、`pipeline` 127、`zimage` 40、`qwen21` 41、`structure` 33、`registry` 37、
       `inventory` 52、`quant` 60、`loader` 33、`device_policy` 0 failed ✓。
+    * ㊶ **2026-11-01·文本域 P0（流式 / 思考分栏 / 结构化校验）** ——
+      ⓐ **流式**：自研引擎原来**只能整段返回** ✗（`generate_llm` 没有回调口 ✓✗）⇒
+      `generate_llm(on_token=, stop_ids=)` ＋ `LlmBackend.generate_stream()`（增量解码走
+      「解**累积 id 全文**、只发比上次多出来的那段」✓✗ —— 逐 token 解码会吐出半个 UTF-8 ✗）＋
+      `app/services/text_stream.py`（六种归一事件 `meta/thinking/content/usage/done/error` ✓）＋
+      `app/routers/text.py` 的 SSE 端点（`asyncio.Queue` ＋ `call_soon_threadsafe` 中继 ✓、
+      15 秒 `: ping` 心跳 ✓、客户端断开**取消推理** ✓✗）。
+      ⓑ **思考内容原来被直接丢弃** ✗✗：Ollama 的 `message.thinking` / OpenAI 的 `reasoning_content`
+      两处都读、与正文**并列**成 `thinking`（绝不拼进 `text` ✗）；`/agent/{type}/chat` 的 `done`
+      增 `thinking` 键 ✓（`agent_route_test` 的键集合断言同步登记 ✓）。
+      ⓒ **结构化输出**：`generate_text` 只会「要 JSON 然后 `json.loads`」✗ ⇒ 新增
+      `generate_json(conn, prompt, schema, repairs=1)`（解析 → 子集校验 → 不合格**把问题回喂**再生成 →
+      仍不行就 `schemaOk=False` ✓✗，**不**用规则兜底冒充成功 ✗）；路由侧 `schemaOk=False` 直接 400 ✓。
+      ⓓ 三个坑值得记：① **FastAPI 0.162 的 `include_router` 是惰性的** —— `app.routes` 里只有
+      `_IncludedRouter` 占位（`path` 为 `None`）、子路由请求时才展开 ⇒ 拿 `app.routes` 判「路由登记」
+      **永远查不到** ✓✗（本仓既有口径是 `app.openapi()["paths"]` ✓）；② `route.response_class` 默认是
+      `DefaultPlaceholder` 对象 ⇒ 与字符串比恒不等 ✗；③ 本套收尾行一度写成 `SUMMARY[text_stream]: …`
+      ⇒ 撞 ㊈（`run_all` 只认 `SUMMARY:` 字面量 ✓）。
+      ⓔ 新套 `text_stream_test` **52/52**（协议层 SSE 帧＋两家解析／构造层「流式与非流式只差该差的几格」／
+      增量层「半个字符不发」＋文字级停用词／编排层事件顺序＋空流报错／**HTTP 层真起 `TestClient`**
+      跑一遍队列中继与 error 帧 ✓）；本轮回归：`text_generation` 67、`agent_runtime` 70、
+      `agent_route` 17、`agent_protocol` 25、`adapters` 124、`smoke` 481、`route_parity` 14、
+      `frontend_api_coverage` 5、`structure` 36、`engine_llm*`／`engine_text` 全绿 ✓。
+    * ㊷ **2026-11-01·并行线收口（结构自检从 32/36 回到 36/36）** —— 全量跑出来只剩 `structure_test`
+      红 4 条，逐条都不是文本域的 ✅，但都**必须修**（否则全量永远不绿 ✓）：
+      ⓐ `engine/__init__.py::GROUP_MODEL` / `GROUP_TOKEN` 补登记 `dit_seedvr2` / `umt5_te` /
+      `umt5_tokenizer`（三条都是并行线当天新写的骨架 ✓）。**首次编辑踩了个自己造的坑** ✗：
+      把 `"umt5_te", "dit_seedvr2",` 插在 `GROUP_MODEL: tuple[...] = (` **之前** ⇒ 变成模块级裸
+      字符串表达式 ✗✗ —— 语法合法、元组里根本没有它们 ✓✗（`import` 不报错，只有「查表查不到」
+      才露头 ✗）。已移进元组内 ✓ 并用 `'umt5_te' in GROUP_MODEL` 直接核 ✓。
+      ⓑ `structure_test.UNWIRED` 补三条欠账（生产代码 0 处 import ⇒ 不接线就登记欠的是什么 ✓✗）：
+      SEEDVR2 缺**装配族 + 双输入在 pipeline 里怎么表达**、UMT5 缺 `ensure_loaded` 的 `textWeights`
+      入口、`umt5_tokenizer` 只服务 `umt5_te`（**先塔后分词器** ✗ 反过来没有调用口 ✓）。
+      ⓒ `docs/feature-map.md` 三处归类 ＋ 新增 §10.1g，并把 §10.1f／§10.2 里「umt5 无实现」
+      「SEEDVR2 没有前向」两处**过期句**改成「有实现、没接线」✓（只改口径，不夸大成能跑 ✗）。
+      ⓓ `tests/engine_int4_resident_test.py` 与 `tests/engine_seedvr2_test.py` 的收尾行都写成
+      `SUMMARY n/m …`／`n/m 通过（跳过 k 项）` ⇒ 撞 ㊈（本套项数恒为 0 ✗），改回 `SUMMARY: n/m passed`，
+      skip 另起一行 ✓。
+      ⓔ `dit_seedvr2.py` 三处**真缺陷**（不是风格问题 ✗）：① `_window` 的 `window_fn` 口径写反了
+      —— 生产侧唯一实现 `_Patcher._make_window` 是**吃张量**（自己从 `x.shape` 取 `t,h,w` ✓），
+      而 `_WINDOW_FNS` 里的裸函数吃的是 `(t,h,w)` 元组 ✗ ⇒ 测试把裸函数递进去直接炸
+      `'torch.Size' object has no attribute 'shape'`（**口径混用**的典型症状 ✗）；已把注释钉死成
+      「window_fn 吃张量」＋测试侧加同口径的 `_window_fn()` 包装器 ✓。② `infer_shape` **不校验块编号
+      连续** ✗：`_blocks_index` 只按出现过的编号归类 ⇒ 少一块（量化转换/裁剪产物里真会出现 ✓）
+      会**静默**建成浅一层的模型 —— 键名全对、形状全对、跑得通、出片全糊 ✗✗；已加
+      `idxs != list(range(len(idxs)))` ⇒ `ShapeError` 点名「块编号不连续」✓。③ 同函数里
+      `mm_layers != len([i for i in range(mm_layers)])` **恒为假** ✗（死代码 ✓，真正起作用的是后半截
+      「后半段一块都不许再有 `.txt.`」）⇒ 已删 ✓。
+      ⓕ 三条**假红**（测试自己写错 ✓✗）：① 「缺一块」却只 `pop` 了块 1 的**一个键** ⇒ 块仍在、
+      本来就该放行 ✗（已改成删掉 `blocks.1.` 全部键 ✓，并补一条反向判据「只掉一个键 ⇒ 不报不连续」✓）；
+      ② 期望输出 `(B,16,T,H/2,W/2)` ✗ —— `vid_out` 会**解 patch 回原尺寸** ✓，修复任务要的是与输入逐
+      元素对齐的残差 ✗（改成 `(B,16,T,H,W)` ✓）；③ 拿 `σ=[0.7,0.3]`（两行**不同**）当「广播」基准 ✗
+      ⇒ 差 0.46 是正常的 ✓（改用 `[0.7,0.7]` 那次做基准 ✓）。
+      ⓖ `engine_seedvr2_test` 缺 `sys.stdout.reconfigure(encoding="utf-8")` ⇒ cp936 控制台下第一个 `✓`
+      就 UnicodeEncodeError、**0 条判据直接退** ✗（`run_all` 下不露头 ✓，与 `engine_win_io_test`
+      同一个坑 ✓）；已补 ✓。收尾：seedvr2 **52/52**、umt5 24/24、int4_resident 16/16、
+      structure **36/36**、text_stream 52/52、text_generation 67、agent_route 17、smoke 481、
+      route_parity 14、frontend_api_coverage 5、h3_form 114、h3_form_routing 24、licenses 13 全绿 ✓。
+      ⚠️ 期间 `h3_form.py` 一度 `IndentationError`（并行线在写的中间态，mtime 20:35）—— **没动它** ✓，
+      几分钟后自行恢复 ✓；记在这里是为了下次别当成自己弄坏的 ✗。
+    * ㊸ **2026-11-01·全面复看文本域，抓出两处「注释写着做了、代码其实没做」** ——
+      ⓐ **取消 ≠ 停推理** ✗✗：`text.py` 的 `_relay` 在客户端断开时只 `task.cancel()` ✓，可推理是
+      `asyncio.to_thread` 里的**同步**采样循环 ✗ —— 取消 await 只让协程那边抛 `CancelledError` ✓，
+      线程照样把 `max_new_tokens` 跑完（本地 CPU/GPU 实打实烧卡 ⏳✗）。修：`generate_stream(abort=)`
+      每步先看一眼 `threading.Event` ✓，置位即抛内部哨兵 `_Aborted` **且不补发任何字** ✗
+      （`_StopHit` 是"发到命中断点"，`_Aborted` 是"连当前 token 都不要"——两者必须分开 ✓）；
+      `text_stream._stream_engine` 捕获 `CancelledError` 后 `abort.set()` 再上抛 ✓。
+      ⓑ **error 帧重复** ✗：`stream_text` 抛错前**已经** `_push("error")` ✓，路由 `_run` 的
+      `except` 又补发一次 ⇒ 前端同一句报错弹两个红条 ✓✗。修：`emit` 侧记 `seen=error`，只补「还没发过」的 ✓；
+      顺带给 `call_soon_threadsafe` 加 `RuntimeError` 兜底（事件循环已关时工作线程里再抛＝没人接的异常 noise ✗）。
+      ⓒ 判据 +8 条（`text_stream_test` **52 → 60**）：引擎 abort「一开始就置位 ⇒ 一个增量都不发」「中途置位
+      ⇒ 只发置位前那段」；编排「取消任务 ⇒ abort 确实递给了引擎」「取消后线程真停了（假后端跑到上限就判红）」；
+      HTTP 层「服务层已发 error ⇒ 路由不再补发」；编排「后端**不收** abort ⇒ 不许送这个 kwarg」。ⓓ 口径提醒：
+      `_Aborted` 的返回值是**半段** ✓，调用方那时已经取消、值会被丢弃 ✓ —— 不许拿它当正常返回往下走 ✗。
+      ⓔ **别把补充功能做成新的崩溃点** ✗：`abort=` 只送给**签名里收**它的后端（`_accepts_abort` 判
+      `inspect.signature` ✓，`**kwargs` 形算收 ✓）—— 老/替身后端硬塞一个 kwarg ⇒ `TypeError: unexpected
+      keyword argument` ⇒ 正常流式当场崩 ✓✗（判据用的是"加 abort 之前"那份签名，正是要摁住这一种 ✓）。
     """
 
 from __future__ import annotations
@@ -1784,6 +1879,7 @@ TESTS = [
     ("适配器层", "adapters_test.py"),
     ("厂商错误归因", "vendor_errors_test.py"),
     ("文本生成", "text_generation_test.py"),
+    ("文本流式/结构化", "text_stream_test.py"),
     ("图片生成链路", "image_generation_test.py"),
     ("视频生成链路", "video_generation_test.py"),
     ("TTS / 音色复刻", "tts_generation_test.py"),
@@ -1800,14 +1896,35 @@ TESTS = [
     ("Agent 工具集", "agent_tools_test.py"),
     ("Agent 音色工具", "agent_voice_tools_test.py"),
     ("Agent 剧本/语料工具", "agent_script_corpus_test.py"),
+    ("剧本知识库检索", "script_library_test.py"),
+    ("剧本知识库写能力（编辑/删除/上传）", "library_overlay_test.py"),
+    ("剧本知识库目录与路由", "script_catalog_test.py"),
+    ("场次结构（解析器/派生索引/项目事实）", "scene_parser_test.py"),
+    ("扫描件 OCR 入库（docx 整页图）", "ocr_index_test.py"),
+    ("第三库补抽（OLE2/RTF/码表/可打印率）", "lib_index_test.py"),
+    ("OCR 校对机制（清洗/门禁/隔离）", "ocr_clean_test.py"),
+    ("OCR 版面分栏与 VLM 升级通道", "ocr_layout_vlm_test.py"),
     ("Agent 提取工具", "agent_extract_tools_test.py"),
     ("Agent 分镜工具", "agent_storyboard_tools_test.py"),
     ("Agent 运行时", "agent_runtime_test.py"),
     ("Agent 聊天域", "agent_route_test.py"),
     ("MCP 接入层 + 路由", "mcp_test.py"),
+    ("修复内核（提案/应用/回滚）", "repair_tools_test.py"),
+    ("修复诊断（依赖反推/缺口）", "repair_diagnose_test.py"),
+    ("修复技能提示词（L0–L4 权能边界）", "repair_skill_test.py"),
+    ("画布工具层（工具→op 编译/跨语言同源）", "canvas_ops_test.py"),
+    ("画布插件契约（清单校验/源对拍）", "canvas_plugins_test.py"),
+    ("画布 Agent（一句话→op，工具无副作用）", "canvas_agent_test.py"),
+    ("知识闭环（跑次归一/台账/蒸馏/投喂/接线）", "knowledge_loop_test.py"),
+    ("知识复盘定时器（默认关/防重入/失败隔离/复位）", "knowledge_scheduler_test.py"),
+    ("质检阈值覆盖层（qc 伪档/证据核验/接线到 ffmpeg）", "qc_thresholds_test.py"),
+    ("调参候选（只读/样本闸门/归因边界/凭据可核/抽样如实）", "tuning_suggest_test.py"),
+    ("跑次落账输入侧（引擎封口/质检写回/锁外/码可聚/重跑覆盖）", "outcome_wiring_test.py"),
     ("Agent 出厂提示词", "agent_prompts_test.py"),
     ("评测打分器 + 基准目录", "evaluation_scorer_test.py"),
     ("Skill 解析 + 加载", "skills_test.py"),
+    ("Skill 附件按需读取（边界/截断）", "skill_refs_test.py"),
+    ("Skill 引用解析基准（断链守卫四类基准）", "skill_refs_check_test.py"),
     ("评测执行器 + 端点", "evaluation_route_test.py"),
     ("基准资产搬迁 + 评测 CLI", "eval_cli_test.py"),
     ("GPU 显存管理器 + 2 端点", "gpu_manager_test.py"),
@@ -1832,6 +1949,10 @@ TESTS = [
     ("SSE 总线 + 尾帧提取", "sse_hub_frames_test.py"),
     ("全自动管线 + SSE 端点", "auto_pipeline_test.py"),
     ("本地模型扫描 + 11 端点", "local_models_test.py"),
+    ("ComfyUI 工作流三件套（目录 / 注入 / 槽位）", "comfyui_workflows_test.py"),
+    ("ComfyUI 局部重绘 / 扩图变体（参考图顺序、蒙版通道、两段尺寸成对）", "comfyui_inpaint_test.py"),
+    ("ComfyUI 提示词模板编译（按上下文算的两格、参考图接线、反复编译不叠加、该拒就拒）",
+     "comfyui_prompts_test.py"),
     ("**真实权重指纹**（读 safetensors/GGUF 头判架构；合成字节 + 扫描接入 + 2 端点）",
      "model_fingerprint_test.py"),
     ("本机 Ollama 模型库**离线**读取（服务没起也列得出；零外部依赖；清单↔blob 的 sha256 核对）",
@@ -1866,6 +1987,12 @@ TESTS = [
     ("ComfyUI 能力门面（系统/目录/队列/历史/作业/媒体 + 通用工作流）", "comfyui_capability_test.py"),
     ("ComfyUI 工作流运行（持久化/崩溃恢复/串行租约/产物落点/用量/归因；真 stub 上游 + 真 DB）",
      "comfyui_runs_test.py"),
+    ("ComfyUI 参数落点推断（未登记工作流 ⇒ bindings；连线不覆盖/正负不混/21 条逐格对拍；纯函数）",
+     "comfyui_infer_test.py"),
+    ("ComfyUI 参数落点推断端点（UI 格式/无输出/别名当场拒；真 TestClient + 临时数据根）",
+     "comfyui_infer_route_test.py"),
+    ("ComfyUI 运行记录保留清理（在跑的不动/行与产物同生共死/共享不删；干跑默认 + 真 DB）",
+     "comfyui_retention_test.py"),
     ("自研引擎·加速链（配置解析 + 提交前校验 + 接线；零依赖）", "engine_accel_chain_test.py"),
     ("自研引擎·H3 prompt 契约（声明 / 跳过判据 / 标签 / 任务选择；零依赖）",
      "engine_conditioning_test.py"),
@@ -1881,6 +2008,8 @@ TESTS = [
      "engine_image_ops_test.py"),
     ("自研引擎·CLIP 文本塔（CLIP-L + OpenCLIP-bigG：双命名换算 + 因果/池化/选层 + SDXL 条件拼接；纯 torch）",
      "engine_clip_text_test.py"),
+    ("自研引擎·画布计划与用途档位（吸附按族 / 档位查表不猜默认 / 计划层与管线分离；零依赖）",
+     "engine_canvas_test.py"),
     ("自研引擎·超清模式规划（契约校验 / 1.5×先 2× / 4× 小分块；零依赖）",
      "engine_upscale_test.py"),
     ("自研引擎·超清放大器网络（V2 主干 + V3 因子化注意力；T 不变 / 残差恒等 / 严格装载）",
@@ -1934,8 +2063,13 @@ TESTS = [
      "并接到 `weights.load_module_weights` 端到端 —— 合成文件与真权重两层都是 `torch.equal`，"
      "缺伙伴时写前即拒、模型零污染）",
      "engine_quant_nvfp4_test.py"),
-   ("自研引擎·流式装载（逐张量读/峰值≈单张量/失败零污染/与整份读逐位相同）",
+   ("自研引擎·流式装载（逐张量读/峰值≈单张量/失败零污染/与整份读逐位相同/"
+    "**0 元素张量（哨兵）能装且不算缺键** —— `frombuffer(b\"\")` 会当场抛，Edit 2511 真权重踩过）",
     "engine_weights_streaming_test.py"),
+    ("自研引擎·4bit 打包常驻（解包顺序不许反 / convrot 搬边与 int8 同一条路 / int4 与 int8 计划"
+     "靠文件自述分工且互斥 / 缺 scale 不进计划 / 真 4bit 文件 224·256 层全进计划且驻留 6.91·7.02 GiB "
+     "（无壳 23.89·24.48）/ `_shell_int8` 换壳＋装载原样写入＋前向与旧路对齐 / 每条判据都有反证）",
+     "engine_int4_resident_test.py"),
     ("自研引擎·int8 常驻（convrot 搬边数值对齐 / 装载不许 cast / scale 不降精度 / 元数据不算多键 / "
      "`int8_offload` 只钉 int8 且峰值不随层数增长（4 层 vs 12 层对照）/ 账目自洽且**漏装即拒** / "
      "开关只认显式 True；无 torch 或无卡逐条显式 SKIP）", "engine_int8_resident_test.py"),
@@ -1975,6 +2109,28 @@ TESTS = [
     "ChatML 模板两套逐字照抄 + 系统段按第 2 个 `<|im_start|>` 截掉、空串补空格、自带 im_start 不套模板；"
     "先整条编码再切行（位置编码算在完整序列上）；真权重 1108 根多余键全被 `visual.`/scale 规则认领）",
     "engine_qwen25_te_test.py"),
+   ("自研引擎·Qwen2.5-VL **视觉塔**（Edit 2511 参考图语义通路；714 张量里 390 个真权重 + 324 个 fp8 "
+    "配套，逐键零多余零遗漏；窗口重排在**合并格**域（112//2//14 = 4）且必须与独立算法一致、"
+    "`cu_window` 段表末值 = 合并格数 × 4；数值层拿「置换+分段 SDPA」对「不置换+全图掩码」两条结构不同的路"
+    "对拍 —— ⚠️ 掩码只能是 ``(1, seq, seq)``，写成 ``(1, 1, seq, seq)`` 会把分数广播成 4 维、"
+    "`transpose(0,1).reshape` 先把 head 与 token 混压，形状全对、差 0.4~0.6 却像是塔错了；"
+    "⚠️ 图必须**横竖都跨窗**（84×84 只有 3×3 格 < 一窗 ⇒ 置换退化成恒等、白测；168×112 虽两窗但"
+    "行优先序本等于窗口序 ⇒ 也是恒等）；反向把窗口改成「一格一窗」输出必须变，否则对「窗口划在哪」是瞎的；"
+    "真权重装机盯 `loadedKeys`（字段真名，写成 `loaded` 恒 None ⇒ 永远红且看着像真缺陷）+ 两次前向逐元素相同）",
+    "engine_qwen25vl_vision_test.py"),
+   ("自研引擎·Qwen-Image **Edit 2511 的参考图通路**（视觉塔 ⇒ `<|image_pad|>` 注入 ✓、参考图 ⇒ `ref_latents` ✓，"
+    "两路口径**必须分开** ✗✗：视觉塔 **384² 面积**、VAE **1024² 面积**，混用不报错只让整图偏色；"
+    "**面积 ≠ 边长**（1024² 对 16:9 是 1368×768，写成 1024×576 就把构图压扁了且 0 报错）；"
+    "视觉塔那一路吃 `(H,W,C)` 三维、VAE 那一路吃 `(1,3,1,H,W)` 五维 ⇒ 必须各自转换；"
+    "Wan 族编出 5 维 ⇒ 单帧参考图挤成 4 维（5 维进 `ref_latents` 在 patchify 上炸）；"
+    "`ref_latents` 是 `Sequence[Tensor]` ⇒ **少包一层列表**会按 batch 维遍历（每个变 3 维 ⇒ `_patch` 解包失败）；"
+    "正走 `prompt_edit` 模板、负向**不带图**；`_refLatents` 存后端而不是回执（只放回执 ⇒ 只有第一步拿得到）；"
+    "Edit 权重没给参考图 / 换回 t2i 请求没清 `_refLatents` 都是「0 报错的能力消失」，两头都要拦；"
+    "**多图**（Plus 口径）：N 张 ⇒ 模板 N 个槽 + 嵌入 N 块 + `ref_latents` N 条，任一处还按单图走都不报错、"
+    "只让第 2..N 张的指令落空，且 `Picture i` 与 `embeds[i]` **顺序即语义**；编辑口径下 `max_length` 要叠加图的 token 数"
+    "（三张 588 > 512 ⇒ 截掉的正好是尾部指令）；真权重那组盯 32 层 / 1280 宽 / 3584 出宽 + 16 通道 4 维潜变量"
+    "+ 两张不同长宽的图 token 数各不相同）",
+   "engine_qwen_image_edit_test.py"),
    ("自研引擎·Qwen-Image **2512/Edit 2511** 的出图口径与装配门禁（与 2.1 只差一个 `21` ⇒ 族名比较"
     "只能 `==`，前缀判族会让 2.1 被 2512 的 shift 接走：σ 钉 **3.1**、逐点比 2.1 的 0.69 更偏噪、也不等于"
     "Z-Image 的 3.0；尺寸吸 **16** 且**潜边长必须偶数**（只吸 8 ⇒ 奇数潜边 ⇒ `img_in` 拍平爆）、单帧 "
@@ -1985,17 +2141,84 @@ TESTS = [
     "**三本账不许混**（拿 2.1 的 13.26 判 38.05 ⇒ 判「装得下」⇒ 装到一半 OOM；假体卡况下 2.1 判 `off`、"
     "2512 必须 `split`、余量不足 0.5 GiB 才整份转 CPU；三个可见面都要是生效值：能力表单开 "
     "`needGiB.qwenImagePart`、`describe()` 的 `partNeedGiB`/`defaultPartNeedGiB`、`declare_chain` 回执）；"
-    "Edit 权重**在向前之前**拒跑并给两条出路）",
+    "Edit 权重在缺 `ref_latents` 时**在向前之前**拒跑，文案点名上游三处且 `ref_latents` 必须是**一条列表**）",
     "engine_qwen_image_test.py"),
-   ("自研引擎·Wan 系 VAE（先接 Qwen-Image 2.1 的 64 通道：238 键与 comfy `WanVAE` 逐键同名；"
-    "`temporal_kernel=1` ⇒ 单帧路径；四通道 RGBA 出图要丢第 4 通道；"
-    "解码前反缩放走 `latent_formats.QwenImage21` 的 mean/std —— 直接喂 `decode()` 形状全对、图是灰噪）",
+   ("自研引擎·Krea2 的出图口径与装配门禁（**与 2.1 / 2512 的 shift 同形不同义**：盘上写 `1.15` 是 "
+    "**μ** ⇒ `ModelSamplingFlux` 要 `e^1.15≈3.158`，当底数喂下去不报错、σ 曲线不弯、出图一团纹理；"
+    "尺寸吸 **16**（不必 32）、默认 0.65 MP 视频口径被换成 1.05 MP 且回执如实写「1:1 实际 1040×1040」"
+    "而不是官方 1024；单帧 `frames=1`/`fps=0`、`timesteps` 就是 σ；cfg=1.0 在本族是**对的**"
+    "（别照抄 2.1 那句）；四格缺项逐格点名且误报里点名 12.82B/16 通道/反缩放取 Wan21；"
+    "换 `textWeights`/`vaeWeights` 必须换装载键；就绪档只列这条链三件 ≈17.88 GiB 且全算必需、"
+    "**不许**并进 `image` 档的必需集合；分时驻留有本族账 `KREA2_PART_NEED_GIB`）",
+    "engine_krea2_test.py"),
+   ("自研引擎·**Wan 2.2 I2V** 接线（第八套生成链：主干入口 **36** = 噪声 16 ＋ 掩码 4 ＋ 首帧条件 16 "
+    "⇒ `firstFrame` **必给**，不给就**拒**而不是退化成文生视频；尺寸吸 **16**、像素帧吸 `4n+1`"
+    "（16ch VAE 时间 **4×** ⇒ 80 帧会静默丢尾巴）；`fps` 默认 24（别的族口径）⇒ 换官方 **16** 并"
+    "**说清这一档给不了 24**（`fps` 是值不是 None ⇒ 分不出「没写」与「写了 24」，别谎称显式 24 会保留）；"
+    "`steps` 默认 30 ⇒ 换官方 **4**、`wanHighSteps = round(steps×0.5)`、σ 走 flow **shift=5.0**；"
+    "`initImage` 与 `firstFrame` **互斥** ⇒ 当场拒（静默丢掉会让用户以为起点是他那张图）；"
+    "双专家按 **σ 阈值**换装（`sigmas[wanHighSteps]`）且边界必须 `<=`（写 `<` ⇒ 4 步退化成 3/1），"
+    "`bind_plan` 每轮复位 high；装配只**登记**两份路径（并存 ≈53 GiB 装不进 22.49）、"
+    "装完核 **36 通道**、`ditPath2` **必须进装载键**、三件分时 encode(text+vae)/sample(dit)/decode(vae)；"
+    "`wan22` 单列一档（标签 `wan22` 而非 `wan`，否则卷进 `wan26_i2v_14b_gguf`）、四件全必需、"
+    "就绪档如实报 33.14 GiB `fits=False`）",
+    "engine_wan22_test.py"),
+   ("自研引擎·**Music3（音频 DiT + DAV）** 接线（第九套生成链：潜变量是 **3 维** `(b,128,T)`、"
+    "潜帧率 **86.1328 Hz** = 44100/512（≠ 条件帧率 25 Hz）⇒ 200 条件帧 = **689** 潜帧"
+    "（错值 367 = 忘乘 960/512、375 = 用 25Hz 反推，都「形状自洽、只有歌不对」）；"
+    "σ 走 flow ⇒ 主干要 `t = 1 − σ` 且 `velocity()` 与 `forward()` **分开**（输出还要取负，"
+    "写成 \"网络直接吐噪声\" 会整段反相）；RoPE 是 **split-half 正号**、只转 q/k 的**前 `rotary` 维**、"
+    "v 不转；长音频滑窗 689/344 累加后**除命中次数**、最后一次性取负；"
+    "DAV 121 键、`weight_g/weight_v` ↔ `parametrizations.weight.original*` **两向**互归"
+    "（只做一向 ⇒ 「自证零问题」变成「缺 60/多 60」）、`shape_problems` 两种写法都收；"
+    "`128 = 2 × 64` 行主序折半成两个**独立样本**（行为判据不判「清零那半恒为常数」——"
+    "转置卷积在 T 小时整段都是边界、零输入照样解出时变波形；要判**没动的那半逐位不变**）；"
+    "`scale_factor` 必须 1.0 否则当场拒；`Snake1d.alpha` 必须给**确定初值**（`torch.empty` 会留"
+    "未初始化内存，实测抽到 3.5e7 ⇒ 不装权重的壳会解出假声音）)",
+    "engine_music3_test.py"),
+
+   ("自研引擎·Music3 **语义塔装载对账**（第十族的 context 生产段 ✓：Qwen3-8B 形态 36 层 / GQA 32+8 头 / "
+    "**QK per-head RMSNorm 在 RoPE 前** / 合并 qkv+gate_up / 剪枝版词嵌入与 `lm_head_pruned`；"
+    "**词表内嵌在 TE 文件里**（`tokenizer_json` 键 11.4 MB ✓）不用外置目录 ✗；"
+    "160 层 int8_tensorwise+convrot(256) 常驻 ✓ 装载五步序与 `_prepare_h3_module` 同一套 ✓。"
+    "四处「形状全对、只有歌不对」：①CFG 非条件份只换 `[:, 1:-2]` ②c0 引导采样的 top-k 阈值取自 "
+    "**conditioned** 那份 ✗✗ ③深码本查表要加 `(index−1)×1024` 段偏移 ④帧隐状态只收**条件份**；"
+    "另有「H3 缺 `audioLatentMode`/`temporalCompression` ⇒ **提交时就 400**」的路由闸门判据 ✓"
+    "——不给这两格 ⇒ 装载 20 秒后采样才炸 ✓✗）",
+    "engine_music3_keys_test.py"),
+   ("自研引擎·Music3 **全链接线**（零件都对、拼起来对不对只有真跑或逐处对账才判得出："
+    "`audioVaeWeights` 被塞进 `imageVaeWeights` ⇒ 报「缺 audioVaeWeights」读起来像清单缺件；"
+    "`lyrics` 掉在路由键表外 ⇒ 前端送了被静默丢掉、`plan.warnings` 还理直气壮写「按纯器乐出」；"
+    "`latent_shape` 先判 `vae_scale` 再认 3 维 ⇒ Music3 没有 `vae_scale` ⇒ 一维占位 ⇒ 采样第 1 步炸。"
+    "七组：A 两把尺子各自同源（条件 25 Hz / 潜帧 86.1328 Hz，**不是**互推）＋B 秒→条件→潜帧三档互核"
+    "（1 s ⇒ 25/86、20 s ⇒ 500/1722、360 s ⇒ 9000/31007，`width/height` 恒 0）＋C 引导散文不许再说「更平」"
+    "（两层 CFG：真旋钮在自回归内部的 `cfg 1.5`/top-50，DiT 那层要负向条件而本仓恒空 ⇒ 这一格调多少都不变）"
+    "＋D 清单口径（三件 13.34 GiB 逐件必需、VAE 槽位表 music3→audio / h3→video / 其余回 image、不收词表）"
+    "＋E 五处接线顺序与自述一致＋F 装配拒绝面（给 `tokenizerPath` 当场拒 / 缺格首行只列真缺 / "
+    "**不回读** `real_audio_vae` —— 默认就是 False，按它拒会拦掉每次正常调用）"
+    "＋G 路由键表（`lyrics` 在册、档位标签必须写明**产物是音频**）",
+    "engine_music3_wiring_test.py"),
+   ("自研引擎·Wan 系 VAE（**两族共用一条装配线**：Qwen-Image 2.1 的 64 通道 + Krea2 的 16 通道 "
+    "`wan21`；238 键与 comfy `WanVAE` 逐键同名；`temporal_kernel=1` ⇒ 单帧路径；"
+    "⚠️ `temporal_kernel=3` 解**单帧**要走 comfy 的 `autopad=\"causal_zero\"` 把时间核**截到最后一拍**"
+    "（旧写法「T==1 不补零」会报 `kernel(3) > input(1)`，读起来像尺寸算错）；四通道 RGBA 出图要丢第 4 通道；"
+    "解码前反缩放按族取 mean/std（2.1 的 `QwenImage21` / Krea2 的 `Wan21`）—— 直接喂 `decode()` "
+    "形状全对、图是灰噪；回执点名**人话族名**，不许写死「否则 H3」，且族名的三种写法"
+    "（`wan21` / `wan-2.1` / `wan2.1`）必须折成同一个键 —— `FAMILY_TITLES` 与 `LATENTS_STATS` 键口径不同 ⇒ "
+    "归一查不到时要按原样再查一次，否则 `latents_stats(\"wan2.1\")` 会把本来能命中的族判死；"
+    "未知族一律原样回显、当场报错，不许折进某一行）",
     "engine_vae_wan_test.py"),
    ("自研引擎·Flux VAE（16 通道 / 无 `quant_conv` / 244 键 = SDXL 的 248 − 4；"
     "`x/0.3611+0.1159` 反缩放用**恒等解码桩**钉死，并反向钉住「`(x−shift)/scale` 在 SDXL 上恒等价 ⇒ "
     "试不出来」这条差；真权重键集+逐键形状+参数量全等；"
     "预检把潜通道换成 4 必须报「拿成了 SDXL VAE」）",
     "engine_vae_flux_test.py"),
+   ("自研引擎·**编码侧**（像素 ⇒ 潜变量：`latent_formats.process_in` 从零调用变成真消费者；"
+    "Wan `Encoder3d.forward` / `WanVAE.encode` 5 维与 4 维、通道 = `z_dim`；"
+    "`encode_latents` 与 `decode_latents` 用**恒等桩**互逆、`family` 与 `z_dim` 不符当场人话；"
+    "Flux 编码 `(x−0.1159)*0.3611` 且 `(mean, logvar)` 必须拆开；用 SDXL 缩放建 Flux VAE 当场拒；"
+    "`torch_backend` 里裸调 `self._vae.encode(` 只许在 `_encode_pixels` 内、首帧形状自检不许用滑窗）",
+    "engine_encode_test.py"),
     ("自研引擎·GPU+CPU 联合驻留（非层先上卡、层取**连续前缀**、放不下就 `fits=False` 不假装；"
      "`blocks.N` 也认层（DiT/H3 真形态）；split 搬激活 / park 搬权重且峰值=单层；"
      "不挂 hook 必报设备不一致；老路 `off` 零 hook 零搬运；接线后报告可观察"
@@ -2034,6 +2257,16 @@ TESTS = [
     "出函数不留后台线程（不等干净 ⇒ 换装退完后还在读旧文件）；截断文件必须当场报；"
     "⚠️ 这条套件连跑三次才抓到 `win_io` 的**槽共用**缺陷：短读不报错、单线程永远测不出来）",
      "engine_readahead_test.py"),
+   ("自研引擎·**内存这一级**（三级内存的中段 ✓：配额按件一本 ⇒ 超了按 LRU 只卸**层**、钉住的不动；"
+    "快照**先于**卸载 ⇒ 重读能核形状；装载跳过卸过的键且**不**判 `shapeMismatch`；"
+    "前向进层前重读 ⇒ 数值与整份常驻**逐元素相同**；重读用**第二把**句柄（装载那把已随 `with` 关闭）；"
+    "不启用时 `hostCache=None` 零变化）",
+     "engine_host_cache_test.py"),
+   ("自研引擎·**层预取上卡**（`foresight`：算 CPU 上这一层时，下一层的权重在**独立拷流**上搬进额外槽；"
+    "进那一层**先问落地没** ⇒ 落地了那层在卡上算、没落地照原路在 CPU 上算（不等 ✗ 不拿半份数据 ✗）；"
+    "槽是计划之外的地 ⇒ **先从预算里扣**、扣完太亏就不启用；0 槽／没卡／park 一律不建槽；"
+    "报告 `foresight=None`（没开）与 `usedLayers=0`（开了没等到）分得开）",
+    "engine_foresight_test.py"),
    ("自研引擎·VAE 分块缩放/解码（`tile`/`overlap` 是**像素**单位 ⇒ 除 8× 才是潜像素；"
     "权重累积＋除法归一 ⇒ 重叠带精确平均、与整张解码逐位相同；`overlap ≥ tile` 死循环 / 不足 1 潜像素 / "
     "`tile` 过小 三条「不报错但结果坏」的坑一律改成报错；只切空间不切时间维）",
@@ -2059,6 +2292,54 @@ TESTS = [
     ("自研引擎·通用单流 DiT 骨架（Krea2/Lumina-2 同构；维度**全从权重形状反推**、键集合与盘上"
      " 878 个张量双向对账；`scale+1` 归一化 / RoPE 原点恒等且保范数 / 文本与时间支路缺一即变 / "
      "形状矛盾当场拒）", "engine_dit_generic_test.py"),
+    ("自研引擎·**族装配表**（`dit_build`：一族一行 `FamilyBuilder` + 一份公共流程；表项完备"
+     "（模块/入口/label/改名目标都在）/ 判得出⇔建得了（`BUILDERS ∪ DETECT_ONLY = FAMILY_KEYS`，"
+     "两边不重叠）/ **收口**（`torch_backend` 零 `family ==` 分叉、四个 `_build_*` 只剩薄壳、"
+     "`dit_build` 不反向 import）/ 表驱动真生效（临时登记一族即建得出）/ 推不出结构当场拒并包成"
+     " `TorchBackendUnavailable(reason=pending)` / Krea2 三层前缀在形状表·分组表·key_map 同步剥 / "
+     "**前向契约**（潜变量几维·σ 形态·潜空间，`contract` 无默认值、枚举写错当场拒、"
+     "`IMAGE_ONLY_FAMILIES` 由表派生）/ **口径对账**（自造名当场拒、别名归一、同族放行·异族当场报·"
+     "一边未知不假装、H3 这类非装配族单独答口径、`meanstd` 族在 `vae_wan` 有 16 组数、"
+     "装配线 `vae_family` 从契约读、`readout` 写出换算方式）/ **派生格**（`config` 只收 dataclass 字段，"
+     "`@property` 不在 `vars()` 里 ⇒ `qwen_image` 的 `ref_timestep_zero` 必须登记成派生格，"
+     "不登记就永远读到 None、Edit 被当 t2i 装）)", "engine_dit_build_test.py"),
+    ("自研引擎·**Flux.1 双流＋单流 MMDiT**（19 双流 + 38 单流 / 拼接顺序 `(txt, img)` / "
+     "调制 6+3 组顺序 `(shift, scale, gate)` / 时间口径 `1000·σ` 不翻转 / 一根 vec 三路相加 / "
+     "位置号不居中 / `img_in` 吃拍平 patch 且 `final_layer` 不展开；与参考实现逐层对拍）",
+     "engine_dit_flux_test.py"),
+    ("自研引擎·**Wan2.2 I2V 14B 骨架**（40 块/5120/13824/40 头；真头 1908 键 = 真权重 1095 + "
+     "fp8 伴生 813、参数量 14 288 901 184 与公式互核；六路调制 `(mod+e).unbind(2)` **不是** Flux 的 "
+     "`chunk`；门控三连 `+1` 那项 / 三轴 RoPE 宽度 44·42·42 且位置从 0 起 / σ⇒时刻 ×1000 在骨架里 / "
+     "36 通道 I2V 布局只切不造 / 不补边；fp64 与独立参照同一前向差 5e-16）",
+     "engine_dit_wan22_test.py"),
+    ("自研引擎·**SEEDVR2 / NaDiT** 骨架（视频修复主干；小号合成几何 2 块/dim=64 钉形状反推 ＋ 前向守门 ＋ "
+     "结构口径；真实 3B 权重只读 safetensors **头**核几何与参数量、不加载数据）；四处「形状全对、只有数值错」"
+     "：`ada` 的 `emb` 切片组号、`mlp` 的 SwiGLU 门控顺序、`attn_norm` 有没有 affine、末块 `vid_only` 的文本分支。"
+     "⚠️ 与参考实现的逐位对拍（含真实 fp16 权重）是**人为验收那一步**，本套不含 ⇒ 装配线未接前不许当端到端通过",
+     "engine_seedvr2_test.py"),
+    ("自研引擎·**SEEDVR2 VAE（ByteDance `VideoAutoencoderKL`）**（视频修复链的潜变量出入口："
+     "从 250 个真键反推 `(128,256,512,512)`／时间 ÷4／空间 ÷8／16 通道／缩放 0.9152，"
+     "四种坏权重各一条人话判据；帧数铁律 `4n+1` 与潜↔像素互逆；"
+     "**因果性双侧**（扰动末帧不许改首潜帧／首像素帧）＋ 三处口径的反向验证"
+     "（时间 padding 换零填、`remove_head` 恒等、组归一化跨帧 ⇒ 判据必须红）；"
+     "`build+装载` 键对账 250 键、参数量 250 648 227；"
+     "黄金数值取自与 ComfyUI `comfy/ldm/seedvr/vae.py` 的逐位对拍"
+     "（fp32/CPU、`manual_seed(1234)`，encode/decode **maxdiff 0.0**）"
+     "⚠️ 真权重不在盘上时 ①④⑧ 三项显式跳过、其余照跑)",
+     "engine_seedvr2_vae_test.py"),
+    ("自研引擎·**SEEDVR2 修复支路端到端**（plan → 17 通道条件 → denoise → 落盘："
+     "11 帧真 mp4 ⇒ 修 **9 帧**（`4n+1` 向下吸、截尾 2 帧如实记账）、空提示词合法（本族无文本塔）、"
+     "两条源视频**拒**而不是静默取第一路、`cfg>1` 只报不拒；条件 = `cat(latent16, mask1)` = **17** 且"
+     "mask 全 1，挂 `denoise` 的 `conditioning` 位（不是 `context` 位）、主干入维 **33**、"
+     "`condition=None` 时回落到已登记条件、全无时点名 `referenceVideos`；"
+     "`write` 的 `synthetic` 由 `decode` 说了算（真 VAE 产物不许叫「噪声」）。"
+     "⚙️ 12/13/14 节要真 VAE（501 MB），不在盘上则跳过）",
+     "engine_seedvr2_pipeline_test.py"),
+    ("自研引擎·**UMT5-XXL 文本塔 ＋ unigram 分词器**（Wan 系提示词入口；五条坏法各给一条判据："
+     "键名错一个字、相对位置偏置**只写第 0 层**（T5 写法搬到 UMT5 ⇒ 后 23 层丢 bias）、"
+     "掩码方向反（当「要屏蔽的」用 ⇒ 只有 pad 区坏、肉眼看不出）、FFN 写成单支（`wi_1` 白装）、"
+     "RMSNorm 写成 LayerNorm（带 bias/减均值 ⇒ 全层数值偏移））",
+     "engine_umt5_test.py"),
     ("自研引擎·H3 形态积木（RMSNorm / SwiGLU / 18 路 adaLN / 正弦时间嵌入 / RoPE 旋转不变量 / "
      "双 fp32 输出头 / PDD 头库 —— 已接进 `TorchBackend` 双流路径 ✓ `H3_FORM_TODO` 已清零 ✓）",
      "engine_h3_form_test.py"),
@@ -2111,6 +2392,11 @@ TESTS = [
      "（`freedBytes` 不许假释放）/ 算不出的字节数报 None 不编数 / **接线静态守卫**：`_apply_loras` 经账本借、"
      "失败两条路径都还、`unload` 先还租约再清账本（按行号判序，不比 ast.walk 下标）；零依赖）",
      "engine_lora_cache_test.py"),
+    ("自研引擎·LoRA **补丁层**（挂载不折进权重（`weight` 逐位不变）/ **搬家后仍对**（模块换精度、"
+     "换设备之后钩子当场对齐因子 ⇒ 不炸 `Expected all tensors to be on the same device`）/ "
+     "**卸载是真摘钩子**（只还租约 ⇒ 钩子指着已释放张量、重挂即叠两遍）/ 重复卸载是空操作 / "
+     "int8 的 `weight` 不当对齐参考（退化成整数量化因子）/ 两处收口有源码级守卫）",
+     "engine_lora_patch_test.py"),
     ("LoRA 训练（**不装模型、不跑训练** ✓，钉的是「跑之前那一半」：参数收敛 / argv 拼装 / 输出切行 /"
      "日志增量取 / 真子进程取消不算失败 / 素材改写拒绝；85 项。**此前漏登记 ⇒ 一个多月没人跑过** ✗）",
      "lora_train_test.py"),
@@ -2262,6 +2548,17 @@ def main() -> int:
             for line in output.splitlines():
                 if line.startswith("FAIL") or line.startswith("  DRIFT") or line.startswith("  SHADOW"):
                     print(f"        {line.strip()}")
+            if not summary:
+                # ⚠️ **崩溃型**失败：子进程抛异常 / 被杀 ⇒ 输出里**一行都不带** `FAIL` 前缀 ✗
+                #    ⇒ 上面那圈一条也捞不到 ⇒ 日志只剩「FAIL 套名 + 空摘要」✓✗（2026-11-01 实测：
+                #    `image_generation_test` 就这么静默失败过一整轮 ✓，只能另跑一次才知道原因 ✗）。
+                #    ⇒ 这里补印末尾若干行 ✓：traceback / Fatal Python error 才有机会看见 ✓。
+                #    为什么是「末尾」而不是全部 ✗：整份输出可能有几千行（PASS 明细）✓，翻不动 ✗。
+                print("        （无摘要 ⇒ 疑似崩溃/被中断；以下为末尾输出）")
+                for line in output.splitlines()[-15:]:
+                    print("        " + line.rstrip())
+                if not output.strip():
+                    print("        （子进程**一个字都没输出** ⇒ 更像被外部杀掉/启动即失败）")
 
     print()
     if failures:

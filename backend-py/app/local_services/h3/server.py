@@ -83,7 +83,7 @@
   而那个类**不在模板里**（空插座 ✓）⇒ 只能**问引擎**现建 ✓（``_video_loader`` ✓：类名/文件格/
   ``IMAGE``、``AUDIO`` 各在第几槽都从 ``/object_info`` 读 ✓，一个候选都用不了就如实告警且**不上传** ✗）。
   上游候选由 ``H3_REF_VIDEO_NODES`` 覆盖（默认 ``LoadVideo,VHS_LoadVideo`` ✓）。
-  ⚠️⚠️ 而且**多半是两跳** ✓✗（2026-10-27 照抄 ``reference/comfy-org`` 后端口径 ✓）：现版核心
+  ⚠️⚠️ 而且**多半是两跳** ✓✗（2026-10-27 照抄 ``comfy-org`` 上游后端口径 ✓）：现版核心
   ``LoadVideo`` 只吐 **``VIDEO``** ✗，而 ``ref_videos.ref_video_k`` 要的是 **``IMAGE``** 帧串 ✗
   ⇒ 中间必须再有一个 ``GetVideoComponents``（``VIDEO`` → ``images``/``audio`` ✓，候选由
   ``H3_REF_VIDEO_COMPONENT_NODES`` 覆盖 ✓）。生态节点（``VHS_LoadVideo`` ✓）自带 ``IMAGE``/``AUDIO``
@@ -189,7 +189,7 @@ REF_IMAGE_SIZES: tuple[str, ...] = ("match", "max")
 REF_IMAGE_SIZE_DEFAULT = "match"
 #: 把「视频」拆成「帧串 + 音轨」的那类节点 ✓（候选，按顺序问引擎 ✓）。
 #:
-#: ⚠️⚠️ 为什么需要**第二跳**（2026-10-27 照抄 ``reference/comfy-org`` 后端口径 ✓✗）：
+#: ⚠️⚠️ 为什么需要**第二跳**（2026-10-27 照抄 ``comfy-org`` 上游后端口径 ✓✗）：
 #: 现版核心 ``LoadVideo``（``comfy_extras/nodes_video.py`` ✓）的输出**只有一个 ``VIDEO``** ★ ——
 #: 而 ``ref_videos.ref_video_k`` 要的是 **``IMAGE``**（帧串 ✓，见 ``nodes_minimax_h3.py`` 的
 #: ``io.Image.Input("ref_video", tooltip="Reference video frames at 24 fps (2-15s)")`` ✓）。

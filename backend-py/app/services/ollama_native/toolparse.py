@@ -1,4 +1,4 @@
-"""工具调用的**流式**解析器 —— 逐字移植 ``reference/ollama/tools/tools.go``。
+"""工具调用的**流式**解析器 —— 逐字移植 ``tools/tools.go``。
 
 背景：Ollama 原生 ``/api/chat`` 里的工具调用不是 OpenAI 那种结构化 JSON 字段，
 而是**混在正文文本里的一段带标签文本**，形如::

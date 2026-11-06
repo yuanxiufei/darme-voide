@@ -421,13 +421,36 @@ def case_dataset_files(root: Path) -> None:
     convert = root / "convert"
     _make_images(convert, 2, suffix=".png", real=True)
     facts = dataset_files.run_convert(convert, target_suffix="jpg", backup=True, quality=90)
-    backup = dataset_files.backup_directory(convert)
+    #: ⚠️ 判据只认**回执里的那个路径** ✓（``backup_directory()`` 带秒级时间戳 ⇒ 现算一次会
+    #: 跨秒、指向不存在的新目录 ✗；一度因此偶发假红 —— 那也暴露了回执本身报错路径的真缺陷 ✓）
+    backup = Path(str(facts["backup"]))
     check("素材/转格式: 备份目录**在素材目录之外** ✓✓（在里面会把备份自己再抄一遍 ⇒ 无终止递归 ✗）",
           not str(backup).startswith(str(convert) + os.sep) and backup.is_dir()
           and len(list(backup.rglob("*.png"))) == 2,
           {"backup": str(backup), "source": str(convert), "facts": facts})
     check("素材/转格式: 目标格式真产出 ✓",
           len(list(convert.glob("*.jpg"))) == 2, sorted(p.name for p in convert.iterdir()))
+
+    # —— 回执里的备份路径必须是**这次真用的**那个 ✓（旧写法在收尾处再算一遍 ⇒ 跨秒就报出不存在的目录 ✗）
+    calls: list[Path] = []
+    original_backup = dataset_files.backup_directory
+
+    def _counting_backup(directory):
+        calls.append(original_backup(directory))
+        return calls[-1]
+
+    stub_root = root / "convert_stub"
+    _make_images(stub_root, 1, suffix=".png", real=True)
+    dataset_files.backup_directory = _counting_backup
+    try:
+        stub_facts = dataset_files.run_convert(stub_root, target_suffix="jpg", backup=True,
+                                              quality=80)
+    finally:
+        dataset_files.backup_directory = original_backup
+    check("素材/转格式: 备份路径**只取一次** ✓ 且回执报的就是它 ✓✓（收尾再算一遍会跨秒 ⇒ 人照路径找不到备份 ✗）",
+          len(calls) == 1 and stub_facts["backup"] == str(calls[0])
+          and Path(str(stub_facts["backup"])).is_dir(),
+          {"calls": [str(item) for item in calls], "facts": stub_facts})
 
     # —— 标签读写 + 计数 ✓（用**独立的**目录 ✓：转格式那处两种格式叠在一起 ✓，数不准 ✓）
     labels = root / "labels"
@@ -524,15 +547,15 @@ def main() -> int:
     case_dataset_files(root)
     case_dataset_runtime(root)
 
-    # ⚠️ 命令层要求两套工具**真在本机** ✓（reference/ 是开发期脚手架 ✓ 不在就跳过 ✓，
-    #    而不是让它以"报了个文件找不到"的假象红掉 ✓）
+    # ⚠️ 命令层要求两套工具**真在本机** ✓（musubi-tuner / sd-scripts 是外部仓、本仓不内置 ✓，
+    #    没配或没装就跳过 ✓，而不是让它以"报了个文件找不到"的假象红掉 ✓）
     missing = [toolkit for toolkit in (paths.TOOLKIT_MUSUBI, paths.TOOLKIT_SD_SCRIPTS)
                if not paths.tool_available(
                    options.spec("wan" if toolkit == paths.TOOLKIT_MUSUBI
                                 else "flux").train_script, toolkit=toolkit)]
     if missing:
         skip("缺工具 ⇒ 命令层 argv 结构那组跳过 ✓（缺：" + " / ".join(missing)
-             + " ✓；装到 reference/lora/ 或设 MUSUBI_TUNER_ROOT / SD_SCRIPTS_ROOT ✓）")
+             + " ✓；把工具装到本机任意位置，再设 MUSUBI_TUNER_ROOT / SD_SCRIPTS_ROOT ✓）")
     else:
         case_commands(root)
         case_runner()

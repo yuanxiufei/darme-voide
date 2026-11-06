@@ -6,7 +6,8 @@
   Generative Models》的 ρ-ramp 采样（ρ=7 ✓）；
 * ``exponential`` —— 在对数域线性插值（σ 从 σ_max 指数衰减到 σ_min ✓）；
 * ``linear_log_snr`` —— DPM-Solver++ 一类的「log-SNR 均匀」思路 ✓；
-* ``normal``      —— 几何（对数）插值 ✓；
+* ``normal``      —— **timestep 等距**（离散/EDM 域里 timestep↔σ 是 log 关系 ⇒ 落到 σ 上就是几何插值 ✓；
+  flow 域里 timestep **就是** σ ⇒ 落到 σ 上就是**σ 等距** ✓ —— 见 :func:`normal_sigmas` ✓）；
 * ``ddim_uniform``—— DDIM 的均匀 t 采样再映射回 σ ✓。
 
 ⚠️ 与任何具体实现的**数值**都**不承诺逐位一致** ✗ —— 这是我们自己的引擎 ✓，
@@ -24,9 +25,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
-__all__ = ["FLOW_SHIFT_DEFAULT", "SCHEDULES", "flow_shift_for_sequence", "flow_sigmas_for_steps",
-           "flow_sigmas_for_video", "interpolate_sigmas", "sigmas_for", "time_shift_sigma",
-           "timesteps_for"]
+__all__ = ["FLOW_LADDER_STEPS", "FLOW_SHIFT_DEFAULT", "SCHEDULES", "beta_ppf", "beta_sigmas",
+           "flow_shift_for_sequence", "flow_sigma_bounds", "flow_sigmas_for_steps",
+           "flow_sigmas_for_video", "interpolate_sigmas", "sigmas_for",
+           "simple_sigmas", "time_shift_sigma", "timesteps_for"]
+
+#: flow 族自带的 σ 细梯子**格数** ✓（``ModelSamplingDiscreteFlow.set_parameters(timesteps=1000)`` ✓
+#: ⇒ ``sigmas = [σ(i/1000) for i in 1..1000]`` ✓）。:func:`flow_sigma_bounds` 与
+#: :func:`simple_sigmas` 用的是**同一条**梯子 ✓ —— 别各写一个 1000 ✗。
+FLOW_LADDER_STEPS = 1000
 
 #: 常用锚点（SD 系模型的经验值；**可覆盖** ✓）
 DEFAULT_SIGMA_MIN = 0.0292
@@ -94,10 +101,58 @@ def exponential_sigmas(steps: int, *, sigma_min: float = DEFAULT_SIGMA_MIN,
     return sigmas + [0.0]
 
 
+def flow_sigma_bounds(shift: float, *, base_steps: int = FLOW_LADDER_STEPS
+                      ) -> tuple[float, float]:
+    """flow 族**自己的** σ 定义域端点 ``(σ_min, σ_max)`` ✓ —— 不是 EDM 那对 ✗✗。
+
+    出处：``ModelSamplingDiscreteFlow.sigmas = [σ(i/1000) for i in 1..1000]`` ✓ ⇒
+    上端 ``σ(1) = 1``（任意 shift 的不动点 ✓）、下端 ``σ(1/1000)`` ✓（shift=3 ⇒ ``0.002994`` ✓）。
+
+    ⚠️ 为什么必须问模型要这对端点 ✗✗：``karras`` / ``normal`` 这些名字在**参考实现**里都是拿
+    ``model_sampling.sigma_min/sigma_max`` 当端点算的 ✓（``comfy/samplers.py::calculate_sigmas`` ✓
+    逐字：``sigmas = k_diffusion_sampling.get_sigmas_karras(n=steps, sigma_min=model_sampling.sigma_min,
+    sigma_max=model_sampling.sigma_max, ...)`` ✓）—— 也就是说它们**不是**「EDM 专用调度」✓，
+    是「在**模型自己的** σ 区间上画曲线」✓。拿 EDM 的 ``0.0292 / 14.6146`` 套到 flow 模型上 ✓✗
+    ⇒ 首值 14.6 ⇒ DiT 收到 ``t = 1 − σ = −13.6`` ✓ ⇒ **不报错、出糊图** ✓✗（本仓踩过 ✓）。
+    """
+    ladder = _ladder(max(1, int(base_steps)), shift=float(shift),
+                     sigma_min=DEFAULT_SIGMA_MIN, sigma_max=DEFAULT_SIGMA_MAX)
+    return float(ladder[0]), float(ladder[-1])
+
+
 def normal_sigmas(steps: int, *, sigma_min: float = DEFAULT_SIGMA_MIN,
-                  sigma_max: float = DEFAULT_SIGMA_MAX) -> list[float]:
-    """几何插值（对 lnσ 等分 ✓）。"""
+                  sigma_max: float = DEFAULT_SIGMA_MAX,
+                  shift: float | None = None) -> list[float]:
+    """``normal`` 调度 ✓ —— 语义是「**timestep 等距**」，两种域下落到 σ 上是**两条不同的曲线** ✓✗。
+
+    出处（逐字对齐 ✓）：``comfy/samplers.py::normal_scheduler`` ✓
+
+    .. code-block:: python
+
+        start = s.timestep(s.sigma_max); end = s.timestep(s.sigma_min)
+        timesteps = torch.linspace(start, end, steps)
+        sigs = [s.sigma(t) for t in timesteps] + [0.0]
+
+    ⇒ ① **离散/EDM 域**（``shift=None`` ✓）：``timestep ↔ σ`` 是 log 关系 ✓ ⇒ timestep 等距
+    = **对数等距** ⇒ 几何插值 ✓（本函数的老行为 ✓，逐位不变 ✓）；
+    ② **flow 域**（给了 ``shift`` ✓）：``multiplier = 1`` ⇒ ``timestep(sigma) = sigma`` **恒等** ✓
+    ⇒ timestep 等距 = **σ 等距** ✓，再各点过一遍 shift ✓（``s.sigma(t)`` 那一步 ✓）⇒ 与
+    :func:`flow_sigmas_for_steps`（**t** 等距）**不是同一条** ✓✗：shift=3 / 8 步时第 2 点
+    ``0.9475`` vs ``0.9545`` ✓、末段密度也不同 ✓ —— 写成 flow 的 t 等分不是「换个名字」✗，
+    是真的换了日程 ✓（不报错、只是与参考实现差一截 ✓✗）。
+
+    ⚠️ flow 域**必须**用 :func:`flow_sigma_bounds` 那对端点 ✗✗（不是 EDM 的 14.6 ✓）——
+    见该函数的说明 ✓。
+    """
     steps = max(1, int(steps))
+    if shift is not None:
+        shift = float(shift)
+        if shift <= 0:
+            raise ValueError(f"shift 必须为正（收到 {shift} ✗）")
+        floor, top = flow_sigma_bounds(shift)
+        #: ⚠️ 端点**先取模型自己那对** ✓，再逐点过 shift ✓（= ``s.sigma(timesteps)`` 那一步 ✓）。
+        grid = _linspace(top, floor, steps)
+        return [shift * value / (1.0 + (shift - 1.0) * value) for value in grid] + [0.0]
     log_min, log_max = math.log(sigma_min), math.log(sigma_max)
     return [math.exp(value) for value in _linspace(log_max, log_min, steps)] + [0.0]
 
@@ -202,6 +257,153 @@ def flow_sigmas_for_video(steps: int, *, shift: float | None = None, seq_len: in
     return flow_sigmas_for_steps(steps, shift=float(shift))
 
 
+def _ladder(base_steps: int, *, shift: float | None, sigma_min: float,
+            sigma_max: float) -> list[float]:
+    """**模型自带的那条细梯子** ✓（`simple` / `beta` 都从它上面取点 ✓）。
+
+    ``shift`` 给了 ⇒ **flow 域** ✓（``σ(t) = shift·t/(1+(shift−1)t)`` ✓，``t = (i+1)/base_steps`` ⇒
+    ``σ_last = 1`` ✓，与 ``ModelSamplingDiscreteFlow.sigmas`` **逐位同构** ✓）；
+    没给 ⇒ 几何梯子（``sigma_max`` ⇒ ``sigma_min`` ✓，离散模型的 ``sigmas`` 在 log 域上就是这个形状 ✓）。
+    """
+    count = max(1, int(base_steps))
+    if shift is None:
+        log_min, log_max = math.log(sigma_min), math.log(sigma_max)
+        # ⚠️ 必须是**升序** ✓（0 号最小 ✓、末号 = ``sigma_max`` ✓）—— 与 comfy 的
+        #    ``model_sampling.sigmas`` 同向 ✓（它从"最干净"排到"最噪" ✓，取点靠 ``-(1+idx)`` ✓）。
+        #    写成降序**不报错** ✓✗：``simple`` 会原样倒过来用 ✓，σ 从 0.03 起步 ⇒ 一轮全是细修 ✓。
+        return [math.exp(log_min + (log_max - log_min) * index / max(1, count - 1))
+                for index in range(count)]
+    shift = float(shift)
+    if shift <= 0:
+        raise ValueError(f"shift 必须为正（收到 {shift} ✗）")
+    sigmas = []
+    for index in range(count):
+        t = (index + 1) / count                 # ← 与 comfy 的 `i/1000, i=1..1000` 同一式子 ✓
+        sigmas.append(shift * t / (1.0 + (shift - 1.0) * t))
+    return sigmas
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """正则化不完全 beta 的**连分式**（Lentz 法 ✓；纯 math ✓ 零依赖 ✓）。"""
+    tiny, eps = 1e-300, 3e-14
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for step in range(1, 201):
+        twice = 2 * step
+        for numerator in (step * (b - step) * x / ((qam + twice) * (a + twice)),
+                          -(a + step) * (qab + step) * x / ((a + twice) * (qap + twice))):
+            d = 1.0 + numerator * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + numerator / c
+            c = c if abs(c) > tiny else tiny
+            delta = d * c
+            h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """正则化不完全 beta ``I_x(a,b)`` ✓（x 单调增 ✓ ⇒ 可二分求逆 ✓）。"""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                     + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def beta_ppf(probability: float, alpha: float, beta: float) -> float:
+    """beta 分布的**分位函数** ✓（二分求逆 ✓；``alpha=beta=1`` ⇒ 恒等 ✓）。
+
+    为什么自己写 ✗：``scipy.stats.beta.ppf`` 要 scipy ✓，本仓零依赖 ✓。
+    精度到 1e-12 量级就够 ✓ —— 下游还要 ``rint`` 到 1/1000 的格子上 ✓。
+    """
+    low, high = 0.0, 1.0
+    for _ in range(200):
+        middle = (low + high) / 2.0
+        if _betainc(alpha, beta, middle) < probability:
+            low = middle
+        else:
+            high = middle
+        if high - low < 1e-13:
+            break
+    return (low + high) / 2.0
+
+
+def simple_sigmas(steps: int, *, shift: float | None = None,
+                  sigma_min: float = DEFAULT_SIGMA_MIN,
+                  sigma_max: float = DEFAULT_SIGMA_MAX,
+                  base_steps: int = FLOW_LADDER_STEPS) -> list[float]:
+    """``simple`` 调度 ✓ —— **在模型自带的那条细梯子上等距取点** ✓（不是另造一条曲线 ✗）。
+
+    出处（逐字对齐 ✓）：``comfy/samplers.py::simple_scheduler`` ✓ ——
+
+    .. code-block:: python
+
+        ss = len(s.sigmas) / steps
+        for x in range(steps):
+            sigs += [float(s.sigmas[-(1 + int(x * ss))])]
+        sigs += [0.0]
+
+    ⚠️ 两个必须照抄的细节（差一点只是在**第 4 位小数**上不同 ✓，肉眼看不出来 ✓✗）：
+    ① 取点是 ``int(x·1000/steps)`` **向下**取整 ✓（**不是** ``round`` ✗）；
+    ② 梯子本身是 ``1000`` 格 ✓ —— 于是 ``steps`` 整除 1000 时（8/10/20/25/40/50 ✓）结果与
+       :func:`flow_sigmas_for_steps` **完全一致** ✓，除不尽时（30/50 以外 ✓）会略有偏差 ✓。
+
+    ``shift`` 给了 ⇒ 走 **flow 域**（H3/图族 ✓，与 ComfyUI 的 flow 模型同一把尺子 ✓）。
+    """
+    steps = max(1, int(steps))
+    ladder = _ladder(base_steps, shift=shift, sigma_min=sigma_min, sigma_max=sigma_max)
+    grid = len(ladder)
+    sigmas = []
+    for index in range(steps):
+        pick = grid - 1 - int(index * grid / steps)
+        sigmas.append(float(ladder[max(0, min(grid - 1, pick))]))
+    return sigmas + [0.0]
+
+
+def beta_sigmas(steps: int, *, alpha: float = 0.6, beta: float = 0.6,
+                shift: float | None = None, sigma_min: float = DEFAULT_SIGMA_MIN,
+                sigma_max: float = DEFAULT_SIGMA_MAX,
+                base_steps: int = FLOW_LADDER_STEPS) -> list[float]:
+    """``beta`` 调度 ✓（出处 ``comfy/samplers.py::beta_scheduler`` ✓，论文 arXiv:2407.12173 ✓）。
+
+    .. code-block:: python
+
+        ts = 1 - numpy.linspace(0, 1, steps, endpoint=False)
+        ts = numpy.rint(scipy.stats.beta.ppf(ts, alpha, beta) * (len(sigmas) - 1))
+        # 相邻重复值只留一个，末尾补 0.0
+
+    ``alpha`` / ``beta`` 越小 ⇒ 取点越挤向**高噪声**端 ✓（前几步改动大、后几步细修 ✓）；
+    ``1.0/1.0`` ⇒ 与 ``simple`` 几乎重合 ✓（差别只在 ``rint`` 与 ``int`` 那一格 ✓）。
+
+    ⚠️ 相邻重复值会**合并** ✓ ⇒ 返回长度可能 **小于** ``steps + 1`` ✓（这是参考实现的语义 ✓，
+    不是 bug ✗）；调用方拿 ``len(sigmas) - 1`` 当步数即可 ✓。
+    """
+    steps = max(1, int(steps))
+    if alpha <= 0 or beta <= 0:
+        raise ValueError(f"alpha/beta 必须为正（收到 {alpha}/{beta} ✗）")
+    ladder = _ladder(base_steps, shift=shift, sigma_min=sigma_min, sigma_max=sigma_max)
+    total = len(ladder) - 1
+    sigmas: list[float] = []
+    last: int | None = None
+    for index in range(steps):
+        probability = 1.0 - index / steps            # ← `linspace(0,1,steps,endpoint=False)` 的 1−t ✓
+        picked = int(round(beta_ppf(max(1e-12, min(1.0 - 1e-12, probability)),
+                                    alpha, beta) * total))
+        picked = max(0, min(total, picked))
+        if picked != last:
+            sigmas.append(float(ladder[picked]))
+            last = picked
+    return sigmas + [0.0]
+
+
 #: 可用调度名 → 生成函数 ✓（新增调度请**同时**加自检 ✓）
 #:
 #: ⚠️ 2026-09-17 自检抓到并**删掉**了一个 ``linear_log_snr``：本仓扩散 σ 的常见范围到 **14.6（>1）**✗，
@@ -212,6 +414,11 @@ SCHEDULES: dict[str, Any] = {
     "exponential": exponential_sigmas,
     "normal": normal_sigmas,
     "ddim_uniform": ddim_uniform_sigmas,
+    # 2026-11-01 补两档 ✓：**工作流侧 8 个工作流全用 `simple`** ✓（`16/17/18/19/21` 与
+    # `01/02/03/20` 的 KSampler 里写的都是 `scheduler="simple"` ✓）—— 引擎不认这个名字
+    # 就只能报「未知调度」✗，于是「按工作流参数原样跑」这条路断在这里 ✓✗。
+    "simple": simple_sigmas,
+    "beta": beta_sigmas,
 }
 
 

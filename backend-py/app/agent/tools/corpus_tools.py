@@ -11,6 +11,11 @@
 
 ⚠️ 返回的 ``prompt_excerpt`` **截断到 400 字符**且压平空白：参考是给模型看的，过长会挤占上下文；
 要全文自行按 id 到语料里取。
+
+⚠️ 每次检索同时回一份**语料盘点**（:func:`corpus_stats`：条数 / 字节 / 来源分布 / 空正文条数）：
+只给「命中几条」而不给「库里一共几条」，模型会把「3 条语料里的第 1 条」当成
+「9000 条里的最佳写法」——**采集到一半的语料和装好的语料，结果长得一模一样**。
+盘点与 ``rows`` 同一次读盘算出，不额外 stat；语料缺失时回 ``None``，**不编 0**。
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from typing import Any
 from app.core.config import PROJECT_ROOT
 from app.agent.tool import Tool, json_number, json_string, object_schema
 
-__all__ = ["CORPUS_JSONL", "load_corpus", "tokenize", "create_corpus_tools"]
+__all__ = ["CORPUS_JSONL", "load_corpus", "corpus_stats", "tokenize", "create_corpus_tools"]
 
 #: 语料文件（与 Node 同法：**基于仓库根**解析，兼容任意 cwd / Docker）
 CORPUS_JSONL = PROJECT_ROOT / "data" / "prompt-corpus" / "_normalized" / "prompts.jsonl"
@@ -36,25 +41,61 @@ _CJK_RUN = re.compile(r"\u4e00-\u9fff")
 #: 懒加载 + 进程内缓存：语料 ~2.5MB 文本，启动时读一次即可（缺失则缓存 None，不反复 stat）
 _cache: list[dict[str, Any]] | None | bool = False  # False = 未加载
 
+#: 语料盘点（与 ``_cache`` 同一次读盘算好）：``None`` = 没有语料 ⇒ **不编 0**
+_stats: dict[str, Any] | None = None
+
+
+def _count(rows: list[dict[str, Any]], size: int) -> dict[str, Any]:
+    """盘点：条数 / 文件字节 / 来源分布 / 语言分布 / 正文为空的条数。
+
+    ``emptyPrompts`` 是**可信度**而不是统计趣味：正文为空的条目只能靠标题/标签命中，
+    模型照着它写镜头会得到「有参考」的错觉。
+    """
+    sources: dict[str, int] = {}
+    languages: dict[str, int] = {}
+    empty = 0
+    for row in rows:
+        source = str(row.get("source") or "(未知)")
+        sources[source] = sources.get(source, 0) + 1
+        lang = str(row.get("lang") or "(未知)")
+        languages[lang] = languages.get(lang, 0) + 1
+        if not str(row.get("prompt") or "").strip():
+            empty += 1
+    return {
+        "documents": len(rows),
+        "bytes": size,
+        "sources": dict(sorted(sources.items())),
+        "languages": dict(sorted(languages.items())),
+        "emptyPrompts": empty,
+    }
+
 
 def load_corpus() -> list[dict[str, Any]] | None:
-    """读语料（缺失/解析失败返回 None，并**缓存**该结果）。"""
-    global _cache
+    """读语料（缺失/解析失败返回 None，并**缓存**该结果；盘点与它同生共死）。"""
+    global _cache, _stats
     if _cache is not False:
         return _cache  # type: ignore[return-value]
-    if not Path(CORPUS_JSONL).exists():
-        _cache = None
+    path = Path(CORPUS_JSONL)
+    if not path.exists():
+        _cache, _stats = None, None
         return None
     try:
         rows = [
             json.loads(line)
-            for line in Path(CORPUS_JSONL).read_text(encoding="utf-8").split("\n")
+            for line in path.read_text(encoding="utf-8").split("\n")
             if line
         ]
+        _stats = _count(rows, path.stat().st_size)
         _cache = rows
     except Exception:  # noqa: BLE001 —— 与 TS 的 catch 等价
-        _cache = None
+        _cache, _stats = None, None
     return _cache  # type: ignore[return-value]
+
+
+def corpus_stats() -> dict[str, Any] | None:
+    """语料盘点回执（条数 / 字节 / 来源 / 语言 / 空正文条数）；缺失返回 ``None``。"""
+    load_corpus()
+    return _stats
 
 
 def tokenize(text: str) -> list[str]:
@@ -94,11 +135,21 @@ def create_corpus_tools() -> dict[str, Tool]:
     async def search_reference_prompts(arguments: dict[str, Any]) -> dict[str, Any]:
         rows = load_corpus()
         if rows is None:
-            return {"available": False, "results": [], "hint": _NOT_AVAILABLE_HINT}
+            return {
+                "available": False,
+                "corpus": None,
+                "results": [],
+                "hint": _NOT_AVAILABLE_HINT,
+            }
 
         tokens = tokenize(arguments.get("query") or "")
         if not tokens:
-            return {"available": True, "results": [], "hint": "检索词为空。"}
+            return {
+                "available": True,
+                "corpus": _stats,
+                "results": [],
+                "hint": "检索词为空。",
+            }
 
         top = arguments.get("top")
         limit = min(max(top if top is not None else 3, 1), 5)
@@ -129,6 +180,7 @@ def create_corpus_tools() -> dict[str, Tool]:
 
         return {
             "available": True,
+            "corpus": _stats,
             "total_matched": len(scored),
             "results": [
                 {
@@ -157,7 +209,9 @@ def create_corpus_tools() -> dict[str, Tool]:
             description=(
                 "在本地提示词语料库（约 9000 条真实视频提示词，含 Seedance 短剧/电影级写法）中"
                 "检索与当前镜头相似的参考写法。当你需要具体可抄的运镜/光线/一致性写法，"
-                "或想让画面描述更专业时调用；返回若干条参考提示词（已截断）。"
+                "或想让画面描述更专业时调用；返回若干条参考提示词（已截断），"
+                "并附语料盘点 corpus（条数/来源/空正文条数）——条数极少或空正文多时，"
+                "说明参考不足，不要当成最佳写法照抄。"
             ),
             input_schema=object_schema(
                 {

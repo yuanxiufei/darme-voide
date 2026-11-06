@@ -1,4 +1,4 @@
-"""本地模型仓库（manifests + blobs）的**写入侧** —— 移植 ``reference/ollama/manifest``。
+"""本地模型仓库（manifests + blobs）的**写入侧** —— 移植 ``manifest``。
 
 ollama 的本地仓库是「内容寻址」的：真正的大文件放 ``blobs/sha256-<hex>``，
 ``manifests/<host>/<namespace>/<model>/<tag>`` 只是一张 JSON 清单，

@@ -8,7 +8,8 @@
 ⚠️⚠️ 本文件的**调用方是 `TorchBackend`（H3 双流路径）** ✓（2026-09-20 起接线完毕 ✓）：
 主干前向 ✓ / 打包布局 ✓ / 采样循环 `sample_dual_stream` ✓ / PDD 头库 ✓ / 参考块四类 ✓
 （图 ✓ 音 ✓ 视频 ✓ 带音轨视频 ✓ ⇒ `H3_FORM_TODO` 已清零 ✓）。
-**还没核过真权重** ✗（机制已实现 ✓ ⇒ 缺口的权威清单在 `torch_backend.PENDING_PARTS` ✓）。
+**还没核过真权重** ✗（机制已实现 ✓ ⇒ 缺口沿革在 `torch_backend.IMPLEMENTATION_HISTORY` ✓、
+今日缺口在 `torch_backend.CODE_GAPS` ✓）。
 
 事实来源：`dit.H3_SHAPE_FACTS` / `dit.H3_PACK_FACTS`（2026-09-20 从参考实现读全后核出 ✓）。
 ⚠️ 本文件的**代码是自己写的** ✓（不抄 ✗），只在**结构事实**（键名 / 形状 / 18 路 / 打包顺序 ✓）上对齐 ✓。
@@ -18,8 +19,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
+#: ⚠️ 只借 `multistep_step`（**纯 stdlib** ✓，本模块仍然"没装 torch 也导得进" ✓）——
+#: 双流的逐拍更新式与单流 `sample_res_multistep` 必须**同一份符号约定** ✓（见 `advance` ✓）。
+#: ⚠️ 别名不能叫 `sampler` ✗：`sample_dual_stream(..., sampler="euler")` 的**参数名就是** `sampler` ✓，
+#:    同名会把模块遮掉 ⇒ `'str' object has no attribute 'multistep_step'` ✓✗（真踩过 ✓）。
+from . import sampler as sampler_mod
+
 __all__ = [
-    "H3_FORM_PARTS", "H3_FORM_SIGNATURE_KEYS", "H3_FORM_TODO", "H3_SIGMA_SHIFTS",
+    "DUAL_SAMPLERS", "H3_FORM_PARTS", "H3_FORM_SIGNATURE_KEYS", "H3_FORM_TODO", "H3_SIGMA_SHIFTS",
     "H3_TRUNK_DEFAULTS", "AdalnProj", "Attention", "DIT_SIGNATURE_KEYS", "DiTBlock",
     "FinalLayer", "FRAME_PER_TOKEN", "FRAME_RESCALE", "RefinerBlock", "RMSNorm", "SwiGLU",
     "TimeEmbedder", "TokenRefiner", "frame_grid_coords", "looks_like_h3_form", "mod_row",
@@ -146,6 +153,14 @@ H3_TRUNK_DEFAULTS: dict[str, Any] = {
 
 #: 采样侧的 shift ✓（不在主干构造参数里 ✗ —— 所以单独列 ✓）
 H3_SIGMA_SHIFTS: dict[str, float] = {"sigma_shift_video": 12.0, "sigma_shift_audio": 3.0}
+
+#: 双流采样**支持**的采样器名 ✓（**唯一真源** ✓ —— `pipeline` 的门禁读这里 ✓，不许各写一份名单 ✗）。
+#:
+#: ⚠️ 为什么是**白名单**而不是照搬 `sampler.SAMPLERS` ✗：双流每一步只有**一次**共享前向 ✓，
+#: 两路 σ 各走各的 ✓ —— 只有「**每步一次模型调用**」的采样器能这么套 ✓；heun/dpmpp 之类
+#: 每步要两次调用 ✗，硬套会让音视频两路错拍 ✓✗。实测工作流侧 `res_multistep` 是
+#: H3 官方模板的默认档 ✓（`KSamplerSelect` 只给这一项 ✓），故 2026-11-01 放开到这两档 ✓。
+DUAL_SAMPLERS: tuple[str, ...] = ("euler", "res_multistep")
 
 #: ``video_out`` 头的键名 ✓（**权重里的事实** ✓ —— 本仓模块名与参考逐字对齐 ✓ ⇒ 键名一致 ✓）。
 H3_VIDEO_OUT_KEY = "final_layer.video_out.weight"
@@ -1073,7 +1088,7 @@ def _build_torch_parts() -> dict[str, Any]:
 
         ⚠️ ``cond``/``refs`` 段 ✓、denoise mask ✓、输出头 bank（PDD ✓）都已实现 ✓；
         ``unpatchify``/``unpack_audio`` 的**外层封装**也已有 ✓（`pipeline` → `write` ✓）。
-        ⚠️ 仍未核过**真权重** ✗（机制已实现 ✓ ⇒ 见 `torch_backend.PENDING_PARTS` ✓）。
+        ⚠️ 仍未核过**真权重** ✗（机制已实现 ✓ ⇒ 见 `torch_backend.CODE_GAPS` ✓）。
         """
 
         def __init__(self, hidden: int = H3_DEFAULTS["hidden"], layers: int = H3_DEFAULTS["layers"],
@@ -1595,8 +1610,13 @@ def _build_torch_parts() -> dict[str, Any]:
                            extra_audio_rows: Any = None, keyframes: Any = None,
                            refs: Any = None, denoise_mask: Any = None,
                            pin: Any = None, pin_mask: Any = None,
-                           text_token_tags: Any = None) -> dict[str, Any]:
-        """**双流欧拉采样** ✓：视频走 `sigmas` ✓、音频走**换算后**的 σ ✓（各走各的日程 ✓）。
+                           text_token_tags: Any = None,
+                           sampler: str = "euler") -> dict[str, Any]:
+        """**双流采样** ✓：视频走 `sigmas` ✓、音频走**换算后**的 σ ✓（各走各的日程 ✓）。
+
+        ``sampler``（2026-11-01 补 ✓，白名单见 :data:`DUAL_SAMPLERS` ✓）：``euler``（默认 ✓，
+        逐位等于旧路径 ✓）或 ``res_multistep`` ✓（H3 官方模板的默认档 ✓）。两档都是
+        **每步一次模型调用** ✓ ⇒ 一路共享前向出两条 velocity ✓，再各自按**自己的** σ 更新 ✓。
 
         更新式（按参考**取负**的 velocity 约定 ✓ —— 见 `CONST.calculate_denoised` 是 ``x − σ·v`` ✓）::
 
@@ -1646,6 +1666,11 @@ def _build_torch_parts() -> dict[str, Any]:
             raise ValueError(f"sigmas 至少要有 2 个（收到 {len(steps)} ✗）")
         if float(steps[-1]) != 0.0:
             raise ValueError(f"sigmas 末位必须是 0.0（收到 {steps[-1]} ✗ —— 本仓约定 ✓）")
+        name = str(sampler or "euler").strip().lower()
+        if name not in DUAL_SAMPLERS:
+            raise ValueError(
+                f"双流不支持采样器 {sampler!r} ✗（可选 {list(DUAL_SAMPLERS)} ✓）—— 双流每步只有"
+                "**一次**共享前向 ✓ ⇒ 只容得下「每步一次模型调用」的档 ✓（heun/dpmpp 每步两次 ✗）")
         video_sigmas = [float(value) for value in steps]
         audio_sigmas = [schedules.time_shift_sigma(value, shift_v, shift_a)
                         for value in video_sigmas]
@@ -1713,6 +1738,41 @@ def _build_torch_parts() -> dict[str, Any]:
                 noise_video = (state_video - pin_video) / float(video_sigmas[0])
             if pin_audio is not None:
                 noise_audio = (state_audio - pin_audio) / float(audio_sigmas[0])
+
+        # ⭐⭐ 增量内核 ✓（`sampler` 的差别**只在这一处** ✓ —— 掩码缩放与 pin 写回都在外面 ✓，
+        #    所以两档走的是同一套掩码/冻结语义 ✓，`euler` 那条逐位等于旧写法 ✓）
+        use_multistep = name == "res_multistep"
+        memory_video: dict[str, Any] = {"previous": None, "down": 0.0}
+        memory_audio: dict[str, Any] = {"previous": None, "down": 0.0}
+
+        def advance(state: Any, velocity: Any, sigma: float, next_sigma: float,
+                    earlier: float, memory: dict[str, Any]) -> Any:
+            """返回**这一步的增量** ✓（掩码乘在增量上 ✓、pin 写回在增量之后 ✓）。
+
+            ``res_multistep`` 的更新式（参考 ``sample_res_multistep`` ✓，`t = −log σ` ✓）::
+
+                h = t_next − t ✓；c₂ = (t_{i−1} − t_{i−1,down}) / h ✓
+                b₁ = φ₁(−h) − φ₂(−h)/c₂ ✓，b₂ = φ₂(−h)/c₂ ✓
+                x' = e^{−h}·x + h·(b₁·x0_i + b₂·x0_{i−1}) ✓
+
+            ⚠️ 首步没有 `x0_{i−1}` ✓ ⇒ 退回一阶（`(σ' − σ)·v` ✓），与参考一致 ✓；
+            ``σ' = 0``（末步）同样一阶 ✓（参考里那是 ``x = x0`` 的同一结果 ✓）。
+
+            ⚠️⚠️ 更新式**不在这里展开** ✗：双流每步只算"一拍" ✓、调不了整个循环 ✓，
+            于是这里曾各抄了一遍 ✓✗ —— 抄的那份把 `c₂` 写成 `(log σ_prev − log σ_down)` ✓、
+            **正负号反了**（不报错、只是 `b₂` 变号，非线性模型结局差一倍以上 ✓，2026-11-01 抓到 ✓）。
+            现在统一调 :func:`sampler.multistep_step` ✓（单一真源 ✓）。
+            """
+            denoised = state - velocity * sigma
+            target = (sampler_mod.multistep_step(state, denoised, memory["previous"],
+                                                 sigma=sigma, next_sigma=next_sigma,
+                                                 earlier=earlier, previous_down=memory["down"])
+                      if use_multistep else None)
+            delta = velocity * (next_sigma - sigma) if target is None else (target - state)
+            memory["previous"] = denoised
+            memory["down"] = next_sigma
+            return delta
+
         for index in range(len(video_sigmas) - 1):
             sigma_v, next_v = video_sigmas[index], video_sigmas[index + 1]
             sigma_a, next_a = audio_sigmas[index], audio_sigmas[index + 1]
@@ -1736,8 +1796,10 @@ def _build_torch_parts() -> dict[str, Any]:
                 velocity_v = velocity_v * pin_mask_video + noise_video * (1.0 - pin_mask_video)
             if pin_audio is not None:
                 velocity_a = velocity_a * pin_mask_audio + noise_audio * (1.0 - pin_mask_audio)
-            delta_v = (next_v - sigma_v) * velocity_v
-            delta_a = (next_a - sigma_a) * velocity_a
+            delta_v = advance(state_video, velocity_v, sigma_v, next_v,
+                              video_sigmas[index - 1] if index else sigma_v, memory_video)
+            delta_a = advance(state_audio, velocity_a, sigma_a, next_a,
+                              audio_sigmas[index - 1] if index else sigma_a, memory_audio)
             if mask_video is not None:
                 delta_v = delta_v * mask_video          # ⭐ mask=0 ⇒ 该流**逐位不变** ✓✗
             if mask_audio is not None:
@@ -1754,7 +1816,7 @@ def _build_torch_parts() -> dict[str, Any]:
             if callback is not None:
                 callback(index, sigma_v, sigma_a)
         return {"video": state_video, "audio": state_audio, "steps": len(video_sigmas) - 1,
-                "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas,
+                "videoSigmas": video_sigmas, "audioSigmas": audio_sigmas, "sampler": name,
                 "masked": denoise_mask is not None, "pinned": pin is not None}
 
     class Int8Linear(nn.Module):  # noqa: D101 —— 公开名见 __all__ ✓
@@ -1783,14 +1845,23 @@ def _build_torch_parts() -> dict[str, Any]:
 
         def __init__(self, in_features: int, out_features: int, *, bias: bool = True,
                      scale_shape: Any = (1,), convrot: int | None = None,
+                     packed4: bool = False,
                      dtype: Any = None, device: Any = None) -> None:
             super().__init__()
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             self.convrot = None if convrot is None else int(convrot)
+            #: ⭐ ``packed4=True`` ⇒ 参数存的是**每字节两个 4bit** ✓（2026-11-02 加 ✓）——
+            #: 见 :meth:`forward` 与 :func:`upgrade_linear_to_int4` 的文档 ✓。
+            self.packed4 = bool(packed4)
+            if self.packed4 and self.in_features % 2:
+                raise ValueError(
+                    f"4bit 打包的线性层要求 in_features 是**偶数** ✗（收到 {self.in_features} ✓）"
+                    "—— 每字节塞两个 4bit ✓，奇数没法均分 ✓（不补齐、不猜 ✗）")
             self.weight = nn.Parameter(
-                torch.empty((self.out_features, self.in_features), dtype=torch.int8,
-                            device=device), requires_grad=False)
+                torch.empty((self.out_features,
+                             self.in_features // 2 if self.packed4 else self.in_features),
+                            dtype=torch.int8, device=device), requires_grad=False)
             #: ⚠️ 形状**照文件**建 ✓（`[N]` 与 `[N,1]` 两种写法都有 ✓ —— 自己写死会被装载闸口按
             #: 「形状不符」拦下 ✓，而模板是 `loader` 那份「不猜」的口径 ✓）。
             self.register_buffer(
@@ -1805,8 +1876,9 @@ def _build_torch_parts() -> dict[str, Any]:
 
         def extra_repr(self) -> str:
             rot = "" if self.convrot is None else f", convrot={self.convrot}"
+            kind = "int4packed" if self.packed4 else "int8"
             return (f"in_features={self.in_features}, out_features={self.out_features}, "
-                    f"bias={self.bias is not None}, int8{rot}")
+                    f"bias={self.bias is not None}, {kind}{rot}")
 
         def forward(self, x: Any) -> Any:
             quant = _quant_mod()
@@ -1820,6 +1892,11 @@ def _build_torch_parts() -> dict[str, Any]:
                 weight = weight.to(x.device, non_blocking=weight.is_pinned())
             if scale.device != x.device:
                 scale = scale.to(x.device, non_blocking=scale.is_pinned())
+            #: ⭐ 4bit 打包层：**先解包再乘尺度** ✓（顺序不能反 ✗ —— 对打包字节直接乘 scale
+            #: 就是「每字节一个数」那个 2026-10-30 的假绿 ✓✗）。解包发生在**卡上** ✓：
+            #: 打包字节只有 1 B/2参 ✓，搬过来再解 ⇒ 永不在 CPU 上量化/解包 ✓。
+            if self.packed4:
+                weight = quant.unpack_int4(weight)
             weight = quant.dequantize_weight_rotated(weight, scale, dtype=x.dtype)
             if self.convrot is not None:
                 x = quant.rotate_activations(x, self.convrot)
@@ -1893,21 +1970,58 @@ def upgrade_linear_to_int8(module: Any, int8_scales: dict[str, Any], *,
     （实测 H3 全量版同文件里 64 与 256 并存 ✓）—— 一律经 :func:`quant.group_for` 取本层那一个 ✓，
     查不到的层 ⇒ 不旋转（不拿别层的 group 顶上 ✗）。
     """
-    import torch  # noqa: PLC0415
+    return _upgrade_linear(module, int8_scales, convrot=convrot, packed4=False, label="int8")
+
+
+def upgrade_linear_to_int4(module: Any, int4_scales: dict[str, Any], *,
+                           convrot: Any = None) -> list[str]:
+    """把 ``int4_scales`` 点名的 ``nn.Linear`` **原地**换成 4bit 打包常驻层 ✓（返回换掉的名单 ✓）。
+
+    ## 为什么需要它（2026-11-02 ✓）
+
+    盘上 8 个 4bit 文件（``*_int4_w4a4`` / ``*_int4_convrot`` ✓）此前只能走「整份反量化成
+    bf16」那条路 ✓✗ —— Krea2 一族因此要 **23.89 GiB** ✓✗ > 卡 22.49 GiB ⇒ **根本装不进去** ✗。
+    改成「打包字节常驻 ＋ 前向现解」之后驻留 ＝ **5.98 GiB**（文件数据区 ✓）✓。
+
+    ## 与 int8 那一个的三处差别
+
+    ① 参数形状是 ``(out, in // 2)`` ✓（每字节两个 4bit ✓）—— 于是**文件形状与参数形状逐字相同** ✓
+       ⇒ 装载侧无需任何特殊分支 ✓：``weights`` 的「参数是 int8 ⇒ 原样写」那条路直接命中 ✓；
+    ② 前向多一步 :func:`quant.unpack_int4` ✓（**必须先解包、后乘 scale** ✓✗ —— 见
+       :meth:`Int8Linear.forward` 的注释 ✓）；
+    ③ 换壳的判据必须来自**文件自述** ✓（:func:`quant.int4_stems_of` ✓）—— 4bit 打包与 per-row
+       int8 **逐字同形** ✓✗，只凭头部会把它当 int8 乘（2026-10-30 的假绿 ✓）。
+
+    ⚠️ 与 :func:`upgrade_linear_to_int8` **互斥** ✓：同一层只能归一个计划 ✓（``int8_scale_plan``
+    已经把 ``int4_stems`` 排除掉了 ✓ —— 两边都点名会在装壳时把刚换好的 4bit 层再换回 int8 ✓✗）。
+    其余口径（调用时机、``weight_scale`` 必须 fp32、``convrot`` 逐层解析 ✓）与 int8 那一个**逐条相同** ✓。
+    """
+    return _upgrade_linear(module, int4_scales, convrot=convrot, packed4=True, label="4bit 打包")
+
+
+def _upgrade_linear(module: Any, scales: dict[str, Any], *, convrot: Any, packed4: bool,
+                    label: str) -> list[str]:
+    """int8 / int4 两条换壳路**共用的那份实现** ✓（差别只有 ``packed4`` 一格 ✓）。
+
+    ⚠️ 抽出来的理由与 :func:`dit_build._shell_int8` 相同 ✗：换壳逻辑一旦手抄两份，
+    改一处忘一处 ⇒ 另一族静默按 bf16 物化（显存翻倍、能装能跑、只是 OOM 或慢 ✓✗）。
+    """
+    import torch  # noqa: PLC0415,F401
     from torch import nn  # noqa: PLC0415
 
     cls = _parts()["Int8Linear"]
     swapped: list[str] = []
-    for name, scale_shape in int8_scales.items():
+    for name, scale_shape in scales.items():
         parent_path, _, leaf = str(name).rpartition(".")
         parent = module.get_submodule(parent_path) if parent_path else module
         old = getattr(parent, leaf, None)
         if not isinstance(old, nn.Linear):
             raise TypeError(f"`{name}` 不是 nn.Linear（收到 {type(old).__name__} ✗）"
-                            f"⇒ 不能换成 int8 常驻层 ✗")
+                            f"⇒ 不能换成 {label} 常驻层 ✗")
         new = cls(old.in_features, old.out_features, bias=old.bias is not None,
                   scale_shape=tuple(int(d) for d in scale_shape),
                   convrot=_quant_mod().group_for(str(name), convrot),
+                  packed4=packed4,
                   dtype=old.weight.dtype, device=old.weight.device)
         new.train(old.training)
         setattr(parent, leaf, new)

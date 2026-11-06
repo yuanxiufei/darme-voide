@@ -1,4 +1,4 @@
-"""Modelfile 的解析与渲染 —— 逐状态移植 ``reference/ollama/parser/parser.go``。
+"""Modelfile 的解析与渲染 —— 逐状态移植 ``parser/parser.go``。
 
 Modelfile 是 ollama 的「模型配方」文本格式::
 

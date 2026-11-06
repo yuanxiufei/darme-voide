@@ -46,12 +46,15 @@ __all__ = [
     "clean_visual_fragment",
     "continue_script",
     "generate_action_suggestion",
+    "generate_json",
     "generate_text",
     "infer_voice_role_tags",
     "optimize_video_prompt",
+    "parse_json_object",
     "split_character_visuals",
     "split_shot_into_sub_shots",
     "split_visuals_by_rules",
+    "validate_json_schema",
 ]
 
 
@@ -196,6 +199,153 @@ async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
                           if options.get("temperature") is not None else 1.0),
         max_new_tokens=int(options.get("maxTokens") or 256),
     )
+
+
+# ====== 结构化输出（schema 校验 + 回喂重试，2026-11-01 补）======
+
+#: 支持校验的 JSON Schema 子集 ✓（**够用即可** ✓：本仓 8 类任务都是「对象 + 若干字段」✗ 不需要 $ref/allOf ✗）。
+#: 刻意**不引第三方依赖** ✓✗：``jsonschema`` 一装就带一堆入口点，而这里要判的只是「键在不在、类型对不对」✓。
+SCHEMA_TYPES = ("object", "array", "string", "number", "integer", "boolean", "null", "any")
+
+
+def parse_json_object(raw: str) -> tuple[Any, str]:
+    """从模型输出里取 JSON ✓ → ``(值, 错误说明)``（成功时错误说明为 ``""`` ✓）。
+
+    ⚠️ 走 :func:`clean_json_string` 之后**必须**再 ``json.loads`` ✓：清洗只去围栏/截花括号 ✓，
+    它**不保证**合法（截到一半、尾部多逗号、中文引号都还在 ✓✗）。
+    """
+    text = clean_json_string(raw)
+    if not text.strip():
+        return None, "输出里没有 JSON 对象"
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as err:
+        return None, f"JSON 解析失败（{err.msg} @ {err.lineno}:{err.colno}）"
+
+
+def validate_json_schema(value: Any, schema: Any, path: str = "$") -> list[str]:
+    """按**子集** schema 校验 ✓ → 问题列表（空 = 通过 ✓）。
+
+    支持：``type`` / ``required`` / ``properties`` / ``items`` / ``enum`` /
+    ``minItems`` / ``maxItems`` / ``minLength`` / ``maxLength`` ✓。
+    **不支持的关键字安静放过** ✓（不假装校验过 ✗ 也不因此判错 ✗）。
+    """
+    if not isinstance(schema, dict) or not schema:
+        return []
+    problems: list[str] = []
+
+    expected = schema.get("type")
+    if isinstance(expected, str) and expected != "any":
+        if not _type_matches(value, expected):
+            return [f"{path} 类型应为 {expected}，实际 {type(value).__name__}"]
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum and value not in enum:
+        problems.append(f"{path} 必须是 {enum!r} 之一，实际 {value!r}")
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if key not in value:
+                    problems.append(f"{path} 缺少必填字段 {key!r}")
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, sub in properties.items():
+                if key in value:
+                    problems.extend(validate_json_schema(value[key], sub, f"{path}.{key}"))
+    if isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, item in enumerate(value):
+                problems.extend(validate_json_schema(item, items, f"{path}[{index}]"))
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            problems.append(f"{path} 至少 {min_items} 项，实际 {len(value)}")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            problems.append(f"{path} 最多 {max_items} 项，实际 {len(value)}")
+    if isinstance(value, str):
+        min_len = schema.get("minLength")
+        if isinstance(min_len, int) and len(value) < min_len:
+            problems.append(f"{path} 长度至少 {min_len}，实际 {len(value)}")
+        max_len = schema.get("maxLength")
+        if isinstance(max_len, int) and len(value) > max_len:
+            problems.append(f"{path} 长度最多 {max_len}，实际 {len(value)}")
+    return problems
+
+
+def _type_matches(value: Any, expected: str) -> bool:
+    """JSON 口径的类型判定 ✓（⚠️ ``bool`` 是 ``int`` 的子类 ✗ ⇒ 必须先排除 ✓）。"""
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True          # 未知 type 不拦 ✓（schema 写错了不该把任务判死 ✗）
+
+
+def _repair_prompt(user_prompt: str, raw: str, problem: str) -> str:
+    """把「上一轮哪里不合格」喂回去 ✓（只说问题 + 附原文 ✓，不复述整份 schema ✗）。"""
+    excerpt = (raw or "").strip()
+    if len(excerpt) > 1500:
+        excerpt = excerpt[:1500] + "…"
+    return (
+        f"{user_prompt}\n\n"
+        "—— 注意：你上一轮的输出不合格，请**重新输出**，只给 JSON，不要任何解释或代码围栏。\n"
+        f"不合格原因：{problem}\n"
+        f"上一轮输出（仅供对照，不要复述）：\n{excerpt}"
+    )
+
+
+async def generate_json(
+    conn: Connection,
+    user_prompt: str,
+    schema: Any,
+    options: dict[str, Any] | None = None,
+    *,
+    repairs: int = 1,
+) -> tuple[Any, dict[str, Any]]:
+    """要**结构化**输出 ✓ → ``(数据, 元信息)``。
+
+    口径（这是 P0-3 的核心 ✓）：
+
+    * 先按原 prompt 生成 ✓ → 解析 ✓ → 校验 ✓；
+    * 解析/校验失败 ⇒ **把问题回喂再生成** ✓（默认重试 ``repairs=1`` 次 ✓）；
+    * 仍不合格 ⇒ **``schemaOk=False`` 返回** ✓（``data`` 为 ``None`` ✓）——**不**用规则兜底冒充成功 ✗✗
+      （旧 8 类任务里「解析失败就按规则拆」那条路，在调用方看来和真解析成功**无法区分** ✗，
+      于是「模型退化了」这类问题能藏很久 ✓✗）。
+
+    元信息：``{"schemaOk", "schemaError", "repairs", "raw"}``（``repairs`` = 实际用掉的额外次数 ✓）。
+    """
+    base_options = dict(options or {})
+    attempts = max(0, int(repairs)) + 1
+    raw = ""
+    problem = ""
+    for attempt in range(attempts):
+        prompt = user_prompt if not problem else _repair_prompt(user_prompt, raw, problem)
+        # ⚠️ 传输层失败**直接上抛、不重试** ✗（重试兜的是「模型给的 JSON 不合规」✓，多模型 fallback
+        # 是 ``generate_text`` 的事 ✓ —— 两者混在一起会让「服务挂了」被当成「模型输出不合规」✗）
+        raw = await generate_text(conn, prompt, base_options)
+        data, parse_error = parse_json_object(raw)
+        if data is None:
+            problem = parse_error
+        else:
+            found = validate_json_schema(data, schema)
+            if not found:
+                return data, {"schemaOk": True, "schemaError": "", "repairs": attempt, "raw": raw}
+            problem = "；".join(found[:5])
+        log_task_error("TextGen", "schema-miss", {"attempt": attempt, "problem": problem[:200]})
+    return None, {"schemaOk": False, "schemaError": problem, "repairs": attempts - 1, "raw": raw}
 
 
 # ====== 分镜动作建议 ======

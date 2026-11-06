@@ -5,8 +5,10 @@
 1. **装载** 用 `load_weights` 的**真路径** ✓（造缩小版 H3 形态权重 ✓ ⇒ 判形态那条路照走 ✓）；
 2. **排队** 真串行 ✓（两个任务：后一个的 `startedAt` **不早于**前一个的 `finishedAt` ✓）；
 3. **产物** 真 mp4 + 真 wav ✓（`result.outputs.videoPath` 落盘 ✓、文件真在 ✓）；
-4. **诚实** `synthetic` **必须**是 `True` ✗（参考 TE / VAE 未训练 ⇒ 是噪声画面 ✓；
-   若哪天它变成 `False` 而实现没换 ⇒ **这条自检就该红** ✓✗）；
+4. **诚实** `synthetic` 必须**按已装件算** ✓✗（2026-11-01 ✓）：参考 TE / VAE 未训练 ⇒ `True` ✓；
+   真权重 VAE（`REAL_VAE_KINDS`）挂上 ⇒ `False` ✓。⚠️ 它曾经是**类属性写死 `True`** ✓✗ ——
+   那时这条自检只能钉住"写死的值"，钉不住"说的是不是实话"✗；同理 `canGenerate` 曾写死 `False`
+   ⇒ 装完整链、真出过 mp4 也照样报「不能出片」✓✗（见 `case_generation_facts` ①⁶ 与 `case_status` ①⁵）；
 5. **卸载** 真丢张量 ✓（之后 `loaded.dit` 必须回到 `False` ✓）且**正忙时拒卸** ✓；
 6. **回收缓存** 还的只是"空着的块" ✓ —— `memory_allocated` 前后必须**一致** ✓、装好的东西必须**还在** ✓
    （⚠️ 回收 ≠ 卸载 ✗；不还的话缓存会"看着占满整卡"✗ —— 实测见 `case_reclaim` 的注释 ✓）；
@@ -30,6 +32,7 @@ import inspect
 import os
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -92,11 +95,95 @@ def case_status() -> None:
           set(status["loaded"]) == {"dit", "textEncoder", "vae", "audioVae"}, status["loaded"])
     check("⭐ 不依赖外部: externalDependencies 是**空列表**（接回任何外部服务这条就该红）",
           status["externalDependencies"] == [], status["externalDependencies"])
-    check("自述: synthetic 恒 True（参考 TE / VAE 未训练 ⇒ 噪声画面）",
+    check("自述: 没建后端时 synthetic 按「一件都没装」算 True（DiT / 真权重 VAE 都没有 ⇒ 只可能是噪声）",
           status["synthetic"] is True, status["synthetic"])
+    check("自述: 没建后端时 canGenerate 必须是 False（**且这一格是算出来的**，见 `case_generation_facts`）",
+          status["canGenerate"] is False, status["canGenerate"])
     check("自述: 没装也能答「将会在哪跑」（deviceSource=probe ⇒ cpu 还是 cuda 要一眼看见）",
           (status["device"] in ("cpu", "cuda") and status["deviceSource"] in ("probe", "loaded", None)),
           (status["device"], status["deviceSource"]))
+    #: ⭐ ①⁵ 两个「缺口」面**必须不同名、不同形** ✓✗（2026-11-01 ✓）：
+    #: `capabilities().knownGaps` 是**环境**缺口（`[{id, severity, summary, facts, fix}]` ✓），
+    #: `status().codeGaps` 是**代码**缺口（`[str]` ✓ —— 还没写前向的族）。
+    #: 同名（都叫 `knownGaps`）的后果：前端按 `.summary` 读代码缺口 ⇒ 一串 `undefined` ✓✗；
+    #: 反向按「有 codeGaps」判「要修代码」又会被环境缺口顶掉 ✓✗ —— 两件事都会读错 ✓。
+    from app.services.engine import facade as facade_mod            # noqa: PLC0415
+    from app.services.engine import torch_backend as tb_mod        # noqa: PLC0415
+
+    caps = facade_mod.capabilities()
+    gaps = status.get("codeGaps")
+    check("①⁵ 自述: 代码缺口叫 `codeGaps`（字符串数组、与 `torch_backend.CODE_GAPS` 同源）"
+          "且 `status` 里**不许**出现 `knownGaps` ✗✗（那是环境缺口的名字 ✓）",
+          isinstance(gaps, list) and bool(gaps)
+          and all(isinstance(item, str) and item for item in gaps)
+          and list(gaps) == list(tb_mod.CODE_GAPS)
+          and "knownGaps" not in status,
+          {"codeGaps": gaps, "statusKeys": sorted(status)})
+    #: ⚠️ 这里**不能**断言「环境缺口非空」✗：它按设计就是「空数组 = 没有既知缺口」✓
+    #: （本机 torch 正常时正是空 ✓）⇒ 那样写会在健康的机器上报假红 ✓✗。
+    check("①⁵ 两个缺口面的**形状必须不同**（环境缺口 dict / 代码缺口 str —— 同名会读成 undefined）",
+          isinstance(caps.get("knownGaps"), list)
+          and all(isinstance(item, dict) for item in caps["knownGaps"])
+          and not any(item in caps["knownGaps"] for item in gaps),
+          {"capabilities.knownGaps": caps.get("knownGaps"), "codeGaps": gaps})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ①⁶ 「此刻能不能出片」必须**算**出来，不许写死 ✓✗（2026-11-01 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_generation_facts() -> None:
+    """⭐ `TorchBackend._generation_facts`：装了什么 ⇒ 报什么 ✓✗。
+
+    ⚠️ 这条钉的是**实测踩过的误导** ✗：`describe()["canGenerate"]` 原先**写死 `False`** ✓、
+    `pendingParts` 塞的是 75 行「当时缺什么、后来怎么补的」**沿革散文** ✓✗ ⇒ H3 / Z-Image /
+    Krea2 / Qwen-Image 2.1 / Flux 全都端到端出过片之后，`GET /engine/backends`（UI 唯一的自述口 ✓）
+    仍报「不能出片 ＋ 一堆没实现」✓✗ —— 一台能用的机器被说成不能用 ✓。
+    ⇒ 判据：**三件齐 + 真权重 VAE ⇒ True**；反向验证（本轮做过 ✓）：把那格改回 `False`
+    （或把 `synthetic` 改回类属性 `True`），本条第二/四条立刻红 ✓。
+
+    ⚠️ 走 `object.__new__` **不跑 `__init__`** ✗：不为这条判据 import torch ✓（判据零依赖 ✓），
+    只钉语义 —— 「按已装件算」这件事本身与 torch 无关 ✓。
+    """
+    from app.services.engine import torch_backend as tb_mod            # noqa: PLC0415
+
+    backend = object.__new__(tb_mod.TorchBackend)                     # noqa: SLF001
+    backend._available = True                                         # noqa: SLF001
+    backend._reason = ""                                              # noqa: SLF001
+    backend._model = backend._textEncoder = backend._vae = None       # noqa: SLF001
+    backend._audioVae = None                                          # noqa: SLF001
+    backend._vaeKind = None                                           # noqa: SLF001
+    backend._form = None                                              # noqa: SLF001
+
+    empty = backend._generation_facts()                               # noqa: SLF001
+    check("①⁶ 一件没装 ⇒ canGenerate=False 且**逐件**点名（DiT / 文本编码器 / 画面 VAE），"
+          "不按「机制」列 ✗（机制层缺口是 `codeGaps` ✓）",
+          empty["canGenerate"] is False and len(empty["pendingParts"]) == 3
+          and "DiT" in empty["pendingParts"][0]
+          and "文本编码器" in empty["pendingParts"][1]
+          and "画面 VAE" in empty["pendingParts"][2]
+          and empty["synthetic"] is True,
+          empty)
+
+    backend._model = object()                                         # noqa: SLF001
+    backend._textEncoder = object()                                   # noqa: SLF001
+    backend._vae = object()                                           # noqa: SLF001
+    backend._vaeKind = "flux-real"                                    # noqa: SLF001
+    full = backend._generation_facts()                                # noqa: SLF001
+    check("①⁶ 三件齐 ＋ 真权重 VAE ⇒ canGenerate=True / pendingParts 空 / synthetic=False"
+          "（**这就是 2026-11-01 之前恒 False 的那一格** ✓✗）",
+          full["canGenerate"] is True and full["pendingParts"] == []
+          and full["synthetic"] is False, full)
+
+    backend._vaeKind = "synthetic"                                    # noqa: SLF001
+    soft = backend._generation_facts()                                # noqa: SLF001
+    check("①⁶ VAE 是**合成**的 ⇒ 能出片但必须标 synthetic=True（参考 TE/VAE 未训练时不许改口）",
+          soft["canGenerate"] is True and soft["synthetic"] is True, soft)
+
+    backend._form = tb_mod.TorchBackend.H3_FORM_NAME                  # noqa: SLF001
+    h3 = backend._generation_facts()                                  # noqa: SLF001
+    check("①⁶ H3 形态**多要一件**音频 VAE（反向陷阱：拿它判单流族 ⇒ Z-Image 永远「缺一件」✓✗）",
+          h3["canGenerate"] is False
+          and any("音频 VAE" in part for part in h3["pendingParts"]), h3)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -308,6 +395,7 @@ def case_half_load() -> None:
 
     from app.services.engine import lora_cache  # noqa: PLC0415
     from app.services.engine import runtime as runtime_mod  # noqa: PLC0415
+    from app.services.engine import torch_backend as tb_mod  # noqa: PLC0415
 
     engine_runtime._backend = None                # noqa: SLF001 —— 从干净态起判 ✓
     engine_runtime._loadKeyTuple = None           # noqa: SLF001
@@ -323,7 +411,13 @@ def case_half_load() -> None:
         ⚠️ 必须把 `_model` / `_textEncoder` / `_vae` / `_audioVae` 真的挂到自身上 ✗✗ ——
         `status().loaded` 读的就是这四个属性 ✓（见 `_loaded_flags` ✓）；不挂上去，
         "逐项相同"那条判据会因为"真后端也报 False"而**永远绿** ✓✗。
+
+        ⚠️ 也必须带上 `REAL_VAE_KINDS` ✓✗：`runtime` 判定 ``synthetic`` 时读的是
+        ``TorchBackend.REAL_VAE_KINDS`` ✓，而这个名字在测试里**已经被换成替身** ✓ ⇒
+        替身缺这个类属性时会 ``AttributeError`` 把整条判据炸掉 ✓（不是"判红"、是根本没跑到 ✓）。
         """
+
+        REAL_VAE_KINDS = tb_mod.TorchBackend.REAL_VAE_KINDS
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.components: set[str] = set()
@@ -505,22 +599,29 @@ def case_load_ledger() -> None:
     #    ⚠️ 认**代码形态** ``"replaced": had_previous`` ✓ 而不是裸键名 ✗：文档里也写着
     #    ``report["replaced"]`` ✓ ⇒ 数裸键名会得多一个、判据变成"6 才算对"那种莫名数字 ✓✗。
     assembly_lines = ("_ensure_loaded_internal", "_ensure_image_loaded", "_ensure_zimage_loaded",
-                      "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded")
+                      "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded",
+                      "_ensure_krea2_loaded", "_ensure_seedvr2_loaded",
+                      "_ensure_wan22_loaded", "_ensure_music3_loaded")
     replaced_hits = src.count('"replaced": had_previous')
-    check("②c′ 报告: 五条装配线**都**报 `replaced` ✓（漏一条 ⇒ 那条线的换装看不见 ✓✗）",
-          replaced_hits == 5, replaced_hits)
+    #: ⚠️ 这条**数字必须跟着装配线走** ✗✗（2026-11-01 加第六套 Krea2 时它当场红 ✓；
+    #: 同日加第七套 SEEDVR2 又红了一次 ✓；2026-11-02 加第八套 Wan2.2 第三次红 ✓；
+    #: 2026-11-06 加第九套 Music3 第四次红 ✓ —— 每加一条线都要来这里加名字 ✓）：
+    #: 「新加一条线、忘了报 `replaced`」的症状是**换装看不见** ✓（看着像"内存莫名不够" ✓✗）。
+    check("②c′ 报告: **每条**装配线都报 `replaced` ✓（漏一条 ⇒ 那条线的换装看不见 ✓✗）",
+          replaced_hits == len(assembly_lines), replaced_hits)
 
     # ③b 缺格收集也一样 ✓✗：两条装配线各抄过 23 行「missing.append + if missing: raise」✓，
     #     而这段的**纪律**是"首行只列真缺的那几格" ✓（测试也只读首行 ✓）⇒ 必须只有一份实现 ✓
     bodies = _method_bodies(src)
-    slot_users = ("_ensure_zimage_loaded", "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded")
+    slot_users = ("_ensure_zimage_loaded", "_ensure_qwen21_loaded", "_ensure_qwen_image_loaded",
+                  "_ensure_krea2_loaded")
     slot_copies = [(name, line.strip())
                    for name in slot_users
                    for line in bodies.get(name, "").splitlines() if "missing.append(" in line]
-    check("②c′ 缺格: 三条装配线不再各抄一遍「收集 + 首行只列真缺」（只许 `_require_slots` ✓✗）",
+    check("②c′ 缺格: **四条**装配线不再各抄一遍「收集 + 首行只列真缺」（只许 `_require_slots` ✓✗）",
           slot_copies == [], slot_copies)
     slot_callers = [name for name in slot_users if "_require_slots(" in bodies.get(name, "")]
-    check("②c′ 缺格: 三条装配线**都真调** `_require_slots` ✓"
+    check("②c′ 缺格: **四条**装配线都真调 `_require_slots` ✓"
           "（上一条只查'不再手抄' ⇒ 把这段整段删掉也能过 ✓✗）",
           slot_callers == list(slot_users), slot_callers)
     check("②c′ 覆盖面: 这份测试点名的装配线**与实现里的条数一致** ✓✗"
@@ -608,13 +709,50 @@ def case_cache_meter() -> None:
         engine_runtime._cacheEvents.clear()                # noqa: SLF001
         engine_runtime._cacheSince = runtime_mod._now_ms()  # noqa: SLF001
 
+    def _normalizers() -> dict[str, Any]:
+        """`ensure_loaded` 进键前**真的**对哪几项做了归一 ✓ —— 从它自己的源码里读 ✓（不手抄 ✗）。
+
+        ⚠️ 为什么不能按「参数名 ＋ `_key`」硬拼 ✗✗：`loras` 的归一函数叫 `_lora_key` ✓
+        （没有那个 s ✓），硬拼 `_loras_key` 会**静默**取不到 ⇒ 这一项就漏归一 ✓✗。
+        漏了不会报错 ✓，只会让本文件摆的"同键"和真实键**不同形** ⇒ 假 miss ⇒ 真去装权重 ✓✗
+        （2026-11-02 实况：`vae_tiling` 漏归一后，这条用例报的是「DiT 权重未到位」✓✗
+        —— 看起来完全像环境问题，其实是测试本身在算命 ✓）。
+
+        ⚠️ 读源码而不是再抄一张表 ✗✗：抄表的话，下次 `ensure_loaded` 里新加一项归一，
+        这里不跟着改又是同一个坑 ✓✗（而它只在**恰好**摆白盒状态时才露头 ✓）。
+        源码里没写的归一这里也照实不做 ✓ —— 那才是 `ensure_loaded` 自己的问题 ✓，
+        不该由测试替它补齐 ✓（补齐等于把缺陷抹平 ✓✗）。
+        """
+        import ast  # noqa: PLC0415
+
+        source = inspect.getsource(engine_runtime.ensure_loaded)
+        table: dict[str, Any] = {}
+        for node in ast.walk(ast.parse(textwrap.dedent(source))):
+            if not isinstance(node, ast.Call) or getattr(node.func, "id", "") != "_load_key":
+                continue
+            for keyword in node.keywords:
+                value = keyword.value
+                if (keyword.arg and isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name) and value.func.id.endswith("_key")):
+                    coerce = getattr(runtime_mod, value.func.id, None)
+                    if callable(coerce):
+                        table[keyword.arg] = coerce
+        return table
+
     def _key(dit_path: str) -> tuple[Any, ...]:
-        """与 `ensure_loaded` **同一份**键 ✓ —— 默认值**现取** ✓（手抄参数清单迟早对不上 ✗✗）。"""
+        """与 `ensure_loaded` **同一份**键 ✓ —— 默认值**现取** ✓、归一**照源码** ✓。
+
+        ⚠️ 归一必须跟着做 ✗✗：`ensure_loaded` 进键前会把 `loras` / `vae_tiling` 这类
+        「多种写法同一个意思」的项先过一层快照函数 ✓（`None` 与 `{}`、`512` 与 `"512"` 都归一 ✓）。
+        只搬签名默认值、不过那一层 ⇒ 键的**形**不一样 ⇒ 同键被算成"换了装配" ✓✗。
+        """
         params = inspect.signature(engine_runtime.ensure_loaded).parameters
         kwargs = {name: param.default for name, param in params.items()
                   if name not in ("self", "force") and param.default is not inspect.Parameter.empty}
-        return runtime_mod._load_key(**{**kwargs, "dit_path": dit_path,
-                                        "loras": runtime_mod._lora_key(kwargs.get("loras"))})
+        for name, coerce in _normalizers().items():
+            if name in kwargs:
+                kwargs[name] = coerce(kwargs[name])
+        return runtime_mod._load_key(**{**kwargs, "dit_path": dit_path})
 
     _fresh()
     cache = engine_runtime.status()["cache"]
@@ -859,9 +997,128 @@ def case_unload() -> None:
         engine_runtime._current = None             # noqa: SLF001 —— 别把假状态留给后面的用例 ✓
 
 
+def case_vae_tiling_wiring() -> None:
+    """VAE 解码旋钮（``vaeTiling``）**接线**是不是每一条装配线都拿到了 ✓✗（纯静态判 ✓，不装 torch ✓）。
+
+    ⚠️ 为什么这条要独立成一条 ✗✗：装配白名单那条守卫（路由契约 ⑪′）只保证
+    ``ensure_loaded`` 的**签名**有这一项 ✓ —— 而真正把它送到后端的是**八处**手写调用 ✓
+    （七条 ``_ensure_*_loaded`` ＋ ``_ensure_loaded_internal`` 里 H3 那条 ✓）。少写一处
+    ⇒ 那一档「配了没生效」✓✗，症状是同一个开关在某些档位管用、在另一些档位静默无效 ✓✗
+    （``int8_offload`` 2026-10-29 就是这么丢的 ✓），而且**任何**运行期测试都撞不到 ✓✗
+    （它们不会去验"每个档位的构造器都收了它"✓）。
+    """
+    import ast  # noqa: PLC0415
+
+    from app.services.engine import runtime as rt_mod  # noqa: PLC0415
+
+    path = Path(rt_mod.__file__)
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    cls = next(node for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "EngineRuntime")
+    funcs = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
+
+    loaders = {name: node for name, node in funcs.items()
+               if name == "_ensure_loaded_internal"
+               or (name.startswith("_ensure_") and name.endswith("_loaded"))}
+    no_param: list[str] = []
+    no_pass: list[str] = []
+    for name, node in sorted(loaders.items()):
+        args = {arg.arg for arg in node.args.args + node.args.kwonlyargs}
+        if "vae_tiling" not in args:
+            no_param.append(name)
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if getattr(call.func, "id", "") != "TorchBackend":
+                continue          #: 出图那条走 ``SdxlBackend`` ✓ —— 它没有这两个旋钮 ✓（另有声明 ✓）
+            if not any(kw.arg == "vae_tiling" for kw in call.keywords):
+                no_pass.append(name)
+                break
+    check("旋钮接线: 每条装配线**都收** `vae_tiling` 且**都传给** `TorchBackend(...)`"
+          "（少一处 ⇒ 那一档「配了没生效」，运行期测试撞不到）",
+          not no_param and not no_pass, {"少参数": no_param, "收了没传": no_pass})
+
+    internal = loaders.get("_ensure_loaded_internal")
+    dispatch = [call for call in (ast.walk(internal) if internal is not None else [])
+                if isinstance(call, ast.Call)
+                and getattr(call.func, "attr", "").startswith("_ensure_")
+                and getattr(call.func, "attr", "").endswith("_loaded")]
+    missing = sorted({getattr(call.func, "attr", "?") for call in dispatch
+                      if not any(kw.arg == "vae_tiling" for kw in call.keywords)})
+    check("旋钮分派: `_ensure_loaded_internal` 往七条装配线**每一处**都带上了它"
+          "（签名改了、调用点没改 ⇒ 默认 None ⇒ 又是「配了没生效」）",
+          bool(dispatch) and not missing, {"分派数": len(dispatch), "漏": missing})
+
+    key_calls = [call for call in ast.walk(cls) if isinstance(call, ast.Call)
+                 and getattr(call.func, "id", "") == "_load_key"]
+    key_missing = [i for i, call in enumerate(key_calls)
+                   if not any(kw.arg == "vae_tiling" for kw in call.keywords)]
+    check("旋钮进装载键: **两处** `_load_key` 都带 `vae_tiling`"
+          "（只改一处 ⇒ 一处判「已装」、另一处判「要重装」⇒ 抖动 ✓✗）",
+          len(key_calls) == 2 and not key_missing,
+          {"调用点": len(key_calls), "漏": key_missing})
+
+    commit = funcs.get("_commit_load")
+    commit_src = ast.get_source_segment(source, commit) if commit is not None else ""
+    check("旋钮回执: `_commit_load` 用 `vae_tiling()` 回吐实值 ✓"
+          "（挂在所有装配线共用的人口上 ✓；各线自己写会漏 ✗）",
+          "vaeTiling" in (commit_src or "") and "vae_tiling" in (commit_src or ""),
+          (commit_src or "")[:200])
+
+    #: ⭐ **`temporalChunk` 的最后一公里**（2026-11-02 晚 ✓）：空间档走 `vae_wan` 自己的分块器 ✓，
+    #: 时间档却是后端在 SEEDVR2 那条解码分支上**显式**取出、传给 `decode_latents` ✓ ——
+    #: 这一行漏了，开关就是「收下了、存住了、从没用过」✓✗（运行期同样撞不到 ✓，症状＝
+    #: 回执里 `temporalChunk` 明明有值、解码却还整段跑 ✓✗）。
+    tb_src = (path.parent / "torch_backend.py").read_text(encoding="utf-8")
+    tb_tree = ast.parse(tb_src)
+    decode_fn = next((node for node in ast.walk(tb_tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == "decode"), None)
+    chunk_calls = [call for call in (ast.walk(decode_fn) if decode_fn is not None else [])
+                   if isinstance(call, ast.Call)
+                   and getattr(call.func, "attr", "") == "decode_latents"
+                   #: 只看 ``vae_seedvr2`` 那一族 ✓（flux / wan21 的 ``decode_latents`` 是**同名
+                   #: 不同模块** ✓，它们没有时间分块这条旋钮 ✓ —— 一律要求带参就是在冤枉它们 ✗）。
+                   and getattr(call.func.value, "id", "") == "vae_seedvr2_mod"]
+    wired = [any(kw.arg == "temporal_chunk" for kw in call.keywords) for call in chunk_calls]
+    #: 读旋钮**两种写法都算** ✓✗：``self._vaeTiling.get("temporalChunk")`` 与
+    #: ``_knobs = dict(self._vaeTiling); _knobs["temporalChunk"]`` ✓ —— 只认前一种就是把
+    #: 「先取一份快照再逐项读」这种**更稳**的写法判红 ✗（实测就是这么误红过一次 ✓）。
+    #: 三种**等价**写法都要认 ✓✗：``self._vaeTiling.get("x")`` ／ ``self._vaeTiling["x"]`` ／
+    #: 先 ``_knobs = dict(self._vaeTiling)`` 再 ``_knobs["x"]`` ✓ —— 只认第一种会把「取一份
+    #: 快照再逐项读」这种**更稳**的写法判红 ✗（实测就是这么误红过一次 ✓✗）。
+    snapshots = {
+        target.id
+        for node in (ast.walk(decode_fn) if decode_fn is not None else [])
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", "") == "dict"
+        and any(getattr(arg, "attr", "") == "_vaeTiling" for arg in node.value.args)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    read_knob: list = []
+    for node in (ast.walk(decode_fn) if decode_fn is not None else []):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") == "get"
+                and getattr(node.func.value, "attr", "") == "_vaeTiling"
+                and any(getattr(arg, "value", None) == "temporalChunk" for arg in node.args)):
+            read_knob.append(node)
+        elif (isinstance(node, ast.Subscript)
+              and (getattr(node.value, "attr", "") == "_vaeTiling"
+                   or getattr(node.value, "id", "") in snapshots)
+              and getattr(node.slice, "value", None) == "temporalChunk"):
+            read_knob.append(node)
+    check("旋钮落地: `decode` 的 SEEDVR2 分支**读** `_vaeTiling[\"temporalChunk\"]`，"
+          "并**真的传给** `decode_latents(...)`（漏这一行 ⇒ 旋钮进得了键、进不了解码器）",
+          bool(chunk_calls) and all(wired) and bool(read_knob),
+          {"调用数": len(chunk_calls), "带参": wired, "读旋钮": len(read_knob)})
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="engine_runtime_"))
     case_status()
+    case_generation_facts()
     case_queue(tmp)
     case_terminal_order(tmp)
     case_missing_weights(tmp)
@@ -869,6 +1126,7 @@ def main() -> int:
     case_half_load()
     case_load_ledger()
     case_cache_meter()
+    case_vae_tiling_wiring()
     if not _have_torch():
         skip("缺 torch ⇒ 真装载 / 真产物 / 真卸载 跳过 ✓")
     elif not media_mod.have_ffmpeg():

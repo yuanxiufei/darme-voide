@@ -330,6 +330,8 @@ def main() -> int:  # noqa: C901
     check("路由: GET 非法 id -> 404",
           client.get("/api/v1/merge/episodes/abc/merge").status_code == 404)
 
+    case_video_interpolate(client)
+
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:
@@ -337,6 +339,114 @@ def main() -> int:  # noqa: C901
     print()
     print(f"SUMMARY: {len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed")
     return 1 if failed else 0
+
+
+def case_video_interpolate(client: TestClient) -> None:  # noqa: C901
+    """⑦ 插帧：倍率/帧率/滤镜的纯函数口径 + 服务参数 + 路由契约（**不真跑 ffmpeg** ✓）。"""
+    from app.routers import video_ops as vo
+    from app.services import video_interpolate as vi
+
+    check("⑦ 倍率只认 2/3", (vi.normalize_multiplier(2), vi.normalize_multiplier("3")) == (2, 3))
+    for bad in (4, 1, 0, "abc", None):
+        try:
+            vi.normalize_multiplier(bad)
+            check(f"⑦ 倍率 {bad!r} 必须拒", False, "没抛")
+        except ValueError as exc:
+            check(f"⑦ 倍率 {bad!r} 必须拒", "仅支持 2× 或 3×" in str(exc), str(exc))
+
+    check("⑦ 分数帧率解析", vi.parse_frame_rate("30000/1001") == 29.97, vi.parse_frame_rate("30000/1001"))
+    check("⑦ 整数帧率解析", vi.parse_frame_rate("24") == 24.0, vi.parse_frame_rate("24"))
+    bad_rates = [vi.parse_frame_rate(x) for x in ("", "abc", "0/0", None)]
+    check("⑦ 坏帧率一律 None", bad_rates == [None] * 4, bad_rates)
+    check("⑦ 目标帧率跟随源（不是写死 24）",
+          (vi.target_fps_of(24, 2), vi.target_fps_of(29.97, 3)) == (48.0, 89.91),
+          (vi.target_fps_of(24, 2), vi.target_fps_of(29.97, 3)))
+    filt = vi.build_interpolate_filter(30, 3)
+    # fps 是浮点（30×3 ⇒ 90.0 ✓）—— 断言只认数值内容，不锁字符串末尾的 `.0` ✓
+    check("⑦ 滤镜先偶数化再插帧",
+          filt.startswith("scale=trunc(iw/2)*2:trunc(ih/2)*2,minterpolate=fps=90")
+          and "mi_mode=mci" in filt and "vsbmc=1" in filt, filt)
+
+    # ---- 服务：假 ffmpeg（只验参数与产物落地 ✓，不需要真 ffmpeg ✓）----
+    storage = Path(get_storage_root())
+    (storage / "uploads").mkdir(parents=True, exist_ok=True)
+    (storage / "uploads" / "src.mp4").write_bytes(b"fake")
+
+    calls: list[list[str]] = []
+    original_run, original_fps, original_audio = vi._run_ffmpeg, vi.probe_video_fps, vi._has_audio
+
+    async def fake_run(args, timeout_seconds):  # noqa: ARG001
+        calls.append(list(args))
+        Path(args[-1]).write_bytes(b"out")
+
+    async def fake_fps(_path):
+        return 30.0
+
+    async def audio_on(_path):
+        return True
+
+    async def audio_off(_path):
+        return False
+
+    vi._run_ffmpeg = fake_run  # type: ignore[assignment]
+    vi.probe_video_fps = fake_fps  # type: ignore[assignment]
+    vi._has_audio = audio_on  # type: ignore[assignment]
+    try:
+        result = asyncio.run(vi.interpolate_video("/uploads/src.mp4", 3))
+        args = calls[-1]
+        check("⑦ 产物落在 static/interpolate + 帧率 ×3",
+              result["url"].startswith("/static/interpolate/") and result["targetFps"] == 90
+              and result["sourceFps"] == 30.0, result)
+        check("⑦ 有音轨就 -c:a copy",
+              "-c:a" in args and args[args.index("-c:a") + 1] == "copy", args[-8:])
+        check("⑦ 滤镜进到命令行", args[args.index("-vf") + 1].startswith("scale=trunc(iw/2)*2"),
+              args[args.index("-vf") + 1])
+
+        vi._has_audio = audio_off  # type: ignore[assignment]
+        calls.clear()
+        asyncio.run(vi.interpolate_video("/uploads/src.mp4", 2))
+        check("⑦ 无音轨改用 -an", "-an" in calls[-1], calls[-1][-6:])
+
+        out_dir = storage / "static" / "interpolate"
+        before = {p.name for p in out_dir.glob("*")} if out_dir.is_dir() else set()
+        try:
+            asyncio.run(vi.interpolate_video("/uploads/src.mp4", 4))
+            check("⑦ 倍率非法不产文件", False, "没抛")
+        except ValueError:
+            after = {p.name for p in out_dir.glob("*")} if out_dir.is_dir() else set()
+            check("⑦ 倍率非法不产文件", before == after, (len(before), len(after)))
+
+        try:
+            asyncio.run(vi.interpolate_video("/uploads/nope.mp4", 2))
+            check("⑦ 源不存在必须报", False, "没抛")
+        except FileNotFoundError as exc:
+            check("⑦ 源不存在必须报", "视频不存在" in str(exc), str(exc))
+    finally:
+        vi._run_ffmpeg, vi.probe_video_fps, vi._has_audio = original_run, original_fps, original_audio
+
+    # ---- 路由契约 ----
+    check("⑦ 路由缺 videoUrl -> 400",
+          client.post("/api/v1/videos/interpolate", json={}).status_code == 400)
+    check("⑦ 路由倍率 4 -> 400（服务里一处真源）",
+          client.post("/api/v1/videos/interpolate",
+                      json={"videoUrl": "/uploads/src.mp4", "multiplier": 4}).status_code == 400)
+
+    original_service = vo.interpolate_video
+
+    async def fake_service(_url, _multiplier=2, **_kwargs):
+        return {"url": "/static/interpolate/x.mp4", "sourceFps": 24.0, "targetFps": 48.0,
+                "multiplier": 2, "elapsedMs": 1}
+
+    vo.interpolate_video = fake_service  # type: ignore[assignment]
+    try:
+        resp = client.post("/api/v1/videos/interpolate",
+                           json={"videoUrl": "/uploads/src.mp4", "multiplier": 2})
+        body = resp.json()
+        check("⑦ 路由返回 camelCase 契约",
+              resp.status_code == 200 and body["data"]["targetFps"] == 48.0
+              and body["data"]["url"].startswith("/static/interpolate/"), body)
+    finally:
+        vo.interpolate_video = original_service  # type: ignore[assignment]
 
 
 def _insert_episode(drama_id: int, title: str) -> int:

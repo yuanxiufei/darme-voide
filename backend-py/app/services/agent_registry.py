@@ -25,13 +25,19 @@
 * **提示词正文** 仍住在 ``agent_prompts.py``（「只放 instructions」，内容与结构分居）。
   两个键集合必须逐项同序 —— 由下面 ``_assert_same_membership()`` **导入期硬失败**兜底，
   而不是等某个测试偶然发现。
-* **``HOST_TOOL_NAMES``** 仍是静态清单：取值来源是 Mastra ``tool.id``（snake_case），
-  而 Python 侧无法执行 Mastra 工厂，只能静态镜像 + 守卫比对。
+* **``HOST_TOOL_NAMES``** 仍是静态清单：取值来源是 Mastra ``tool.id``（snake_case）。
+  但对照物已换 —— ``backend/``（Node）删除后，冻结的 TS 快照只能作历史参考；
+  权威改成 ``live_host_tool_names()``（真实 ``create_*`` 工厂产出），两者必须严格相等。
+  2026-11-06 再收一步：live 取的是 ``Tool.id`` 而非工厂 dict 的**键** —— 驱动侧的函数名
+  就是 ``Tool.id``（``ToolRegistry.as_openai_tools`` 逐项用它），键只是工厂内检索标签；
+  两者约定等同，但一旦某工厂沿用 TS 的 camelCase 键，只读键的 live 会拿一个**模型永远
+  调不到的名字**去当「真实工具」，于是清单守卫与 ``missingTools`` 会一起说错。
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from importlib import import_module
+from typing import Any, NamedTuple
 
 from .agent_prompts import DEFAULT_INSTRUCTIONS
 
@@ -47,6 +53,9 @@ __all__ = [
     "get_agent_spec",
     "get_default_name",
     "get_host_tool_names",
+    "live_host_tool_names",
+    "live_tool_objects",
+    "SUBAGENT_ONLY_TOOL_NAMES",
 ]
 
 
@@ -196,12 +205,23 @@ SUBAGENT_REGISTRY: tuple[dict[str, str], ...] = tuple(
 #:
 #: Node 侧是懒计算 + 缓存（遍历 ``validAgentTypes`` 调 ``createAgentTools`` 收集 ``tool.id``）——
 #: 那需要 Mastra 工厂，Python 侧无法执行 ⇒ 改为静态清单，并用漂移守卫保证与 TS 源码一致。
+#:
+#: ⚠️ 2026-11-06：只对着**冻结的 TS 快照**比对是不够的 —— ``backend/``（Node）已删除，快照
+#: 定格在删除那一刻，Python 侧**此后新增的工具永远不会被它发现**。实测漏了三个真实工具
+#: （``search_script_library`` 于 2026-11-04 补的按需通路、``list_skill_refs``／``read_skill_ref``
+#: 同批），于是「宿主有没有这个工具」这件事在本文件里会**向两个方向说谎**：
+#:   * 真实工具不在清单里 ⇒ 有 skill 声明它时，``/skills`` 的 ``missingTools`` 把它报成「缺」，
+#:     徽标写着「绑定后它会教 Agent 调用不存在的工具」，而那个工具其实好得很；
+#:   * 已删工具留在清单里 ⇒ 徽标不亮，绑定后调用落空。
+#: ⇒ 现以 ``live_host_tool_names()``（真实工厂产出）为权威，TS 快照降级为历史对照，
+#: 两道守卫分别钉住「真实工具不能缺席」与「清单里的名字必须有出处」。
 HOST_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "assign_voice",
         "generate_grid_prompt",
         "get_characters",
         "list_available_agents",
+        "list_skill_refs",
         "list_voices",
         "read_episode_script",
         "read_existing_characters",
@@ -209,6 +229,7 @@ HOST_TOOL_NAMES: frozenset[str] = frozenset(
         "read_existing_scenes",
         "read_script_for_extraction",
         "read_shots_for_grid",
+        "read_skill_ref",
         "read_storyboard_context",
         "rewrite_to_screenplay",
         "run_subagent",
@@ -219,9 +240,62 @@ HOST_TOOL_NAMES: frozenset[str] = frozenset(
         "save_script",
         "save_storyboards",
         "search_reference_prompts",
+        "search_script_library",
         "update_storyboard",
     }
 )
+
+#: 只能由 ``subagent.py`` 提供的两个工具（``create_run_subagent_tools`` 产出）。它的 ``conn``
+#: 只供**执行**委托时真跑一次 Agent run，构造期不查库 ⇒ 现与其它 8 个工厂一样被真实调用取名，
+#: 本常量降级为「必须存在的两个」的**声明**，由 ``skills_test`` 钉住（``live ⊇ 本集合``）。
+#: 旧写法是把这串手抄名**并入** live 结果 —— 工厂里 ``Tool.id`` 一改名，全仓唯一该知道这件事的
+#: 地方（live）反倒最不可能知道。
+SUBAGENT_ONLY_TOOL_NAMES: frozenset[str] = frozenset({"list_available_agents", "run_subagent"})
+
+
+#: :func:`live_tool_objects` 的取数口：``(模块路径, 工厂名, 构造参数)``。
+#: 存成模块级常量而不是写在函数体里，是为了让测试拿**同一份**清单去交叉核对
+#: 「``Tool.id`` == 驱动发给模型的 ``function.name``」—— 测试里抄第二份，就是把
+#: 「手抄清单」这个病根换个地方重新种下。
+_LIVE_TOOL_FACTORIES: tuple[tuple[str, str, tuple[object, ...]], ...] = (
+    ("app.agent.tools.corpus_tools", "create_corpus_tools", ()),
+    ("app.agent.tools.library_tools", "create_library_tools", ()),
+    ("app.agent.tools.skill_ref_tools", "create_skill_ref_tools", ()),
+    ("app.agent.tools.extract_tools", "create_extract_tools", (0, 0)),
+    ("app.agent.tools.grid_prompt_tools", "create_grid_prompt_tools", (0, 0)),
+    ("app.agent.tools.script_tools", "create_script_tools", (0,)),
+    ("app.agent.tools.storyboard_tools", "create_storyboard_tools", (0, 0)),
+    ("app.agent.tools.voice_tools", "create_voice_tools", (0, 0)),
+    ("app.agent.subagent", "create_run_subagent_tools", (0, 0, 0, "")),
+)
+
+
+def live_tool_objects() -> list[Any]:
+    """按 :data:`_LIVE_TOOL_FACTORIES` **真实构造**全部宿主工具对象。
+
+    工厂在函数内 import（``services`` ←→ ``agent`` 互引，模块级 import 会成环）；
+    构造期不查库、不联网（真正的 IO 都在 ``execute`` 里）⇒ 拿 ``0`` 当占位形参安全。
+    """
+    out: list[Any] = []
+    for module_name, factory_name, args in _LIVE_TOOL_FACTORIES:
+        factory = getattr(import_module(module_name), factory_name)
+        out.extend(factory(*args).values())
+    return out
+
+
+def live_host_tool_names() -> frozenset[str]:
+    """**真实**宿主工具集：逐个调 ``app/agent/tools/*.py`` 与 ``subagent.py`` 的工厂取 ``Tool.id``。
+
+    这是 ``HOST_TOOL_NAMES`` 的权威对照物 —— 冻结的 TS 快照只记到 Node 后端被删除那一刻，
+    之后 Python 侧新增的工具它一概看不见（2026-11-06 实测漏 3 个，见上面 ⚠️）。
+
+    取 ``Tool.id`` 而不是工厂返回 dict 的**键**：驱动侧拿到的函数名就是 ``Tool.id``
+    （``ToolRegistry.as_openai_tools`` 逐项用它组 ``function.name``），键只是工厂内的检索标签。
+    只读键的写法在「键 = id」时毫无差别，**一旦某个工厂用了 camelCase 键**（TS 迁移常见形态，
+    ``ToolRegistry.get`` 已为此按 id 兜底）就会拿一个模型永远调不到的名字当「真实工具」——
+    ``HOST_TOOL_NAMES`` 守卫随即误红、``missingTools`` 也跟着说错。
+    """
+    return frozenset(tool.id for tool in live_tool_objects())
 
 
 def get_agent_spec(agent_type: str) -> AgentSpec | None:

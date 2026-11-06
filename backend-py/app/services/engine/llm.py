@@ -448,7 +448,8 @@ def _build() -> dict[str, Any]:
 
     def generate_llm(model: Any, ids: Any, *, max_new_tokens: int = 64,
                      temperature: float = 1.0, top_p: float = 1.0, top_k: int = 0,
-                     eos_id: int | None = None, seed: int | None = None) -> Any:
+                     eos_id: int | None = None, seed: int | None = None,
+                     stop_ids: Any = None, on_token: Any = None) -> Any:
         """逐 token 生成 ✓（greedy / temperature / top-p / top-k ✓ + 早停 ✓）。
 
         ⚠️ ``temperature=0`` ⇒ greedy ✓（直接 argmax ✓ —— 保证可复现 ✓，也是**跨设备一致**的判据 ✓）。
@@ -456,6 +457,15 @@ def _build() -> dict[str, Any]:
         同一份权重/输入 ⇒ 逐 token 复现 ✓；⚠️ **跨设备不保证逐 token 相同** ✗ —— 两端 logits 本身就差
         1e-5 量级 ✓，再从概率分布里抽样 ⇒ 尾部 token 会分叉 ✓（这是数学 ✓ 不是 bug ✓）。
         要跨设备逐字相同 ⇒ 用 ``temperature=0`` ✓（:class:`~.llm_backend.LlmBackend` 的一致性测试就这么判 ✓）。
+
+        流式两的口子（2026-11-01 补 ✓，**默认关闭 ⇒ 老调用方字节不变** ✓）：
+
+        * ``on_token(tid: int)``：**每步一调** ✓，把刚采到的 token **id** 递出去（**不解码、不判 stop** ✗ ——
+          解码与停用词判定属于 :meth:`~.llm_backend.LlmBackend.generate_stream` ✓，本层只管"步" ✓）。
+          回调**抛异常即中止生成** ✓（异常原样上抛、不吞 ✗）——这正是「文字级停用词命中」与
+          「客户端断开」两种中止的实现方式 ✓；已生成的张量**不返回**（抛出去了 ✓）。
+        * ``stop_ids``：命中的 token **计入输出后**收尾 ✓（字符级停用词由上层按解码文本裁 ✓，
+          本层只处理"整 token 级"的哨兵 ✓）。
         """
         if max_new_tokens < 1:
             raise LlmError(f"max_new_tokens 必须 ≥1（收到 {max_new_tokens} ✗）")
@@ -494,7 +504,14 @@ def _build() -> dict[str, Any]:
                 token = torch.multinomial(probs, 1)
             current = token
             generated.append(token)
+            token_id = int(token.reshape(-1)[0].item())
+            if on_token is not None:
+                # ⚠️ 顺序固定：**先回调再判停** ✓ —— 让流式端也看见收尾那个 token（不看见就得靠上层猜 ✗）；
+                # 回调抛异常=主动中止（文字级停用词/客户端断开 ✓），原样上抛 ✓。
+                on_token(token_id)
             if eos_id is not None and bool((token == eos_id).all()):
+                break
+            if stop_ids is not None and token_id in stop_ids:
                 break
         return torch.cat([ids] + generated, dim=1)
 

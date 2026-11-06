@@ -13,7 +13,8 @@
 
 ## 两种目录布局都真实存在 ✓（所以是候选表，不是单一路径 ✗）
 
-* **官方仓库布局**（本仓 ``reference/lora/musubi-tuner`` 实测 = musubi-tuner **0.3.5** ✓）：
+* **官方仓库布局**（musubi-tuner **0.3.5** 实测 ✓ —— 2026-11-04 之前那棵树只作
+  ``reference/`` 里的学习用副本存在 ✓，**本仓不再内置、也不再指向它** ✗）：
   根目录是**薄壳** —— ``wan_train_network.py`` 全文只有一行
   ``from musubi_tuner.wan_train_network import main`` ✓，真实现在 ``src/musubi_tuner/`` ✓
   ⇒ 跑那层壳需要 ``PYTHONPATH`` 含 ``<root>/src`` ✓。
@@ -56,12 +57,12 @@ TOOLKIT_SD_SCRIPTS = "sd-scripts"
 #: ``configs/model-paths.json`` ✓（与 ``models_dir`` 等键并列 ✓）
 PATHS_JSON = REPO_ROOT / "configs" / "model-paths.json"
 
-#: 工具根：JSON 键名 / 环境变量名 / 本仓默认落点 ✓ —— 三个对齐着一处一处写清 ✓。
-_TOOL_ROOTS: dict[str, tuple[str, str, Path]] = {
-    TOOLKIT_MUSUBI: ("musubi_tuner_root", "MUSUBI_TUNER_ROOT",
-                     REPO_ROOT / "reference" / "lora" / "musubi-tuner"),
-    TOOLKIT_SD_SCRIPTS: ("sd_scripts_root", "SD_SCRIPTS_ROOT",
-                         REPO_ROOT / "reference" / "lora" / "sd-scripts"),
+#: 工具根：JSON 键名 / 环境变量名 ✓ —— 两个对齐着一处一处写清 ✓。
+#: ⚠️ **本仓不内置任何工具副本** ✗（2026-11-04 起 ``reference/`` 整棵都不再是运行时依赖 ✓）：
+#: 两处都没配 ⇒ 当场 :class:`LoraTrainEnvironmentError`，报文里写清两个配法 ✓（不猜 ✗）。
+_TOOL_ROOTS: dict[str, tuple[str, str]] = {
+    TOOLKIT_MUSUBI: ("musubi_tuner_root", "MUSUBI_TUNER_ROOT"),
+    TOOLKIT_SD_SCRIPTS: ("sd_scripts_root", "SD_SCRIPTS_ROOT"),
 }
 
 #: 环境变量：显式指定跑训练用的 python ✓（默认 ``sys.executable`` ✓ = 当前后端那个 venv ✓，
@@ -83,14 +84,16 @@ def _read_paths_json() -> dict[str, object]:
 
 
 def tool_root(toolkit: str) -> Path:
-    """工具根目录 ✓。优先级：环境变量 > ``model-paths.json`` > 本仓 ``reference/lora/`` ✓。
+    """工具根目录 ✓。优先级：环境变量 > ``model-paths.json`` ✓（**没有第三档** ✗）。
 
+    ⚠️ 两处都没配 ⇒ :class:`LoraTrainEnvironmentError` —— 本仓**不内置** musubi-tuner /
+    sd-scripts 副本 ✗（以前失败于「找到了一个不存在的位置」，现在明说「你还没告诉我它装在哪」✓）。
     ⚠️ 返回的是**解析结果**，不保证存在 ✗ —— 存在性由 :func:`resolve_tool` 报错 ✓
     （分开是为了让「路径算得出来、但没装」这种状态能被单独说清楚 ✓）。
     """
     if toolkit not in _TOOL_ROOTS:
         raise LoraTrainEnvironmentError(f"不认识的工具 {toolkit!r} ✗；合法值：{sorted(_TOOL_ROOTS)}")
-    json_key, env_key, fallback = _TOOL_ROOTS[toolkit]
+    json_key, env_key = _TOOL_ROOTS[toolkit]
 
     override = (os.environ.get(env_key) or "").strip()
     if override:
@@ -98,7 +101,12 @@ def tool_root(toolkit: str) -> Path:
     configured = _read_paths_json().get(json_key)
     if isinstance(configured, str) and configured.strip():
         return Path(configured.strip())
-    return fallback
+    raise LoraTrainEnvironmentError(
+        f"未配置训练工具根：{toolkit} ✗\n"
+        f"⇒ 设环境变量 {env_key}（指向 {toolkit} 仓库根），"
+        f"或在 configs/model-paths.json 里写 \"{json_key}\" ✓。\n"
+        "（本仓不内置 musubi-tuner / sd-scripts 副本 ✗，也不从 reference/ 里取 ✓）"
+    )
 
 
 def python_executable() -> str:
@@ -167,19 +175,26 @@ def resolve_tool(script: str, toolkit: str = TOOLKIT_MUSUBI) -> ResolvedTool:
                 toolkit=toolkit,
                 root=root,
             )
-    json_key, env_key, fallback = _TOOL_ROOTS[toolkit]
+    json_key, env_key = _TOOL_ROOTS[toolkit]
     raise LoraTrainEnvironmentError(
         f"找不到训练脚本 {script}（工具：{toolkit} ✗）\n"
         f"工具根：{root}（存在={root.is_dir()}）\n"
         "试过的路径：\n  - " + "\n  - ".join(tried) + "\n"
-        f"⇒ 装法：把 {toolkit} 放到 {fallback} ✓，"
-        f"或设环境变量 {env_key} / 在 configs/model-paths.json 里写 \"{json_key}\" ✓。"
+        f"⇒ 装法：设环境变量 {env_key}（指向 {toolkit} 仓库根），"
+        f"或在 configs/model-paths.json 里写 \"{json_key}\" ✓。"
     )
 
 
 def tool_available(script: str, toolkit: str = TOOLKIT_MUSUBI) -> bool:
-    """只问「在不在」✓，**不抛异常** ✗ —— 给体检接口用 ✓（启动路径请直接用 :func:`resolve_tool` ✓）。"""
-    root = tool_root(toolkit)
+    """只问「在不在」✓，**不抛异常** ✗ —— 给体检接口用 ✓（启动路径请直接用 :func:`resolve_tool` ✓）。
+
+    ⚠️ 「工具根还没配」也算「不在」✓（:class:`LoraTrainEnvironmentError` 被吞在这里）——
+    本函数是**问句**、不是断言 ✓；配上之后再问才是真的「装了没装」✓。
+    """
+    try:
+        root = tool_root(toolkit)
+    except LoraTrainEnvironmentError:
+        return False
     return any((root / relative).is_file() for relative, _ in _candidates(toolkit, script))
 
 
@@ -243,29 +258,53 @@ def environment_report() -> dict[str, object]:
 
     ⚠️ ``checked`` 三态语义（与本仓 ``services/engine_readiness`` 同一口径 ✓）：
     ``False`` = **没查**✗，不是「不行」✓；要让前端能区分「没证据」与「证据是坏」✓。
+    ⚠️ 每个工具多给 ``configured`` 一栏 ✓（2026-11-04 起两者不同义了 ✓）：
+    ``configured=False`` 表示**还没告诉本仓它装在哪**（环境变量/JSON 都没配）✗，
+    此时 ``root`` 是空串、``rootExists=False`` ✓ —— 让前端能说「去配路径」而不是「它不在本机」✓。
     """
     exe = python_executable()
+    tools: dict[str, object] = {}
+    for toolkit, (json_key, env_key) in _TOOL_ROOTS.items():
+        try:
+            root = tool_root(toolkit)
+        except LoraTrainEnvironmentError:
+            tools[toolkit] = {
+                "root": "",
+                "rootExists": False,
+                "configured": False,
+                "envKey": env_key,
+                "jsonKey": json_key,
+            }
+        else:
+            tools[toolkit] = {
+                "root": str(root),
+                "rootExists": root.is_dir(),
+                "configured": True,
+                "envKey": env_key,
+                "jsonKey": json_key,
+            }
     return {
         "python": exe,
         "pythonExists": Path(exe).is_file() if os.path.sep in exe else bool(shutil.which(exe)),
         "accelerate": accelerate_available_cached(),
         "pythonPathEntries": [str(p) for p in _all_pythonpath_entries()],
-        "tools": {
-            toolkit: {
-                "root": str(tool_root(toolkit)),
-                "rootExists": tool_root(toolkit).is_dir(),
-            }
-            for toolkit in _TOOL_ROOTS
-        },
+        "tools": tools,
     }
 
 
 def _all_pythonpath_entries() -> tuple[Path, ...]:
-    """两套工具各自的导入根 ✓（去重 ✓）—— 体检里列出来，方便对「装是装了、导入路径不对」✓。"""
+    """两套工具各自的导入根 ✓（去重 ✓）—— 体检里列出来，方便对「装是装了、导入路径不对」✓。
+
+    ⚠️ 没配根的那套**不产出条目** ✗（否则会往 ``PYTHONPATH`` 建议里塞一条空串路径 ✓✗）。
+    """
     found: list[Path] = []
     for toolkit in _TOOL_ROOTS:
+        try:
+            root = tool_root(toolkit)
+        except LoraTrainEnvironmentError:
+            continue
         for _script, py_relative in _candidates(toolkit, "x"):
-            entry = tool_root(toolkit) / py_relative
+            entry = root / py_relative
             if entry not in found:
                 found.append(entry)
     return tuple(found)

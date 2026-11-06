@@ -147,12 +147,23 @@ def case_hardware_report() -> None:
            "python": live.get("python"), "catalogModels": (saved.get("catalog") or {}).get("models")})
 
     stable = ("schemaVersion", "apiVersion", "engine", "python", "stages", "operations",
-              "unverified", "devicePolicy", "limits", "knownGaps")
+              "unverified", "devicePolicy", "limits", "knownGaps",
+              # ⭐ 2026-11-01 起这四栏也进对账 ✓：它们是「**认哪些名字**」的对外承诺 ✓——
+              #    落盘那份停在旧词表时，读它的人会以为某个采样器/调度器/画布档位不存在 ✓✗。
+              "samplers", "schedules", "canvasStages", "attentionBackends")
     drift = {key: {"文件": saved.get(key), "现场": live.get(key)}
              for key in stable if saved.get(key) != live.get(key)}
     check("① `hardware-report.json` 的能力段与**现场**一致 ✓✗（`schemaVersion` 就曾经停在 1 ⇒ "
           "读它的人会按旧契约理解今天的行为 ✓✗）",
           not drift, drift)
+
+    #: ⚠️ `profiles` **只比 id 集合** ✗（不比全字段 ✓）：档位的 steps/cfg 改了不必动落盘文件 ✓，
+    #:    但**增删一档**是契约变化 ✓ ⇒ 必须同步 ✓✗（这是本轮新增这栏的全部理由 ✓）。
+    saved_profiles = sorted(str(item) for item in (saved.get("profiles") or []))
+    live_profiles = sorted(str(item.get("id")) for item in (live.get("profiles") or []))
+    check("① `profiles` 的**档位 id 集合**与现场一致 ✓✗（改数值不必同步 ✓ 增删档位必须同步 ✓）",
+          saved_profiles == live_profiles,
+          {"文件": saved_profiles, "现场": live_profiles})
 
     for section, keys in (("backend", ("available", "missingRequired", "optionalMissing")),
                           ("quant", ("supportedLayouts", "unsupportedFamilies", "unsupportedFormats")),
@@ -165,22 +176,29 @@ def case_hardware_report() -> None:
     #: ⚠️ 设备策略这一栏**必须答全**，否则等于没接 ✗✗：只报各条的 `device`（"这次在 CPU"）
     #: 会让读的人把**一次降级**读成**能力缺失** ✓✗（本仓 2026-10-31 之前就是这样 ✓）。
     #: 三件事缺一不可 ✓：① 四档策略名与默认档 ✓；② 判定规则（凭什么从卡挪到 CPU ✓）；
-    #: ③ **两本账**（分时 / 整链同驻 ✓ —— 混一起报会按最重的单件估 ⇒ 差 4.5 GiB OOM ✓✗）。
+    #: ③ **四本账**（2.1 分时 / Z-Image 整链同驻 / 2512 分时 / Krea2 分时 ✓ —— 键名相同的族
+    #: **不能并**：混一起报只会留最后写的那本 ⇒ 按别族的值估本族余量 ✓✗）。
     dp = live.get("devicePolicy") or {}
     need = dp.get("needGiB") or {}
-    check("①′ 设备策略栏答全四档 + 判定规则 + **三本账** ✓✗"
-          "（只有结论没有规则 ⇒ 一次降级被读成能力缺失；只有一本账 ⇒ 按单件估会 OOM）",
+    check("①′ 设备策略栏答全四档 + 判定规则 + **四本账** ✓✗"
+          "（只有结论没有规则 ⇒ 一次降级被读成能力缺失；少一本账 ⇒ 拿别族的键名估本族余量）",
           list(dp.get("policies") or []) == ["auto", "gpu", "cpu", "balanced"]
           and dp.get("default") == "auto"
           and len(dp.get("rules") or []) >= 3
-          and set(need) == {"part", "chain", "qwenImagePart"}
+          and set(need) == {"part", "chain", "qwenImagePart", "krea2Part"}
           and abs(float((need.get("chain") or {}).get("zimage") or 0) - 19.28) < 0.01
           and float((need.get("part") or {}).get("dit") or 0) > 0
           #: ⚠️ **第三本账**必须真报出来 ✓✗（2026-10-31 补 ✓）：2512 的 DiT 38.05 GiB 与 2.1 的
           #: 13.26 差 24.8 GiB ✓ ⇒ 只报前者会让"这台机器能跑 2512"变成想当然 ✓（实际必然 split/CPU）。
           and abs(float((need.get("qwenImagePart") or {}).get("dit") or 0) - 38.05) < 0.01
           and float((need.get("qwenImagePart") or {}).get("dit") or 0)
-          > float((need.get("part") or {}).get("dit") or 0), dp)
+          > float((need.get("part") or {}).get("dit") or 0)
+          #: ⚠️ **第四本账**（2026-11-01 补 ✓）：Krea2 的 `text` 7.5 与 2.1 的 14.79 差 7.3 GiB ✓ ⇒
+          #: 少这一本，读者会拿 2.1 的 14.79 估 Krea2 的余量 ⇒ 把「装得下」判成「装不下」✓；
+          #: 反向（Krea2 那份顶掉 2.1 那份）则把 7.5 当成 14.79 ⇒ **真 OOM** ✓✗。既要有、还得比 2.1 小。
+          and abs(float((need.get("krea2Part") or {}).get("dit") or 0) - 12.57) < 0.01
+          and float((need.get("krea2Part") or {}).get("text") or 0)
+          < float((need.get("part") or {}).get("text") or 0), dp)
 
     #: ⚠️ `capabilities()` 的契约是「零副作用、不 import torch、毫秒级」✓✗ ⇒ 这一栏**不许**
     #: 带当时的卡况读数（那是 `GET /engine/runtime` 的事 ✓）。带了就说明有人为了凑字段

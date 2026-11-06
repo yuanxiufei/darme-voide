@@ -50,6 +50,13 @@ HIGH_USED_RATIO = 0.80
 #: 已用率超过它 ⇒ **需求未知**时直接转移 ✓（这时候赌"还塞得下"是最坏的选择 ✗）
 HARD_USED_RATIO = 0.92
 
+#: ⭐ `auto` **只在这两档里选** ✓✗（``off`` 不切 / ``split`` 联合）——
+#: **不含** ``park`` ✗✗（2026-11-01 定 ✓）。理由见 :func:`decide` 的「为什么 auto 不选 park」一节 ✓：
+#: park 每步搬的是**全部层的权重**（2512 那族单向 ≈38 GiB ✓），split 搬的是**跨界那一次激活**
+#: （几 MB 量级 ✓）⇒ 自动选 park 只会更慢 ✓✗，它留在**手工档**（``--residency park`` ✓）。
+AUTO_RESIDENCIES: tuple[str, ...] = ("off", "split")
+
+
 def is_cuda_device(device: Any) -> bool:
     """``device`` 指向的是不是**卡** ✓（``"cuda"`` / ``"cuda:0"`` / ``torch.device("cuda:1")`` ✓）。
 
@@ -229,6 +236,23 @@ def decide(*, policy: Any = DEFAULT_POLICY, requested_device: str | None = None,
 
     ⚠️ ``need_bytes=0`` 是「**不知道**要多少」✗ 而不是「不要空间」✓：
     这时只能按**已用率**粗判 ✓（结论会更保守 ✓，报告里的 ``needGiB`` 也缺席 ✓ 看得见 ✓）。
+
+    ## 为什么 `auto` **不选** `park` ✗✗（2026-11-01 定 ✓，见 :data:`AUTO_RESIDENCIES`）
+
+    ``residency`` 真干活的两档是 ``split`` 与 ``park`` ✓，名字听着 park「更省显存」✓ ——
+    但**省的不是同一个东西** ✓：
+
+    * ``split``：权重各自**常驻**（卡上一份、内存一份 ✓），过界只搬**那一次激活** ✓
+      ⇒ 每步搬运量 ＝ 一条跨界张量（几 MB 量级 ✓，``Plan.transfer_bytes("split")`` 明写返回 ``None``
+      ✗ 因为它不知道激活多大 ✓，**不猜** ✓）；
+    * ``park``：权重**全留内存** ✓，每层前向前把**整层权重**搬上卡、算完搬回 ✓
+      ⇒ 每步单向 ＝ ``Plan.layer_bytes``（**全部层的权重** ✓，2512 那族 ≈38 GiB ✓、双向 ≈76 GiB ✓✗）。
+      PCIe 4.0 x16 实测 ~25 GB/s ✓ ⇒ 光搬运就 3 秒以上/步 ✓，而 ``split`` 同一步是毫秒级 ✓。
+
+    ⇒ 自动选 park **只会更慢** ✓✗（唯一可能更好的场景是「卡上一个前缀层都放不下、又必须用卡算」✓，
+    那属于**手工调参**的事 ✓ ⇒ 留在 ``--residency park`` ✓）。⚠️ 选 ``split`` 必须**如实**标
+    ``degraded=True`` ✓ —— 它是「卡装不下但还得用卡」的兜底 ✓，**不是**优化 ✓✗
+    （报告里不许写成"已优化" ✗）。
     """
     name = normalize_policy(policy)
     need_gib = None if need_bytes <= 0 else round(int(need_bytes) / GIB, 2)
@@ -343,6 +367,15 @@ def selftest() -> list[str]:
         pass
     else:
         problems.append("拼错的策略名应抛 ValueError（不许静默回落 auto）")
+    # ⑨ ⭐ `auto` 三档全覆盖扫一遍：**不许**冒出 `park` ✓✗（搬整份权重 ⇒ 比 split 慢一个量级 ✓）
+    for total, free, need_gib in ((22.49, 20.0, 13.26), (22.49, 6.0, 38.05),
+                                  (22.49, 0.2, 38.05), (22.49, 20.0, 0.0), (22.49, 0.5, 0.0)):
+        for name in ("auto", "balanced"):
+            got = decide(policy=name, need_bytes=int(need_gib * GIB),
+                         pressure=_fake(total, free)).residency
+            if got not in AUTO_RESIDENCIES:
+                problems.append(f"策略 {name} 在 free={free}/need={need_gib} 时给了 {got!r}："
+                                f"auto 只许 {' / '.join(AUTO_RESIDENCIES)}")
     return problems
 
 

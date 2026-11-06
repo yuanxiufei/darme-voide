@@ -343,6 +343,33 @@ def case_api(root: Path) -> None:
     check("㉗⁴ ⭐ 契约不合法 ⇒ **具名原因** ✗（不是「文件坏了」那种笼统话 ✓✗）且注定回退普通模式 ✓",
           up_bad.get("contract") is None and bool(up_bad.get("contractError")), up_bad)
 
+    # ⚠️ ㉗⁵ 治的是**只读不核**那个真缺陷 ✗✗（2026-11-01 复核 ✓）：``format`` / ``strict_latent_only``
+    #    都对、只是 ``base_config`` **少一个字段** ⇒ 旧代码会走出 try 块，然后在这句
+    #    ``contract['base_config']['in_channels']`` 上 **KeyError** ⇒ 整条 ``/engine/readiness``
+    #    **500**（体检接口自己挂掉 ✓✗）；少的是别的字段时更坏 —— 接口照样说「契约 OK ⇒ 2× 可做」✓✗
+    #    （静默绿灯 ✓）。修法＝读 + 结构核一步到位（``upscale.load_upscaler_contract`` ✓）。
+    for missing_field in ("in_channels", "temporal_kernel"):
+        partial = root / f"partial_{missing_field}.safetensors"
+        broken = {
+            "format": "minimax_h3_clean_latent_upscaler_v3_factorized_attention",
+            "strict_latent_only": True,
+            "base_config": {key: value for key, value in contract["base_config"].items()
+                            if key != missing_field},
+            "config": dict(contract["config"]),
+        }
+        write_safetensors(partial, {"w": ("F16", [4])},
+                          metadata={"metadata": json.dumps(broken)})
+        resp = client.get("/api/v1/engine/readiness",
+                          params={"stage": "h3", "upscalePath": str(partial)})
+        up_partial = (resp.json().get("data") or {}).get("upscale") or {}
+        check(f"㉗⁵ ⭐⭐ 契约 ``base_config`` 少 ``{missing_field}`` ⇒ **具名拒绝** ✗"
+              f"（200 ✓ + ``contract=null`` + ``contractError`` 点名缺哪个 ✓）"
+              f"—— 旧代码少 ``in_channels`` 时**整条体检 500** ✗✗、少别的字段时还会说「契约 OK」✗✗",
+              resp.status_code == 200 and up_partial.get("contract") is None
+              and missing_field in str(up_partial.get("contractError") or "")
+              and not any("契约 OK" in note for note in (up_partial.get("notes") or [])),
+              (resp.status_code, up_partial))
+
     good = root / "api_good.safetensors"
     write_safetensors(good, {"weight": ("F16", [4, 4])}, metadata={"src": "api"})
     detail = client.post("/api/v1/engine/inspect", json={"path": str(good)})
@@ -553,6 +580,133 @@ def case_quant_scheme(root: Path) -> None:
           bare_plan.quantScheme == "fp8", bare_plan.computeDtype)
 
 
+def case_assembly_for_stage() -> None:
+    """⑬ 清单 → 装配参数：**只报档位就能跑** ✓（画布不该知道权重路径 ✓）。"""
+    from app.services.engine import inventory as inv
+
+    empty_root = Path(tempfile.mkdtemp(prefix="engineinv_asm_empty_"))
+    bare = inv.assembly_for_stage("zimage", root=empty_root)
+    check("⑬ 空盘不塞假路径（塞了要到读文件时才炸，报错读起来像权重坏了）",
+          "dit_path" not in bare and bare.get("stage") == "zimage", sorted(bare))
+    check("⑬ 空盘把缺件写进 note（不是静默空跑）",
+          "缺" in str(bare.get("note") or ""), bare.get("note"))
+
+    root = Path(tempfile.mkdtemp(prefix="engineinv_asm_"))
+    for stage in ("zimage", "wan22"):
+        for entry in inv.stage_entries(stage):
+            path = inv.component_path(entry, root)
+            if path is None:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"placeholder")
+
+    got = inv.assembly_for_stage("zimage", root=root)
+    check("⑬ 件齐：dit/text/vae 三格都解析出来",
+          all(key in got for key in ("dit_path", "text_weights", "image_vae_weights")), sorted(got))
+    check("⑬ 图片档 VAE 进 image_vae_weights（不是 video 那格）",
+          "image_vae_weights" in got and "video_vae_weights" not in got, sorted(got))
+    # ⭐ 反向验证：第一版把 **H3 的 Qwen3-VL-32B 词表**套给了四档图片链 ——
+    #    四档文本塔分别是 Qwen3-4B / Qwen3.5-9B / Qwen2.5-VL-7B / Qwen3-VL-4B，
+    #    喂错族「装得上、编得出、id 全错」且**一条报错都没有** ✗✗
+    #    ⇒ 现在按档问 `find_tokenizer_for_stage` ✓；这里验**接线**（不依赖本机装没装 ✓）
+    from app.services.engine import tokenizer_hub as th
+
+    saved = th.find_tokenizer_for_stage
+    try:
+        th.find_tokenizer_for_stage = lambda stage: {
+            "path": "X:/fake/qwen3_4b", "tokenizerClass": "Qwen2Tokenizer", "source": "test"}
+        wired = inv.assembly_for_stage("zimage", root=root)
+        check("⑬ 解析到的词表要真的进 tokenizer_path（不是只写在 note 里）",
+              wired.get("tokenizer_path") == "X:/fake/qwen3_4b", wired.get("tokenizer_path"))
+        th.find_tokenizer_for_stage = lambda stage: None
+        bare_tok = inv.assembly_for_stage("zimage", root=root)
+        check("⑬ 解析不到词表 ⇒ **不塞**（运行时点名缺哪格，比塞别族的强）",
+              "tokenizer_path" not in bare_tok and "tokenizer" in str(bare_tok.get("note") or ""),
+              bare_tok.get("note"))
+    finally:
+        th.find_tokenizer_for_stage = saved
+
+    wan = inv.assembly_for_stage("wan22", root=root)
+    check("⑬ Wan2.2 双专家按文件名 high/low 分格",
+          "high" in str(wan.get("dit_path") or "").lower()
+          and "low" in str(wan.get("dit_path2") or "").lower(),
+          (wan.get("dit_path"), wan.get("dit_path2")))
+    # ⭐ 反向验证（真跑抓到的）：第一版按「这档出视频」把 Wan2.2 的 VAE 塞进了
+    #    `video_vae_weights` ✗✗ ⇒ 装载当场报「还没给 `imageVaeWeights`」✓。
+    #    真相：runtime 里 `video_vae_weights` **只服务 H3 的 real_video_vae** ✓，
+    #    Wan2.2 / SEEDVR2 那一格也叫 `image_vae_weights` ✓（尽管它俩出的是 mp4 ✓）。
+    check("⑬ Wan2.2 的 VAE 进 image_vae_weights（不是按「出视频」归到 video 那格）",
+          "image_vae_weights" in wan and "video_vae_weights" not in wan, sorted(wan))
+
+    h3 = inv.assembly_for_stage("h3")
+    # H3 的 STAGE_FILTERS 只有 category=video ⇒ 清单里混着 SEEDVR2/Wan2.2 的件 ✓
+    # 按 kind 挑必然挑错主干 ⇒ 必须交 bridge 探 fl2va ✓
+    check("⑬ H3 不经 kind 挑件（清单混着别档 ⇒ 交 bridge 探 fl2va）",
+          h3.get("stage") == "h3" and ("dit_path" in h3 or "note" in h3), sorted(h3))
+    check("⑬ H3 不会挑出第二份 dit（它只有一个主干）",
+          "dit_path2" not in h3, h3.get("dit_path2"))
+
+    # ---- 对外口子：``GET /engine/stages``（画布选档就读它 ✓）----
+    import json
+
+    from app.routers import engine as engine_router
+
+    rows = json.loads(engine_router.engine_stages().body)["data"]["stages"]
+    check("⑬ /stages 七档齐全（四个图片档 + Wan2.2 + H3 + Music3）", len(rows) == 7,
+          [row["stage"] for row in rows])
+    check("⑬ /stages 每档都带 ready / fits / components",
+          all({"ready", "fits", "components"} <= set(row) for row in rows), sorted(rows[0]))
+    qwen = next(row for row in rows if row["stage"] == "qwen_image")
+    # ⭐ 这一条是「合成一个布尔值就会骗人」的反向验证：件齐 ✓ 但 47 GiB 装不下 24 GB 卡 ✓
+    check("⑬ 2512 件齐但装不下（ready≠fits，两个都要报）",
+          qwen["ready"] is True and qwen["fits"] is False,
+          (qwen["ready"], qwen["fits"], qwen["estimatedGiB"]))
+
+
+def case_stage_tokenizers() -> None:
+    """⑭ **按档**词表解析：目录名 / 仓库名认族 ＋ ``tokenizer_class`` 排错族（双判据 ✓）。"""
+    from app.services.engine import tokenizer_hub as th
+
+    root = Path(tempfile.mkdtemp(prefix="engineinv_tok_"))
+    good = root / "qwen3_4b"
+    good.mkdir()
+    (good / "tokenizer_config.json").write_text('{"tokenizer_class": "Qwen2Tokenizer"}', encoding="utf-8")
+    (good / "vocab.json").write_text('{"!": 0}', encoding="utf-8")
+    (good / "merges.txt").write_text("#version: 0.2\n", encoding="utf-8")
+    check("⑭ 文件齐 + class 认识 ⇒ 可用",
+          th._tokenizer_files_present(good) and th._tokenizer_class_of(good) == "Qwen2Tokenizer",
+          (th._tokenizer_files_present(good), th._tokenizer_class_of(good)))
+
+    empty = root / "qwen3vl_4b"
+    empty.mkdir()
+    (empty / "tokenizer_config.json").write_text('{"tokenizer_class": "LlamaTokenizer"}', encoding="utf-8")
+    # ⚠️ 只核 config 不行 ✗：空目录也能过 ⇒ 错误拖到几十秒后的 encode 才炸 ✓✗
+    check("⑭ 只有 config、没有词表文件 ⇒ 不可用",
+          not th._tokenizer_files_present(empty), sorted(item.name for item in empty.iterdir()))
+    check("⑭ 别族 class 照实读出（由调用方判它不在白名单）",
+          th._tokenizer_class_of(empty) == "LlamaTokenizer", th._tokenizer_class_of(empty))
+
+    saved_dirs, saved_caches = th._stage_tokenizer_dirs, th._hf_caches
+    try:
+        th._stage_tokenizer_dirs = lambda spec: [(root / str(spec["subdir"]), "test")]
+        th._hf_caches = lambda: []
+        found = th.find_tokenizer_for_stage("zimage")
+        check("⑭ 命中候选目录 ⇒ 直接用它（带 source 说明来历）",
+              bool(found) and Path(str(found["path"])) == good and found["source"] == "test", found)
+        (good / "tokenizer_config.json").write_text(
+            '{"tokenizer_class": "LlamaTokenizer"}', encoding="utf-8")
+        check("⑭ 错族 ⇒ 宁可 None（不静默拿别的族顶上）",
+              th.find_tokenizer_for_stage("zimage") is None, th.find_tokenizer_for_stage("zimage"))
+    finally:
+        th._stage_tokenizer_dirs, th._hf_caches = saved_dirs, saved_caches
+
+    check("⑭ 没登记的档位 ⇒ None（不猜）",
+          th.find_tokenizer_for_stage("sdxl") is None, th.find_tokenizer_for_stage("sdxl"))
+    check("⑭ 四档都登记了落点目录（少了哪档就等于那档永远装不上）",
+          all(key in th.STAGE_TOKENIZERS for key in ("zimage", "krea2", "qwen_image21", "qwen_image")),
+          sorted(th.STAGE_TOKENIZERS))
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="engineinv_files_"))
     case_safetensors(root)
@@ -560,6 +714,8 @@ def main() -> int:
     case_api(root)
     case_probe_root(root)
     case_quant_scheme(root)
+    case_assembly_for_stage()
+    case_stage_tokenizers()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

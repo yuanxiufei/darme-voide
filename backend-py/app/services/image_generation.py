@@ -501,15 +501,20 @@ async def _process_image_generation(image_id: int, config: dict[str, Any]) -> No
 async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: Row) -> None:
     """``provider=engine`` ⇒ **进程内自研引擎** ✓（不调 SD WebUI / ComfyUI ✗ —— 「不依赖外部」✓）。
 
-    ⚠️ 两条路的**产物不是一回事** ✗✗ ⇒ 产物路径与 ``engineBackend`` 标签**都要如实区分** ✓：
+    ⚠️ 产物**形状不一样** ✗✗ ⇒ 产物路径与 ``engineBackend`` 标签**都要如实区分** ✓：
 
-    * **SDXL 路**（首选 ✓ ✓）：**真·文生图** ✓ ⇒ 产物本来就是**一张 PNG** ✓，标 ``sdxl`` ✓、
-      ``synthetic=false`` ✓（四件套全是真权重 ✓）；**没有**取帧这一步 ✗。
+    * **五档文生图**（``sdxl`` ✓ / ``zimage`` ✓ / ``qwen_image21`` ✓ / ``qwen_image``（2512 ✓）/
+      ``krea2`` ✓）：产物本来就是**一张 PNG** ✓，``engineBackend`` 报**实际**那一档 ✓；
+      **没有**取帧这一步 ✗。
+      五档的取舍：``engineStage`` **显式给**就听它的 ✓（**不降级** ✗✗ —— 要的那个装不上就当场报 ✓）；
+      没给 ⇒ 老路：装得上 SDXL 走 SDXL ✓、装不上走 H3 兜底 ✓。
     * **H3 兜底路**：H3 是**视频**模型 ✓ ⇒ 只能跑**最短的那段**（5 帧 ✓）再取**首帧** ✓
-      ⇒ 标 ``engine-still-from-video`` ✓。**别把它讲成"引擎直接画了张图"** ✗
+      ⇒ 标 ``h3-still-from-video`` ✓。**别把它讲成"引擎直接画了张图"** ✗
       —— 产物是**视频** ✓，图片是从它**派生**的 ✓。
 
     ⚠️ 兜底**必须记下原因** ✗（静默换路 = 用户以为拿到的是 SDXL 的图 ✓✗，本仓最忌这类 ✓）。
+    ⚠️ 四条新链**要四格权重**（``ditPath`` / ``textWeights`` / ``imageVaeWeights`` / ``tokenizerPath``）✓：
+    本层**不补默认、不探测** ✗ —— 缺格由运行时当场拒并点名哪一格 ✓（猜一个"看起来对"的最贵 ✓✗）。
 
     失败一律**抛错** ✗ ⇒ 由外层已有的 fallback / 失败收口逻辑接管 ✓（不重写一套 ✓）。
     """
@@ -518,24 +523,60 @@ async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: 
     settings = bridge.normalize_settings(config)
     outputs_dir = bridge.outputs_dir_for("image", image_id)
 
-    # ── 选路 ✓：装得上 SDXL ⇒ **真·文生图** ✓；装不上 ⇒ **明说原因**再走 H3 兜底 ✓ ──────────
-    # ⚠️ `resolve_sdxl_path` 的报错**自带可行动指引** ✓ ⇒ 直接当兜底原因记下来 ✓ 不吞 ✗。
+    # ── 选路 ✓：``engineStage`` 显式给了就听它的 ✓；没给 ⇒ 装得上 SDXL 走 SDXL ✓、否则 H3 兜底 ✓ ──
     fallback_reason = ""
     tokenizer_source = ""
-    try:
-        _weights, weights_source = bridge.resolve_sdxl_path(settings)
-        # ⚠️ 2026-09-26 补 ✓：**词表也得能定** ✗✗ —— SDXL 要的是「权重 **+** 一张 CLIP 词表」✓✗，
-        #    只查权重就选 SDXL 那条路 ⇒ 会在**装载**时才炸（运行时如实报「缺 CLIP 词表」✓）✓✗
-        #    —— 本来能走 H3 兜底交一张图，却变成一次失败 ✓✗。口径与权重**一致** ✓：
-        #    缺哪样、为什么缺，都进 ``fallbackReason`` 让用户看见 ✓（不静默换路 ✗）。
-        _tokenizer, tokenizer_source = bridge.resolve_tokenizer_path(settings)
-        stage, route, route_note = bridge.IMAGE_STAGE, "sdxl", (
-            "SDXL **真·文生图** ✓：产物是**单张 PNG** ✓（**不是**从视频取帧 ✗）")
-    except ValueError as error:
-        _weights, weights_source = bridge.resolve_dit_path(settings)
-        stage, route = bridge.VIDEO_STAGE, "h3-still-from-video"
-        fallback_reason = str(error)
-        route_note = "H3 **兜底**：装不了 SDXL ⇒ 跑 5 帧视频再**取首帧** ✓。原因：" + fallback_reason
+    weights_source = ""
+    explicit = str(settings.get("engine_stage") or "").strip().lower()
+    if explicit:
+        # ⚠️ **显式指定就不许降级** ✗✗（2026-11-01 补 ✓）：用户要的就是这一档 ✓ ——
+        #    静默换成"能跑的那一档"= 出现"你要的和你拿到的不是一回事" ✓✗（本仓最忌这类 ✓）。
+        #    合法值从 `pipeline` 的 stage 常量**取** ✓ 不手抄 ✗（`int8_offload` 漏过一次 ✓）。
+        from .engine import pipeline as _pipeline  # 局部 import ✓
+
+        #: ⚠️ 五档 ✓（2026-11-01 补 ``qwen_image`` 2512 ✓）：`runtime.ensure_loaded` 有五条
+        #: 出图装配线 ✓ —— 少列一档的后果是「支持但业务层拒收」✓✗（用户选了 2512 却被
+        #: 告知"只认四档"✓），比装不上更难查 ✓✗。**从 `pipeline` 取** ✗ 不手抄 ✓。
+        allowed = (_pipeline.IMAGE_STAGE, _pipeline.ZIMAGE_STAGE, _pipeline.QWEN21_STAGE,
+                   _pipeline.QWEN_IMAGE_STAGE, _pipeline.KREA2_STAGE)
+        if explicit not in allowed:
+            raise ValueError(
+                f"``engineStage`` 只认 {allowed} ✓，收到 {explicit!r} ✗"
+                "（⚠️ 视频档在这里没有意义 ✗ —— 图片链路要的是「单张静态图」✓；"
+                "要出视频请走 ``video_generation`` ✓）")
+        stage = explicit
+        if stage == bridge.IMAGE_STAGE:
+            _weights, weights_source = bridge.resolve_sdxl_path(settings)   # 权重+词表都得能定 ✓
+            _tokenizer, tokenizer_source = bridge.resolve_tokenizer_path(settings)
+            route_note = "SDXL **真·文生图** ✓（``engineStage`` 显式指定 ✓）：产物是**单张 PNG** ✓"
+        else:
+            # 三件套出图链 ✓：DiT 由 `ditPath` 明给 ✓（不探测 ✗），另两份 + 词表由桥转手 ✓；
+            # **缺格不在本层补** ✗ —— 让运行时当场拒并点名缺哪格 ✓（同 `bridge` 的纪律 ✓）。
+            weights_source = str(settings.get("dit_path") or "").strip() or "（未给 ditPath ✗）"
+            tokenizer_source = str(settings.get("tokenizer_path") or "").strip()
+            route_note = (
+                f"{stage} **文生图** ✓（``engineStage`` 显式指定 ✓）：产物是**单张 PNG** ✓；"
+                "⚠️ 它要**四格**权重（``ditPath`` / ``textWeights`` / ``imageVaeWeights`` / "
+                "``tokenizerPath``）✓ —— 缺哪格运行时会当场拒并点名 ✓")
+    else:
+        try:
+            _weights, weights_source = bridge.resolve_sdxl_path(settings)
+            # ⚠️ 2026-09-26 补 ✓：**词表也得能定** ✗✗ —— SDXL 要的是「权重 **+** 一张 CLIP 词表」✓✗，
+            #    只查权重就选 SDXL 那条路 ⇒ 会在**装载**时才炸（运行时如实报「缺 CLIP 词表」✓）✓✗
+            #    —— 本来能走 H3 兜底交一张图，却变成一次失败 ✓✗。口径与权重**一致** ✓：
+            #    缺哪样、为什么缺，都进 ``fallbackReason`` 让用户看见 ✓（不静默换路 ✗）。
+            _tokenizer, tokenizer_source = bridge.resolve_tokenizer_path(settings)
+            stage, route_note = bridge.IMAGE_STAGE, (
+                "SDXL **真·文生图** ✓：产物是**单张 PNG** ✓（**不是**从视频取帧 ✗）")
+        except ValueError as error:
+            _weights, weights_source = bridge.resolve_dit_path(settings)
+            stage = bridge.VIDEO_STAGE
+            fallback_reason = str(error)
+            route_note = "H3 **兜底**：装不了 SDXL ⇒ 跑 5 帧视频再**取首帧** ✓。原因：" + fallback_reason
+
+    #: 产物形状：这五档都是**一张 PNG** ✓（只有 h3 是"视频取首帧" ✗）。
+    image_route = stage != bridge.VIDEO_STAGE
+    route = stage if image_route else "h3-still-from-video"
 
     log_task_progress("ImageTask", "engine-assembly", {
         "id": image_id, "provider": bridge.PROVIDER,
@@ -567,23 +608,25 @@ async def _run_image_with_engine(image_id: int, config: dict[str, Any], record: 
                                 record_id=image_id, label="图片")
     paths = bridge.artifact_paths(task)
 
-    if route == "sdxl":
+    if image_route:
         png_path = paths.get("primaryPath")
         if not png_path:
             # ⚠️ 这条路**不该**只有视频 ✗ —— 报出来说明后端选错了 ✓✗（比"悄悄去取帧"好得多 ✓）
             raise RuntimeError(
-                f"SDXL 任务 {task.get('id')} 成功了却没报图片路径 ✗（outputs={paths} ✗）"
+                f"{stage} 任务 {task.get('id')} 成功了却没报图片路径 ✗（outputs={paths} ✗）"
                 "：多半是装配的 stage 与实际跑的后端对不上 ✓")
         stored = await bridge.store_image_to_storage(png_path, record_id=image_id)
         log_task_progress("ImageTask", "engine-sdxl-image", {
-            "id": image_id, "engineTaskId": task.get("id"),
+            "id": image_id, "engineTaskId": task.get("id"), "stage": stage,
             "enginePath": png_path, "localPath": stored.get("localPath"),
             "bytes": stored.get("bytes"),
-            "note": "SDXL 真·文生图 ✓ —— 产物本来就是**一张 PNG** ✓，**没有**取帧这一步 ✓",
+            "note": f"{stage} 真·文生图 ✓ —— 产物本来就是**一张 PNG** ✓，**没有**取帧这一步 ✓",
         })
+        # ⚠️ ``engineBackend`` 报**实际**档 ✗：写死 ``"sdxl"`` 会让"这张其实是 Krea2 出的"
+        #    在台账里彻底查不出来 ✓✗（同 `engineStage` 一起留着才能对上账 ✓）。
         await _handle_image_complete_local(
             image_id, bridge.PROVIDER, str(stored["localPath"]),
-            extra={"engineTaskId": task.get("id"), "engineBackend": "sdxl",
+            extra={"engineTaskId": task.get("id"), "engineBackend": stage,
                    "engineStage": stage, "engineImagePath": png_path})
         return
 

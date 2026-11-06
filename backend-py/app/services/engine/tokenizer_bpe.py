@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -151,7 +152,8 @@ class BpeTokenizer:
                  bos_ids: Sequence[int] = (), eos_ids: Sequence[int] = (),
                  notes: Sequence[str] = (),
                  splitter: Callable[[str], list[str]] | None = None,
-                 pre_tokenizer_name: str = "gpt2") -> None:
+                 pre_tokenizer_name: str = "gpt2",
+                 normalizers: Sequence[str] = ()) -> None:
         if not vocab:
             raise ValueError("词表是空的 ✗")
         # ⚠️ 预分词规则**可注入**（2026-10-29 补 ✓）：GPT-2 与 Qwen2 的字面规则**不一样** ✗
@@ -160,6 +162,7 @@ class BpeTokenizer:
         # （SDXL 那套 CLIP 词表就是它 ✓，行为一字不变 ✓）。
         self._splitter = splitter or pretokenize
         self.pre_tokenizer_name = str(pre_tokenizer_name)
+        self._normalizers = tuple(str(item) for item in normalizers)
         self.vocab: dict[str, int] = {str(token): int(index) for token, index in vocab.items()}
         self._byte_encoder = bytes_to_unicode()
         self._byte_decoder = {char: byte for byte, char in self._byte_encoder.items()}
@@ -280,7 +283,12 @@ class BpeTokenizer:
     def encode(self, text: str, *, add_special_tokens: bool = True) -> list[int]:
         """文本 → id ✓（**特殊 token 原子化** ✓；普通段走预分词 + BPE ✓）。"""
         ids: list[int] = list(self._bos) if add_special_tokens else []
-        for kind, chunk in self._split_specials(str(text or "")):
+        # ⚠️ 归一化要在**切分之前** ✓✗：HF 的 ``normalizer: NFC`` 作用在原文上 ✓ ——
+        # 漏了它在**带重音/组合字符**的歌词上会切出不同的字节串 ✓✗（不报错，只是 id 不同 ✓）。
+        normalized = str(text or "")
+        for form in self._normalizers:
+            normalized = unicodedata.normalize(form, normalized)
+        for kind, chunk in self._split_specials(normalized):
             if kind == "special":
                 ids.append(self._added[chunk])
                 continue
@@ -347,6 +355,25 @@ class BpeTokenizer:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as err:
             raise ValueError(f"{json_path} 不是合法 JSON ✗（{err} ✓）") from err
+        tokenizer = cls.from_tokenizer_payload(payload, source=json_path.name)
+        tokenizer.source_path = str(json_path)
+        return tokenizer
+
+    @classmethod
+    def from_tokenizer_payload(cls, payload: Mapping[str, Any], *,
+                               source: str = "") -> "BpeTokenizer":
+        """**已经读进来**的 ``tokenizer.json`` 内容 ⇒ 分词器 ✓（2026-11-06 加 ✓）。
+
+        ## 为什么必须有这一格 ✗✗
+
+        Music3 的词表**不在盘上** ✓：它被焊在语义塔那份 safetensors 里（键名 ``tokenizer_json`` ✓，
+        一个 uint8 字节块 ✓）。只有 ``from_tokenizer_json(path)`` 的话，装配侧要么得往盘上
+        写临时文件 ✗（一个进程崩了就留垃圾 ✓）、要么只能绕开本模块用 HF 的 ``tokenizers`` ✗
+        （那会让引擎多一条 rust 依赖 ✓）。
+
+        ``source`` 只进 ``notes``（回执里要看得出这份词表是哪来的 ✓）。
+        """
+        label = f"`{source}`" if source else "内存里的词表"
         model = payload.get("model") or {}
         model_type = str(model.get("type") or "")
         if model_type != "BPE":
@@ -360,32 +387,121 @@ class BpeTokenizer:
             content = item.get("content")
             if content is not None and item.get("id") is not None:
                 added[str(content)] = int(item["id"])
-        notes: list[str] = [f"来自 `{json_path.name}` ✓"]
-        notes.extend(_check_pre_tokenizer(payload.get("pre_tokenizer")))
+        notes: list[str] = [f"来自 {label} ✓"]
+        pre_notes, splitter, splitter_name = _pre_tokenizer_plan(payload.get("pre_tokenizer"))
+        notes.extend(pre_notes)
+        normalizer_notes, normalizers = _normalizer_plan(payload.get("normalizer"))
+        notes.extend(normalizer_notes)
         bos, eos, post_note = _post_processor_specials(payload.get("post_processor"), added)
         if post_note:
             notes.append(post_note)
-        tokenizer = cls(vocab, merges, added_tokens=added, bos_ids=bos, eos_ids=eos, notes=notes)
-        tokenizer.source_path = str(json_path)
+        tokenizer = cls(vocab, merges, added_tokens=added, bos_ids=bos, eos_ids=eos, notes=notes,
+                        splitter=splitter, pre_tokenizer_name=splitter_name,
+                        normalizers=normalizers)
+        tokenizer.source_path = source
         return tokenizer
 
 
-def _check_pre_tokenizer(spec: Any) -> list[str]:
-    """``pre_tokenizer`` 必须是 ``ByteLevel`` ✓（``Sequence`` 里含它也行 ✓）—— 否则**报错** ✓。"""
+#: Qwen2 / Qwen2.5 / Qwen3 的预分词正则**字面形** ✓（``tokenizer.json`` 里存的就是这一串 ✓）。
+#: ⚠️ 与 GPT-2 那条的**两处实差** ✗：``\p{N}`` 是**单个数字** ✓（GPT-2 是 ``\p{N}+`` ✗）、
+#: 另有独立的 ``\s*[\r\n]+`` 分支 ✓ —— 硬套 GPT-2 规则会**静默算出错的 id** ✓✗。
+_QWEN_PATTERN = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+                 r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+                 r"|\s*[\r\n]+|\s+(?!\S)|\s+")
+
+
+def _pattern_text(pattern: Any) -> str:
+    """``Split.pattern`` ⇒ 可比较的字面形 ✓（``{"Regex": "…"}`` / 裸串 都吃 ✓，空白压成一个 ✓）。"""
+    if isinstance(pattern, dict):
+        pattern = pattern.get("Regex") or pattern.get("String") or ""
+    return " ".join(str(pattern or "").split())
+
+
+def _pre_tokenizer_plan(spec: Any) -> tuple[list[str], Any, str]:
+    """``pre_tokenizer`` ⇒ ``(说明, 切分器, 名字)`` ✓ —— 不认识的形态**明确报错** ✓。
+
+    认三种 ✓：
+    ① 没有这一段 ✓ / 单个 ``ByteLevel`` ✓ ⇒ GPT-2 规则 ✓；
+    ② ``Sequence[ByteLevel]`` ✓ ⇒ 同上 ✓；
+    ③ ``Sequence[Split(Qwen2 正则), ByteLevel]`` ✓ ⇒ **Qwen2** 规则 ✓
+      （``tokenizer_gguf.pretokenize_qwen2`` ✓ —— 与 GPT-2 那两处实差就在它里面 ✓）。
+
+    ⚠️ 第 ③ 种是 2026-11-02 补的 ✓：MiniMax Music3 的内嵌分词器正是这一形 ✓，
+    之前直接报「只实现了 ByteLevel」⇒ 这条线**根本编不出提示词** ✓✗。
+    """
     node = spec
     if isinstance(node, dict) and str(node.get("type")) == "Sequence":
-        inner = node.get("pretokenizers") or []
-        if len(inner) == 1:
-            node = inner[0]
+        inner = [item for item in (node.get("pretokenizers") or []) if isinstance(item, dict)]
+        kinds = [str(item.get("type")) for item in inner]
+        splits = [item for item in inner if str(item.get("type")) == "Split"]
+        if "ByteLevel" not in kinds:
+            raise ValueError(
+                f"`pre_tokenizer.type` 是 `Sequence[{'/'.join(kinds) or '空'}]` ✗ —— 本模块只实现了 "
+                f"**ByteLevel**（含 ``Sequence[Split(…), ByteLevel]`` 这一形 ✓）；"
+                f"`Metaspace`（SentencePiece 风格 ✗）/ `Whitespace` / `BertPreTokenizer` 等的切分规则不同 ✓ "
+                f"⇒ **明确报错** ✓（不硬套 ✓ —— 硬套会静默算出错的 id ✓✗）")
+        if not splits:
+            return (["`pre_tokenizer` = ``Sequence[ByteLevel]`` ✓（本模块实现的正是它 ✓）"], None, "gpt2")
+        if len(splits) > 1:
+            raise ValueError(
+                f"`pre_tokenizer` 里有 {len(splits)} 条 `Split` ✗ —— 只认得 Qwen2 那一条 ✓")
+        split = splits[0]
+        behavior = str(split.get("behavior") or "")
+        if behavior and behavior != "Isolated":
+            raise ValueError(
+                f"`Split.behavior` 是 `{behavior}` ✗ —— 只实现了 `Isolated` ✓（其余是合并相邻段 ✓✗）")
+        if split.get("invert"):
+            raise ValueError("`Split.invert = true` ✗ —— 本模块不实现反选 ✓")
+        pattern = _pattern_text(split.get("pattern"))
+        if pattern != _pattern_text(_QWEN_PATTERN):
+            raise ValueError(
+                f"`Split` 正则不认识 ✗：`{pattern}` —— 只实现了 Qwen2/Qwen3 的那一条 ✓"
+                f"（硬套会静默算出错的 id ✓✗）")
+        from . import tokenizer_gguf                           # 局部 import ✓（那边也 import 本模块 ✓）
+        return (["`pre_tokenizer` = ``Sequence[Split(Qwen2 正则), ByteLevel]`` ✓ ⇒ 按 **Qwen2** 规则切分 ✓"
+                 "（`\\p{N}` 是单个数字 ✓、另有 `\\s*[\\r\\n]+` 分支 ✓）"],
+                tokenizer_gguf.pretokenize_qwen2, "qwen2")
     if node is None:
-        return ["没有 `pre_tokenizer` 段 ✓ ⇒ 按 ByteLevel 规则切分 ✓（BPE 字节模型的默认 ✓）"]
+        return (["没有 `pre_tokenizer` 段 ✓ ⇒ 按 ByteLevel 规则切分 ✓（BPE 字节模型的默认 ✓）"], None, "gpt2")
     node_type = str((node or {}).get("type") or "")
     if node_type == "ByteLevel":
-        return ["`pre_tokenizer` = ByteLevel ✓（本模块实现的正是它 ✓）"]
+        return (["`pre_tokenizer` = ByteLevel ✓（本模块实现的正是它 ✓）"], None, "gpt2")
     raise ValueError(
         f"`pre_tokenizer.type` 是 `{node_type or '空'}` ✗ —— 本模块只实现了 **ByteLevel** ✓；"
         f"`Metaspace`（SentencePiece 风格 ✗）/ `Whitespace` / `BertPreTokenizer` 等的切分规则不同 ✓ "
         f"⇒ **明确报错** ✓（不硬套 ✓ —— 硬套会静默算出错的 id ✓✗）")
+
+
+def _check_pre_tokenizer(spec: Any) -> list[str]:
+    """``pre_tokenizer`` 说明 ✓（兼容旧调用点 ✓ —— 真判据在 :func:`_pre_tokenizer_plan` ✓）。"""
+    return _pre_tokenizer_plan(spec)[0]
+
+
+def _normalizer_plan(spec: Any) -> tuple[list[str], tuple[str, ...]]:
+    """``normalizer`` ⇒ ``(说明, 归一化形式序列)`` ✓（NFC/NFD/NFKC/NFKD 及其 ``Sequence`` ✓）。"""
+    forms: list[str] = []
+    node = spec
+    if isinstance(node, dict) and str(node.get("type")) == "Sequence":
+        for item in node.get("normalizers") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "")
+            if kind not in ("NFC", "NFD", "NFKC", "NFKD"):
+                raise ValueError(
+                    f"`normalizer` 序列里有 `{kind}` ✗ —— 只实现了 NFC/NFD/NFKC/NFKD ✓"
+                    f"（`Precompiled` / `Replace` / `Lowercase` 等会改变字节串 ✓ ⇒ 硬套会静默算错 id ✓✗）")
+            forms.append(kind)
+    elif node is not None:
+        kind = str((node or {}).get("type") or "")
+        if kind not in ("NFC", "NFD", "NFKC", "NFKD"):
+            raise ValueError(
+                f"`normalizer.type` 是 `{kind or '空'}` ✗ —— 只实现了 NFC/NFD/NFKC/NFKD ✓"
+                f"（`Replace` / `Prepend` / `BertNormalizer` 等会改变字节串 ✓ ⇒ 硬套会静默算错 id ✓✗）")
+        forms.append(kind)
+    if not forms:
+        return (["没有 `normalizer` ✓ ⇒ 原文照切 ✓"], ())
+    return ([f"`normalizer` = {' → '.join(forms)} ✓（编码前先归一化 ✓ —— 与 HF 同序 ✓）"],
+            tuple(forms))
 
 
 def _post_processor_specials(spec: Any, added: dict[str, int]

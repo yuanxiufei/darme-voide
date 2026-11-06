@@ -1,20 +1,99 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 6,
   "apiVersion": "1.0.0",
   "engine": "darme-engine (in-process)",
   "python": "3.12.10",
+  "samplers": [
+    "dpmpp_2m",
+    "er_sde",
+    "euler",
+    "euler_ancestral",
+    "heun",
+    "lcm",
+    "lms",
+    "multistep",
+    "res_multistep",
+    "sa_solver"
+  ],
+  "schedules": [
+    "beta",
+    "ddim_uniform",
+    "exponential",
+    "karras",
+    "normal",
+    "simple"
+  ],
+  "canvasStages": {
+    "h3": {
+      "grid": 32,
+      "scheme": "megapixels"
+    },
+    "sdxl": {
+      "grid": 8,
+      "scheme": "megapixels"
+    },
+    "zimage": {
+      "grid": 16,
+      "scheme": "resolution-selector"
+    },
+    "qwen_image21": {
+      "grid": 16,
+      "scheme": "megapixels"
+    },
+    "qwen_image": {
+      "grid": 16,
+      "scheme": "megapixels"
+    },
+    "krea2": {
+      "grid": 16,
+      "scheme": "resolution-selector"
+    }
+  },
+  "attentionBackends": {
+    "available": [
+      "sdpa"
+    ],
+    "missing": [
+      "kitchen",
+      "block-sparse"
+    ]
+  },
+  "profiles": [
+    "h3/final-1080p",
+    "h3/storyboard-768p",
+    "krea2/character-sheet",
+    "krea2/scene-card",
+    "krea2/storyboard-first",
+    "krea2/storyboard-last",
+    "krea2/storyboard-last-dual",
+    "qwen_image/character-sheet",
+    "qwen_image/character-sheet-lightning",
+    "qwen_image/crowd",
+    "qwen_image/reference-sheet",
+    "qwen_image/scene-card",
+    "qwen_image/storyboard-first",
+    "qwen_image/storyboard-last",
+    "qwen_image21/reference-edit",
+    "zimage/character-sheet",
+    "zimage/scene-card"
+  ],
   "stages": [
     "audio",
     "h3",
     "image",
+    "krea2",
+    "music3",
     "qwen_image",
     "qwen_image21",
+    "seedvr2",
     "text",
+    "wan22",
     "zimage"
   ],
   "operations": [
     "capabilities",
     "plan",
+    "canvas_plan",
     "readiness",
     "inspect_weights",
     "manifest",
@@ -84,13 +163,19 @@
       "qwenImagePart": {
         "dit": 38.05,
         "text": 16.1,
+        "vae": 0.24,
+        "vision": 1.35
+      },
+      "krea2Part": {
+        "dit": 12.57,
+        "text": 7.5,
         "vae": 0.24
       }
     }
   },
   "catalog": {
     "path": "D:\\code\\voide\\darme-voide\\configs\\models.json",
-    "models": 26,
+    "models": 39,
     "error": null,
     "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models"
   },

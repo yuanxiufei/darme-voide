@@ -120,7 +120,7 @@ SPECS: dict[str, dict[str, Any]] = {
     # ⭐ 读视频的加载器 ✓ —— **不在任何模板图里**（R2V 的 ``ref_videos`` 是空插座 ✓）⇒ 和 ``LoraLoader``
     #    一样得单独并进注册表 ✓✗，否则 ``_video_loader`` 探不到它 ⇒ 参考视频那条路**在本套里永远验不到** ✓✗
     #    （正是本仓反复记的那类假覆盖 ✓）。
-    #    ⚠️⚠️ 形状照 **`reference/comfy-org` 的真身** ✓✗（2026-10-27 改 ✓）：核心 ``LoadVideo`` 的输出
+    #    ⚠️⚠️ 形状照 **`comfy-org` 上游的真身** ✓✗（2026-10-27 改 ✓）：核心 ``LoadVideo`` 的输出
     #    **只有 ``VIDEO``** ★（``comfy_extras/nodes_video.py``：``inputs=[io.Combo.Input("file", ...,
     #    upload=io.UploadType.video)]``、``outputs=[io.Video.Output()]`` ✓）——
     #    旧 stub 写成 ``[IMAGE, AUDIO]`` 是**假的**：它让「一拍接两处」那条用例在**真机上根本跑不通**
@@ -846,7 +846,7 @@ def main() -> int:  # noqa: C901
               names31 == ("ref_audio_1.mp3", "ref_audio_2.wav", "ref_audio_3.wav"), names31)
 
         # ── ⭐⭐ 参考**视频**（Ref2VA 的第三条素材路）：2026-10-27 接通 ✓ ──
-        #    ⚠️ 它与图/音**结构不同** ✓✗，而且是**两跳** ✓✗（2026-10-27 照 ``reference/comfy-org``
+        #    ⚠️ 它与图/音**结构不同** ✓✗，而且是**两跳** ✓✗（2026-10-27 照 ``comfy-org`` 上游
         #    的真身改 ✓）：端口类型是 ``IMAGE``（=一串帧 ✓）⇒ 上游不是 ``LoadImage`` ✗；
         #    而核心 ``LoadVideo`` 只吐 **``VIDEO``** ✗ ⇒ 中间必须再来一个 ``GetVideoComponents``
         #    （``video``(VIDEO) → ``images``(IMAGE) / ``audio``(AUDIO) ✓）。两个类**都不在模板里**

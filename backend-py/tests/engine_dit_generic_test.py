@@ -252,10 +252,65 @@ def case_real_weights() -> None:
           == (28, 6144, 48, 12, 16384), shape)
 
 
+def case_krea2_pitfalls() -> None:
+    """两条「形状自洽、键名全对、只有数值错」的坑（2026-11-01 端到端实测抓的 ✓）。
+
+    ⚠️ 它们**都不会**被 :func:`case_tiny_forward` 抓住 ✗：那里只判「换文本条件输出必变」✓，
+    而这两条错法下输出**也**会变（只是变得太少 / 变得不对）✓✗ ⇒ 必须直接对拍参考公式 ✓。
+    """
+    torch.manual_seed(11)
+
+    # ── ① 注意力闸门：`wo(out·g)` ✓ vs `wo(out)·g` ✗ ─────────────────────────────
+    attn = g.Attention(8, 2, 4, 1).eval()
+    x = torch.randn(1, 5, 8)
+    pos = torch.zeros(1, 5, 3, dtype=torch.long)
+    freqs = g.rope_freqs(pos, [4]).unsqueeze(1)
+    with torch.no_grad():
+        q = attn.wq(x).view(1, 5, 2, 4).transpose(1, 2)
+        k = attn.wk(x).view(1, 5, 1, 4).transpose(1, 2)
+        v = attn.wv(x).view(1, 5, 1, 4).transpose(1, 2)
+        q, k = attn.qknorm(q, k)
+        q, k = g.apply_rope(q, freqs), g.apply_rope(k, freqs)
+        raw = F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
+        raw = raw.transpose(1, 2).reshape(1, 5, 8)
+        gate = torch.sigmoid(attn.gate(x))
+        want = attn.wo(raw * gate)
+        wrong = attn.wo(raw) * gate
+        got = attn(x, freqs)
+    check("注意力闸门在 `wo` **之前**（`wo(out·sigmoid(gate))`，参考 model.py:104）",
+          torch.allclose(got, want, atol=1e-6), (got - want).abs().max().item())
+    check("判据有区分力：`wo(out)·g` 是另一个数（写它也形状自洽、也不报错）",
+          not torch.allclose(want, wrong, atol=1e-5), (want - wrong).abs().max().item())
+
+    # ── ② 文本融合的序列轴：层 ✓ vs token ✗ ────────────────────────────────────
+    #: ``txtlayers=3`` / ``blocks=1`` 是故意拆开的 ✓：盘上就是「2 个块吃 12 层」✓。
+    fusion = g.TextFusionTransformer(txtlayers=3, txtdim=8, heads=2, head_dim=4,
+                                     kvheads=1, mlpdim=16, refiner_layers=0, blocks=1).eval()
+    feats = torch.randn(2, 5, 3, 8)                     # (b, n=token, layers, dim)
+    with torch.no_grad():
+        got = fusion(feats)
+        #: 参考实现（``comfy/ldm/krea2/model.py``）：``x.reshape(b*l, n, d)`` ✓
+        #: ⇒ **序列 = 层** ✓、批 = token ✓。
+        flat = feats.reshape(2 * 5, 3, 8)
+        right = fusion.layerwise_blocks[0](flat)
+        back = right.reshape(2, 5, 3, 8).permute(0, 1, 3, 2)
+        want = fusion.projector(back).squeeze(-1)
+        #: 写反的版本：批 = 层 ✗、序列 = token ✗。
+        swapped = feats.permute(0, 2, 1, 3).reshape(2 * 3, 5, 8)
+        swapped = fusion.layerwise_blocks[0](swapped)
+        swapped = swapped.reshape(2, 3, 5, 8).permute(0, 2, 3, 1)
+        wrong = fusion.projector(swapped).squeeze(-1)
+    check("文本融合的逐层块吃的是**某 token 的 12 层**（序列 = 层、批 = token）",
+          torch.allclose(got, want, atol=1e-6), (got - want).abs().max().item())
+    check("判据有区分力：把「批 / 序列」两轴对调会得到**不同**结果",
+          not torch.allclose(got, wrong, atol=1e-5), (got - wrong).abs().max().item())
+
+
 def main() -> int:
     case_math()
     case_tiny_forward()
     case_reject()
+    case_krea2_pitfalls()
     case_real_weights()
 
     failures = [(name, detail) for name, passed, detail in _RESULTS if not passed]

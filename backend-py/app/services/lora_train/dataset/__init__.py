@@ -1,6 +1,6 @@
 """**素材工具** ✓ —— LoRAMaster ``dataset_manager`` 的移植 ✓。
 
-| 参考实现（``reference/lora/LoRAMaster/dataset_manager/`` ✓） | 本仓 |
+| 参考实现（``LoRAMaster/dataset_manager/`` ✓） | 本仓 |
 | --- | --- |
 | ``image_rename.py`` ✓ | :mod:`~app.services.lora_train.dataset.files` 的 ``run_rename`` ✓ |
 | ``image_convert.py`` ✓ | 同上的 ``run_convert`` ✓ |

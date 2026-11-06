@@ -13,8 +13,8 @@
 
 ## 事实来源（不猜 ✗）
 
-* ``reference/ComfyUI-H3-Multishot/h3_extend.py`` 的 :func:`_snap_grid` / :func:`plan_take`（MIT ✓）；
-* ``reference/ComfyUI-H3-Multishot/h3_retake.py`` 的 ``H3Retake._window`` 与两处网格换算（MIT ✓）；
+* ``h3_extend.py`` 的 :func:`_snap_grid` / :func:`plan_take`（MIT ✓）；
+* ``h3_retake.py`` 的 ``H3Retake._window`` 与两处网格换算（MIT ✓）；
 * 帧网格 ``17k+5`` / 24fps / 音频潜 40Hz：本仓 :mod:`app.services.engine.geometry` 的既有事实 ✓。
 
 ## ⚠️ 与上游**刻意不同**的三处（都是「本仓不猜」✓ 不是漏 ✗）

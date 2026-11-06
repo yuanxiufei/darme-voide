@@ -144,8 +144,11 @@ _RULES: tuple[_Rule, ...] = (
         mlp="gelu_linear", cond="adaln_lin", qk_norm=True, dual_stream=True,
         hidden_from="double_blocks.0.img_attn.qkv.weight",
         mlp_from="double_blocks.0.img_mlp.0.weight", text_from="txt_in.weight",
-        unknown=("heads（qkv 融合，头数权重里没有，需显式给）",
-                 "single_blocks 层数要与 double_blocks 分开数（本 spec 只报 double）"),
+        #: ⚠️ 原先还挂过一条「heads 需显式给」✗ —— **错**：``qk_norm`` 的 ``norm.query_norm.scale``
+        #: 宽就是 ``head_dim`` ✓，``features / head_dim`` 就能反推头数 ✓（:mod:`dit_flux` 一直这么算 ✓）。
+        #: 词条 ``unknown`` 的语义是「权重里读不到、建前向时必须显式给」⇒ 可反推的不许挂在这里 ✗。
+        unknown=("single_blocks 层数本 spec 不报（只报 double_blocks 的 19）"
+                 "⇒ 建前向时须另行数 `single_blocks.*`（Flux.1-dev 是 38）",),
     ),
     _Rule(
         key="qwen_image", label="Qwen-Image / 2512 / Edit（MMDiT 联合注意力）",
@@ -208,9 +211,18 @@ _RULES: tuple[_Rule, ...] = (
         block_prefix="blocks.", norm="layer_weight", attn="split_qkv", mlp="gelu_linear",
         cond="cross_attn", qk_norm=True, hidden_from="blocks.0.self_attn.q.weight",
         mlp_from="blocks.0.ffn.0.weight", text_from="text_embedding.0.weight",
-        unknown=("heads（q 是 [hidden,hidden]，权重里没有）",
-                 "3D patch（patch_embedding 是 Conv3d，帧/高/宽三轴参数权重里没有）",
-                 "Wan-Animate 多出的 k_img/v_img 参考图通路（本 spec 不区分）"),
+        #: ⚠️ 2026-11-01 更正两处 ✗：
+        #: ① 「3D patch 权重里没有」**错** —— ``patch_embedding.weight`` 是 ``[dim, in_dim, 1,2,2]``，
+        #:    kernel/stride 就是后三维 ⇒ patch 是**可读**的 ✓（:func:`dit_wan22.infer_shape` 一直这么读 ✓）。
+        #:    词条语义是「读了也读不到」⇒ 可读的不许挂在这里 ✗（Flux 的 ``heads`` 那条同款修过 ✓）。
+        #: ② ``heads`` 确实读不到（q/k/v 各是单条 ``[dim,dim]``、``norm_q`` 宽 = ``dim`` 而不是 head_dim ✓），
+        #:    但已经**登记成表**了 ✓ ⇒ 只有表外的几何才真需要显式给 ✓（别让读者以为 14B 也必须手给 ✗）。
+        unknown=("heads（q 是 [hidden,hidden]，权重里没有 ⇒ 靠 `dit_wan22.HEADS_BY_GEOMETRY` "
+                 "按 (dim, ffn_dim, layers) 查表；表外的几何必须显式给 heads=）",
+                 "Wan-Animate 多出的 k_img/v_img/img_emb 参考图通路（本 spec 不区分；"
+                 "`dit_wan22` 见到这些键**当场拒** ✓，因为它是 Wan2.1 I2V 的写法）",
+                 "I2V 的 36 通道拼接（噪声 16 + 条件图 16 + 掩码 4）在权重的 `in_dim` 里能看见、"
+                 "但**拼接本身在上层** ⇒ 由 `dit_wan22.split_i2v` 反查 ✓"),
     ),
     _Rule(
         key="seedvr2", label="SEEDVR2（双流 txt/vid + 各自 ada 调制）",

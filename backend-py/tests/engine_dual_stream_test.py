@@ -380,9 +380,25 @@ def case_pipeline(root: Path) -> None:
     refused_heun = pipe.run_sync(
         pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(heun_dir), "sampler": "heun"}),
         _h3_backend(root, name="h3_heun"))
-    check("㉝ ⭐ 双流 + heun ⇒ **明确报错** ✓（循环是一阶欧拉 ✓ —— 静默换算法比报错坏得多 ✗）",
+    check("㉝ ⭐ 双流 + heun ⇒ **明确报错** ✓（每步两次模型调用的档套不上双流 ✓ —— "
+          "静默换算法比报错坏得多 ✗），且报错里**列出**可用的档 ✓（白名单只有一处真源 ✓）",
           refused_heun.ok is False
-          and "欧拉" in str((refused_heun.error or {}).get("message")), refused_heun.error)
+          and "只支持" in str((refused_heun.error or {}).get("message"))
+          and "res_multistep" in str((refused_heun.error or {}).get("message")),
+          refused_heun.error)
+
+    # ⭐⭐ 2026-11-01 放开：`res_multistep` 是 **H3 官方模板的默认档** ✓，而旧代码把它当 heun
+    # 一样**直接拒掉** ✗ ⇒ 「照工作流参数原样跑」在这条路上断死 ✓✗。
+    # 判据不只看「跑通」✓ —— 还要 **结果与 euler 不同** ✓：相同就说明名字被无视了 ✓✗。
+    multi = pipe.run_sync(
+        pipe.GenerationRequest(**{**REQUEST, "outputs_dir": str(root / "multi"),
+                                  "sampler": "res_multistep"}),
+        _h3_backend(root, name="h3_multi"))
+    check("㉝′ ⭐⭐ 双流 + `res_multistep` ⇒ **跑通** ✓ 且 wav 与 euler **不同** ✓"
+          "（相同 ⇒ 名字被静默无视 ✗✗）",
+          multi.ok is True
+          and Path(multi.outputs["audioPath"]).read_bytes() != Path(audio).read_bytes(),
+          (multi.error, multi.outputs.get("audioPath") if multi.outputs else None))
 
 
 # ══════════════════════════════════════════════════════════════════════════

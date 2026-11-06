@@ -2,7 +2,7 @@
 
 出处（参考实现 ✓）：
 
-* 改名 —— ``reference/lora/LoRAMaster/dataset_manager/image_rename.py`` 的 ``run_rename()`` ✓
+* 改名 —— ``LoRAMaster/dataset_manager/image_rename.py`` 的 ``run_rename()`` ✓
   （第 87~127 行 ✓）；
 * 转格式 —— 同目录 ``image_convert.py`` 的 ``convertSuffix()`` ✓（第 86~192 行 ✓）；
 * 扫图与标签读写 —— ``AutoCaptioning.py`` 的 ``loadDataSets()`` ✓（第 539~576 行 ✓）与
@@ -334,6 +334,11 @@ def run_convert(dataset: Path, *, target_suffix: str, backup: bool = True,
         )
     quality = max(1, min(100, int(quality)))
 
+    #: ⚠️ 回执里的备份路径必须是**这次真用的那个** ✓：目录名带秒级时间戳 ✓，
+    #: 到收尾时再调一次 ``backup_directory()`` 会跨秒 ⇒ 报出一个**不存在**的目录 ✗
+    #: （实测：转 2 张图跨过一次秒界，回执指向 ``…_backup_201939`` 而真目录是 ``…_201938`` ✓✗）。
+    #: 那种回执比没有回执更坏 —— 人照着路径去找备份会找不到 ✓。
+    destination: Path | None = None
     if backup:
         destination = backup_directory(dataset)
         log(f"开始备份到（素材目录**之外** ✓）：{destination}")
@@ -395,7 +400,7 @@ def run_convert(dataset: Path, *, target_suffix: str, backup: bool = True,
     return {"scanned": scanned, "converted": converted, "skipped": skipped,
             "failed": len(failures), "failures": [{"path": p, "reason": r} for p, r in failures[:20]],
             "targetSuffix": normalized, "quality": quality, "stopped": stopped,
-            "backup": str(backup_directory(dataset)) if backup else None,
+            "backup": str(destination) if destination is not None else None,
             "removedOriginal": bool(remove_original)}
 
 

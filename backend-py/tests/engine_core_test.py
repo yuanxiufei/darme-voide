@@ -148,6 +148,12 @@ def case_geometry() -> None:
           and geo.latent_frames(124, temporal_compression=4) == 31
           and geo.latent_frames(1, temporal_compression=4) == 1,
           geo.latent_frames(124, temporal_compression=4))
+    check("⑭′ ⭐ ``frames < 1`` **当场拒** ✗✗（原来 ``max(1, int(frames))`` 把 0 / 负数悄悄当成"
+          "「1 帧」✓✗ ⇒「没算出来帧数」与「1 帧视频」在这条路上长得一样，下游只看到\"怎么只有一拍\"✓✗）",
+          ">= 1" in str(_raises(lambda: geo.latent_frames(0, temporal_compression=4)))
+          and ">= 1" in str(_raises(lambda: geo.latent_frames(-3, temporal_compression=4)))
+          and "整数" in str(_raises(lambda: geo.latent_frames(12.5, temporal_compression=4))),
+          "0 / -3 / 12.5 都该报")
     check("⑮ 像素回显（用于成本/日志 ✓）",
           abs(geo.megapixels_for_size(1088, 608) - 0.6615) < 0.001,
           geo.megapixels_for_size(1088, 608))
@@ -197,6 +203,78 @@ def case_sampler() -> None:
           "未知采样器" in str(_raises(lambda: smp.sample(perfect, Vec(1.0), sigmas, "nope"))))
 
 
+def case_authority() -> None:
+    """㉒–㉚ **照工作流参数原样跑**要用的两件权威口径（2026-11-01 ✓）。
+
+    ``simple`` / ``beta`` 是 ComfyUI ``KSampler`` 里真会被选中的档 ✓；``ResolutionSelector``
+    是工作流算画布的那个节点 ✓。引擎自己的近似口径（``flow`` 曲线 / ``size_for_megapixels`` ✓）
+    不是错 ✗，但**名字一样、数不一样** ⇒ 工作流照抄过来就跑不出同一张图 ✓✗。
+    """
+    # ---- ① 调度：`simple` 就是「flow 曲线 + 1000 格模型梯子」✓ ----
+    listed = sch.sigmas_for(10, "simple", shift=3.0)
+    flowing = sch.flow_sigmas_for_steps(10, shift=3.0)
+    # ⚠️ 只能判"数值相同"✗：``simple`` 走的是**梯子取点** ✓（下标 100 记作 100/1000 ✓），
+    #    ``flow`` 直接算 ``i/steps`` ✓（1/10 ✓）—— 两者数学上是同一个 t ✓，但浮点末位会差 1 ulp ✓。
+    #    写 `==` 会红 ✓✗（本轮先红了这一条 ✓）。
+    check("㉒ ⭐ `simple` @10 步 shift=3 ⇒ 与 `flow` **同一个数**（差 ≤1e-12 ✓）"
+          "（1000 能被步数整除时没有取整损耗 ✓；这条同时钉住「默认档不变」✓）",
+          len(listed) == len(flowing)
+          and max(abs(x - y) for x, y in zip(listed, flowing)) < 1e-12, (listed, flowing))
+
+    plain = sch.sigmas_for(8, "simple")
+    check("㉓ `simple` @8 步（无 shift）= **几何梯子反着取** ✓：首位 σ_max、末位 0、严格递减 ✓✗"
+          "（梯子写成降序 ⇒ 一开头就是 0.03 一轮细修 ✓✗，出图「没声音」✓）",
+          len(plain) == 9 and plain[-1] == 0.0 and abs(plain[0] - 14.6146) < 1e-3
+          and all(plain[i] > plain[i + 1] for i in range(len(plain) - 1)), plain[:3])
+
+    # ---- ② 调度：`beta` ----
+    beta = sch.sigmas_for(8, "beta")
+    check("㉔ `beta`（默认 α=β=0.6 ✓）⇒ 长度 ≤ steps+1 且末位 0、严格递减 ✓"
+          "（`rint` 撞车会合并相邻档 ⇒ 允许短 ✗ 但不许乱 ✓）",
+          len(beta) <= 9 and beta[-1] == 0.0
+          and all(beta[i] > beta[i + 1] for i in range(len(beta) - 1)), beta)
+
+    uniform = sch.sigmas_for(8, "beta", alpha=1.0, beta=1.0)
+    ratios = [a / b for a, b in zip(uniform, plain) if b > 0]
+    check("㉕ `beta(α=β=1)` ⇒ 反演退化成均匀分位 ✓ ⇒ 与 `simple` 只差**取整**（每档 ≤2% ✓）",
+          max(abs(r - 1.0) for r in ratios) < 0.02, ratios[:4])
+
+    message = str(_raises(lambda: sch.sigmas_for(8, "no-such-schedule")))
+    check("㉖ 未知调度名 ⇒ **报错并列出可用项** ✓（别静默落回 flow ✗✗ —— 名字打错会以为生效了 ✓）",
+          "simple" in message and "beta" in message, message)
+
+    # ---- ③ `beta_ppf`（零依赖实现，必须与真分布对得上 ✓）----
+    ppf_ok = (abs(sch.beta_ppf(0.25, 1, 1) - 0.25) < 1e-9        # 均匀分布 ⇒ 恒等 ✓
+              and abs(sch.beta_ppf(0.5, 2, 5) - 0.26445) < 1e-4  # 固定值对拍 ✓
+              and all(sch.beta_ppf(p, 2, 5) < sch.beta_ppf(q, 2, 5)
+                      for p, q in ((0.1, 0.3), (0.3, 0.6), (0.6, 0.9))))
+    check("㉗ `beta_ppf` 对拍：`(0.25,1,1)=0.25` ✓、`(0.5,2,5)≈0.2644` ✓、对 p **单调** ✓",
+          ppf_ok, [round(sch.beta_ppf(p, 2, 5), 5) for p in (0.1, 0.5, 0.9)])
+
+    # ---- ④ 尺寸：`ResolutionSelector` 口径 ----
+    check("㉘ `ratio_terms` 认得四种写法 ✓（`16:9` / `9:16 (Portrait…)` / 元组 / 浮点 ✓）",
+          geo.ratio_terms("16:9") == (16.0, 9.0)
+          and geo.ratio_terms("9:16 (Portrait Widescreen)") == (9.0, 16.0)
+          and geo.ratio_terms((3, 2)) == (3.0, 2.0)
+          and abs(geo.ratio_terms(1.5)[0] / geo.ratio_terms(1.5)[1] - 1.5) < 1e-9,
+          geo.ratio_terms("9:16 (Portrait Widescreen)"))
+
+    check("㉙ `size_for_resolution_selector` 与节点逐档相同 ✓：1.0MP@1:1 ⇒ **1024²** ✓、"
+          "1.0MP@16:9(m16) ⇒ **1360×768** ✓、且都是吸附步长的倍数 ✓",
+          geo.size_for_resolution_selector(1.0, "1:1", multiple=8) == (1024, 1024)
+          and geo.size_for_resolution_selector(1.0, "16:9", multiple=16) == (1360, 768),
+          geo.size_for_resolution_selector(1.0, "16:9", multiple=16))
+
+    # ⚠️ 反向：**旧口径在同一档给的是另一个数** ✓✗ —— 这条说明"换口径"不是文字游戏 ✓；
+    #    同时也钉住"哪几族**不换**" ✓：1.76 MP@1:1 旧口径正好是 Qwen 官方 1328 ⇒ 保持 ✓。
+    check("㉚ 反向：1.0MP@1:1 旧 `size_for_megapixels` 给 **1000²** ✗ ≠ 节点的 1024 ✓"
+          "（换口径的理由 ✓）；而 1.76MP@1:1 旧口径 = **1328²** ✓ = Qwen 官方画布 ⇒ 那两族**不换** ✓",
+          geo.size_for_megapixels(1.0, "1:1", multiple=8) == (1000, 1000)
+          and geo.size_for_megapixels(1.76, "1:1", multiple=16) == (1328, 1328),
+          (geo.size_for_megapixels(1.0, "1:1", multiple=8),
+           geo.size_for_megapixels(1.76, "1:1", multiple=16)))
+
+
 def _raises(fn) -> Exception:  # noqa: ANN001
     try:
         fn()
@@ -209,6 +287,7 @@ def main() -> int:
     case_schedules()
     case_geometry()
     case_sampler()
+    case_authority()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

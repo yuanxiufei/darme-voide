@@ -194,6 +194,8 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 > | `tests/` | **行为契约自检**（`run_all.py` = 权威清单） | 开发者 | 人 / CI；**不参与产品运行时** | ❌（已在 `app/` 内，`COPY backend-py/app` 覆盖） |
 > | `app/scripts/` | **仓库守卫 + 工具链 + 语料**（四类，见 `scripts/README.md`） | 开发者 | `.githooks/pre-commit`、人；**不 `import app.*`** | ❌ |
 > | `app/local_services/` | **本地服务根**（clone 来的第三方服务 + 自带 `h3` / `cosyvoice` 薄封装） | `scripts/model_manager.py --runtime git`（**机器相关**） | 后端经 subprocess / HTTP | ❌ |
+> | `output/` | **引擎真跑产物**（PNG / MP4 / 一次性 JSON 快照；不是代码、不是配置） | `/engine/generate` 与 `_run_qwen_image.py` 之类手动入口 | 人（当真跑验收证据看） | ❌（已 gitignore） |
+> | `_bench/` | **调试草稿区**（一次性 probe 脚本 + txt/png/csv 账；跑完即弃） | 人 | 人；`desktop/scripts/sync-backend.mjs` 打包时按 `EXCLUDE_DIRS` 排除 | ❌（已 gitignore） |
 >
 > **结论：不需要再套一层**（`src/`、`assets/`、`tools/` 之类只会把「哪棵树属于哪种生命周期」重新搅浑）。
 > `Dockerfile` 的 COPY 面已经把「运行时必需」与「开发期工具」分开了 —— 这张表就是那个事实的展开。
@@ -267,7 +269,8 @@ backend-py/
 │  │  ├─ README.md                 技能库权威约定（改 skill 前必读）
 │  │  ├─ <name>/SKILL.md           自有 skill（frontmatter `agents:` 决定默认注入）
 │  │  └─ <lib>/library.yaml        外部技能库声明（库由声明文件识别，零代码加库）
-│  ├─ scripts/                     工具与自检脚本（**15 个 .py + 本目录 README**，2026-09-15 从仓库根 scripts/ 搬来）
+│  ├─ scripts/                     工具与自检脚本（2026-09-15 从仓库根 scripts/ 搬来；2026-11-04 实测
+│  │                               **16 个顶层 .py + `corpus/` 语料子包 13 个 + 本目录 README**）
 │  │  ├─ check_memory.py           记忆层守卫（8k 预算 + 锚点 + 落点路径）
 │  │  ├─ check_skill_refs.py       skills 引用完整性守卫
 │  │  ├─ test_guards.py            两套守卫的自检（13 例，含 ④b「步骤小节必须有锚点」）
@@ -395,7 +398,8 @@ backend-py/
    ├─ http_logger_test.py     请求日志中间件（格式/截断/开关，13 用例）
    ├─ compressed_data_url_test.py 参考图压缩（ffmpeg，16 用例）
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
-   ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口/子包不单独 COPY ↔ 代码常量，27 用例）
+   ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口/子包不单独 COPY ↔ 代码常量，
+   │                            含 `.dockerignore` 整根排除大目录，37 用例）
    ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，5 用例）
    ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端 + 前端 dev 代理端口，8 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
@@ -404,8 +408,9 @@ backend-py/
    │                            `numeric` 组顶层零依赖 / 模块头 ≥8 词 / 仓库根无空壳 / 说明里的 `app/…py` 不腐烂 /
    │                            每个 engine 模块**有生产调用者或登记为欠账** / `docs/feature-map.md`
    │                            点到 `app/` 每一个 `.py` / 盘上每份 `tests/*_test.py` 都进了
-   │                            `run_all.py::TESTS`；零 torch ——
-   │                            这 8 类事故原先**没有任何测试会失败**；用例数不写死，跑了就知道）
+   │                            `run_all.py::TESTS`；零 torch / 生成物不入库（`output/` `_bench/`
+   │                            `models/tokenizers/` 必须被 `.gitignore` 整目录挡住，包根不散落脚本）
+   │                            —— 这 10 类事故原先**没有任何测试会失败**；用例数不写死，跑了就知道）
    ├─ h3_chain_test.py          本地 H3 链**接缝契约**（适配器 ↔ 8765 薄封装；含「阶段2 未接线」缺口断言，13 用例）
    ├─ local_services_live_test.py 本地服务**活体**接缝（ollama 真推理 9 用例；未启动的服务显式 SKIP）
    ├─ h3_backend_live_test.py   **H3 全栈活体**（配置 → 服务层 → 真 8765 → 落库；含「落库 task_id 被运行中的

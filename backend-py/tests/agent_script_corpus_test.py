@@ -156,6 +156,7 @@ def main() -> int:  # noqa: C901
 
     # 语料缺失 -> 优雅降级
     original_jsonl, original_cache = ct.CORPUS_JSONL, ct._cache
+    original_stats = ct._stats
     ct.CORPUS_JSONL = Path(tempfile.mkdtemp()) / "missing.jsonl"  # type: ignore[assignment]
     ct._cache = False  # type: ignore[assignment]
     degraded = _call(ct.create_corpus_tools(), "search_reference_prompts", {"query": "雨夜"})
@@ -165,6 +166,11 @@ def main() -> int:  # noqa: C901
         and "data/prompt-corpus/ 已 gitignore" in degraded["hint"]
         and "fetch_raw.py" in degraded["hint"],
         degraded["hint"][:40],
+    )
+    check(
+        "语料盘点: 缺语料时 corpus=None（**不编 0 条**，否则「没装」看起来像「装了个空库」）",
+        degraded["corpus"] is None and ct.corpus_stats() is None,
+        degraded.get("corpus"),
     )
 
     # 造一份临时语料验打分
@@ -207,15 +213,33 @@ def main() -> int:  # noqa: C901
     check("检索: excerpt 压平空白（多空格/换行 -> 单空格，但不 trim）",
           found["results"][0]["prompt_excerpt"] == " a very long prompt ", 
           found["results"][0]["prompt_excerpt"])
-    check("检索: 空检索词 -> available=true 但 results 空 + hint",
-          _call(ct.create_corpus_tools(), "search_reference_prompts", {"query": ""}) ==
-          {"available": True, "results": [], "hint": "检索词为空。"})
+    stats = found["corpus"]
+    check(
+        "语料盘点: 条数/字节/来源/语言/空正文 五项来自真文件（3 条：c 行正文空 -> emptyPrompts=1）",
+        stats == {
+            "documents": 3,
+            "bytes": corpus_file.stat().st_size,
+            "sources": {"s": 3},
+            "languages": {"zh": 3},
+            "emptyPrompts": 1,
+        },
+        stats,
+    )
+    check(
+        "语料盘点: 与 rows 同生共死（同一进程内再问一次是**同一个**对象，不重复读盘）",
+        ct.corpus_stats() is stats, ct.corpus_stats(),
+    )
+    check(
+        "检索: 空检索词 -> available=true 但 results 空 + hint（**盘点照给**，别让模型以为「没结果=没语料」）",
+        _call(ct.create_corpus_tools(), "search_reference_prompts", {"query": ""}) ==
+        {"available": True, "corpus": stats, "results": [], "hint": "检索词为空。"})
     check("检索: top 夹到 [1,5]（传 99 -> 5，传 0 -> 1）",
           len(_call(ct.create_corpus_tools(), "search_reference_prompts",
                     {"query": "雨夜", "top": 99})["results"]) <= 5
           and len(_call(ct.create_corpus_tools(), "search_reference_prompts",
                         {"query": "雨夜", "top": 0})["results"]) >= 1)
-    ct.CORPUS_JSONL, ct._cache = original_jsonl, original_cache  # type: ignore[assignment]
+    ct.CORPUS_JSONL, ct._cache, ct._stats = (  # type: ignore[assignment]
+        original_jsonl, original_cache, original_stats)
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

@@ -2,7 +2,7 @@
 
 事实来源（只参考行为、实现自己写 ✓）：
 
-* ``reference/comfy-org/ComfyUI/comfy/text_encoders/z_image.py`` —— ``Qwen3_4BModel(...)`` 的构造口径：
+* ``ComfyUI/comfy/text_encoders/z_image.py`` —— ``Qwen3_4BModel(...)`` 的构造口径：
   ``vocab_size=151936, hidden=2560, num_layers=36, num_heads=32, num_kv_heads=8,
   intermediate_size=9728, rms_norm_eps=1e-6, qkv_bias=False`` ✓；并且 ``layer="hidden"`` /
   ``layer_idx=-2`` / ``layer_norm_hidden_state=False`` ✓；``pad_token_id=151643`` ✓；

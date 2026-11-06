@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ...core.response import js_nullish
@@ -118,6 +119,72 @@ class OpenAICompatibleTextAdapter:
                     return part["text"]
         return ""
 
+    # ── 流式 ✓（2026-11-01 补）
+    def build_stream_request(self, config: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+        """与非流式只差三格：``stream`` / ``stream_options`` / ``stop`` ✓（其余复用 ✓）。"""
+        req = self.build_request(config, params)
+        body = req["body"]
+        body["stream"] = True
+        # 让最后一块带上 usage ✓（不写这条 ⇒ 流式下**永远拿不到 token 数** ✗，计费只能估 ✓✗）
+        body["stream_options"] = {"include_usage": True}
+        stops = [str(s) for s in (params.get("stop") or []) if str(s)]
+        if stops:
+            body["stop"] = stops
+        return req
+
+    def parse_stream_line(self, line: str) -> dict[str, Any]:
+        """SSE 一行（**含** ``data: `` 前缀）→ 归一事件 ✓。
+
+        * ``data: [DONE]`` ⇒ ``done=True`` ✓
+        * ``delta.content`` 是正文 ✓；``delta.reasoning_content`` / ``delta.reasoning`` 是思考 ✓
+          （思考模型在各家兼容实现里的字段名不统一 ⇒ 两个都收 ✓，但**不合并** ✓）
+        """
+        event: dict[str, Any] = {"thinking": "", "content": "", "done": False,
+                                 "usage": None, "error": ""}
+        text = line.strip()
+        if not text or text.startswith(":"):        # 空行 / SSE 注释心跳 ✓
+            return event
+        if text.startswith("data:"):
+            text = text[5:].strip()
+        if text == "[DONE]":
+            event["done"] = True
+            return event
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            event["error"] = f"非法 SSE 分块：{text[:80]}"
+            return event
+        if not isinstance(data, dict):
+            event["error"] = f"非对象分块：{text[:80]}"
+            return event
+        err = data.get("error")
+        if isinstance(err, dict) or (isinstance(err, str) and err):
+            message = err.get("message") if isinstance(err, dict) else err
+            event["error"] = str(message or err)[:200]
+            return event
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            event["usage"] = {
+                "promptTokens": usage.get("prompt_tokens"),
+                "completionTokens": usage.get("completion_tokens"),
+            }
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = as_dict(choices[0])
+            delta = as_dict(first.get("delta"))
+            for key in ("content",):
+                value = delta.get(key)
+                if isinstance(value, str):
+                    event["content"] = value
+            for key in ("reasoning_content", "reasoning"):
+                value = delta.get(key)
+                if isinstance(value, str):
+                    event["thinking"] = value
+                    break
+            if first.get("finish_reason"):
+                event["done"] = True
+        return event
+
 
 class OllamaTextAdapter:
     """Ollama **原生**文本生成（``/api/chat``）—— **不**走 OpenAI 兼容端点。
@@ -171,6 +238,69 @@ class OllamaTextAdapter:
             return content
         # 兜底：若网关把 /api/chat 反代成 OpenAI 形状，仍能取到文本
         return OpenAICompatibleTextAdapter.parse_response(self, result)
+
+    # ── 流式 ✓（2026-11-01 补）
+    def build_stream_request(self, config: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+        """与 :meth:`build_request` **只差两格** ✓：``stream: true`` 与 ``options.stop`` ✓。
+
+        ⚠️ 复用非流式那份构造 ✓（不是复写一遍 ✗）：端点/``think``/``num_ctx`` 这些已经踩过坑的格子
+        必须**只有一处** ✓，否则流式那条路会慢慢长回旧值 ✓✗。
+        """
+        req = self.build_request(config, params)
+        body = req["body"]
+        body["stream"] = True
+        stops = [str(s) for s in (params.get("stop") or []) if str(s)]
+        if stops:
+            body["options"]["stop"] = stops          # ollama 原生的停用词就在 options 里 ✓
+        return req
+
+    def parse_stream_line(self, line: str) -> dict[str, Any]:
+        """``/api/chat`` 的 **ndjson 一行** → 归一事件 ✓（空行 ⇒ ``done=False`` 的空事件 ✓）。
+
+        形状（原生）::
+
+            {"message": {"role": "assistant", "content": "你", "thinking": ""}, "done": false}
+            {"done": true, "eval_count": 12, "prompt_eval_count": 33, ...}
+            {"error": "model not found"}
+
+        ⚠️ ``thinking`` 与 ``content`` **分两栏** ✓：思考模型（qwen3）把推理写进 ``thinking`` ✓，
+        合成一栏会让「正文为空而 reasoning 非空」这个老坑在流式里再犯一次 ✗✗。
+        """
+        event: dict[str, Any] = {"thinking": "", "content": "", "done": False,
+                                 "usage": None, "error": ""}
+        text = line.strip()
+        if not text:
+            return event
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            event["error"] = f"非法 ndjson 行：{text[:80]}"
+            return event
+        if not isinstance(data, dict):
+            event["error"] = f"非对象分块：{text[:80]}"
+            return event
+        err = data.get("error")
+        if isinstance(err, str) and err:
+            event["error"] = err
+            return event
+        message = data.get("message")
+        if isinstance(message, dict):
+            thinking = message.get("thinking")
+            if isinstance(thinking, str):
+                event["thinking"] = thinking
+            content = message.get("content")
+            if isinstance(content, str):
+                event["content"] = content
+        if data.get("done"):
+            event["done"] = True
+            usage = {}
+            for key in ("prompt_eval_count", "eval_count"):
+                value = data.get(key)
+                if isinstance(value, int):
+                    usage[{"prompt_eval_count": "promptTokens",
+                           "eval_count": "completionTokens"}[key]] = value
+            event["usage"] = usage or None
+        return event
 
 
 class GeminiTextAdapter:

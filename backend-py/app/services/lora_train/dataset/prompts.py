@@ -1,6 +1,6 @@
 """**打标提示词表** ✓ —— 原样搬自 LoRAMaster ✓（本仓唯一"照抄数据"的地方 ✓）。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/dataset_manager/AutoCaptioning.py``
+出处（参考实现 ✓）：``LoRAMaster/dataset_manager/AutoCaptioning.py``
 第 19~141 行 ✓：
 
 * :data:`CAPTION_TYPE_MAP` —— 打标类型 → 三档模板（**第 0 行 = 不限定 ✓、

@@ -613,6 +613,19 @@ def case_component_spots(tmp: Path) -> None:
     manager = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(manager)  # type: ignore[union-attr]
 
+    def _same_tail(path: str, declared: object) -> bool:
+        """``declared`` 是清单里的 ``filename`` ✓ —— 它**允许带子目录** ✓✗（2026-11-01 补 ✓）。
+
+        ⚠️ 原来这里比的是 ``os.path.basename(theirs) == filename`` ✗：碰上
+        ``filename = "Krea2/krea2_turbo_int8_convrot.safetensors"``（共享池按档分目录 ✓，
+        Krea2 / Qwen3_VL_4B 那几条就是这么写的 ✓）⇒ basename 只有一个文件名 ✓
+        ⇒ 判据判成「漂移」✓✗，而真实原因只是**判据没跟上「filename 可带子目录」这个口径** ✓✗。
+        修法：统一分隔符后比**尾巴** ✓（既认纯文件名、也认带目录 ✓，比本意「装的那份对不对」不变 ✓）。
+        """
+        left = str(path).replace("\\", "/").lower()
+        right = str(declared or "").replace("\\", "/").lstrip("./").lower()
+        return bool(right) and (left == right or left.endswith("/" + right))
+
     root = tmp / "清单根"
     root.mkdir(parents=True, exist_ok=True)  # 空目录 ✓（别的用例也用这个名字 ✓）
     paths = manager.Paths("", str(root), "", "")  # 空根 ⇒ ``model_status`` 只做 isfile ✓ 不下潜 ✓
@@ -633,7 +646,7 @@ def case_component_spots(tmp: Path) -> None:
         #       ⇒ 这是「引擎看得见、只是不在本仓」✓ —— **不是漂移** ✗（本仓落点仍由 `component_path` 说了算 ✓）；
         #    ② 其余一律算漂移 ✗（两边各说各的位置、而那边**空着** ⇒ 就是「装好了」与「说没装」并存 ✓✗）。
         if theirs and os.path.isfile(theirs) \
-                and os.path.basename(theirs) == str(entry.get("filename")) \
+                and _same_tail(theirs, entry.get("filename")) \
                 and str(manager.find_elsewhere(entry, paths) or "") == str(theirs):
             elsewhere.append((str(entry.get("key")), str(theirs),
                               str(entry.get("filename"))))
@@ -645,8 +658,8 @@ def case_component_spots(tmp: Path) -> None:
           and {"sdxl_base", "dit_fl2va_int8", "vae_video_fp8mix"} <= set(keys),
           (len(keys), mismatched[:3]))
     check("⭐ 落点: 报「别处可见」的必须是**那份真的**（isfile ✓ + 文件名对 ✓ + 就是 `find_elsewhere`"
-          " 的结果 ✓ —— 放宽的是「哪份」✗ 不是「有没有」✗）",
-          all(os.path.basename(path) == name for _key, path, name in elsewhere),
+          " 的结果 ✓ —— 放宽的是「哪份」✗ 不是「有没有」✗；`filename` 带子目录时比尾巴 ✓）",
+          all(_same_tail(path, name) for _key, path, name in elsewhere),
           (len(elsewhere), elsewhere[:3]))
 
 
@@ -781,6 +794,209 @@ def case_job_stage(tmp: Path) -> None:
           and video_task.get("stage") == bridge.VIDEO_STAGE, (seen[1:], video_task.get("stage")))
 
 
+def case_chain_stages(tmp: Path) -> None:
+    """⭐⭐ **桥认的 stage 必须是运行时装得下的那几档** ✗✗（2026-11-01 审查抓的真缺口 ✓）。
+
+    抓到的病：`bridge` 原先只认 ``zimage`` / ``qwen_image21`` / ``krea2`` 三条链 ✓，
+    而 `runtime.ensure_loaded` 有**四条**三件套装配线 ✓（还有 ``qwen_image`` 2512 ✓）——
+    用户选 2512 ⇒ 桥当场 ``ValueError`` 说"不认识"，**而 runtime 明明装得下** ✓✗。
+    这种「支持但没接线」比"不支持"难查得多 ✓✗：报错文案看起来像**能力缺失** ✓，
+    实际是**清单落后** ✓。所以这里**不比谁写的字多** ✗ —— 直接把 ``runtime`` 的分派
+    用 AST 扒出来对账 ✓（那边加一条装配线、这边没跟上 ⇒ 当场红 ✓）。
+    """
+    import ast  # noqa: PLC0415
+
+    from app.services.engine import pipeline  # noqa: PLC0415
+    from app.services import image_generation  # noqa: PLC0415
+
+    #: 运行时的**全部**出图装配线 ✓（顺序＝`ensure_loaded` 里的分派顺序 ✓）
+    expected = (pipeline.IMAGE_STAGE, pipeline.ZIMAGE_STAGE, pipeline.QWEN21_STAGE,
+                pipeline.QWEN_IMAGE_STAGE, pipeline.KREA2_STAGE)
+
+    # ── ① runtime 那边到底认几档 ✓（AST 扫 `… == pipe.XXX_STAGE` 的比较 ✓，不 import 不执行 ✓）──
+    runtime_source = (BACKEND_PY / "app" / "services" / "engine" / "runtime.py").read_text(encoding="utf-8")
+    dispatched: list[str] = []
+    for node in ast.walk(ast.parse(runtime_source)):
+        if not isinstance(node, ast.Compare):
+            continue
+        for side in [node.left, *node.comparators]:
+            if (isinstance(side, ast.Attribute) and isinstance(side.value, ast.Name)
+                    and side.value.id == "pipe" and side.attr.endswith("_STAGE")):
+                value = getattr(pipeline, side.attr, None)
+                if isinstance(value, str) and value not in dispatched:
+                    dispatched.append(value)
+    #: ⚠️ 2026-11-01：`ensure_loaded` 里多分派了一档 **`seedvr2`** ✓ —— 它是**视频修复**、
+    #: 不进「出图五档」那份名单 ✗（桥与业务白名单都不认它 ✓）。
+    #: ⚠️ 2026-11-02：又多分派了一档 **`wan22`** ✓ —— **首帧 ⇒ 视频**（四格、请求必带首帧）✓，
+    #: 同样**不是**出图档 ✗（`_chain_stages` / 业务 `allowed` 都不列它 ✓）。
+    #: 所以这里判的是「**出图五档**都在 ＋ 多出来的只许是这两条**另一类**装配线」✓✗ ——
+    #: 写成 `set(dispatched) == set(expected)` 会把新加的非出图档误报成「出图档位漂移」✗。
+    extra = set(dispatched) - set(expected)
+    check("⭐ 运行时出图装配线 = 五档 ✓（``sdxl`` / ``zimage`` / ``qwen_image21`` / "
+          "``qwen_image`` / ``krea2`` ✓ —— 下面几条都按这份对账 ✓；多出来的只许是 "
+          "``seedvr2``（修复）与 ``wan22``（首帧⇒视频）两条非出图档 ✓）",
+          set(expected) <= set(dispatched)
+          and extra <= {pipeline.SEEDVR2_STAGE, pipeline.WAN22_STAGE},
+          (sorted(dispatched), sorted(expected)))
+
+    check("⭐ 桥的三件套链 ∪ SDXL == 运行时那五档 ✓（桥漏一档 ⇒ 选它直接被拒 ✓✗）",
+          set(bridge._chain_stages()) | {bridge.IMAGE_STAGE} == set(expected),
+          (sorted(bridge._chain_stages()), sorted(expected)))
+
+    check("桥的报错文案列的是**同一份**五档 ✓（文案漏一档 ⇒ 把「支持」讲成「不支持」 ✓✗）",
+          all(f"``{name}``" in bridge._image_stage_names() for name in expected),
+          bridge._image_stage_names())
+
+    #: 业务层那份白名单 ✓（`_run_image_with_engine` 里 `allowed = (…)`）—— 手抄就会漏 ✓✗
+    image_gen_source = Path(image_generation.__file__).read_text(encoding="utf-8")
+    allowed: list[str] = []
+    for node in ast.walk(ast.parse(image_gen_source)):
+        if not isinstance(node, ast.Assign) or not any(
+                isinstance(t, ast.Name) and t.id == "allowed" for t in node.targets):
+            continue
+        for item in getattr(node.value, "elts", []):
+            if (isinstance(item, ast.Attribute) and isinstance(item.value, ast.Name)
+                    and item.value.id == "_pipeline"):
+                value = getattr(pipeline, item.attr, None)
+                if isinstance(value, str):
+                    allowed.append(value)
+    check("⭐ 业务层白名单 ``engineStage`` 也认这五档 ✓（少列一档 ＝ 用户被「只认四档」挡住 ✓✗）",
+          set(allowed) == set(expected), (sorted(allowed), sorted(expected)))
+
+    # ── ② 每一档都能**真的**产出装配 ✓，且 stage 不被改写 ✓ ──
+    dit = tmp / "假DiT.safetensors"
+    dit.write_bytes(b"x")
+    for stage in expected[1:]:
+        bare = bridge.assembly_from_config({"settings": {}}, stage=stage)
+        told = bridge.assembly_from_config({"settings": {"ditPath": str(dit)}}, stage=stage)
+        check(f"装配 ``{stage}``: stage 原样回 ✓、缺 ``ditPath`` 时**不猜** ✗（不塞这个键 ✓）"
+              "、给了就转手 ✓",
+              bare.get("stage") == stage and "dit_path" not in bare
+              and told.get("stage") == stage and told.get("dit_path") == str(dit),
+              (bare, told))
+
+    # ── ③ 没认过的 stage ⇒ **当场拒** ✗（绝不静默改写成 h3 ✓✗）──
+    #: ⚠️ 反面例子**不能再用 ``wan22``** ✗（2026-11-02 起它是**真档** ✓ —— 拿它当"没认过"
+    #: 会让这条判据在"wan22 已接线"时仍绿 ✓✗，静默把新档当成反例 ✓）。
+    rejected: object = None
+    try:
+        bridge.assembly_from_config({"settings": {}}, stage="wan21")
+    except ValueError as err:
+        rejected = err
+    check("⭐ 没认过的 stage ⇒ 当场报 ✗，且报错里**列出全部认得的档** ✓（不列 ⇒ 用户不知道该改成"
+          "什么 ✓✗）—— 静默改写 h3 是「装得上、跑得出、结果全错」✓✗",
+          isinstance(rejected, ValueError)
+          and "装配 stage 只认" in str(rejected)
+          and all(f"``{name}``" in str(rejected) for name in expected)
+          and f"``{pipeline.WAN22_STAGE}``" in str(rejected), rejected)
+
+    # ── ④ Wan2.2 I2V 装配：四格**只转手、不补默认** ✓✗ ──
+    #: ⚠️ 判据要点是**不许猜** ✗：缺格 ⇒ 键就不出现（让 runtime 点名）✓；
+    #: 尤其 ``dit_path`` 不许走 `resolve_dit_path` 探到 **H3** 那份 ✓✗（16 通道、装进去会被拒）。
+    high, low = tmp / "假高噪.safetensors", tmp / "假低噪.safetensors"
+    tet, vae = tmp / "假UMT5.safetensors", tmp / "假WanVAE.safetensors"
+    for path in (high, low, tet, vae):
+        path.write_bytes(b"x")
+    bare22 = bridge.assembly_from_config({"settings": {}}, stage=pipeline.WAN22_STAGE)
+    full22 = bridge.assembly_from_config({"settings": {
+        "ditPath": str(high), "ditPath2": str(low),
+        "textWeights": str(tet), "imageVaeWeights": str(vae)}}, stage=pipeline.WAN22_STAGE)
+    old_dit = bridge.resolve_dit_path
+    bridge.resolve_dit_path = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("别探 H3 的 DiT"))
+    try:
+        no_guess = bridge.assembly_from_config({"settings": {}}, stage=pipeline.WAN22_STAGE)
+    finally:
+        bridge.resolve_dit_path = old_dit
+    check("⭐ 装配 ``wan22``: 四格齐 ⇒ **原样转手** ✓（含 ``dit_path2`` 低噪 ✓）；"
+          "一格没给 ⇒ **不塞那个键** ✗ 且**不去探 H3 的 DiT** ✗✗（探到 16 通道那份 ⇒ 装得上、"
+          "跑得出、结果全错 ✓✗）",
+          bare22 == {"stage": pipeline.WAN22_STAGE} and no_guess == bare22
+          and full22.get("stage") == pipeline.WAN22_STAGE
+          and full22.get("dit_path") == str(high) and full22.get("dit_path2") == str(low)
+          and full22.get("text_weights") == str(tet)
+          and full22.get("image_vae_weights") == str(vae),
+          (bare22, full22))
+
+
+def case_business_explicit_stage(tmp: Path) -> None:
+    """⭐⭐ **显式 ``engineStage`` 就听它的、绝不降级** ✓（2026-11-01 收尾 ✓）。
+
+    这段行为**不是**"函数返回了个 dict" ✓，是**选路**：用户点名要 Krea2 ✓，
+    就**不许**因为"SDXL 装得上"而改成 SDXL ✓✗、更不许**静默**换成 H3 兜底 ✓✗
+    （兜底 = 产物是**视频首帧** ✓，用户以为拿到的是文生图 ✓✗）。
+    ⚠️ 判据刻意把 **SDXL 解析器打死** ✗（`resolve_sdxl_path` 一律抛 ✓）：
+    这样"降级"如果发生 ✓，`stage` 就会变成 ``h3`` 或 ``sdxl`` ⇒ 当场红 ✓✗ ——
+    否则两台都通 ✓，"降没降级"根本看不出来 ✓✗。
+    """
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from app.services import image_generation  # noqa: PLC0415
+
+    png = tmp / "假出图.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    seen: dict[str, Any] = {}
+
+    async def _fake_run_job(request: Any, assembly: Any, *, task_type: str = "",
+                            record_id: Any = 0, label: str = "") -> dict[str, Any]:
+        seen["requestStage"] = getattr(request, "stage", None)
+        seen["assemblyStage"] = (assembly or {}).get("stage")
+        return {"id": "t-engine", "result": {"outputs": {"primaryPath": str(png)}}}
+
+    async def _fake_store(source: Any, *, record_id: Any = 0,
+                          sub_dir: str = "images") -> dict[str, Any]:
+        return {"localPath": "static/images/假.png", "bytes": 8}
+
+    async def _fake_complete(image_id: Any, provider: Any, local_path: Any, *,
+                             extra: Any = None) -> None:
+        seen["localPath"] = local_path
+        seen["extra"] = dict(extra or {})
+
+    def _no_sdxl(_settings: Any) -> Any:
+        raise ValueError("盘上没有 SDXL 权重（本用例的**故意**设定 ✓）")
+
+    saved = (bridge.run_job, bridge.store_image_to_storage, bridge.outputs_dir_for,
+             bridge.resolve_sdxl_path, bridge.resolve_tokenizer_path,
+             image_generation._handle_image_complete_local)
+    bridge.run_job = _fake_run_job                     # type: ignore[assignment]
+    bridge.store_image_to_storage = _fake_store        # type: ignore[assignment]
+    bridge.outputs_dir_for = lambda *a, **k: str(tmp)  # type: ignore[assignment]
+    bridge.resolve_sdxl_path = _no_sdxl                # type: ignore[assignment]
+    bridge.resolve_tokenizer_path = _no_sdxl           # type: ignore[assignment]
+    image_generation._handle_image_complete_local = _fake_complete  # type: ignore[assignment]
+
+    record = SimpleNamespace(prompt="甲", negative_prompt="", size="1024x1024",
+                             reference_images=None)
+    config = {"settings": {"ditPath": str(tmp / "假DiT.safetensors")}}
+    try:
+        for stage in ("zimage", "qwen_image21", "qwen_image", "krea2"):
+            seen.clear()
+            config["settings"]["engineStage"] = stage
+            asyncio.run(image_generation._run_image_with_engine(1, config, record))
+            check(f"显式 ``engineStage={stage}`` ⇒ 装配/请求/台账**三处**都是它 ✓"
+                  "（SDXL 解析器被打死也**不降级** ✗✗ —— 降了就变成 ``sdxl`` / ``h3`` ✓✗）",
+                  seen.get("assemblyStage") == stage and seen.get("requestStage") == stage
+                  and (seen.get("extra") or {}).get("engineBackend") == stage
+                  and (seen.get("extra") or {}).get("engineStage") == stage,
+                  seen)
+
+        rejected: dict[str, str] = {}
+        for name in ("h3", "wan22"):
+            config["settings"]["engineStage"] = name
+            try:
+                asyncio.run(image_generation._run_image_with_engine(1, config, record))
+            except ValueError as err:
+                rejected[name] = str(err)
+        check("⭐ 图片链路里点名视频档 / 没认过的档 ⇒ 当场拒 ✗（不静默当成兜底 ✓✗）"
+              "、且报错把**五档**列给用户 ✓",
+              set(rejected) == {"h3", "wan22"}
+              and all("engineStage" in text for text in rejected.values()),
+              rejected)
+    finally:
+        (bridge.run_job, bridge.store_image_to_storage, bridge.outputs_dir_for,
+         bridge.resolve_sdxl_path, bridge.resolve_tokenizer_path,
+         image_generation._handle_image_complete_local) = saved
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="engine_bridge_case_"))
     case_provider()
@@ -790,6 +1006,8 @@ def main() -> int:
     case_paths(tmp)
     case_requests(tmp)
     case_stages(tmp)
+    case_chain_stages(tmp)
+    case_business_explicit_stage(tmp)
     case_business_wiring()
     case_candidates(tmp)
     case_component_spots(tmp)

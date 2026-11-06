@@ -11,8 +11,11 @@
    **元素 0 在高半字节** ✓ —— 后者由 ComfyUI 自己的量化实现
    （`comfy/float.py::stochastic_float_to_fp4_e2m1`：``(fp4[0::2] << 4) | fp4[1::2]`` ✓）直接给出 ✓，
    而 ComfyUI 正是**写这个文件的那一方** ✓；
-2. **逐位对拍**：与 `reference/lora/musubi-tuner/.../nvfp4_utils.py::dequantize_nvfp4`
-   比 ``torch.equal`` ✓（该实现抬头写着 “verified bit-level against the BF16 reference” ✓）；
+2. **逐位对拍**：与上游 musubi-tuner 的 ``nvfp4_utils.py::dequantize_nvfp4``
+   比 ``torch.equal`` ✓（该实现抬头写着 “verified bit-level against the BF16 reference” ✓）。
+   ⚠️ 这一层**要外部仓** ✗：2026-11-04 起本仓不再持有 ``reference/`` 副本 ✓，
+   所以定位改成 ``MUSUBI_TUNER_ROOT``（与 ``lora_train/paths.py`` 同源 ✓）；
+   没配就**如实 skip** ✓ 不编造 ✓；
 3. **布局往返**：``from_blocked(to_blocked(M)) == M`` ✓，其中 ``to_blocked`` 用的是
    **跑 ComfyUI 那份源码**（ast 抽出来 ✓）—— 不是本仓的复制品 ✓✗；
 4. **真实文件**：盘上那份 14.61 GiB 的 nvfp4 文本编码器逐层体检 ✓（350 层 / 0 问题 ✓），
@@ -46,7 +49,20 @@ sys.path.insert(0, str(BACKEND_PY))
 
 from app.services.engine import quant_nvfp4 as nv  # noqa: E402
 
-REFERENCE = WORKSPACE / "reference" / "lora" / "musubi-tuner" / "src" / "musubi_tuner" / "modules" / "nvfp4_utils.py"
+def _reference_path() -> Path | None:
+    """② 层对拍要的**上游实现** ✓ —— 本仓不持有副本 ✗（2026-11-04 起 ``reference/`` 不再作依赖 ✓）。
+
+    定位口径与 ``app/services/lora_train/paths.py::tool_root`` 同源 ✓：``MUSUBI_TUNER_ROOT``
+    指向 musubi-tuner 仓库根 ✓。没配 / 配了但文件不在 ⇒ ``None``（② 层如实 skip ✓）。
+    """
+    root = (os.environ.get("MUSUBI_TUNER_ROOT") or "").strip()
+    if not root:
+        return None
+    candidate = Path(root) / "src" / "musubi_tuner" / "modules" / "nvfp4_utils.py"
+    return candidate if candidate.is_file() else None
+
+
+REFERENCE = _reference_path()
 COMFY_FLOAT = Path("d:/code/voide/comfy-studio/ComfyUI/comfy/float.py")
 REAL_MODEL = Path(r"D:\Comfy-Desktop\ComfyUI-Shared\models\text_encoders"
                   r"\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
@@ -126,8 +142,10 @@ def case_spec() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 def case_reference() -> None:
     torch = _torch()
-    if not REFERENCE.exists():
-        skip("② 与参照实现逐位对拍", f"找不到 {REFERENCE} ✗")
+    if REFERENCE is None:
+        skip("② 与参照实现逐位对拍",
+             "没配 MUSUBI_TUNER_ROOT（或该仓里没有 src/musubi_tuner/modules/nvfp4_utils.py）✗ "
+             "—— 本仓不持有该副本 ✓")
         return
     ns = _extract(REFERENCE, {"dequantize_nvfp4", "to_blocked", "from_blocked",
                               "_byte_pair_lut", "_ceil_div", "_roundup"})

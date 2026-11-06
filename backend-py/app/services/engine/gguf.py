@@ -37,7 +37,7 @@ GGUF 元数据 ``general.file_type``（0=F32、15=**Q4_K_M** ✓ …）是**打�
 * 本模块**只给清单**（头 + 张量表 + 形状 + 字节 + 方案名 ✓），**不反量化** ✗
   —— 与 :mod:`.safetensors` 同界 ✓。
 * 反量化在 :mod:`.gguf_dequant` ✓（**自家 numpy 实现** ✓，不依赖 llama.cpp / ComfyUI-GGUF ✓）。
-  已覆盖 F32 / F16 / BF16 / Q8_0 / Q4_K / Q6_K ✓；Q2_K / Q3_K / Q5_K 仍具名拒绝 ✗。
+  已覆盖 F32 / F16 / BF16 / Q8_0 / Q4_K / Q5_K / Q6_K ✓；Q2_K / Q3_K 仍具名拒绝 ✗。
 * ⚠️ 块类型（``TENSOR_TYPES`` ✓）与**打包方案名**（``FILE_TYPES`` ✓）是两回事 ✗：
   一个 ``Q4_K_M`` 文件里可能同时有 Q4_K 与 Q6_K ✓（也可能全是 Q4_K ✓，取决于量化器
   按张量挑类型的名单能否命中该架构命名 ✓）—— 判据只能读``dtype_counts`` ✓。

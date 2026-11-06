@@ -65,7 +65,8 @@ foreach ($sub in @('doctor','plan','readiness','status')) {
 | `readiness --stage h3` | `1` | 3 条阻断（`convrot`×2、`nvfp4`×1）＋ 4 条未查（文件不在盘上）＋ 显存估 49.44 GiB / 容量 24 GiB ⇒ 溢出 |
 | `status` | `0` | `阶段 None 运行中=None / 已装: 无`（无进程内会话，正常） |
 
-原始输出留档：`tmp/e14-{doctor,plan,readiness,status}.txt`。
+原始输出当时留在仓库根的 `tmp/`（`e14-doctor.txt` 等四份）—— 该目录是 `.gitignore` 的草稿区，
+已于 2026-11-04 清理；要复核就重跑上表四条命令，输出直接看 stdout（不必再留档）。
 
 结论：**通过**。四条命令全部在无 HTTP 的进程里给出结论，且退出码与语义一致。
 

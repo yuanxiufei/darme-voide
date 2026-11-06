@@ -1,4 +1,4 @@
-"""Windows **无缓冲重叠读** ✓（移植自 ``reference/expert-stream/engine/expert-stream.c`` ✓）。
+"""Windows **无缓冲重叠读** ✓（移植自 ``engine/expert-stream.c`` ✓）。
 
 ## 为什么照搬它 ✗
 

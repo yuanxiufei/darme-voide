@@ -15,9 +15,10 @@ llama.cpp 的 ``ggml-quants.c`` ✓（**MIT** 许可 ✓ —— 公式可照实�
 ## 支持范围
 
 * F32 / F16 / BF16：直接转换 ✓；
-* **Q8_0** ✓ / **Q4_K** ✓ / **Q6_K** ✓（2026-10-29 补 ✓）；
-* ⚠️ 其余 k-quant（Q2_K / Q3_K / Q5_K）**后续补** ✗ —— 块布局已在
-  :data:`gguf.TENSOR_TYPES` 核清 ✓，但反量化公式未实现 ⇒ 遇到就**具名拒绝** ✗（不静默当 F32 ✗）。
+* **Q8_0** ✓ / **Q4_K** ✓ / **Q6_K** ✓（2026-10-29 补 ✓）/ **Q5_K** ✓（2026-11-01 补 ✓）；
+* ⚠️ 其余 k-quant（Q2_K / Q3_K）**未实现** ✗ —— 块布局已在 :data:`gguf.TENSOR_TYPES`
+  核清 ✓，但反量化公式未实现 ⇒ 遇到就**具名拒绝** ✗（不静默当 F32 ✗）。
+  为什么先补 Q5_K 而不补这两个：见下节 ✓（盘上有真文件要 Q5_K ✓、没有文件要 Q2_K/Q3_K ✓）。
 
 ### 为什么 Q6_K 是「非补不可」的那个（2026-10-29）
 
@@ -34,6 +35,22 @@ llama.cpp 的 ``ggml-quants.c`` ✓（**MIT** 许可 ✓ —— 公式可照实�
 ⚠️ 反过来也**不能凭后缀断定** ✗：`seedvr2_ema_3b-Q4_K_M.gguf` 实测是**纯 Q4_K**
 （210 张量、无一个 Q6_K ✓）—— 量化器的张量名单没命中该架构的命名，就全是 Q4_K ✓。
 所以「M 后缀 ⇒ 一定含 Q6_K」是错的口径 ✓✗；判据只能是**读文件里的实际块类型** ✓。
+
+### 为什么 Q5_K 是第二个「非补不可」（2026-11-01）
+
+同一个坑换个壳 ✓：`Q4_K_M` 里**也可能出现 Q5_K** ✓（不是「只有 Q4_K 和 Q6_K 两种」✗ ——
+量化器按张量挑类型的名单命中某些架构时，会把 ``attn``/``mlp`` 的投影挑成 Q5_K ✓）。
+盘上实测 `diffusion_models/Krea2/krea2_turbo-Q4_K_M.gguf` = **432 张量**
+（F32 167 / F16 1 / **Q5_K 63** / Q4_K 201 ✓，而 ``general.file_type`` 明写 ``Q4_K_M`` ✓）
+⇒ 2026-10-29 补 Q6_K 之后的白名单**仍然读不了这个文件** ✗，且症状与上次一模一样：
+前几十个张量全对、读到那 63 张才具名拒绝 ✓✗。
+
+公式来源（不猜 ✓）：llama.cpp ``dequantize_row_q5_K`` ✓（MIT ✓），经参考仓 Strata
+``include/strata/artifact/dequant.hpp:212-234`` 的逐行转写与参考仓 ds4 ``ds4.c`` 的标量版
+**两份独立转录互核** ✓ —— 两份对不上就说明我抄错了 ✓。块布局 = ``d``(f16) + ``dmin``(f16)
++ ``scales``[12] + ``qh``[32] + ``qs``[128] = **176** ✓；与 Q4_K 的唯一结构差别是
+「第 5 个 bit 存在 ``qh`` 里」✓，6-bit ``scale``/``min`` 的打包与 Q4_K **完全同源** ✓
+（所以直接复用 :func:`_q4_k_scale_min` ✓，不再写第二份解包 ✓）。
 """
 from __future__ import annotations
 
@@ -53,7 +70,7 @@ class GgufDequantError(RuntimeError):
 
 #: 已实现反量化的张量类型 id → 名字 ✓（⚠️ 这是「能反量化」的白名单 ✗，不是全部 ✓）
 SUPPORTED_DEQUANT: dict[int, str] = {
-    0: "F32", 1: "F16", 32: "BF16", 8: "Q8_0", 12: "Q4_K", 14: "Q6_K",
+    0: "F32", 1: "F16", 32: "BF16", 8: "Q8_0", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K",
 }
 
 
@@ -217,8 +234,65 @@ def _dequant_q6_k(data: bytes, numel: int) -> np.ndarray:
     return out.reshape(-1)
 
 
+#: Q5_K 每块字节数 ✓（d[2] + dmin[2] + scales[12] + qh[32] + qs[128] ✓）
+_Q5_K_BLOCK = 176
+#: 一次向量化处理多少块 ✓ —— 只影响峰值内存 ✓（4096 块 ≈ 704 KiB 输入 / 4 MiB 输出 ✓），不影响结果 ✓
+_Q5_K_CHUNK = 4096
+
+#: Q5_K 的 256 列 → ``qs`` 字节下标 / 是否取低半字节 / 段号（= 第 5 bit 在 ``qh`` 里的位号）✓
+_Q5_K_COL = np.arange(256)
+_Q5_K_BYTE = ((_Q5_K_COL % 32) + 32 * (_Q5_K_COL // 64)).astype(np.intp)
+_Q5_K_IS_LOW = (_Q5_K_COL % 64) < 32
+_Q5_K_SEG = (_Q5_K_COL // 32).astype(np.intp)            # 0…7 = 2×组号 + 高低半 ✓
+_Q5_K_QBIT = (_Q5_K_COL % 32).astype(np.intp)            # qh 的 32 字节按列循环 ✓
+
+
+def _dequant_q5_k(data: bytes, numel: int) -> np.ndarray:
+    """Q5_K ✓：每 256 元素 = d(f16) + dmin(f16) + 12 字节 scales + **qh[32]** + qs[128] ✓（176 字节/块 ✓）。
+
+    与 Q4_K 的**唯一**结构差别：4-bit 之外的第 5 个 bit 单独存在 ``qh`` 里 ✓ ——
+    ``y = d*sc*(lane + 16*qh_bit) − dmin*mn`` ✓（Q4_K 没有这一项 ✓，照抄 Q4_K 会得到
+    「形状对、数值小一半量级」的权重 ✗✗）。
+
+    位序（照 llama.cpp ``dequantize_row_q5_K`` ✓，两份独立转录互核 ✓）：
+
+    * ``qh`` 的 32 字节**按列循环**用 ✓：第 ``c`` 列取 ``qh[c % 32]`` ✓；
+    * 第 5 bit 的位号 = **段号**（``2×组号 + 高低半`` ✓，组号 = 列 ÷ 64 ✓）——
+      标量版的 ``u1 <<= 2; u2 <<= 2``（1,2 → 4,8 → 16,32 → 64,128 ✓）与这里的
+      ``(qh >> 段号) & 1`` **完全等价** ✓（``engine_gguf_dequant_test`` 两版逐位对拍 ✓）；
+    * 6-bit ``scale``/``min`` 的打包与 Q4_K **同源** ✓ ⇒ 直接复用 :func:`_q4_k_scale_min` ✓。
+
+    ⚠️ 结合顺序照 llama.cpp（先 ``d*sc`` 再乘 q ✓）—— 换顺序差 1 ulp ✗、逐位对拍立刻报 ✗。
+    """
+    if numel % 256 != 0:
+        raise GgufDequantError(f"Q5_K 块不整除：numel={numel} ✗")
+    nblock = numel // 256
+    need = nblock * _Q5_K_BLOCK
+    if need > len(data):
+        raise GgufDequantError(f"Q5_K 数据不够：需要 {need} 字节、只有 {len(data)} ✗")
+    raw = np.frombuffer(data, dtype=np.uint8, count=need).reshape(nblock, _Q5_K_BLOCK)
+    out = np.empty((nblock, 256), dtype=np.float32)
+    for start in range(0, nblock, _Q5_K_CHUNK):
+        stop = min(start + _Q5_K_CHUNK, nblock)
+        chunk = raw[start:stop]
+        # ⚠️ 切出来的列不是 C 连续 ⇒ view 成 f16 前必须 ascontiguousarray ✓（同 Q4_K ✓）
+        d = np.ascontiguousarray(chunk[:, 0:2]).view("<f2").astype(np.float32).reshape(-1, 1)
+        dmin = np.ascontiguousarray(chunk[:, 2:4]).view("<f2").astype(np.float32).reshape(-1, 1)
+        sc, mn = _q4_k_scale_min(chunk[:, 4:16])
+        qh = chunk[:, 16:48]
+        qs = chunk[:, 48:176]
+        lanes = qs[:, _Q5_K_BYTE]                        # (n, 256) uint8 ✓
+        low4 = np.where(_Q5_K_IS_LOW, lanes & 0x0F, lanes >> 4)
+        fifth = np.right_shift(qh[:, _Q5_K_QBIT], _Q5_K_SEG.astype(np.uint8)) & 1
+        q_val = (low4 + (fifth << 4)).astype(np.float32)  # 0…31 ✓（uint8 装得下 ✓）
+        out[start:stop] = (d * sc[:, _Q5_K_SEG] * q_val
+                           - dmin * mn[:, _Q5_K_SEG])
+    return out.reshape(-1)
+
+
 _DEQUANT_FN = {0: _dequant_f32, 1: _dequant_f16, 32: _dequant_bf16,
-               8: _dequant_q8_0, 12: _dequant_q4_k, 14: _dequant_q6_k}
+               8: _dequant_q8_0, 12: _dequant_q4_k, 13: _dequant_q5_k,
+               14: _dequant_q6_k}
 
 
 def dequantize_tensor(data: bytes, type_id: int, numel: int) -> np.ndarray:

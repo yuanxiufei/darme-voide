@@ -25,11 +25,12 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from . import checkpoint_meta as meta_mod
+from .latent_container import H3_VIDEO_CHANNELS
 
-__all__ = ["BASE_CONFIG_FIELDS", "CHECKPOINT_FORMAT", "CONFIG_FIELDS", "REFINE_MIN_DENOISE",
-           "REQUIRED_CONTRACT_KEYS", "refine_tail_steps",
-           "UpscalePlan", "check_upscaler_contract", "plan_upscale", "read_upscaler_contract",
-           "tile_plan"]
+__all__ = ["BASE_CONFIG_FIELDS", "CHECKPOINT_FORMAT", "CONFIG_FIELDS", "H3_VIDEO_CHANNELS",
+           "REFINE_MIN_DENOISE", "REQUIRED_CONTRACT_KEYS", "refine_tail_steps",
+           "UpscalePlan", "check_upscaler_contract", "load_upscaler_contract", "plan_upscale",
+           "read_upscaler_contract", "tile_plan"]
 
 #: 放大器检查点的内嵌契约**必须有**的键 ✓（口径来自逆向 ✓）。
 REQUIRED_CONTRACT_KEYS: tuple[str, ...] = ("format", "base_config", "config")
@@ -67,16 +68,24 @@ def _check_config_block(raw: Any, fields_wanted: Sequence[str], *, label: str) -
     return parsed
 
 
-def check_upscaler_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+def check_upscaler_contract(contract: Mapping[str, Any], *,
+                            expect_channels: int | None = H3_VIDEO_CHANNELS) -> dict[str, Any]:
     """把已解出的契约**再往下核一层** ✓ ⇒ ``{"base_config": …, "config": …, "step": …}`` ✓。
 
     ⚠️ 这一层是**结构**校验（字段集 / 类型 / 值域 ✓），**不是**「能不能跑」✗（那要真权重 + 真张量 ✓）。
+
+    ⚠️⚠️ ``expect_channels`` **必须由调用方给得出的时候给** ✗✗：默认 :data:`H3_VIDEO_CHANNELS`（真权重
+    下就是它 ✓），但 `torch_backend.refine_latents` 那边是**从已装主干推**（``_config["latents_dim"]`` ✓）
+    ⇒ 传 ``None`` 会把这条跨来源核验**关掉** ✓，而缩小版自检（``latents_dim=2``）正是靠它才走得通 ✓✗
+    —— 旧版把 24 写死在这一层 ✗ ⇒ 缩小版在**进主干推导之前**就被拒 ✓✗（症状＝真权重全绿、自检的
+    "缩小版走同一条路"整条崩在契约校验上 ✓，看起来像"契约写错了" ✓✗）。
     """
     base = _check_config_block(contract.get("base_config"), BASE_CONFIG_FIELDS, label="base_config")
-    if base["in_channels"] != 24:
+    if expect_channels is not None and base["in_channels"] != int(expect_channels):
         raise ValueError(
-            f"放大器契约的 ``base_config.in_channels`` 必须是 **24** ✗，实得 {base['in_channels']} ✓"
-            f" —— 这就是 H3 视频潜变量的通道数 ✓（与 `h3_form.H3_TRUNK_DEFAULTS['latents_dim']` 同一个事实 ✓）")
+            f"放大器契约的 ``base_config.in_channels`` 必须是 **{int(expect_channels)}** ✗，实得 "
+            f"{base['in_channels']} ✓ —— 这就是 H3 视频潜变量的通道数 ✓"
+            f"（与 `h3_form.H3_TRUNK_DEFAULTS['latents_dim']` 同一个事实 ✓）")
     if base["temporal_kernel"] % 2 != 1:
         raise ValueError(
             f"放大器契约的 ``base_config.temporal_kernel`` 必须是**奇数** ✗，实得 "
@@ -92,6 +101,34 @@ def check_upscaler_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
     return {"base_config": base, "config": config, "step": step}
 
 
+def load_upscaler_contract(metadata: Mapping[str, Any] | None,
+                           *, expect_format: str | None = CHECKPOINT_FORMAT,
+                           expect_channels: int | None = H3_VIDEO_CHANNELS) -> dict[str, Any] | None:
+    """**读 + 结构核**一步到位 ✓ ⇒ 可用的契约 dict ✓；**没有契约** ⇒ ``None`` ✓（不是通过 ✗）。
+
+    ⚠️ 外部调用方**只该用这个口** ✗✗（:func:`read_upscaler_contract` 只管"解出" ✓、
+    :func:`check_upscaler_contract` 只管"往下核一层" ✓ —— 两步**分开**放出去必然有人只做第一步 ✓✗）：
+    本仓三处调用点（``/upscale-plan`` 路由 / ``inventory.upscale_status`` /
+    ``torch_backend.refine_latents``）**原先都只读了不核** ✗ ⇒ 契约里 ``base_config`` 缺一个字段时：
+    计划层照样报「2× 可做 ✓」（静默绿灯 ✓✗）、状态接口在 ``contract['base_config']['in_channels']``
+    上**直接 KeyError** ✗、张量层则悄悄用 ``H3LatentUpscalerV2`` 的**默认值**建网络 ✓✗
+    （缺键走默认 ⇒ 形状自洽、只是与真权重不是一套 ✓✗）。
+
+    返回的是**合好的**契约 ✓：``base_config`` / ``config`` / ``step`` 换成 :func:`check_upscaler_contract`
+    解析出的那份（值已确认是正整数 ✓），其余键（``format`` / ``strict_latent_only`` 等 ✓）原样带回 ✓。
+
+    ⚠️ ``expect_channels`` 透给 :func:`check_upscaler_contract` ✓：默认 :data:`H3_VIDEO_CHANNELS`
+    （真权重口径 ✓）；``torch_backend.refine_latents`` 传**从已装主干推**的那个值 ✓，
+    这样缩小版自检与真权重走同一条路 ✓✗（那一层自己还会再对一次 ✓，两处核的是同一个事实 ✓）。
+    """
+    contract = read_upscaler_contract(metadata, expect_format=expect_format)
+    if contract is None:
+        return None
+    checked = check_upscaler_contract(contract, expect_channels=expect_channels)
+    return {**dict(contract), "base_config": checked["base_config"],
+            "config": checked["config"], "step": checked["step"]}
+
+
 def read_upscaler_contract(metadata: Mapping[str, Any] | None,
                            *, expect_format: str | None = CHECKPOINT_FORMAT) -> dict[str, Any] | None:
     """读放大器检查点的内嵌契约 ✓ ⇒ 契约 dict ✓；**没有契约** ⇒ ``None`` ✓（**不是通过** ✗）。
@@ -99,6 +136,8 @@ def read_upscaler_contract(metadata: Mapping[str, Any] | None,
     ⚠️ ``strict_latent_only`` **必须真是 True** ✓（有键 ≠ 为真 ✓✗ —— 松读会把它当已声明 ✓✗）；
     ⚠️ ``format`` 默认按 :data:`CHECKPOINT_FORMAT` 核 ✓（2026-09-24 核到真值 ✓ ——
     要读**别的**格式时显式传 ``expect_format=None`` ✓，但那样就**只剩**「有这个键」的松校验了 ✗）。
+    ⚠️⚠️ **这一步只"解出"不解结构** ✗✗（``base_config`` / ``config`` 的字段集与值域在
+    :func:`check_upscaler_contract` ✓）⇒ **应用侧一律用 :func:`load_upscaler_contract`** ✓。
     """
     return meta_mod.read_contract(metadata, expect_format=expect_format,
                                   required=REQUIRED_CONTRACT_KEYS,

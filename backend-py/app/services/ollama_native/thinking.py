@@ -1,4 +1,4 @@
-"""thinking 标签的**流式**解析器 —— 逐字移植 ``reference/ollama/thinking/parser.go``。
+"""thinking 标签的**流式**解析器 —— 逐字移植 ``thinking/parser.go``。
 
 作用：把模型吐出的 ``<think>…</think>实际回答`` 流切成「思考」与「回答」两路，
 且**必须能跨 chunk 工作** —— 标签可能被网线切成 ``<thi`` + ``nk>`` 两半，也可能

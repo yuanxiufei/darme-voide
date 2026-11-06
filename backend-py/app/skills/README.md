@@ -23,10 +23,33 @@ backend-py/app/skills/
 ├── genre-templates/          # 片型模板库（9 个）—— 按「成片类型」组织的端到端入口
 │   ├── library.yaml
 │   └── <skill>/SKILL.md
-└── production-tools/         # 制作工序库（20 个）—— 制作链路上的单点能力与工序工具
+├── production-tools/         # 制作工序库（20 个）—— 制作链路上的单点能力与工序工具
+│   ├── library.yaml
+│   └── <skill>/SKILL.md
+├── h3-canvas/                # H3 画布提示词库（1 个）—— 2026-11-02 移植自 ComfyUI-Local-Infinite-Canvas（MIT）
+│   ├── library.yaml
+│   └── h3-prompt-writing/SKILL.md   # 正文引用 references/*.txt ⇒ 只作 vendor 库按需启用
+└── wuxia-action/             # 武打编排库（2 个）—— 判据自建、原文不搬
     ├── library.yaml
-    └── <skill>/SKILL.md
+    ├── combat-choreography/SKILL.md  # 打戏四拍动作链 + 走位轴线
+    └── ultimate-moves/SKILL.md       # 大招五段结构 + 属性视觉语法
 ```
+
+> `wuxia-action` 两个 skill 的方法来源是原料库的 combat 77 份 ＋ ultimate 11 份
+> （`data/playbook/film-expert-bridge/`），
+> 那份目录 2026-11-04 起**随仓库分发**（此前在 gitignore 的 `方法语料/` 里 ⇒ 新克隆的仓库检索为空）：
+> 本库仍只装归纳出的判据，查原文走 `search_script_library(source="playbook")`。
+> 同日「有用的抄没用的删」：打戏三件（受击反馈模板／打斗运镜 15 种／招式命名与距离节奏）
+> 已消化进 `wuxia-action/combat-choreography/references/hit-reaction-and-moves.md`，
+> 出稿不必再检索引擎；原料库其余部分（特效库、造型库、招式库、技法资料库）可检索。
+> `combat-choreography` 带一份**自写**附件 `references/hit-reaction-and-moves.md`（受击反应模板／
+> 打斗运镜 15 种／招式命名与距离—节奏表，85 行，消化自原料库而非原文搬运）⇒ 它**依赖
+> `read_skill_ref`** 才能读到那份；`ultimate-moves` 则没有附件、全靠正文与检索。
+>
+> ⚠️ **它的 `agents: []` 是刻意的，不是漏写**：库内 skill 声明 `agents:` 一律不生效（见 §四），
+> 要启用只能在前端「Agent 配置 → 绑定 Skills」勾选。此前这里写过
+> `agents: [screenwriter, storyboard_breaker]` —— 两处错叠在一起（`screenwriter` 根本不是合法
+> Agent 类型 ＋ 库内声明本就无效），症状都是「静默不注入」，`skills_test.py` 已加两条判据守它。
 
 ### 库声明文件 `library.yaml`
 
@@ -37,6 +60,32 @@ description: …          # 侧栏悬浮提示
 ```
 
 **`name` 与 `label` 分离**是这里最实用的一点：目录名 / 库标识保持稳定，对外展示名随时可调。
+
+**但 `name` 必须两两唯一**（2026-11-06 补断言）：它是前端分组键 `lib:<name>`，而前端取库用的是
+`vendorLibs.find(l => \`lib:${l.id}\` === type)` —— **只取第一个**；`inGroup` 又用 `lib:${s.source}` 比对，
+两个库声明同一个 `name` 时两边都成立 ⇒ 两库 skill 在侧栏**并成一组**，组名/描述只显示第一个库的。
+全程不报错、不告警，症状只是「这个库里混进了别的库的 skill」，肉眼极难发现。
+`skills_test.py` 现守四件事：`name` 唯一、不含 `:` 与 `/`（会破坏 `lib:` 前缀解析）、声明没有 `name`
+时回退目录名**不算错**（设计允许解耦）、以及真树确实扫到多个库（别是空跑）。
+解析规则直接复用 `app/routers/skills.py::_read_library`，**不在测试里重写一遍**（重写那份迟早漂移）。
+已验证：把 `wuxia-action` 的 `name` 临时改成 `production-tools`，真树断言当场红并点名两个冲突目录。
+
+**顶层目录的两种退化形态**（同日再补一层）：前端侧栏选项是
+`['all', ...agentDefs, ...vendorLibs.map(lib:<id>)]`，而 `vendorLibs` 只收**带 `library.yaml`** 的
+目录；每条 skill 的 `source` 却由 `_classify()` **独立推导**（顶层有 `SKILL.md` ⇒ `core`；有
+`library.yaml` ⇒ `vendor`+声明 id；两者都没有 ⇒ 兜底 `vendor`+目录名）。两处一旦错位，界面就少了东西：
+
+| 形态 | 后果 |
+|---|---|
+| 容器目录漏写 `library.yaml`（自身无 `SKILL.md`、下面却挂着 skill） | 兜底判成 `vendor`/目录名，但侧栏压根没有这个分组 ⇒ 那些 skill **只在「全部」可见**，按库浏览永远找不到（前端另有一份 `valid` 白名单，硬拼出 `lib:<目录名>` 也会被重置） |
+| 顶层目录**同时**有 `SKILL.md` 与 `library.yaml` | `_classify()` 先判 `core`，侧栏却仍为它渲染 `lib:<id>` 分组 ⇒ **那个分组点开永远是空的** |
+
+这和「库标识重复」是同一个病：分组由两处独立推导拼出来，任一处漏项都不报错，只表现为
+「界面上少了东西 / 空了一块」。`skills_test.py` 再守一条真树断言 ＋ 五种反验（漏声明／补声明／
+两者齐备／删声明后合法／空库合法）。真树验证过：给 `extractor` 加一份 `library.yaml` ⇒ 报
+「库分组恒空」；造一个 `_probe_lib/child/` 漏声明 ⇒ 报「其下 1 个 skill 只在「全部」可见」。
+两者跑完均自动清理。
+注意**建库但还没装 skill 属合法中间态**，不报错 —— 否则新建库的第一步就红。
 
 ### 上游清单 `meta.yaml`（本项目**不读取**，仅供溯源）
 
@@ -74,6 +123,26 @@ priority: 20                                          # 注入顺序，越小越
 | `backend-py/app/agent/runtime.py` 的 `get_agent_defaults`（+ `agent_registry.py`） | `GET /agent-configs/defaults` 的出厂默认值 |
 | `backend-py/app/routers/skills.py` → `/skills`、`/skills/meta` | 反向查询「该 skill 被谁绑定」与前端侧栏分组 |
 
+**名册只有一个：`agent_registry.VALID_AGENT_TYPES`（当前 6 个，含 `orchestrator`）。**
+`AGENT_PHASES` 是「阶段展示表」（5 条，不含 `orchestrator`），**不是名册**——
+凡是要「把 Agent 全量过一遍」的地方（反向绑定枚举、`/skills/meta` 的 agents 列表、
+各测试的期望条数），都必须枚举 `VALID_AGENT_TYPES`；`AGENT_PHASES` 只允许用来取
+`phase` 字段（取不到时给 `""`）。
+
+反面案例（2026-11-06 修）：`/skills` 的反向绑定与 `/skills/meta` 曾用 `AGENT_PHASES`
+枚举 ⇒ `agents: [orchestrator]` 的 skill **永远显示「未绑定」**；同时前端
+`agents.vue` 硬编码 5 条 Agent 卡片 ⇒ `orchestrator` 没有卡片、模型/提示词/Skill
+在 UI 上根本改不了。三处都是**静默**的：页面看着正常、运行期
+`build_agent_config('orchestrator')` 照读 DB 配置注入，没有任何一处报错。
+修法：三处统一到 `VALID_AGENT_TYPES`；前端名册改为由
+`GET /agent-configs/defaults` 派生（`AGENT_ICONS` 只留图标，不再存名字），并把它
+`catch` 里「非关键」的静默吞错改成 `toast.error`（名册由它派生后就再也不是非关键了）。
+
+反验口径（同一坏状态「旧绿新红」才算钉住）：把 `meta` 的枚举改回 `AGENT_PHASES`
+⇒ `skills_test` **75/77**，精确点出 agents 列表少了 `orchestrator`；复原 ⇒ **77/77**。
+`AGENT_PHASES` 与 `VALID_AGENT_TYPES` 的差集也被测试钉成恰为 `{"orchestrator"}`
+——将来谁新增 Agent 只登展示表、忘了登名册，会当场红。
+
 ## 三、注入规则
 
 1. DB `agent_configs.skills` 有值 → **只**按 DB 配置加载（前端「Agent 配置 → 绑定 Skills」写入）
@@ -81,10 +150,12 @@ priority: 20                                          # 注入顺序，越小越
 3. 所有注入受**字符预算**约束：默认 60000 字符，超出部分按优先级跳过并在注入文本末尾注明；
    用环境变量 `AGENT_SKILL_BUDGET` 覆盖（设为 `0` 关闭限制）
 
-实测（2026-09-25）：5 个 Agent 默认注入合计 **30,793 字符、零跳过**
-（`storyboard_breaker` 19,446 / `grid_prompt_generator` 8,319 / `script_rewriter` 1,059 /
-`extractor` 1,078 / `voice_assigner` 891；`orchestrator` 无默认绑定）。
+实测（**2026-11-05 重测**）：名册 6 个 Agent 中**有默认绑定的 5 个**合计 **34,875 字符、零跳过**（预算 60,000，余量 42%）
+（`storyboard_breaker` 22,033 / `grid_prompt_generator` 9,281 / `script_rewriter` 1,592 /
+`extractor` 1,078 / `voice_assigner` 891；`orchestrator` 无默认绑定，注入 0 字符）。
 口径：各 Agent `load_agent_skills` 的返回长度，逐次稳定可复现（绑定按 `(priority, id)` 排序）。
+（上一轮记的 30,793 是 2026-09-25 的值；此后 `storyboard_breaker` 侧的正文在持续增补，
+这个数只会往上走 —— 判断配额余量看「离 60,000 还有多少」，别把增量当回归。）
 
 > **2026-09-12 两轮体量治理**（结论只对**默认绑定**成立；DB `agent_configs.skills` 一旦有值就按 DB 走，见 §三.1）：
 >
@@ -126,7 +197,16 @@ priority: 20                                          # 注入顺序，越小越
 2. **语义错位**：它们是"按触发词独立启动"的会话式技能（自带 `STEP 1/2/3`、`Not for: …`），
    不是"常驻系统提示词层"；
 3. **注入不完整**：其正文大量引用 `references/*.md`，而加载器**只读 `SKILL.md`**
-   → agent 顺着引用找文件必然落空，等于注入半截指令。
+   → 默认注入只能拿到正文、拿不到附件，等于注入半截指令。
+   （**自有 skill 也会这样**：`audio-prompt-library` 带 1 份、`video-prompt-library` 带 4 份
+   `references/`。差别只在「自有 skill 由本仓作者控制正文长度、外部库是上游原文」，
+   通路是同一条。）
+   （2026-11-04 起补了一条**按需**通路：`list_skill_refs` / `read_skill_ref` 两个只读工具
+   ——见 `backend-py/app/services/skill_refs.py`。它只开放 `<skill>/references/` 下白名单后缀、
+   单文件 ≤512 KB、单次 ≤400 行，且目前只挂在 `script_rewriter`（剧本改写）与
+   `storyboard_breaker`（分镜拆解）两个 Agent 上 —— 挂载点是 `runtime.py` 的 tool_set
+   `script` / `storyboard`，**不认 skill 名也不认 `agents:`**；
+   **不是**默认注入的替代品 —— 模型得先知道要看哪个文件，才谈得上按需读。）
 
 ## 五、命名约定
 
@@ -192,11 +272,130 @@ python backend-py/app/scripts/check_skill_refs.py          # 退出码 1 = 存�
 python backend-py/app/scripts/check_skill_refs.py --verbose # 额外列出被跳过的候选，审计盲区
 ```
 
-**基线约定**：**142 文件 / 104 处待校验 / 致命 0 / 非致命 0**（2026-09-25 实测）
-（跳过计数：上游/外来宿主 5 / 示意引用 2 / 基准不明 3）。
+**基线怎么读**：只看两个数 —— **致命 0 / 非致命 0**。文件数、待校验处数、三类跳过计数
+**都在漂**（并行工作流随时往库里加 `references/`），写这份时是 154 文件 / 133 处 / 跳过 9·2·9，
+隔天就不作数了；把它们当基线去追，只会每轮都在改同一个数字。
+（历史：2026-09-25 起这份文档记过 93→96→107→114→116→118 处待校验，涨的都是"新加附件"与
+"把某类跳过改判真校验"，从来没有一次是断链多了。）
+**2026-11-04 补一条解析基准 ④**：`<另一个 skill 的目录名>/references/x.md` 按**本库 `skills/` 根**解析，
+由「基准不明」转为**真校验**（这类「细节见某某 skill」的写法很常见，先前一直绿着也能指空）。
+同名 skill 有多处时不猜，仍归基准不明 —— 猜错会把真断链判绿，比少判更糟。
+**同日再补：通配符模式也进真校验**（`references/*.md` 走同一套基准 glob，命中 0 个 ⇒ 致命
+「模式未命中任何文件」）。这类串原在 token 收集阶段就被丢掉 —— 连跳过计数都不进，
+是「看着像路径、其实指空」里最彻底的一种。四条反验已固化成套件
+`tests/skill_refs_check_test.py`（37 项，已进全量清单）：指错 ⇒ 退出 1；同名歧义 ⇒ 仍跳过且退出 0；
+模式命中 ⇒ 过；模式空 ⇒ 致命；回执表头的扫描目录必须跟着 `SKILL_REFS_DIR` 变。
+**同日三补：一个 skill 有两个名字，两个都收**。本仓 5 个 core skill 的**目录名跟着 agent type 走**
+（`extractor` / `grid_prompt_generator` / `script_rewriter` / `storyboard_breaker` / `voice_assigner`，
+因为 `agents:` 里的类型名就是那几个），而 frontmatter `name` 是上游 kebab
+（`character-scene-extractor` / `storyboard-breaker` …）。**契约只有一条**：`id`（＝目录名）是标识，
+`name` 只是展示名 —— 但文档里两种写法都会出现，所以基准 ④ 的索引**两个名字都收**（同名多处照样不猜）。
+不这么做的后果与基准 ④ 当初一模一样：按 `name` 写的引用全落「基准不明」静默跳过。
+同轮还修了一处真断链：`prompt-style-library/SKILL.md` 原写「运镜词表 `camera-movement-guides.ts`」，
+文件早就迁成 `backend-py/app/services/camera_movement_guides.py`（全仓已无任何 `.ts`），
+裸文件名（无斜杠）**从来不进校验**，所以它一直绿着 —— 改成带 `backend-py/` 前缀的真路径后进了真校验，从此这条断了会红。
+**同日四补：库限定路径**（`wuxia-action/combat-choreography/references/hit-reaction-and-moves.md`）
+也进真校验，行文按 **`skills/` 根**解析。判据只认「`skills/` 下一层、不含 `SKILL.md` 的容器目录」——
+库名写错仍归基准不明（不猜）。起因是逐条判读了那 10 条「基准不明」：只有它一条真能判（文件确实在盘上），
+其余 9 条各有正当理由 —— 通配符那条是本文档的说明文字、`export/…` 是**产出物**（写指导时当然还不存在，
+判红就是假警报）、`modules/` 那两条是 `search_script_library` 例句里「带斜杠才不误捞」的路径形状、
+`knowledge/vendors/…` 是上游路径。
+**别再顺手「清理」那 9 条** —— 它们是**判过之后的保留**，不是漏判。
+
+**同日五补：反向断链（资产无人指路）**。以上所有判据都只盯「指向空白」，但「空白无人指向」
+是同一类失效的另一半 —— 知识同样进不了模型上下文，只不过程序化检查一直只认前者。
+2026-11-06 实测 `references/`、`scripts/` 下 121 份资产里有 12 份无人指路，**全是真能力白废**：
+`genre-templates/ui-motion/references/styles/A.md` 到 `H.md` 这八份样式锚点（正文写着
+"The 8 style files" 却从没说它们在 `references/styles/`）、同目录 `common-adaptations.md`
+（常见改稿请求的完整战术，正文一句没提）、
+`production-tools/subtitle-correction/references/terminology.md`（语音识别纠错对照表，而技能
+Step 1 反倒让用户手抄术语）与该目录的 `srt-format.md`、
+`production-tools/skill-creator/references/NAMING.cn.md`（只指英文版 `NAMING.md`）。
+已按「补指路、不删资产」修复，现归零。
+
+判据 `orphan_assets()`。**本 skill 内**四种形态**都算指路**：点名文件名、通配符整体指路、**多级**
+目录整体指路（`references/styles/`）、以及写到别的 skill 去。单级 `references/` 不算：「有这么个
+目录」不等于「去读这一份」。
+只扫 `references/`、`scripts/` 的**子树**：`NOTICE.md`、`agents/`、`gui.json`、`meta.yaml` 这类
+平台与元数据文件本来就不该被正文引用，不在子树内自然不判。
+**这一档计入退出码**（与断链同级）：资产不可达不是风格问题。
+★两个只有真跑才露头的实现坑：① 按「直接父目录名 ∈ {references, scripts}」筛资产会**整片漏掉**
+放在 `styles/` 子目录里的那八份（它们的直接父目录是 `styles`，不在那两个名字里），
+当时那条「目录整体指路」断言其实是**假通过**；
+② 文件名用子串匹配会让 `A.md` 被 `CTA.md` 蒙混过去，必须加词边界。
+反验过：撤掉 ui-motion 那句样式指路 ⇒ 精准报 8 份、退出 1；改回后 0 份。
+
+**同日六补：这条判据自己的网，被反验捅了两个洞。** 两个都是「反验一做一个不吱声」才发现的：
+
+① **类型网是正向白名单**（`.md/.py/.json/.yaml/.yml/.ts/.sh/.txt`）—— 有 `.ts`、有 `.sh`、
+   偏偏**没有 `.js`**。真树上 `multi-shot` 与 `n-storyboard` 各有一份 Node 入口脚本 `index.js`，
+   **整份在网外**。当轮这两份恰好被正文点名（`entry:` 那行），症状没露；但形状是错的：正向白名单
+   意味「明天新加的任何类型从落地那刻起默认不受看管，且**永远不报**」。改成**反白名单**
+   （`NON_ASSET_SUFFIXES` / `NON_ASSET_NAMES`）：默认**在**网内，只有图片／音视频／压缩包／字体／
+   二进制／占位符（`.gitkeep`、`LICENSE`、`NOTICE`）跳过 —— 这些「没有可读内容」，无从指路。
+② **同名代答**：原来看的是**整棵树**的 md。抹掉 `multi-shot` 对 `index.js` 的点名后，孤儿数照旧 0、
+   退出照旧 0 —— 因为 `n-storyboard` 里那句同名指路还在全树文本里，替它担保了。现改为：
+   **裸名只在本 skill 内算数**，出了这个 skill 必须带 `<skill>/` 前缀（`n-storyboard/…/main.js`）
+   或指向目录才算 —— 裸名只说得出文件名，说不出是谁的。
+   与之配套，`<skill>/` 里那个 skill 名**目录名与 frontmatter `name` 两个都收**（本仓 5 个 core
+   skill 二者不一致，只认目录名会把用别名写的合法指路判成孤儿）。
+③ 顺带确认三件不报的事：图片放 `references/` 无人指路**不报**（图无从指路，要求指路只会逼出凑数
+   句子）；建库但还没装 skill **不报**；`meta.yaml` / `gui.json` / `agents/` 仍在子树外。
+
+反验三向（跑完自动还原）：抹掉 `multi-shot` 那两行点名 ⇒ 报 1 份、退出 1、点名到目录与文件；
+`references/` 塞一张无人指的 png ⇒ **不报**；换成 `.mjs` ⇒ 报 1 份、退出 1。
+套件新增 ⑦b 六条（`skill_refs_check_test.py` 共 **37 项**）。
+
+### 派生登记：skill 声明的工具 ↔ 本仓真实工具
+
+`/skills` 给每条 skill 算一个 `missingTools`（＝ `allowed-tools ∪ foreignToolRefs − 宿主工具集`），
+前端用它亮「缺 N 个工具」徽标。这条链上有三处**只会静默错**的地方，2026-11-06 逐处补了守卫：
+
+**① 声明键的变体**：`parse_skill` 原先只读 `allowed-tools`，而 `voice-clone` 把它写在
+**`allowed-tools-speech`** 里（`hub_voice_prepare`），正文一次都没提 ⇒ 声明**整条消失** ⇒
+`requiredTools` 少一项 ⇒ 徽标不亮。那枚徽标的提示语恰恰是「绑定后它会教 Agent 调用这些不存在的
+工具（既不报错也不生效）」，此刻却一声不响。改为 `to_allowed_tools()` 收**所有** `allowed-tools*`
+前缀的键、跨键去重保序；`allowed-skills` 这类不相干的键不收。
+
+**② 清单的对照物是死的**：`HOST_TOOL_NAMES` 是静态镜像，守卫原本只对着**冻结的 TS 快照**比对 ——
+而 `backend/`（Node）已删除，快照定格在删除那一刻，**Python 侧此后新增的工具它永远看不见**。
+实测漏了三个真实工具（`search_script_library` 与按需通路 `list_skill_refs`／`read_skill_ref`，
+均 2026-11-04 补），于是清单会**向两个方向说谎**：真实工具缺席 ⇒ 有 skill 声明它时徽标报「缺」
+（假警报，而那工具好得很）；已删工具留着 ⇒ 徽标装死、绑定后调用落空。
+⇒ 现以 `live_host_tool_names()`（逐个调 `create_*` 工厂取 **`Tool.id`**，构造期不查库不联网）为
+**权威**，与 `HOST_TOOL_NAMES` **严格相等**；TS 快照降级为历史对照（`py_only` 只要求「确有工厂产出」）。
+
+**③ 权威自身取错了字段，还并入了一串手抄名**（同日第三补，两个洞都在「活的权威」自己身上）：
+
+* 它取的是工厂返回 dict 的**键**，而驱动侧拿到的函数名是 **`Tool.id`**
+  （`ToolRegistry.as_openai_tools` 逐项用它组 `function.name`）。键 = id 时毫无差别，
+  可一旦某个工厂沿用 TS 的 camelCase 键（`ToolRegistry.get` 早为这种事按 id 兜底，
+  说明它真发生过），「真实工具集」就会多出一个**模型永远调不到的名字** ⇒ 清单守卫误红、
+  `missingTools` 跟着说错。
+* 两个 subagent 专属工具（`list_available_agents` / `run_subagent`）原先以**手抄**的
+  `SUBAGENT_ONLY_TOOL_NAMES` 直接并入结果，理由是「工厂要 `conn`」。实测那个 `conn`
+  只在 `execute` 里用、构造期不查库 ⇒ 与其它 8 个工厂一样真实调用即可。手抄串留着，
+  只会让 live 在 `subagent.py` 改名时**最后一个**知道 —— 而它本该是唯一知道的地方。
+
+⇒ 现 `live_tool_objects()` 按模块级清单真实构造全部 25 个工具、统一取 `Tool.id`；
+`SUBAGENT_ONLY_TOOL_NAMES` 降级为「必须存在的两个」的**声明**（`live ⊇ 它` 由测试钉住，
+不再代答）。清单提成模块级常量是为了让测试拿**同一份**去和 `as_openai_tools()` 对拍 ——
+测试里抄第二份，就是把「手抄」这个病根换个地方重新种下。
+
+上一轮双向反验：从清单删掉 `search_script_library` ⇒ `skills_test` 68/70 精确点出该名、
+`route_parity` 报「真实工具未进 HOST_TOOL_NAMES」；塞一个查无实据的 `ghost_tool` ⇒ 69/70
+与「清单里查无实据」。两侧跑完均自动还原。
+
+本轮单向反验（针对 ③）：把 `subagent.py` 的 `id="run_subagent"` 改成 `run_sub_agent`
+（dict 键不动）。**旧算法（读键）当场看不出任何异常** —— `HOST_TOOL_NAMES == 旧算法: True`、
+73/73 全绿；新算法立刻红：`skills_test` 71/73 点出 `['run_sub_agent', 'run_subagent']`、
+`route_parity` 12/14 报「真实工具未进 HOST_TOOL_NAMES：['run_sub_agent']」。复原后 73/73、13/14。
+**同一坏状态下「旧绿新红」这一对，就是漏报的实证。**
+判据 `skills_test.py`（**73 项**）。
+★本文档里举例也走**库限定形式**（`genre-templates/ui-motion/...`，按基准 ⑥ 进真校验）；
+不加库限定的相对写法会落回「基准不明」，白丢一次检查（本文档不在任何 skill 内，解不出 skill 根）。
 三类跳过均按判据计数 ⇒ **致命与非致命任何非零都是真回归**，不是噪声。
-新增 / 删除 skill 会改变**文件数**与**待校验处数**（属预期变化）；**致命必须恒为 0**。
-⚠️ 本节基线、§一 的 skill 数量、§三 的注入体量**都是手写数字**，漂移时守卫**不会报警** ⇒
+⚠️ 本节、§一 的 skill 数量、§三 的注入体量**都是手写数字**，漂移时守卫**不会报警** ⇒
 动完 skill 请顺手重跑本守卫并同步这三处（本次新增 skill 即按此流程更新）。
 
 > 2026-09-12 补一处盲区：`docs/…` 形式的引用此前不在 `REPO_ROOT_PREFIXES` 里，

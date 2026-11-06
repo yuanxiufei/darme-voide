@@ -49,8 +49,8 @@ from . import quant as quant_mod
 from . import quant_nvfp4 as nvfp4_mod
 from . import safetensors as st_mod
 
-__all__ = ["WeightLoadReport", "diff_state_dict", "load_module_weights", "nvfp4_layers_of",
-           "save_module_weights"]
+__all__ = ["WeightLoadReport", "RestoreError", "diff_state_dict", "load_module_weights",
+           "make_reloader", "nvfp4_layers_of", "save_module_weights"]
 
 #: safetensors 头部的 dtype 字符串 → torch 的属性名 ✓（**装载**要知道怎么把字节变成张量 ✓）
 #: ⚠️ 这张表必须覆盖 :data:`safetensors.DTYPE_ITEMSIZE` 的全部取值 ✗ ——
@@ -81,7 +81,13 @@ class WeightLoadReport:
     #: 但一个模板里就有 400+ 个 ✓ ⇒ 落进 `unexpected` 会把真正的「多出来的键」淹掉 ✓✗
     consumedQuantMeta: int = 0
     #: **原样常驻**成 int8 的权重个数 ✓（不反量化 ✓ —— 见 `weights` 模块 docstring 的显存一段）
+    #: ⚠️ 含 4bit 打包层 ✓（它们的参数也是 ``int8`` ✓、形状就是文件里的打包形状 ✓）——
+    #: 于是 :func:`_int8_residency_problems` 的「常驻层数 ≥ 层数」那一条**同时**管住两者 ✓。
     int8Resident: int = 0
+    #: 其中**4bit 打包**的层数 ✓（:meth:`Int8Linear.forward` 会多一步 :func:`quant.unpack_int4` ✓）。
+    #: 单列出来的理由：4bit 与 per-row int8 **头部逐字同形** ✓✗ ⇒ 只报一个合计数时，
+    #: 「说好 224 层 4bit、实际全按 int8 乘了」在报告里看不出来 ✓✗（2026-10-30 的假绿 ✓）。
+    int4Resident: int = 0
     #: 被**当配套张量吃掉**的 nvfp4 伙伴个数 ✓（`weight_scale` / `weight_scale_2` / `pre_quant_scale` ✓）——
     #: 它们和 `comfy_quant` 一样**不是权重** ✗，但一个 32B 文本编码器有 700+ 个 ✓ ⇒ 落进
     #: `unexpected` 会把「真·多出来的键」淹掉 ✓✗
@@ -94,6 +100,16 @@ class WeightLoadReport:
     #: ⚠️ 它必须**随报告给出来** ✗ —— 「装上了」与「按对的布局还原了」是两件事 ✓（同 `configSources` 的纪律 ✓）。
     dequant: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: ⭐ 被**内存这一级**卸过、因而**故意没装**的键数 ✓（2026-11-02 ✓）。
+    #: ⚠️ 它**不是** missing ✗✗：missing 是"模型要、文件里没有"（真缺陷 ✓）；
+    #: 这里是"文件里有、我们决定先放盘上"（策略 ✓）—— 混成一栏会让真缺键被埋掉 ✓✗。
+    skipped: int = 0
+    #: ⭐ 逐张量**还原器** ✓（2026-11-02 ✓）：**不进** :meth:`to_dict` ✗ ——
+    #: 它握着文件 reader 与模块参数的引用 ✓，序列化既没意义也装不下 ✓。
+    #: 内存这一级（`residency` 的 ``host_cache``）靠 ``report.restorer.group_values`` 重读 ✓；
+    #: ``None`` ⇒ 这次装载**没走到**逐张量那一步（钥匙都对不上 / 预检就中止了 ✓），
+    #: 别把它当成"能重读"✓✗（那时卸层就是一个填不回去的洞 ✗）。
+    restorer: Any = None
 
     @property
     def complete(self) -> bool:
@@ -109,6 +125,7 @@ class WeightLoadReport:
             "shapeMismatch": self.shapeMismatch[:6], "shapeMismatchCount": len(self.shapeMismatch),
             "renamed": self.renamed, "dtypeCasts": self.dtypeCasts,
             "consumedQuantMeta": self.consumedQuantMeta, "int8Resident": self.int8Resident,
+            "int4Resident": self.int4Resident,
             "consumedNvfp4": self.consumedNvfp4, "consumedScales": self.consumedScales,
             "dequant": dict(self.dequant), "error": self.error,
         }
@@ -230,7 +247,16 @@ def _tensor_from_bytes(raw: bytes, dtype: Any, shape: tuple[int, ...]) -> Any:
     ⚠️ 返回的张量是**只读**的（共享 ``raw`` 的缓冲 ✓）⇒ 调用方**只能读它** ✓，
     真写进模型是由 ``param.copy_(tensor)`` 完成的 ✓（copy_ 读源、写目标 ✓）。
     """
-    tensor = _torch().frombuffer(raw, dtype=dtype)
+    torch = _torch()
+    shape = tuple(int(dim) for dim in shape) if shape else ()
+    if 0 in shape:
+        #: ⚠️ **0 元素张量**（哨兵 ✓，如 Edit 2511 的 ``__index_timestep_zero__`` 在 int8_convrot
+        #: 那份里是 ``shape=[0]`` ✓、TE 的 ``scaled_fp8`` 同物种 ✓）：``frombuffer(b"")`` 当场抛
+        #: ``both buffer length (0) and count (-1) must not be 0`` ✓✗（2026-11-01 真权重首跑踩到 ✓，
+        #: 报错落在 ``torch.frombuffer`` 上、读起来像「文件坏了」✓，其实**字节本来就该是 0 个** ✓）。
+        #: 它的意义只在「键存在」✓ ⇒ 给个同形状的空张量 ✓（``copy_`` 空张量也无事 ✓）。
+        return torch.empty(shape, dtype=dtype)
+    tensor = torch.frombuffer(raw, dtype=dtype)
     return tensor.reshape(shape if shape else ())
 
 
@@ -328,9 +354,19 @@ def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
         report.error = f"读取权重失败：{type(err).__name__}: {err}"
         return report
 
+    #: ⭐ 内存这一级卸过的组 ✓（2026-11-02 ✓）：由 `residency._spill` 写在**模块上** ✓✗ ——
+    #: 本文件有 13 处装载调用点 ✓，逐个加参数必漏 ✓（漏一处就是「前向到那层报形状错」✓✗），
+    #: 所以走模块上的约定而不是参数 ✓。
+    #: 被跳过的键**不读、不写** ✓：参数已被换成 0 元素占位 ✓，``copy_`` 进去会当场形状不符 ✗✗，
+    #: 它们留给前向那一刻的 ``reload``（:func:`make_reloader` ✓）补 ✓。
+    skip_prefixes = tuple(
+        f"{name}." for name in getattr(module, "_residency_spilled", ()) or ()
+        if name and name != "‹root›")
+
     with reader, _prefetch_scope(read_ahead) as prefetcher:
         return _load_streaming(reader, own, report, dtype=dtype, key_map=key_map,
-                               read_ahead=read_ahead, prefetcher=prefetcher)
+                               read_ahead=read_ahead, prefetcher=prefetcher,
+                               skip_prefixes=skip_prefixes, module=module)
 
 
 def _read_ahead_bytes(entries: dict[str, Any], orig: str) -> int:
@@ -381,6 +417,191 @@ def last_prefetch() -> dict[str, Any]:
     return dict(_LAST_PREFETCH)
 
 
+class RestoreError(RuntimeError):
+    """单个张量**读不回来 / 还原不了** ✓（带键名与原因 ✓ —— 内存这一级拿它直接报给人看 ✓）。"""
+
+
+class _Restorer:
+    """「读一个键 ⇒ 拿到**最终值**」✓ —— 装配与**重读**共用这一段代码 ✓✗。
+
+    ⚠️ 存在的唯一理由就是**不许两份还原逻辑** ✗✗：内存这一级（`residency` 的 ``host_cache``）
+    卸层之后要重读 ✓，若另写一份"简化版"（只认 bf16 ✓、忘了 convrot / nvfp4 / int4 ✓ ✓），
+    症状是**数值偏了但不报错** ✓✗。本仓已经用 `_int8_residency_problems` 那一套证明过：
+    这类错误只能靠"同一处代码"防 ✓。
+
+    ⚠️ 它**不写模块** ✗：只返回张量 ✓。写进去的动作留给调用方 ✓ ——
+    装配时写 ``own[logical]`` ✓、重读时由 `residency._refill_group` 写回参数 ✓，
+    两边都是"覆盖式 copy" ✓，可单元测试直接对拍 ✓。
+    """
+
+    def __init__(self, *, reader: Any, own: dict[str, Any], meta: dict[str, Any],
+                entries: dict[str, Any], resident: set[str], nv_layers: dict[str, dict[str, Any]],
+                int4: set[str], convrot: Any, converted: dict[str, dict[str, Any]],
+                scales: dict[str, Any], dtype: Any,
+                orig_of: dict[str, str] | None = None, path: str | Path | None = None) -> None:
+        self.reader = reader
+        #: ⭐ **重读专用**的第二把把手 ✓✗（2026-11-02 ✓）：装载那把活在
+        #: ``load_module_weights`` 的 ``with reader:`` 里 ✓ ⇒ 出函数就关了 ✓，
+        #: 而重读发生在**前向那一刻** ✓（可能几十分钟以后 ✓）—— 拿装载那把去读
+        #: 会得到「读取已关闭」✓，症状是"卸了层、于是前向炸"✓✗。
+        #: 懒开：不卸层就一个句柄都不多 ✓（不占 fd ✓）。
+        self.path: Path | None = None if path is None else Path(path)
+        self._reader: Any = None
+        self.own = own
+        self.meta = meta
+        self.entries = entries
+        self.resident = resident
+        self.nv_layers = nv_layers
+        self.int4 = int4
+        self.convrot = convrot
+        self.converted = converted
+        self.scales = scales
+        self.dtype = dtype
+        #: 逻辑键 ⇒ 文件里的原名 ✓（重读要按原名去盘上取 ✓；别名改写会把这一步做错 ✗）
+        self.orig_of: dict[str, str] = dict(orig_of or {})
+
+    def value_of(self, orig: str, logical: str, prefetcher: Any = None,
+                 reader: Any = None) -> tuple[Any, str | None]:
+        """``(最终值, 被 cast 的原 dtype 名)`` ✓ —— 原 dtype 名仅在**真 cast 过**时非 ``None`` ✓。
+
+        ``reader`` ✓：用哪把把手读 ✓（装配时是本次装载那把 ✓、重读时由
+        :meth:`restore_reader` 现开的那把 ✓）—— 两把**读的是同一份字节** ✓✗，
+        所以还原逻辑仍然只有一份 ✓。
+        """
+        torch = _torch()
+        stream = self.reader if reader is None else reader
+        try:
+            raw = _read_raw(prefetcher, stream, orig)
+        except (st_mod.SafetensorsError, OSError, pf_mod.PrefetchError) as err:
+            raise RestoreError(
+                f"读取 `{logical}` 失败：{type(err).__name__}: {err}") from err
+        tensor = _tensor_from_bytes(raw, *self.meta[logical])
+        del raw                      # 张量仍持着这块缓冲 ✓ ⇒ 这里删掉的只是本地名 ✓
+        if logical in self.resident:
+            # ⚠️ **原样写入** ✓：既**不**反量化 ✗（反量化就是把 17.94 GiB 变成 35.9 GiB ✗），
+            #    也**不** cast ✗（`copy_` 会把 bf16 cast 进 int8 参数 ⇒ 静默截断成 0 ✓✗）。
+            if tensor.dtype != torch.int8:
+                raise RestoreError(
+                    f"`{logical}` 的参数是 int8 常驻 ✓，但文件里是 {tensor.dtype} ✗"
+                    f" ⇒ 拒绝写入（cast 进 int8 会被静默截断 ✓✗）")
+            return tensor, None
+        if logical in self.nv_layers:
+            # ⚠️ nvfp4：**必须**按打包形状还原 ✗ —— 文件里的 `weight` 是 U8，两个 4 bit 挤一个字节 ✓，
+            #    直接 `copy_` 进 bf16 参数只会得到「65536 分之 1 的值」✓✗（形状都对、数值全错 ✓✗）。
+            #    算在 **float32** 里再 cast ✓：`fp4 × (块 scale × 二级 scale) × AWQ` 三步都不该在
+            #    bf16 上连乘（尾数只有 8 位 ✓ 连乘误差会攒 ✓）。
+            stem = self.nv_layers[logical]["stem"]
+            #: ⚠️ 目标形状从**层体检的回执**取（``rows × inFeatures`` ✓），**不读** ``own[...].shape``
+            #: ✗✗：内存这一级卸过的组，参数已经被换成 **0 元素占位** ✓ ⇒ 那里读到的是 ``(0,)`` ✓
+            #: ⇒ 反量化按错形状拼 ⇒ 报一个「形状对不上」的错 ✓，而真正的原因在两级之外 ✓。
+            plan_item = self.nv_layers[logical]
+            target_shape = (int(plan_item["rows"]), int(plan_item["inFeatures"]))
+            try:
+                block_scale = _read_named(stream, stem + nvfp4_mod.COMFY_SCALE_SUFFIX)
+                per_tensor = _read_named(stream, stem + nvfp4_mod.COMFY_SCALE_2_SUFFIX)
+                pre_quant = (None if stem + nvfp4_mod.PRE_QUANT_SCALE_SUFFIX not in self.entries
+                             else _read_named(stream, stem + nvfp4_mod.PRE_QUANT_SCALE_SUFFIX))
+            except (st_mod.SafetensorsError, OSError) as err:
+                raise RestoreError(
+                    f"读取 `{logical}` 的 nvfp4 配套张量失败：{type(err).__name__}: {err}") from err
+            try:
+                value = nvfp4_mod.dequantize(tensor, block_scale, per_tensor,
+                                             target_shape, dtype=torch.float32)
+                value = nvfp4_mod.fold_pre_quant_scale(value, pre_quant)
+            except ValueError as err:
+                # 预检已用同一套等式验过 ✓ ⇒ 走到这里说明**文件在两次读之间变了**（或被别的
+                # 进程改过 ✓）—— 一律中止并说清已写多少 ✗（继续写就是一锅乱 ✓✗）
+                raise RestoreError(f"`{logical}` 的 nvfp4 还原被拒 ✗（{err}）") from err
+            target = self.dtype if self.dtype is not None else self.own[logical].dtype
+            if value.dtype != target:
+                value = value.to(target)
+            return value, None
+        if logical in self.converted:
+            # ⚠️ **反量化必须在 cast 之前** ✗（2026-09-22 ✓）：fp8 直接 `to(bf16)` 是把尺度丢掉 ✗，
+            #   `copy_` 照单全收 ⇒ 不报错 ✗✗，症状要到出片才发现「画面是噪声」✓✗
+            scale_name = self.converted[logical]["scale"]
+            #: ⚠️ `int4` 必须**逐层传下去** ✗：预检认出了打包 ✓、逐层却没解包 ✓✗
+            #: ⇒ 又是一次「报告说解了、实际没解」✓✗（`report.dequant["int4PackCount"]` 会露馅 ✓）
+            single = quant_mod.dequantize_state(
+                {logical: tensor, scale_name: self.scales[scale_name]},
+                convrot=self.convrot, int4=self.int4)
+            if not single.ok:        # pragma: no cover - 上面预检应当已拦下 ✓
+                raise RestoreError(
+                    f"`{logical}` 反量化失败 ✗（预检没拦住 ✓）：" + "；".join(single.problems[:2]))
+            tensor = single.tensors[logical]
+        if self.dtype is not None and tensor.dtype != self.dtype:
+            return tensor.to(self.dtype), str(tensor.dtype).replace("torch.", "")
+        return tensor, None
+
+    def __call__(self, group: str) -> dict[str, Any]:
+        """可调用 ✓（``slot(group)`` 直接落到 :meth:`group_values` ✓ —— 绑定与关闭都靠同一个对象 ✓）。"""
+        return self.group_values(group)
+
+    def group_values(self, group: str) -> dict[str, Any]:
+        """把**一个驻留组**的全部键重新还原 ✓ ⇒ ``{相对名: 张量}`` ✓。
+
+        ⚠️ 相对名而不是全名 ✗：`residency._refill_group` 用的是
+        ``named_parameters(recurse=True)`` 的名字 ✓（那正是相对名 ✓）—— 两边都用全名就等于
+        把"前缀剥到哪一层"变成第二个真源 ✓✗（`KREA2_PREFIXES` 那次已经栽过 ✓）。
+
+        ⚠️ **顺序读、不预取** ✗：这是"前向到这一层"的**当拍** ✓，预取要提前一个层才叫预取 ✓
+        （那属于 `residency` 的下一轮预取规则 ✓，见 `prefetch` 模块头"跨阶段预取被否掉" ✓）。
+        """
+        prefix = "" if group in ("‹root›", "") else group + "."
+        stream = self.restore_reader()
+        values: dict[str, Any] = {}
+        for logical in self.own:
+            if prefix and not logical.startswith(prefix):
+                continue
+            rel = logical[len(prefix):]
+            if not rel:
+                continue
+            orig = self.orig_of.get(logical)
+            if orig is None:         # pragma: no cover - 能装进来就一定有出处 ✓
+                raise RestoreError(f"`{logical}` 没有登记出处 ⇒ 无法重读 ✗")
+            value, _cast = self.value_of(orig, logical, reader=stream)
+            values[rel] = value
+        if not values:
+            raise RestoreError(
+                f"组 `{group}` 一个键都没匹配上 ✗（组名与模块参数名对不上 ⇒ 重读会静默返回空 ✗）")
+        return values
+
+    def restore_reader(self) -> Any:
+        """重读用的把手 ✓（第一次用到时**现开** ✓，之后复用 ✓；文件没了 ⇒ :class:`RestoreError` ✓）。
+
+        ⚠️ 为什么是**第二把**而不是"接着用装载那把" ✗✗：``load_module_weights`` 用
+        ``with reader:`` 管装载 ✓ ⇒ 出函数时 reader 已经关了 ✓，而重读发生在**前向那一刻** ✓。
+        症状是"卸层之后一开始采样就报「读取已关闭」"✓ —— 一个看起来像 IO 故障、
+        实际是**句柄寿命**的错 ✓✗。
+
+        ⚠️ 也**不是**每次重读都现开 ✗：一层的参数要读好几个键 ✓、一层还可能每步都卸 ✓
+        ⇒ 每次现开等于每层重解析一遍头部（真机头部有几 MB ✓）。开一次留到
+        :meth:`close` ✓（由 `residency.Handle.detach` 收 ✓）。
+        """
+        if self._reader is not None:
+            return self._reader
+        if self.path is None or not self.path.exists():
+            raise RestoreError(
+                f"权重文件不在盘上了：{self.path} ✗ ⇒ 卸掉的层读不回来"
+                f"（内存这一级要靠它 ✓）—— 别把盘上的原件挪走 / 删掉 ✓")
+        try:
+            self._reader = st_mod.TensorReader(self.path)
+        except (st_mod.SafetensorsError, OSError, ValueError) as err:
+            raise RestoreError(
+                f"重读口打不开：{type(err).__name__}: {err}") from err
+        return self._reader
+
+    def close(self) -> None:  # pragma: no cover - 只在退件路径上
+        """把重读口还回去 ✓（**没开过就什么都不做** ✓ —— 不卸层的那些件一个 fd 都不占 ✓）。"""
+        reader, self._reader = self._reader, None
+        if reader is None:
+            return
+        try:
+            reader.close()
+        except Exception:  # noqa: BLE001 - 收尾不许反过来搞坏退件 ✓✗
+            pass
+
+
 def _read_raw(prefetcher: Any, reader: Any, orig: str) -> bytes:
     """取一件的字节 ✓（预取里有就等它 ✓、没有就地读 ✓ —— **两条路字节相同** ✓✗）。"""
     if prefetcher is None:
@@ -394,8 +615,15 @@ def _read_raw(prefetcher: Any, reader: Any, orig: str) -> bytes:
 
 def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, *,
                     dtype: Any = None, key_map: dict[str, str] | None = None,
-                    read_ahead: int = _READ_AHEAD, prefetcher: Any = None) -> WeightLoadReport:
-    """流式装载的**主体** ✓（差集 → 预检 → 逐张量 ✓；分三段是为了「失败时不写字节」✓）。"""
+                    read_ahead: int = _READ_AHEAD, prefetcher: Any = None,
+                    skip_prefixes: tuple[str, ...] = (),
+                    module: Any = None) -> WeightLoadReport:
+    """流式装载的**主体** ✓（差集 → 预检 → 逐张量 ✓；分三段是为了「失败时不写字节」✓）。
+
+    ``skip_prefixes`` ✓：属这些组前缀的键**故意不装** ✓（内存这一级已卸 ✓，留给前向重读 ✓）。
+    ⚠️ 跳过**发生在预检之后** ✗✗：预检要看到完整形状表 ✓，先跳会让 nvfp4 的
+    "列数恰好一半"判不出来 ✓✗（跳过 ≠ 缺键，混起来会把一次正常装载报成半装 ✗）。
+    """
     entries = reader.entries
     report.sourceKeys = len(entries)
 
@@ -438,6 +666,16 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     for orig_w in nv_orig:
         nv_logical[_map_name(orig_w, compiled)] = nv_orig[orig_w]["stem"]
 
+    #: ⭐ 内存这一级卸过的键 ✓✗（2026-11-02 ✓）：**必须在形状比对之前认出来** ✗✗ ——
+    #: 那些参数已经被换成 **0 元素占位** ✓ ⇒ ``own[logical].shape`` 是 ``(0,)`` ✓ ⇒
+    #: 照常比形状会把**每一层卸过的**都判成 ``shapeMismatch`` ✓、``report.error`` 置位 ✓、
+    #: 整次装载中止 ✓✗ —— 症状是「内存装不下 ⇒ 卸了几层 ⇒ 于是整个模型装不进来」✓，
+    #: 而真正的病根（顺序反了）在报告里一个字都看不到 ✓✗。
+    #: 跳过仍发生在**预检之后** ✓（见 :func:`_load_streaming` 抬头 ✓），这里只是让形状比对
+    #: 别拿被破坏的东西当基准 ✓（与 :func:`residency._refill_group` 用快照核形状是同一条纪律 ✓）。
+    skipped_keys = {logical for logical in orig_of if skip_prefixes
+                    and logical.startswith(skip_prefixes)}
+
     # ② 差集：**只看头部** ✓ —— 形状不符时一个字节都不读 ✓（旧实现已经把 20 GiB 拉进内存了 ✗）
     meta: dict[str, tuple[Any, tuple[int, ...]]] = {}
     plan: list[tuple[str, str]] = []
@@ -470,6 +708,11 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
                 continue
             report.unexpected.append(logical)
             continue
+        if logical in skipped_keys:
+            #: 卸过的键：**不比形状** ✓（占位是 ``(0,)`` ✓），也不先剔出 plan ✗
+            #: —— 留着让预检看得见完整形状表 ✓，到下面 :data:`skip_prefixes` 那一步统一剔 ✓。
+            plan.append((orig, logical))
+            continue
         want = tuple(own[logical].shape)
         if want != shape:
             # ⚠️ nvfp4 的 `weight` 在文件里是 **U8 打包**（两个 4 bit 挤一个字节 ✓）⇒ 列数**正好是一半** ✓。
@@ -484,6 +727,11 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
                 "key": logical, "expected": list(want), "got": list(shape)})
             continue
         plan.append((orig, logical))
+    if skip_prefixes:
+        kept = [(orig, logical) for orig, logical in plan
+                if not logical.startswith(skip_prefixes)]
+        report.skipped = len(plan) - len(kept)
+        plan = kept
     report.missing = [key for key in own if key not in orig_of]
     report.loadedKeys = len(plan)
     if report.shapeMismatch:
@@ -611,86 +859,96 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     #: 「换装退干净了、预取的字节还挂着」那种账 ✗✗（跨阶段预取被明确否掉 ✓，见 :func:`_submit_ahead` ✓）。
     casts: dict[str, int] = {}
     written = 0
+    #: ⭐ 单一真源 ✓：装配这一段与「内存这一级卸层之后的重读」走**同一个** :class:`_Restorer` ✓✗
+    restorer = _Restorer(reader=reader, own=own, meta=meta, entries=entries,
+                         resident=resident, nv_layers=nv_layers, int4=int4, convrot=convrot,
+                         converted=pre.converted, scales=scales, dtype=dtype, orig_of=orig_of,
+                         path=report.path)
     with torch.no_grad():
         for index, (orig, logical) in enumerate(plan):
             if prefetcher is not None:
                 _submit_ahead(prefetcher, reader, plan, entries, index + 1, read_ahead)
             try:
-                raw = _read_raw(prefetcher, reader, orig)
-            except (st_mod.SafetensorsError, OSError, pf_mod.PrefetchError) as err:
-                report.error = (f"读取 `{logical}` 失败：{type(err).__name__}: {err}"
+                tensor, cast_from = restorer.value_of(orig, logical, prefetcher)
+            except RestoreError as err:
+                report.error = (f"{err}"
                                 f" ⇒ 已写入 {written}/{len(plan)} 个键（模块处于**半装**状态 ✗）")
                 return report
-            tensor = _tensor_from_bytes(raw, *meta[logical])
-            del raw                      # 张量仍持着这块缓冲 ✓ ⇒ 这里删掉的只是本地名 ✓
-            if logical in resident:
-                # ⚠️ **原样写入** ✓：既**不**反量化 ✗（反量化就是把 17.94 GiB 变成 35.9 GiB ✗），
-                #    也**不** cast ✗（`copy_` 会把 bf16 cast 进 int8 参数 ⇒ 静默截断成 0 ✓✗）。
-                if tensor.dtype != torch.int8:
-                    report.error = (f"`{logical}` 的参数是 int8 常驻 ✓，但文件里是 {tensor.dtype} ✗"
-                                    f" ⇒ 拒绝写入（cast 进 int8 会被静默截断 ✓✗）"
-                                    f"　已写入 {written}/{len(plan)} 个键")
-                    return report
-                own[logical].copy_(tensor)
-                written += 1
-                report.int8Resident += 1
-                del tensor
-                continue
-            if logical in nv_layers:
-                # ⚠️ nvfp4：**必须**按打包形状还原 ✗ —— 文件里的 `weight` 是 U8，两个 4 bit 挤一个字节 ✓，
-                #    直接 `copy_` 进 bf16 参数只会得到「65536 分之 1 的值」✓✗（形状都对、数值全错 ✓✗）。
-                #    算在 **float32** 里再 cast ✓：`fp4 × (块 scale × 二级 scale) × AWQ` 三步都不该在
-                #    bf16 上连乘（尾数只有 8 位 ✓ 连乘误差会攒 ✓）。
-                stem = nv_layers[logical]["stem"]
-                try:
-                    block_scale = _read_named(reader, stem + nvfp4_mod.COMFY_SCALE_SUFFIX)
-                    per_tensor = _read_named(reader, stem + nvfp4_mod.COMFY_SCALE_2_SUFFIX)
-                    pre_quant = (None if stem + nvfp4_mod.PRE_QUANT_SCALE_SUFFIX not in entries
-                                 else _read_named(reader, stem + nvfp4_mod.PRE_QUANT_SCALE_SUFFIX))
-                except (st_mod.SafetensorsError, OSError) as err:
-                    report.error = (f"读取 `{logical}` 的 nvfp4 配套张量失败：{type(err).__name__}: {err}"
-                                    f" ⇒ 已写入 {written}/{len(plan)} 个键（模块处于**半装**状态 ✗）")
-                    return report
-                try:
-                    value = nvfp4_mod.dequantize(tensor, block_scale, per_tensor,
-                                                 tuple(own[logical].shape), dtype=torch.float32)
-                    value = nvfp4_mod.fold_pre_quant_scale(value, pre_quant)
-                except ValueError as err:
-                    # 预检已用同一套等式验过 ✓ ⇒ 走到这里说明**文件在两次读之间变了**（或被别的
-                    # 进程改过 ✓）—— 一律中止并说清已写多少 ✗（继续写就是一锅乱 ✓✗）
-                    report.error = (f"`{logical}` 的 nvfp4 还原被拒 ✗（{err}）"
-                                    f" ⇒ 已写入 {written}/{len(plan)} 个键（模块处于**半装**状态 ✗）")
-                    return report
-                target = dtype if dtype is not None else own[logical].dtype
-                if value.dtype != target:
-                    value = value.to(target)
-                own[logical].copy_(value)
-                written += 1
-                del tensor, value, block_scale, per_tensor, pre_quant
-                continue
-            if logical in pre.converted:
-                # ⚠️ **反量化必须在 cast 之前** ✗（2026-09-22 ✓）：fp8 直接 `to(bf16)` 是把尺度丢掉 ✗，
-                #   `copy_` 照单全收 ⇒ 不报错 ✗✗，症状要到出片才发现「画面是噪声」✓✗
-                scale_name = pre.converted[logical]["scale"]
-                #: ⚠️ `int4` 必须**逐层传下去** ✗：预检认出了打包 ✓、逐层却没解包 ✓✗
-                #: ⇒ 又是一次「报告说解了、实际没解」✓✗（`report.dequant["int4PackCount"]` 会露馅 ✓）
-                single = quant_mod.dequantize_state(
-                    {logical: tensor, scale_name: scales[scale_name]}, convrot=convrot, int4=int4)
-                if not single.ok:        # pragma: no cover - 上面预检应当已拦下 ✓
-                    report.error = (f"`{logical}` 反量化失败 ✗（预检没拦住 ⇒ 已写入 {written}/"
-                                    f"{len(plan)} 个键 ⇒ **半装** ✗）："
-                                    + "；".join(single.problems[:2]))
-                    return report
-                tensor = single.tensors[logical]
-            if dtype is not None and tensor.dtype != dtype:
-                key = str(tensor.dtype).replace("torch.", "")
-                casts[key] = casts.get(key, 0) + 1
-                tensor = tensor.to(dtype)
             own[logical].copy_(tensor)
             written += 1
+            if logical in resident:
+                #: ⭐ 4bit **打包**常驻层（``Int8Linear(packed4=True)`` ✓，2026-11-02 ✓）：
+                #: 参数 dtype 也是 ``int8`` ✓、形状也是**文件里那个打包形状** ✓ ⇒ 与 int8 常驻
+                #: 走**同一段原样写入** ✓（零特殊分支 ✓）；这里只为把两种账分开数 ✓：
+                #: ``int8Resident`` 记「原样常驻的总层数」✓（:func:`_int8_residency_problems`
+                #: 拿它对层数 ✓），``int4Resident`` 是其中「4bit 打包」的子计数 ✓。
+                report.int8Resident += 1
+                if orig.endswith(".weight") and orig[: -len(".weight")] in int4:
+                    report.int4Resident += 1
+            elif cast_from:
+                casts[cast_from] = casts.get(cast_from, 0) + 1
             del tensor
     report.dtypeCasts = casts
+    #: ⭐ 把还原器交出去 ✓（2026-11-02 ✓）：内存这一级（`residency` 的 ``host_cache``）
+    #: 卸掉某层之后要靠它**重读** ✓ —— 走的是与上面**同一段**代码 ✓✗，
+    #: 另写一份"只认 bf16 的简化版"就是给自己埋一个「数值偏了但不报错」✓✗
+    report.restorer = restorer
+    #: ⭐ 自动接上延迟绑定的重读入口 ✓✗（2026-11-02 ✓）：`residency` 在 ``place()`` 时
+    #: （比装载**早** ✓）只能给一个空壳 :class:`residency.ReloadSlot` ✓，这里装完就绑 ✓。
+    #: 走模块属性而不是函数参数，是为了让**13 处装载调用点一行都不用改** ✓✗。
+    _bind_reload_slot(module, restorer)
+    #: ⚠️ 4bit 常驻层的「账要对得上」✗✗（2026-11-02 ✓）：这些层**故意不解包** ✓
+    #: ⇒ ``int4PackCount``（真解了几层）会比 ``int4PackedCount``（文件自称几层）**小** ✓。
+    #: 不写明 ⇒ 下一次读报告的人会当成「有层漏解」✓✗，然后去修一个不存在的 bug ✓。
+    if report.int4Resident:
+        report.dequant["int4Resident"] = report.int4Resident
+        report.dequant["int4ResidentNote"] = (
+            f"{report.int4Resident} 层走 4bit **常驻壳** ✓（打包字节原样留在卡上 ✓，"
+            f"解包挪到前向 ✓）⇒ 不算进 int4PackCount ✓")
     return report
+
+
+def _bind_reload_slot(module: Any, restorer: Any) -> None:
+    """装载成功后，把还原器接到**模块上那个空壳** ✓（见 :class:`residency.ReloadSlot` ✓）。
+
+    三件都不做就静默返回 ✓：模块上没挂槽（没启用内存这一级 ✓）、还原器没造出来（整份路径 ✓）、
+    槽不是槽（别的东西恰好用了同名属性 ✓）—— 都不该让一次**成功的装载**变成失败 ✗。
+    """
+    if restorer is None:
+        return
+    slot = getattr(module, "_residency_reload", None)
+    binder = getattr(slot, "bind", None)
+    if binder is None:
+        return
+    #: ⚠️ 接的是**还原器本身** ✓✗（不是 ``restorer.group_values`` ✓）：退件时
+    #: `residency.Handle.detach` 要通过槽调 ``close()`` 把那把懒开的读口还回去 ✓，
+    #: 而**绑定方法**上 `getattr(fn, "close")` 查的是底层函数的属性 ✓ ⇒ 查不到 ✓
+    #: ⇒ 静默不关 ✓（症状＝Windows 上临时文件删不掉 / 长期跑掉 fd ✓）。
+    binder(restorer)
+
+
+def make_reloader(report: WeightLoadReport) -> Any:
+    """从装载报告取出**重读入口** ✓ ⇒ ``Callable[[组名], {相对名: 张量}]`` ✓ 或 ``None`` ✓。
+
+    直接喂给 ``residency.place(reload=…)`` / ``residency.attach(reload=…)`` ✓：
+
+    ```python
+    report = weights.load_module_weights(module, path)
+    handle = residency.place(module, main_device="cuda", mode="split",
+                             host_cache=host_cache.HostCache(quota),
+                             reload=weights.make_reloader(report))
+    ```
+
+    ⚠️ ``None`` 必须**如实**返回 ``None`` ✗✗（不能返回一个空壳 lambda ✓）：
+    ``residency`` 会因为「给了 host_cache 却没给 reload」当场拒 ✓；
+    而空壳 lambda 会让它以为能重读 ✓、真卸了层之后再抛一个看不懂的 KeyError ✓✗。
+    """
+    restorer = getattr(report, "restorer", None)
+    if restorer is None:
+        return None
+    #: 返回还原器**本身** ✓（它可调用 ⇒ 形状仍是"组名 → {相对名: 张量}" ✓，
+    #: 而且它带 ``close()`` ✓ —— 裸的绑定方法不行，见 :func:`_bind_reload_slot` ✓）。
+    return restorer
 
 
 def save_module_weights(module: Any, path: str | Path, *,

@@ -171,6 +171,96 @@ def case_deep_contract() -> None:
                   {**GOOD, "config": {**GOOD["config"], "blocks": 0}}),
               lambda: up.check_upscaler_contract(
                   {**GOOD, "config": {**GOOD["config"], "blocks": "4"}}))))
+    #: ⚠️ 通道数**不许在本模块写死 24** ✗✗：`torch_backend.refine_latents` 那边的口径是
+    #: 「从**已装主干**推」（``_config["latents_dim"]`` ✓）—— 自检的缩小版（``latents_dim=2``）
+    #: 与真权重走**同一条路** ✓✗。旧版把 24 写死在这一层 ⇒ 缩小版**在进主干推导之前**就被
+    #: 当成「不是这套检查点」拒掉 ✓✗（症状＝真权重全绿、自检整条崩在契约校验上 ✓）。
+    tiny = {**GOOD, "base_config": {**GOOD["base_config"], "in_channels": 2}}
+    check("④⁶ ⭐ 通道数**由调用方给** ✓（契约 2 ↔ 期望 2 ⇒ 过 ✓；契约 2 ↔ 默认 24 ⇒ 拒 ✗ 且点名 24 ✓）"
+          "—— 这正是不许把它写死在本模块的理由 ✓✗",
+          up.check_upscaler_contract(tiny, expect_channels=2)["base_config"]["in_channels"] == 2
+          and _raises(lambda: up.check_upscaler_contract(tiny), "24") is not None,
+          _raises(lambda: up.check_upscaler_contract(tiny), "24"))
+    check("④⁷ ⚠️ ``expect_channels=None`` ⇒ **不核通道** ✓（显式关掉这条跨来源核验 ✗ ⇒ 别处必须补 ✗；"
+          "本仓只有张量层那处双保险补得上 ✓）",
+          up.check_upscaler_contract(tiny, expect_channels=None)["base_config"]["in_channels"] == 2)
+
+
+def case_load_helper() -> None:
+    """⑥ **读 + 结构核一步到位** ✓（``load_upscaler_contract`` ✓ 2026-11-01 补 ✓）。
+
+    ⚠️ 这一条治的是**真实缺陷** ✗：三处调用点原先只 ``read_upscaler_contract``（只解出 ✓ 不核 ✗）⇒
+    ``base_config`` 缺一个字段时：``/upscale-plan`` 照样说「2× 可做」✓✗（静默绿灯 ✓）、
+    ``inventory.upscale_status`` 在 ``['base_config']['in_channels']`` 上 **KeyError** ✗、
+    张量层按 :class:`H3LatentUpscalerV2` 的**默认值**建网络 ✓✗（形状自洽、与真权重不是一套 ✓）。
+    """
+    loaded = up.load_upscaler_contract(_meta(GOOD))
+    check("⑥ ``load_upscaler_contract(正常契约)`` ⇒ 合好的契约 ✓（``base_config``/``config``/``step`` 都在 ✓、"
+          "``format`` 等其余键**原样带回** ✓）",
+          isinstance(loaded, dict) and loaded["base_config"]["in_channels"] == 24
+          and loaded["config"]["heads"] == 8 and loaded["step"] == 12000
+          and loaded["format"] == up.CHECKPOINT_FORMAT, loaded)
+    check("⑥′ 没有契约 ⇒ ``None`` ✓（**不是**通过 ✓ —— 与 ``read_upscaler_contract`` 同一条纪律 ✓）",
+          up.load_upscaler_contract(None) is None and up.load_upscaler_contract({}) is None)
+    short = {key: value for key, value in GOOD["base_config"].items() if key != "temporal_kernel"}
+    msg = _raises(lambda: up.load_upscaler_contract(
+        _meta({**GOOD, "base_config": short})), "缺")
+    check("⑥″ ⭐⭐ ``base_config`` **缺一个字段** ⇒ 当场报错并点名缺哪个 ✓✗"
+          "（不核的话：计划层静默绿灯 ✗、状态接口 KeyError ✗、张量层按默认值建网络 ✗✗）",
+          msg is not None and "temporal_kernel" in msg, msg)
+    check("⑥‴ 结构不合法（``in_channels`` 不是 24 / ``width % heads``）⇒ 也在这一步就报 ✓"
+          "（``read_upscaler_contract`` 单独用**不会**报 ✗ —— 这正是抽这个口的理由 ✓）",
+          _raises(lambda: up.load_upscaler_contract(
+              _meta({**GOOD, "base_config": {**GOOD["base_config"], "in_channels": 48}})), "24") is not None
+          and _raises(lambda: up.load_upscaler_contract(
+              _meta({**GOOD, "config": {**GOOD["config"], "heads": 7}})), "整除") is not None
+          and up.read_upscaler_contract(
+              _meta({**GOOD, "base_config": {**GOOD["base_config"], "in_channels": 48}})) is not None,
+          "read 单独用不报 ⇒ load 必须报")
+    tiny_meta = _meta({**GOOD, "base_config": {**GOOD["base_config"], "in_channels": 2}})
+    check("⑥⁴ ⭐ ``expect_channels`` 从 load 口**透到**结构核 ✓（缩小版 ``in_channels=2`` + 期望 2 ⇒ 过 ✓；"
+          "不给期望 ⇒ 按默认 24 拒 ✗）—— 张量层那条「从主干推」由此才走得通 ✓✗",
+          up.load_upscaler_contract(tiny_meta, expect_channels=2)["base_config"]["in_channels"] == 2
+          and _raises(lambda: up.load_upscaler_contract(tiny_meta), "24") is not None,
+          _raises(lambda: up.load_upscaler_contract(tiny_meta), "24"))
+
+
+def case_call_sites() -> None:
+    """⑦ **应用侧只许走 ``load_upscaler_contract``** ✓（三处调用点逐处核 ✓ + 全树反向扫 ✗）。"""
+    import ast  # noqa: PLC0415
+
+    app_dir = BACKEND_PY / "app"
+    wanted = {
+        app_dir / "routers" / "engine.py": "load_upscaler_contract",
+        app_dir / "services" / "engine" / "inventory.py": "load_upscaler_contract",
+        app_dir / "services" / "engine" / "torch_backend.py": "load_upscaler_contract",
+    }
+    for path, _name in wanted.items():
+        if not path.exists():
+            skip(f"⑦ 找不到 {path}（跳过接线核 ✓）")
+            return
+    callers: dict[str, list[str]] = {"read_upscaler_contract": [], "load_upscaler_contract": []}
+    for path in sorted(app_dir.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name in callers:
+                callers[name].append(str(path.relative_to(BACKEND_PY)).replace("\\", "/"))
+    outside = [where for where in callers["read_upscaler_contract"]
+               if not where.endswith("services/engine/upscale.py")]
+    check("⑦ ⭐ **全应用树里没有谁再直接调 ``read_upscaler_contract``** ✗"
+          "（只解出 / 不核 ⇒ 缺字段的契约会静默绿灯 ✓✗）",
+          outside == [], outside)
+    check("⑦′ 三处调用点（路由 / 就绪体检 / 张量层）都改走 ``load_upscaler_contract`` ✓",
+          sorted(set(callers["load_upscaler_contract"]))
+          == sorted(str(path.relative_to(BACKEND_PY)).replace("\\", "/") for path in wanted),
+          callers["load_upscaler_contract"])
 
 
 def case_second_pass_params() -> None:
@@ -200,6 +290,8 @@ def case_second_pass_params() -> None:
 def main() -> int:
     case_contract()
     case_deep_contract()
+    case_load_helper()
+    case_call_sites()
     case_scale_rules()
     case_tiling()
     case_second_pass_params()

@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
+from app.services.scene_parser import parse_scenes
+
 __all__ = [
     "LOCATION_MATCH_RATIO",
     "locations_match",
@@ -32,14 +34,9 @@ LOCATION_MATCH_RATIO = 0.82
 #: 归一化时要丢掉的标点/分隔符
 _PUNCT = re.compile(r"[\s·・,，。、:：;；|｜\-—_/\\()（）\[\]【】<>《》\"'“”‘’]")
 
-#: 场景小标题行（``## S01 | 外景 · 民国上海街道 | 黄昏``）
-_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*(.+)$")
-
-#: 小标题里的「内景/外景」前缀
-_INDOOR_OUTDOOR = re.compile(r"^(内景|外景|日景|夜景|日|夜)\s*[·・.、:：]?\s*")
-
-#: 小标题开头的场景编号（``S01 `` / ``场景2：``）
-_HEADING_ID = re.compile(r"^(S\d+|场景\s*\d+|第\s*\d+\s*场)\s*[·・:：.、]?\s*")
+#: md 小标题的行前缀。识别本身已统一到 ``scene_parser``，这里只用来还原 ``raw``
+#: （老调用方拿 ``raw`` 做"字面是否出现在标题里"的判断，不想要 ``## ``）
+_MD_PREFIX = re.compile(r"^\s{0,3}#{1,6}\s*")
 
 #: 时段同义归一：同一「打光时段」写成不同词不该算两个场景
 _TIME_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -52,8 +49,7 @@ _TIME_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-#: 能被认出来的「时段桶名」（解析小标题时判断末尾那个词是不是时段）
-_TIME_BUCKET_NAMES = frozenset(bucket for bucket, _ in _TIME_BUCKETS)
+
 
 
 def normalize_location(value: str | None) -> str:
@@ -100,30 +96,25 @@ def same_scene(location_a: str | None, time_a: str | None,
 def script_scene_headings(script: str) -> list[dict[str, str]]:
     """把剧本里的场景小标题拆成 ``{raw, location, time}``。
 
-    认的是平台剧本格式 ``## S01 | 外景 · 民国上海街道 | 黄昏``；也兼容
-    ``## 场景1：东家大厅 夜`` 这种没有竖线的写法（整段当地点，时段留空）。
+    **识别不在这里**：统一走 :func:`app.services.scene_parser.parse_scenes`（五条路线
+    ``md-heading`` / ``cn-numbered`` / ``inline`` / ``slug``，外加围栏排除与 preamble 单列）。
+    本函数只做转换：把 ``{heading, location, time}`` 还原成老调用方要的形状，并丢掉"地点与
+    时段都读不出"的光杆标题。
+
+    为什么必须统一（2026-11-04 实测）：旧实现把**任何** ``##`` 标题都当场景，于是
+    ``## 人物设定`` 会变成 ``location="人物设定"`` 的假场景 —— ``_missing_script_scenes``
+    把它当"剧本里有、场景表里没有"回灌给模型，要求"为这一场保存场景"，可剧本里根本没有这一场。
+    同时旧实现认不出 ``1. 内景 客厅 夜``、也认不出被 OCR 压平的正文 ⇒ 判据**过宽与过窄同时存在**。
+    两套实现并存时，改好一套另一套不跟，就是下一次"看起来能用"的坑。
     """
     headings: list[dict[str, str]] = []
-    for line in (script or "").splitlines():
-        match = _HEADING.match(line)
-        if match is None:
-            continue
-        text = match.group(1).strip()
-        if not text:
-            continue
-        parts = [part.strip() for part in re.split(r"[|｜]", text) if part.strip()]
-        if len(parts) >= 2:
-            location = parts[1]
-            time_part = parts[2] if len(parts) >= 3 else ""
-        else:
-            # 无竖线写法：``S01 · 东家大厅 夜`` / ``场景2：东家大厅 夜``
-            residual = _HEADING_ID.sub("", parts[0] if parts else "").strip()
-            head, _, tail = residual.rpartition(" ")
-            # 只有末尾那个词**确实是时段词**（夜/黄昏/清晨…）才把它当时段
-            if head.strip() and tail.strip() and normalize_time(tail) in _TIME_BUCKET_NAMES:
-                location, time_part = head.strip(), tail.strip()
-            else:
-                location, time_part = residual, ""
-        location = _INDOOR_OUTDOOR.sub("", location).strip()
-        headings.append({"raw": text, "location": location, "time": time_part})
+    for item in parse_scenes(script)["scenes"]:
+        if item["extractor"] == "preamble":
+            continue  # 首个场次头之前的说明文字不是一场戏
+        location = (item["location"] or "").strip()
+        time_part = (item["time"] or "").strip()
+        if not location and not time_part:
+            continue  # 「场景覆盖」比不了光杆标题（``## S03``），留着只会制造假缺口
+        raw = _MD_PREFIX.sub("", (item["heading"] or "").strip()).strip()
+        headings.append({"raw": raw, "location": location, "time": time_part})
     return headings

@@ -106,7 +106,7 @@ cinematic film still, highly detailed
 `rule of thirds` / `centered symmetrical composition` / `leading lines` /
 `negative space` / `frame within frame` / `foreground occlusion`
 
-> 注意：本项目已有独立的运镜词表（`camera-movement-guides.ts`）。
+> 注意：本项目已有独立的运镜词表（`backend-py/app/services/camera_movement_guides.py`）。
 > 分镜/视频提示词的运镜若已有既定取值，**沿用既有值**，不要另造同义说法。
 
 ---
@@ -164,8 +164,14 @@ PromptHero / Promptomania / Film-Grab 六个来源的用法）。
 **这些站点你访问不了**，本文件不再罗列 —— 你的任务是用**已有词表**组合出提示词，
 而不是去查资料。缺词时优先用第 2–4 节里的近义锚点，或向用户说明缺少哪个维度的词。
 
-**项目内已有**（外部技能库，需在「Agent 配置 → 绑定 Skills」按需启用）：
-`film-style-picker`（12 大类电影风格参考）与 `film-reference-prompt-writer`（参考图写词）。
+**项目内已有**（`data/playbook/`，随仓库分发、**可直接检索**）：`film-cinedance`（镜头调度与
+运镜）与 `film-expert-bridge`（`references/library/general` 38 份：男女造型库、古风/都市人物设定库、
+场景模板、运镜实例、情绪表达、特效与施法手势）。取法：
+
+`search_script_library(query="女性造型 提示词", source="playbook", path_contains="library/general")`
+
+- 它们**不是技能**（没有 `SKILL.md`、不会注入、不用在「绑定 Skills」里启用），只当检索语料。
+- 缺词时仍优先用第 2–4 节的近义锚点；要成体系的写法（不是单个词）再去查，别每个宫格都查。
 
 ---
 

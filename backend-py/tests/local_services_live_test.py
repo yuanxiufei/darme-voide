@@ -7,7 +7,10 @@ ollama(11434) / local-sd(7860) / ComfyUI(8188) / H3 薄封装(8765) / CosyVoice(
 并计入汇总。这样：
   * 有服务时：能抓到「适配器假设 ≠ 服务实际」这类只有真机才暴露的问题 ✓；
   * 无服务时：**不影响 CI** ✓，但**跳过条数会打印出来** ✓（`SUMMARY: k/n passed（skip s）`）——
-    刻意**不掩盖**覆盖率，避免重演本会话那两次「断言恒真/静默失效」的假绿 ✗。
+    刻意**不掩盖**覆盖率，避免重演本会话那两次「断言恒真/静默失效」的假绿 ✗；
+  * **服务在跑但打不动**（2026-11-01 加 ✓：本机 ollama 在跑而 `/api/tags` 返回 0 个模型 ⇒ 没有模型可推理）
+    同样算**未验证 ⇒ SKIP** ✓：那是**机器状态**、不是本仓代码缺陷 ✗（判 FAIL 会让全量回归长期无解地红 ✗✗），
+    但跳过走 `skip()` 而**不是** `check(…, True)` ✓ ⇒ 不计入 passed、SKIP 行明写「不是通过」✓。
 
 可移植断言（不依赖服务在线 ✓，每次都跑）：适配器**构造出的 URL / body** 必须符合各服务的公开协议 ✓。
 
@@ -84,14 +87,36 @@ def main() -> int:
           {"/api/tags", "/sdapi/v1/samplers", "/system_stats", "/healthz"})
 
     # ── ② ollama：真打一次（唯一在跑也能验的文本链路）
+    #    ⚠️ **「在跑但库空」按 SKIP 算，不按 FAIL**（2026-11-01 实测本机 `GET /api/tags` → `{"models": []}` ✓）：
+    #    那几条判据（清单非空 / 14b 就位 / 真推理 / 成因记录）都**必须有模型才打得动** ✓，
+    #    而「本机模型库空」是**机器状态**、不是本仓代码缺陷 ✗ ⇒ 判 FAIL 会让全量回归**长期无解地红** ✗✗。
+    #    为什么这不是假绿 ✗：① 走 `skip()` 而不是 `check(…, True)` ⇒ **不计入 passed** ✓，
+    #    `SUMMARY` 里的 `skip n` 会把它显式数出来 ✓、下面还会单独印 SKIP 行写明**「不是通过」** ✓；
+    #    ② 库里**有别的模型但缺 qwen3:14b** 时，「就位」那一条仍**如实判 FAIL** ✓（那是可行动的偏差 ✓），
+    #    只把「真推理」两条降为 SKIP（没有该模型就是打不动 ✓）。
+    live: list[str] = []  # 真在跑的服务（收尾统一打印）
     ok, how = probe("http://127.0.0.1:11434/api/tags")
+    names: list[str] = []
+    tags_error = ""
     if ok:
-        tags = json.loads(urllib.request.urlopen(  # noqa: S310
-            "http://127.0.0.1:11434/api/tags", timeout=TIMEOUT).read())
-        names = [m.get("name") for m in tags.get("models", [])]
-        check("ollama: /api/tags 返回模型清单（非空）", bool(names), names[:4])
+        live.append("ollama")
+        try:
+            tags = json.loads(urllib.request.urlopen(  # noqa: S310
+                "http://127.0.0.1:11434/api/tags", timeout=TIMEOUT).read())
+            names = [m.get("name") for m in tags.get("models", [])]
+        except Exception as exc:  # noqa: BLE001
+            tags_error = f"{type(exc).__name__}: {exc}"[:160]
+    if not ok:
+        skip(f"ollama(11434) 未在跑（{how}）")
+    elif tags_error:
+        check("ollama: /api/tags 的响应能解析出 models 字段", False, tags_error)
+    elif not names:
+        skip("ollama(11434) **在跑但模型库为空**（/api/tags 返回 0 个模型 ⇒ 清单/就位/真推理/成因 4 条均无法真打）")
+    else:
+        check("ollama: 清单条目都带 name（下游按 name 选模型，缺名字等于没有）",
+              all(names), names[:4])
         check("ollama: 本地文本默认模型 qwen3:14b 已就位", "qwen3:14b" in names, names[:6])
-        # 真推理：极小 prompt + 极小 max_tokens（数百毫秒级）
+        # 注册表路由断言是**纯构造**（不碰网络 ⇒ 与服务在不在、库空不空无关 ✓）⇒ 无条件核 ✓
         # ⚠️ **必须用注册表里的 ollama 适配器**（原生 /api/chat + think:false）：
         #    2026-09-16 实测同一模型走 OpenAI 兼容端点（/v1/chat/completions）时 **content 恒为空串**
         #    （正文落在 message.reasoning 里，max_tokens 给到 128 也一样）✗ ⇒ 那条路调用方拿不到文本。
@@ -102,26 +127,30 @@ def main() -> int:
              "maxTokens": 32, "temperature": 0})
         check("注册表: provider=ollama 解析到**原生**适配器（/api/chat，非 OpenAI 兼容）",
               req["url"].endswith("/api/chat") and req["body"].get("think") is False, req["url"])
-        try:
-            resp = httpx.post(req["url"], json=req["body"], headers=req["headers"], timeout=180)
-            text = ollama_adapter.parse_response(resp.json()) if resp.status_code == 200 else ""
-            check("ollama: **真推理**一次 → 原生适配器拿到非空文本（这就是「本地文本可用」的实证）",
-                  resp.status_code == 200 and isinstance(text, str) and text.strip() != "",
-                  f"{resp.status_code} {text[:40]!r}")
-            # 反向固定：OpenAI 兼容那条路**确实**拿不到文本（记录成因，避免有人「优化」回去 ✗）
-            oai = OpenAICompatibleTextAdapter().build_request(
-                local_cfg, {"model": "qwen3:14b", "messages": [{"role": "user", "content": "只回复两个字：收到"}],
-                            "maxTokens": 32, "temperature": 0})
-            raw = httpx.post(oai["url"], json=oai["body"], headers=oai["headers"], timeout=180).json()
-            content = (raw.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-            reasoning = (raw.get("choices") or [{}])[0].get("message", {}).get("reasoning") or ""
-            check("ollama: 记录成因 —— OpenAI 兼容端点下 content 为空而 reasoning 非空"
-                  "（思考模型所致；别把 provider 改回 openai ✗）",
-                  content == "" and reasoning != "", f"content={content[:20]!r} reasoning={reasoning[:20]!r}")
-        except Exception as exc:  # noqa: BLE001
-            check("ollama: 真推理", False, f"{type(exc).__name__}: {exc}"[:160])
-    else:
-        skip(f"ollama(11434) 未在跑（{how}）")
+        if "qwen3:14b" not in names:
+            # 库里有别的模型、独缺默认档 ⇒ 「就位」那条已判 FAIL（可行动的偏差 ✓），
+            # 但真推理**打不动**（无此模型）⇒ 显式 SKIP，不伪装成通过 ✓
+            skip("ollama 库里有模型但没有 qwen3:14b ⇒ 真推理两条（原生出文本 / OpenAI 兼容空 content）未验证")
+        else:
+            # 真推理：极小 prompt + 极小 max_tokens（数百毫秒级）
+            try:
+                resp = httpx.post(req["url"], json=req["body"], headers=req["headers"], timeout=180)
+                text = ollama_adapter.parse_response(resp.json()) if resp.status_code == 200 else ""
+                check("ollama: **真推理**一次 → 原生适配器拿到非空文本（这就是「本地文本可用」的实证）",
+                      resp.status_code == 200 and isinstance(text, str) and text.strip() != "",
+                      f"{resp.status_code} {text[:40]!r}")
+                # 反向固定：OpenAI 兼容那条路**确实**拿不到文本（记录成因，避免有人「优化」回去 ✗）
+                oai = OpenAICompatibleTextAdapter().build_request(
+                    local_cfg, {"model": "qwen3:14b", "messages": [{"role": "user", "content": "只回复两个字：收到"}],
+                                "maxTokens": 32, "temperature": 0})
+                raw = httpx.post(oai["url"], json=oai["body"], headers=oai["headers"], timeout=180).json()
+                content = (raw.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+                reasoning = (raw.get("choices") or [{}])[0].get("message", {}).get("reasoning") or ""
+                check("ollama: 记录成因 —— OpenAI 兼容端点下 content 为空而 reasoning 非空"
+                      "（思考模型所致；别把 provider 改回 openai ✗）",
+                      content == "" and reasoning != "", f"content={content[:20]!r} reasoning={reasoning[:20]!r}")
+            except Exception as exc:  # noqa: BLE001
+                check("ollama: 真推理", False, f"{type(exc).__name__}: {exc}"[:160])
 
     # ── ③ 其余本地服务：在跑就验端点，没跑就显式跳过
     targets = [
@@ -130,7 +159,6 @@ def main() -> int:
         ("h3-8765", "http://127.0.0.1:8765/healthz", "本地 H3 薄封装"),
         ("cosyvoice", "http://127.0.0.1:9880/openapi.json", "语音克隆/合成"),
     ]
-    live: list[str] = []
     for name, url, label in targets:
         ok, how = probe(url)
         if ok:
@@ -232,14 +260,14 @@ def main() -> int:
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))
     for name in _SKIPS:
-        print("SKIP  " + name + "（服务未启动 ⇒ 该条按设计未验证，**不是通过**）")
+        # ⚠️ 措辞不能写死「服务未启动」✗：ollama 那条可能是**在跑但库空** ✓（2026-11-01 实测 ✓）
+        print("SKIP  " + name + "（⇒ 该条按设计未验证，**不是通过**）")
     print()
-    running = [name for name, name_url, _label in targets if name_url]
-    print("LIVE 在跑: " + ("、".join(["ollama"] if not _SKIPS else []) or "（见上面 SKIP 行）")
-          + ("；其余在跑: " + "、".join(live) if live else ""))
-    del running  # 保留语义清晰的占位，避免误用旧变量
+    # ⚠️ 上一版这里写死 `["ollama"]` ✗ ⇒ ollama 明明没起也印成「在跑」✓✗（且服务真在跑时反而印不出来 ✗）；
+    #    现在统一读 `live`（探活真通过的那些）✓ —— 报告行必须跟着事实走 ✓。
+    print("LIVE 在跑: " + ("、".join(live) or "（无 ⇒ 全部 SKIP，见上面 SKIP 行）"))
     print(f"SUMMARY: {len(_RESULTS) - len(failures)}/{len(_RESULTS)} passed"
-          + (f"（skip {len(_SKIPS)}：服务未启动）" if _SKIPS else ""))
+          + (f"（skip {len(_SKIPS)}：服务未启动或无法验证）" if _SKIPS else ""))
     return 1 if failures else 0
 
 

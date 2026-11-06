@@ -281,6 +281,122 @@ def case_forward() -> None:
           "batch" in message, message or "没报错 ✗")
 
 
+def case_image_inject() -> None:
+    """⑧ 视觉塔输出 ⇒ 文本塔（Edit 2511 的唯一注入点 ✓）。"""
+    torch.manual_seed(11)
+    module = te.build_from_shapes(_table(), head_dim=8).eval()
+    #: 占位符落在 **user 段内**（下标 9 ✓），前面 9 条是 system 段与模板骨架 ✓
+    ids = torch.tensor([[te.IM_START_ID, 11, 12, 151648, 198,
+                         te.IM_START_ID, te.USER_ID, 198,
+                         151647, te.IMG_PAD_ID, 151648, 23, 24, 151648, 198,
+                         te.IM_START_ID, 520, 198]])
+    at, length, count = 9, int(ids.shape[1]), 4
+    first = torch.randn(count, 32)
+    second = torch.randn(count, 32)
+    with torch.no_grad():
+        got = module(ids, trim=False, image_embeds=first)
+        other = module(ids, trim=False, image_embeds=second)
+    check(f"⑧ 单槽 ⇒「整段替换」✓：长度 s − 1 + n = {length} − 1 + {count} ✓",
+          tuple(got.shape) == (1, length - 1 + count, 32), tuple(got.shape))
+    #: ⚠️ 前缀不变这条**不能**靠"不给嵌入"当基线 ✗ —— 那正是 ⑧⁵ 要报错的场景 ✓。
+    #: 正确做法：两份**不同**的图像嵌入互比 ✓ —— 前缀必须逐位相同 ✓（因果注意力 ⇒
+    #: 后面的东西影响不到前面 ✓），而占位符之后必须不同 ✓。这一对把「拼错位置」
+    #: （拼到开头/末尾）与「嵌入被忽略」同时钉死 ✓。
+    check("⑧′ 占位符**之前**的 token 与嵌入无关 ✓ 逐位相同（因果注意力 ✓）"
+          "（拼到开头/末尾 ⇒ 这里会红 ✓✗）",
+          torch.equal(got[:, :at], other[:, :at]), "前缀不一致 ✗")
+    check("⑧″ 占位符**之后**的 token 随嵌入变 ✓（嵌入真进了上下文 ✓；被忽略 ⇒ 这里会相同 ✓✗）",
+          not torch.allclose(got[:, at:], other[:, at:], atol=1e-6),
+          float((got[:, at:] - other[:, at:]).abs().max()))
+    with torch.no_grad():
+        cut = module(ids, trim=True, image_embeds=first)
+    start = te.trim_start(ids[0].tolist())
+    check("⑧⁴ 切段与注入互不干扰 ✓：先注入、后按 `trim_start` 切 ✓（长度 s − 1 + n − start ✓）",
+          tuple(cut.shape) == (1, length - 1 + count - start, 32), tuple(cut.shape))
+
+    message = _error_of(lambda: module(ids, trim=False))
+    check("⑧⁵ 有占位符却不给图像嵌入 ⇒ **当场报错** ✓✗（`<|image_pad|>` 是真 token ✓，"
+          "拿词表嵌入顶替 ⇒ 装得上、算得出、Edit 能力没有 ✓✗）",
+          "image_pad" in message and "视觉塔" in message, message or "没报错 ✗")
+
+    plain = torch.tensor([[te.IM_START_ID, 11, 12, 151648, 198,
+                           te.IM_START_ID, te.USER_ID, 198, 23, 24, 151648, 198,
+                           te.IM_START_ID, 520, 198]])
+    message = _error_of(lambda: module(plain, trim=False, image_embeds=first))
+    check("⑧⁶ 无占位符却给图像嵌入 ⇒ 报错 ✓（不猜「接在末尾/开头」✗）",
+          "占位符" in message, message or "没报错 ✗")
+    message = _error_of(lambda: module(ids, trim=False, image_embeds=torch.randn(count, 16)))
+    check("⑧⁷ 嵌入宽度 ≠ hidden ⇒ 报错 ✓（两座塔不是同一族 ✓）",
+          "hidden" in message, message or "没报错 ✗")
+
+    many = torch.tensor([[te.IM_START_ID, 11, 12, 151648, 198,
+                          te.IM_START_ID, te.USER_ID, 198,
+                          151647] + [te.IMG_PAD_ID] * count + [151648, 23, 24, 151648, 198,
+                          te.IM_START_ID, 520, 198]])
+    with torch.no_grad():
+        spread = module(many, trim=False, image_embeds=first)
+    check("⑧⁸ 写满 n 个占位符与只写 1 个**结果一致** ✓（散入 / 整段替换两条写法等价 ✓）",
+          torch.allclose(spread, got, atol=1e-6), float((spread - got).abs().max()))
+    message = _error_of(lambda: module(many, trim=False, image_embeds=torch.randn(count + 1, 32)))
+    check("⑧⁹ 槽数与条数不匹配（4 槽 vs 5 条）⇒ 报错 ✓（多出来的那条会没处放 ✗）",
+          "占位槽" in message, message or "没报错 ✗")
+    check("⑧¹⁰ `prompt_edit` 的模板里占位符只有**一个** ✓（⇒ 主路走「整段替换」✓）",
+          te.prompt_of("x", with_image=True, image_embeds=True).count(te.IMG_PAD_TOKEN) == 1, "—")
+
+    #: ⭐ **多图**（Plus 口径 ✓）：两个槽、两块，**长度可以不同** ✓ —— 两张参考图尺寸不同就是这种情况 ✓。
+    pair = torch.tensor([[te.IM_START_ID, 11, 12, 151648, 198,
+                          te.IM_START_ID, te.USER_ID, 198,
+                          151647, te.IMG_PAD_ID, 151648,
+                          151647, te.IMG_PAD_ID, 151648,
+                          23, 24, 151648, 198,
+                          te.IM_START_ID, 520, 198]])
+    blocks = [torch.randn(5, 32), torch.randn(3, 32)]
+    swapped = [blocks[1], blocks[0]]
+    with torch.no_grad():
+        multi = module(pair, trim=False, image_embeds=blocks)
+        flipped = module(pair, trim=False, image_embeds=swapped)
+    slots = 2
+    total = int(sum(int(item.shape[0]) for item in blocks))
+    check(f"⑧¹¹ 两槽两块 ⇒ 长度 s − {slots} + Σnᵢ = {int(pair.shape[1])} − {slots} + {total} ✓"
+          f"（各块**长度不必相同** ✓✗）",
+          tuple(multi.shape) == (1, int(pair.shape[1]) - slots + total, 32), tuple(multi.shape))
+    check("⑧¹² 多图的第一块落在**第一个**槽 ✓（前缀与嵌入无关 ✓、游标错位会红 ✓）",
+          torch.equal(multi[:, :9], flipped[:, :9]), "前缀不一致 ✗")
+    check("⑧¹³ 两块**换个顺序**结果就不同 ✓✗（顺序即语义 ✓：乱序不报错、只让编辑作用错图 ✓）",
+          not torch.allclose(multi, flipped, atol=1e-6),
+          float((multi - flipped).abs().max()))
+    message = _error_of(lambda: module(pair, trim=False, image_embeds=[blocks[0]]))
+    check("⑧¹⁴ 两槽却只给**一块** ⇒ 报错 ✓✗（少一块 ⇒ 少一张图的条件，不报错就查不出来 ✓）",
+          "占位槽" in message and "块" in message, message or "没报错 ✗")
+    message = _error_of(lambda: module(pair, trim=False, image_embeds=blocks[0]))
+    check("⑧¹⁴′ 两槽却给**一个裸张量** ⇒ 报错 ✓（按 n 条散入的老路走 ✓：5 条 ≠ 2 槽 ✓）",
+          "占位槽" in message, message or "没报错 ✗")
+    message = _error_of(lambda: module(pair, trim=False, image_embeds=blocks + blocks[:1]))
+    check("⑧¹⁵ 两槽却给**三块** ⇒ 报错 ✓（第三块没有锚点 ✓；不许悄悄丢掉 ✓✗）",
+          "占位槽" in message, message or "没报错 ✗")
+    message = _error_of(lambda: module(pair, trim=False,
+                                       image_embeds=[torch.randn(0, 32), torch.randn(3, 32)]))
+    check("⑧¹⁶ 空块（0 条）⇒ 报错 ✓（视觉塔不出空块 ✓，出现即上游取错层 ✓✗）",
+          "空" in message, message or "没报错 ✗")
+
+    single_text = te.prompt_of("换成雪夜", with_image=True, image_embeds=True)
+    both_text = te.prompt_of("把第一张的人放进第二张的场景", with_image=True, image_embeds=True,
+                             image_count=2)
+    check("⑧¹⁷ 单图模板里**没有** ``Picture 1:`` ✓✗（Plus 那套连单图也加编号 ⇒ 两套口径不能混用 ✓）",
+          "Picture" not in single_text and single_text.count(te.IMG_PAD_TOKEN) == 1, "—")
+    check("⑧¹⁸ 多图模板 ⇒ N 个视觉块 + ``Picture i:`` 逐图编号 ✓、system 段与单图**逐字相同** ✓",
+          both_text.count(te.IMG_PAD_TOKEN) == 2
+          and "Picture 1: " in both_text and "Picture 2: " in both_text
+          and both_text.split("<|im_start|>user")[0] == single_text.split("<|im_start|>user")[0],
+          both_text[:80])
+    message = _error_of(lambda: te.edit_prefix(0))
+    check("⑧¹⁹ ``edit_prefix(0)`` ⇒ 报错 ✓✗（0 张图拼出空前缀 ⇒ 模板里一个槽都没有 ✓）",
+          "≥ 1" in message, message or "没报错 ✗")
+    message = _error_of(lambda: te.prompt_of("x", image_count=2))
+    check("⑧²⁰ 无图模板却给 ``image_count=2`` ⇒ 报错 ✓（张数只在编辑口径下有意义 ✓✗）",
+          "image_count" in message, message or "没报错 ✗")
+
+
 def case_runtime() -> None:
     sh = _shape()
     rt = te.Qwen25TeRuntime(sh, max_length=512)
@@ -347,6 +463,7 @@ def main() -> int:
     case_template()
     case_trim()
     case_forward()
+    case_image_inject()
     case_runtime()
     case_real_header()
 

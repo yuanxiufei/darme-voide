@@ -138,6 +138,137 @@ def host_room_bytes(host: tuple[int, int] | None = None) -> int | None:
     return max(0, int(free) - host_reserve_bytes(total))
 
 
+# ── 进程工作集压帽（**只为验证**，不是省内存的手段 ✗✗）──────────────────────
+#
+# 机制取自 `windows/serve/mem_budget.h` 的 ``--mem-budget-mb`` ✓
+# （它用 ``SetProcessWorkingSetSize`` 把工作集钉死，从而让 llama.cpp 真的从盘读 ✓）。
+#
+# ## 为什么本仓需要它 ✓✗
+#
+# 本仓读权重走 :mod:`win_io` 的**绕过缓存**路径 ✓，所以"权重不在页缓存里"这件事是成立的 ✓；
+# 但**页缓存之外还有工作集** ✓：同一份张量在 `pin_memory` / `empty_cache` 反复搬运中
+# 会被留在进程工作集里 ✓✗ ⇒ 测「降级到 SSD 还跑不跑得动」时，工作集把整份兜住 ✓
+# ⇒ **第三级永远走不到** ✓✗（测出来的"SSD 分层"其实还是内存速度 ✓）。
+#
+# ## 它做了什么、没做什么 ✗
+#
+# * 做过：把**已在工作集里的页**挤出去 ✓（页仍在 standby / 修改页仍会写回 ✓）；
+# * 没做：不释放堆 ✓、不改 allocator ✓、不动显存 ✓；
+# * 副作用：下次访问**真回盘** ✓ ⇒ 慢一个数量级 ✓✗。
+#
+# ⇒ **正常装载路径不许调它** ✗✗。只在两处用：验证 SSD 那一级的可用性 ✓、
+# 复现「机器内存紧张」时的真实降级行为 ✓（`LoadWatch` 的压力档靠的正是这个前提 ✓）。
+
+#: 压帽的成功/失败**都要如实报** ✓✗（``ok=False`` 时必带 ``error`` 数字 ✓ —— 不假装成功 ✗）
+WORKING_SET_FLOOR_BYTES = 64 * MIB
+
+
+def working_set() -> dict[str, Any] | None:
+    """本进程**工作集**读数 ✓；量不到 ⇒ ``None`` ✓（不猜 ✗）。
+
+    返回 ``{"workingSetBytes", "workingSetMiB", "peakWorkingSetBytes", "pagefileBytes"}`` ✓。
+
+    ⚠️ 这是**本进程**的工作集 ✗✗，不是机器可用内存 ✓（那是 :func:`host_memory` ✓）：
+    "内存占用低"的结论要用两个数一起看 ✓ —— 机器还有多少 ✓ ＋ 本进程压了多少 ✓。
+    """
+    if not sys.platform.startswith("win"):  # pragma: no cover - 平台分支
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        #: Vista+ 在 kernel32 里叫 ``K32GetProcessMemoryInfo`` ✓；老系统才要 psapi ✓
+        read = getattr(kernel32, "K32GetProcessMemoryInfo", None)
+        if read is None:  # pragma: no cover - 老系统
+            read = ctypes.WinDLL("psapi", use_last_error=True).GetProcessMemoryInfo
+        read.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessMemoryCounters),
+                         wintypes.DWORD]
+        read.restype = wintypes.BOOL
+        if not read(kernel32.GetCurrentProcess(), ctypes.byref(counters),
+                    ctypes.sizeof(counters)):
+            return None
+        working = int(counters.WorkingSetSize)
+        return {
+            "workingSetBytes": working,
+            "workingSetMiB": round(working / MIB, 1),
+            "peakWorkingSetBytes": int(counters.PeakWorkingSetSize),
+            "pagefileBytes": int(counters.PagefileUsage),
+        }
+    except Exception:  # noqa: BLE001 —— 读数失败不是致命错 ✓（与 `host_memory` 同口径 ✓）
+        return None
+
+
+def limit_working_set(bytes_: int = -1) -> dict[str, Any]:
+    """把本进程工作集**压到** ``bytes_`` 以内 ✓；``-1`` ⇒ 尽量挤空 ✓（＝``EmptyWorkingSet`` ✓）。
+
+    **只在验证/压测里调** ✓✗（见上面那段：正常路径调它会把每次权重访问变成读盘 ✓）。
+    ``bytes_`` 小于 :data:`WORKING_SET_FLOOR_BYTES` 时**按它算**✓ —— 压不动就是压不动 ✓，
+    不替调用方放宽 ✗（否则"已压到 X"这句话会变成假的 ✓✗）。
+
+    返回里 ``ok`` 与 ``error`` **必居其一** ✓✗：
+
+    * ``{"supported": True, "ok": True, "requestedBytes", "beforeBytes", "afterBytes"}`` ✓；
+    * ``{"supported": True, "ok": False, "error": <GetLastError 数字>, "note": ...}`` ✓；
+    * ``{"supported": False, ...}`` ⇒ 非 Windows ✓（**不抛** ✓：与 :mod:`win_io` 的 ``mode="plain"``
+      同口径 ✓，调用方据此换验证手段 ✓）。
+    """
+    want = int(bytes_)
+    if want != -1 and want < 0:
+        raise ValueError(f"limit_working_set 只认 -1（挤空）或非负字节数，拿到 {bytes_!r}")
+    before = working_set()
+    if not sys.platform.startswith("win"):  # pragma: no cover - 平台分支
+        return {"supported": False, "ok": False, "requestedBytes": want,
+                "note": "非 Windows：本仓只实现了 Windows 的工作集压帽 ✓，"
+                        "类 Unix 请用 cgroup memory.max ✓（未实现 ✗）"}
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetProcessWorkingSetSize.argtypes = [wintypes.HANDLE, ctypes.c_size_t,
+                                                      ctypes.c_size_t]
+        kernel32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+        #: ``-1`` 走 ``(SIZE_T)-1`` 那一档 ✓（文档口径：传 (SIZE_T)-1,(SIZE_T)-1 ⇒ 尽量全挤空 ✓）
+        low = high = ctypes.c_size_t(-1).value if want == -1 else want
+        ok = bool(kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), low, high))
+        report: dict[str, Any] = {
+            "supported": True, "ok": ok, "requestedBytes": want,
+            "beforeBytes": None if before is None else before["workingSetBytes"],
+            "afterBytes": None,
+        }
+        after = working_set()
+        if after is not None:
+            report["afterBytes"] = after["workingSetBytes"]
+            report["afterMiB"] = after["workingSetMiB"]
+        if not ok:
+            report["error"] = int(ctypes.get_last_error())
+            report["note"] = ("SetProcessWorkingSetSize 失败 ✓ ⇒ **没压成** ✗"
+                              "（不是「压了但没效果」✗）；"
+                              "常见原因：句柄不是本进程 / 配额权限不足 ✓")
+        return report
+    except Exception as exc:  # noqa: BLE001 —— 失败要如实报 ✓，不假装成功 ✗
+        return {"supported": True, "ok": False, "requestedBytes": want,
+                "beforeBytes": None if before is None else before["workingSetBytes"],
+                "error": type(exc).__name__, "note": str(exc)}
+
+
 def ensure_host_room(need_bytes: int, *, host: tuple[int, int] | None = None,
                      what: str = "") -> dict[str, Any]:
     """**整份放内存**之前核一次 ✓✗（放不下 ⇒ :class:`InsufficientResources` ✓）。

@@ -15,6 +15,8 @@ Corrects speech recognition errors in subtitle files while strictly preserving t
 
 **IMPORTANT**: Before starting any correction, ALWAYS ask the user for domain-specific terms.
 
+**Before asking, read `references/terminology.md`.** It already tabulates the most frequent speech-recognition errors by domain (AI/ML frameworks, the LangChain ecosystem, code identifiers). Use it as the base correction table and only ask the user about domains it does not cover — otherwise you make them retype terms the skill already knows. Their answers extend that table for the current file.
+
 Prompt the user with:
 
 ```
@@ -87,6 +89,8 @@ If user says "没有" / "no" / "直接开始":
 ## Strict rules
 
 ### Timeline preservation
+
+The exact block layout you must keep intact (index line / timecode line / one or more text lines / blank separator) is spelled out in `references/srt-format.md` — read it before editing when unsure whether a trailing blank line belongs to the entry.
 
 - **NEVER modify timestamps** — keep all `00:00:00,000 --> 00:00:00,000` lines exactly as-is
 - **NEVER change subtitle numbering** — preserve sequence numbers

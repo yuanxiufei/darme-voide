@@ -27,6 +27,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 判据还没跑就崩在第一条打印上 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
@@ -34,6 +40,11 @@ from app.services.engine import qwen35_te as q  # noqa: E402
 from app.services.engine import quant, safetensors as st  # noqa: E402
 
 FAILS: list[str] = []
+#: 全部判据名 ✓ —— 收尾要报「过了几项／共几项」✗✗：原来只印「✓ 全部通过」✓✗，而
+#: `run_all.py` **只认 `SUMMARY: n/m passed`** ✓ ⇒ 本套在全量表里**项数恒为 0**（"凭空消失" ✗）。
+CHECKS: list[str] = []
+#: 未过的**判据**数 ✓（``FAILS`` 里还混着「整段 case 抛异常」的条目 ✓ ⇒ 不能用它减 ✗）。
+_BAD = 0
 
 #: 盘上真文件 ✓（不在就跳过 ①，②③④ 照跑 ✓）
 REAL = Path("D:/Comfy-Desktop/ComfyUI-Shared/models/text_encoders/"
@@ -41,8 +52,11 @@ REAL = Path("D:/Comfy-Desktop/ComfyUI-Shared/models/text_encoders/"
 
 
 def check(name: str, ok: object, detail: object = None) -> None:
+    global _BAD
+    CHECKS.append(name)
     print(f"  {'✓' if ok else '✗'} {name}")
     if not ok:
+        _BAD += 1
         FAILS.append(name)
         if detail is not None:
             print(f"      {detail}")
@@ -590,10 +604,12 @@ def main() -> int:
     if FAILS:
         print(f"✗ {len(FAILS)} 项未过：")
         for name in FAILS:
-            print(f"  · {name}")
-        return 1
-    print("✓ 全部通过")
-    return 0
+            #: ⚠️ 前缀必须是 `FAIL` ✓（`run_all` 只转贴 `FAIL` 开头的行 ✓）。
+            print(f"FAIL  {name}")
+    #: ⚠️ 口径是硬要求 ✗✗（`run_all.py` 抬头那条 ✓）：只认 `SUMMARY: n/m passed` ✓ ——
+    #: 原来只印「✓ 全部通过」✗ ⇒ 全量表里这套的**项数恒为 0** ✓✗。
+    print(f"SUMMARY: {max(0, len(CHECKS) - _BAD)}/{len(CHECKS)} passed")
+    return 1 if FAILS else 0
 
 
 if __name__ == "__main__":

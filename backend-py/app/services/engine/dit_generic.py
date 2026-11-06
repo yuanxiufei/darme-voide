@@ -149,10 +149,18 @@ class SwiGLU(nn.Module):
 
 
 class Attention(nn.Module):
-    """GQA：q/k 先 per-head RMSNorm、再 3 轴 RoPE、再 SDPA，输出乘 ``sigmoid(gate)``。
+    """GQA：q/k 先 per-head RMSNorm、再 3 轴 RoPE、再 SDPA，输出过 ``sigmoid(gate)`` 再 ``wo``。
 
-    闸门在 **``wo`` 之后**（参考：``out = self.wo(out) * sigmoid(gate)``），不是加在残差上
-    —— 顺序错了数值仍然「看着合理」，只有逐位对拍才抓得住。
+    闸门在 **``wo`` 之前** ✓（参考 ``comfy/ldm/krea2/model.py:104``：
+    ``return self.wo(out * F.sigmoid(gate))`` ✓）。
+
+    ⚠️ **``wo(out)·g`` 与 ``wo(out·g)`` 不是一回事** ✗✗（2026-11-01 实测抓的 ✓）：
+    ``wo`` 是**无 bias 的混合矩阵** ✓ ⇒
+    ``wo(out·g)_i = Σ_j W_ij·out_j·g_j`` ✓，而 ``wo(out)_i·g_i = g_i·Σ_j W_ij·out_j`` ✓
+    —— 前者是**逐输入通道**加权后再混合 ✓、后者是**混合后按输出通道**加权 ✓。
+    两式在 ``g`` 恒定时才相等 ✗，而这里的 ``g = sigmoid(gate(x))`` **逐元素不同** ✓✗。
+    写反的症状：形状自洽 ✓、不报错 ✓、能出图 ✓，只是**提示词几乎不生效** ✓✗
+    （实测：同 seed 换一条完全不同的提示词，输出相关 0.9998 ✓，图是一团纹理 ✓）。
     """
 
     def __init__(self, dim: int, heads: int, head_dim: int, kvheads: int) -> None:
@@ -175,7 +183,8 @@ class Attention(nn.Module):
             q, k = apply_rope(q, freqs), apply_rope(k, freqs)
         out = F.scaled_dot_product_attention(q, k, v, enable_gqa=self.heads != self.kvheads)
         out = out.transpose(1, 2).reshape(b, n, self.heads * self.head_dim)
-        return self.wo(out) * torch.sigmoid(self.gate(x))
+        #: ⚠️ 闸门在 ``wo`` **之前** ✓（见类 docstring：两式不等价 ✗）。
+        return self.wo(out * torch.sigmoid(self.gate(x)))
 
 
 class SimpleModulation(nn.Module):
@@ -223,10 +232,10 @@ class TextFusionBlock(nn.Module):
 
 
 class TextFusionTransformer(nn.Module):
-    """把 N 层文本特征压成 1 层：逐层块（``(b·l, n, d)`` 展平）→ ``projector`` → 精修块。
+    """把 N 层文本特征压成 1 层：逐层块（**序列 = 层** ✓、批 = token ✓）→ ``projector`` → 精修块。
 
     ``projector`` 是 ``Linear(num_txt_layers, 1)``（权重形状 ``[1, 12]``）—— 它给每一层学一个
-    标量权重再求和，不是把特征投影到别的维。
+    标量权重再求和，不是把特征投影到别的维 ✓。
     """
 
     def __init__(self, txtlayers: int, txtdim: int, heads: int, head_dim: int,
@@ -249,11 +258,20 @@ class TextFusionTransformer(nn.Module):
         if layers != self.projector.in_features:
             raise ShapeError(f"文本特征层数 {layers} ≠ `projector` 入维 "
                              f"{self.projector.in_features}")
-        flat = x.reshape(b * layers, n, dim)
+        #: ⚠️ **两个块的「序列」不是同一根轴** ✗✗（2026-11-01 对照参考实现改的 ✓）：
+        #: * ``layerwise_blocks`` 的**序列 = 层** ✓、批 = 文本 token ✓
+        #:   （参考：``x.reshape(b * l, n, d)`` ✓ —— ``l`` 是 token 数 ✓、``n`` 是层数 ✓，
+        #:   它写的是 ``x = x.reshape(b * l, n, d)`` 里的 ``(b, l, n, d)`` ✓ 即
+        #:   ``(token, 层, 宽)`` ⇒ 展平后**每条序列就是某 token 的 12 层** ✓）；
+        #: * ``refiner_blocks`` 的**序列 = 文本 token** ✓、宽仍是 ``txtdim`` ✓。
+        #: 反过来写（批 = 层 ✓、序列 = token ✗）形状**完全自洽** ✓、键名也全对得上 ✓，
+        #: 只有数值错 ✓✗ —— 症状是「提示词几乎不生效」✓（实测换提示词后输出相关 0.9998 ✓），
+        #: 因为逐层混合变成了逐 token 混合 ✓，``projector`` 在层轴上收的东西被搅匀了 ✗。
+        flat = x.reshape(b * n, layers, dim)                   # 序列维 = 层 ✓
         for block in self.layerwise_blocks:
             flat = block(flat)
-        back = flat.view(b, layers, n, dim).transpose(1, -1)   # (b, d, n, l)
-        x = self.projector(back).squeeze(-1).transpose(1, 2)   # (b, n, d)
+        back = flat.reshape(b, n, layers, dim).permute(0, 1, 3, 2)   # (b, n, dim, layers)
+        x = self.projector(back).squeeze(-1)                   # (b, n, dim) ✓
         for block in self.refiner_blocks:
             x = block(x)
         return x
@@ -533,11 +551,25 @@ class Krea2DiT(nn.Module):
         if x.shape[1] != self.channels:
             raise ShapeError(f"latent 通道 {x.shape[1]} ≠ 结构里的 {self.channels}")
         b, _, h0, w0 = x.shape
+        #: ⚠️ 潜变量**故意是 f32** ✓（`torch.randn` 的默认 ✓、采样全程也保 f32 ✓ 更准 ✓），
+        #: 而权重是 bf16/fp16 ✓（Krea2 的 int8 常驻层反量化出来也是 bf16 ✓）⇒
+        #: **必须在这里对齐到权重精度** ✓✗：不对齐的话 ``first`` 当场报
+        #: ``mat1 and mat2 must have the same dtype, but got Float and BFloat16`` ✓ ——
+        #: 报错指向 ``nn.Linear`` ✓、读起来像「权重坏了」✗，其实是「精度没对齐」✓
+        #: （2026-11-01 接 Krea2 时就是这么炸的 ✓；同族 `dit_lumina.LuminaDiT.forward` 同一处 cast ✓）。
+        #: ⚠️ 反方向的两种做法都错 ✗：在采样侧把潜变量降成 bf16 ⇒ 全程丢精度 ✓；
+        #: 把权重升成 f32 ⇒ 12.82B 参数翻倍 ✓✗（int8 常驻白做 ✓）。
+        wdt = self.first.weight.dtype
+        x = x.to(wdt)
+        #: 文本条件同理 ✓：`encode_text` 出来的是 TE 的 dtype ✓、主干是 DiT 的 dtype ✓，
+        #: 两者**未必相同** ✓（TE 在 CPU 上跑是 f32 ✓、DiT 在卡上是 bf16 ✓）⇒ 这里一并归一 ✓。
+        context = context.to(wdt)
         img, imgpos, hh, ww = self.process_img(x)
         img_tokens = img.shape[1]
         img = self.first(img)
 
-        t = self.tmlp(timestep_embedding(timesteps, self.shape_.tdim).unsqueeze(1)
+        #: 时间向量 ✓：正弦在 f32 里算完再 cast ✓（用 bf16 算 ``cos/sin`` 会把相邻步糊成一个数 ✓✗）。
+        t = self.tmlp(timestep_embedding(timesteps.float(), self.shape_.tdim).unsqueeze(1)
                       .to(img.dtype))
         tvec = self.tproj(t)
 
@@ -566,12 +598,24 @@ def build_from_shapes(shapes: dict[str, tuple[int, ...]], *, patch: int = 2,
     return model if dtype is torch.float32 else model.to(dtype)
 
 
+# ⭐ **对外名字**（2026-11-01 补 ✓）：本模块的骨架/形态是**单流 DiT 的通用形** ✓ ——
+# `Krea2Shape` / `Krea2DiT` 只是"第一个按它建出来的族"留下的名字 ✓✗。带族名的类名会让
+# 下一个同构族误以为得再抄一份模块 ✓✗（Flux 就是那时候抄出独立 `dit_flux` 的 ✓ —— 那个抄得对 ✓：
+# 它是**双流** ✓；但第三、第四个"单流"族不该再抄 ✓）。
+# ⇒ 加族时 `dit_build.FamilyBuilder(build_fn="SingleStreamDiT" ✓)` 就够 ✓；
+# 两个名字指向**同一个类对象** ✓（`is` 判等 ✓），不存在两份实现 ✓。
+SingleStreamShape = Krea2Shape
+SingleStreamDiT = Krea2DiT
+
+
 __all__ = [
     "Attention",
     "COMPANION_SUFFIXES",
     "DoubleSharedModulation",
     "Krea2DiT",
     "Krea2Shape",
+    "SingleStreamDiT",
+    "SingleStreamShape",
     "LastLayer",
     "QKNorm",
     "RMS_EPS",

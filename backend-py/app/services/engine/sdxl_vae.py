@@ -63,6 +63,7 @@ __all__ = [
     "SdxlVaeError",
     "build_sdxl_vae",
     "decode_latents",
+    "encode_latents",
     "has_torch",
     "load_sdxl_vae_state_dict",
     "sdxl_vae_key_names",
@@ -583,3 +584,30 @@ def decode_latents(model: Any, latents: Any, *, config: "SdxlVaeConfig | None" =
     if not to_unit:
         return pixels
     return ((pixels + 1.0) / 2.0).clamp(0.0, 1.0)
+
+
+def encode_latents(model: Any, images: Any, *, config: "SdxlVaeConfig | None" = None) -> Any:
+    """像素 ⇒ **模型空间**潜变量 ✓ —— :func:`decode_latents` 的**对称面** ✓。
+
+    ## 式子（从上一条反推，**不是**另写一套 ✓）
+
+    ``decode_latents`` 用 ``x_vae = x_model / scale + shift`` ✓
+    ⇒ 编码反过来就是 ``x_model = (x_vae - shift) * scale`` ✓。
+
+    ⚠️ 这就是 :meth:`latent_formats.LatentFormatSpec.process_in` 的那条式子 ✓ ——
+    **本仓不自己再写一份** ✗：这里只是把 ``encode`` 的 ``(mean, logvar)`` 取均值 ✓ 再套同一对
+    ``scale/shift`` ✓；换族只需要换 ``config`` ✓。
+
+    ⚠️ 2026-11-01 前**没有这个函数** ✓✗：调用方只能裸调 ``model.encode()`` ✓ —— 那返回的是
+    **模型空间**的 ``(mean, logvar)`` 二元组 ✓✗（Flux 族差 ``0.3611`` 缩放 + ``0.1159`` 偏移 ✓、
+    SDXL 族差 ``0.13025`` ✓）⇒ 首帧条件/参考图的数值整体歪掉、形状全对、一个错不报 ✓✗。
+    """
+    if not _HAS_TORCH:
+        raise SdxlVaeError("没装 torch ✗ ⇒ 编不了码 ✓")
+    spec = config or getattr(model, "config", None) or SdxlVaeConfig()
+    scale = float(spec.scaling_factor)
+    if scale == 0.0:
+        raise SdxlVaeError("scaling_factor 为 0 ✗ ⇒ 会乘成 0 ✓（配置有问题 ✓）")
+    with torch.no_grad():
+        mean, _logvar = model.encode(images.to(_weight_dtype(model, images)))
+    return (mean.float() - float(spec.shift_factor)) * scale

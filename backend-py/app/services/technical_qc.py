@@ -59,10 +59,12 @@ from sqlalchemy.engine import Connection
 
 from ..core.models import storyboards, video_generations, video_quality_checks
 from ..core.response import now
+from .engine import tuning
 from .file_storage import get_absolute_path
 from .task_logger import log_task_warn
 
-__all__ = ["TECH_QC_THRESHOLDS", "probe_video_technical_spec", "run_technical_qc"]
+__all__ = ["ISSUE_CODES", "TECH_QC_THRESHOLDS", "probe_video_technical_spec",
+           "qc_thresholds", "run_technical_qc"]
 
 #: 硬性数值标准（可调）
 #: ⚠️ **必须与 ``technical-qc.ts`` 的同名常量逐值一致**（守卫 ``route_parity_test`` 会比对）
@@ -77,6 +79,43 @@ TECH_QC_THRESHOLDS: dict[str, float] = {
     "fpsMin": 15,               # 合理帧率下限
     "durationToleranceSec": 1,  # 时长偏差容差（s）
 }
+
+#: 技术 issue 的**稳定 code**（闭集）。
+#: 为什么非要它 ✗：``message`` 里带的是每次跑都不一样的数字（"画面黑场 0.42s（第 1.3s 起…）"）
+#: ⇒ 按文案聚类永远聚不到一起（改一个标点就断），写进 ``outcome_index.error_code`` 也
+#: 只会得到"每个文案各一条"✗。**code 只说属于哪一类（可聚类），数字仍留在 message 里给人看** ✓。
+#: 用途：① 跑次索引的 ``error_code``（`tuning.suggest()` 的失败聚集靠它分组）；
+#: ② 以后要统计"哪个阈值最常被触发"时，分母是 code 而不是文案。
+ISSUE_CODES: dict[str, str] = {
+    "spec.unreadable": "ffprobe 读不出时长与帧率（后续检测全部空转）",
+    "spec.probe_failed": "ffprobe 直接失败，跳过技术检测",
+    "black": "画面黑场超过阈值",
+    "freeze": "画面冻帧超过阈值",
+    "audio.true_peak": "音频真峰超过阈值（削波风险）",
+    "audio.loudness": "集成响度偏离目标",
+    "fps.low": "帧率低于下限",
+    "duration.mismatch": "时长与分镜声明偏差过大",
+}
+
+
+def qc_thresholds() -> tuple[dict[str, float], dict[str, str]]:
+    """**生效**的阈值 + 每格来源（``"default"`` / ``"override:qc.<字段>"``）。
+
+    覆盖层走 ``engine/tuning.py`` 的 ``qc`` 伪档（同一套白名单 / 区间 / 写前备份 /
+    **证据核验**）：质检阈值最需要证据 —— 调低 ``blackMinDuration`` 就是让烂片过审，
+    调高就是批量误杀，凭感觉改一次之后没人说得清「这批成片为什么突然全过/全挂」。
+
+    ⚠️ 返回的是**副本**，绝不回写 :data:`TECH_QC_THRESHOLDS`：那份是 TS 镜像常量
+    （``route_parity_test`` 逐值比对原文件），一次覆盖就写进去 ⇒ 镜像守卫变成假绿 ✗。
+    ⚠️ 没有覆盖文件时逐值与常量相同 ⇒ 行为**一分不变** ✓（这是能默认开着的前提）。
+    """
+    values: dict[str, float] = {}
+    sources: dict[str, str] = {}
+    for name, default in TECH_QC_THRESHOLDS.items():
+        value, source = tuning.resolve(tuning.QC_STAGE, name, default)
+        values[name] = value
+        sources[name] = source
+    return values, sources
 
 _BLACK_RE = re.compile(
     r"black_start:\s*([0-9.]+)\s*black_end:\s*([0-9.]+)\s*black_duration:\s*([0-9.]+)")
@@ -267,7 +306,13 @@ def probe_video_technical_spec(local_path: str,
         return _empty_result(str(exc))
 
     result = _empty_result()
-    thresholds = TECH_QC_THRESHOLDS
+    #: 阈值走覆盖层（``engine/tuning.json`` 的 ``qc.*``）：没有文件就是常量本身 ✓。
+    #: 有覆盖时**打一条警告** —— 否则"这批片为什么全过/全挂"只能靠猜 ✗。
+    thresholds, threshold_sources = qc_thresholds()
+    overridden = {name: source for name, source in threshold_sources.items()
+                  if source != "default"}
+    if overridden:
+        log_task_warn("TechQc", "thresholds-overridden", overridden)
 
     # ===== 1. ffprobe：时长 / 帧率 =====
     try:
@@ -300,13 +345,14 @@ def probe_video_technical_spec(local_path: str,
         if result["duration"] is None and result["fps"] is None:
             result["score"] -= 15
             result["issues"].append({
+                "code": "spec.unreadable",
                 "severity": "warning",
                 "message": "无法读取视频规格（ffprobe 未给出时长与帧率）"
                            "⇒ 黑场/冻帧/响度这些检测会全部空转 ✗",
             })
     except Exception:  # noqa: BLE001
         result["score"] -= 15
-        result["issues"].append({"severity": "warning",
+        result["issues"].append({"code": "spec.probe_failed", "severity": "warning",
                                  "message": "无法读取视频规格（ffprobe 失败），跳过技术检测"})
         return result
 
@@ -322,6 +368,7 @@ def probe_video_technical_spec(local_path: str,
         for segment in result["blackSegments"]:
             result["score"] -= 20
             result["issues"].append({
+                "code": "black",
                 "severity": "error",
                 "message": f"画面黑场 {_js_to_fixed(segment['duration'], 2)}s"
                            f"（第 {_js_to_fixed(segment['start'], 1)}s 起，"
@@ -348,6 +395,7 @@ def probe_video_technical_spec(local_path: str,
                     else "画面冻帧（时长未知 ⇒ ffmpeg 未给结束时刻）")
             tail = "，该段一直持续到片尾" if segment["open"] else ""
             result["issues"].append({
+                "code": "freeze",
                 "severity": "error",
                 "message": f"{head}（第 {_js_to_fixed(segment['start'], 1)}s 起{tail}，"
                            f"标准 >{_js_num_str(thresholds['freezeMinDuration'])}s 即判缺陷）",
@@ -376,6 +424,7 @@ def probe_video_technical_spec(local_path: str,
             if true_peak is not None and true_peak > thresholds["truePeakDb"]:
                 result["score"] -= 15
                 result["issues"].append({
+                    "code": "audio.true_peak",
                     "severity": "warning",
                     "message": f"音频真峰 {_js_to_fixed(true_peak, 1)}dBTP 超过 "
                                f"{_js_num_str(thresholds['truePeakDb'])}dBTP 标准（防削波）",
@@ -385,6 +434,7 @@ def probe_video_technical_spec(local_path: str,
                     > thresholds["loudnessTolerance"]:
                 result["score"] -= 10
                 result["issues"].append({
+                    "code": "audio.loudness",
                     "severity": "info",
                     "message": f"集成响度 {_js_to_fixed(integrated, 1)}LUFS 偏离标准 "
                                f"{_js_num_str(thresholds['loudnessTarget'])}"
@@ -397,6 +447,7 @@ def probe_video_technical_spec(local_path: str,
     if result["fps"] is not None and result["fps"] < thresholds["fpsMin"]:
         result["score"] -= 10
         result["issues"].append({
+            "code": "fps.low",
             "severity": "warning",
             "message": f"帧率 {_js_num_str(result['fps'])}fps 过低"
                        f"（标准 ≥{_js_num_str(thresholds['fpsMin'])}fps）",
@@ -407,6 +458,7 @@ def probe_video_technical_spec(local_path: str,
         if difference > thresholds["durationToleranceSec"]:
             result["score"] -= 10
             result["issues"].append({
+                "code": "duration.mismatch",
                 "severity": "warning",
                 "message": f"视频实际时长 {_js_to_fixed(result['duration'], 1)}s 与期望 "
                            f"{_js_num_str(expected_duration)}s 偏差 "
@@ -445,6 +497,57 @@ def _json_list(raw: Any) -> list[Any]:
     except Exception:  # noqa: BLE001
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _index_qc_run(*, storyboard_id: Any, video_generation_id: Any, episode_id: Any,
+                  status: str, overall: int, spec: dict[str, Any],
+                  issues: list[Any]) -> None:
+    """把这次质检写进 ``outcome_index``（``kind="qc"``）—— 知识闭环的**输入侧**。
+
+    为什么非写不可 ✗：``tuning.suggest()`` 的「失败聚集」读的是跑次索引，而在此之前
+    **没有任何生产代码往里写 image/video/qc 跑次**（只有 agent trace 被 ``ingest_trace`` 灌进去）
+    ⇒ 那条规则在真机上永远只会答「没有哪一族的失败集中到同一个 error_code」✗
+    （自测里全是夹具造的假行，假绿）。质检是最便宜、也最该被归因的一类失败 ✓。
+
+    为什么 ``error_code`` 取 issue 的 ``code`` 而不是 ``message`` ✗：文案里带每次都不一样的
+    数字（"画面黑场 0.42s（第 1.3s 起…）"）⇒ 聚不到一起；``code`` 只描述类别 ✓。
+
+    记账失败**绝不能**影响质检结论（P0 只加事实，不是必需路径）⇒ 整段吞异常。
+    """
+    try:
+        from . import outcome_index
+
+        codes = [str(item.get("code")) for item in issues
+                 if isinstance(item, dict) and item.get("code")]
+        error_code = codes[0] if codes else None
+        outcome_index.record_run({
+            # 同一次成品重跑质检要**覆盖**同一条，不能堆出 N 条（否则失败率被自己的重试污染）
+            "run_id": f"qc:{storyboard_id}:{video_generation_id}",
+            "kind": "qc",
+            "stage": "video_spec",
+            "status": "ok" if status == "passed" else "failed",
+            "error_code": None if status == "passed" else error_code,
+            # ⚠️ 统一到 0–1（``suggest`` 的 `差 0.01 就是白花` 是 1 分制口径）；原值另存 meta
+            "score": round(overall / 100.0, 4),
+            "episode_id": episode_id,
+            "storyboard_id": storyboard_id,
+            "meta": {
+                "scoreScale": "0-1",
+                "overallRaw": overall,
+                "status": status,
+                # 失败是技术维度判的还是规则维度判的（规则维度的 issue 只有自然语言 message，
+                # 拿不到稳定 code ⇒ 那时 error_code 只能是 null，这里如实标明"为什么没有 code"）
+                "cause": "video_spec" if codes else ("rule" if status != "passed" else None),
+                "blackSegments": len(spec.get("blackSegments") or []),
+                "freezeSegments": len(spec.get("freezeSegments") or []),
+                "duration": spec.get("duration"),
+                "fps": spec.get("fps"),
+                "hasAudio": spec.get("hasAudio"),
+                "issueCodes": codes,
+            },
+        })
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def run_technical_qc(conn: Connection, storyboard_id: Any,
@@ -493,9 +596,12 @@ def run_technical_qc(conn: Connection, storyboard_id: Any,
 
         issues = _json_list(qc.issues)
         for issue in spec["issues"]:
+            # ⚠️ 去重仍按 **message**（不是 code）：一次成片里可能有两段黑场，两条都得留着；
+            # 按 code 去重会把"两处黑场"压成一条 ⇒ 缺陷数量失真 ✓✗
             if not any(isinstance(item, dict) and item.get("dimension") == "video_spec"
                        and item.get("message") == issue["message"] for item in issues):
-                issues.append({"dimension": "video_spec", "severity": issue["severity"],
+                issues.append({"dimension": "video_spec", "code": issue.get("code"),
+                               "severity": issue["severity"],
                                "message": issue["message"]})
 
         # 重算总分：规则三维平均 70% + 技术维度 30%
@@ -517,6 +623,14 @@ def run_technical_qc(conn: Connection, storyboard_id: Any,
             .values(dimensions=json.dumps(dims, ensure_ascii=False, separators=(",", ":")),
                     issues=json.dumps(issues, ensure_ascii=False, separators=(",", ":")),
                     overall_score=overall, status=status, updated_at=now())
+        )
+
+        # 落账放在写回**之后**：先保证用户能看到的 QC 结论落盘，再记跑次
+        # （索引坏了也不该让这一次质检白跑）
+        _index_qc_run(
+            storyboard_id=storyboard_id, video_generation_id=video_generation_id,
+            episode_id=(sb.episode_id if sb is not None else None),
+            status=status, overall=overall, spec=spec, issues=spec["issues"],
         )
     except Exception as exc:  # noqa: BLE001 —— 与原 TS 的 catch 等价
         log_task_warn("TechQc", "run-failed",

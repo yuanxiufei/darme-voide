@@ -110,7 +110,7 @@ VRAM_ESTIMATES: dict[str, dict[str, Any]] = {
     "minimax:hailuo-02": {"vramGB": 15, "unloadStrategy": "comfyui-free",
                           "unloadBaseUrl": COMFYUI_BASE_URL, "cooldownMs": 5000},
     # ⭐ 自研引擎（2026-09-26 ✓）：**本进程内** ✓✗ —— 不依赖任何外部服务 ✓（不起子进程 ✓、无 HTTP ✓）。
-    # ⚠️ 19.5 GiB 是**主 DiT 权重的真实体积** ✓（`torch_backend.PENDING_PARTS` 记的 19.53 GiB ✓，
+    # ⚠️ 19.5 GiB 是**主 DiT 权重的真实体积** ✓（`torch_backend.IMPLEMENTATION_HISTORY` 记的 19.53 GiB ✓，
     #    与 `/engine/readiness` 同一口径 ✓）—— 本机 A5000 22.5 GiB 能装下 ✓，但**装下 = 几乎占满** ✓✗
     #    ⇒ 它与 ollama / SD / ComfyUI **同时**要显存时必然打起来 ✓ ⇒ 这条数就是那个矛盾的账本 ✓。
     "engine:h3": {"vramGB": 19.5, "unloadStrategy": "engine-unload", "cooldownMs": 1000},

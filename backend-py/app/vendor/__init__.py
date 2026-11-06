@@ -6,7 +6,7 @@
 
 当前内容：
 
-* ``app.vendor.ollama`` —— Ollama 官方 Python SDK（``reference/ollama-python``，MIT）。
+* ``app.vendor.ollama`` —— Ollama 官方 Python SDK（MIT；原 `reference/ollama-python` 参考副本已随 `reference/` 清理删掉）。
   相对上游只做了**一处**机械改动：把 4 行 ``from ollama.xxx import`` 改成相对导入
   （``from .xxx import``），否则以 ``app.vendor.ollama`` 为模块路径导入时会去找顶层
   ``ollama`` 包。依赖 ``httpx`` / ``pydantic>=2.9`` / ``anyio`` / ``typing_extensions``，

@@ -2,7 +2,7 @@
 
 ## 为什么要有它 ✗
 
-参考实现（``reference/lora/LoRAMaster`` ✓）是 NiceGUI 单体 ✓ ⇒ 它直接
+参考实现（``LoRAMaster`` ✓）是 NiceGUI 单体 ✓ ⇒ 它直接
 ``ui.log.push(line)`` ✓ 就把日志显示掉了 ✓ —— 用不到"缓冲 + 增量取"这一层 ✓。
 本仓是 **HTTP 后端** ✓ ⇒ 前端要靠轮询取日志 ✓✗，于是必须解决三件事 ✓：
 

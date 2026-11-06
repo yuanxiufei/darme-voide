@@ -2,7 +2,7 @@
 
 钉的都是**能证伪**的东西 ✓：
 * 计划层拿**上游真值**钉死 ✓（帧网格 / 窗口边界 / 银行家舍入的后果 ✓）——
-  事实来源 ``reference/ComfyUI-H3-Multishot/h3_extend.py`` 与 ``h3_retake.py`` ✓（MIT ✓）；
+  事实来源 ``h3_extend.py`` 与 ``h3_retake.py`` ✓（MIT ✓）；
 * **冻结区逐位等于原始潜变量** ✓✓（这是"重拍/续拍"与"整条锁死"的分水岭 ✓，见
   :func:`app.services.engine.h3_form.sample_dual_stream` 的 docstring ✓）；
 * **掩码全开 == 不 pin** 逐位相同 ✓（证明这条新路径**不影响**原来的采样 ✓）；

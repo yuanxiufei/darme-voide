@@ -1071,6 +1071,8 @@ with TestClient(app) as client:
     r = client.post("/api/v1/character-library", json={
         "name": "SMOKE 模板", "appearance": "高个黑衣",
         "referenceImages": ["ref1.png", "ref2.png"], "tags": ["a", "b"], "voiceConfig": {"tone": "低"},
+        # 写侧一律按 camel(column) 取 body（见 resource_library.create_item）⇒ 读侧必须能原样还回来
+        "imageUrl": "static/uploads/hero.png", "clothingStyle": "hanfu",
     })
     dump("POST /character-library", r)
     check("lib create: HTTP 200 + code 0 + message 创建成功",
@@ -1090,6 +1092,20 @@ with TestClient(app) as client:
           and tpl.get("referenceImages") == ["ref1.png", "ref2.png"], str(tpl.get("referenceImages")))
     check("lib detail: voice_config aliased to voiceConfig",
           tpl.get("voiceConfig") == {"tone": "低"}, str(tpl.get("voiceConfig")))
+    # ⚠️ 回归护栏：`_decorate` 曾只补 out_aliases（reference_images 那几个），普通列只回 snake_case
+    #    ⇒ 写入用 camel、读出拿不到 camel，前端 `item.imageUrl` 恒 undefined
+    #    （症状：图存得进、界面上永远空着、编辑表单被清空）。
+    check("lib detail: plain columns carry BOTH spellings (imageUrl / clothingStyle)",
+          tpl.get("imageUrl") == "static/uploads/hero.png"
+          and tpl.get("image_url") == "static/uploads/hero.png"
+          and tpl.get("clothingStyle") == "hanfu"
+          and tpl.get("clothing_style") == "hanfu",
+          f"imageUrl={tpl.get('imageUrl')!r} clothingStyle={tpl.get('clothingStyle')!r}")
+    check("lib list: items also carry camelCase aliases",
+          any(it.get("id") == tpl_id and it.get("imageUrl") == "static/uploads/hero.png"
+              for it in ((client.get("/api/v1/character-library", params={"pageSize": 50})
+                          .json().get("data") or {}).get("items") or [])),
+          "list item 缺 imageUrl")
     check("lib detail: category default 通用", tpl.get("category") == "通用", str(tpl.get("category")))
     check("lib detail: usage_count defaults 0", tpl.get("usage_count") == 0, str(tpl.get("usage_count")))
 
@@ -2089,15 +2105,18 @@ with TestClient(app) as client:
     r = client.get("/api/v1/skills/meta")
     dump("GET /api/v1/skills/meta", r)
     meta = r.json()["data"]
-    check("skills meta: 5 个 Agent + charBudget 60000 + sources + coreCount",
-          len(meta["agents"]) == 5 and meta["charBudget"] == 60000
+    # 名册＝AGENT_SPECS 的**全部** Agent（6 个，含总调度 orchestrator），不再只是阶段表里的 5 个：
+    # 旧口径把 orchestrator 漏在外面，于是它的默认 skill 绑定在侧栏永远显示「未绑定」。
+    from app.services.agent_registry import AGENT_PHASES, VALID_AGENT_TYPES, get_default_name
+
+    check("skills meta: 全部 Agent（VALID_AGENT_TYPES，含 orchestrator）+ charBudget 60000 + sources + coreCount",
+          tuple(a["type"] for a in meta["agents"]) == tuple(VALID_AGENT_TYPES)
+          and meta["charBudget"] == 60000
           and "sources" in meta and "coreCount" in meta, str(sorted(meta)))
-    check("skills meta: Agent label（本地副本，与 DEFAULT_PROMPTS 有漂移守卫）",
-          {a["type"]: a["label"] for a in meta["agents"]} == {
-              "script_rewriter": "剧本改写", "extractor": "角色场景提取",
-              "storyboard_breaker": "分镜拆解", "voice_assigner": "角色音色分配",
-              "grid_prompt_generator": "宫格图提示词生成"},
-          str([(a["type"], a["label"]) for a in meta["agents"]]))
+    check("skills meta: Agent label 与 phase 全部走出厂声明（AGENT_SPECS / AGENT_PHASES，无本地副本）",
+          all(a["label"] == get_default_name(a["type"]) for a in meta["agents"])
+          and all(a["phase"] == AGENT_PHASES.get(a["type"], "") for a in meta["agents"]),
+          str([(a["type"], a["label"], a["phase"]) for a in meta["agents"]]))
     check("skills meta: coreCount + Σsources.skillCount == /skills 总数（自洽）",
           meta["coreCount"] + sum(s["skillCount"] for s in meta["sources"]) == len(skills),
           f'{meta["coreCount"]} + {sum(s["skillCount"] for s in meta["sources"])} != {len(skills)}')
@@ -2192,6 +2211,13 @@ with TestClient(app) as client:
     saved_file = Path(os.environ["DATA_ROOT"]).resolve() / up["path"]
     check("upload image: 真的落盘且内容一致",
           saved_file.exists() and saved_file.read_bytes().startswith(b"\x89PNG"), str(saved_file))
+    # 上传的图要能**立刻被取回**：素材库头像/场景图就是把 url 存进 image_url、界面直接用 <img> 加载。
+    # url 是 `/static/uploads/...`（带前导斜杠），而 `/static/{rel}` 的基准是 storage_root
+    # ⇒ 这条同时钉住「落盘目录 / 返回的 url / 静态路由」三者一致（任一处错位就是整片裂图）。
+    r = client.get(up["url"])
+    check("upload image: 返回的 url 可被 /static 直接取回（素材库 <img> 依赖这条）",
+          r.status_code == 200 and r.content.startswith(b"\x89PNG"),
+          f"{r.status_code} {r.headers.get('content-type')} {len(r.content)}B")
 
     oversize = b"x" * (20 * 1024 * 1024 + 1)
     r = client.post("/api/v1/upload/image", files={"file": ("big.png", oversize, "image/png")})

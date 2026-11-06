@@ -7,10 +7,11 @@
 **张量本身** | ✅ **真 torch 张量** ✓（`realTensors=True` ✓）—— 不再用 `dryrun` 那个 12 行 `list[float]` 假张量 ✓ |
 **随机与复现** | ✅ 真 `torch.Generator().manual_seed(seed)` + `torch.randn` ✓ ⇒ 同种子**逐位可复现** ✓ |
 **采样/引导/首帧数学** | ✅ 全部跑在真张量上 ✓（与 `dryrun` 共用同一份 `sampler`/`guidance`/`conditioning` ✓） |
-**模型前向（DiT/TE/VAE）** | ✅ **机制已接** ✓（`load_weights` 真装载 DiT/H3 形态 ✓ + `denoise`/`encode_text`/`decode` 真前向 ✓ + H3 双流 `sample_dual` 真前向 ✓）—— ⚠️ **真权重（主 DiT 19.53 GiB ✗）没下载** ⇒ 没装模型时前向是**占位** ✓（如实标 ✓ 不冒充 ✗） |
-**产物** | ✅ **H3 双流已出真 mp4 + 真 wav** ✓（`engine_dual_stream_test` ✓）—— ⚠️ 没装真权重/单流时仍是合成产物 ✗（`synthetic=True` ✓） |
+**模型前向（DiT/TE/VAE）** | ✅ **五族真权重都真跑通过** ✓（2026-11-01 ✓：Z-Image / Krea2 / Qwen-Image 2.1（含 2512）/ Flux / H3 双流 ✓，各带端到端自检 ✓）—— ⚠️ **没装权重**时前向仍是**占位** ✓（如实标 ✓ 不冒充 ✗） |
+**产物** | ✅ **真 PNG ✓ / 真 mp4 + wav ✓ 都已实测落盘** ✓（`engine_dual_stream_test` 等 ✓）—— ⚠️ 没装真权重时仍是合成产物 ✗ |
 
-⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic=True`（没装真权重时画面不真 ✗）。
+⇒ 两个标志**同时**给出，不许混 ✗：`realTensors=True`（张量真 ✓）+ `synthetic`（**按已装件算** ✓ ——
+没装权重 / VAE 是参考实现 ⇒ `True` ✗；DiT ＋ 真权重 VAE 都在 ⇒ `False` ✓，见 :meth:`_picture_is_real` ✓）。
 UI/接口据此可以显示「真张量 ✓ / 真模型 ✗」而不至于误导 ✓。
 
 ## 关于 CPU / CUDA（⚠️ 2026-10-29 实测落定）
@@ -38,8 +39,10 @@ import json
 import math
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping, NoReturn
 
 from app.core import cpu_budget
@@ -47,11 +50,15 @@ from app.core import cpu_budget
 from . import audio_vae as audio_vae_mod
 from . import device_policy
 from . import dit as dit_mod
+from . import dit_build
+from . import foresight as foresight_mod
 from . import geometry as geometry_mod
+from . import host_cache as host_cache_mod
 from . import inventory as inv
 from . import keyframes as keyframes_mod
 from . import loader
 from . import media as media_mod
+from . import quant as quant_mod
 from . import residency as residency_mod
 from . import scheduler as scheduler_mod
 from . import safetensors as st
@@ -60,11 +67,18 @@ from . import vae as vae_mod
 from . import weights as weights_mod
 
 __all__ = [
+    "CODE_GAPS",
     "DEPENDENCIES",
-    "PENDING_PARTS",
+    "IMPLEMENTATION_HISTORY",
     "TorchBackend",
     "TorchBackendUnavailable",
+    "VAE_TILING_DEFAULTS",
     "dependency_status",
+    "int4_scale_plan",
+    "normalize_vae_tiling",
+    "part_need_gib",
+    "resident_bytes_of",
+    "resident_need_gib",
     "torch_available",
     "torch_facts",
 ]
@@ -80,6 +94,77 @@ def _residency_mode(value: Any) -> str:
     if mode not in residency_mod.MODES:
         raise ValueError(f"residency 只认 {' / '.join(residency_mod.MODES)}，拿到 {value!r}")
     return mode
+
+
+def _residency_kind(what: Any) -> str | None:
+    """``what``（**报告名** ✓）⇒ 余量档的**件类型**（``"dit"`` / ``"te"`` / ``"vae"`` ✓ / ``None`` = 认不出 ✓）。
+
+    ## 为什么这一层不能省 ✗✗（2026-11-01 实测）
+
+    `_place_with_residency` 的 ``what`` 是**给报告读者看的** ✓：DiT 那两族各写各的名字
+    （``"dit"`` / ``"h3"`` ✓），文本塔写 ``"te"`` / ``"h3-te"`` ✓。而余量只认三档 ✓
+    （`residency.RESERVE_BY_KIND` ✓）。**直接拿 ``what`` 去查表** ⇒ ``"h3-te"`` 查不到 ⇒
+    退回 25% ✓✗ ⇒ 改了半天，恰恰是 H3 那件 **25.44 GiB 的文字塔**（全仓最需要这条改动的一件 ✓）
+    一点没吃到 ✓✗。这不是猜的：仓库里 grep ``_place_int8_module`` 的 ``what=`` 只有
+    ``"h3"`` / ``"h3-te"`` 两个值 ✓。
+
+    ## 归一的取舍
+
+    * ``*-te`` / ``te`` / ``text*`` ⇒ ``te`` ✓（**先判** ✗：``"h3-te"`` 也含 ``h3`` ✓，
+      顺序颠倒会把文本塔判成 DiT ✓✗ —— 余量从 5% 变 25%，白扔 4 GiB ✓）
+    * 含 ``vae`` ⇒ ``vae`` ✓（``"h3-audio-vae"`` 这类 ✓）
+    * ``dit`` / ``h3*`` ⇒ ``dit`` ✓
+    * 其余 ⇒ ``None`` ✓（认不出就往保守侧倒 ✓，见 `reserve_for` ✓）
+    """
+    key = str(what if what is not None else "").strip().lower()
+    if not key:
+        return None
+    if key.endswith("-te") or key in ("te", "text") or key.startswith("text"):
+        return "te"
+    if "vae" in key:
+        return "vae"
+    if key in ("dit", "h3") or key.startswith("h3"):
+        return "dit"
+    return None
+
+
+#: 层预取上卡的槽数开关 ✓✗（2026-11-02 加 ✓）。**默认 0 ＝ 不存在这一级** ✓
+#: （与 `Strata` 上游的 ``STRATA_FS_SLOTS > 0`` 同一条纪律 ✓）：它花的是一整层显存 ✓，
+#: 而"该不该多占这一层"是**策略**不是正确性 ✓ ⇒ 显式开关 ✓，不设时引擎一字不变 ✓。
+FORESIGHT_SLOTS_ENV = "DARME_FORESIGHT_SLOTS"
+
+#: 默认槽数 ✓（``0`` ＝ 关 ✓）。**为什么"往上一层看"要 2 个槽** ✗✗：一个槽正在被这一层用 ✓，
+#: 另一层要拷就得另有一块地 ✓ —— 只有 1 个槽也能跑 ✓，但每层都是"先拷完再算" ✓
+#: （``busy`` 数涨满 ✓，正是"没有重叠"的证据 ✓）。
+FORESIGHT_SLOTS_DEFAULT = 0
+
+
+def _foresight_slots(raw: Any = None, *, default: int = FORESIGHT_SLOTS_DEFAULT) -> int:
+    """槽数归一 ✓（读不懂就用默认 ✓、负数当 0 ✓）—— 不为一个限额把引擎起不来 ✓✗。"""
+    if raw is None:
+        raw = os.environ.get(FORESIGHT_SLOTS_ENV)
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return max(0, int(default))
+    return max(0, value)
+
+
+def _foresight_of(mode: str) -> Any:
+    """按环境变量给出**层预取**的配置 ✓ ⇒ :class:`foresight.Foresight` 或 ``None`` ✓。
+
+    ``None``（**没开** ✓）与"开了但这次没等到落地"（``hits=0`` ✓）在报告里必须分得开 ✗✗ ——
+    前者整个 ``foresight`` 字段是 ``None`` ✓，后者字段在、``yieldLayers=0`` ✓。
+    """
+    slots = _foresight_slots()
+    if slots <= 0:
+        return None
+    conf = foresight_mod.Foresight(slots=slots)
+    if mode != "split":
+        conf.slots = 0
+        conf.disabledReason = (f"residency={mode} ⇒ 层预取不启用 ✓"
+                              "（park 本来就逐层搬权重 ✓、off 没有卡 ✓）")
+    return conf
 
 
 def _residency_budget_mib(value: Any) -> float | None:
@@ -127,13 +212,15 @@ DEPENDENCIES: tuple[_Dependency, ...] = (
                 optional=True),
 )
 
-#: ⚠️ **仍未实现**的部分 ✓（依赖齐了、DiT 也装好了，也还是这些 ✗）—— 分开报，别让人去查环境 ✗
+#: ⚠️ **已闭合缺口的沿革** ✓（人读 ✓）—— ⚠️ **不再进接口** ✗✗（2026-11-01 起 `describe()` 只报
+#: :data:`CODE_GAPS` ＋ 运行期实况 ✓）：这 75 行是"当时缺什么、后来怎么补的" ✓，**不是**今天的缺口 ✗。
+#: 把它当 `pendingParts` 报出去的后果实证过 ✗：装了整链照样说「还不能出片」✓✗（见 `describe()` 那段 ✓）。
 #: ⚠️ 2026-09-20 **更正**：上一版清单**过期了** ✗ —— 它写着「文本编码器前向 ✗」「VAE 解码与出片落盘 ✗」，
 #: 但这些**机制都已经实现** ✓（`encode_text` ✓ / `attach_text_encoder` ✓ / `decode` ✓ /
 #: `attach_vae` ✓ / `write` ✓，且 `engine_io_test` / `engine_text_test` 已跑通
 #: 「TE → DiT → VAE → **真 mp4**」✓）。⇒ **真正缺的只有「真权重 + 真配置」** ✓：
 #: 机制齐了、权重没到 ✓ ⇒ `canGenerate=False` **依然正确** ✓（只是别把原因归到机制上 ✗）。
-PENDING_PARTS: tuple[str, ...] = (
+IMPLEMENTATION_HISTORY: tuple[str, ...] = (
     "✅ **低精度权重能真装了** ✓（2026-09-22 ✓ `engine/quant.py` ✓）：fp8/int8 先按配套 scale **反量化** ✓"
     "（布局**按形状**判 ✓ per-tensor / per-row / per-col / 逐元素 ✓；`*_scale_inv` 走除 ✓）"
     "⇒ 再归一 dtype ✓ —— ⚠️ 此前是**直接 `to(bf16)`** ✗ ⇒ 尺度丢掉但**不报错** ✓✗（19.53 GiB 的主权重"
@@ -210,6 +297,43 @@ PENDING_PARTS: tuple[str, ...] = (
     "但它验的是**管道** ✓、不是真权重 ✓。",
 )
 
+#: ⭐ **代码里现在还没写的**能力 ✓（`describe()["codeGaps"]` 报的就是它 ✓）—— 与 `pendingParts`
+#: （"这台后端还没装" ✓，随 `attach_*` / `load_weights` 变 ✓）**必须分开** ✗✗：
+#: 混成一格就看不出「该去修代码 ✓」还是「该去装权重 ✓」✓✗ —— 这正是 2026-11-01 之前那 75 行沿革
+#: 被当成 `pendingParts` 报出去时的病根 ✓（装齐了也照样说"不能出片"✗）。
+#: ⚠️ 事实口径：`python -m app.scripts.dit_families` 的「通路」栏 ✓（`有` / `无` ✓，2026-11-01 实测 ✓）。
+#: ⚠️⚠️ **为什么不叫 `knownGaps`** ✗✗：`facade.capabilities()["knownGaps"]` 已经占了那个名字 ✓，
+#: 而它是**环境**缺口（`[{id, severity, summary, facts, fix}]` ✓，见 `facade._known_gaps` ✓）——
+#: 同名不同形、同在 `/engine/*` 名下 ✓✗：前端按 `gaps.map(g => g.summary)` 读环境缺口 ✓，
+#: 拿到这里的一串字符串只会读出 `undefined` ✓；反过来按"有没有 codeGaps"判「要不要修代码」
+#: 也会被环境缺口顶掉 ✓✗。⇒ 两个面各自用**自解释**的名字 ✓：环境缺口 `knownGaps`、
+#: 代码缺口 `codeGaps` ✓（`engine_runtime_test` 的 ①⁵ 钉这一条 ✓）。
+CODE_GAPS: tuple[str, ...] = (
+    #: ⚠️ 2026-11-02 **已删**「Wan2.2 I2V 的 36 通道拼接未接 / umt5 无实现」✓ —— 三段都接上了 ✓：
+    #: 首帧 20 通道条件在 `encode` 段用 VAE 编好 ✓（`_wan_i2v_condition`）、`i2v_concat` 拼 36 ✓、
+    #: UMT5 文本塔 ✓（`umt5_te` ＋ `umt5_tokenizer` ✓，`_encode_wan22_text` 顺手把 pad 位置清零 ✓）、
+    #: 双专家按 **σ 阈值**接力 ✓（`register_wan_experts` ✓）。
+    #: ⚠️ 剩下的**不是代码缺口** ✗：单份 bf16 **26.62 GiB > 22.49 GiB 卡** 是硬件边界 ✓ ⇒ 走
+    #: `split`/`cpu` 并按件分时 ✓（写进 `readiness` / 回执，不要退回 `codeGaps` 里报"没实现"✗）。
+    "**Wan Animate 2** 判族落到 `wan`，但它是 **Wan2.1 式参考图通路**（`cross_attn.k_img/v_img` ＋ "
+    "`img_emb.proj.*`，2263 键）⇒ `dit_wan22` 见到这些键**当场拒** ✓✗（别当成「能跑」✗：`dit_families` "
+    "的「可建 3/3」只说明拓扑读得全 ✓，不说明建得出 ✓）",
+    #: ⚠️ 2026-11-02 **已删**「SEEDVR2 无前向」✓ —— `dit_seedvr2` ＋ `vae_seedvr2` 已进 `dit_build` 与
+    #: `stage="seedvr2"` 装配线 ✓ 且真 3B 权重出过片 ✓（唯一短板是解码慢，那是已知的性能事实 ✓
+    #: 不是代码缺口 ✗）。
+    #: ⭐ 2026-11-02 同日把「Music3 无前向」**改写成真话** ✓✗：骨架（`dit_music3` ✓）与音频 VAE
+    #: 解码（`vae_music3` ✓）**都写完了** ✓，缺的是**把它们连起来** ✗：没有 `stage="music3"`
+    #: 装配线、没有歌词/文本塔接线、没有滑窗采样循环 ✓ —— 写「无前向」会让人以为一行代码都不用写 ✓✗。
+    "**Music3** 音频生成：DiT 骨架 ＋ 前向口径（σ 翻转取负 / RoPE split-half / 潜帧率 86.1328 Hz）"
+    " ＋ DAV 解码都已写出并自检 ✓，但**没接进 `pipeline`** ✗：无 `stage=\"music3\"` 装配线、"
+    "无歌词-文本塔接线、无 689/344 滑窗采样循环（TE 与音频 VAE 都在盘 ✓）",
+    #: ⚠️ 2026-11-01 **已删**「Edit 2511 编辑通路未接」那条 ✓ —— 视觉塔 ⇒ `<|image_pad|>` 注入 ✓、
+    #: 参考图 ⇒ `ref_latents` ✓ 两路都接上 ✓（守卫见 `engine_qwen_image_edit_test` ✓）。
+    #: ⚠️ 同轮**也删了**「模板只有一个图槽 ⇒ 多参考图仍拒」✓ —— 多图走 Plus 口径 ✓
+    #: （`Picture i: <视觉块>` 逐图一槽 ✓、`ref_latents` 一列 ✓，守卫见同一测试的 ④′/⑦′ ✓）。
+    "GGUF **Q2_K / Q3_K** 反量化未实现 ✓（盘上无该档文件 ⇒ **有意不补** ✗，见 `gguf_dequant` ✓）",
+)
+
 
 def _same_setting(left: Any, right: Any) -> bool:
     """两个「配置值」是不是**同一个** ✓（``tuple`` ↔ ``list`` 算相同 ✓、数是数 ✓）。
@@ -226,23 +350,300 @@ def _same_setting(left: Any, right: Any) -> bool:
     return left == right
 
 
-def int8_scale_plan(info: Any) -> dict[str, tuple[int, ...]]:
+def int8_scale_plan(info: Any, *, strip_prefix: str | None = None,
+                    int4_stems: Any = None) -> dict[str, tuple[int, ...]]:
     """从权重头部挑出「该走 **int8 常驻**」的线性层 ✓ ⇒ ``{子模块名: scale 形状}`` ✓。
 
     判据只两条 ✓：键以 ``.weight`` 结尾 ✓、dtype 是 ``I8`` ✓；且**必须有配套 scale** ✓。
+
+    ⚠️ **``int4_stems`` 必须给** ✗✗（2026-11-02 加 ✓）：4bit 打包权重**存成** ``I8`` 且**也带**
+    per-row ``weight_scale`` ⇒ 两条判据**逐字同形** ✓✗ ⇒ 只看头部就会把「每字节两个 4bit」
+    当成「per-row int8 常驻」✓，乘出来的数值全错、形状全对、一声不响 ✓✗（这正是 2026-10-30
+    抓到的那个假绿 ✓）。4bit 与 int8 只能靠**文件自述**分（:func:`quant.int4_stems_of` ✓）⇒
+    调用方把那份集合递进来，这里只负责跳过 ✓（不在这里读盘 ✗ —— 本函数的入参只有头部 ✓）。
     ⚠️ 缺 scale 的**不在这里补** ✗ —— 留给装载闸口报「缺 scale」✓（这里塞个假尺度只是把
     真问题藏起来 ✓✗）。``weight_scale`` 与 ``.scale`` 两种写法盘上都有 ✓。
+
+    ⭐ ``strip_prefix`` ✓（2026-11-01 加 ✓，接 Krea2 时逼出来的 ✓）：有的导出把全部键套一层
+    ``model.diffusion_model.`` ✓（见 :data:`_KREA2_PREFIXES` ✓），而 :func:`h3_form.upgrade_linear_to_int8`
+    是**按模块名**查表 ✓ ⇒ 表里若还带着那层前缀，**一个名字都对不上** ✓✗：结果不是报错 ✗，
+    而是「计划点名了、模块里还是普通 ``nn.Linear``」⇒ 权重按 bf16 反量化落盘 ✓✗
+    （12.82B 参数 ⇒ 23.9 GiB 挤 22.49 GiB 卡 ⇒ 采样第 1 步 OOM ✓，报错指不到前缀 ✓）。
+    ⚠️ **不在这里猜前缀** ✗：剥什么由调用方按 ``_krea2_stripped`` 的结果显式给 ✓。
     """
     plan: dict[str, tuple[int, ...]] = {}
+    skip: frozenset[str] = frozenset(str(item) for item in (int4_stems or ()))
     for logical, tensor in info.tensors.items():
         if tensor.dtype != "I8" or not logical.endswith(".weight"):
             continue
         name = logical[: -len(".weight")]
+        if name in skip:
+            continue                       # 4bit 打包 ⇒ 不是 int8 常驻层 ✓（见 docstring ✓）
         scale = info.tensors.get(f"{name}.weight_scale") or info.tensors.get(f"{name}.scale")
         if scale is None:
             continue
+        if strip_prefix and name.startswith(strip_prefix):
+            name = name[len(strip_prefix):]
         plan[name] = tuple(int(dim) for dim in scale.shape)
     return plan
+
+
+def int4_scale_plan(info: Any, *, strip_prefix: str | None = None,
+                    int4_stems: Any = None) -> dict[str, tuple[int, ...]]:
+    """从权重头部挑出「该走 **4bit 打包常驻**」的线性层 ✓ ⇒ ``{子模块名: scale 形状}`` ✓。
+
+    判据**三条一起**（缺一条就拒绝，不猜 ✗）：
+
+    1. 这一层**文件自述**是 4bit 打包 ✓（``int4_stems`` ＝ :func:`quant.int4_stems_of` 的结果 ✓）——
+       ⚠️ 只看 dtype/scale 是不行的 ✗✗：打包权重存成 ``I8`` 且带 per-row ``weight_scale``，
+       与 per-row int8 **逐字同形** ✓（2026-10-30 那个假绿 ✓）；
+    2. 头部写得出 ``(rows, cols)`` 且 dtype 是单字节整型 ✓（:func:`quant.int4_shape_problem` ✓）
+       —— 逻辑列数（打包列 ×2 ✓）必然是偶数 ✓，这条无需另判 ✓；
+    3. 有配套 scale ✓（``weight_scale`` / ``scale`` 两种写法盘上都有 ✓ 缺失不在这里补 ✗）。
+
+    ⚠️ 与 :func:`int8_scale_plan` **互斥** ✓：调用方必须把 ``int4_stems`` 同时递给两边
+    （那边是"跳过" ✓、这边是"才要" ✓），否则同一层会被两个计划同时点名 ✓✗。
+    """
+    skip_free: frozenset[str] = frozenset(str(item) for item in (int4_stems or ()))
+    plan: dict[str, tuple[int, ...]] = {}
+    if not skip_free:
+        return plan
+    for logical, tensor in info.tensors.items():
+        if not logical.endswith(".weight"):
+            continue
+        name = logical[: -len(".weight")]
+        if name not in skip_free:
+            continue
+        if quant_mod.int4_shape_problem(name, tensor.dtype, tensor.shape) is not None:
+            continue                       # 自称打包但存不了打包 ⇒ 不换壳 ✓（装载侧会拒 ✓）
+        scale = info.tensors.get(f"{name}.weight_scale") or info.tensors.get(f"{name}.scale")
+        if scale is None:
+            continue
+        if strip_prefix and name.startswith(strip_prefix):
+            name = name[len(strip_prefix):]
+        plan[name] = tuple(int(dim) for dim in scale.shape)
+    return plan
+
+
+def resident_need_gib(path: str | Path, *, fallback: float,
+                      strip_prefix: str | None = None) -> tuple[float, dict[str, Any]]:
+    """**这一件权重**装起来会占多少显存 ✓ ⇒ ``(GiB, 凭据)`` ✓。
+
+    ## 为什么一张表不够 ✗
+
+    Qwen-Image 2512 那一族盘上**同时有两种文件** ✓：
+
+    * ``qwen_image_2512_bf16.safetensors`` ＝ 38.05 GiB / **bf16** ✓ ⇒ 装起来就是 38.05 GiB ✓
+      （:attr:`TorchBackend.QWEN_IMAGE_PART_NEED_GIB` 里那个数是**量出来的** ✓）；
+    * ``qwen_image_edit_2511_int8_convrot.safetensors`` ＝ 19.09 GiB / **840 层 int8** ✓ ⇒
+      走 `Int8Linear` 常驻后**仍然是 19.09 GiB** ✓（**不再**反量化成 bf16 ✓）。
+
+    拿一张写死的 38.05 去判后者 ⇒ `decide()` 判 `split`（38.05 > 22.49 卡 ✓）或 `cpu` ✓✗ ——
+    **实测就是这么发生的** ✓：`gpu 15.9 / cpu 22.15 GiB` ⇒ 58% 的权重在内存里逐层爬 ✓✗，
+    而卡其实**整份装得下**（19.09 < 19.71 可用 ✓）。判据本身没错 ✗，错在**需求数** ✓。
+
+    ## 判据（只认文件头部，毫秒级 ✓）
+
+    文件里 `.weight` 是 ``I8`` 且有配套 scale ⇒ 这一层会**原样常驻** ✓ ⇒ 该件的驻留字节
+    ＝**数据区字节** ✓（int8 权重 1 字节/参数 ＋ scale 自己也在文件里 ✓，一个 tensor 不多不少 ✓）。
+    否则退回 ``fallback``（表里的**实测**值 ✓ —— 不在这里编一个 bf16 倍率 ✗：fp8_scaled 是 2×、
+    bf16 是 1×，两者都叫"低精度文件" ✓✗）。
+
+    ⚠️ 读不出头部 / 头部自述有问题 ⇒ **退回 fallback** ✓ 并把原因写进凭据 ✓（不猜 ✓）。
+    """
+    table = float(fallback)
+    try:
+        info = st.inspect(path)
+    except Exception as err:  # noqa: BLE001 —— 读不到就按表，别把装配挡住
+        return table, {"int8": None, "why": f"读不出头部 ⇒ 按表 {table:.2f} GiB（{err}）"}
+    if not info.ok:
+        return table, {"int8": None,
+                       "why": f"头部自述有问题 ⇒ 按表 {table:.2f} GiB（{info.problems[:2]}）"}
+    plan = int8_scale_plan(info, strip_prefix=strip_prefix)
+    if not plan:
+        return table, {"int8": False,
+                       "why": f"文件侧没有 int8 层 ⇒ 按表 {table:.2f} GiB（反量化后的实测值 ✓）"}
+    resident = info.total_tensor_bytes / device_policy.GIB
+    return resident, {
+        "int8": True, "layers": len(plan),
+        "fileGiB": round(info.file_bytes / device_policy.GIB, 2),
+        "why": (f"文件侧 {len(plan)} 层 int8 ⇒ 走 `Int8Linear` 常驻 ⇒ 驻留 ＝ 数据区 "
+                f"{resident:.2f} GiB ✓（不再按 bf16 反量化；表里那 {table:.2f} GiB 是 bf16 文件的账 ✓）"),
+    }
+
+
+#: 走 **int8 常驻** 的入口 ✓（`dit_build._ADAPTERS` 的两个 ＋ H3 那条自带换壳的路 ✓）——
+#: 只有这些入口才会把 ``I8`` 权重**原样**留在卡上 ✓；其余族一律反量化成 bf16 ⇒ 1 B/参 变 2 B/参 ✓。
+_INT8_RESIDENT_ADAPTERS: frozenset[str] = frozenset({"int8", "krea2", "h3"})
+
+#: 走 **4bit 常驻** 的入口 ✓（2026-11-02 补壳 ✓）—— 判据是「这条入口的换壳器会不会把 4bit 层
+#: 换成 ``Int8Linear(packed4=True)``」✓：:func:`dit_build._shell_int8` 现在**同时**换 int8 与
+#: 4bit 两种壳 ✓ ⇒ 用它做 shell 的两个 adapter（``int8`` / ``krea2``）都算 ✓。
+#: ⚠️ ``h3`` **不在**集合里 ✗：H3 那条路（:func:`_prepare_h3_module` ✓）**没传** ``int4_stems``
+#: ⇒ 4bit 文件在它手里仍按 int8 常驻（数值全错 ✗✗）—— 所以宁可让它按 2 倍记（保守 ✓），
+#: 也不许在这里假装能跑 ✓（盘上 H3 没有 4bit 文件 ✓，这条只是不许写成通用假绿 ✗）。
+_INT4_RESIDENT_ADAPTERS: frozenset[str] = frozenset({"int8", "krea2"})
+
+#: 存储侧**每参 1 字节**的 dtype ✓ ⇒ 物化成 bf16 之后每参数变 2 字节 ✓
+#: ⚠️ 这是**按字面换算**（1 B → 2 B ✓），不是「低精度文件一律乘 2」那种猜 ✗：bf16/f16 文件是 1× ✓。
+_ONE_BYTE_STORAGE: frozenset[str] = frozenset({
+    "I8", "U8", "F8_E4M3", "F8_E5M2", "F8_E4M3FN", "F8_E5M2FN", "I4", "U4"})
+
+#: 各 dtype 的**元素字节数** ✓（认不出 ⇒ 退回该张量的文件字节 ✓，不猜 ✗）
+_DTYPE_BYTES: dict[str, int] = {
+    "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
+    "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1, "BOOL": 1,
+    "F8_E4M3": 1, "F8_E5M2": 1, "F8_E4M3FN": 1, "F8_E5M2FN": 1, "I4": 1, "U4": 1,
+}
+
+
+def _materialized_bytes(entry: Any) -> int:
+    """一个**非量化权重**张量物化之后占几字节 ✓（物化＝换成 bf16 ✓）。
+
+    ⚠️ 只对「存储 1 B/参」的那几类乘 2 ✗（``I8``/``U8``/``F8_*``/``I4``/``U4`` ✓）——
+    bf16/f16/f32 原样 ✓，``BOOL``（掩码）原样 ✓。认不出的 dtype 或形状与字节对不上 ⇒
+    **退回该张量的文件字节** ✓（宁可保守，不编一个倍率 ✗）。
+    """
+    dtype = str(getattr(entry, "dtype", "") or "").upper()
+    nbytes = int(getattr(entry, "nbytes", 0) or 0)
+    per = _DTYPE_BYTES.get(dtype)
+    if per is None:
+        return nbytes
+    count = int(getattr(entry, "element_count", 0) or 0)
+    if count <= 0 or count * per != nbytes:
+        return nbytes                     # 形状与字节对不上 ⇒ 按文件字节 ✓（不猜 ✗）
+    if dtype in _ONE_BYTE_STORAGE:
+        return count * 2
+    return nbytes
+
+
+def resident_bytes_of(info: Any, *, adapter: str | None,
+                      specs: Any = None) -> tuple[int, dict[str, Any]]:
+    """**这一份权重**装起来真占多少字节 ✓ ⇒ ``(字节, 逐类账)`` ✓。
+
+    ## 三种层的算法（每一条都有据可查 ✓）
+
+    1. **4bit 打包层**（文件自述 ``convrot_w4a4``/``int4`` ✓、存成 1 B/字节×2 参 ✓）：
+       有 int4 常驻壳 ⇒ 打包字节 ✓；**现在没有** ⇒ 物化成 bf16 ＝ **逻辑参数 × 2 B** ✓
+       （:func:`quant.logical_weight_shape` 把打包维 ×2 ✓ —— 不能拿打包形状去乘 ✗，那样少一半 ✓）。
+    2. **int8 + 配套 scale 的 ``.weight``**：该装配线有常驻壳（``adapter`` ∈
+       :data:`_INT8_RESIDENT_ADAPTERS` ✓）⇒ 文件字节（1 B/参 ✓）；没有 ⇒ **×2**（反量化 bf16 ✓）。
+    3. **其余张量**（norm/embedding/scale/bias ✓）：按 dtype 的**物化**字节 ✓
+       （见 :func:`_materialized_bytes` ✓）。
+
+    ⚠️ 与 :func:`resident_need_gib` 的分工 ✗：那个函数只认 int8（历史口径 ✓、Qwen-Image 那条线
+    在用 ✓）；这个是**逐层分类**的精算 ✓，服务「同一族不同量化档」的其余五条线 ✓。
+    """
+    int4_stems = quant_mod.int4_stems_of(specs) if specs else frozenset()
+    plan = int8_scale_plan(info, int4_stems=int4_stems)
+    #: ⚠️ 4bit 的判据必须问**换壳器真正会换的那几张** ✗✗（:func:`int4_scale_plan` ✓）：
+    #: 只问「文件自称 4bit 吗」⇒ 自称了却缺 scale / 存成 2D 以外的层会被当成能常驻 ✓✗
+    #: （那种层换不了壳 ⇒ 装载时按 bf16 反量化 ⇒ 实际是 2 倍 ✓，账却按 1 B/2参 报 ⇒ 装到一半 OOM ✓）。
+    int4_plan = int4_scale_plan(info, int4_stems=int4_stems)
+    keep_int8 = adapter in _INT8_RESIDENT_ADAPTERS
+    keep_int4 = adapter in _INT4_RESIDENT_ADAPTERS
+    total = 0
+    int8_hit = 0
+    int4_hit = 0
+    for name, entry in info.tensors.items():
+        if name.endswith(quant_mod.QUANT_META_SUFFIX):
+            continue                       # 量化说明本身不是模型参数 ✓
+        stem = name[: -len(".weight")] if name.endswith(".weight") else None
+        dtype = str(getattr(entry, "dtype", "") or "").upper()
+        if stem is not None and stem in int4_stems and quant_mod.is_int4_storage(dtype):
+            #: ``packed_ok`` ＝ 这一层**真能**换成 4bit 常驻壳（有 scale ✓ 头部自洽 ✓）——
+            #: 换不了 ⇒ 只能按 bf16 反量化 ⇒ **逻辑**参数 × 2 B ✓（拿打包形状乘会少一半 ✓✗）
+            packed_ok = keep_int4 and (stem in int4_plan)
+            int4_hit += 1
+            logical = quant_mod.logical_weight_shape(entry.shape, packed=True)
+            count = 1
+            for dim in logical:
+                count *= int(dim)
+            total += int(entry.nbytes) if packed_ok else count * 2
+            continue
+        if stem is not None and keep_int8 and stem in plan:
+            int8_hit += 1
+            total += int(entry.nbytes)     # 1 B/参 原样留 + scale 在别的张量里原样计 ✓
+            continue
+        total += _materialized_bytes(entry)
+    return total, {"int8Layers": len(plan), "int8ResidentLayers": int8_hit,
+                   "int4Layers": int4_hit,                    "int4Resident": keep_int4,
+                   #: 真正会被换壳的层数 ✓ —— 没给 adapter / 该 adapter 没有 4bit 壳 ⇒ **0** ✓
+                   #: （算成 len(int4_plan) 会让回执说「256 层走 4bit 壳」而实际按 bf16 装 ✓✗）
+                   "int4ShellLayers": len(int4_plan) if keep_int4 else 0,
+                   "adapter": adapter}
+
+
+def part_need_gib(path: str | Path | None, *, fallback: float,
+                  adapter: str | None = None,
+                  assume: str | None = None) -> tuple[float, dict[str, Any]]:
+    """**这一件权重**在这条装配线上装起来占多少 GiB ✓ ⇒ ``(GiB, 凭据)`` ✓。
+
+    ## 为什么不能只留一张表 ✗
+
+    表里的数是「**某个文件**在某台机器上量出来的驻留」✓ —— 同一族换一个量化档就**不再成立** ✓✗：
+
+    * Krea2 的 ``12.57 GiB`` 是 **int8** 档（224 层 ``Int8Linear`` 常驻 ✓）；
+      换成 **int4** 档 ⇒ 反量化成 bf16 是 **23.9 GiB** ✓✗ —— 拿 12.57 判「装得下」⇒ 整份上卡
+      ⇒ 采样第 1 步 OOM ✓，而报错指不到「表用错了档」✗。
+    * 反过来，拿 bf16 档的数去判 int8 档 ⇒ 白白切一半到内存里逐层爬 ✓✗（Qwen-Image 那次的症状 ✓）。
+
+    ## 判据（`assume` 就是表值的**出处** ✓）
+
+    ``assume`` ＝「表里这个数是按**哪种档**的文件量的」✓（``"int8"`` / ``"int4"`` / ``"plain"``）：
+
+    * 实测档 == ``assume`` ⇒ **用表值** ✓（表值含**骨架自建参数** ✓，比只算文件数据区更准 ✓）；
+    * 否则 ⇒ 用 :func:`resident_bytes_of` 的**精算** ✓（按 dtype 与常驻壳逐层算 ✓）；
+    * 读不出头部 / 头部自述有问题 ⇒ 用表值 ✓ 并把原因写进凭据（不猜 ✗）。
+
+    凭据里 ``source`` 说明这次用的是 ``"table"`` 还是 ``"file"`` ✓ —— 回执里要能答
+    「这个需求数是量出来的还是算出来的」✓。
+    """
+    table = float(fallback)
+    if not str(path or "").strip():
+        return table, {"source": "table", "mode": "unknown", "table": table,
+                       "why": "没给权重路径 ⇒ 按表（无从精算 ✓）"}
+    try:
+        info = st.inspect(str(path))
+    except Exception as err:  # noqa: BLE001 —— 读不到就按表，别把装配挡住
+        return table, {"source": "table", "mode": "unknown", "table": table,
+                       "why": f"读不出头部 ⇒ 按表 {table:.2f} GiB（{err}）"}
+    if not info.ok:
+        return table, {"source": "table", "mode": "unknown", "table": table,
+                       "why": f"头部自述有问题 ⇒ 按表 {table:.2f} GiB（{info.problems[:2]}）"}
+    try:
+        specs = loader.quant_specs_of(Path(str(path)), info)
+    except Exception as err:  # noqa: BLE001 —— 补证据失败不该把装配搞崩
+        specs = {}
+        specs_error = str(err)
+    else:
+        specs_error = ""
+    resident, ledger = resident_bytes_of(info, adapter=adapter, specs=specs)
+    mode = "int4" if ledger["int4Layers"] else ("int8" if ledger["int8Layers"] else "plain")
+    if assume is not None and str(assume) == mode:
+        return table, {
+            "source": "table", "mode": mode, "table": table,
+            "fileGiB": round(info.file_bytes / device_policy.GIB, 2),
+            "why": (f"文件是 **{mode}** 档 ✓ ⇒ 表里 {table:.2f} GiB 正是按这种文件量的 ✓"
+                    f"（含骨架自建参数 ✓；文件数据区 "
+                    f"{resident / device_policy.GIB:.2f} GiB 只作旁证 ✓）"),
+        }
+    est = resident / device_policy.GIB
+    return est, {
+        "source": "file", "mode": mode, "table": table,
+        "fileGiB": round(info.file_bytes / device_policy.GIB, 2),
+        "residentGiB": round(est, 2),
+        "int8ResidentLayers": ledger["int8ResidentLayers"],
+        "int4Layers": ledger["int4Layers"],
+        "int4ShellLayers": ledger.get("int4ShellLayers", 0),
+        "why": (f"文件是 **{mode}** 档 ✓，而表里 {table:.2f} GiB 是按 **{assume or '未登记'}** 档量的"
+                f" ⇒ 这次**不能**用表 ✓ ⇒ 按文件精算 {est:.2f} GiB ✓"
+                f"（int8 常驻 {ledger['int8ResidentLayers']} 层 ✓、4bit 打包 {ledger['int4Layers']} 层 ✓"
+                f"，其中 {ledger.get('int4ShellLayers', 0)} 层走 4bit 常驻壳 ✓"
+                f"{'（其余按 bf16 反量化 ✓）' if ledger.get('int4Layers', 0) > ledger.get('int4ShellLayers', 0) else ''}）"
+                + (f"；⚠️ 量化说明读取失败（{specs_error}）⇒ 4bit 层可能按 int8 算 ✓"
+                   if specs_error else "")),
+    }
 
 
 def _int8_bytes_of(module: Any, torch_mod: Any) -> int:
@@ -255,37 +656,12 @@ def _int8_bytes_of(module: Any, torch_mod: Any) -> int:
 
 
 def _materialize_meta(module: Any, *, torch_mod: Any, device: Any = "cpu") -> int:
-    """把还停在 **meta** 上的参数/缓冲区换成同形状同 dtype 的**未初始化**实存 ✓ ⇒ 返回换了几个 ✓。
+    """把 meta 上的参数/缓冲区换成未初始化实存 ⇒ 换了几个（**实现已下沉**，见 :mod:`dit_build`）。
 
-    ## 为什么不能用 ``module.to_empty()`` ✗✗（2026-11-01 实测 ✓）
-
-    32B 的 H3 文本塔在 meta 上建壳之后，``to_empty`` 会把**整份 62 GiB bf16** 一次性分配出来 ✓✗
-    —— 而那 350 个 ``nn.Linear`` 紧接着就被 :func:`h3_form.upgrade_linear_to_int8` 换成
-    int8 常驻层（22.7 GiB ✓）✓。**换掉不等于还给系统** ✗：实测进程 WS 停在 **74 GiB**、
-    系统物理内存只剩 **6 GiB**（共 93 GiB ✓）⇒ 后面的装载全在页错误里爬 ✓✗。
-
-    ⇒ 这里只碰 ``device.type == "meta"`` 的那些 ✓：换过壳的 int8 层**已经不在 meta 上** ✓，
-    一根 byte 都不会被重复分配 ✓。调用点必须排在 ``upgrade_linear_to_int8`` **之后** ✗。
-
-    ⚠️ 分配出来是**未初始化**的 ✓（``torch.empty`` ✓）—— 这是**故意**的：值一律由
-    :func:`weights.load_module_weights` 逐张量写入 ✓，而它报 ``complete=False`` 时装载方当场拒 ✓
-    （少写一个键 ⇒ ``missing`` 非空 ✓），所以"没填的壳"不可能被当成模型跑 ✓✗。
+    保留这个名字是因为 H3 那条路（:func:`_prepare_h3_module`）与本文件另外两处直接调它，
+    以及 ``tests/engine_*`` 里有用例按名字取 —— 行为与实现逐字一致 ✓。
     """
-    moved = 0
-    for sub in module.modules():
-        for name, param in list(sub._parameters.items()):
-            if param is None or param.device.type != "meta":
-                continue
-            sub._parameters[name] = torch_mod.nn.Parameter(
-                torch_mod.empty(param.shape, dtype=param.dtype, device=device),
-                requires_grad=bool(param.requires_grad))
-            moved += 1
-        for name, buffer in list(sub._buffers.items()):
-            if buffer is None or buffer.device.type != "meta":
-                continue
-            sub._buffers[name] = torch_mod.empty(buffer.shape, dtype=buffer.dtype, device=device)
-            moved += 1
-    return moved
+    return dit_build.materialize_meta(module, torch_mod=torch_mod, device=device)
 
 
 def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], str | None]:
@@ -323,6 +699,10 @@ def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], 
         "int8OnCpu": sum(1 for param in int8_params if param.device.type == "cpu"),
         "int8OnGpu": sum(1 for param in int8_params if param.device.type != "cpu"),
         "int8Resident": resident,
+        #: ⭐ 其中**4bit 打包**的层数 ✓（2026-11-02 ✓）：与 ``int8Resident`` 是**子集关系** ✓
+        #: —— 它们的参数同样 ``int8`` ✓，只是前向多一步解包 ✓。单列出来才看得出
+        #: 「说好 4bit、实际按 int8 乘」✓✗（头部逐字同形 ⇒ 合计数看不出来 ✓）。
+        "int4Resident": int(getattr(report, "int4Resident", 0) or 0),
     }
     if layers != len(int8_params):
         return ledger, (
@@ -430,10 +810,44 @@ QWEN21_FAMILY = "qwen_image21"
 #: 4 组调制对 6 组调制的键对账会报「缺 4 组」✓，读起来像权重没下全 ✗）。
 QWEN_IMAGE_FAMILY = "qwen_image"
 
-#: ⭐ **只出图、潜变量 4 维** 的族 ✓（``(1, C, H/scale, W/scale)`` ✓ **没有时间维** ✗）。
-#: 单一真源 ✓：``latent_shape`` / ``_latent_mode`` / ``denoise`` **三处都读它** ✓ ——
-#: 手抄成三份的下场是"加了新族只改了两处"，而漏掉的那处**不会报错** ✗（形状对、数是噪声 ✓✗）。
-IMAGE_ONLY_FAMILIES: tuple[str, ...] = (ZIMAGE_FAMILY, QWEN21_FAMILY, QWEN_IMAGE_FAMILY)
+#: ⭐ **Krea2**（单流 ✓ ``first/last/blocks/txtfusion`` ✓ 见 :mod:`dit_generic` 的 ``Krea2DiT`` ✓）。
+#: 与上面三族都**不是**一套键 ✗；条件也不是「一根向量」✗ 而是 **Qwen3-VL-4B 的 12 层栈**
+#: （``3krea2`` 的 ``txtlayers=12 × txtdim=2560 ⇒ 30720`` 宽 ✓ 盘上逐数如此 ✓）。
+#: 潜变量 / VAE 走 **Wan21**：16ch、8×、**有** mean/std 反缩放 ✓（``latent_formats.Wan21`` ✓），
+#: 采样 ``shift = 1.15``（``supported_models.Krea2.sampling_settings`` ✓ —— 不是 Flux 的 3 ✗）。
+KREA2_FAMILY = "krea2"
+
+#: ⭐ **SEEDVR2**（视频**修复/超分** ✓ 见 :mod:`dit_seedvr2` ✓ / :mod:`vae_seedvr2` ✓）。
+#:
+#: 与前六族的差别是**任务换了一类** ✗：它不是「从噪声生成」✓，而是「给一段退化视频 ⇒ 出修复版」✓
+#: ⇒ 主干每一步都要额外吃 **conditioning 17 通道** ✓（退化视频的 16 通道潜变量 ＋ 1 通道 loss mask ✓），
+#: 所以 ``vid_in`` 是 **33** 通道 ✓（噪声 16 ＋ 条件 17 ✓）而**潜变量仍是 16** ✓✗
+#: （:meth:`TorchBackend.latent_shape` 必须读 ``latent_channels`` 那一格 ✓，见那里的坑 ✓）。
+#: 潜空间口径 ``latent_formats.SeedVR2`` ✓（反缩放 ×**0.9152** ✓ 不是 mean/std 组 ✗）；
+#: 而且它**没有文本塔** ✓ —— 提示词是 ``positive_conditioning`` / ``negative_conditioning``
+#: 烤在权重里的固定上下文 ✓（58 / 64 条 × 5120 宽 ✓）。
+SEEDVR2_FAMILY = "seedvr2"
+
+#: Krea2 权重在盘上带**三层**前缀（不同导出工具各写一层 ✓）：先长后短地试 ✓，
+#: 一起交给 :func:`weights.load_module_weights` 的 ``key_map`` ✓（正则 ⇒ 点要转义 ✓）。
+#: ⚠️ 判据是「**全部**键都带这一层」✓ 不是「有一些带」✗ —— 后者会把两族混在一起认 ✓✗。
+#: 单一真源：表在 :mod:`dit_build`（判前缀与建网现在是同一份声明），这里只留名字给文档引用。
+_KREA2_PREFIXES: tuple[str, ...] = dit_build.KREA2_PREFIXES
+
+#: ⭐ **前向契约**（潜变量几维 / σ 喂什么形态）—— 真源在 :attr:`dit_build.BUILDERS` 的
+#: ``contract`` 字段 ✓，这里只是**派生视图**（保留旧名字给文档与测试引用 ✓）。
+#:
+#: 2026-11-01 收口前：这个元组是手写的 ✓✗，``latent_shape`` / ``_latent_mode`` / ``denoise``
+#: 三处各读一遍同名族名 ⇒ 加族时「改了两处、漏一处」**不报错** ✗（形状对、数是噪声 ✓✗）。
+#: 现在三处都读 :func:`dit_build.contract_of` ✓，族表加一行三处自动跟上 ✓✓。
+IMAGE_ONLY_FAMILIES: tuple[str, ...] = dit_build.image_only_keys()
+
+#: ⭐ **Flux.1**（双流 19 + 单流 38 ✓ 见 :mod:`dit_flux` ✓）。
+#: 与前四族的**接口**差别只有一处 ✓✗：条件不止一根 —— T5 的 4096 宽走 ``condition`` ✓，
+#: 另有 CLIP-L 的 pooled 768 宽 ✓ 和一个 guidance **标量** ✓。后两根不进 ``denoise`` 的
+#: 位置参数（那会让所有族都多两个空位 ✗），而是**挂在模块上** ✓（``default_vector`` /
+#: ``default_guidance`` ✓，见 :meth:`TorchBackend.attach_flux_conditioning` ✓）。
+FLUX_FAMILY = "flux"
 
 
 def _dit_family_of(info: Any) -> str | None:
@@ -455,174 +869,54 @@ def _dit_family_of(info: Any) -> str | None:
     return getattr(spec, "key", None)
 
 
+#: ── 以下是**过渡薄壳**（2026-11-01）────────────────────────────────────────────
+#: 实现已收口到 :mod:`dit_build` 的装配表（一族一行声明）。保留这些名字有两个原因：
+#: ``tests/engine_dit_lumina_test.py`` / ``engine_dit_qwen_image_test.py`` 直接调它们，
+#: 运维脚本也可能这么调 —— 行为逐字不变 ✓。
+#: **新代码别照这个抄** ✗：加族请改 ``dit_family._RULES`` + ``dit_build.BUILDERS``，
+#: 不要再往本文件加 ``_build_*``（那正是本表要消掉的重复样板 ✗）。
+def _build_via_table(key: str | None, info: Any, explicit: dict[str, Any] | None,
+                     *, dtype: Any = None, path: Any = None) -> tuple[Any, dict[str, Any]]:
+    """查表建网 ⇒ ``(module, config)``；表里没有这族 ⇒ 抛不可用（**不静默回老路**）。"""
+    try:
+        built = dit_build.build(key, info, explicit or {}, dtype=dtype, path=path,
+                                int8_plan=int8_scale_plan, int4_plan=int4_scale_plan)
+    except dit_build.BuildError as err:
+        raise TorchBackendUnavailable(str(err), reason=getattr(err, "reason", "pending")) from err
+    if built is None:
+        raise TorchBackendUnavailable(
+            f"族 {key} 没有装配声明 ✗（`dit_build.BUILDERS` 里缺这一行："
+            f"加族要同时改 `dit_family._RULES` 与它）", reason="pending")
+    return built
+
+
 def _build_zimage_module(info: Any, explicit: dict[str, Any],
                          *, dtype: Any = None) -> tuple[Any, dict[str, Any]]:
-    """Z-Image 族 ⇒ 按**权重形状**建 :class:`dit_lumina.LuminaDiT` ✓ ⇒ ``(module, config)`` ✓。
-
-    ``config`` 返回 **dict** ✓（与 H3 形态同一种形态 ✓ ⇒ :meth:`TorchBackend.describe` 认 dict ✓；
-    旧 DiT 那个 dataclass 形态是另一条路 ✓ 两边都得认 ✓ 见 ``_configured_text_dim`` ✓）。
-
-    ⚠️ ``patch`` **推不出来** ✗：``x_embedder`` 的入维是 ``channels × patch²`` ✓ —— 只知道乘积、
-    分不出「16 通道 patch=2」与「64 通道 patch=1」✓✗，两者都能建成功、前向都算得出数 ✓✗
-    （错了只会让出片与潜变量错位 ✗）。⇒ 默认 2（ComfyUI ``z_image`` 的构造口径 ✓）但**必须
-    在报告里写明"这是默认值、不是从权重读出来的"** ✗（``configSources`` 那套口径 ✓）。
-
-    ⚠️ 建的时候直接给**计算精度** ✗（有 CUDA ⇒ bf16 ✓）：Z-Image bf16 权重约 8 GiB ✓，
-    fp32 建一遍就是 16 GiB ✓✗ —— H3 那条 78 GiB 的教训同一个 ✓（见 :func:`_prepare_h3_module` ✓）。
-    """
-    import torch  # noqa: PLC0415
-
-    from app.services.engine import dit_lumina as lumina_mod  # noqa: PLC0415
-
-    shapes = {name: tuple(entry.shape) for name, entry in info.tensors.items()}
-    patch = explicit.get("patch", explicit.get("patch_size"))
-    source = "explicit" if patch is not None else "default"
-    patch = int(patch or 2)
-    #: ⚠️ ``dtype`` 由调用方按**实际设备**给 ✓✗（``self._compute_dtype()`` ✓）—— 这里若按
-    #: ``cuda.is_available()`` 自己判 ✓，在有卡而 `device="cpu"` 时会建成 bf16 ✓✗（CPU 上慢/缺算子 ✓）。
-    dtype = dtype or (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-    try:
-        module = lumina_mod.build_from_shapes(shapes, patch=patch, dtype=dtype)
-    except lumina_mod.ShapeError as err:
-        raise TorchBackendUnavailable(
-            f"Z-Image 权重推不出可装的结构 ✗（**不拿出厂形状硬装** ✗ —— 那会「名字对、形状错」✓✗）："
-            f"{err}", reason="pending") from err
-    shape = lumina_mod.infer_shape(shapes, patch=patch)
-    config: dict[str, Any] = dict(shape.__dict__)          # dataclass ⇒ 字段名即权重事实 ✓
-    config["family"] = ZIMAGE_FAMILY
-    # ⚠️ 文本特征宽度就叫 ``cap_dim`` ✓（Lumina 的命名 ✓）—— 但后端协议问的是 ``text_dim`` ✗
-    #    ⇒ 这里显式映射一次 ✓，否则 `_configured_text_dim` 会**悄悄回落**到默认值 ✓✗
-    #    （TE 的 output_dim 与主干对不上 ✓，那条路 2026-09-20 踩过 ✓）。
-    config["text_dim"] = shape.cap_dim
-    # ⚠️ 后端协议问的是 ``in_channels`` / ``vae_scale`` ✗，而 Lumina 的字段叫 ``channels`` ✓ 且
-    #    **根本没有 vae_scale** ✗ ⇒ 不补这两个，`latent_shape` 会在 dict 上 ``getattr`` 取不到 ✓✗
-    #    ⇒ 静默回 ``None`` ⇒ 造**一维占位**潜变量 ⇒ 真 DiT 前向当场形状错 ✓✗（而报告会写"已装模型"✓）。
-    config["in_channels"] = int(shape.channels)
-    #: Z-Image 的 VAE 是 **Flux** 那一档 ✓（``latent_formats.Flux`` ✓ ``spatialScale=8`` ✓ 见
-    #  ``vae_flux`` 模块头 ✓）—— 这不是从 DiT 权重读出来的 ✗，是**同族事实** ✓ ⇒ 记进 ``configSources`` ✓。
-    config["vae_scale"] = 8
-    config["configSources"] = {"patch": source, "结构": "权重形状反推 ✓",
-                               "vae_scale": "同族事实（Flux VAE，8× ✓）"}
-    return module, config
+    return _build_via_table(ZIMAGE_FAMILY, info, explicit, dtype=dtype)
 
 
 def _build_qwen21_module(info: Any, explicit: dict[str, Any],
                          *, dtype: Any = None) -> tuple[Any, dict[str, Any]]:
-    """Qwen-Image 2.1 族 ⇒ 按**权重形状**建 :class:`dit_qwen21.Qwen21DiT` ✓ ⇒ ``(module, config)`` ✓。
-
-    ⚠️ 三件"权重里写着、但后端协议按**别的名字**问"的事实，必须在这里显式搬一次 ✓
-    （少搬一个都是**静默**的 ✗ —— 后端 ``getattr`` 取不到就回落默认值 ✓✗）：
-
-    * ``context_dim`` ⇒ ``text_dim``（TE 输出宽度 4096 ✓；不搬 ⇒ ``_configured_text_dim`` 回落 ⇒
-      TE 与主干对不上，报错指不到这里 ✗）；
-    * ``channels`` ⇒ ``in_channels``（**64** ✓ 不是 16 ✗ —— 2.1 的 VAE 直出 64ch ✓，
-      ``img_in`` 就是 ``Linear(64 → dim)`` ✓，**没有 conv patchify** ✗）；
-    * ``vae_scale = 16``（**同族事实** ✓ 见 ``latent_formats.QwenImage21.spacial_downscale_ratio`` ✓）
-      —— 这一档**权重里没有** ✗，也不是 8 ✗（用 8 ⇒ 潜变量边长翻倍 ⇒ 真前向当场形状错 ✓✗）。
-
-    ⚠️ **meta 建、再 to_empty** ✗✗：2.1 是 32 层 × 4096 ⇒ bf16 约 14 GiB ✓，fp32 建一遍就是 28 GiB ✓
-    （与 H3 那 78 GiB 的同一条教训 ✓）。``with torch.device("meta")`` 只建元数据 ✓，``.to(dtype)``
-    在 meta 上**只改 dtype、不分配** ✓，``to_empty`` 才按目标 dtype 真正分配 ✓ ⇒ 峰值只剩"真正那一份" ✓。
-    """
-    import torch  # noqa: PLC0415
-
-    from app.services.engine import dit_qwen21 as q21_mod  # noqa: PLC0415
-
-    shapes = {name: tuple(entry.shape) for name, entry in info.tensors.items()}
-    heads = explicit.get("heads", explicit.get("num_heads"))
-    #: ``axes_dim`` 权重里没有 ✗ ⇒ 默认走族事实 (16,56,56) ✓；只给自检缩结构时覆盖 ✓
-    axes = explicit.get("axes_dim")
-    try:
-        shape = q21_mod.infer_shape(shapes,
-                                    heads=int(heads) if heads else None,
-                                    axes_dim=tuple(int(x) for x in axes) if axes else None)
-    except q21_mod.ShapeError as err:
-        raise TorchBackendUnavailable(
-            f"Qwen-Image 2.1 权重推不出可装的结构 ✗（**不拿出厂形状硬装** ✗ —— 那会「名字对、形状错」✓✗）："
-            f"{err}", reason="pending") from err
-    #: 同上：精度跟**实际设备**走 ✓（`self._compute_dtype()` ✓ 传进来 ✓）。
-    dtype = dtype or (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-    with torch.device("meta"):
-        module = q21_mod.build(shape)
-    module.to(dtype)                     # meta 上只改 dtype ✓（不分配 ✓）
-    module.to_empty(device="cpu")        # 到这里才按目标 dtype 分配 ✓
-    config: dict[str, Any] = dict(shape.__dict__)      # dataclass ⇒ 字段名即权重事实 ✓
-    config["family"] = QWEN21_FAMILY
-    config["text_dim"] = int(shape.context_dim)
-    config["in_channels"] = int(shape.channels)
-    config["vae_scale"] = 16
-    config["configSources"] = {
-        "结构": "权重形状反推 ✓",
-        "heads": "权重算出（to_q 输出宽 ÷ norm_q 宽 ✓）" if heads is None else "explicit",
-        "text_dim": "权重事实（`txt_in.in_layer` 输入宽 ✓）",
-        "vae_scale": "同族事实（`latent_formats.QwenImage21`：64ch / 16× ✓）",
-    }
-    return module, config
+    return _build_via_table(QWEN21_FAMILY, info, explicit, dtype=dtype)
 
 
 def _build_qwen_image_module(info: Any, explicit: dict[str, Any],
                              *, dtype: Any = None) -> tuple[Any, dict[str, Any]]:
-    """Qwen-Image **2512**（t2i）/ **Edit 2511** 族 ⇒ 按形状建 :class:`dit_qwen_image.QwenImageDiT` ✓。
+    return _build_via_table(QWEN_IMAGE_FAMILY, info, explicit, dtype=dtype)
 
-    与 :func:`_build_qwen21_module` 是**两条不同的路** ✗（族名 ``qwen_image`` vs ``qwen_image21`` ✓）：
 
-    * 2512 是**双流 MMDiT** ✓（``attn.to_q`` ＋ ``attn.add_q_proj`` ✓、每层 6 组调制 ✓）；
-    * 潜变量 16 通道 ✓、VAE 8× ✓ —— **不是** 2.1 的 64 通道 / 16× ✗（用错 ⇒ 潜变量边长翻倍 ✓✗）；
-    * 时间口径 **``1000·σ`` 不翻转** ✓（2.1 是 lumina 式 ``1000·(1−σ)`` ✗）—— 这一格错了两族都
-      装得上、都算得出，只是画面与提示词脱钩 ✓✗（见 :mod:`dit_qwen_image` 模块头 ✓）。
+def _build_krea2_module(info: Any, explicit: dict[str, Any], *, dtype: Any = None,
+                        path: Any = None) -> tuple[Any, dict[str, Any]]:
+    return _build_via_table(KREA2_FAMILY, info, explicit, dtype=dtype, path=path)
 
-    三件"权重里写着、但后端协议按别的名字问"的事实，显式搬一次 ✓（与 2.1 那条同一个理由 ✓）：
 
-    * ``context_dim`` ⇒ ``text_dim``（Qwen2.5-VL-7B 出 **3584** ✓ —— 不是 2.1 的 4096 ✗）；
-    * ``channels`` ⇒ ``in_channels``（**16** ✓：``img_in`` 吃的是拍平后的 16×2×2 = 64 ✓）；
-    * ``vae_scale = 8``（同族事实：``latent_formats.Wan21`` ✓ 见参考实现
-      ``supported_models.QwenImage.latent_format`` ✓ —— 权重里没有这一格 ✗）。
+def _krea2_stripped(shapes: dict[str, tuple[int, ...]]
+                   ) -> tuple[dict[str, tuple[int, ...]], dict[str, str] | None, str | None]:
+    return dit_build.krea2_strip(shapes)
 
-    ⚠️ **Edit 2511（``__index_timestep_zero__`` ✓）的参考图通路尚未接** ✗✗：它要走 Qwen2.5-VL
-    的视觉塔把参考图编成 token ✓ 再由 :meth:`TorchBackend.denoise` 传 ``ref_latents`` ✓ ——
-    两段都还没有 ✓。⇒ 这里**照装**（键对账与形状必须现在就能核 ✓），但把事实写进
-    ``configSources`` ✓，并让 :meth:`TorchBackend.denoise` 在 Edit 权重上**明确报错** ✓✗
-    （静默按 t2i 出图 = 编辑能力凭空消失 ✓✗）。
-    """
-    import torch  # noqa: PLC0415
 
-    from app.services.engine import dit_qwen_image as qimg_mod  # noqa: PLC0415
-
-    shapes = {name: tuple(entry.shape) for name, entry in info.tensors.items()}
-    heads = explicit.get("heads", explicit.get("num_heads"))
-    axes = explicit.get("axes_dim")
-    try:
-        shape = qimg_mod.infer_shape(
-            shapes,
-            heads=int(heads) if heads else None,
-            axes_dim=tuple(int(x) for x in axes) if axes else None,
-            ref_method=explicit.get("ref_method"))
-    except qimg_mod.ShapeError as err:
-        raise TorchBackendUnavailable(
-            f"Qwen-Image 权重推不出可装的结构 ✗（**不拿出厂形状硬装** ✗ —— 那会「名字对、形状错」✓✗）："
-            f"{err}", reason="pending") from err
-    #: 精度跟**实际设备**走 ✓（`self._compute_dtype()` ✓ 传进来 ✓）—— 20B 的族 fp32 建一遍是
-    #: 两倍显存 ✓✗，所以这里与 2.1 一样走「meta 建 ⇒ 只改 dtype ⇒ to_empty 才分配」✓。
-    dtype = dtype or (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-    with torch.device("meta"):
-        module = qimg_mod.build(shape)
-    module.to(dtype)                     # meta 上只改 dtype ✓（不分配 ✓）
-    module.to_empty(device="cpu")        # 到这里才按目标 dtype 分配 ✓
-    config: dict[str, Any] = dict(shape.__dict__)      # dataclass ⇒ 字段名即权重事实 ✓
-    config["family"] = QWEN_IMAGE_FAMILY
-    config["text_dim"] = int(shape.context_dim)
-    config["in_channels"] = int(shape.channels)
-    config["vae_scale"] = 8
-    config["configSources"] = {
-        "结构": "权重形状反推 ✓",
-        "heads": "权重算出（`attn.norm_q` 宽 = head_dim ✓）" if heads is None else "explicit",
-        "text_dim": "权重事实（`txt_norm` 宽 / `txt_in` 出宽 ✓ = Qwen2.5-VL-7B 的 3584 ✓）",
-        "vae_scale": "同族事实（`latent_formats.Wan21`：16ch / 8× ✓；权重里没有 ✗）",
-        "ref_method": f"{shape.ref_method} ✓（Edit 哨兵 = `{qimg_mod.EDIT_SENTINEL}` ✓）",
-        "editRefWired": "False —— 参考图通路（视觉塔 + 参考图 VAE 编码）未接 ✓【未接事实】"
-                        if shape.ref_timestep_zero else "n/a（t2i 权重 ✓）",
-    }
-    return module, config
+def _krea2_specs(specs: Any, prefix: str | None) -> Any:
+    return dit_build.krea2_specs(specs, prefix)
 
 
 def _timesteps_of(torch_mod: Any, latents: Any, sigma: float) -> Any:
@@ -772,12 +1066,128 @@ def _freeze_inference(module: Any) -> int:
     return frozen
 
 
+def _is_oom(exc: BaseException) -> bool:
+    """这个异常是不是**显存不够** ✓✗（用于「降档再来一次」，别把真 bug 也吞掉 ✗）。
+
+    判据取**最宽**的两种写法 ✓：``torch.cuda.OutOfMemoryError``（torch ≥ 1.13 ✓）与
+    ``RuntimeError`` 里的 ``out of memory`` 字串 ✓（旧版 / ``torch.OutOfMemoryError`` 未导出时 ✓）。
+    ⚠️ 刻意**不**在这里调 ``empty_cache`` ✗：那是「腾地方」不是「判类型」✓，混在一起会让
+    "判定函数" 有副作用 ✓✗（调用点看不出卡上被清过 ✓）。
+    """
+    if exc.__class__.__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error: out of memory" in text
+
+
+#: VAE 解码省显存旋钮的**装配默认** ✓✗（2026-11-02 ✓）：两个**改数值**的关 ✓、
+#: 只在 OOM 才生效的兜底开 ✓ —— 理由见 :meth:`TorchBackend.set_vae_tiling` ✓。
+VAE_TILING_DEFAULTS: dict[str, Any] = {"tile": None, "halo": None, "attnChunk": None,
+                                       "temporalChunk": None, "fallback": True}
+
+#: 键的两个写法都认 ✓（``attn_chunk`` 是 Python 侧、``attnChunk`` 是回执/HTTP 侧 ✓）
+#: ⇒ 调用方写哪个都不会「给了没生效」✓✗。
+_VAE_TILING_ALIASES: dict[str, str] = {"tile": "tile", "halo": "halo",
+                                       "attn_chunk": "attnChunk", "attnchunk": "attnChunk",
+                                       "attnChunk": "attnChunk",
+                                       "temporal_chunk": "temporalChunk",
+                                       "temporalchunk": "temporalChunk",
+                                       "temporalChunk": "temporalChunk",
+                                       "fallback": "fallback"}
+
+#: 报错时把「这个数是什么单位」说清楚 ✓✗ —— 一律写「像素」会把 ``temporalChunk``（**潜帧** ✓）
+#: 也读成像素 ✓✗：``5`` 帧 vs ``5`` 像素 差着两个数量级 ✓。
+_VAE_TILING_UNITS: dict[str, str] = {"tile": "像素（宽/高 ✓）", "halo": "像素（宽/高 ✓）",
+                                     "attnChunk": "元素数（query 行 ✓）",
+                                     "temporalChunk": "潜帧数（时间维 ✓）"}
+
+#: 布尔的字面写法 ✓（**嵌套值到不了路由层的 ``_as_bool``** ✗ —— 那是给顶层开关用的 ✓，
+#: 这里的值已经是 JSON 里掏出来的了 ⇒ 词表只能落在这儿 ✓，两处**语义必须一致** ✓）。
+_TRUE_WORDS = ("1", "true", "yes", "on", "y", "t")
+
+
+def normalize_vae_tiling(raw: Any) -> dict[str, Any]:
+    """``None`` / 部分 dict → **规范化**的 VAE 解码旋钮 ✓✗（非法值当场 ``ValueError`` ✓）。
+
+    这是**唯一**的归一入口 ✓：装配线（进装载键 ✓）、HTTP 白名单（转 400 ✓）、
+    回执（回吐实值 ✓）都调它 ⇒ 三处的口径不可能分叉 ✓✗。
+
+    规则：
+
+    * ``None`` ⇒ :data:`VAE_TILING_DEFAULTS` 的副本 ✓（＝``tile`` / ``halo`` / ``attnChunk`` /
+      ``temporalChunk`` 全关、OOM 兜底开 ✓）；
+    * 数字 ``<= 0`` ⇒ **关** ✓（``0`` 不是「0 像素一块」✗ —— 与 ``vae_wan`` 的
+      ``chunk <= 0`` 同一个意思 ✓）；
+    * 认 ``attn_chunk`` 与 ``attnChunk`` 两种写法 ✓（别让「换了个写法 ⇒ 没生效」发生 ✗）；
+      ``temporalChunk`` 同理认 snake / camel 三种写法 ✓；
+    * **不认识的键 ⇒ 抛** ✗（``tile_size`` / ``attn_chunks`` 这类拼错的键静默忽略 ⇒
+      调用方以为开了、其实全程逐位 ✓✗ —— 那是最难查的一种「没生效」✗）。
+    """
+    if raw is None:
+        return dict(VAE_TILING_DEFAULTS)
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        #: 也收 ``[("tile", 512), …]`` ✓（``_vae_tiling_key`` 的快照形直接回灌 ✓，幂等 ✓）
+        if not all(isinstance(x, (list, tuple)) and len(x) == 2 for x in raw):
+            raise ValueError(f"`vaeTiling` 给成序列时必须形如 [[键, 值], …] ✗ 实收 {raw!r}")
+        items = [tuple(x) for x in raw]  # type: ignore[misc]
+    else:
+        raise ValueError(
+            f"`vaeTiling` 只收对象（形如 {{\"tile\": 512, \"attnChunk\": 1024}}）或不写 ✓，"
+            f"实收 {type(raw).__name__} {raw!r} ✗ —— 想全关就写 {{}} 或显式给 null ✓"
+            f"（**没有** ``true``/``false`` 这种写法 ✗：那会把「两个旋钮」和「OOM 兜底」"
+            f"混成一件事 ✓✗）")
+
+    out = dict(VAE_TILING_DEFAULTS)
+    for key, value in items:
+        canonical = _VAE_TILING_ALIASES.get(str(key))
+        if canonical is None:
+            raise ValueError(
+                f"`vaeTiling` 里有不认识的键 {key!r} ✗ —— 只认 "
+                f"{sorted(set(_VAE_TILING_ALIASES.values()))} ✓（拼错的键静默忽略 ⇒ "
+                f"你以为开了、其实全程逐位 ✓✗）")
+        if canonical == "fallback":
+            if isinstance(value, bool):
+                out[canonical] = value
+            elif isinstance(value, (int, float)):
+                out[canonical] = bool(value)
+            elif isinstance(value, str) and value.strip():
+                out[canonical] = value.strip().lower() in _TRUE_WORDS
+            else:
+                raise ValueError(f"`vaeTiling.fallback` 要布尔 ✓，实收 {value!r} ✗")
+            continue
+        if value is None:
+            out[canonical] = None
+            continue
+        if isinstance(value, str):
+            #: 字符串数字也收 ✓✗（同 ``residencyBudgetMib`` 那条口径 ✓：表单/查询串送来的是
+            #: ``"768"`` ✓；而 ``"big"`` 仍然要**当场报** ✓ —— 不是"收下再说" ✗）。
+            try:
+                number = int(float(value.strip()))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"`vaeTiling.{canonical}` 要整数（{_VAE_TILING_UNITS.get(canonical, '整数')}），"
+                    f"实收 {value!r} ✗") from None
+            out[canonical] = number if number > 0 else None
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"`vaeTiling.{canonical}` 要整数"
+                             f"（{_VAE_TILING_UNITS.get(canonical, '整数')}），"
+                             f"实收 {type(value).__name__} {value!r} ✗")
+        number = int(value)
+        out[canonical] = number if number > 0 else None
+    return out
+
+
 class TorchBackend:
-    """真张量后端 ✓（``realTensors=True`` ✓ / ``synthetic=True`` ✗ —— 见模块头那张表 ✓）。"""
+    """真张量后端 ✓（``realTensors=True`` 恒真 ✓ / ``synthetic`` **按已装件算** ✗ —— 见模块头那张表 ✓）。"""
 
     name = "torch"
-    #: ⚠️ **产物不是真画面** ✗（前向是占位 ✓）—— 刻意保持 True ✓，不许因为"用上 torch 了"就改成 False ✗
-    synthetic = True
+    #: 装到这些 ``vaeKind`` ⇒ 解出来的是**真画面** ✓（``reference-untrained`` / ``None`` ⇒ 合成 ✗）
+    #: ⚠️ ``music3-real`` 解出来的是**真波形** ✓（不是画面 ✗）—— 但它确实是"真解码器" ✓，
+    #: 所以照样入册 ✓；落盘侧靠 ``audioPath`` 区分 ✓（``write`` 的纯音频分支 ✓）。
+    REAL_VAE_KINDS = ("h3-real", "flux-real", "wan21-real", "seedvr2-real", "music3-real")
     #: 张量是真的 ✓（与 :class:`app.services.engine.dryrun.DryRunBackend` 的本质区别 ✓）
     realTensors = True
     #: 条件/噪声的向量长度（占位前向用 ✓ —— 真模型接入后由架构决定 ✓）
@@ -788,7 +1198,8 @@ class TorchBackend:
                  int8_offload: bool = False,
                  residency: str = "off",
                  residency_budget_mib: float | None = None,
-                 policy: str | None = None) -> None:
+                 policy: str | None = None,
+                 vae_tiling: Any = None) -> None:
         available, reason = torch_available()
         self._available = available
         self._reason = reason
@@ -826,6 +1237,11 @@ class TorchBackend:
         self._residencyBudgetMib = _residency_budget_mib(residency_budget_mib)
         #: 联合驻留的把手 ✓（``place()`` 的返回值 ✓ —— 报告与 `detach()` 都靠它 ✓；off ⇒ None ✓）
         self._residencyHandle: Any = None
+        #: ⭐ **内存这一级**（宿主配额表 ✓ —— 2026-11-02 加 ✓）：**每件一本** ✓✗
+        #: （``dit`` 与 ``te`` 的组名都叫 ``blocks.0`` ✓ —— 合成一本账会把一件的层当成另一件的
+        #: 同一层卸掉 ✓，前向到那里就会撞上 0 元素占位 ✓）。值 ``None`` ⇒ 这台机器的内存读数
+        #: 取不到 ⇒ 这一级**不启用** ✓（如实走老路，不假装有上限 ✓）。
+        self._hostCaches: dict[str, Any] = {}
         #: ⭐ **任务账本** ✓（"这些字节现在是谁的" ✓）＋ **运行期压力状态机** ✓（带滞回 ✓）——
         #: 见 :mod:`scheduler` ✓。⚠️ 账本**不是判据** ✗：判据永远是**现测**读数（`device_policy.probe` ✓），
         #: 账本只回答归属 ✓（换装泄漏 / 忘记回收 / 两件重叠占卡，都从这看出来 ✓）。
@@ -852,6 +1268,25 @@ class TorchBackend:
         #: 反缩放事实 ✓（``(mean, std, family)`` ✓ —— 只有 ``wan21-real`` 用 ✓）。
         #: ⚠️ 归 **VAE 侧**而不是 DiT 侧 ✗：它是**解码**这一步的常数 ✓，DiT 吃的是归一化后的值 ✓。
         self._vaeLatents: tuple[tuple[float, ...], tuple[float, ...], str] | None = None
+        #: ⭐ VAE 解码的**两个**省显存旋钮 ✓✗（2026-11-02 实测落地 ✓）：``tile``（切注意力
+        #: **之后**的 up 链 ✓）＋ ``attn_chunk``（注意力按 query 分块 ✓）。**默认全关** ✓ ——
+        #: 开任一都**改数值** ✓（tile 实测相对差 5.8e-03 ✓、attn 见 `AttentionBlock` 的表 ✓），
+        #: 而本仓对「同 seed 同文本逐像素复现」有硬要求 ✓ ⇒ 由调用方 :meth:`set_vae_tiling`
+        #: 明确开口 ✓，回执里如实报「开了哪个、为什么、不是逐位」✓。
+        #: ⚠️ **整段按潜变量切块**这一条永远错 ✗：``middle.1`` 是全图单头注意力 ✓ ⇒ 切块后
+        #: 注意力只看得到自己那块 ✓、拼回来**整张**都变（真 2.1 权重实测相对差 1.35 ✓，
+        #: 不是接缝 ✓）。``fallback=True`` 只在 OOM 时才临时降档 ✓（那是"总比崩强" ✓ 不是优化 ✗）。
+        #: ⚠️ 为什么 ``fallback`` **默认开**、而两个旋钮默认关 ✗✗：前者只在**本来要崩**的那条路上
+        #: 生效 ✓（装得下时逐位不变 ✓ ⇒ 对「逐像素复现」零影响 ✓），后者一动就换字节 ✓。
+        #: 归一在 :func:`normalize_vae_tiling` **一处** ✓✗（装配线、HTTP、回执三处共用 ✓）。
+        self._vaeTiling: dict[str, Any] = normalize_vae_tiling(vae_tiling)
+        #: 「这一档是**溢出自动降下来的**」✓ != 创作者点名要的 ✓✗ —— 两者必须分开 ✓：
+        #: 自动降下来的还可以继续降 ✓，点名要的只回报不擅动 ✓（见 :meth:`TorchBackend.decode` ✓）。
+        self._vaeAutoChunk: int | None = None
+        #: 上一轮**溢出**过（reserved 超物理显存）⇒ 下一轮开跑前先把缓存块还回去 ✓✗：
+        #: 那些块散在主机内存里 ✓，不还的话新的一轮还在原地颠簸 ✓（实测已降到 1 档却仍花 200 秒 ✗，
+        #: 还回去之后是 8~10 秒 ✓）。
+        self._vaeSpilled = False
         #: 音频那侧的同一件事 ✓（现在只有参考一族 ✓；写在这里是为了 `_decode_dual` 的 ``synthetic`` ✓
         #: 能**按事实算** ✓ 而不是写死 True ✗）
         self._audioVaeKind: str | None = None
@@ -872,6 +1307,16 @@ class TorchBackend:
         #: ``"reference-untrained"`` **写死**在返回里 ✓✗ ⇒ 挂上真文本塔之后仍然自述"未训练"✓，
         #: 调用方据此会以为条件没有语义 ✓✗（而它其实是真的 ✓）。
         self._textKind: str | None = None
+        #: Qwen2.5-VL 的**视觉塔** ✓（Edit 2511 参考图的语义通路 ✓；挂在文本塔旁边 ✓，见
+        #: :meth:`attach_qwen25vl_vision` ✓）。它与文本塔**同文件不同前缀** ✓（``visual.*`` ✓）。
+        self._visionTower: Any = None
+        self._visionShape: Any = None
+        self._visionReport: dict[str, Any] | None = None
+        #: ⭐ Edit 2511 的**参考图潜变量** ✓（由 :meth:`encode_text` 算出 ✓、:meth:`denoise`
+        #: 每一步带进 DiT ✓）。放后端字段而不是回执里 ✓，是因为 `pipeline` 只把
+        #: ``condition["positive"]`` 递给 `denoise` ✓ ⇒ 走回执就**只有第一步能拿到** ✓✗。
+        #: ⚠️ 类型是**一列** ✓（单图 = 长度 1 ✓、多图 = N ✓）：统一成列表 ⇒ 两条路不用分叉 ✓。
+        self._refLatents: Any = None
         #: 首帧条件**实际走了哪条路** ✓（真 VAE 编码 / 占位 ✓ —— 由管线回给调用方 ✓）
         self._conditioningNote: dict[str, Any] | None = None
         #: 超清放大器 ✓（按**需求装载** ✓ —— 没要超清就不装 ✓ 省显存）；装载报告与本次二采的实况 ✓
@@ -881,6 +1326,11 @@ class TorchBackend:
         #: 本实例**借来还没还**的 LoRA ✓（E2.5 ✓：借的是进程级 `lora_cache` 里那份共享张量 ✓，
         #: 同一个内容挂两次只占**一份**内存 ✓）；模型被换掉 / 卸载时必须 :meth:`release_loras` ✗✗
         self._loraLeases: list[Any] = []
+        #: ⭐ 挂上去的**补丁钩子** ✓（2026-11-01 补 ✗✗）：LoRA 走 bypass 路时是**挂载**（
+        #: ``register_forward_hook`` ✓）而不是折进权重 ✓ —— 归还租约只把**张量**还了 ✓，
+        #: 钩子还赖在模块上 ✗ ⇒ 再挂一次就是「同一份增量叠两遍」✓✗（不报错、只是越来越"重" ✓）。
+        #: 所以卸载要**两件一起还**：先摘钩子 ✓、再还租约 ✓。
+        self._loraHooks: list[Any] = []
         #: 分时驻留的**链登记** ✓（``declare_chain`` 写 ✓、``enter_phase`` 读 ✓；``None`` ⇒ 不换装 ✓）。
         #: ⚠️ 只有「三件之和装不下」的族才登记 ✗（Qwen-Image 2.1 ✓ —— 账见 :attr:`PHASE_PARTS` ✓）。
         self._chain: dict[str, Any] | None = None
@@ -981,15 +1431,86 @@ class TorchBackend:
     #: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
     #: |---|---|---|---|---|
     #: | DiT | ``qwen_image_2512_bf16`` ✓ | **38.05 GiB** ✓ | **38.05** ✓ | 本来就是 bf16 ⇒ 1:1 ✓ |
-    #: | DiT（Edit）| ``qwen_image_edit_2511_int8`` ✓ | 17.78 GiB ✓ | ≈**35.5** ✓ | int8 ⇒ ×2 ✓ |
+    #: | DiT（Edit）| ``qwen_image_edit_2511_int8`` ✓ | **19.09 GiB** ✓ | **19.09** ✓ | 840 层 int8 **原样常驻** ✓ ⇒ 1:1（旧账写 ≈35.5 是"一律反量化成 bf16"时代的 ✗，已作废 ✓） |
     #: | 文本塔 | ``qwen_2.5_vl_7b_fp8_scaled`` ✓ | 8.74 GiB ✓ | ≈**16.1** ✓ | fp8 ⇒ ×2 ✓；且**只装语言塔** ✓（视觉塔 714 张量不建 ✗ ⇒ 略小于 ×2 ✓） |
     #: | VAE | ``qwen_image_vae`` ✓ | 0.24 GiB ✓ | **0.24** ✓ | 本体就是 bf16/fp32 权重 ✓ |
+    #: | 视觉塔 | 同 ``qwen_2.5_vl_7b_fp8_scaled`` 的 ``visual.*`` ✓ | 8.74 GiB 里的 714 张量 ✓ | ≈**1.35** ✓ | **只在 Edit 链**的 encode 段在场 ✓（fp8 ⇒ ×2 ✓；装配后实测 390 真权重 ✓） |
     #:
-    #: ⚠️ **这一族在这张卡上注定装不满** ✗✗：DiT 单件 38.05 GiB > 卡 **22.49** ✓ ⇒ `auto` 会判
+    #: ⚠️ **只在 bf16 的 2512 这一份上装不满** ✗✗：DiT 单件 38.05 GiB > 卡 **22.49** ✓ ⇒ `auto` 会判
     #: `split`（按层切给卡＋内存 ✓，跨界前向慢 ✓）或 `cpu`（整件在内存 ✓，更慢 ✓）。**这是必付
     #: 成本** ✓，不是可省的优化 ✗ —— 报告里如实说 ✓，不许写"已优化" ✗。
     #: ⚠️ 拿 2.1 的 13.26 判它 ⇒ 结论"装得下" ✓✗、`residency` 留 `full` ✓、装到 20 GiB 才 OOM ✓。
-    QWEN_IMAGE_PART_NEED_GIB: dict[str, float] = {"dit": 38.05, "text": 16.1, "vae": 0.24}
+    #: ⭐⭐ 表里的 ``dit`` 是 **bf16 那一份**的账 ✓✗（2026-11-01 ✓）：装配线不直接用这一格 ✗，
+    #: 而是把它当 ``fallback`` 交给 :func:`resident_need_gib` ✓ —— 文件侧是 int8（Edit 2511 ✓）
+    #: ⇒ 返回**数据区字节 19.09** ✓ ⇒ `off` 可用（19.71 ✓）⇒ 整份上卡 ✓。
+    #: 这一格**必须留在 38.05** ✗✗：它是 bf16 那份的真驻留 ✓，调小 ⇒ 2512 装到 20 GiB 才 OOM ✓✗。
+    QWEN_IMAGE_PART_NEED_GIB: dict[str, float] = {"dit": 38.05, "text": 16.1, "vae": 0.24,
+                                                  "vision": 1.35}
+
+    #: ⭐ **Krea2** 那一族的分时账 ✓（2026-11-01 加 ✓）—— 与上面两张表都**必须分开** ✗✗。
+    #:
+    #: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
+    #: |---|---|---|---|---|
+    #: | DiT | ``krea2_turbo_int8_convrot`` ✓ | 12.57 GiB ✓ | **12.57** ✓ | I8 12.155B ＋ BF16 0.665B ⇒ **常驻 int8** ⇒ 1:1 ✓ |
+    #: | 文本塔 | ``Krea2-Engineer-V1-int8-convrot`` ✓ | 5.08 GiB ✓ | ≈**7.5** ✓ | int8 ⇒ 反量化 ×2 ✓，但**只装语言塔** ✓（视觉塔 0.415B 不建 ✗） |
+    #: | VAE | ``qwen_image_vae`` ✓ | 0.24 GiB ✓ | **0.24** ✓ | 本体 bf16 ✓ |
+    #:
+    #: ⚠️ **DiT 这一格是这一族唯一的活路** ✓✗：12.82B 参数按 bf16 物化是 **23.9 GiB** ✓✗ >
+    #: 卡 22.49 ✓ ⇒ 「照另三族那样 `to_empty` 按 bf16 建」**必装不下** ✓。所以这里记的是
+    #: **int8 常驻之后**的 12.57 ✓ —— 而它成立的前提是 `_build_krea2_module` 真把层换成了
+    #: ``Int8Linear`` ✓（少一层 ⇒ 那层 bf16 ⇒ 实际驻留 14.8 GiB ✓，账就虚了 ✓✗）。
+    #: ⚠️ 拿 2.1 的 ``13.26`` 去判 Krea2 ⇒ 结论"差不多装得下" ✓，看着没错 ✓✗ ——
+    #: 但拿 2512 的 ``38.05`` 判 ⇒ 结论"必然切 CPU" ✓，白扔掉 12 GiB 余量 ✓✗。
+    KREA2_PART_NEED_GIB: dict[str, float] = {"dit": 12.57, "text": 7.5, "vae": 0.24}
+
+    #: ⭐ **SEEDVR2**（视频修复 ✓）两件套的驻留账 ✓ —— 本仓**唯一一条两件同驻**的线 ✓。
+    #:
+    #: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
+    #: |---|---|---|---|---|
+    #: | DiT | ``seedvr2_3b_int8_convrot`` ✓ | 3.39 GiB ✓ | ≈**6.8** ✓ | int8 ⇒ **不挂常驻壳** ✗ ⇒ 反量化成 bf16 ⇒ ×2 ✓ |
+    #: | VAE | ``ema_vae_fp16`` ✓ | 0.47 GiB ✓ | **0.47** ✓ | 本体 fp16 ⇒ 装成 bf16 同宽 ✓ |
+    #:
+    #: ⚠️ **DiT 这一格与 Krea2 相反** ✗✗：Krea2 的 12.82B 按 bf16 物化 23.9 GiB **装不下** ✓ ⇒
+    #: 必须常驻 int8 ✓；而 SEEDVR2 是 **3.39B** ✓ ⇒ bf16 物化只要 6.8 ✓ ⇒ **不换壳更简单也更准** ✓
+    #: （`dit_build` 里 seedvr2 那行**没有** ``adapter`` ✓ 就是这个意思 ✓）。所以这里记 **6.8** ✓、
+    #: 文件字节按 3.39 记会少一半 ✓✗（症状＝判了 `off` 结果装到一半 OOM ✓）。
+    #: ⚠️ 表值是**int8 档**量的 ✓；换成 ``w4a8`` / ``int4_convrot`` ⇒ 文件更小但**驻留不变** ✓（都反量化
+    #: 成 bf16 ✓）⇒ `part_need_gib` 的精算会给出同一个 6.8 ✓（不信文件字节 ✓）。
+    SEEDVR2_PART_NEED_GIB: dict[str, float] = {"dit": 6.8, "vae": 0.47}
+
+    #: ⭐ **Wan 2.2 I2V**（第八条线 ✓）的**分时**驻留账 ✓ —— 与上面几张表都**必须分开** ✗✗。
+    #:
+    #: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
+    #: |---|---|---|---|---|
+    #: | DiT | ``wan2.2_i2v_high_noise_14B`` ✓ | 13.31 GiB ✓ | **26.62** ✓ | fp8_scaled 只省盘 ✓ ⇒ 反量化成 bf16 ×2 ✓ |
+    #: | 文本塔 | ``umt5_xxl_fp8_e4m3fn_scaled`` ✓ | 6.27 GiB ✓ | **10.58** ✓ | 同上 ×2（数据区 10.59 ✓）⇒ 只建**编码器** ✓ |
+    #: | VAE | ``wan_2.1_vae`` ✓ | 0.24 GiB ✓ | **0.24** ✓ | 本体 bf16 ✓（16ch / 8× / 4× 时间 ✓） |
+    #:
+    #: ⚠️⚠️ ``dit`` 记的是**一份专家** ✓✗：本线的两份（高噪 ＋ 低噪）**永不并存** ✓
+    #: （`:meth:`register_wan_experts` 只登记路径 ✓，采样中途**原地重装** ✓）⇒ 把两格相加
+    #: （53.24 ✓）当需求 ⇒ 结论"整卡都装不下、连 split 也没戏" ✓✗ —— 那不是保守 ✓，
+    #: 是错误的悲观 ✓（会让 `decide_for` 选更大范围的 offload ✓、白慢一倍 ✓）。
+    #: ⚠️ 但**单份 26.62 ＞ 卡 22.49** ✓✗ ⇒ 这一格的意义正相反 ✓：它保证 ``decide_for``
+    #: **必须**给出 ``split`` ✓（给 ``off`` ⇔ 走到 ``sample`` 当场 OOM ✓，报在 ``module.to`` 上 ✓，
+    #: 读起来像"卡被别的程序占了" ✗）。
+    #: ⚠️ 表值是**fp8_scaled 文件 ＋ bf16 档**量的 ✓；换 ``int8_convrot``（Animate 2 ✓）或 bf16 本体
+    #: ⇒ 文件更小/更大但**驻留不变** ✓（都反量化成 bf16 ✓）⇒ :func:`part_need_gib` 的精算会给出同样的数 ✓。
+    WAN22_PART_NEED_GIB: dict[str, float] = {"dit": 26.62, "text": 10.58, "vae": 0.24}
+
+    #: ⭐ **Music3**（音频族 ✓）三件套的驻留账 ✓ —— 2026-11-06 按**盘上真实文件字节**记 ✓。
+    #:
+    #: | 部件 | 文件 | 盘上 | 驻留 | 为什么 |
+    #: |---|---|---|---|---|
+    #: | DiT | ``minimax_music3_dit_fp16`` ✓ | 4.58 GiB ✓ | **4.58** ✓ | 本体 fp16 ⇒ 装成 bf16 **同宽** ✓（不 ×2 ✓✗） |
+    #: | 语义塔 | ``minimax_music3_text_encoder_int8_convrot`` ✓ | 8.57 GiB ✓ | **8.57** ✓ | int8 ⇒ `load_tower(require_int8=True)` **常驻 int8** ✓ |
+    #: | DAV | ``minimax_music3_dav`` ✓ | 0.20 GiB ✓ | **0.20** ✓ | 本体 fp16 ✓（512× 上采样 ＋ 44.1 kHz ✓） |
+    #:
+    #: 三件相加 **13.34 GiB** ✓ ＜ 卡 22.49 ⇒ 这一族**不需要分时链** ✓（与 Qwen-Image 2.1 相反 ✗✗）。
+    #: ⚠️ 语义塔按 int8 记是对的 ✓，但**前提是**真装成了 int8 常驻 ✓：若哪天有人把 `require_int8=False`
+    #: 打开 ⇒ 反量化成 bf16 ⇒ 那份变 **17.1 GiB** ✓，这张表就虚了 ✓✗（症状＝判了 `off`、
+    #: 装到语义塔才 OOM ✓，报错落在文本塔上看着像"文本塔坏了" ✓）。
+    #: ⚠️ DiT 这一格**不能**按"fp16 物化 ×2"记 ✗：fp16 与 bf16 都是 2 字节 ✓（只有 fp8/int8 才需要 ×2 ✓）。
+    MUSIC3_PART_NEED_GIB: dict[str, float] = {"dit": 4.58, "text": 8.57, "vae": 0.20}
 
     #: **整条链同时驻留**的实测总账 ✓（GiB ✓）—— 与 :attr:`PART_NEED_GIB`（**分时**账 ✓）是两回事 ✗✗。
     #: ``zimage`` 那条线三件**同时在卡上** ✓✗（不像 2.1 那样 encode/sample/decode 各占一段 ✓）：
@@ -999,6 +1520,15 @@ class TorchBackend:
     #: 装 TE 时才 OOM ✓，报错落在 TE 上，看着像"文本塔坏了" ✓✗（实测过一次这种误导 ✓）。
     #: ⚠️ 没核过的族**不进表** ✗：查不到实测就传 ``0``（走占用率粗判 ✓），不编数字 ✗✗。
     CHAIN_NEED_GIB: dict[str, float] = {"zimage": 19.28}
+
+    #: **整链账的分件明细** ✓（GiB ✓）—— 与 :attr:`CHAIN_NEED_GIB` 是同一套实测的两种粒度 ✓。
+    #: ⚠️ 为什么需要拆开 ✗✗（2026-11-02 ✓）：整链 19.28 只在「三份文件都是 bf16」时成立 ✓ ——
+    #: 三件里任意一件换了量化档（例如 DiT 换 int8 ⇒ 反量化后 11.46 变不了 ✓，但换 fp8 ⇒ ×2 ✓）
+    #: 整链数就不成立 ✓✗，而只拿总和判又会把差额记到"最后装的那件"头上 ✓（报错误导 ✓）。
+    #: 分件表的每一格都必须与 :attr:`CHAIN_NEED_GIB` **对得上**（11.46+7.49+0.33=19.28 ✓）。
+    CHAIN_NEED_PARTS_GIB: dict[str, dict[str, float]] = {
+        "zimage": {"dit": 11.46, "text": 7.49, "vae": 0.33},
+    }
 
     def gpu_pressure(self) -> dict[str, Any] | None:
         """现测一次卡况 ✓（``None`` ⇒ 没卡/取不到 ✓ —— 不猜 ✗）。
@@ -1202,6 +1732,10 @@ class TorchBackend:
         ⚠️ 切完之后**退化成纯 CPU** 的情况也要报 ✗：预算比"非层参数"还小时 `plan.fits=False` ✓
         ⇒ 装载照样成功 ✓、但前向全在内存里爬 ✓✗ —— 报告里 ``fits=False`` + ``reason`` 必须看得见 ✓
         （静默退化 = 用户以为开了联合、实际比不切还慢 ✓✗）。
+
+        ⭐ ``what`` 有两个用途，**别再合成一个** ✗✗（2026-11-01 ✓）：进报告的名字是它本身 ✓
+        （``"dit"`` / ``"h3"`` / ``"h3-te"`` ✓ —— 读者要能分清是哪一族哪一件 ✓），而**余量**只认
+        件类型三档 ✓ ⇒ 中间过一次 :func:`_residency_kind` ✓（见那里的归一表 ✓）。
         """
         if self._residency == "off":
             return None
@@ -1217,8 +1751,21 @@ class TorchBackend:
         #: ⇒ 先还再算 ✓（与 `decide_for` 是同一句 `_trim_cuda()` ✓，不是第二套口径 ✓）。
         self._trim_cuda()
         budget = None if self._residencyBudgetMib is None else int(self._residencyBudgetMib * 2**20)
+        #: ⭐ 余量**按件**给 ✓✗（2026-11-01 ✓，见 `residency.RESERVE_BY_KIND` ✓）：``what``
+        #: 就是 ``"dit"`` / ``"te"`` ✓（调用点走 `_place_before_load`，只有这两个值 ✓）。
+        #: ⚠️ 这里**只**在"没显式给预算"时才生效 ✗：``residencyBudgetMib`` 是调用方的决定 ✓，
+        #: 按件猜的余量不许覆盖它 ✓✗。
+        #: ⭐ 内存这一级 ✓✗（2026-11-02 ✓）：落到 CPU 侧的层要过**宿主配额** ✓，
+        #: 装不下的卸到盘上 ✓（`:mod:`host_cache`` 的模块头讲了为什么必须补这一级 ✓）。
+        #: ⚠️ **每件一个** HostCache ✗：``dit`` 与 ``te`` 的组名都叫 ``blocks.0`` ✓✗ ——
+        #: 合成一本账会把两件的层当成同一层互相卸掉 ✓（配额是每件按总内存算的 ✓，
+        #: 真装不下时由 `_host_guard` 那道闸兜底 ✓）。
         handle = residency_mod.place(module, main_device=self._device, budget=budget,
-                                     mode=self._residency, guard=self._host_guard(what))
+                                     mode=self._residency, kind=_residency_kind(what),
+                                     guard=self._host_guard(what),
+                                     host_cache=self._host_cache_of(what),
+                                     reload=residency_mod.ReloadSlot(),
+                                     foresight=_foresight_of(self._residency))
         self._residencyHandle = handle
         #: 记账 ✓（**切完才记** ✓ —— 记的是"实际留在内存的那份" ✓，不是估算 ✓）
         self._ledger.reserve(what, bytes_=int(handle.plan.gpu_bytes), device=str(self._device),
@@ -1236,19 +1783,38 @@ class TorchBackend:
             "device": str(self._device),
             "budgetMib": round(handle.plan.budget / 2**20, 1),
             "budgetSource": "explicit" if budget is not None else "cuda-free",
+            #: ⭐ 这次按多少余量算的 ✓✗（``None`` ⇒ 显式预算，没走这条 ✓）—— 2026-11-01 加 ✓：
+            #: 25.44 GiB 的塔只上卡 61% 时，第一个要看的数就是它 ✓（不是预算、不是层数 ✓）。
+            "reserve": None if budget is not None else residency_mod.reserve_for(
+                _residency_kind(what)),
+            #: 余量档认的是哪一类件 ✓（``None`` ⇒ 没归一出件类型 ⇒ 退回 25% ✓，见 `_residency_kind`）
+            "reserveKind": _residency_kind(what),
             # ⭐ 「切完还剩多少在卡上」是**判断有没有意义**的那个数 ✓（0 层 ⇒ 等于纯 CPU ✗）
             "fits": handle.plan.fits,
         })
+        #: ⭐ **GPU 承担了多少**（按字节 ✓）—— 2026-11-01 加 ✓：用户问"为什么大部分计算在 CPU 上"时，
+        #: 唯一能直接回答的数 ✓（层数占比会骗人 ✗：卡上 41% 的层也可能只占 41% 的字节、
+        #: 却吃掉 95% 的时间 ✗）。分母为 0 ⇒ 不给（不编一个 1.0 ✗）。
+        total = int(handle.plan.gpu_bytes) + int(handle.plan.cpu_bytes)
+        report["gpuShare"] = (round(int(handle.plan.gpu_bytes) / total, 4) if total > 0 else None)
         if not applied:
             report["note"] = (
                 f"预算 **{report['budgetMib']} MiB** ⇒ 没有可切的显存 ✓（`{handle.plan.reason}`）"
                 "⇒ 整份留在内存里 ✓✗（**等于纯 CPU** ✓ —— 装载成功、但这一档没联合 ✗；"
                 "卡被别人占着就等它空出来 ✓，或显式给 `residencyBudgetMib` ✓）")
         elif not handle.plan.fits:
+            #: ⭐ 2026-11-02：**这笔预算被谁花掉了** ✓✗ —— 只说"预算 16.9 GiB 不够"没法行动 ✗
+            detail = report.get("budget") or {}
+            spent = ""
+            if detail.get("marginGiB") is not None:
+                spent = (f"（可用 {detail['usableGiB']} GiB − 余量 {detail['marginGiB']} GiB"
+                         f" − 钉死 {detail['fixedGiB']} GiB ＝ **{detail['effectiveGiB']} GiB** ✓）")
             report["note"] = (
-                f"⚠️ 预算（{report['budgetMib']} MiB）连**非层参数**都放不下 ✗ ⇒ 整份回落到 CPU ✓✗"
+                f"⚠️ 预算（{report['budgetMib']} MiB{spent}）连**非层参数**都放不下 ✗"
+                f" ⇒ 整份回落到 CPU ✓✗"
                 f"（`plan.reason`：{handle.plan.reason}）—— 装载**成功** ✓，但这一步**没有联合** ✗，"
-                "前向会全在内存里跑 ✓（把预算调大 / 换 `split`→`park` 再试 ✓）")
+                "前向会全在内存里跑 ✓（余量占大头 ⇒ 换 `kind` 档 ✓；"
+                "钉死那块占大头 ⇒ 少钉一点 ✓；两者都不大 ⇒ 这件真比卡大 ✓，换更小的档位 ✓）")
         elif handle.plan.layers_on_cpu and self._residency == "split":
             report["note"] = (
                 f"卡上 {handle.plan.layers_on_gpu} 层 / CPU {handle.plan.layers_on_cpu} 层 ✓ ⇒ "
@@ -1269,6 +1835,45 @@ class TorchBackend:
             result = scheduler_mod.ensure_host_room(need, what=f"{what} 的 CPU 那一半")
             self._record_event("host-guard", {"what": what, **result})
         return _guard
+
+    def _host_cache_of(self, what: str) -> Any:
+        """按件取**宿主层配额表** ✓ ⇒ :class:`host_cache.HostCache` 或 ``None``（这一级不启用 ✓）。
+
+        ⚠️ **每件一本** ✗✗：``dit`` 与 ``te`` 的组名都是 ``blocks.0`` ✓ —— 合成一本账时
+        "装不下就卸 LRU"会去卸**另一件**的层 ✓，而那件的 hook 还会去 `ensure` 它 ✓✗
+        ⇒ 症状是采样第 1 步报「0 元素占位、形状对不上」✓，查起来像权重坏了 ✓。
+
+        ⚠️ 配额取 ``min(quota_of(总内存), host_room_bytes())`` ✓✗ —— **两个数各管一头**：
+        :func:`host_cache.quota_of` 说"这台机器最多能拿多少给权重"（总内存 × 75% ✓，
+        留着给激活 / 碎片 / Python 本体 ✓）；:func:`scheduler.host_room_bytes` 说"**此刻**
+        还剩多少"（已经被别的进程或别件吃掉的不能算 ✓）。只取前者 ⇒ 在一台还跑着别的东西的
+        机器上照样往内存里塞 ✓✗；只取后者 ⇒ 上限随一次采样抖动 ✓✗（同一件两次装载两套账 ✓）。
+        ★真到了那一刻的兜底仍是 :meth:`_host_guard`（装载前**现测** ✓）—— 这里只是把上限
+        钉低一点 ✓，**不是**第二道判据 ✗。
+
+        ⚠️ 读数取不到 ⇒ ``None`` ✓（`:func:`scheduler.host_memory` 只说 ``None`` 表示测不到，
+        不猜一个数 ✗）—— 没有配额就没有"该卸谁"的判据 ✓，宁可不启用也不拿假数卸层 ✓✗。
+        """
+        if what in self._hostCaches:
+            return self._hostCaches[what]
+        cache: Any = None
+        host = scheduler_mod.host_memory()
+        if host is not None:
+            total = int(host[1])
+            room = scheduler_mod.host_room_bytes(host)
+            quota = host_cache_mod.quota_of(total)
+            if room is not None:
+                quota = min(quota, max(0, int(room)))
+            cache = host_cache_mod.HostCache(quota=quota, name=what)
+            self._record_event("host-cache", {
+                "what": what, "quotaGiB": round(quota / device_policy.GIB, 2),
+                "totalGiB": round(total / device_policy.GIB, 2),
+                "roomGiB": (None if room is None
+                            else round(int(room) / device_policy.GIB, 2)),
+                "note": ("内存这一级启用了 ✓：CPU 那几层超出配额就卸到盘上、"
+                         "前向到那一层再读回来 ✓（不再因为装不下而中止装载 ✓）")})
+        self._hostCaches[what] = cache
+        return cache
 
     def _record_event(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         """记一条调度事件 ✓（**限长** ✓：运行期每步都可能探 ✓，无上限会自己把内存吃光 ✗✗）。"""
@@ -1517,7 +2122,7 @@ class TorchBackend:
             #    尺寸 / 层数 / 头数 / head_dim / ffn / text_dim / modalities / `inv_freq_len` /
             #    **PDD 头库** 全部读权重 ✓ ⇒ 自检的**缩小版**与工作站上的**真权重**走**同一条**路 ✓。
             #    ⚠️ 老写法（`form_defaults = H3_TRUNK_DEFAULTS` + 只推 banks ✗）对**非出厂**检查点
-            #    （社区重导出 / 蒸馏 / 缩小版 ✓）会「名字对、形状错」✓✗ —— 那正是 `PENDING_PARTS`
+            #    （社区重导出 / 蒸馏 / 缩小版 ✓）会「名字对、形状错」✓✗ —— 那正是 `IMPLEMENTATION_HISTORY`
             #    第 4 条「H3 的 DiTConfig」剩下的机制缺口 ✓（现在补上了 ✓）。
             shapes = {name: tensor.shape for name, tensor in info.tensors.items()}
             inferred = h3_keys.infer_h3_trunk_config(shapes, patch_size=explicit.get("patch_size"))
@@ -1632,12 +2237,16 @@ class TorchBackend:
         explicit = dict(config) if isinstance(config, dict) else {}
         #: ⭐ 精度**跟着 `self._device`** 走 ✓✗（有卡但 `device="cpu"` ⇒ fp32 ✓，见 `_compute_dtype` ✓）
         want_dtype = self._compute_dtype()
-        if family == ZIMAGE_FAMILY:
-            module, config = _build_zimage_module(info, explicit, dtype=want_dtype)
-        elif family == QWEN21_FAMILY:
-            module, config = _build_qwen21_module(info, explicit, dtype=want_dtype)
-        elif family == QWEN_IMAGE_FAMILY:
-            module, config = _build_qwen_image_module(info, explicit, dtype=want_dtype)
+        #: ⭐ 一个族一条装配声明（2026-11-01 收口 ✓）：原先这里是 `if/elif` 四支、每支各抄
+        #:    一遍「抽形状 → infer → meta → 物化 → 搬字段 → 写口径」，少改一支就静默回落默认值 ✗。
+        #:    表在 :mod:`dit_build`；这里只**查一次**。加族不需要再动本文件 ✓（有测试守着 ✓）。
+        #:    ⚠️ ``path`` 必须传 ✗✗：Krea2 要按**文件里的** convrot 说明把 int8 层换成
+        #:    ``Int8Linear`` 常驻（12.82B 参数 ⇒ 按 bf16 物化 23.9 GiB 装不进 22.49 GiB 卡 ✓）。
+        #:    不给 ⇒ 换壳一个都不做 ⇒ 权重按 bf16 落盘 ⇒ 采样第 1 步 OOM ✓✗（别的族忽略它 ✓）。
+        built = _build_via_table(family, info, explicit, dtype=want_dtype, path=target) \
+            if family in dit_build.BUILDERS else None
+        if built is not None:
+            module, config = built
         else:
             if config is None:
                 config = dit_mod.DiTConfig.from_metadata(info.metadata)   # 读不到会**明确报错** ✓
@@ -1654,13 +2263,32 @@ class TorchBackend:
         #    ⇒ 装载期的峰值显存就只是"卡上那一刀" ✓（先装后切 ⇒ 峰值仍是整份 ✗✗）。
         #    `residency=off` ⇒ 原样 ``.to(device)`` ✓（老路一字未变 ✓）。
         residency_report = self._place_before_load(module, what="dit")
-        report = weights_mod.load_module_weights(module, target, device=self._device)
+        #: ⭐ Krea2 那层**导出前缀**（``model.diffusion_model.`` 之类 ✓）在装载时剥掉 ✓ ——
+        #: ``key_map`` 由 :func:`_build_krea2_module` 按「全部键都带哪一层」实测给出 ✓，
+        #: 其余族恒为 ``None`` ✓（老路一字未改 ✓）。
+        key_map = config.get("weightKeyMap") if isinstance(config, dict) else None
+        report = weights_mod.load_module_weights(module, target, device=self._device,
+                                                 key_map=key_map)
         if not report.complete:
             del module                        # 别让半装的模型在 raise 期间继续被引用 ✓
             raise TorchBackendUnavailable(
                 f"权重与模型结构对不上 ✗（complete=False ⇒ **不是**完整模型）"
                 f"　：{report.to_dict()}",
                 reason="pending")
+        #: ⭐ **int8 常驻层的入册对账** ✓✗（目前只有 Krea2 这一族真走常驻 ✓）：
+        #: 计划点名了 N 层、模块里就得真有 N 层 ``Int8Linear`` ✓；少一层 ⇒ 那层按 bf16 落盘 ⇒
+        #: 显存按 2 倍算 ⇒ **装得下、跑不动**（OOM 落在采样第 1 步，报错指不到"哪层没接管" ✗✗）。
+        #: ⚠️ 这条必须**装完之后**查 ✓：装载前查只能看见"壳换没换"✓，看不见"权重真落进 int8 参数了没"✓。
+        int8_intent = config.get("int8Plan") if isinstance(config, dict) else None
+        int8_ledger: dict[str, Any] | None = None
+        if int8_intent:
+            int8_ledger, leftover = _int8_residency_problems(module, report)
+            if leftover:
+                del module
+                raise TorchBackendUnavailable(
+                    f"int8 常驻层没接管齐 ✗ ⇒ 不装载（少一层就多 2 倍显存 ✓✗）："
+                    f"{leftover}　〔计划 {int8_intent.get('layers')} 层 / "
+                    f"账目 {int8_ledger}〕", reason="pending")
         #: ⭐⭐ **纯推理形态** ✓✗（同 H3 那一条 ✓，见 :func:`_freeze_inference` 里 83.7 GiB 那份实测 ✓）：
         #: 这条路的骨架（`dit_lumina` / `dit_qwen_image` / `dit_generic` ✓）的 norm 权重同样是
         #: ``nn.Parameter(torch.ones(...))`` ✓（默认取梯度 ✓）⇒ 不冻就白建图 ✓（Z-Image 8 步的图上，
@@ -1682,18 +2310,28 @@ class TorchBackend:
             self._loadReport["configSources"] = dict(config["configSources"])
         # ⭐ 「卡上几层 / CPU 几层 / 每步搬多少字节」✓ —— `off` ⇒ None（老路 ✓）
         self._loadReport["residency"] = residency_report
+        # ⭐ 「int8 常驻层到底接管了几层」✓ —— 只有走常驻的族（Krea2 ✓）才有这一格；
+        #    其余族仍报 ``int8Ledger=None`` ✓（老路 ✓，不凭空多一个字段 ✗）。
+        if int8_ledger is not None:
+            self._loadReport["int8Ledger"] = int8_ledger
         if self._int8Offload:
             # ⚠️ **必须如实说"没生效"** ✗✗：`int8_offload` 只认 H3 形态的 `Int8Linear` 常驻层 ✓
             #    （见 :func:`_prepare_h3_module` ✓）；这条路把 int8 **反量化进计算精度** ✓✗
             #    ⇒ 一个 int8 参数都不会被 park ✓。静默忽略的后果是「以为省了 18 GiB 显存」✓✗，
             #    然后在 720×1280 上照样 OOM、且找不到原因 ✓✗
             #    （与 CPU 后端那条"无需生效"**同一个口径** ✓：不生效可以 ✓，不说不行 ✗）。
+            #: ⚠️ 但 🚨**别把这句话写死成"没有常驻层"** ✗✗（2026-11-01 修 ✓）：Krea2 之后这条路上
+            #: **有**常驻层了 ✓（12.155B 个 int8 参数 ✓）⇒ 老句子变成假话 ✓✗（"有 224 层却说没有" ✓）。
+            #: 判据必须是**实测**：数一数模块里真有几个 ``Int8Linear`` ✓。
             self._loadReport["int8Residency"] = {
                 "device": str(self._device), "parkedOn": None, "applied": False,
                 "moved": 0, "parked": 0, "parkedBytes": 0, "pinned": False,
-                "note": "DiT 形态没有 `Int8Linear` 常驻层 ⇒ `int8_offload` **不生效** ✓"
-                        "（它只对 H3 形态的 int8 权重有意义 ✓；"
-                        "这条路上的 int8 会被反量化成计算精度 ⇒ 显存按 2 倍算 ✓）"}
+                "note": (f"有 {int8_ledger['layers']} 层 `Int8Linear` 常驻 ✓，但 `int8_offload` "
+                         "只接了 H3 形态那条路 ⇒ 这次**不生效** ✓（常驻权重仍全在卡上 ✓）"
+                         if int8_ledger and int8_ledger.get("layers") else
+                         "DiT 形态没有 `Int8Linear` 常驻层 ⇒ `int8_offload` **不生效** ✓"
+                         "（它只对 H3 形态的 int8 权重有意义 ✓；"
+                         "这条路上的 int8 会被反量化成计算精度 ⇒ 显存按 2 倍算 ✓）")}
         try:
             self._loadReport["loras"] = self._apply_loras(loras)
             #: ⚠️ 同 H3：LoRA 是挂载那刻才建参数 ✓ ⇒ 挂完再冻一次 ✓（否则那几层照样建图 ✓✗）。
@@ -1765,6 +2403,9 @@ class TorchBackend:
         report = {"specs": [spec.to_dict() for spec in specs], **result.to_dict(),
                   "files": loaded}
         if result.error or result.applied == 0:
+            #: ⚠️ 半装的钩子也要摘 ✗✗（"没装全"里可能有几十层已经挂上了 ✓）——
+            #:    不摘 ⇒ 抛异常后模块上还留着半个 LoRA ✓✗，调用方重试一次就变成两份 ✓。
+            self._detach_lora_hooks(list(result.hooks))
             self._release_leases(leases, reason="LoRA 没装全 ⇒ 不占用内存 ✓")
             if result.error:
                 raise TorchBackendUnavailable(f"LoRA 没装全 ✗：{result.error}", reason="pending")
@@ -1776,6 +2417,8 @@ class TorchBackend:
         #:    折进去的那批其实可以立刻还 ✓，但为多省那点 LoRA 内存去猜"哪条是 merge"不值得 ✓
         #:    （猜错 = 跑起来像对、数值悄悄不对 ✓✗）。要优化得先让 `apply_specs` 逐条回报 ✓。
         self._loraLeases.extend(leases)
+        #: ⭐ 钩子入账 ✓（`release_loras` 摘的就是这批 ✓）—— 与租约**同生同灭** ✓。
+        self._loraHooks.extend(result.hooks)
         facts = cache.facts()
         report["cache"] = {"entries": facts["entryCount"], "refTotal": facts["refTotal"],
                            "tensorBytes": facts["tensorBytes"],
@@ -1800,10 +2443,29 @@ class TorchBackend:
                 freed_bytes += int(fact.get("tensorBytes") or 0)
         return {"leases": len(leases), "released": released, "freedBytes": freed_bytes}
 
+    def _detach_lora_hooks(self, handles: list[Any]) -> int:
+        """把 bypass 钩子**真摘掉** ✓ ⇒ 摘掉几个 ✓（重复摘同一个 handle 是空操作 ✓ 不炸 ✗）。"""
+        removed = 0
+        for handle in handles:
+            try:
+                handle.remove()
+                removed += 1
+            except Exception:                 # noqa: BLE001 —— 句柄已失效 ⇒ 目的已达成 ✓
+                continue
+        del handles[:]
+        return removed
+
     def release_loras(self, *, reason: str = "") -> dict[str, Any]:
-        """还掉本实例借的全部 LoRA ✓ ⇒ 报告 ✓（**模型卸载 / 换装配时必须调** ✗✗）。"""
+        """还掉本实例借的全部 LoRA ✓ ⇒ 报告 ✓（**模型卸载 / 换装配时必须调** ✗✗）。
+
+        ⚠️ **两件一起还** ✗✗：钩子（补丁）＋ 租约（张量）✓ —— 只还租约 ⇒ 模块上还挂着
+        指向已释放张量的 hook ✓✗（前向读到释放内存 ✓），而掩掉那类崩溃的更糟情形是：钩子活着、
+        张量被 cache 复用给**另一条** LoRA ⇒ 增量静静变成别人的 ✓✗（画面"像但不对" ✓）。
+        """
+        hooks = self._detach_lora_hooks(self._loraHooks)
         leases, self._loraLeases = self._loraLeases, []
-        return self._release_leases(leases, reason=reason or "模型卸载 ⇒ 还 LoRA ✓")
+        fact = self._release_leases(leases, reason=reason or "模型卸载 ⇒ 还 LoRA ✓")
+        return {**fact, "hooks": hooks}
 
     def _default_dit_path(self) -> str | None:
         """按清单找主 DiT ✓（``category=video`` 且 ``required`` 的第一个 ✓ —— 与体检同一份清单 ✓）。
@@ -1830,6 +2492,61 @@ class TorchBackend:
         except Exception:  # noqa: BLE001 - 诊断信息不该反过来把主流程搞崩 ✓
             return "（加载计划不可用 ✓）"
 
+    #: ⚠️ 原来这里是**类属性写死** ``synthetic = True`` ✗✗（注释写着「刻意保持 True」✓）。在真权重
+    #: 还没接上时它是对的 ✓；2026-11-01 起 Z-Image / Krea2 / Qwen-Image 2.1 / Flux / H3 都端到端出片 ✓
+    #: ⇒ 写死 True 就成了「明明出的是真图、接口却说自己出的是假图」✗✗，而且与本仓 `sdxl_backend`
+    #: （那一格早就按装载状态算 ✓）自相矛盾 ✗。⇒ 改按**已装件的事实**算 ✓。
+    @property
+    def synthetic(self) -> bool:
+        """产物**是不是合成图** ✓ —— 按**现在装了什么**算 ✗，不写死 ✗（见 :meth:`_picture_is_real` ✓）。"""
+        return not self._picture_is_real()
+
+    def _picture_is_real(self) -> bool:
+        """此刻解出来的画面**是不是真**的 ✓ —— DiT 装了 ＋ VAE 是**真权重**那三种之一 ✓。
+
+        ⚠️ 两个条件缺一不可 ✗：只装 VAE ⇒ 前向仍走占位（DiT 没装 ✓）⇒ 画面不是真的 ✓；
+        只装 DiT ⇒ 解不了（`decode` 自己会拒 ✓）。H3 的音频轨另有判据，见 :meth:`_decode_dual` ✓。
+        """
+        return (self._model is not None
+                and self._vae is not None
+                and self._vaeKind in self.REAL_VAE_KINDS)
+
+    def _generation_facts(self) -> dict[str, Any]:
+        """⭐「**此刻**能不能出片 ✓ / 还缺什么 ✓ / 画面真不真 ✓」—— 全按已装件算 ✗（不写死 ✗）。
+
+        ⚠️ 为什么必须按状态算 ✗✗（2026-11-01 修 ✓）：`describe()` 原来把 ``canGenerate`` **写死 `False`**、
+        ``pendingParts`` 塞了 75 行沿革散文 ✓✗ ⇒ 装完整链、真出过 mp4 之后接口仍报
+        「不能出片 ＋ 一堆『没实现』」✓✗（`/engine/backends` 是 UI 唯一的自述口 ✓，
+        读起来像整个引擎都不能用 ✗）。本仓 `llm_backend` 的 ③″ 与 `sdxl_backend` 早就是这套口径 ✓，
+        这里只是补齐 ✗。
+
+        ⚠️ 缺件按**件**列 ✗，不按"机制"列 ✓（机制层缺口在 :data:`CODE_GAPS` ✓）：
+        依赖没装 ⇒ **只报依赖这一件** ✓（别把 DiT/TE/VAE 一起报成"缺"✗ —— 那是"还没轮到装"✓）。
+        """
+        if not self._available:
+            return {"canGenerate": False,
+                    "pendingParts": [f"torch 本身（{self._reason or '缺依赖'} ✓ —— 见 `dependencies` ✓）"],
+                    "synthetic": True}
+        missing: list[str] = []
+        if self._model is None:
+            missing.append("DiT 权重（`load_weights(path)` 或 `ensure_loaded(...)` ✓）")
+        if self._textEncoder is None:
+            #: ⚠️ **SEEDVR2 没有文本塔** ✗（条件＝源视频编码 ＋ mask 的 17 通道 ✓，
+            #: 正向/负向条件都烤在权重里 ✓）—— 拿「缺文本编码器」判它，会让这条**唯一装得下的**
+            #: 修复线永远自述"不能出片" ✓✗（2026-11-01 接线时踩到 ✓）。
+            #: 它真正缺的一件不是常驻的 ✓ 而是**每单的源视频** ✓ ⇒ 不列进 ``pendingParts`` ✗
+            #: （那是「还缺哪个权重文件」的地方 ✓）；请求里没给 `referenceVideos` 由
+            #: :meth:`_encode_seedvr2_conditioning` 当场拒并说清 ✓。
+            if getattr(self, "_ditFamily", None) != SEEDVR2_FAMILY:
+                missing.append("文本编码器（`attach_text_encoder(...)` ✓）")
+        if self._vae is None:
+            missing.append("画面 VAE（`attach_vae(...)` ✓）")
+        #: ⚠️ 只有 H3 形态**才**要音频 VAE ✗（单流族没有音频轨 ⇒ 拿它判会让 Z-Image 永远"缺一件"✓✗）
+        if getattr(self, "_form", None) == self.H3_FORM_NAME and self._audioVae is None:
+            missing.append("音频 VAE（H3 双流要它 ✓ —— `attach_h3_audio_vae(...)` ✓）")
+        return {"canGenerate": not missing, "pendingParts": missing,
+                "synthetic": not self._picture_is_real()}
+
     def _latent_mode(self) -> str:
         """潜变量现在是什么形态 ✓ —— **四态**（别混成一个 bool ✗）：
 
@@ -1845,7 +2562,15 @@ class TorchBackend:
         """
         if getattr(self, "_form", None) == self.H3_FORM_NAME:
             return "h3-dual" if self.dualStream["enabled"] else "h3-trunk-only"
-        if getattr(self, "_ditFamily", None) in IMAGE_ONLY_FAMILIES:
+        #: ⭐ **音频族（3 维）** ✓✗（2026-11-06 ✓）：它同样**没有** `vae_scale` ✓，若走下面的
+        #: 「有 vae_scale 才算真形状」判据 ⇒ 自述成 `placeholder-1d` ✓✗（说的与做的相反 ✓：
+        #: :meth:`latent_shape` 已经能给出 ``(1,128,T)`` ✓）。判据与那边**同一口径** ✓：
+        #: 有 config ＋ 有潜通道 ⇒ 真形状 ✓（潜帧数由 plan 给 ✓，见 `_fill_music3_plan` ✓）。
+        if dit_build.contract_of(getattr(self, "_ditFamily", None)).latent_dims == 3:
+            channels = int(self._config_value("latent_channels", 0) or 0) \
+                if self._config is not None else 0
+            return "real-shape" if channels else "placeholder-1d"
+        if dit_build.contract_of(getattr(self, "_ditFamily", None)).latent_dims == 4:
             #: ⚠️ 判据与 :meth:`latent_shape` **同一口径** ✓✗ —— 形状靠 `_config` ✓ 不靠模块 ✓：
             #: 分时驻留下「TE 在场、DiT 已退」是真正常态 ✓，那时 `init_latents` 造的**是真形状** ✓，
             #: 这里若还看 `_model` 就会自述成 `placeholder-1d` ✓✗（说的与做的相反 ✓）。
@@ -1864,6 +2589,8 @@ class TorchBackend:
                 torch_version = str(self._torch().__version__)
             except Exception:  # noqa: BLE001 - pragma: no cover
                 torch_version = ""
+        #: ⭐ 「此刻能不能出片」的事实 ✓ —— 一次算完再分发到三格 ✓（别在同一份自述里各算各的 ✗）
+        facts = self._generation_facts()
         return {
             "name": self.name, "synthetic": self.synthetic, "realTensors": self.realTensors,
             "available": self._available, "reason": self._reason,
@@ -1950,10 +2677,18 @@ class TorchBackend:
             #    （而 `/engine/backends` 端点正是调它 ✓ ⇒ 装了 H3 权重后端就 500 ✓✗）。
             "config": (dict(self._config) if isinstance(self._config, dict)
                        else (self._config.to_dict() if self._config is not None else None)),
-            # ⚠️ 2026-09-20 更正：TE / VAE / 落盘的**机制都已实现** ✓（见 `PENDING_PARTS` 的注释 ✓）
-            #    ⇒ 现在「不能出片」的**唯一**原因是**真权重没到** ✗（如实 ✓；别归因错到机制上 ✗）
-            "canGenerate": False,
-            "pendingParts": list(PENDING_PARTS),
+            # ⚠️⚠️ 2026-11-01 修（原来是**写死**的两格 ✗✗）：`canGenerate` 恒 `False` ✓✗ —— 注释
+            #    写着「唯一原因是真权重没到」✗，而 H3 / Z-Image / Krea2 / Qwen-Image 2.1 / Flux 早已
+            #    端到端出片 ✓ ⇒ 装完整链也照样报「不能出片」✓✗；`pendingParts` 塞的是 75 行**沿革散文** ✓✗
+            #    （读起来像"机制都没写"，实际早就闭合 ✓）。
+            #    现在两格按**已装件的事实**算 ✓，与 `llm_backend` ③″ / `sdxl_backend` 同一口径 ✓。
+            "canGenerate": facts["canGenerate"],
+            "pendingParts": list(facts["pendingParts"]),
+            # ⭐ **代码里还没写的**缺口 ✓ —— 与「这台后端还没装」**分开报** ✗✗（混一格就看不出
+            #    该去修代码还是去装权重 ✓✗）。事实口径 = `python -m app.scripts.dit_families` 的「通路」栏 ✓
+            #    ⚠️ 键名是 `codeGaps` 而**不是** `knownGaps` ✗✗（后者被 `capabilities()` 占了，
+            #    语义是**环境**缺口、形状是 dict ✓ —— 见 `CODE_GAPS` 上方那段 ✓）。
+            "codeGaps": list(CODE_GAPS),
             "dependencies": dependency_status(),
         }
 
@@ -2139,6 +2874,108 @@ class TorchBackend:
         return {"pieces": pieces, "images": images, "videos": video_frames, "refs": refs,
                 "task": "ref2va" if refs else ("fl2va" if first else "t2va")}
 
+    def _encode_music3_condition(self, request: Any) -> dict[str, Any]:
+        """提示串 → **音频语义帧** ``(F, 32768)`` ✓（Music3 的"条件"不是一次编码 ✓✗）。
+
+        ## 与另几座塔的三处根本不同（每一处写错都**不报错** ✓✗）
+
+        ① **条件有时间维度** ✓：``F = 25 × seconds`` ✓（``AUDIO_FRAMES_PER_SECOND`` ✓）。它是**量**，
+        不是一个向量 ⇒ 必须与 ``plan.frames`` **逐帧一致** ✓✗ —— 多一帧少一帧都不炸 ✓，
+        DiT 拿到的是"比歌长/短"的条件 ✓（症状＝尾巴越来越空 ✓）。所以这里**照 plan 的同一算式
+        重算** ✓（``round(seconds × 25)`` ✓），对不上就**当场拒** ✗（不许"按自己的数跑" ✓）。
+
+        ② **词表焊在权重里** ✓：盘上没有配套 ``tokenizer.json`` ✓ ⇒ 用 ``self._tokenizer``
+        （装配时从 safetensors 的 ``tokenizer_json`` 建的 ✓，见 :meth:`attach_music3_te` ✓）。
+
+        ③ **CFG 在自回归内部** ✓✗：``generate`` 一次吃**两条支路**（正文 ＋ 用 ``<|audio_cfg|>``
+        顶掉正文段的那条 ✓）并按官方 ``CFG_SCALE`` / ``CFG_TOP_K`` 做截断式引导 ✓
+        ⇒ 这里返回的条件**已经是引导过的** ✓。
+
+        ⚠️ 因此 ``negative`` 一律 **None** ✓✗：DiT 层再要一条负向条件就得**再跑一遍完整自回归** ✓
+        （几分钟量级 ✓、且要与正向严格同长 ✓）。这一格留空是**如实的**"没接" ✓，不是"不用负向" ✓ ——
+        回执 ``byBranch`` 里写清楚 ✓。
+        """
+        self._gate()
+        torch = self._torch()
+        from app.services.engine import te_music3 as te_mod  # noqa: PLC0415
+
+        if self._textEncoder is None or self._tokenizer is None:
+            raise TorchBackendUnavailable(
+                "Music3 要**语义塔 ＋ 内嵌词表**两样 ✓✗（现在 "
+                f"塔={'有' if self._textEncoder is not None else '没有'} ✓、"
+                f"词表={'有' if self._tokenizer is not None else '没有'} ✓）"
+                " ⇒ 先 ``attach_music3_te()`` ✓（它是生成器不是编码器 ✓，缺了连条件都造不出来 ✓）",
+                reason="pending")
+        caption = str(request.prompt or "").strip()
+        lyrics = str(getattr(request, "lyrics", "") or "").strip()
+        try:
+            seconds = float(request.seconds)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        cond = int(round(seconds * int(te_mod.AUDIO_FRAMES_PER_SECOND)))
+        if cond <= 0:
+            raise TorchBackendUnavailable(
+                f"Music3 的条件帧算成 {cond} 帧 ✗（``seconds``={request.seconds!r} ✓）"
+                " —— 时长只认 ``seconds`` ✓（音频没有「像素帧」可数 ✓）", reason="pending")
+        if cond > int(te_mod.MAX_AUDIO_FRAMES):
+            raise TorchBackendUnavailable(
+                f"Music3 要 {cond} 条件帧 ✗ > 上限 {int(te_mod.MAX_AUDIO_FRAMES)} ✓"
+                f"（＝ {int(te_mod.MAX_AUDIO_FRAMES) / int(te_mod.AUDIO_FRAMES_PER_SECOND):g} 秒 ✓）"
+                " —— 这是塔的硬上限 ✓，超了不是慢而是编不出 ✓", reason="pending")
+        text = te_mod.build_prompt(caption, lyrics)
+        ids = list(self._tokenizer.encode(text, add_special_tokens=False))
+        if len(ids) > int(te_mod.MAX_PROMPT_TOKENS):
+            raise TorchBackendUnavailable(
+                f"Music3 提示串 {len(ids)} token ✗ > 上限 {int(te_mod.MAX_PROMPT_TOKENS)} ✓"
+                " —— （超了要**截提示词** ✓，不能截音频 ✓；本仓不自动截 ✗：那会静默少一句歌词 ✓✗）",
+                reason="pending")
+        if len(ids) < 3:
+            raise TorchBackendUnavailable(
+                f"Music3 提示串只有 {len(ids)} token ✗ —— ``build_prompt`` 的正常形状是"
+                " ``<|im_start|>…<|im_end|><|audio_start|>`` ✓，至少 3 个 ✓（少于此 ⇒ 词表对不上 ✓）",
+                reason="pending")
+        tensor = torch.tensor([ids], dtype=torch.long, device=self._device)
+        with torch.no_grad():
+            frames = self._textEncoder.generate(
+                tensor, seed=int(request.seed), max_audio_frames=cond,
+                cfg_scale=float(te_mod.CFG_SCALE), top_k=int(te_mod.CFG_TOP_K))
+        got = int(frames.shape[0]) if hasattr(frames, "shape") and len(frames.shape) >= 1 else 0
+        if got != cond:
+            #: ⚠️ 参考侧是"生成到停止符就停" ✓ ⇒ 短了**是可能的** ✓（不是 bug ✓✗）。但**不许**
+            #: 拿短条件去喂一个按 cond 定长的 latent ✗：DiT 会拿零填充补齐 ✓、尾部变成越来越空的
+            #: 拖音 ✓✗。两种处理都可（补零 or 缩 latent ✓），本仓选**报错**：让调用方显式选 ✓。
+            raise TorchBackendUnavailable(
+                f"Music3 自回归只生成 {got} 帧 ✗（要 {cond} ✓）—— 早停 ✓（遇到停止符 ✓）"
+                f"或时长估算偏大 ✓；pipeline 已按 ``seconds`` 定 latent 长度 ✓，"
+                f"这里**不替它补零** ✗（补零 ⇒ 尾部一段越来越空的拖音 ✓✗）", reason="pending")
+        #: ⚠️⚠️ **必须在边界这里搬一次卡** ✗✗（2026-11-06 首次真跑栽的第二处 ✓）：
+        #: `te_music3.generate` 是**有意** `return ….to(device="cpu")` 的 ✓（生成过程要腾卡 ✓、
+        #: 条件只有 32 MB/20 秒 ✓），而 `denoise` 一进门就核「condition 与后端同设备」✓✗ ⇒
+        #: 原样往下传 ⇒ `调用方给的 condition 在 cpu，而后端在 cuda:0` ✓。
+        #: 读起来像"调用方忘了搬" ✓，其实是**上一环故意留在 CPU** ✓ —— 交接点只有这里一处 ✓。
+        frames = frames.to(device=self._device_torch(), dtype=self._compute_dtype())
+        return {
+            "positive": frames.unsqueeze(0),
+            "negative": None,
+            "ids": ids,
+            "tokens": len(ids),
+            "truncated": False,
+            "textEncoder": "music3-ar",
+            "conditioning": {
+                "kind": "music3-audio-frames",
+                "frames": int(got),
+                "frameRate": int(te_mod.AUDIO_FRAMES_PER_SECOND),
+                "dim": int(frames.shape[-1]),
+                "seconds": float(got) / float(te_mod.AUDIO_FRAMES_PER_SECOND),
+            },
+            "byBranch": {
+                "positive": {"kind": "music3-ar", "frames": int(got), "tokens": len(ids),
+                             "cfg": float(te_mod.CFG_SCALE), "topK": int(te_mod.CFG_TOP_K),
+                             "lyrics": len(lyrics)},
+                "negative": None,
+            },
+        }
+
     def _encode_h3_condition(self, request: Any) -> dict[str, Any]:
         """**真**两塔串联 ✓：段序列 → 视觉塔 → 拼 embeds → 语言塔 ⇒ ``hidden`` ＋ ``tags`` ✓。
 
@@ -2180,42 +3017,527 @@ class TorchBackend:
                 "h3Refs": [str(item.get("type")) for item in (prepared.get("refs") or ())],
                 "visionBlocks": len(condition.spans)}
 
+    def _encode_wan22_text(self, request: Any) -> dict[str, Any]:
+        """Wan 2.1/2.2 的文本条件 ✓：**UMT5-XXL**（4096 宽 ✓）＋ 参考图条件（I2V 那 20 通道 ✓）。
+
+        ## 为什么不能退回占位
+
+        出图族（`qwen_image`/`krea2`/`zimage`）没挂文本塔时用 sha256 造状态位**能跑**（只影响画风 ✓），
+        但 Wan 的 cross-attn **只吃文本状态** ✓：宽度 / 层数不对就当场 shape 报错 ✓；即使宽度凑对 ✓，
+        占位状态没有任何语义 ✓ ⇒ 出片是一片**会动的糊**✓✗，比报错难查得多 ✓。所以这里**硬拒** ✓。
+
+        ## 三条与出图族不同的口径
+
+        1. **padding 位置要置 0** ✓：Wan 的 cross-attn 不吃 attention mask ✓（`:class:`WanDiT`
+           只收 ``context`` ✓），不置 0 就是拿 pad 行的**真数值**当语义 ✓✗；
+        2. **序列长 512** ✓：官方 Wan 口径 ✓（`Umt5TeRuntime.max_length` ✓），短提示词补 pad ✓、
+           长提示词截尾但仍以 ``</s>`` 收尾 ✓（该收尾由分词器保证 ✓）；
+        3. **I2V 的两段条件在这里一起做** ✓：参考图 → VAE → 16 通道 latent（**整段 T 帧** ✓，
+           首帧是参考图、其余是 0.5 灰 ✓ —— 与 ``WanImageToVideo`` 逐字同构 ✓），掩码 4 通道
+           首拍为 1 ✓。VAE 只在 encode 段挂着 ✓（`:meth:`enter_phase` ✓），所以**必须**在这一拍做完 ✗
+           留到 sample 段就没 VAE 了 ✓✗。
+        """
+        torch = self._torch()
+        runtime = getattr(self, "_textConfig", None)
+        encoder = getattr(self, "_textEncoder", None)
+        tokenizer = getattr(self, "_tokenizer", None)
+        if encoder is None or tokenizer is None or int(getattr(runtime, "output_dim", 0) or 0) <= 0:
+            raise TorchBackendUnavailable(
+                "Wan 2.1/2.2 的文本塔必须是 **UMT5-XXL** ✗（`umt5_xxl_fp8_e4m3fn_scaled.safetensors` ✓）"
+                " —— 现在没挂 ⇒ 拒绝拿 sha256 占位顶替 ✓（Wan 的 cross-attn 只吃真文本状态 ✓，"
+                "占位状态出片是一片会动的糊 ✓✗）",
+                reason="attach")
+        #: ⚠️⚠️ 2026-11-02 **真跑抓到的第四处** ✓✗：这里原先写 ``self._device()`` ✓，
+        #: 而 ``_device`` 是**字符串属性** ✓（``"cuda"`` ✓，见 ``__init__`` 与 :attr:`device` ✓）
+        #: ⇒ ``TypeError: 'str' object is not callable`` ✓，报在「文本编码失败」那句里 ✓
+        #: （读起来像分词器/塔坏了 ✓✗）。具体 :class:`torch.device` 的正确取法是
+        #: :meth:`_device_torch` ✓（它顺手补卡号 ✓ —— ``"cuda"`` vs ``cuda:0`` ✓）。
+        device = self._device_torch()
+        limit = int(getattr(runtime, "max_length", 0) or 512)
+        want = next(encoder.parameters()).dtype
+
+        def states(text: str) -> tuple[Any, int, int]:
+            ids, mask = tokenizer.encode(runtime.prompt(text), max_length=limit)
+            ids_t = torch.as_tensor([ids], dtype=torch.long, device=device)
+            mask_t = torch.as_tensor([mask], dtype=torch.long, device=device)
+            with torch.no_grad():
+                hidden = encoder(input_ids=ids_t, attention_mask=mask_t)
+            #: ⭐ padding 位置置 0 ✓（Wan cross-attn 不吃 mask ✓）—— 只清 pad ✓，`</s>` 那行留着 ✓
+            hidden = hidden * mask_t.unsqueeze(-1).to(hidden.dtype)
+            return hidden.to(want), int(mask_t.sum().item()), int(ids_t.shape[1])
+
+        prompt = str(getattr(request, "prompt", "") or "")
+        negative = str(getattr(request, "negative", "") or "")
+        positive, pos_tokens, pos_seq = states(prompt)
+        negative_states, neg_tokens, _ = states(negative)
+        plan = getattr(self, "_plan", None)
+        condition = self._wan_i2v_condition(request, plan, want=want)
+        note = (
+            f"真 UMT5-XXL 编码器 ✓（{int(getattr(runtime, 'output_dim', 0))} 宽 ✓、"
+            f"序列 {pos_seq} ✓、有效 token {pos_tokens} ✓、padding 位置置 0 ✓）")
+        if condition is None:
+            note += "；**没给首帧** ⇒ 走的是纯文本路线 ✓（I2V 权重没条件图时仅 16 通道可用 ✗，"
+            note += "所以本份权重会当场拒 ✓）"
+        else:
+            note += (f"；首帧条件已拼 ✓（{condition['shape']} ⇒ 送 DiT 的是 36 通道 ✓，"
+                     f"掩码首拍 1 ✓、其余 0 ✓，参考 latent 首帧来自 {condition['source']} ✓）")
+        return {
+            "positive": positive,
+            "negative": negative_states,
+            "note": note,
+            "tokens": pos_tokens,
+            "originalTokens": pos_tokens,
+            "truncated": False,
+            "textEncoder": "umt5-xxl",
+            "wan22": {
+                "textDim": int(getattr(runtime, "output_dim", 0) or 0),
+                "seqLen": pos_seq,
+                "maxLength": limit,
+                "i2v": None if condition is None else {
+                    "concat": int(condition["concat"]),
+                    "maskFrames": int(condition["mask_frames"]),
+                    "layout": list(condition["layout"]),
+                    "source": condition["source"],
+                },
+            },
+        }
+
+    def _wan_i2v_condition(self, request: Any, plan: Any, *, want: Any) -> dict[str, Any] | None:
+        """把首帧变成 I2V 的 **20 通道**条件 ✓（掩码 4 ＋ 参考 latent 16 ✓，顺序按 `I2V_LAYOUT` ✓）。
+
+        参考实现（``comfy_extras/nodes_wan.py::WanImageToVideo`` ✓）是**整段像素**一起编码 ✓：
+        第 0 帧是首帧 ✓、其余补 0.5 灰 ✓（``[-1,1]`` 里就是 0 ✓）。**不要**只编码一张再零填充 ✗ ——
+        灰帧的 latent 不是 0 ✓✗，少一段会让"没条件的那几拍"整体偏暗 ✓。
+        """
+        torch = self._torch()
+        from app.services.engine import dit_wan22 as wan22_mod  # noqa: PLC0415
+        from app.services.engine import media as media_mod  # noqa: PLC0415
+
+        path = getattr(request, "first_frame", None)
+        if not path:
+            return None
+        if getattr(self, "_vae", None) is None:
+            raise TorchBackendUnavailable(
+                "Wan I2V 的首帧条件要过 VAE ✗，而这一拍手上没有 VAE ✓ —— "
+                "`encode` 段必须同时留着 vae ✓（`declare_chain(phase_parts={'encode': ('text', 'vae')})` ✓）",
+                reason="attach")
+        shape = self.latent_shape(plan) if plan is not None else None
+        if not shape or len(shape) != 5:
+            raise TorchBackendUnavailable(
+                "Wan I2V 要按潜变量尺寸编码首帧 ✗，但这一拍算不出 5 维潜变量 ✗"
+                f"（拿到的是 {shape} ✓；`bind_plan` 没跑或 vae_scale / latent_frames 缺 ✓）",
+                reason="pending")
+        b, _c, t, h, w = (int(v) for v in shape)
+        scale = int(self._config_value("vae_scale", 0) or 0) or 8
+        frames = 4 * (t - 1) + 1
+        height, width = h * scale, w * scale
+        image, info = media_mod.load_image_tensor(path, width=width, height=height)
+        image = image.to(device=self._device_torch(), dtype=want)
+        #: ⚠️ **整段像素**一起编码 ✓（首帧＝参考图 ✓，其余 0.5 灰 ⇒ `[-1,1]` 里是 0 ✓）
+        video = torch.zeros((1, 3, frames, height, width), dtype=want, device=self._device_torch())
+        video[:, :, 0] = image[:, :, 0]
+        with torch.no_grad():
+            image_latents = self._encode_pixels(video)
+        if image_latents.ndim == 4:            # ⚠️ 4 维是单帧 `(b,c,h,w)` ✓ ⇒ 补时间轴 ✓
+            image_latents = image_latents.unsqueeze(2)
+        got_c = int(image_latents.shape[1])
+        if got_c != 16:
+            raise TorchBackendUnavailable(
+                f"Wan 的参考 latent 要 16 通道 ✗，VAE 实际给 {got_c} ✓"
+                f"（这份 VAE 不是 Wan 2.1 那套 ⇒ 16 通道/8× ✗）", reason="pending")
+        got_t = int(image_latents.shape[2])
+        if got_t != t:
+            raise TorchBackendUnavailable(
+                f"参考 latent 时间维 {got_t} ✗ ≠ 潜变量 {t} ✓ "
+                f"（像素喂了 {frames} 帧 ✓；Wan 的 VAE 是 4 倍时间压缩 ⇒ 帧数必须 4k+1 ✓）",
+                reason="pending")
+        mask = wan22_mod.i2v_condition_mask(
+            frames=t, height=h, width=w, dtype=want, device=self._device_torch(), batch=b)
+        #: ⭐ 只存**两段**，拼接交给 :func:`dit_wan22.i2v_concat` ✓（顺序只有一份真源 ✓）
+        self._i2vImage = image_latents.to(want)
+        self._i2vMask = mask
+        return {
+            "concat": 36,
+            "mask_frames": t,
+            "shape": (b, got_c + 4, t, h, w),
+            "source": str(getattr(info, "name", "") or Path(str(path)).name),
+            "layout": [f"{name}:{width_}" for name, width_ in wan22_mod.I2V_LAYOUT],
+        }
+
     def encode_text(self, request: Any) -> dict[str, Any]:
-        """提示词 → 条件 ✓：挂了文本编码器就走**真编码器** ✓，否则用 sha256 占位 ✓（都如实标 ✓）。"""
+        """提示词 → 条件 ✓：挂了文本编码器就走**真编码器** ✓，否则用 sha256 占位 ✓（都如实标 ✓）。
+
+        ⭐ **Edit 2511 的参考图**（2026-11-01 接上 ✓，**多图**同轮接 ✓）：装了 Edit 权重
+        （`ref_timestep_zero` ✓）⇒ 这里一次办完三件事 ✓：
+
+        1. 参考图过**视觉塔** ⇒ ``image_embeds`` ✓（语义那一路 ✓；**一张一块** ✓，多图就是一列 ✓）；
+        2. 正向提示词走 :meth:`Qwen25TeRuntime.prompt_edit` 模板 ✓（`<|vision_start|>` 在 **user 段**、
+           正文**之前** ✓✗ 写成 system 段就静默变成"描述一张不存在的图" ✓）；多图时按张数选
+           Plus 那套模板 ✓（``Picture i: <视觉块>`` 逐图一个槽 ✓）；
+        3. 参考图过 **VAE** ⇒ ``ref_latents`` ✓，存进 ``self._refLatents``（**一列** ✓）供
+           :meth:`denoise` **每一步**带进 DiT ✓。
+
+        ⚠️ 反向提示词**不带图** ✓：照 comfy 的做法负向走普通模板 ✓（负向那句是"不要什么" ✓，
+        跟参考图没有语义关系 ✓；硬塞同一串图像 token 只会让负向也不再是纯文本 ✓）。
+        """
         self._gate()
         if getattr(self, "_form", None) == self.H3_FORM_NAME:
             return self._encode_text_states(request)
+        #: ⭐ **SEEDVR2 修复线没有文本塔** ✓（2026-11-01 接上 ✓）：这一步在出图族里是
+        #: 「提示词 → 条件」✓，在这一族是「**源视频 → 17 通道条件**」✓（见
+        #: :meth:`_encode_seedvr2_conditioning` ✓）。⚠️ 它的 ``positive`` 是**张量**不是文本状态 ✓
+        #: —— `pipeline._branches` 会把它当正向条件原样交给 `denoise` ✓
+        #: （`negative=None` ⇒ 单次前向 ✓ 不做 CFG ✓，这一族官方就是 cfg=1 ✓）。
+        if getattr(self, "_ditFamily", None) == "seedvr2":
+            return self._encode_seedvr2_conditioning(request)
+        #: ⭐ **Wan 2.1/2.2**（2026-11-02 接上 ✓）：文本塔是 UMT5-XXL ✓，且 I2V 的首帧条件
+        #: **必须在这一拍**做完 ✓（VAE 只在 encode 段挂着 ✓，到 sample 段就退掉了 ✓✗）。
+        if getattr(self, "_ditFamily", None) == "wan":
+            return self._encode_wan22_text(request)
+        #: ⭐ **Music3**（2026-11-06 接上 ✓）：这一族的"文本塔"是**自回归生成器** ✓✗ ——
+        #: 它不吃"编码一次"就完事 ✓，要按**时长**逐帧生成 `25/s` 的音频语义帧 ✓。
+        #: ⚠️ 判据用 ``_textKind``（装配时就钉死 ✓）而不是 ``family ==`` ✓：与 `dit_build` 的
+        #: 「族只认表」同口径 ✓；也保证"装错了塔"（比如塞了 Qwen）在这一拍立刻现形 ✓。
+        if getattr(self, "_textKind", None) == "music3-ar":
+            return self._encode_music3_condition(request)
         if self._textEncoder is not None:
             torch = self._torch()
             config = self._textConfig
             results: dict[str, Any] = {}
             meta: dict[str, Any] = {}
             positive_ids: list[int] = []
+            #: ⭐ Edit 2511：参考图的那两样 ✓（非 Edit 族 ⇒ ``None`` ✓；Edit 族没给图 ⇒ **当场报错** ✗✗）
+            #: ⚠️ ``latents`` 是**一列** ✓（单图也是长度 1 ✓）—— 统一成列表 ⇒ `denoise` 不用分叉 ✓；
+            #: 单图存裸张量、多图存列表那种写法会让"换回 t2i 没清空"更难发现 ✗。
+            edit = self._edit_reference(request)
+            self._refLatents = list(edit["latents"]) if edit is not None else None
             # ⭐ 模板**只在配置里加**一次 ✓（`Qwen3TeRuntime.prompt` ✓）；参考 TE 没这个方法 ✓ ⇒ 原样送 ✓。
             wrap = getattr(config, "prompt", None)
+            #: Edit 2511 用的是**另一套**模板 ✓（同一个类里的 `prompt_edit` ✓）；没这个方法 ⇒ 说明
+            #: 挂的不是 Qwen2.5-VL 那座塔 ✓ ⇒ 下面注入时当场报错 ✓（不静默退回纯文本 ✗）。
+            wrap_edit = getattr(config, "prompt_edit", None)
             for name, text in (("positive", request.prompt), ("negative", request.negative)):
                 raw = "" if text is None else str(text)
-                prepared = wrap(raw) if callable(wrap) else raw
+                use_edit = edit is not None and name == "positive"
+                if use_edit and callable(wrap_edit):
+                    #: ⚠️ 张数必须与嵌入块数**一致** ✓：模板少一个视觉块 ⇒ 多出来的那块没处放 ✓✗
+                    #: （`_with_image_blocks` 会当场报「块数 ≠ 槽数」✓）；多一个块 ⇒ 提示词里
+                    #: 没有对应锚点 ✓✗ ⇒ 两条都由注入点兜 ✓。
+                    prepared = wrap_edit(raw, image_count=int(edit["count"]))
+                else:
+                    prepared = wrap(raw) if callable(wrap) else raw
+                #: ⚠️ ``max_length`` 是**文本**预算 ✓✗：图是排在文本**前面**的 ✓ ⇒ 一张 384² 图
+                #: 约 196 token ✓、三张就 588 ✓ > 512 ⇒ 截断正好切掉**尾部那句指令** ✓✗
+                #: （截断的是"把背景换成海边"这类话 ✓，图像条件留着 ✓）—— ``truncated=True`` 只说明
+                #: "截了" ✓，不说明"编辑能力没了" ✓✗。参考实现那座塔干脆不设上限 ✓；
+                #: 这里折中：把图的 token 数**加到文本预算之上** ✓（文本仍保 512 ✓）。
+                limit = int(config.max_length)
+                if use_edit:
+                    limit += int(edit["report"]["vision"]["tokens"])
                 ids, original, truncated = te_mod.tokenize_prompt(
-                    self._tokenizer, prepared, max_length=config.max_length)
+                    self._tokenizer, prepared, max_length=limit)
                 tensor = torch.tensor([ids], dtype=torch.long, device=self._device)
                 with torch.no_grad():
-                    results[name] = self._textEncoder(tensor)
+                    if use_edit:
+                        #: ⚠️ `image_embeds` 走**关键字** ✓；参考 TE（`te_mod` 那几座）没这个参数 ✗
+                        #: ⇒ 只在 Edit 这一支传 ✓（无条件传会给所有族一个 `TypeError` ✓✗）。
+                        results[name] = self._textEncoder(tensor, image_embeds=edit["embeds"])
+                    else:
+                        results[name] = self._textEncoder(tensor)
                 if name == "positive":
                     positive_ids = list(ids)
                 meta[name] = {"tokens": len(ids), "originalTokens": original,
-                              "truncated": truncated, "templated": callable(wrap)}
+                              "truncated": truncated, "templated": callable(wrap) or use_edit}
+                if use_edit:
+                    meta[name]["imageTokens"] = int(edit["report"]["vision"]["tokens"])
+                    meta[name]["images"] = int(edit["count"])
+                    meta[name]["maxLength"] = limit
+                    meta[name]["template"] = "edit" if int(edit["count"]) == 1 else "edit-plus"
             # ⚠️ `ids` 必须是**真的 id 列表** ✓（第一版把 meta 字典塞进了 `ids` ✗ ⇒ 调用方
             #    `len(...)` 拿到的是"字典键数"而不是 token 数 ✓ —— 自检 ⑯ 当场红 ✓ 已改 ✓）；
             #    逐分支明细放 `byBranch` ✓。
-            return {**results, "ids": positive_ids, "tokens": len(positive_ids),
-                    "originalTokens": meta["positive"]["originalTokens"],
-                    "truncated": meta["positive"]["truncated"],
-                    "byBranch": meta,
-                    "textEncoder": self._textKind or "reference-untrained"}
+            payload = {**results, "ids": positive_ids, "tokens": len(positive_ids),
+                       "originalTokens": meta["positive"]["originalTokens"],
+                       "truncated": meta["positive"]["truncated"],
+                       "byBranch": meta,
+                       "textEncoder": self._textKind or "reference-untrained"}
+            if edit is not None:
+                #: 回执里**如实写**两路口径 ✓（382² / 1024² 这类数字只有这里能查 ✓）；
+                #: `ids`/`tokens` 是**注入后**的序列事实 ✓（`<|image_pad|>` 那一格已换成 n 条 ✓）。
+                payload["edit"] = edit["report"]
+            return payload
         return {"positive": self._condition(request.prompt),
                 "negative": self._condition(request.negative),
                 "textEncoder": "sha256-placeholder"}
+
+    def _edit_reference(self, request: Any) -> dict[str, Any] | None:
+        """Edit 2511 的参考图在哪 ✓ —— 非 Edit 族 ⇒ ``None`` ✓；Edit 族没给图 ⇒ **当场报错** ✗✗。
+
+        ⚠️ 「没给图就退回纯 t2i」是**必须拒**的 ✓✗：那样出来的图与参考图毫无关系 ✓、
+        却一条报错都没有 ✓✗ —— 正是本仓最不能接受的那类错 ✓。
+
+        ⭐ **多图**（2026-11-01 已接 ✓）：``referenceFrames`` 有几张就准备几份 ✓
+        （第 i 张 ⇒ 模板第 i 个视觉块 ✓ ＋ ``ref_latents[i]`` ✓）；顺序**即**语义 ✓✗。
+        """
+        is_edit = bool(self._config_value("ref_timestep_zero", False))
+        if not is_edit:
+            return None
+        frames = [str(item) for item in (getattr(request, "reference_frames", ()) or ())
+                  if str(item).strip()]
+        if not frames:
+            raise TorchBackendUnavailable(
+                "装的是 **Edit 2511** 的权重 ✓（权重里有 ``__index_timestep_zero__`` 哨兵 ✓）"
+                "却**没给参考图** ✗ ⇒ 编辑无从谈起 ✓（`referenceFrames` 至少一张 ✓）",
+                reason="input")
+        return self.prepare_edit_references(frames)
+
+    def bind_plan(self, plan: Any) -> None:
+        """把**本轮 plan** 递给后端 ✓（可选钩子 ✓ —— 不实现的后端零影响 ✓）。
+
+        为什么需要它 ✗：``encode_text(request)`` 的契约里**没有 plan** ✓，出图族确实不需要 ✓
+        （提示词编码与画布/帧数无关 ✓✗）；**修复族不成立** ✗✗ —— 它的"条件"**就是**源视频编码
+        出的 16 通道 ✓，而"编多少帧、编成多大"正是 plan 说了算 ✓ ⇒ 两边必须看**同一份** ✓
+        （两处各算一遍的症状：plan 说 96 帧、实际编出 121 帧 ✓，采样第 1 步 33 通道拼不上 ✓，
+        报错指不到"算了两遍"✓）。
+
+        ⚠️ 这里**只登记不判断** ✗ —— 尺寸/帧数的裁定在
+        :meth:`_encode_seedvr2_conditioning` 里 ✓（它才是唯一读源视频的地方 ✓）。
+        """
+        self._plan = plan
+        #: ⭐ Wan 2.2 的**双专家分界**在这里落定 ✓（`plan.wan_high_steps` ✓，非本族恒 0 ✓）。
+        #:
+        #: ⚠️⚠️ 判据是**σ 阈值**，不是"数第几次调用" ✗✗：`denoise` 每步的调用次数**不是 1** ✓ ——
+        #: 引导开时每步 **2** 次（正向＋负向 ✓ 见 `pipeline.model_fn` ✓）、二阶采样器（heun）
+        #: 再翻倍 ⇒ 每步最多 **4** 次 ✓。按调用次数数 ⇒ 在第 1/2 步就换 ✓✗（还换在负向那一趟 ✓，
+        #: 同一步里正负两趟用的**不是同一个专家** ✓ ⇒ 引导被两份权重各算一次 ✓✗，不报错 ✓）。
+        #: σ 则是**单调下降**的 ✓ ⇒ 同一步的全部子调用落在分界的同一侧 ✓；
+        #: 阈值取 ``plan.sigmas[wan_high_steps]`` ✓（**跟着 schedule 走** ✓，不是写死的数 ✓✗）。
+        _high = int(getattr(plan, "wan_high_steps", 0) or 0)
+        _sig = list(getattr(plan, "sigmas", None) or [])
+        self._wanHighSteps = _high
+        self._wanSwitchSigma = (float(_sig[_high]) if (_high > 0 and len(_sig) > _high) else None)
+        #: 每次新 run 都从「高噪」重来 ✓✗（上一轮换到低噪后 `_wanActive` 会一直是 ``low`` ✓，
+        #: 不清 ⇒ 第二次跑从第一步就用低噪专家 ✓、画面糊且**没有任何提示** ✓✗）。
+        self._wanActive = "high"
+
+    # ------------------------------------------------------------------ Wan 2.2 双专家
+    def register_wan_experts(self, high: str, low: str | None = None) -> dict[str, Any]:
+        """登记 Wan 2.2 的**两份主干** ✓（``high`` = 高噪 ✓、``low`` = 低噪 ✓）。
+
+        ## 为什么非要有这一格
+
+        Wan2.2 A14B 把噪声区间拆成**两个专家** ✓：官方 UI 模板 ``video_wan2_2_14B_i2v.json``
+        是**两个** ``KSamplerAdvanced`` 接力 ✓（高噪跑 ``[0, 2)`` ✓、低噪跑 ``[2, 4)`` ✓，
+        切换在 **50%** ✓）。只用其中一份跑满全程也能出画面 ✓✗ —— 前段发灰 ✓、后段细节糊 ✓，
+        而且**一条报错都没有** ✓（盘上两份文件名字只差 ``HighNoise`` / ``LowNoise`` 两个词 ✓）。
+
+        ## 26.62 GiB 装不进 22.49 GiB ⇒ **换装**（不并存 ✗）
+
+        单份 14B 反量化到 bf16 ≈ **26.62 GiB** ✓（实测本仓 ``WAN22_PART_NEED_GIB["dit"]`` ✓），
+        两份并存 ≈ **53 GiB** ✗✗ —— 卡装不下 ✓、也没必要 ✓：同一时刻只有一份在算 ✓。
+        所以这里**只登记路径** ✓、真换发生在 :meth:`_wan_switch_expert` ✓（走到分界那一步 ✓），
+        换法是 ``load_module_weights`` **原地重装** ✓（流式 ✓ 峰值≈单张量 ✓，见 `weights` 的说明 ✓）
+        —— 模块骨架、驻留切分（``split`` ✓）、设备全都不动 ✓✗。
+
+        ⚠️ 换装**不是免费** ✓：要重读 13.31 GiB 的 fp8 文件 ✓（本机约 20~40 秒 ✓）⇒
+        4 步里有 2 步是"第一步就要换" ✓；只在**真跑长视频**时才值得 ✓。
+        """
+        path_high = str(high or "").strip()
+        if not path_high:
+            raise TorchBackendUnavailable("Wan 双专家的「高噪」路径为空 ✗", reason="input")
+        experts = {"high": path_high}
+        path_low = str(low or "").strip()
+        if path_low:
+            if Path(path_low) == Path(path_high):
+                raise TorchBackendUnavailable(
+                    f"Wan 2.2 的**低噪**权重与高噪是同一个文件 ✗（{path_high} ✓）—— "
+                    "这两个专家必须给两份不同文件 ✓（同名就是「只有一份 ⇒ 不接力」✓，"
+                    "请**别登记**低噪 ✓ 而不是登记成同一份 ✓）", reason="input")
+            experts["low"] = path_low
+        self._wanExperts = experts
+        self._wanActive = "high"
+        return {"experts": dict(experts), "active": "high",
+                "note": ("两份专家已登记 ✓（高噪 → 低噪，分界由 `plan.wanHighSteps` 说 ✓）；"
+                         "⚠️ 只登记、**没装**第二份 ✓ —— 换装发生在采样走到分界那一步 ✓"
+                         if len(experts) > 1 else
+                         "只登记了**一份**主干 ✓ ⇒ 不接力 ✓（后段质量会掉 ✓，如实标 ✓）")}
+
+    def _wan_switch_expert(self, want: str) -> dict[str, Any]:
+        """把主干**原地换成**另一个专家 ✓（骨架/驻留切分不动 ✓，只重装权重 ✓）。"""
+        experts = getattr(self, "_wanExperts", None) or {}
+        path = experts.get(want)
+        if not path:
+            raise TorchBackendUnavailable(
+                f"要换成 Wan 的「{want}」专家 ✗，但没登记那份权重 ✓ "
+                f"（已登记 {sorted(experts)} ✓）", reason="attach")
+        if self._model is None:
+            raise TorchBackendUnavailable(
+                "Wan 双专家换装要一份**已装好的骨架** ✗（`attach_dit` 没跑 ✓）", reason="pending")
+        started = time.perf_counter()
+        report = weights_mod.load_module_weights(
+            self._model, Path(path), dtype=self._compute_dtype())
+        if not report.complete:
+            raise TorchBackendUnavailable(
+                f"Wan「{want}」专家权重装不全 ✗：缺"
+                f"{len(report.missing)} / 多{len(report.unexpected)} / "
+                f"形状不符{len(report.mismatched)} ✓（两份专家的骨架必须完全同构 ✓）",
+                reason="pending")
+        self._wanActive = want
+        elapsed = time.perf_counter() - started
+        note = {"expert": want, "path": str(path), "seconds": round(elapsed, 2),
+                "note": f"采样中途**换装**到「{want}」专家 ✓（原地重装 ✓，"
+                        f"{elapsed:.1f} 秒 ✓；骨架与驻留切分未动 ✓）"}
+        self._wanLastSwitch = note
+        return note
+
+    def _wan_expert_tick(self, sigma: float) -> None:
+        """按 **σ 阈值**决定这一拍用哪个专家 ✓（`:meth:`denoise` 每次前向调一次 ✓）。
+
+        ⚠️ **不能按"第几次调用"** ✗✗：每步的调用次数随配置变 ✓（引导 2 次 / heun 再翻倍 ✓），
+        而阈值只有一个 ✓ ⇒ 数次数会在**半路**换 ✓、还会让同一步的正负两趟分属两个专家 ✓✗。
+        σ 单调下降 ✓ ⇒ 阈值判据天然"每步一致"✓。**换了就不回头** ✓（`_wanActive` 只是记账 ✓）。
+
+        ⚠️ 边界必须写 **``<=``** ✗✗：阈值取的是 ``plan.sigmas[wanHighSteps]`` ✓，而采样第
+        ``index`` 步喂进来的正是 ``sigmas[index]`` ✓ ⇒ 第 ``wanHighSteps`` 步（0 基）那一次的 σ
+        **恰好等于**阈值 ✓。写成严格 ``<`` ⇒ 那一步仍用高噪 ✓，于是 4 步里变成「高噪 3 步 ＋
+        低噪 1 步」✓✗（官方是 2/2 ✓）—— 这条**不报错** ✓、只是后段细节被高噪专家重画一遍 ✓✗。
+        """
+        experts = getattr(self, "_wanExperts", None) or {}
+        if len(experts) < 2:
+            return
+        if getattr(self, "_wanActive", "high") == "low":   # 已换过 ⇒ 不回头 ✓（σ 本就单调 ✓）
+            return
+        switch = getattr(self, "_wanSwitchSigma", None)
+        if switch is None:                                  # plan 没给分界 ⇒ 全程高噪 ✓并如实标 ✓
+            return
+        if float(sigma) <= float(switch) + 1e-12:
+            self._wan_switch_expert("low")
+
+    def _encode_seedvr2_conditioning(self, request: Any) -> dict[str, Any]:
+        """**源视频 → 17 通道 conditioning** ✓ —— SEEDVR2 修复线的"条件"那一路 ✓。
+
+        ``17 = 退化视频 16 ＋ loss mask 1`` ✓；主干再把它与噪声的 16 拼成 ``vid_in`` 的 **33** ✓
+        （拼接在 :meth:`dit_seedvr2.SeedVR2DiT.forward` 里做 ✓ —— 这里**不要**先拼成 33 ✓✗，
+        那会变成「噪声 16 ＋ 条件 17 ＋ 条件 17 = 50」✓）。
+
+        四条硬口径（都属于「不报错、只是结果不对」那一类 ✗✗）：
+
+        ① **帧数 ``4n+1`` 向下吸** ✓（:func:`pipeline.seedvr2_target` 是唯一真源 ✓），且用
+           **真解码出来的帧数**再算一遍 ✗：ffprobe 的 ``nbFrames`` 常比真能解出来的多 ✓
+           （封装 / 尾部丢帧 ✓）—— 按它编会「少一帧就差一个潜帧」✓；
+        ② **``mask`` 全 1** ✓（整段重绘 ✓）：SEEDVR2 官方推理就是全 1 ✓，局部修复要 per-frame
+           mask 得先有"训练时怎么给"的证据 ✓，本仓没有 ⇒ **不编** ✗（写 0.5 之类的"半透明
+           修复"没有任何依据 ✓✗）；
+        ③ **必须走真 VAE** ✓（``_vaeKind == "seedvr2-real"`` ✓）：Wan / Flux 的 VAE 同为
+           16ch / 8× ✓、同样装得下 ✓，只差 ``×0.9152`` 与「编码器出 32 通道取前 16」✓
+           ⇒ 跑得下去、修出来**整片发灰** ✓✗；
+        ④ **``positive`` 是张量** ✓：`pipeline._branches` 会把它当正向条件原样交给
+           :meth:`denoise` ✓（后者见 ``condition`` 带 ``shape`` 就直接当 conditioning ✓）；
+           ``negative=None`` ⇒ **单次前向** ✓ 不做 CFG ✓（这一族官方就是 cfg=1 ✓）。
+        """
+        self._gate()
+        if self._vaeKind != "seedvr2-real" or self._vae is None:
+            raise TorchBackendUnavailable(
+                f"SEEDVR2 修复线的条件要用**它自己的 VAE** ✗（当前挂的是 "
+                f"``{self._vaeKind or '未挂任何 VAE'}`` ✓）—— 先 "
+                f"``attach_seedvr2_vae('vae/SEEDVR2/ema_vae_fp16.safetensors')`` ✓。\n"
+                "  ⚠️ 别拿 Wan / Flux 的 VAE 顶替 ✗✗：形状（16ch / 8×）**一样** ✓、也装得下 ✓，"
+                "只差 `×0.9152` 与「编码器出 32 通道、取前 16」✓ ⇒ 跑得下去、修出来**整片发灰** ✓"
+                "（不报错 ✓，正是本仓最忌讳的那类 ✗）。", reason="attach")
+        sources = [str(item) for item in (getattr(request, "reference_videos", ()) or ())
+                   if str(item).strip()]
+        if not sources:
+            raise TorchBackendUnavailable(
+                "SEEDVR2 是**修视频**的线 ✓ —— 它**没有**「凭空生成」这一路 ✗（主干必填 17 通道 "
+                "conditioning ✓，缺了 33 通道的 ``vid_in`` 就拼不出来 ✓）。请给 "
+                "``referenceVideos[0]``（要修的那条源视频 ✓）；按文字出片请走 ``h3`` ✓。",
+                reason="input")
+        if len(sources) > 1:
+            raise TorchBackendUnavailable(
+                f"SEEDVR2 一次只修**一条**源视频 ✗（收到 {len(sources)} 条 ✓）—— 多段请走 chain"
+                "（每段一条请求 ✓），不静默只取第一路 ✗（那会让你以为其余也修好了 ✓✗）",
+                reason="input")
+
+        torch = self._torch()
+        from . import media as media_mod  # noqa: PLC0415 —— 延迟 import：只这一族用到 ✓
+        from .pipeline import seedvr2_target  # noqa: PLC0415 —— 尺寸/帧数吸附的**唯一真源** ✓
+
+        video, facts = media_mod.load_video_tensor(sources[0])
+        decoded = int(video.shape[2])
+        source_h, source_w = int(video.shape[3]), int(video.shape[4])
+        try:
+            target = seedvr2_target({**facts, "nbFrames": decoded,
+                                     "width": source_w, "height": source_h})
+        except ValueError as err:
+            raise TorchBackendUnavailable(
+                f"源视频没法按 SEEDVR2 的口径取尺寸/帧数 ✗：{err}", reason="input") from err
+
+        frames = int(target["frames"])
+        out_w, out_h = int(target["width"]), int(target["height"])
+        plan = getattr(self, "_plan", None)
+        work = video[:, :, :frames]
+        if (out_w, out_h) != (source_w, source_h):
+            #: 5D → 4D 逐帧插值 ✓（``interpolate`` 只吃 4 维 ✓）；就近吸附差几个像素 ✓，
+            #: 属"不改构图的轻微缩放" ✓（与 letterbox / crop 不同 ✗），如实进回执 ✓。
+            flat = work.permute(0, 2, 1, 3, 4).reshape(-1, 3, source_h, source_w)
+            flat = torch.nn.functional.interpolate(
+                flat, size=(out_h, out_w), mode="bilinear", align_corners=False)
+            work = flat.reshape(1, frames, 3, out_h, out_w).permute(0, 2, 1, 3, 4)
+        work = work.to(self._device).contiguous()
+        packed = self.encode_pixels(work, plan)
+        latents = packed["latents"]
+        #: ``mask`` 通道**只能 1** ✓（17−16 ✓）：写成 3 或 16 会得 19 / 32 通道 ✓
+        #: ⇒ 主干 ``vid_in`` 的 Conv3d 当场抛「期望 33、实际 N」✓（这处报错还算清楚 ✓）。
+        mask = torch.ones((1, 1) + tuple(latents.shape[2:]),
+                          dtype=latents.dtype, device=latents.device)
+        condition = torch.cat([latents, mask], dim=1)
+
+        corrections: dict[str, list[Any]] = {}
+        if plan is not None:
+            for key, value in (("width", out_w), ("height", out_h), ("frames", frames),
+                               ("latent_frames", int(latents.shape[2])),
+                               ("fps", int(target["fps"]))):
+                current = getattr(plan, key, None)
+                if current != value:
+                    corrections[key] = [current, value]
+                    try:
+                        setattr(plan, key, value)
+                    except (AttributeError, TypeError):
+                        pass
+            warnings = getattr(plan, "warnings", None)
+            if corrections and isinstance(warnings, list):
+                pairs = "、".join(f"{key} {old!r} → {new!r}"
+                                  for key, (old, new) in corrections.items())
+                warnings.append(
+                    f"plan 已按**真解码**的源视频校正 ✓：{pairs} ✓"
+                    "（ffprobe 的 nbFrames 常比真能解出来的多 ✓ —— 按它编会「少一帧就差一个潜帧」✓；"
+                    "源视频是唯一事实 ✓，这里只报**不改素材** ✓）")
+
+        report: dict[str, Any] = {
+            "source": str(sources[0]),
+            "sourceSize": f"{source_w}×{source_h}",
+            "sourceFrames": int(facts.get("nbFrames") or decoded),
+            "decodedFrames": decoded,
+            "frames": frames,
+            "droppedFrames": max(0, decoded - frames),
+            "outputSize": f"{out_w}×{out_h}",
+            "fps": int(target["fps"]),
+            "latentFrames": int(latents.shape[2]),
+            "latentShape": [int(value) for value in latents.shape],
+            "conditioningShape": [int(value) for value in condition.shape],
+            "channels": {"degraded": 16, "mask": 1, "vidIn": 33},
+            "mask": "全 1（整段重绘 ✓ —— SEEDVR2 官方推理就是全 1 ✓）",
+            "vaeScale": 0.9152,
+            "planCorrections": corrections,
+            "note": (f"源 {decoded} 帧 → 修 **{frames}** 帧（``4n+1`` ✓，截尾 "
+                     f"{max(0, decoded - frames)} 帧 ✓）；条件 = 退化视频 **16** ＋ mask **1** = "
+                     f"**17** 通道 ✓，主干拼成 ``vid_in`` **33** ✓；本族**没有文本塔** ✓（cfg 无效 ✓）"),
+        }
+        self._repairCondition = condition
+        self._repairSource = report
+        return {"positive": condition, "negative": None,
+                "textEncoder": "none（SEEDVR2 没有文本塔 ✓：条件＝源视频编码 ＋ mask ✓）",
+                "repair": report, "note": report["note"]}
 
     def init_latents(self, plan: Any, request: Any) -> Any:
         """初始噪声 ✓ —— **真** `torch.randn` + **真**种子 ✓ ⇒ 同种子逐位可复现 ✓。
@@ -2226,13 +3548,125 @@ class TorchBackend:
         """
         self._gate()
         torch = self._torch()
+        if getattr(self, "_ditFamily", None) == SEEDVR2_FAMILY:
+            #: ⭐ **修复族**：噪声形状**跟着条件走** ✓✗（2026-11-01 接线 ✓）。
+            #: 出图族的形状由 ``plan`` 决定 ✓；这一族真正的形状事实是**条件的形状** ✓
+            #: （条件又来自**真解码**的源视频 ✓ ⇒ 源视频是唯一事实 ✓）。
+            #: ``plan`` 到这一步应已被 :meth:`_encode_seedvr2_conditioning` 校正过 ✓；
+            #: 这里再核一遍是**幂等的防御** ✓（绕过 ``encode_text`` 直接调 init 的调用方 ✓）——
+            #: 不核的症状是「采样第 1 步 33 通道拼不上」✓✗，那种报错看不出是**帧数**错 ✓。
+            condition = getattr(self, "_repairCondition", None)
+            if condition is None:
+                raise TorchBackendUnavailable(
+                    "SEEDVR2 没有 17 通道条件 ✗ ⇒ 造不出噪声形状 ✓（这一族的形状由**条件**决定 ✓，"
+                    "不是由 plan ✓）。先跑 `encode_text` ✓"
+                    "（= :meth:`_encode_seedvr2_conditioning` ✓）再 `init_latents` ✓。", reason="input")
+            channels = int(self._config_value("latent_channels", 0) or 0)
+            if not channels:
+                raise TorchBackendUnavailable(
+                    "SEEDVR2 主干的 ``latent_channels`` 读不出来 ✗ ⇒ 不猜通道数 ✓", reason="pending")
+            shape = (1, channels, int(condition.shape[2]), int(condition.shape[3]),
+                     int(condition.shape[4]))
+            #: 像素帧数取**编码阶段实测**的那份 ✓（`_repairSource.frames` ✓）；缺了才按 4n+1 反推 ✓。
+            source = getattr(self, "_repairSource", None) or {}
+            frames = int(source.get("frames") or ((shape[2] - 1) * 4 + 1))
+            stale: dict[str, list[Any]] = {}
+            for key, value in (("latent_frames", int(shape[2])), ("frames", frames)):
+                old = getattr(plan, key, None)
+                if old != value:
+                    stale[key] = [old, value]
+                    try:
+                        setattr(plan, key, value)
+                    except (AttributeError, TypeError):
+                        pass
+            warnings = getattr(plan, "warnings", None)
+            if stale and isinstance(warnings, list):
+                pairs = "、".join(f"{key} {old!r} → {new!r}" for key, (old, new) in stale.items())
+                warnings.append(
+                    f"噪声形状按**条件**校正 plan ✓：{pairs} ✓（条件的形状来自真解码 ✓，"
+                    "不是 ffprobe 估算 ✓ —— 不校正就是采样第 1 步 33 通道拼不上 ✓✗）")
+            generator = torch.Generator(device="cpu").manual_seed(int(request.seed))
+            noise = torch.randn(*shape, generator=generator, dtype=torch.float32)
+            return noise.to(self._device)
         shape = self.latent_shape(plan)
         generator = torch.Generator(device="cpu").manual_seed(int(request.seed))
         if shape is None:
             noise = torch.randn(self.width, generator=generator, dtype=torch.float32)
             return noise.to(self._device)
         noise = torch.randn(*shape, generator=generator, dtype=torch.float32)
-        return noise.to(self._device)
+        return self._mix_init_image(noise.to(self._device), plan, request)
+
+    def init_image_latents(self, plan: Any, request: Any) -> Any:
+        """``initImage`` ⇒ **归一化**潜变量 ✓（图生图的**起点** ✓，不是条件 ✗）。
+
+        形状跟着 :meth:`latent_shape` 走 ✓ —— 它可能是 **4 维**（Z-Image / Qwen-Image 2.1 ✓
+        ``IMAGE_ONLY_FAMILIES`` ✓ 没有时间维 ✗）也可能是 **5 维** ✓，这里**照它的维数**交 ✓✗
+        （一律造 5 维 ⇒ 图族 `patchify` 上多一维 ⇒ 报「expected 4D」✓，指不到"起点给错了"✓）。
+
+        ⚠️ 编码**只能**走 :meth:`_encode_pixels` ✗✗：各家 ``encode`` 有三种返回口径 ✓
+        （H3 自带归一化 ✓、Flux 返二元组 ✓、Wan 返未归一化 ✓）—— 裸调 ``self._vae.encode``
+        在 Flux 族上拿到的是 ``(mean, logvar)`` 的**第一个** ✓ 形状对、数值是半份统计量 ✓✗。
+        """
+        self._gate()
+        path = str(getattr(request, "init_image", "") or "").strip()
+        if not path:
+            raise TorchBackendUnavailable(
+                "denoise<1 要一张**起点图** ✗ 但 ``initImage`` 是空的 ✓ —— "
+                "起点不是「可选的美化项」 ✓：不给图就只剩纯噪声起跑 ✓✗（图与参考无关、且不报错 ✓）。",
+                reason="input")
+        target = self.latent_shape(plan)
+        if target is None:
+            raise TorchBackendUnavailable(
+                "读不出**真形状**（``vae_scale`` / 通道数缺 ✓）⇒ 没法把参考图编码成起点 ✗。"
+                "占位路径下图生图无从谈起 ✓（先 `ensure_loaded` 配好 vae_scale ✓）", reason="pending")
+        torch = self._torch()
+        image, info = media_mod.load_image_tensor(path, width=int(plan.width),
+                                                  height=int(plan.height))
+        with torch.no_grad():
+            encoded = self._encode_pixels(image.to(device=self._device, dtype=torch.float32))
+        # ⚠️ **只比 C/h/w、不比 T** ✓（图天然单帧 ⇒ 编码出 T=1 ✓；比较下标逐位点名 ✗ 不用滑窗 ✓）。
+        if encoded.ndim == 5:
+            got = tuple(encoded.shape[i] for i in (1, 3, 4))
+            ref = encoded[:, :, :1]
+        else:
+            got = tuple(encoded.shape[1:])
+            ref = encoded
+        want = (tuple(target[i] for i in (1, 3, 4)) if len(target) == 5
+                else tuple(target[i] for i in (1, 2, 3)))
+        if got != want:
+            raise TorchBackendUnavailable(
+                f"参考图编码后「通道/高/宽」{got} 与潜变量要的 {want} 对不上 ✗ —— "
+                f"VAE 与 DiT 不是一套 ✓（``vae_scale`` / 通道数必须同源 ✓；"
+                f"整条原形状 {tuple(encoded.shape)} vs {tuple(target)} ✓）", reason="pending")
+        if len(target) == 4:
+            ref = ref.reshape(1, ref.shape[1], ref.shape[3], ref.shape[4])
+        self._initImageNote = {"imageInfo": info, "shape": tuple(ref.shape)}
+        return ref.to(device=self._device, dtype=torch.float32)
+
+    def _mix_init_image(self, noise: Any, plan: Any, request: Any) -> Any:
+        """按 ``σ0`` 把参考图 latent 混进噪声 ✓ = :meth:`init_latents` 的**后半步** ✓✗。
+
+        口径逐字对齐参考实现（``comfy/sample.py::noise_scaling`` ✓）::
+
+            x0 = σ0 · noise + (1 − σ0) · image_latent
+
+        ⚠️ 这一半**不能省** ✗✗：``denoise<1`` 只把 σ 梯子截短 ✓ 而起点仍是纯噪声 ⇒
+        跑完是「一张与参考图无关、对比度偏低的图」✓ —— **形状全对、一条报错都没有** ✓✗
+        （这正是 `plan` 层强制 ``denoise<1 ⇒ initImage`` 的理由 ✓）。
+        """
+        if str(getattr(plan, "init_from", "noise") or "noise") != "image":
+            return noise
+        sigmas = getattr(plan, "sigmas", None) or [1.0]
+        sigma0 = float(sigmas[0])
+        torch = self._torch()
+        ref = self.init_image_latents(plan, request).to(device=noise.device, dtype=noise.dtype)
+        if tuple(ref.shape) != tuple(noise.shape):
+            raise TorchBackendUnavailable(
+                f"起点图 latent {tuple(ref.shape)} 与噪声 {tuple(noise.shape)} 形状不一致 ✗ —— "
+                "``initImage`` 的像素尺寸必须是 ``plan.width/height`` ✓（不是任意尺寸 ✓）",
+                reason="input")
+        with torch.no_grad():
+            return noise * sigma0 + ref * (1.0 - sigma0)
 
     def noise_like(self, sample: Any, request: Any, *, nonce: int = 0) -> Any:
         """随机采样器（``sa_solver`` / ``euler_ancestral``）每步回注的噪声 ✓。
@@ -2278,6 +3712,9 @@ class TorchBackend:
         ``Qwen21DiT.forward`` 都只吃 4 维 ✓）。若沿用 5 维那条（``latent_frames`` = 1 ✓）⇒
         ``patchify`` / ``flatten(2)`` 上会多出一维 ⇒ 报的是「expected 4D」✓✗，指不到"这是图模型"✓。
         判据读 :data:`IMAGE_ONLY_FAMILIES` ✓（不是这里再抄一遍族名 ✗）。
+
+        ⭐ **音频族是 3 维** ✓（2026-11-02 接 Music3 ✓）：``(1, 128, T)`` ✓ —— ``T`` 是
+        **潜帧**（44.1 kHz ÷ 512 = 86.13 Hz ✓），既不是像素边也不是视频帧数 ✓✗。
         """
         #: ⚠️ 守门读 **`_config`** 不读 `_model` ✗✗（2026-10-31 实测踩到 ✓）：形状只需要
         #: 「权重反推出的结构事实」✓（几 KB ✓），**不需要 13 GiB 的模块在场** ✓。
@@ -2286,13 +3723,35 @@ class TorchBackend:
         #: ``latents 要 (B,C,H,W)，实际 (512,)`` ✓✗（报错指向 DiT ✓，根因在换装 ✓）。
         if self._config is None:
             return None
+        #: ⚠️ **音频族必须排在 `vae_scale` 之前** ✗✗（2026-11-06 接 Music3 装配线时踩到 ✓）：
+        #: Music3 的结构里**没有 `vae_scale`**（它的潜帧来自条件帧 ✓，不是"像素边 ÷ 缩放" ✓）
+        #: ⇒ 先判 `vae_scale` 会让它整条掉进 `None` ✓✗，而 `None` 的语义是「信息不够 ⇒ 一维占位」✓
+        #: ⇒ 采样第 1 步炸 ``latents 要 (B,C,L)，实际 (512,)`` ✓（报错指向 DiT ✓，根因在**这里** ✓）。
+        #: 所以顺序改成：先取通道 ⇒ 3 维族直接回形状 ⇒ 剩下的才要 `vae_scale` ✓。
+        #: ⚠️ **潜通道 ≠ 输入通道** ✗✗（2026-11-01 接 SEEDVR2 时踩到 ✓）：多数族两者同值 ✓
+        #: （``in_channels`` 就是 ``x_embedder`` 的列数 ÷ patch² ✓），但**带条件的族**把
+        #: 「潜变量 + 条件」在入口拼起来 ✓ —— SEEDVR2 是 ``conditioning`` 17 通道（退化视频 16 ＋
+        #: loss mask 1 ✓）＋ 噪声 16 ⇒ ``vid_in`` 吃 **33** ✓✗。照 ``in_channels`` 造潜变量
+        #: 会造出 ``(1, 33, T, H, W)`` ✓ ⇒ 形状自洽 ✓、采样第 1 步在 ``vid_in`` 上炸 ✓
+        #: （报「expected 16 got 33」✓，指不到"读错了那一格"✓）。⇒ 有 ``latent_channels`` 就用它 ✓。
+        channels = int(self._config_value("latent_channels", 0)
+                       or self._config_value("in_channels", 0) or 0)
+        #: ⭐ **音频族（3 维）在这里分出去** ✓✗（2026-11-02 接 Music3 ✓）：它没有空间维 ✓，
+        #: 潜帧来自**条件帧**（``latent_length(condition_frames)`` ✓ 25 Hz → 86.13 Hz ✓）
+        #: 而不是 ``plan.latent_frames`` 的"像素帧 ÷ 4k+1" ✓。若照视频那条算 ⇒
+        #: ``(1, 128, T, H, W)`` 五维 ✓ 而 ``Music3DiT.forward`` 第一句就判 ``dim() == 3`` ✗
+        #: （报错倒是明确 ✓，但形状本该在这里就分开 ✓）。
+        if dit_build.contract_of(getattr(self, "_ditFamily", None)).latent_dims == 3:
+            latent_frames = getattr(plan, "latent_frames", None)
+            if not latent_frames or not channels:
+                return None
+            return (1, channels, int(latent_frames))
         scale = int(self._config_value("vae_scale", 0) or 0)
         if not scale:
             return None
-        channels = int(self._config_value("in_channels", 0) or 0)
         height = max(1, int(plan.height) // scale)
         width = max(1, int(plan.width) // scale)
-        if getattr(self, "_ditFamily", None) in IMAGE_ONLY_FAMILIES:
+        if dit_build.contract_of(getattr(self, "_ditFamily", None)).latent_dims == 4:
             if not channels:
                 return None
             return (1, channels, height, width)
@@ -2525,7 +3984,9 @@ class TorchBackend:
             frames, info = media_mod.load_image_tensor(
                 image, width=int(plan.width), height=int(plan.height))
             with torch.no_grad():
-                latent = self._vae.encode(frames.to(self._device))[0]
+                #: ⚠️ 走统一编码口子 ✓✗（这三条虽是 H3 专用 ✓，但裸调 ``encode`` 会把
+                #: 「H3 自带归一化 ✓ / Flux 返二元组 ✗ / Wan 没 encode ✗」三种口径混进同一行 ✓）。
+                latent = self._encode_pixels(frames.to(self._device))[0]
             blocks.append({"resolved_frame_index": int(index), "latent": latent,
                            "audio_latent": None,
                            "imagePath": str(info.get("path") or image)})
@@ -2554,7 +4015,7 @@ class TorchBackend:
                 frames, info = media_mod.load_image_tensor(
                     image, width=int(plan.width), height=int(plan.height))
                 with torch.no_grad():
-                    latent = self._vae.encode(frames.to(self._device))[0]      # [C, 1, h, w] ✓
+                    latent = self._encode_pixels(frames.to(self._device))[0]      # [C, 1, h, w] ✓
                 blocks.append({"kind": "image", "latent": latent,
                                "latent_h": int(latent.shape[2]), "latent_w": int(latent.shape[3]),
                                "imagePath": str(info.get("path") or image)})
@@ -2574,7 +4035,7 @@ class TorchBackend:
                     f"参考视频尺寸 {info['width']}×{info['height']} 不能被 vae_scale={scale} 整除 ✗"
                     f"（吸附网格是调用方的事 ✓ —— 这里**不悄悄取整** ✗）", reason="pending")
             with torch.no_grad():
-                latent = self._vae.encode(frames.to(self._device))[0]   # [C, t, h, w] ✓
+                latent = self._encode_pixels(frames.to(self._device))[0]   # [C, t, h, w] ✓
             block: dict[str, Any] = {
                 "kind": "video", "latent": latent,
                 "latent_t": int(latent.shape[1]), "latent_h": int(latent.shape[2]),
@@ -2729,14 +4190,17 @@ class TorchBackend:
             #    （塞进 tensor 里就只能靠"多一通道"这种约定 ✓✗，一改文本长度就对不上 ✓）。
             #    ⇒ 已是**请求契约**里的正式字段 ✓：`GenerationRequest.text_token_tags` ✓，
             #    由 `pipeline` 在 encode 之后从 `condition["tags"]` 填进去 ✓（见那儿的两行注释 ✓）。
-            text_token_tags=getattr(request, "text_token_tags", None))
+            text_token_tags=getattr(request, "text_token_tags", None),
+            # ⚠️ 采样器名走**请求字段** ✓（白名单在 `h3_form.DUAL_SAMPLERS` ✓ 唯一真源 ✓）——
+            #    不在则按 `euler` ✓（= 2026-11-01 之前的行为 ✓，逐位不变 ✓）
+            sampler=str(getattr(request, "sampler", "") or "euler"))
 
     def retake_latents(self, latents: Any, plan: Any, request: Any, *, condition: Any,
                        sigmas: Any, retake: Any, on_step: Any = None) -> dict[str, Any]:
         """**重拍**（retake ✓ 2026-09-26 移植 ✓）：把**成片**的双流潜变量按窗口重画一遍 ✓，
         窗外**逐位保留** ✓（自检钉住 ✓）。
 
-        事实来源：``reference/ComfyUI-H3-Multishot/h3_retake.py``（MIT ✓）—— 上游是
+        事实来源：``h3_retake.py``（MIT ✓）—— 上游是
         ``VAEEncode(成片)`` → ``noise_mask`` 划窗 → ``SamplerCustomAdvanced`` ✓，窗外那片由上游
         ``KSamplerX0Inpaint`` **逐位写回原始潜变量** ✓。本仓对应 :func:`h3_form.sample_dual_stream`
         的 ``pin`` / ``pin_mask`` ✓——⚠️ **不是** ``denoise_mask`` ✗✗（那个冻结在"第 0 步的含噪值"上 ✓，
@@ -2881,12 +4345,32 @@ class TorchBackend:
                 "　⇒ 先放权重（或用 ``H3_UPSCALER`` 指路 ✓），或让计划层按 ``contract=None`` "
                 "**回退普通模式** ✓（⚠️ 本仓不静默降级出「看着像超清」的片子 ✗）", reason="pending")
         metadata, _header = st.read_header(path)
-        contract = upscale_mod.read_upscaler_contract(metadata)
+        # ⚠️ 读 + **结构核** ✓（``load_upscaler_contract``）：只读不核时 ✗，契约缺一个字段会走
+        #    ``H3LatentUpscalerV2`` 的**默认值**建网络 ✓✗（形状自洽 ⇒ 报错会落在"张量不符"上，
+        #    看起来像权重坏了 ✓✗）；这里当场把真因摆出来 ✓。
+        # ⭐ 通道数**从已装主干推** ✗（不写死 24 ✗）—— 自检的**缩小版**与真权重要走**同一条路** ✓✗
+        #    （真权重推出来就是 24 ✓，缩小版推出来是它自己的 latents_dim ✓）。
+        #    ⚠️ 必须在**读契约之前**算出来并传下去 ✗✗：契约校验那一层原先写死 24 ⇒ 缩小版**在进主干
+        #    推导之前**就被当成"不是这套检查点"拒了 ✓✗（症状＝真权重全绿、自检整条崩在契约校验上 ✓）。
+        expected = int((self._config or {}).get("latents_dim") or lc.H3_VIDEO_CHANNELS)
+        try:
+            contract = upscale_mod.load_upscaler_contract(metadata, expect_channels=expected)
+        except ValueError as err:  # ⚠️ ``ContractError`` 就是 ``ValueError`` ✓（读不出 / 格式对不上 / 结构不合法 ✓）
+            raise TorchBackendUnavailable(
+                f"放大器内嵌契约**不可用** ✗（读不出 / ``format`` 对不上 / 结构不合法 ✓）：{err} ✓"
+                f" ⇒ 拒，不拿默认值糊过去 ✓✗"
+                f"（要么换配套的检查点 ✓，要么让计划层按 ``contract=None`` 回退普通模式 ✓）",
+                reason="pending") from err
+        if contract is None:
+            raise TorchBackendUnavailable(
+                f"放大器权重 {path} 里**没有内嵌契约** ✗（``strict_latent_only`` / ``base_config`` / "
+                f"``config`` 三样缺 ✓）⇒ 不知道网络怎么建 ✓ 不猜 ✗（计划层按 ``contract=None`` 回退 ✓）",
+                reason="pending")
         channels = int(contract["base_config"]["in_channels"])
         # ⭐ 跨来源**同一个事实** ✓✗：契约的 ``in_channels`` ↔ **本次装的主干**的视频流通道 ✓。
-        #    ⚠️ 通道数**从已装主干推** ✗（不写死 24 ✗）—— 自检的**缩小版**与真权重要走**同一条路** ✓✗
-        #    （真权重推出来就是 24 ✓，缩小版推出来是它自己的 latents_dim ✓）。
-        expected = int((self._config or {}).get("latents_dim") or lc.H3_VIDEO_CHANNELS)
+        #    （``expected`` 已在读契约之前算好并透给校验层 ✓ —— 这里再核一次是**有意的**双保险 ✗✗：
+        #    万一将来有人只调 :func:`upscale.check_upscaler_contract` 而忘了传 ``expect_channels`` ✓，
+        #    这条仍会拦住 ✓。）
         if channels != expected:
             raise TorchBackendUnavailable(
                 f"放大器契约的 ``in_channels={channels}`` ✗，而本次主干/视频流是 {expected} 通道 ✓ "
@@ -3082,6 +4566,42 @@ class TorchBackend:
                 "upscalerReady": self._upscaler is not None,
                 "upscalerPath": self._upscaler_path()}
 
+    def _wan_concat_latents(self, latents: Any) -> Any:
+        """把 16 通道噪声拼成 Wan I2V 的 **36 通道** 入口 ✓（顺序由 :data:`dit_wan22.I2V_LAYOUT` 说 ✓）。
+
+        ## 两个必须拒跑的场合（都不是"少一点质量"，是**结果完全无关** ✗✗）
+
+        * **没条件**（`:meth:`_wan_i2v_condition` 没跑 / 没给首帧 ✓）⇒ I2V 权重没有 20 通道可拼 ✓，
+          零填充"凑够 36"不会有任何报错 ✓，只是出片跟首帧毫无关系 ✓✗；
+        * **条件与噪声帧数/尺寸不一致** ✓ ⇒ 拼出来像 36 通道 ✓、``in_dim`` 校验也过 ✓，
+          但每一拍对应的位置错位 ✓✗。
+
+        为什么不在 ``denoise`` 里自己算条件 ✗：那时 VAE 已经被 `enter_phase("sample")` 退掉了 ✓
+        （DiT 26.62 GiB ＋ VAE 0.24 GiB 与文本塔三件同时驻留装不进 22.49 GiB ✓）⇒ 条件必须
+        在 encode 段做好存起来 ✓。
+        """
+        torch = self._torch()
+        from app.services.engine import dit_wan22 as wan22_mod  # noqa: PLC0415
+
+        image = getattr(self, "_i2vImage", None)
+        mask = getattr(self, "_i2vMask", None)
+        if image is None or mask is None:
+            raise TorchBackendUnavailable(
+                "装的是 **Wan I2V** 权重（in_dim=36 ✓）但**没有首帧条件** ✗ "
+                "⇒ 这条路线**必须有 `firstFrame`** ✓（T2V 那份 16 通道权重才是纯文本 ✓）。\n"
+                "  · 真因几乎总在上游：`pipeline.run_sync(stage=\"wan22\", firstFrame=<图>)` 没给 ✓ / "
+                "`encode_text` 没跑过 ✓ / 中间有人清了 `_i2vImage` ✓。\n"
+                "  · 零填充「凑够 36」不会有报错 ✓，只是出片跟首帧**毫无关系** ✓✗ ⇒ 这里拒跑 ✓。",
+                reason="input")
+        if getattr(latents, "ndim", 0) != 5:
+            raise TorchBackendUnavailable(
+                f"Wan 的潜变量要 5 维 (b,16,t,h,w) ✗，实际 {tuple(getattr(latents, 'shape', ()))} ✓",
+                reason="input")
+        return wan22_mod.i2v_concat(
+            latents,
+            image.to(device=latents.device, dtype=latents.dtype),
+            mask.to(device=latents.device, dtype=latents.dtype))
+
     def denoise(self, latents: Any, sigma: float, condition: Any, request: Any) -> Any:
         """**真前向**（装了模型 ✓）或**占位**（没装 ✓）—— 由 :meth:`describe` 如实标注 ✓。
 
@@ -3120,41 +4640,174 @@ class TorchBackend:
         torch = self._torch()
         sigma = float(sigma)
         if self._model is not None:
-            #: ⚠️ **Edit 2511 的参考图通路未接 ⇒ 拒绝按 t2i 出图** ✗✗（2026-10-31 显式拦 ✓）：
-            #: 那份权重靠 `__index_timestep_zero__` 哨兵把"参考图 token"与"目标 token"拼在一条
-            #: 序列里 ✓、并给参考图行喂 σ=0 的调制行 ✓；本方法**没有** `ref_latents` 这个口 ✗
-            #: ⇒ 若照装照跑，参考图那一路**整段缺席** ✓✗，模型仍会画出"像提示词"的图 ✓
-            #: —— 报 0 错、能力凭空消失 ✓✗（这正是 `dit_qwen_image` 模块头点破的那个坑 ✓）。
+            #: ⭐ **Edit 2511 的参考图**（2026-11-01 接上 ✓）：那份权重靠 `__index_timestep_zero__`
+            #: 哨兵把"参考图 token"与"目标 token"拼在一条序列里 ✓、并给参考图行喂 σ=0 的调制行 ✓
+            #: ⇒ ``ref_latents`` **每一步**都得给 ✓✗（第一步给、后面不给 ⇒ 中途"忘了参考图" ✓，
+            #: 图会从"照着改"漂成"按提示词重画" ✓，且**一条报错都没有** ✓）。
+            edit_refs = None
             if getattr(getattr(self._model, "shape", None), "ref_timestep_zero", False):
-                raise TorchBackendUnavailable(
-                    "装的是 **Qwen-Image Edit 2511** 的权重（带 `__index_timestep_zero__` 哨兵 ✓）✗，"
-                    "但参考图通路（Qwen2.5-VL 视觉塔 + 参考图 VAE 编码 + `ref_latents` 入前向 ✓）"
-                    "**尚未接** ✗ ⇒ 拒绝按纯 t2i 静默出图 ✓✗（那样编辑能力凭空消失、却一条报错都没有 ✓）。"
-                    "要用编辑：先接视觉塔与 `ref_latents` ✓；要用纯文生图：换 2512 的 t2i 权重 ✓",
-                    reason="pending")
+                stored = getattr(self, "_refLatents", None)
+                if not stored:
+                    raise TorchBackendUnavailable(
+                        "装的是 **Qwen-Image Edit 2511** 的权重 ✓，但 `ref_latents` 不在 ✗ "
+                        "⇒ 参考图那一路整段缺席 ✓✗。"
+                        "真因几乎总在上游：`encode_text` 没跑过 ✓ / 跑过但没给 `referenceFrames` ✓ / "
+                        "中间有人把 `_refLatents` 清了 ✓（拒跑 > 静默按 t2i 出图 ✓）。",
+                        reason="pending")
+                #: ⚠️ 逐张搬（**多图** ✓）：`_refLatents` 是列表 ✓，漏掉 `list()` 直接
+                #: `.to()` 会 AttributeError ✓（至少是报错 ✓，不会静默 ✗）；而只搬第 0 张
+                #: ⇒ 第 2 张图的条件凭空消失 ✓✗（不报错 ✓）。
+                edit_refs = [item.to(device=latents.device, dtype=latents.dtype) for item in stored]
             with torch.no_grad():
-                if getattr(self, "_ditFamily", None) in IMAGE_ONLY_FAMILIES:
-                    prediction = self._model(latents, _timesteps_of(torch, latents, sigma), condition)
+                #: σ 的**形态**也是契约（:class:`dit_build.ForwardContract`）✓：图族收 ``(b,)``
+                #: 张量 ✓、老路通用 DiT 收标量 ✓ —— 喂错不会报错 ✗，只会让 batch 里各条共用同一个 σ ✓✗。
+                timesteps = (_timesteps_of(torch, latents, sigma)
+                             if dit_build.sigma_form_of(getattr(self, "_ditFamily", None)) == "batch"
+                             else sigma)
+                #: ⚠️ `ref_latents` 是**关键字** ✓、且**只有 Edit 那一族**收 ✓ ⇒ 无条件传会给
+                #: 2512 t2i 主干一个 ``TypeError`` ✓✗（它的 forward 没有这个参数 ✓）。
+                #: ⚠️⚠️ 它的类型是 **``Sequence[Tensor]``** ✓✗（``dit_qwen_image.forward`` ✓）——
+                #: 传单个 4 维张量**不会**报「类型不对」✗：``if ref_latents:`` 为真 ✓、
+                #: 然后 `for ref in ref_latents` 会**按 batch 维遍历** ✓ ⇒ 每个 ``ref`` 变 3 维 ✓
+                #: ⇒ `_patch` 里 `b, c, h, w = x.shape` 直接 ``ValueError`` ✓（batch=1 时才炸得这么早 ✓；
+                #: 这种"少包一层列表"读起来完全像对的 ✓✗）。
+                if getattr(self, "_ditFamily", None) == "seedvr2":
+                    #: ⚠️⚠️ **SEEDVR2 的 forward 与出图族不同位置** ✗✗（2026-11-01 接线 ✓）：
+                    #: 它是 ``forward(latents, σ, context, conditioning=)`` ✓ —— 第 **4** 位那个
+                    #: ``conditioning``（17 通道 ✓）是**必填** ✓，喂在第 3 位（context 位）只会
+                    #: 得到「缺 ``conditioning``」或静默把条件当文本用 ✓✗。
+                    #: 本族**没有文本塔** ✓ ⇒ ``context=None`` 是**正解** ✓（不是"漏了提示词" ✓）。
+                    conditioning = condition if hasattr(condition, "shape") else getattr(
+                        self, "_repairCondition", None)
+                    if conditioning is None:
+                        raise TorchBackendUnavailable(
+                            "装的是 **SEEDVR2 修复主干** ✓ 但**没有 17 通道 conditioning** ✗ "
+                            "⇒ 这一族**不能凭空生成** ✓（它的输入是「退化视频 16ch ＋ loss mask 1ch」✓）。\n"
+                            "  · 真因几乎总在上游：`encode_text` 没跑过 ✓ / 跑过但没给 "
+                            "`referenceVideos[0]` ✓ / 中间有人把 `_repairCondition` 清了 ✓。\n"
+                            "  · 怎么修：`pipeline.run_sync(stage=\"seedvr2\", referenceVideos=[<源视频>])` ✓"
+                            "（拒跑 > 静默按噪声出一片灰 ✓）。", reason="input")
+                    prediction = self._model(latents, timesteps, None,
+                                             conditioning=conditioning.to(
+                                                 device=latents.device, dtype=latents.dtype))
+                elif getattr(self, "_ditFamily", None) == "wan":
+                    #: ⚠️⚠️ **Wan I2V 的入口是 36 通道** ✗✗（2026-11-02 接线 ✓）：主干只吃
+                    #: ``[噪声 16, 掩码 4, 条件图 16]`` ✓，直接喂 16 通道的潜变量会当场报
+                    #: 「Wan 的 in_dim 是 36」✓；而**只改 in_dim 不改拼接**更糟 ✗ ——
+                    #: 通道数凑对 ✓、条件图与掩码错位 ✓ ⇒ 出片完全不受首帧约束 ✓且一条报错都没有 ✓✗。
+                    #:
+                    #: ⭐ 双专家接力 ✓：σ 跌破 ``plan.sigmas[wanHighSteps]`` 就**换装**（原地重装 ✓，
+                    #: 骨架/驻留切分不动 ✓）—— 判据是 σ 而不是调用次数 ✓（每步可能 2~4 次 ✓✗）。
+                    self._wan_expert_tick(sigma)
+                    prediction = self._model(self._wan_concat_latents(latents), timesteps, condition)
+                elif edit_refs is None:
+                    prediction = self._model(latents, timesteps, condition)
                 else:
-                    prediction = self._model(latents, sigma, condition)
+                    #: ⚠️ 传的是**列表** ✓：一张图一个元素 ✓（单图也要包一层 ✓✗）。
+                    prediction = self._model(latents, timesteps, condition,
+                                             ref_latents=list(edit_refs))
             return dit_mod.flow_match_x0(prediction, latents, sigma)
         with torch.no_grad():
             g = min(0.5, sigma / (sigma + 1.0)) if sigma > 0 else 0.0
             return condition * (1.0 - g) + latents * g
 
+    def _encode_pixels(self, frames: Any) -> Any:
+        """像素 ⇒ **归一化潜变量** ✓（``[B,C,T,h,w]`` ✓）；按**已挂 VAE 的口径**做正向缩放 ✓。
+
+        ## 为什么必须走这一个口子（**别再裸调 `self._vae.encode`** ✗）
+
+        各家的 ``encode`` 返回值**三种口径**混在一起 ✓✗：
+
+        | VAE | 返回 | 归一化 |
+        |---|---|---|
+        | H3 视频 VAE | ``[B,24,T,h,w]`` 张量 ✓ | **自带** mean/std ✓ |
+        | Flux / SDXL（:mod:`sdxl_vae` 那套） | ``(mean, logvar)`` **二元组** ✗ | **没有**（差 ``0.3611/0.1159`` ✓） |
+        | Wan（:class:`vae_wan.WanVAE`） | ``[B,z,T,h,w]`` ✓ | **没有**（差 16 组 mean/std ✓） |
+        | 参考未训 VAE（:mod:`vae`） | ``[B,C,T,h,w]`` ✓ | 交给 :meth:`normalize_latents` ✓ |
+
+        裸调的结果是：Wan 族 ``AttributeError`` ✓（这个方法以前**不存在** ✓✗ —— 2026-11-01 补 ✓）、
+        Flux 族把二元组当张量 ⇒ ``AttributeError: 'tuple' object has no attribute 'shape'`` ✓✗、
+        参考 VAE 族拿到**未归一化**的潜变量 ⇒ 首帧条件差一个量级 ✓、**形状全对、不报错** ✓✗。
+
+        ⚠️ 这里**不吞异常** ✗：认不出的 VAE 种类 ⇒ 人话指出"哪种 VAE 没有编码器" ✓（别让调用方
+        去猜 ``AttributeError`` ✓）。
+        """
+        if self._vae is None:
+            raise TorchBackendUnavailable(
+                "没挂 VAE ✗ ⇒ 没法把图片编码成潜变量 ✓（先 `attach_vae()` ✓，"
+                "或让这条条件走占位路径 ✓）", reason="attach")
+        kind = self._vaeKind
+        if kind == "seedvr2-real":
+            #: ⚠️ SEEDVR2 的编码器**不是**解码器的镜像 ✓（出 32 通道＝16 均值 + 16 logvar ✓、
+            #: 无 ``quant_conv`` ✓）⇒ 取前 16 的活由 :func:`vae_seedvr2.encode_latents` 做 ✓，
+            #: 且它已经把 ``× 0.9152`` 算进去 ✓（裸调 ``self._vae.encode`` 会漏这一步 ✓✗）。
+            from . import vae_seedvr2 as vae_seedvr2_mod  # noqa: PLC0415
+            return vae_seedvr2_mod.encode_latents(self._vae, frames, family="seedvr2")
+        if kind == "h3-real":
+            #: H3 视频 VAE 的 ``encode`` **自带** mean/std 归一化 ✓（见 :mod:`vae_h3` ✓）⇒ 原样返 ✓。
+            return self._vae.encode(frames)
+        if kind == "wan21-real":
+            from . import vae_wan as vae_wan_mod  # noqa: PLC0415 —— 只在真编码这条路上用 ✓
+            family = self._vaeLatents[2] if self._vaeLatents else None
+            if not family:
+                raise TorchBackendUnavailable(
+                    "Wan 族 VAE 已挂但**登记口径丢了** ✗（``_vaeLatents`` 为空 ✓）"
+                    "⇒ 不知道用哪组 mean/std 归一化 ✓，别猜 ✓", reason="attach")
+            return vae_wan_mod.encode_latents(self._vae, frames, family=family)
+        if kind == "flux-real":
+            from . import vae_flux as vae_flux_mod  # noqa: PLC0415
+            latents = vae_flux_mod.encode_latents(self._vae, frames, config=self._vaeConfig)
+            #: ⚠️ Flux 的编解码器是 **2D** ✓（没有时间维 ✗）⇒ 单帧图补一个 ``T=1`` ✓，
+            #: 下游（掩码混合 ✓）一律按 5 维处理 ✓。
+            return latents if latents.ndim == 5 else latents.unsqueeze(2)
+        if kind == "reference-untrained":
+            latents = self._vae.encode(frames)
+            normalize = getattr(self._vae, "normalize_latents", None)
+            return normalize(latents) if callable(normalize) else latents
+        raise TorchBackendUnavailable(
+            f"认不出的 VAE 种类 {kind!r} ✗ ⇒ 不知道该怎么把像素编码成**这个族**的潜变量 ✓"
+            f"（H3/Wan/Flux/参考各一种口径 ✓；新族要先在 `_encode_pixels` 里登记 ✓）",
+            reason="attach")
+
     def condition_first_frame(self, latents: Any, image_path: str, mask: list[float],
-                              plan: Any, request: Any) -> Any:
+                             plan: Any, request: Any) -> Any:
         """首帧条件 ✓ —— **真张量按掩码混合** ✓（掩码由引擎算出 ✓ 见 `conditioning` ✓）。"""
         self._gate()
         # ⚠️ 这条最有必要点破 ✓：这里的 latents 常是**自检自己造的**（真链路里来自 `init_latents` ✓）⇒
         #    在**有卡那台**上最容易"自检 cpu / 后端 cuda" ⇒ 原报错指向 `aten::slow_conv3d_forward` ✗。
         self._require_own_device("condition_first_frame", latents=latents)
+        #: ⭐ **Wan 2.2 I2V**：条件不走"混进第 0 潜帧" ✗，而是**每一步都把 20 通道并进主干入口** ✓
+        #: （`:func:`dit_wan22.i2v_concat` ✓）。⇒ 这里**不动 latents** ✓，只把条件做出来存好 ✓：
+        #: 主干看到的 ``[噪声 16, 掩码 4, 条件图 16]`` 才是 Wan 的官方条件通路 ✓✗
+        #: （混进 latents 只会得到"第 0 帧像是对的、后面全靠自由发挥" ✓且不报错 ✓）。
+        if getattr(self, "_ditFamily", None) == "wan":
+            report = self._wan_i2v_condition(request, plan, want=latents.dtype)
+            if report is None:
+                raise TorchBackendUnavailable(
+                    "Wan I2V 要首帧条件 ✗，但这一拍拿不到 `firstFrame` ✓ —— "
+                    "它必须由 `pipeline` 从请求里传下来 ✓（`firstFrame` 与 `initImage` 是两个词 ✓✗）",
+                    reason="input")
+            self._conditioningNote = {
+                "mode": "i2v-concat",
+                "maskFrames": int(report["mask_frames"]),
+                "concat": int(report["concat"]),
+                "imageInfo": {"name": report["source"], "shape": list(report["shape"])},
+                "note": ("首帧**不进 latents** ✓ —— 走 Wan 的 **36 通道**条件入口 ✓"
+                         f"（{report['concat']} = 噪声 16 ＋ 掩码 4 ＋ 条件图 16 ✓，"
+                         f"掩码首拍为 1、其余为 0 ✓，布局 {'、'.join(report['layout'])} ✓）；"
+                         "潜变量原样返回 ✓（每步在 `denoise` 里拼 ✓）"),
+            }
+            return latents
         torch = self._torch()
         # ⚠️ 两条路都要支持（初版只按 5 维写 ⇒ 占位一维时 `reshape` 直接崩 ✗，自检 ㊾ 抓到 ✓）：
         #   * **真形状潜变量** (B,C,T,h,w) ⇒ 按掩码**逐潜帧**混 ✓（引擎算的 mask ✓ 长度 = T ✓）；
         #   * **占位一维潜变量** ⇒ 按「首帧权重」整体混 ✓（占位下谈逐帧没意义 ✓，如实标 ✓）。
-        # ⚠️ 仍是**占位数值**：真做法是用 VAE `encode` 把首帧图片编码成潜变量 ✓（`vae` 已就绪 ✓，
-        #    缺"读图 + 缩放 + 组 batch"的胶水 ✓）—— 数学是真的 ✓、数值是占位的 ✓。
+        # ⚠️ **哪条是真、哪条是占位，别混着说** ✗✗（2026-11-01 更正 ✓：这段旧注释写着「仍是占位数值
+        #    —— 缺读图/缩放/组 batch 的胶水」，而它正下方那条 5 维分支**已经在做真编码** ✓✗）：
+        #    * 5 维 + 挂了 VAE + 首权重 > 0 ⇒ **真数值** ✓（读图 ✓ → 缩放到潜变量尺寸 ✓ →
+        #      `_encode_pixels` 按已挂 VAE 的口径归一化 ✓ → 按掩码混进第 0 个潜帧 ✓）；
+        #    * 5 维但没挂 VAE / 首权重为 0 ⇒ **占位向量** ✓（如实标 `mode="placeholder"` ✗）；
+        #    * 一维占位潜变量 ⇒ **无从谈起** ✓（如实标 `mode="placeholder-1d"` ✗）。
         if latents.ndim == 5:
             frames = int(latents.shape[2])
             weight0 = float(mask[0]) if mask else 0.0
@@ -3166,11 +4819,16 @@ class TorchBackend:
                                                           height=pixel_h)
                 torch = self._torch()
                 with torch.no_grad():
-                    encoded = self._vae.encode(
+                    #: ⚠️ 走统一编码口子 ✓✗（裸调 `self._vae.encode` ⇒ Wan 族 AttributeError ✓、
+                    #: Flux 族拿到 `(mean, logvar)` 二元组 ✓、参考 VAE 族拿到**未归一化**潜变量 ✓）。
+                    encoded = self._encode_pixels(
                         image.to(device=latents.device, dtype=latents.dtype))
                 # ⚠️ **只比 C/h/w，不比 T** ✓ —— 图片天然是**单帧** ⇒ 编码出 ``T=1`` ✓
                 #    而潜变量有 T 帧 ✓（初版连 T 一起比 ⇒ 自己把自己拦住了 ✗，自检㉟ 当场红 ✓）。
-                if tuple(encoded.shape[1::2]) != tuple(latents.shape[1::2]):
+                #: ⚠️ 比较下标**别用滑窗** ✗✗：``shape[1::2]`` 取的是「第 1、3、5…位」✓，
+                #: 对 ``[B,C,T,h,w]`` 得到 ``(C,h,w)`` 里**夹着 T** ✓✗（写注释说"不比 T" ✓、
+                #: 代码却在比 T ✓ → 注释对、判据错 ✓）。这里逐位点名 ✓。
+                if tuple(encoded.shape[i] for i in (1, 3, 4)) != tuple(latents.shape[i] for i in (1, 3, 4)):
                     raise TorchBackendUnavailable(
                         f"首帧编码后形状 {tuple(encoded.shape)} 与潜变量 {tuple(latents.shape)} "
                         f"的「通道/高/宽」对不上 ✗（VAE 配置要与 DiT 的 vae_scale、通道数一致 ✓）",
@@ -3204,6 +4862,61 @@ class TorchBackend:
             }
         with torch.no_grad():
             return latents * (1.0 - weights) + image * weights
+
+    def attach_flux_conditioning(self, vector: Any = None, guidance: float | None = None
+                                 ) -> dict[str, Any]:
+        """给 **Flux 族**注入外部条件：CLIP-L 的 pooled 向量 ✓ + guidance 标量 ✓。
+
+        ⚠️ 为什么需要这个专门的挂载口：Flux 的条件是**两路 + 一根标量**（T5-XXL 的 4096 宽走
+        ``condition`` ✓、CLIP-L 的 768 宽 pooled 走 ``vector`` ✓、蒸馏 guidance 是**输入标量** ✓），
+        而这两座文本塔盘上都没有 ✗（只有 ``vae_flux_ae`` ✓）⇒ 只能从外面给。
+        不挂也能跑 ✓（零向量 + 默认 guidance ✓，见 :data:`dit_flux.GUIDANCE_DEFAULT` ✓）——
+        但那是**结构验证** ✗，不是语义 ✓，所以本方法把「挂没挂」如实记进返回值 ✓。
+
+        返回：``{"vector": …, "guidance": …, "note": …}`` ✓（给 `describe` / 报告用 ✓）。
+        """
+        self._gate()
+        model = getattr(self, "_model", None)
+        if model is None:
+            raise TorchBackendUnavailable(
+                "还没装模型 ⇒ 没有地方挂 Flux 条件 ✗（先 ensure_loaded ✓）", reason="pending")
+        if not hasattr(model, "default_vector") or not hasattr(model, "shape"):
+            raise TorchBackendUnavailable(
+                f"当前装的不是 Flux 族（family={getattr(self, '_ditFamily', None) or '未知'}）⇒ "
+                f"没有 pooled / guidance 这两根输管 ✗（这两根是 Flux 的接口事实 ✓）",
+                reason="pending")
+        torch = self._torch()
+        shape = model.shape
+        param = next(model.parameters())
+        # ⚠️ 回执必须报**这一拍真正生效**的值 ✗✗：挂载是**写进模型属性**的 ✓ ⇒ 第二次只传 vector 时，
+        #    上一次挂的 guidance（和 vector）**还在生效** ✗。原先 else 分支一律报 `guidance_default`、
+        #    vector 一律报「零向量」⇒ 回执与实际跑的东西对不上（最坏情况：以为退回默认 3.5、实际还在 7.0）。
+        live_vec = getattr(model, "default_vector", None)
+        note: dict[str, Any] = {
+            "vector": ("沿用上次注入的 " + f"{int(live_vec.numel())} 维" if live_vec is not None
+                       else "零向量（未注入 ⇒ 全局语义缺席 ✗）"),
+            "guidance": None}
+        if vector is not None:
+            vec = torch.as_tensor(vector, dtype=param.dtype, device=param.device).reshape(-1)
+            if vec.numel() < shape.vec_dim:
+                raise TorchBackendUnavailable(
+                    f"pooled 向量宽 {vec.numel()} ✗ < 权重要求的 {shape.vec_dim} ✓"
+                    f"（CLIP-L 的 pooled 就是 {shape.vec_dim} 维 ✓）", reason="pending")
+            model.default_vector = vec
+            note["vector"] = f"已注入 {int(vec.numel())} 维（取前 {shape.vec_dim} ✓）"
+        if guidance is not None:
+            model.default_guidance = float(guidance)
+            note["guidance"] = float(guidance)
+        else:
+            live = getattr(model, "default_guidance", None)
+            note["guidance"] = float(shape.guidance_default if live is None else live)
+            if live is None:
+                note["note"] = ("guidance 用默认值 ⇒ **不是**权重事实 ✗（权重里只有 `guidance_in` 投影 ✓，"
+                                "数值来自推理配置 ✓）")
+            else:
+                note["note"] = (f"沿用上次挂的 guidance {float(live):g}（本次没给 ⇒ **不**回落默认 ✗；"
+                                f"要回落就显式传 {float(shape.guidance_default):g} 或重装模型）")
+        return note
 
     def attach_text_encoder(self, config: Any = None, tokenizer: Any = None,
                             tokenizer_path: str | None = None) -> dict[str, Any]:
@@ -3520,6 +5233,483 @@ class TorchBackend:
                   "切掉 system 段 ✓、q/k/v 带 bias ✓）；unexpected 里的视觉塔/lm_head 是"
                   "**有意不装** ✓"))
 
+    def attach_umt5_te(self, weights: str, *, tokenizer_path: str | None = None,
+                       max_length: int = 512, dtype: Any = None) -> dict[str, Any]:
+        """挂 **UMT5-XXL 编码器** ✓（Wan2.1/2.2 的文本塔 ✓）⇒ :meth:`encode_text` 出 4096 维条件 ✓。
+
+        ## 与另外三座塔的差别（**别互相顶替** ✗）
+
+        | | Qwen3-4B | Qwen3.5-9B | Qwen2.5-VL-7B | **UMT5-XXL** |
+        |---|---|---|---|---|
+        | 结构 | 36 层 decoder | 32 层混合 | 28 层 decoder | **24 层纯 encoder** ✓ |
+        | 宽度 | 2560 | 4096 | 3584 | **4096** ✓ |
+        | 取层 | 倒数第 2 层 | 倒数第 2 层 | **最后一层** | **最后一层的 final norm 之后** ✓ |
+        | 模板 | 套 chat 模板 | 套模板＋关思考 | 切 system 段 | **不套模板**（裸文本 ＋ ``</s>``）✓ |
+
+        ## 四条硬口径（对着 comfy 的 ``wan`` 文本通路核过 ✓）
+
+        1. ``shared.weight`` 是与输出层**共享**的那份嵌入 ✓（文件里只有一份 ✓）；
+        2. **相对位置偏置**必须按桶算 ✓（``relative_attention_bias`` ✓，32 桶 ✓）——
+           :class:`umt5_te.Umt5Encoder` 已实现 ✓，这里只负责接线 ✓；
+        3. **padding 侧必须置 0** ✓（``zeroOutMasked`` ✓）：Wan 的 cross-attn **不吃 mask** ✗ ⇒
+           不置 0 就是拿 padding 行的**真数值**去做注意力 ✓✗（形状全对、出片发灰 ✓）；
+        4. ``max_length`` **512** ✓（官方 Wan 模板口径 ✓；不是 Qwen 那套 1024/2048 ✓）。
+
+        ## 显存
+
+        UMT5-XXL 编码器 bf16 约 **10.58 GiB** ✓（实测：242 个 ``.weight`` ＋ ``spiece_model`` ✓）。
+        与 Wan2.2 I2V 的 DiT（26.62 GiB ✓）**同时驻留装不进 22.49 GiB** ✗ ⇒ 必须分时 ✓
+        （`:meth:`declare_chain` ＋ :meth:`enter_phase` ✓，由 ``runtime`` 那条装配线负责 ✓）。
+
+        ⚠️ 分词器**优先用文件内嵌的** ``spiece_model`` ✓（4.5 MB 单张量 ✓）：Wan 的
+        ``umt5_xxl_fp8_e4m3fn_scaled.safetensors`` 与 comfy 的 ``t5_pile_tokenizer`` 是同一份词表 ✓，
+        但内嵌那份**跟着权重走** ✓ ⇒ 换文件不会静默换词表 ✓。``tokenizer_path`` 只作回落 ✓。
+        """
+        self._gate()
+        from app.services.engine import umt5_te as umt5_mod  # noqa: PLC0415 —— 局部引 ✓
+        from app.services.engine import umt5_tokenizer as umt5_tok_mod  # noqa: PLC0415
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"文本塔权重不存在 ✗：{path} ✓（Wan 2.1/2.2 要的是 "
+                f"`umt5_xxl_fp8_e4m3fn_scaled.safetensors` ✓，**不是** Qwen/CLIP ✗）",
+                reason="pending")
+        info = st.inspect(path)
+        shapes = {name: tuple(record.shape) for name, record in info.tensors.items()}
+        try:
+            shape = umt5_mod.infer_shape(shapes)
+        except umt5_mod.ShapeError as error:
+            raise TorchBackendUnavailable(
+                f"这份权重推不出 UMT5 编码器 ✗：{error} ✓", reason="pending") from error
+        runtime = umt5_mod.Umt5TeRuntime(shape=shape, max_length=int(max_length))
+        #: **先核后改** ✓：``output_dim`` 必须等于主干 ``text_dim``（Wan 主干 4096 ✓）
+        self._check_text_encoder(candidate=runtime)
+        #: 词表：**内嵌 spiece 优先** ✓（跟着权重走 ✓），读不到才用 ``tokenizer_path`` ✓
+        spiece: bytes | None = None
+        if "spiece_model" in info.tensors:
+            try:
+                spiece = st.read_tensor_bytes(path, "spiece_model")
+            except Exception as error:  # noqa: BLE001 —— 读不到就走回落 ✓，但要说出来 ✓
+                spiece = None
+                self._umt5SpieceNote = f"内嵌 spiece 读不出（{type(error).__name__}）⇒ 回落外部词表"
+        tokenizer = umt5_tok_mod.load_tokenizer(
+            spiece_bytes=spiece, path=tokenizer_path, max_length=int(max_length))
+        want = dtype or self._compute_dtype()
+        module = umt5_mod.build_from_shapes(shapes, dtype=want)
+        residency_report = self._place_before_load(module, what="te")
+        report_weights = weights_mod.load_module_weights(module, path, dtype=want)
+        if not report_weights.complete:
+            del module
+            self._raise_te_mismatch(report_weights)
+        self._textEncoder = module.eval().requires_grad_(False)
+        self._textConfig = runtime
+        self._textKind = "umt5-te"
+        self._tokenizer = tokenizer
+        return self._te_report(
+            kind="umt5-te", runtime=runtime, path=path, want=want,
+            residency_report=residency_report, report_weights=report_weights,
+            tokenizer=tokenizer, tokenizer_path=tokenizer_path or f"{path}#spiece_model",
+            extra={"unexpectedCount": len(report_weights.unexpected),
+                   "spieceEmbedded": bool(spiece)},
+            note=("**真** UMT5-XXL **编码器** ✓（24 层 ✓、最后一层 final norm 之后 ✓、"
+                  "不套模板 ✓、padding 位置置 0 ✓）；词表用文件内嵌 ``spiece_model`` ✓"))
+
+    def attach_qwen25vl_vision(self, weights: str, *, dtype: Any = None) -> dict[str, Any]:
+        """挂 **Qwen2.5-VL 的视觉塔** ✓：Edit 2511 参考图的**语义**通路 ✓。
+
+        ## 它解决什么 ✗
+
+        Edit 的模板里有 ``<|vision_start|><|image_pad|><|vision_end|>`` ✓ —— 那个
+        ``<|image_pad|>`` 是**真 token**（id 151655 ✓）⇒ 不填就退化成词表嵌入 ✓✗：
+        模型装得上、跑得动、**Edit 能力一点没有** ✓（本仓最贵的一类静默错 ✗）。
+        填进去的正是本方法挂起来的塔 ✓ 的输出（``(grid_h/2 × grid_w/2, 3584)`` ✓）。
+
+        ## 三条硬口径
+
+        1. **从同一份 TE 文件里取 ``visual.*``** ✓：Qwen2.5-VL 的语言塔与视觉塔在**一个文件**里 ✓
+           （``qwen_2.5_vl_7b_fp8_scaled.safetensors`` ✓）⇒ 不需要第二个路径参数 ✓，
+           但 **必须** `key_map` 剥掉 ``visual.`` ✓（不剥 ⇒ 390 个键全 unexpected ⇒ 一个都没装上 ✓✗）；
+        2. **不参与联合驻留** ✗：塔本体 1.35 GiB ✓，而 ``_residencyHandle`` 是**单槽** ✓✗
+           —— 给它切一刀会把**文本塔（14.79 GiB）**的 handle 顶掉 ✓✗（那才是该切的那件 ✓）
+           ⇒ 这里整份 ``.to(device)`` ✓，报告里 ``residency=None`` ✓ 如实说「没切」✓；
+        3. **族名必须当场核** ✓：盘上文件里 ``visual.`` 前缀同时属于 2.5-VL 与 3-VL 两族 ✗，
+           尺子差 patch 14 vs 16 ✓ ⇒ 形状推不出来就拒 ✓，不猜 ✓。
+        """
+        self._gate()
+        from app.services.engine import qwen25vl_vision as vl_mod  # noqa: PLC0415 —— 局部引 ✓
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"视觉塔权重不存在 ✗：{path} ✓（Edit 2511 的视觉塔就在 **Qwen2.5-VL-7B** 那份文件里 ✓，"
+                f"前缀 ``visual.*`` ✓ —— 就是 `attach_qwen25_te` 用的那一份 ✓）", reason="pending")
+        info = st.inspect(path)                        # ⚠️ 只读头部 ✓
+        shapes = {name: tuple(record.shape) for name, record in info.tensors.items()
+                  if name.startswith("visual.")}
+        if not shapes:
+            raise TorchBackendUnavailable(
+                f"这份文件里一个 ``visual.*`` 都没有 ✗：{path.name} ✓ ⇒ 不是 Qwen2.5-VL 的全量文件 ✓"
+                f"（截断过的纯语言塔 / 别的族 ✓）。缺视觉塔 ⇒ ``<|image_pad|>`` 那一槽没有东西可填 ✓✗",
+                reason="pending")
+        try:
+            shape = vl_mod.infer_shape(shapes)
+        except Exception as error:                    # noqa: BLE001 —— 族的自述就是 ValueError ✓
+            raise TorchBackendUnavailable(
+                f"视觉塔结构推不出来 ✗：{error} ✓（2.5-VL 与 3-VL 都有 ``visual.*`` ✓，"
+                f"尺子差 patch 14 vs 16 ⇒ 本方法只认 2.5-VL ✓）", reason="pending") from error
+        problems = vl_mod.shape_problems(shape)
+        if problems:
+            raise TorchBackendUnavailable(
+                "视觉塔形状自相矛盾 ✗：" + "；".join(problems[:3]) + " ✓", reason="pending")
+        torch = self._torch()
+        want = dtype or self._compute_dtype()
+        module = vl_mod.build_vision_tower(shape, dtype=want, device="meta")
+        filled = _materialize_meta(module, torch_mod=torch, device="cpu")
+        module = module.to(self._device)
+        report_weights = weights_mod.load_module_weights(
+            module, path, dtype=want, key_map={"^visual\\.": ""})
+        if not report_weights.complete:
+            del module
+            self._trim_cuda()
+            raise TorchBackendUnavailable(
+                f"视觉塔权重没装全 ✗：缺 {len(report_weights.missing)} 个 / 形状不符 "
+                f"{len(report_weights.shapeMismatch)} 个 ✓（首个："
+                f"{(report_weights.missing or report_weights.shapeMismatch or ['—'])[0]} ✓）",
+                reason="broken")
+        self._visionTower = module.eval().requires_grad_(False)
+        self._visionShape = shape
+        report = {
+            "kind": "qwen25vl-vision", "path": str(path),
+            "device": str(self._device), "dtype": str(want),
+            "layers": int(shape["depth"]), "hidden": int(shape["hidden_size"]),
+            "heads": int(shape["num_heads"]), "patchSize": int(shape["patch_size"]),
+            "mergeSize": int(shape["spatial_merge_size"]),
+            "windowSize": int(shape["window_size"]),
+            "outHidden": int(shape["out_hidden_size"]),
+            "fullAttBlocks": list(shape["fullatt_block_indexes"]),
+            "loadedKeys": int(report_weights.loadedKeys),
+            "consumedScales": int(report_weights.consumedScales),
+            "materialized": int(filled),
+            "residency": None,
+            "residencyNote": ("塔本体 1.35 GiB ⇒ 不切 ✓：``_residencyHandle`` 单槽 ✓✗，"
+                              "切它会把文本塔（14.79 GiB）的 handle 顶掉 ✓"),
+            "note": ("真 Qwen2.5-VL 视觉塔 ✓；输出 ``(n, 3584)`` 由 "
+                     "`Qwen25TextTowerModule.forward(image_embeds=…)` 按 ``<|image_pad|>`` 位置整段替换 ✓"),
+        }
+        self._visionReport = report
+        #: 账本按名字登记 ✓（`release_part("vision")` / `_pinned_gib("vision")` 都读这一条 ✓；
+        #: 这一族**不切** ✓ ⇒ device 恒为 ``self._device`` ✓，账上不会被当成"可搬"的件 ✓）。
+        self._ledger.reserve(
+            "vision",
+            bytes_=int(sum(item.numel() * item.element_size()
+                           for item in self._visionTower.parameters())),
+            device=str(self._device),
+            note="Edit 2511 参考图视觉塔（只在 encode 段在场 ✓）")
+        self._trim_cuda()
+        return report
+
+    # ── Edit 2511 的参考图：**两条路都得走** ✓（2026-11-01 接上 ✓）────────────────────
+    #
+    #: 参考图给**视觉塔**看的面积 ✓✗ —— 两路**不是同一个数** ✗✗（逐字照 `nodes_qwen.py` ✓）：
+    #:
+    #: | 节点 | 视觉塔（语义 ✓）| VAE（像素 ✓）| 一张图约 |
+    #: |---|---|---|---|
+    #: | ``TextEncodeQwenImageEditPlus`` ✓（2509/2511 走它 ✓）| **384²** ✓ | 1024² ✓ | **196** token |
+    #: | ``TextEncodeQwenImageEdit``（单图老节点 ✓）| 1024² ✓ | 1024² ✓ | 1338 token |
+    #:
+    #: ⚠️ 本仓默认按 **Plus** ✓；要换老节点口径就改这一个常量 ✓ —— 但**不许「两种都试、挑看着顺眼的」** ✗✗：
+    #: 换的是「模型能看到多少细节」✓，差的是模型行为、不是 bug ✓。
+    #:
+    #: ⭐ **多图**（2026-11-01 接上 ✓）：Plus 那个节点有 **3 个**输入口 ✓，本仓**不设上限** ✓ ——
+    #: 一张图一个``(视觉块 + ref_latent)`` ✓，真正的边界是文本塔的 ``max_length`` ✓
+    #: （16:9 的图 384² 面积约 **196** token ✓，三张就 588 ✓ ⇒ 512 的默认上限会被截断 ✓✗）。
+    EDIT_VISION_AREA = 384 * 384
+    #: 参考图给 **VAE** 编码的面积 ✓（两个节点都 1024² ✓，且边长必须是 **8 的倍数** ✓）。
+    EDIT_VAE_AREA = 1024 * 1024
+    #: 老节点 ``TextEncodeQwenImageEdit`` 的视觉口径 ✓（备查 ✓，默认不生效 ✓）。
+    EDIT_VISION_AREA_CLASSIC = 1024 * 1024
+
+    @staticmethod
+    def area_size(width: int, height: int, area: int, *, multiple: int = 1) -> tuple[int, int]:
+        """``(宽,高)`` **等比**缩到「面积≈``area``」✓，再按 ``multiple`` 取整 ✓（下限一个 ``multiple`` ✓）。
+
+        ⚠️ 是**面积**不是边长 ✓✗：``1024*1024`` 对 16:9 的图是 1344×756 ✓，不是 1024×576 ✓。
+        """
+        width, height = max(int(width), 1), max(int(height), 1)
+        step = max(int(multiple), 1)
+        scale = math.sqrt(float(area) / float(width * height))
+        out_w = max(step, int(round(width * scale / step)) * step)
+        out_h = max(step, int(round(height * scale / step)) * step)
+        return out_w, out_h
+
+    def _pixels_of_area(self, image: str, area: int, *, multiple: int = 1,
+                        value_range: str = "0..1") -> tuple[Any, dict[str, Any]]:
+        """参考图 ⇒ 指定面积下的像素张量 ✓ ``(1, 3, 1, H, W)`` ✓。
+
+        ⚠️ 先读**原图尺寸**再算目标宽高 ✓（`load_image_tensor` **按给定宽高拉伸** ✗ ⇒
+        直接把 1024²当宽高喂进去，构图会被**纵向压扁** ✓✗ —— 不报错，只是越看越不对 ✓）。
+        """
+        path = Path(str(image))
+        if not path.is_file():
+            raise TorchBackendUnavailable(f"参考图不存在 ✗：{path}", reason="input")
+        from PIL import Image  # noqa: PLC0415  —— 只为读原图尺寸 ✓
+        with Image.open(path) as handle:
+            native_w, native_h = handle.size
+        out_w, out_h = self.area_size(native_w, native_h, area, multiple=multiple)
+        pixels, info = media_mod.load_image_tensor(
+            str(path), width=out_w, height=out_h, value_range=value_range)
+        return pixels, {**info, "native": [int(native_w), int(native_h)],
+                        "area": int(area), "scaled": [int(out_w), int(out_h)]}
+
+    def reference_embeds(self, image: str, *, area: int | None = None) -> dict[str, Any]:
+        """参考图 ⇒ **视觉塔嵌入** ✓ ``(n, out_hidden)`` ✓（Edit 2511 的**语义**那一路 ✓）。
+
+        ``n`` 是**合并后**的 token 数 ✓（= 网格格数 ÷ ``spatial_merge_size``² ✓）——
+        384² 面积约 **196** ✓、1024² 约 1338 ✓；**别拿面积除 28² 手算** ✗（取整会漂 ✓，
+        一律读返回值里的 ``tokens`` ✓）。
+        """
+        self._gate()
+        if self._visionTower is None or self._visionShape is None:
+            raise TorchBackendUnavailable(
+                "没挂 Qwen2.5-VL **视觉塔** ✗ ⇒ 参考图看不懂 ✓（先 `attach_qwen25vl_vision(路径)` ✓）",
+                reason="attach")
+        from app.services.engine import qwen25vl_vision as vl_mod  # noqa: PLC0415
+        torch = self._torch()
+        target = int(area or self.EDIT_VISION_AREA)
+        pixels, info = self._pixels_of_area(image, target, multiple=1, value_range="0..1")
+        #: ⚠️ 视觉塔那一路吃的是 **``(H, W, C)`` 三维** ✓✗ —— `load_image_tensor` 统一给
+        #: ``(1, 3, 1, H, W)`` ✓（那是 VAE 的口 ✓）⇒ 这里必须**挤成单图** ✓，
+        #: 直接喂 5 维会在 `process_image_with` 里报「必须是三维」（至少是报错 ✓，不是静默 ✗）。
+        frame = pixels[0, :, 0].permute(1, 2, 0).contiguous()      # (H, W, 3) ✓
+        #: ⚠️ 网格按 **patch 14 × merge 2 = 28** 取整 ✓（`process_image_with` 内部 ✓）——
+        #: 于是 384² 面积实际走 **392²** 之类 ✓ ⇒ token 数是取整后的 ✓。
+        patches, grid = vl_mod.patches_of(frame, self._visionShape)
+        grid_thw = torch.tensor([list(grid)], dtype=torch.long, device=self._device)
+        with torch.no_grad():
+            embeds = self._visionTower(patches.to(self._device), grid_thw)
+        embeds = embeds.reshape(-1, int(embeds.shape[-1]))
+        merge = int(self._visionShape["spatial_merge_size"])
+        report = {
+            "path": str(image), "area": target,
+            "native": info["native"], "scaled": info["scaled"],
+            "grid": [int(grid[1]), int(grid[2])],
+            "gridAfterMerge": [int(grid[1]) // merge, int(grid[2]) // merge],
+            "tokens": int(embeds.shape[0]), "hidden": int(embeds.shape[1]),
+            "note": ("视觉塔 **合并后**的 token ✓（每 ``merge²`` 个 patch 合成 1 个 ✓）；"
+                     "按 ``<|image_pad|>`` 位置**整段替换**进文本序列 ✓"),
+        }
+        return {"embeds": embeds, "report": report}
+
+    def reference_latents(self, image: str, *, area: int | None = None) -> dict[str, Any]:
+        """参考图 ⇒ **VAE 参考潜变量** ✓ ``(1, C, h, w)`` ✓（Edit 2511 的**像素**那一路 ✓）。
+
+        ⚠️ 三件容易搞错的地方 ✓✗：
+
+        * 面积是 **1024²**（不是视觉塔那个 384² ✗✗），边长还要是 **8 的倍数** ✓；
+        * 归一化走 :meth:`_encode_pixels` ✓（裸调 ``self._vae.encode`` 拿到的是**未归一化**潜变量 ✓✗，
+          症状是"整张图发灰/偏色"，且**不报错** ✓）；
+        * Wan 族编码出 **5 维** ``(1, C, 1, h, w)`` ✓ ⇒ 参考图是**单帧** ⇒ 必须挤成 **4 维** ✓✗
+          （``QwenImageDiT.forward`` 的 ``ref_latents`` 只吃 4 维 ✓，5 维会在 patchify 上炸 ✓）。
+        """
+        self._gate()
+        if self._vae is None:
+            raise TorchBackendUnavailable(
+                "没挂 **VAE** ✗ ⇒ 参考图潜变量无从谈起 ✓"
+                "（`attach_wan_vae(…, family=…)` ✓ 或走装配链的 encode 段 ✓）", reason="attach")
+        torch = self._torch()
+        target = int(area or self.EDIT_VAE_AREA)
+        pixels, info = self._pixels_of_area(image, target, multiple=8, value_range="-1..1")
+        with torch.no_grad():
+            latent = self._encode_pixels(pixels.to(device=self._device))
+        if latent.ndim == 5:
+            if int(latent.shape[2]) != 1:
+                raise TorchBackendUnavailable(
+                    f"参考图编码出 {int(latent.shape[2])} 个潜帧 ✗（参考图是**单帧** ✓）", reason="pending")
+            latent = latent[:, :, 0]
+        if latent.ndim != 4:
+            raise TorchBackendUnavailable(
+                f"参考图潜变量是 {int(latent.ndim)} 维 ✗（`ref_latents` 只吃 4 维 ✓）", reason="pending")
+        report = {
+            "path": str(image), "area": target,
+            "native": info["native"], "scaled": info["scaled"],
+            "shape": [int(v) for v in latent.shape],
+            "channels": int(latent.shape[1]),
+            "grid": [int(latent.shape[2]), int(latent.shape[3])],
+            "note": ("参考图潜变量 ✓：进 DiT 的 ``ref_latents`` ✓，**每一步采样都要带** ✓"
+                     "（漏带 = 编辑能力凭空消失、图与参考图无关且不报错 ✓✗）"),
+        }
+        return {"latents": latent, "report": report}
+
+    def prepare_edit_reference(self, image: str, *, vision_area: int | None = None,
+                               vae_area: int | None = None) -> dict[str, Any]:
+        """**一张**参考图 ⇒ Edit 2511 要的**两样** ✓：视觉嵌入 ✓ ＋ VAE 参考潜变量 ✓（缺一不可 ✓）。"""
+        embeds = self.reference_embeds(image, area=vision_area)
+        latents = self.reference_latents(image, area=vae_area)
+        return {
+            "embeds": embeds["embeds"],
+            "latents": latents["latents"],
+            "report": {
+                "image": str(image),
+                "vision": embeds["report"],
+                "vae": latents["report"],
+                "note": ("两路口径分开 ✓：视觉塔 384² 面积（token 数）✓、"
+                         "VAE 1024² 面积（像素）✓ —— 混用不报错，只让整图偏色/细节掉 ✓✗"),
+            },
+        }
+
+    def prepare_edit_references(self, images: Sequence[str], *, vision_area: int | None = None,
+                                vae_area: int | None = None) -> dict[str, Any]:
+        """**N 张**参考图 ⇒ ``embeds`` / ``latents`` **各 N 份** ✓（Edit 2511 多图 ✓）。
+
+        ⚠️ **顺序就是语义** ✗✗：提示词里 ``Picture 1: …`` 与 ``embeds[0]`` / ``latents[0]``
+        必须指**同一张**图 ✓。DiT 把 ``ref_latents`` **按列表顺序**接到序列头 ✓、
+        文本侧按 ``<|image_pad|>`` 的**位置顺序**整段换 ✓ —— 两条顺序一致才对得上 ✓；
+        乱序**不报错** ✓，只让「把第一张的头换掉」作用到第二张上 ✓✗。
+
+        ⚠️ 每张图的两路口径**各自独立** ✓（不同尺寸的参考图 token 数不同 ✓）：视觉塔 384² 面积 ✓、
+        VAE 1024² 面积且边长 8 的倍数 ✓（见 :meth:`prepare_edit_reference` ✓）。
+
+        ⚠️ 本仓**不设**张数上限 ✓（参考节点给了 3 个输入口 ✓，模型侧只是序列变长 ✓）；
+        真正的边界是文本塔的 ``max_length`` ✓（一张 384² 图约 196 token ✓，越界由分词器拦 ✓）。
+        """
+        paths = [str(item) for item in (images or ())]
+        if not paths:
+            raise TorchBackendUnavailable(
+                "参考图列表是空的 ✗ ⇒ Edit 2511 至少要一张 ✓（不给图就是纯 t2i，请关掉编辑口径 ✓）",
+                reason="input")
+        pieces = [self.prepare_edit_reference(path, vision_area=vision_area, vae_area=vae_area)
+                  for path in paths]
+        visions = [piece["report"]["vision"] for piece in pieces]
+        vaes = [piece["report"]["vae"] for piece in pieces]
+        return {
+            "count": len(pieces),
+            "embeds": [piece["embeds"] for piece in pieces],
+            "latents": [piece["latents"] for piece in pieces],
+            "report": {
+                "images": len(pieces),
+                "paths": paths,
+                "vision": {
+                    "tokens": sum(int(item["tokens"]) for item in visions),
+                    "perImage": visions,
+                },
+                "vae": {
+                    "channels": int(vaes[0]["channels"]),
+                    "shapes": [item["shape"] for item in vaes],
+                    "perImage": vaes,
+                },
+                "note": ("多图 ✓：第 i 张 ⇒ 模板第 i 个视觉块 ✓ ＋ ``ref_latents[i]`` ✓ —— "
+                         "两路**同序**才对得上 ✓（乱序不报错，只让编辑作用错图 ✓✗）；"
+                         "``Picture i: `` 那 8 个 token 由 :func:`qwen25_te.edit_prefix` 拼 ✓"),
+            },
+        }
+
+    def attach_krea2_te(self, weights: str, *, tokenizer_path: str | None = None,
+                        max_length: int = 512, dtype: Any = None,
+                        taps: tuple[int, ...] | None = None) -> dict[str, Any]:
+        """挂 **Krea2 的文本塔** ✓：Qwen3-VL-4B 语言塔 ＋ **12 层栈条件** ✓。
+
+        ## 与另四座塔的差别（**这是第五条路** ✗ 谁都不顶替谁 ✓）
+
+        | | Qwen3-4B | Qwen3.5-9B | Qwen2.5-VL-7B | Qwen3-VL-32B | **Qwen3-VL-4B（Krea2）** |
+        |---|---|---|---|---|---|
+        | 层/宽 | 36/2560 | 32/4096 | 28/3584 | 64/5120 | **36/2560** |
+        | 取层 | 倒数第 2 | 第 30 层后 | 最后一层 | 最后一层 | **12 层栈（2,5,…,35）** |
+        | 输出宽 | 2560 | 4096 | 3584 | 5120 | **12 × 2560 = 30720** |
+
+        ## 三条硬口径
+
+        1. **取 12 层、不取最后一层** ✗✗：主干吃 ``txtlayers × txtdim`` 的**栈** ✓
+           （``Krea2DiT._unpack`` ⇒ ``reshape(b, seq, 12, 2560)`` ✓）—— 只送最后一层 ⇒
+           宽度 2560 ≠ 30720 ⇒ 当场形状错 ✓（这条会报 ✓）；
+        2. **裁掉模板前缀** ✓：条件从 ``<|im_start|>user\\n`` **之后**起算 ✓（参考逐字 ✓）——
+           裁剪在**模块前向里**做 ✓（必须算完位置编码再裁 ✓，先裁后编码 ⇒ 位置整体前移 ✓✗，
+           不报错、只是画面偏移 ✓）；
+        3. **不过 final norm** ✗（盘上截断模型根本没有 ``model.norm`` ✓，建了就永远缺一个键 ✓）。
+
+        ⚠️ 盘上三份文件里另两份（``Qwen3_VL_4B/*`` 的 int8 全量）带 ``model.language_model.``
+        前缀与视觉塔 ✓ ⇒ 这里统一用 ``key_map`` 搬到 ``model.`` ✓、视觉塔落 ``unexpected`` ✓（预期 ✓）。
+        """
+        self._gate()
+        from app.services.engine import qwen3vl_te as vl_mod  # noqa: PLC0415 —— 局部引 ✓
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"Krea2 文本塔权重不存在 ✗：{path} ✓（Krea2 要的是 **Qwen3-VL-4B** ✓ 如 "
+                f"`Krea2-Engineer-V1-int8-convrot.safetensors` ✓；**不是** Qwen3-4B / 3.5 / 2.5-VL ✗）",
+                reason="pending")
+        torch = self._torch()
+        info = st.inspect(path)                       # ⚠️ 只读头部 ✓
+        raw = {name: tuple(record.shape) for name, record in info.tensors.items()}
+        #: ⚠️ 两套前缀都得认 ✓：截断版（Krea2-Engineer ✓）直接就是 ``model.layers.N`` ✓；
+        #: 全量版写成 ``model.language_model.layers.N`` ✓ ⇒ 搬到 ``model.`` ✓（视觉塔随之落 unexpected ✓）。
+        prefixed = any(name.startswith("model.language_model.") for name in raw)
+        key_map = {r"^model\.language_model\.": "model."} if prefixed else None
+        shapes = ({name.replace("model.language_model.", "model.", 1): value
+                   for name, value in raw.items() if name.startswith("model.language_model.")}
+                  if prefixed else raw)
+        try:
+            shape = vl_mod.infer_shape(shapes)
+        except ValueError as error:
+            raise TorchBackendUnavailable(
+                f"这份权重推不出 Qwen3-VL-4B 语言塔 ✗：{error} ✓", reason="pending") from error
+        #: ⚠️ ``infer_shape`` 对**缺键**是「跳过那一项」✓ ⇒ 缺了关键键它会**默默给出 32B 的默认尺子** ✗
+        #: （层数 64 / 宽 5120 ✓）—— 于是壳建得巨大、装载报「缺 几千个键」✓
+        #: 读起来像「权重不全」✗，其实是拿错了文件 ✓。这两格必须显式在 ✓。
+        missing = [key for key in ("model.embed_tokens.weight",
+                                   "model.layers.0.self_attn.q_proj.weight")
+                   if key not in shapes]
+        if missing:
+            raise TorchBackendUnavailable(
+                f"这份权重不像 Qwen3-VL 语言塔 ✗：缺 {missing} ✓"
+                f"（Krea2 要 `Qwen3_VL_4B/Krea2-Engineer-V1-*.safetensors` ✓）", reason="pending")
+        want_taps = tuple(int(value) for value in (taps or vl_mod.KREA2_TAPS))
+        depth = int(shape["layers"])
+        if max(want_taps) >= depth:
+            raise TorchBackendUnavailable(
+                f"Krea2 要取的层号 {want_taps} 超出这份塔的层数 {depth} ✗ "
+                f"（条件宽会少一段 ⇒ 主干报 30720 ≠ 实数 ✓✗）", reason="pending")
+        runtime = vl_mod.Krea2TeRuntime(shape=shape, taps=want_taps,
+                                       max_length=int(max_length))
+        #: ⚠️ **先核后改** ✓：``output_dim`` 必须等于主干 ``text_dim``（30720 ✓）
+        self._check_text_encoder(candidate=runtime)
+        tokenizer = self._te_tokenizer(tokenizer_path, runtime,
+                                       id_hint="（151644/151645 ✓）")
+        want = dtype or self._compute_dtype()
+        module = vl_mod.build_krea2_stack(shape, dtype=want, taps=want_taps)
+        #: ⚠️ 摆位置要摆**语言塔本体** ✓✗（不是外壳 ✓，2026-11-02 改 ✓）—— 两件事都指同一个对象：
+        #: ① `load_module_weights` 装进 ``module.tower`` ✓ ⇒ 内存这一级的两个约定
+        #: （``_residency_reload`` / ``_residency_spilled`` ✓）与"卸了哪几层"都得写在同一棵树上 ✓，
+        #: 写在外壳上 ⇒ 装载时读不到 ⇒ **卸了的层再也不会被读回来** ✓✗；
+        #: ② `residency.survey` 只在裸 ``nn.Module`` 容器上穿透 ✓（见 `_expand` ✓），而外壳的类型是
+        #: ``Krea2TextStack`` ✓ ⇒ 摆外壳会把**整座 8 GiB 的塔当成一个非层组** ✓（切不动 ⇒ 静默退成纯 CPU ✗）。
+        #: 摆本体之后 `model.embed_tokens` ＋ `model.layers.N` 才认得出 ✓，按层切才有意义 ✓。
+        #: ⚠️ 入口 hook 挂在本体上也够 ✓：外壳的 ``forward`` 只是 ``self.tower(ids=..)`` ✓（无自己的参数 ✓）。
+        residency_report = self._place_before_load(module.tower, what="te")
+        #: 权重装进**语言塔本体** ✓（外层那层只做"取 12 层 + 裁前缀"✓，参数全在 ``tower`` 里 ✓
+        #: —— 装到外壳上的话键名会多一层 ``tower.`` ✓ 全落 missing ✓✗）。
+        report_weights = weights_mod.load_module_weights(module.tower, path, dtype=want,
+                                                        key_map=key_map)
+        if not report_weights.complete:
+            del module
+            self._raise_te_mismatch(report_weights)
+        ignored = [name for name in report_weights.unexpected
+                   if name.startswith(("model.visual.", "visual.", "lm_head.", "model.lm_head."))]
+        self._textEncoder = module.eval().requires_grad_(False)
+        self._textConfig = runtime
+        self._textKind = "krea2-te"
+        self._tokenizer = tokenizer
+        return self._te_report(
+            kind="krea2-te", runtime=runtime, path=path, want=want,
+            residency_report=residency_report, report_weights=report_weights,
+            tokenizer=tokenizer, tokenizer_path=tokenizer_path,
+            extra={"unexpectedCount": len(report_weights.unexpected),
+                   "ignoredTowerKeys": len(ignored), "taps": list(want_taps),
+                   "conditionDim": runtime.output_dim},
+            note=("**真** Qwen3-VL-4B 语言塔 ✓（取第 2,5,…,35 层叠成 12 层栈 ✓、不过 final norm ✓、"
+                  "裁掉模板前缀 ✓）；unexpected 里的视觉塔/lm_head 是**有意不装** ✓"))
+
     def attach_h3_text(self, weights: str, *, tokenizer_path: str | None = None,
                        max_length: int = 512, dtype: Any = None) -> dict[str, Any]:
         """挂 **H3 的真文本塔** ✓：同一个文件里的**语言塔 ＋ 视觉塔**（Qwen3-VL-32B ✓）
@@ -3770,8 +5960,15 @@ class TorchBackend:
 
     def attach_wan_vae(self, weights: str, *, dtype: Any = None,
                        family: str = "qwen_image21") -> dict[str, Any]:
-        """挂 **Wan 2.2 layout 的 64 通道 VAE** ✓ ⇒ Qwen-Image **2.1** 的潜变量能解成真图 ✓
-        （见 :mod:`vae_wan` ✓；盘上 ``vae/qwen_image_2.1_vae_bf16.safetensors`` **238** 键 ✓）。
+        """挂 **Wan layout 的 VAE** ✓ ⇒ Qwen-Image **2.1**（64ch ✓）／**Krea2**（16ch ✓）的
+        潜变量都能解成真图 ✓（见 :mod:`vae_wan` ✓）。
+
+        ⭐ 两族**共用这一条**、但``family`` 给的不一样 ✓✗（2026-11-01 接 Krea2 时确认 ✓）：
+        2.1 给 ``"qwen_image21"`` ✓（64ch，mean/std 恒等 ✓）；**Krea2 给 ``"wan21"``** ✓ ——
+        它的潜空是 ``latent_formats.Wan21`` ✓（comfy ``supported_models.Krea2`` 里写死 ✓），
+        而 VAE 本体用 ``vae/qwen_image_vae.safetensors`` ✓（16ch / 8× ✓）。
+        ⚠️ 别把这两格弄反 ✗✗：给错 mean/std ⇒ 解码照跑 ✓、形状全对 ✓、**图整体偏色/发灰** ✓✗；
+        给错 VAE 文件 ⇒ 尺寸或通道对不上 ⇒ `_check_attached_vaes` 当场拒 ✓（这条会报 ✓）。
 
         为什么单开一个方法 ✗（不扩 :meth:`attach_flux_vae` ✓）：族不同 ⇒ **反缩放不同** ✓✗
         —— Flux 是 ``(x − 0.1159) / 0.3611`` ✓，2.1 是 ``x * std + mean``（64 个数 ✓）。两族混一处
@@ -3788,9 +5985,12 @@ class TorchBackend:
 
         path = Path(str(weights))
         if not path.exists():
+            #: ⚠️ 别把两族的文件名写死成一句 ✗✗（2026-11-01 修 ✓）：2.1 用
+            #: ``qwen_image_2.1_vae_bf16`` ✓、**Krea2 用 ``qwen_image_vae``** ✓ —— 老句子
+            #: 「不是 qwen_image_vae ✗」对 Krea2 恰好说反 ✓✗（照它找 ⇒ 拿到 64ch 那份 ⇒ 装不上 ✓）。
             raise TorchBackendUnavailable(
-                f"Wan 系 VAE 权重不存在 ✗：{path} ✓（2.1 要的是 "
-                f"``vae/qwen_image_2.1_vae_bf16.safetensors`` ✓，不是 qwen_image_vae ✗）",
+                f"Wan 系 VAE 权重不存在 ✗：{path} ✓　〔2.1 要 ``vae/qwen_image_2.1_vae_bf16`` ✓、"
+                f"Krea2 要 ``vae/qwen_image_vae`` ✓，两族**不同文件** ✗〕",
                 reason="pending")
         info = st.inspect(path)
         spec = vae_wan_mod.infer_shape({name: tuple(t.shape) for name, t in info.tensors.items()})
@@ -3818,26 +6018,393 @@ class TorchBackend:
         self._vaeKind = "wan21-real"
         self._vaeLatents = (tuple(mean), tuple(std), str(family))
         detail = spec.to_dict()
+        #: ⚠️ 回执要点名**人话族名** ✓✗（老文案写死「否则 H3」⇒ 挂 2.1 也报 H3 ✓✗）。
+        #: 族名 → 标题走 :func:`vae_wan.family_title` ✓（单一真源 ✓，不在这里另抄一张表 ✗）。
+        title = vae_wan_mod.family_title(family)
         detail.update({"kind": "wan21-real", "complete": True, "path": str(path),
                        "dtype": str(want), "loadedKeys": int(report.loadedKeys),
                        "sourceKeys": int(report.sourceKeys), "latentsFamily": str(family),
+                       "latentsTitle": title,
                        "latentsMean": len(mean), "latentsStd": len(std),
-                       "note": "**真** Wan 2.2 layout VAE ✓（238 键逐键对上 ✓）＋ 反缩放 "
-                               f"``{family}`` 的 {len(mean)} 个 mean/std ✓ ⇒ 解码出的是真图 ✓"})
+                       #: ⚠️ "238 键"是 2.1 那份的事实 ✓，别写死 ✗（Krea2 的 ``qwen_image_vae`` 键数
+                       #: 不同 ✓）：这里报**实测**装了几个键 ✓。
+                       "note": f"**真** Wan layout VAE ✓（{int(report.loadedKeys)} 键逐键对上 ✓）"
+                               f"＋ 反缩放按 **{title}** 的 {len(mean)} 个 mean/std ✓"
+                               f"（族名 ``{family}`` ✓）⇒ 解码出的是真图 ✓"})
         return detail
 
-    def attach_audio_vae(self, config: Any = None) -> dict[str, Any]:
-        """挂上 :mod:`app.services.engine.audio_vae` 的参考音频 VAE ✓ ⇒ 双流的音频侧能解出波形 ✓。
+    def set_vae_tiling(self, *, tile: int | None = None, halo: int | None = None,
+                       attn_chunk: int | None = None, temporal_chunk: int | None = None,
+                       fallback: bool | None = None) -> dict[str, Any]:
+        """开/关 VAE 解码的省显存旋钮 ✓✗（``tile``/``halo``/``attn_chunk`` 只对 Wan layout 那族 ✓；
+        ``temporal_chunk`` 只对 SEEDVR2 那族 ✓ —— 按族分派 ✓，给错族就是闲着 ✓，不报错 ✗）。
+
+        传 ``None`` ⇒ 保持原值 ✓（``0`` / 负数是**关** ✓：``vae_wan`` 里 ``chunk<=0`` 与
+        ``tile=None`` 都是一个意思 ✓）；显式复位用 ``reset_vae_tiling()``（全 ``None`` ✓）。
+
+        ⚠️ **开了就改数值** ✓✗，这是它必须由调用方开口、而不是我做默认的原因 ✓：
+
+        * ``tile``（**像素**单位 ✓，与 ComfyUI ``VAEDecodeTiled`` 同口径 ✓）—— 2048×1536 fp32
+          实测相对差 **5.8e-03** ✓（不是接缝 ✓，halo 加到 24 也还是 5e-2 量级 ✓：cuDNN 对不同
+          窗口尺寸选不同卷积算法 ✓）。
+        * ``attn_chunk`` —— 只切 query 维 ✓ ⇒ softmax 每行独立 ✓，但 SDPA **内部**本来也按
+          query 分块 ✓ ⇒ 只有 chunk 与它自己对齐时才逐位 ✓（小画布实测逐位 ✓、2048×1536 实测
+          差 8.55e-03 ✓）。
+        * ``fallback``（**默认 True** ✓✗）⇒ 只在**抛 OOM** 时临时降档重试 ✓（``tile`` /
+          ``attn_chunk`` 取 :data:`vae_wan.SUGGESTED_TILE` / :data:`vae_wan.SUGGESTED_ATTN_CHUNK` ✓），
+          回执里 ``reason="oom"`` ✓。**为什么默认开** ✗✗：它只在「本来就要崩溃/出不了图」
+          那条路上生效 ✓ —— 装得下时**逐位不变** ✓（对逐像素复现零影响 ✓），
+          而两条显式旋钮一动就换字节 ✓ ⇒ 那两个按纪律默认关 ✓、这个按事实默认开 ✓。
+          那是「总比崩强」✓，**不是优化** ✗（报告里说清是 OOM 降的档 ✓）。
+
+        * ``temporal_chunk``（**潜帧**单位 ✓，只对 SEEDVR2 那族有效 ✓）—— 沿时间维切块解码 ✓，
+          每块带**块外真实上文** ✓ ⇒ **结果与整段相等** ✓✗（测试 ⑫ 的「帧数 ``4T-3`` ＋
+          ``max|Δ| ≤ 1e-5``」两条判据兜住 ✓）。它和上面两个**不是一类** ✓：那两个是「拿数值换显存」✗，
+          它只降**峰值**、不动数值 ✓（峰值只与每块帧数有关 ✓，与整片多长无关 ✓）。
+          默认仍关 ✓（= 与整段同一条代码路径 ⇒ 复现性零风险 ✓）：长片/高分辨率按需开 ✓。
+          ⭐ 因此 ``fallback`` 在**这一族**降的是**它**（:func:`vae_seedvr2.chunk_ladder` 的阶梯 ✓），
+          不是 ``tile`` ✓✗ —— 那一族的峰值来自「时间 ×2 上采样后的重排张量」✓，空间切块救不了 ✓；
+          而且这条兜底**不换画质** ✓（回执里多一格 ``"exact": true`` ✓，与 Wan 那族降档必须标
+          ``reason="oom"`` 且字节变了 ✓✗ 要分开读 ✓）。
+          ⚠️ 阶梯**不是**「降一档就收工」✗✗：峰值 ≈ 与每块像素帧数成正比 ✓，`4` 在 720×480 下
+          一块 17 像素帧 ≈ 19 GiB ✓ 自己就接近上限 ✓ ⇒ 4→2→1 逐档减半 ✓，回执 ``tried`` 记下
+          试过哪几档 ✓（真到 1 仍 OOM 才是「分辨率/帧数超了」✓）。
+
+        返回**当前生效的**设置 ✓（回执里原样带上 ✓，别让这件事只活在我的脑子里 ✓）。
+        """
+        patch: dict[str, Any] = {}
+        if temporal_chunk is not None:
+            patch["temporalChunk"] = temporal_chunk
+        if tile is not None:
+            patch["tile"] = tile
+        if halo is not None:
+            patch["halo"] = halo
+        if attn_chunk is not None:
+            patch["attnChunk"] = attn_chunk
+        if fallback is not None:
+            patch["fallback"] = fallback
+        #: ⚠️ 归一**只走** :func:`normalize_vae_tiling` ✗✗（``0`` / 负数 ⇒ 关 ✓、拼错的键 ⇒ 抛 ✓）
+        #: —— 这里以前自己写 ``int(x) if int(x) > 0 else None`` ✓，和装配线那份是**两套口径** ✓✗。
+        self._vaeTiling.update(normalize_vae_tiling({**self._vaeTiling, **patch}))
+        if temporal_chunk is not None:
+            #: 点名要的档位 ⇒ 忘掉「上一轮是自动降的」✓ —— 否则会被当成还能继续降 ✓✗。
+            self._vaeAutoChunk = None
+        return dict(self._vaeTiling)
+
+    def vae_tiling(self) -> dict[str, Any]:
+        """**当前**的 VAE 解码旋钮 ✓（回执/报告读它 ✓，别让调用方去摸私有字段 ✗）。"""
+        return dict(self._vaeTiling)
+
+    def reset_vae_tiling(self) -> dict[str, Any]:
+        """回到**装配默认** ✓：两个旋钮全关 ✓（逐位 ✓）＋ OOM 兜底仍开 ✓（见 :meth:`set_vae_tiling` ✓）。"""
+        self._vaeTiling = normalize_vae_tiling(None)
+        self._vaeAutoChunk = None
+        self._vaeSpilled = False
+        return dict(self._vaeTiling)
+
+    def attach_seedvr2_vae(self, weights: str, *, dtype: Any = None) -> dict[str, Any]:
+        """挂 **SEEDVR2 VAE** ✓（``vae/SEEDVR2/ema_vae_fp16.safetensors`` ✓ **250** 键 ✓）⇒
+        视频修复链的潜变量能解成真画面 ✓（见 :mod:`vae_seedvr2` ✓）。
+
+        为什么第五条独立方法 ✗✗（不并进 ``wan21`` 那条 ✓）：这一族**没有** ``quant_conv`` /
+        ``post_quant_conv`` ✓（编码器直出 **32** 通道 ✓、取前 16 均值即 latent ✓）、反缩放是
+        ``× 0.9152`` ✓（不是 mean/std 组 ✓、不是 Flux 的 ``0.3611/0.1159`` ✓）；且**空间 8× / 时间 4×** ✓
+        —— 拿 Wan 那条解会走 ``latents_mean`` 分支 ✓✗：形状对得上（都是 16ch / 8× ✓）⇒ **不报错** ✓、
+        只是整片发灰发糊 ✓✗（这正是本仓反复踩的"不报错只是图不对" ✓）。
+
+        ⚠️ 形状**从权重反推** ✗（不像 flux / wan 那样静态配置 ✓）：块数、通道、``spatial_downscale_ratio``
+        全由 250 键的键名与形状决定 ✓ —— 3b / 7b 两个档共用这一条 ✓（``infer_shape`` ✓）。
+        反推不出 ⇒ **当场拒** ✗（不许拿默认结构糊 ✓）。
+
+        ⭐ 三条例外/配套事实（2026-11-01 接这条通路时逐条查清 ✓，与 :mod:`vae_seedvr2` 的
+        对拍测试 ⑧ 互证 ✓）：
+
+        * **帧号是 4n+1** ✓✗（时间 ÷4 ＋ 因果卷积「复制首帧」补边 ✓）—— :meth:`decode` 之所以
+          吃 **5D** ``(B,16,T,H,W)`` 而不是 Wan 的 4D ✓，就是为了让 `4n+1` 这条口径在类型上可见 ✓；
+          T 不合规 ⇒ 当场拒并给出最近两个合法值 ✓（别补帧糊 ✗）。
+        * **通道对账有一条例外** ✗✗：这一族 DiT ``in_channels`` 是 **33 = 16 潜变量 + 17
+          conditioning** ✓（参考实现把两份在**主干内部** concat ✓）⇒ 「DiT ``in_channels`` ==
+          VAE ``latent_channels``」这条通则**对它不成立** ✗。`:meth:`_check_attached_vaes` 靠
+          ``latent_channels`` 属性（16 ✓）而不是 ``in_channels``（33 ✗）判 ✓ —— 两处必须同步改 ✗：
+          只改一处 ⇒ 要么永远挂不上 ✓✗、要么挂上了却不核 ✓✗。
+        * **编码侧也在这条通路上** ✓：修链的第一步就是「降质帧 → 潜变量」✓，走的是
+          :meth:`encode_pixels` ✓（**不是**把 ``decode`` 反着调 ✗：编码器出 32 通道 ✓ 且要取前 16 ✓）。
+
+        四条纪律同 :meth:`attach_vae` ✓：**先核后改** / **严格装载** / **报告说真话** / **设备**。
+        """
+        self._gate()
+        import safetensors as st  # noqa: PLC0415
+
+        from app.services.engine import vae_seedvr2 as vae_seedvr2_mod  # noqa: PLC0415
+        from app.services.engine import weights as weights_mod  # noqa: PLC0415
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"SEEDVR2 VAE 权重不存在 ✗：{path} ✓（这一族要的是 ``vae/SEEDVR2/"
+                f"ema_vae_fp16.safetensors`` ✓ 0.47 GiB ✓，不是 wan / qwen 的任何一支 ✗）",
+                reason="pending")
+        with st.safe_open(str(path), framework="pt", device="cpu") as handle:
+            shapes = {key: tuple(int(dim) for dim in handle.get_slice(key).get_shape())
+                      for key in handle.keys()}
+        try:
+            spec = vae_seedvr2_mod.infer_shape(shapes)
+        except vae_seedvr2_mod.SeedVR2VaeError as exc:
+            raise TorchBackendUnavailable(
+                f"SEEDVR2 VAE 权重**反推不出结构** ✗：{exc} ✓　⇒ 拒 ✗", reason="pending") from exc
+        # ⚠️ **先核后改** ✓：`spatial_scale` ↔ 主干 `vae_scale`（8 ✓）、`latent_channels` ↔ 潜通道
+        #    （16 ✓ —— 别用主干 ``in_channels`` ✗，SEEDVR2 那格是 33 ✓）。
+        self._check_attached_vaes(video=spec)
+        want = dtype or self._compute_dtype()
+        module = vae_seedvr2_mod.build(spec, dtype=want)
+        report = weights_mod.load_module_weights(module, path, dtype=want)
+        if not report.complete:
+            raise TorchBackendUnavailable(
+                f"SEEDVR2 VAE 权重与架构**不符** ✗（缺 {len(report.missing)} 键 ✓ / "
+                f"形状不符 {len(report.shapeMismatch)} 处 ✓，如 {report.missing[:4]} ✓）"
+                f"　⇒ 拒 ✗（不许 `strict=False` 糊过去 ✓✗）", reason="pending")
+        self._vae = module.to(self._device).eval().requires_grad_(False)
+        self._vaeConfig = spec
+        self._vaeKind = "seedvr2-real"
+        #: ⚠️ 反缩放不走 mean/std 组 ✗ ⇒ 清掉上一支留下的账 ✓✗（否则 `_vaeLatents` 还是旧族的
+        #: 64 个数 ✓、`decode` 里按它算会静默套错常数 ✓✗）。
+        self._vaeLatents = None
+        detail = spec.to_dict()
+        detail.update({"kind": "seedvr2-real", "complete": True, "path": str(path),
+                       "dtype": str(want), "loadedKeys": int(report.loadedKeys),
+                       "sourceKeys": int(report.sourceKeys),
+                       "scaleFactor": float(spec.scale_factor),
+                       "note": f"**真** SEEDVR2 VAE ✓（{int(report.loadedKeys)} 键逐键对上 ✓）"
+                               f"＋ 反缩放 ×{float(spec.scale_factor):.4f} ✓"
+                               f"（不是 mean/std 组、也不是 Flux 常数 ✗）、"
+                               f"帧号 4n+1 ✓（时间 ÷4 ✓）⇒ 解出的是真画面 ✓、"
+                               f"``encode_pixels`` 出的也是真潜变量 ✓"})
+        return detail
+
+    def attach_music3_te(self, weights: str, *, dtype: Any = None) -> dict[str, Any]:
+        """挂 **Music3 语义塔** ✓（``text_encoder/minimax_music3_text_encoder_int8_convrot`` ✓
+        648 键 ✓）⇒ :meth:`encode_text` 出**真条件帧** ``(F, 32768)`` ✓。
+
+        ## 这一座塔与另五座的根本差别（别按"文本塔"的直觉想它 ✗✗）
+
+        它**不编码文本** ✓✗ —— 它是一台**自回归生成器** ✓：吃 ``build_prompt(caption, lyrics)``
+        的 token 串 ✓、按 **25 Hz** 逐帧吐**音频语义帧** ✓（每帧 8 codebook × 4096 = **32768** 维 ✓，
+        ``CONTEXT_DIM`` ✓）。所以：
+
+        * 它**不会被"编码一次"** ✓：:meth:`encode_text` 对它走 :meth:`_encode_music3_condition` ✓，
+          一次调用要跑几百上千步自回归 ✓（**秒级到分钟级** ✓，与 DiT 采样是两段时间 ✓）；
+        * 条件帧数**由时长定**（``25 × 秒`` ✓），不是由词数定 ✓ —— 所以它必须先于潜变量尺寸确定 ✓
+          （pipeline 的 ``plan.latent_frames`` 与 ``plan.frames`` 都从它来 ✓）。
+        * **词表焊在这份 safetensors 里** ✓（键名 ``tokenizer_json`` ✓，一个 uint8 字节块 ✓）：
+          盘上**没有** ``tokenizer.json`` 文件 ✓ ⇒ 走 :meth:`tokenizer_bpe.BpeTokenizer.from_tokenizer_payload`
+          ✓（2026-11-06 为此加的 ✓；不许往盘上写临时文件 ✗、也不为它引 HF ``tokenizers`` ✗）。
+          ⚠️ 建完必须用 :func:`te_music3.validate_tokenizer` 核**四个特殊符** ✓ —— 少一个 ⇒
+          ``tokens[1:-2]`` 那段区间整个错位 ✓✗（不报错 ✓、出来的是"人声念提示词"那种噪声 ✓✗）。
+
+        ⚠️ ``require_int8=True`` **不给放松** ✗：这份文件是 int8_convrot ✓，按 bf16 整份装要 13.8 GiB ✓
+        与基卡余量打架 ✓、且与 int8 版**逐位不同** ✓（出的是另一段音乐 ✓✗）。
+        """
+        self._gate()
+        from app.services.engine import te_music3 as te_music3_mod  # noqa: PLC0415
+        from app.services.engine import tokenizer_bpe as tok_mod  # noqa: PLC0415
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"Music3 语义塔权重不存在 ✗：{path} ✓（这一族要的是 ``text_encoder/"
+                f"minimax_music3_text_encoder_int8_convrot.safetensors`` ✓ 8.57 GiB ✓；"
+                f"**不是**任何 Qwen 文本塔 ✗ —— 它不编码文本、它生成音频语义帧 ✓）",
+                reason="pending")
+        #: ⚠️ **先词表**（纯字节读 ✓，不占显存 ✓）：词表坏了要能在装 8.57 GiB 之前就拒 ✗✗。
+        try:
+            raw = st.read_tensor_bytes(str(path), "tokenizer_json", max_bytes=64 << 20)
+        except Exception as exc:                                  # noqa: BLE001 —— 归一成人话 ✓
+            raise TorchBackendUnavailable(
+                f"这份塔里读不到内嵌词表 ✗（键 ``tokenizer_json`` ✓）：{exc} ✓　⇒ 拒 ✗"
+                f"（盘上**没有**配套 tokenizer.json 文件 ✓，词表只在这一块字节里 ✓）",
+                reason="pending") from exc
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:                                  # noqa: BLE001
+            raise TorchBackendUnavailable(
+                f"内嵌词表**不是合法 JSON** ✗（{len(raw)} 字节 ✓）：{exc} ✓　⇒ 拒 ✗",
+                reason="pending") from exc
+        tokenizer = tok_mod.BpeTokenizer.from_tokenizer_payload(
+            payload, source=f"{path.name}:tokenizer_json")
+        tk_problems = te_music3_mod.validate_tokenizer(tokenizer)
+        if tk_problems:
+            raise TorchBackendUnavailable(
+                f"内嵌词表**缺特殊符** ✗：{tk_problems[:3]} ✓（共 {len(tk_problems)} 条 ✓）"
+                f"　⇒ 拒 ✗（``build_prompt`` 的 ``tokens[1:-2]`` 会整段错位 ✓✗ —— "
+                f"不报错、出来的是人声念提示词那种噪声 ✓）", reason="pending")
+        runtime = SimpleNamespace(output_dim=int(te_music3_mod.CONTEXT_DIM),
+                                  kind="music3-ar")
+        self._check_text_encoder(candidate=runtime)
+        want = dtype or self._compute_dtype()
+        try:
+            tower, tower_report = te_music3_mod.load_tower(
+                str(path), dtype=want, place=lambda module: self._place_before_load(
+                    module, what="te"))
+        except ValueError as exc:
+            raise TorchBackendUnavailable(
+                f"这份权重装不成 Music3 语义塔 ✗：{exc} ✓　⇒ 拒 ✗", reason="pending") from exc
+        self._textEncoder = tower
+        self._textConfig = runtime
+        self._textKind = "music3-ar"
+        self._tokenizer = tokenizer
+        return {
+            "kind": "music3-ar",
+            "config": {"outputDim": int(te_music3_mod.CONTEXT_DIM),
+                       "audioFramesPerSecond": int(te_music3_mod.AUDIO_FRAMES_PER_SECOND),
+                       "maxAudioFrames": int(te_music3_mod.MAX_AUDIO_FRAMES),
+                       "codebooks": int(te_music3_mod.NUM_CODEBOOKS),
+                       "codebookWidth": int(te_music3_mod.CODEBOOK_WIDTH)},
+            "complete": True,
+            "path": str(path),
+            "dtype": str(want),
+            "device": str(self._device),
+            "residency": tower_report.get("placement"),
+            "loadedKeys": int(tower_report["keys"]),
+            "sourceKeys": int(tower_report["keys"]),
+            "int8Layers": int(tower_report["int8Layers"]),
+            "tokenizer": getattr(tokenizer, "name", type(tokenizer).__name__),
+            "tokenizerPath": "embedded:tokenizer_json",
+            "tokenizerBytes": int(len(raw)),
+            "note": (f"**真** Music3 语义塔 ✓（{int(tower_report['keys'])} 键 ✓、"
+                     f"{int(tower_report['int8Layers'])} 层 int8 常驻 ✓）；⚠️ 它**不编码文本** ✗ ——"
+                     f" 吃 ``build_prompt(caption, lyrics)`` 并按 {int(te_music3_mod.AUDIO_FRAMES_PER_SECOND)} Hz"
+                     f" 逐帧生成 {int(te_music3_mod.CONTEXT_DIM)} 维音频语义帧 ✓；"
+                     f"词表内嵌在这份文件里 ✓（{len(raw)} 字节 ✓，四个特殊符齐全 ✓）"),
+        }
+
+    def attach_music3_dav(self, weights: str, *, dtype: Any = None) -> dict[str, Any]:
+        """挂 **Music3 DAV** ✓（``vae/minimax_music3_dav.safetensors`` ✓ **121** 键 ✓）⇒
+        音频潜变量 ``(B,128,T)`` 能解成真波形 ✓（见 :mod:`vae_music3` ✓）。
+
+        为什么第五条独立 VAE 方法 ✗✗：这一族的潜空间**是 3 维的** ✓（``128 × T`` ✓，没有 H/W ✓）、
+        反缩放**恒等** ✓（``scale_factor = 1.0`` ✓ —— 既不是 Flux 的 ``0.3611/0.1159`` ✓、
+        也不是 Wan 的 mean/std 组 ✓）；拿视频那条解会走 4D reshape ✓✗：形状对得上（128 = 2×64 ✓）
+        ⇒ **不报错** ✓、出来的是一段"有音量没内容"的噪声 ✓✗。
+
+        ⚠️ **输出不是帧是波形** ✗✗：所以 :meth:`decode` 对这一族**提前 return** ✓
+        （见 :meth:`_decode_music3` ✓），不走 ``frames`` 那条通用路 ✓。
+        ⚠️ **不核 ``_check_attached_vaes`` 的通道对账** ✗：那条通则是「DiT ``in_channels`` == VAE
+        ``latent_channels``」✓ —— Music3 的 DiT 入口是 **128** ✓、DAV 也是 **128** ✓，本来就相等 ✓，
+        所以照常核 ✓（不像 SEEDVR2 的 33 vs 16 ✓✗）。
+        """
+        self._gate()
+        import safetensors as st  # noqa: PLC0415
+
+        from app.services.engine import vae_music3 as vae_music3_mod  # noqa: PLC0415
+        from app.services.engine import weights as weights_mod  # noqa: PLC0415
+
+        path = Path(str(weights))
+        if not path.exists():
+            raise TorchBackendUnavailable(
+                f"Music3 DAV 权重不存在 ✗：{path} ✓（这一族要的是 ``vae/"
+                f"minimax_music3_dav.safetensors`` ✓ 0.20 GiB ✓，不是 H3 的音频 VAE ✗、"
+                f"也不是任何视频 VAE ✗）", reason="pending")
+        with st.safe_open(str(path), framework="pt", device="cpu") as handle:
+            shapes = {key: tuple(int(dim) for dim in handle.get_slice(key).get_shape())
+                      for key in handle.keys()}
+        problems = vae_music3_mod.shape_problems(shapes)
+        if problems:
+            raise TorchBackendUnavailable(
+                f"Music3 DAV 权重与结构**不符** ✗（{problems[:3]} ✓，共 {len(problems)} 处 ✓）"
+                f"　⇒ 拒 ✗（121 键这一族是固定的 ✓，对不上就是拿错了文件 ✓）", reason="pending")
+        spec = vae_music3_mod.MUSIC3_DAV_FACTS
+        #: ⚠️ ``sample_rate`` 必须**记进配置** ✓✗（2026-11-06 首次真跑栽的坑 ✓）：
+        #: :meth:`_decode_music3` 要拿它算时长 ✓，而 ``MUSIC3_DAV_FACTS`` 是**模块常量** ✓ ——
+        #: 那一路读的是 ``self._vaeConfig`` ✓，配置里不记就只剩"猜一个 32000" ✗。
+        candidate = SimpleNamespace(latent_channels=int(spec["latentChannels"]),
+                                    spatial_scale=1,
+                                    sample_rate=int(spec["sampleRate"]),
+                                    channels=int(spec["stereo"]))
+        self._check_attached_vaes(video=candidate)
+        want = dtype or self._compute_dtype()
+        module = vae_music3_mod.build_music3_dav(dtype=want)
+        #: ⚠️ **必须**给 ``key_map`` ✗✗（2026-11-06 首次真跑栽的坑 ✓）：检查点里 weight_norm 是
+        #: **旧式** ``…weight_g / …weight_v`` ✓，而 ``build_music3_dav`` 造出来的模块
+        #: ``state_dict`` 是**新式** ``…parametrizations.weight.original0/1`` ✓ ⇒ 通用装载器按原键
+        #: 硬对 ⇒ 报「缺 60 键 / 形状不符 0 处」✓✗（读起来像拿错了文件 ✓，其实是**同一份文件**
+        #: 两套写法 ✓；`shape_problems` 会归一所以它全绿 ✓ —— 两个口径不一致才是真病根 ✓）。
+        report = weights_mod.load_module_weights(module, path, dtype=want,
+                                                 key_map=vae_music3_mod.KEY_MAP)
+        if not report.complete:
+            raise TorchBackendUnavailable(
+                f"Music3 DAV 权重与架构**不符** ✗（缺 {len(report.missing)} 键 ✓ / "
+                f"形状不符 {len(report.shapeMismatch)} 处 ✓，如 {report.missing[:4]} ✓）"
+                f"　⇒ 拒 ✗（不许 `strict=False` 糊过去 ✓✗）", reason="pending")
+        self._vae = module.to(self._device).eval().requires_grad_(False)
+        self._vaeConfig = candidate
+        self._vaeKind = "music3-real"
+        #: ⚠️ 反缩放恒等 ✓ ⇒ 清掉上一支留下的 mean/std 账 ✓✗（否则 `decode` 里按它算会
+        #: 给波形套上一个毫不相干的常数 ✓✗）。
+        self._vaeLatents = None
+        return {
+            "kind": "music3-real",
+            "complete": True,
+            "path": str(path),
+            "dtype": str(want),
+            "loadedKeys": int(report.loadedKeys),
+            "sourceKeys": int(report.sourceKeys),
+            "latentChannels": int(spec["latentChannels"]),
+            "sampleRate": int(spec["sampleRate"]),
+            "upscaleRatio": int(spec["upscaleRatio"]),
+            "scaleFactor": float(spec["scaleFactor"]),
+            "note": (f"**真** Music3 DAV ✓（{int(report.loadedKeys)} 键逐键对上 ✓）＋ 反缩放**恒等** ✓"
+                     f"（既不是 mean/std 组、也不是 Flux 常数 ✗）、{int(spec['upscaleRatio'])}× 上采样 ⇒"
+                     f" {int(spec['sampleRate'])} Hz 立体声 ✓（T 潜帧 ⇒ {int(spec['upscaleRatio'])}·T 样本 ✓）"),
+        }
+
+    def attach_audio_vae(self, config: Any = None, *,
+                         weights: str | None = None) -> dict[str, Any]:
+        """挂上 :mod:`app.services.engine.audio_vae` 的音频 VAE ✓ ⇒ 双流的音频侧能解出波形 ✓。
 
         ⚠️ 它**与视频 VAE 毫无关系** ✗（DAC 血统编码 + BigVGAN 解码 ✓ —— 见
         `vae.H3_AUDIO_VAE_FACTS` ✓）：H3 的音频侧**不能**用视频 VAE 顶替 ✓✗（会得到"看着接上了"的
         假接线 ✗）。
-        ⚠️ 参考实现**未经训练** ✗ ⇒ 出来是噪声 ✓（验的是**管道** ✓）；真权重到位后换实现即可 ✓
-        （调用点不变 ✓）。
+
+        ``weights``（2026-11-04 新增 ✓，**默认不给** = 参考实现 ✗）：
+        给 **H3 真音频 VAE**（``minimax_h3_audio_vae_fp32.safetensors`` ✓ **917 键** ✓）⇒ 音频侧
+        出的是**真波形** ✓、``kind="h3-real"`` ✓（:meth:`_decode_dual` 的 ``audio_real`` 因此为真 ✓、
+        ``synthetic`` 才有机会为 False ✓）。
+
+        ⚠️ 三条纪律与 :meth:`attach_vae` 的真分支**逐条同形** ✓✗（当初真视频 VAE 踩过、这里一次写对 ✓）：
+        1. **先核后改** ✓（``_check_attached_vaes`` 不合格 ⇒ 模块一个字没动 ✓）；
+        2. **严格装载** ✓（:func:`weights.load_module_weights` 的 ``complete`` 为假**当场抛** ✗ ——
+           917 键里少一个就是随机初始化的层，出的是"半真半噪"的音，而**一声不响** ✓✗）；
+        3. **报告说真话** ✓（``kind`` 由**权重来源**决定 ✓，不按"参数看着像真的"猜 ✗）。
+        ⚠️ dtype **跟着文件走** ✗（不给 ``dtype`` ✓）：音频 VAE 总共 0.56 GiB fp32 ✓，
+        转 bf16 省不下什么却会改变 BigVGAN 的输出刻度 ✓✗。
         """
         self._gate()
         config = config or audio_vae_mod.AudioVAEConfig()
         self._check_attached_vaes(audio=config)   # ⭐ 同上：**先核后改** ✓（音频那一档 ✓）
+        if str(weights or "").strip():
+            path = Path(str(weights))
+            if not path.exists():
+                raise TorchBackendUnavailable(
+                    f"H3 音频 VAE 权重不存在 ✗：{path} ✓（音频侧要的是 **BigVGAN 解码**那份 ✓，"
+                    f"视频 VAE 顶替不了 ✓✗）", reason="pending")
+            module = audio_vae_mod.build_audio_vae(config)
+            load_report = weights_mod.load_module_weights(module, path)
+            if not load_report.complete:
+                raise TorchBackendUnavailable(
+                    f"H3 音频 VAE 权重与架构**不符** ✗（缺 {len(load_report.missing)} 键 ✓ / "
+                    f"形状不符 {len(load_report.shapeMismatch)} 处 ✓，"
+                    f"如 {list(load_report.missing)[:4]} ✓）⇒ 拒 ✗（不许 ``strict=False`` 糊过去 ✓✗）",
+                    reason="pending")
+            #: ⚠️ 与视频侧同一条坑 ✓✗：不 ``eval()`` 也不冻 ⇒ 解码在建图 ⇒ BigVGAN 的 norm 权重
+            #: 默认取梯度 ⇒ 整段上采样中间激活被钉住（`decode` 那一拍正好是"卡空着"✓，
+            #: 所以症状不是 OOM ✗ 而是"解码变慢且退完不还"✓）。
+            self._audioVae = module.to(self._device).eval().requires_grad_(False)
+            self._audioVaeConfig = config
+            self._audioVaeKind = "h3-real"
+            report = config.to_dict()
+            report.update({"kind": "h3-real", "complete": True,
+                           "weights": str(path), "keys": int(load_report.loadedKeys)})
+            return report
         self._audioVae = audio_vae_mod.build_audio_vae(config).to(self._device).eval()
         self._audioVaeConfig = config
         self._audioVaeKind = "reference-untrained"
@@ -3858,6 +6425,17 @@ class TorchBackend:
     #: 逐层跨 CPU↔GPU 搬比换装慢一个量级 ✓，而这里换装**零跨界** ✓。
     PHASE_PARTS: dict[str, tuple[str, ...]] = {
         "encode": ("text",),
+        #: ⭐ **图生图的起点**也要 VAE ✓✗（2026-11-02 真跑逼出来的 ✓）：`init_latents` 要把
+        #: `initImage` 编成起点 latent ✓ ⇒ 那一拍手上必须有 VAE ✓。上面三段**漏了它** ✗✗ ——
+        #: 文生图永远走不到 ✓（请求里没图 ✓），**图生图一走就报**「没挂 VAE ✗ ⇒ 没法把图片
+        #: 编码成潜变量」✓（实测：2512 storyboard-last / denoise=0.55 ✓，装载与采样都正常 ✓，
+        #: 只在 init 这一拍断 ✓）。单元测试里 VAE 是**常驻替身** ✓ ⇒ 永远试不出来 ✓✗。
+        #: ⚠️ 只在**真要编码图片**时申请 ✓（`pipeline` 判 `request.initImage` ✓）：无条件加会
+        #: 让纯文生图每次多一趟 VAE 换装 ✓✗（VAE 0.24 GiB 从盘读 ✓ 白花几秒 ✓）。
+        #: ⚠️ **text 也写进来** ✓✗：`enter_phase` 会退掉「不在 wanted 里的件」✓ ⇒ 只写 vae
+        #: 就会把刚 encode 完的 TE（16.1 GiB）退掉 ✓✗，紧接着 `sample` 又得从盘重读一遍 ✓。
+        #: 两者同驻 = 16.1 ＋ 0.24 ＝ **16.34 GiB** ✓ < 22.49 ✓ 装得下 ✓ ⇒ 留着更省。
+        "init": ("text", "vae"),
         "sample": ("dit",),
         "decode": ("vae",),
     }
@@ -3877,8 +6455,17 @@ class TorchBackend:
 
         ⭐ **两个按族参数**（2026-10-31 加 ✓，接 2512 时逼出来的 ✓）：
 
-        * ``text_kind`` ✓ —— ``"qwen35"``（2.1 ✓ Qwen3.5-9B ⇒ :meth:`attach_qwen35_te` ✓）
-          或 ``"qwen25"``（2512 ✓ Qwen2.5-VL-7B ⇒ :meth:`attach_qwen25_te` ✓）。
+        * ``text_kind`` ✓ —— ``"qwen35"``（2.1 ✓ Qwen3.5-9B ⇒ :meth:`attach_qwen35_te` ✓）、
+          ``"qwen25"``（2512 ✓ Qwen2.5-VL-7B ⇒ :meth:`attach_qwen25_te` ✓）、
+          ``"h3"``（双流 ✓ 语言＋视觉两半 ⇒ :meth:`attach_h3_text` ✓）、
+          ``"krea2"``（Krea2 ✓ Qwen3-VL-4B **只挂语言塔** ＋ 12 层隐状态栈 ⇒ :meth:`attach_krea2_te` ✓）、
+          ``"umt5"``（Wan2.1/2.2 ✓ UMT5-XXL **纯 encoder** ⇒ :meth:`attach_umt5_te` ✓）。
+          ⚠️ 这几个**互不可代替** ✗✗：骨架不同 ✓、取层口径不同 ✓（末层隐状态 vs 12 层栈 ✓
+          vs encoder 末层过 final norm ✓）、模板不同 ✓（Krea2 要 ``<|im_start|>system…<|im_start|>assistant\\n``
+          并把前缀裁掉 ✓；UMT5 **不套模板** ✓）。
+          ⚠️⚠️ **漏写一格就落到 ``qwen35`` 兜底** ✓✗（``umt5`` 2026-11-02 才补上 ✓）：真跑报的是
+          「缺 ``model.embed_tokens.weight`` ⇒ 这不是 Qwen3.5 的文本塔」✓ —— 措辞对 ✓、
+          但指不到真因（分派表少一格 ✗），读起来像"权重下坏了" ✓✗。
           ⚠️ 原来 ``enter_phase`` 里**写死** ``attach_qwen35_te`` ✓✗ ⇒ 2512 的
           ``qwen_2.5_vl_7b_fp8_scaled`` 会被 Qwen3.5 的骨架吃 ✓✗：报的是「缺 `linear_attn.*`」
           ✓（读起来像"权重下错了" ✗，实际是把另一族的塔接了上来 ✓✗）。
@@ -3998,9 +6585,9 @@ class TorchBackend:
         ⇒ 紧接着装 DiT 时预算≈0 ⇒ 整份 17.94 GiB 落到内存 ✓ ⇒ 宿主 71 GiB / 卡 22.5 GiB 卡死 ✓。
         """
         target = {"dit": self._model, "text": self._textEncoder,
-                  "vae": self._vae}.get(part)
-        if part not in ("dit", "text", "vae"):
-            raise ValueError(f"不认识的分时部件 {part!r} ✗（只认 dit / text / vae ✓）")
+                  "vae": self._vae, "vision": self._visionTower}.get(part)
+        if part not in ("dit", "text", "vae", "vision"):
+            raise ValueError(f"不认识的分时部件 {part!r} ✗（只认 dit / text / vae / vision ✓）")
         #: ⚠️ **只退「这一件」的把手** ✓：`_residencyHandle` 是单槽 ✓，它对应**最后装的那件** ✓；
         #: 若正好就是要退的这件 ✓（`module is target` ✓）⇒ 必须先 detach 才有资格谈释放 ✓✗。
         holder = self._residencyHandle
@@ -4033,6 +6620,13 @@ class TorchBackend:
             self._vaeConfig = None
             self._vaeKind = None
             self._vaeLatents = None
+        elif part == "vision":
+            #: ⭐ Edit 2511 的**视觉塔** ✓：只在 encode 段在场 ✓ ⇒ 采样前后各装一次 ✓✗
+            #: （1.35 GiB 不贵 ✓，但它和 38 GiB 的 DiT 抢卡时会直接把 DiT 挤去内存 ✓）。
+            existed = self._visionTower is not None
+            self._visionTower = None
+            self._visionShape = None
+            self._visionReport = None
         #: 账本同步还回去 ✓（**无论有没有真退**都清 ✓：两处不一致比不记更糟 ✓✗）
         self._ledger.release(part)
         self._ledger.release(f"{part}#host")
@@ -4135,8 +6729,11 @@ class TorchBackend:
     def enter_phase(self, phase: str) -> dict[str, Any] | None:
         """进某个阶段前**把不用的那件让出去、把要用的那件装进来** ✓（没登记链 ⇒ 返回 None ✓）。
 
-        ``phase`` 取 ``encode`` / ``sample`` / ``decode`` ✓；别的名字（``plan`` / ``init`` /
-        ``refine`` ✓）不换装 ✓ —— 2.1 的超清二采仍用同一个 DiT ✓（它在 ``sample`` 阶段装着呢 ✓）。
+        ``phase`` 取表里的名字（:attr:`PHASE_PARTS` ✓＝ ``encode`` / ``init`` / ``sample`` /
+        ``decode`` ✓）；**不在表里的**名字（``plan`` / ``refine`` ✓）不换装 ✓ —— 2.1 的超清
+        二采仍用同一个 DiT ✓（它在 ``sample`` 阶段装着呢 ✓）。
+        ⚠️ ``init`` 是**图生图专属**那一段 ✓（`pipeline` 只在给了 ``initImage`` 时才调 ✓，
+        见 :attr:`PHASE_PARTS` 里那段账 ✓）。
 
         ⚠️ **失败要炸在这里** ✓（管线按阶段记错 ✓）：换装不成 ⇒ 后面的 encode/sample/decode
         没有可用权重 ✓，让它"跑下去"只会得到一句更远的报错 ✓✗。
@@ -4155,7 +6752,9 @@ class TorchBackend:
         kept = tuple(self._chain.get("keepParts") or ())
         present = {"dit": self._model is not None,
                    "text": self._textEncoder is not None,
-                   "vae": self._vae is not None}
+                   "vae": self._vae is not None,
+                   #: ⭐ Edit 2511 的**视觉塔** ✓（只有 Edit 链的 encode 段要它 ✓）
+                   "vision": self._visionTower is not None}
         reused = [part for part in wanted if present[part]]
         if len(reused) == len(wanted):
             #: 要的已在场 ✓ ⇒ 只把**不用的**退掉 ✓（能退多少退多少 ✓；常驻件不算"用不着" ✓）
@@ -4203,14 +6802,37 @@ class TorchBackend:
                 elif kind == "qwen25":
                     self.attach_qwen25_te(chain["textWeights"],
                                           tokenizer_path=chain["tokenizerPath"])
+                elif kind in ("krea2", "krea2-te"):
+                    #: Krea2 ✓：Qwen3-VL-4B **只挂语言塔** ✓ + 取 12 层隐状态栈 ✓ + 套
+                    #: ``<|im_start|>…`` 模板并在编码后裁掉前缀 ✓（全在 `attach_krea2_te` 里 ✓）。
+                    #: ⚠️ 不能落到下面那条 ``qwen35`` 兜底 ✗✗：那座塔按「最后一层隐状态」取 ✓，
+                    #: 宽度 2560 ≠ 主干要的 30720 ⇒ 报「文本宽度对不上」✓，读起来像拿错塔 ✗，
+                    #: 真因是「没取层栈」✓✗。
+                    self.attach_krea2_te(chain["textWeights"],
+                                         tokenizer_path=chain["tokenizerPath"])
+                elif kind in ("umt5", "umt5-te"):
+                    #: ⭐ **Wan 2.1/2.2 的 UMT5-XXL** ✓✗（2026-11-02 真跑抓到的第三处 ✓）：
+                    #: 这一支原先**根本没写** ✓ ⇒ 落到下面的 ``qwen35`` 兜底 ✓ ⇒
+                    #: 拿 Qwen3.5-9B 的骨架去读 UMT5 的文件 ✓ ⇒ 报「缺 ``model.embed_tokens.weight`` ✓
+                    #: ⇒ 这不是 Qwen3.5 的文本塔」✓ —— 措辞完全正确 ✓、但**指不到真因** ✓
+                    #: （真因是"分派表里少一格"✗，不是"权重坏了"✓）。
+                    #: ⚠️ 别改成 `try: umt5; except: qwen35` ✗✗：两座塔宽度都可能是 4096 ✓，
+                    #: 试错能"跑起来"✓ 而隐状态来源完全不同 ✓（UMT5 是 encoder 末层过 final norm 且
+                    #: **不套 chat 模板** ✓）⇒ 出图照样有 ✓、只是条件全错 ✓✗。
+                    self.attach_umt5_te(chain["textWeights"],
+                                        tokenizer_path=chain["tokenizerPath"])
                 else:
                     self.attach_qwen35_te(chain["textWeights"],
                                           tokenizer_path=chain["tokenizerPath"])
-            else:
+            elif part == "vae":
                 if str(chain.get("vaeFamily") or "") == "h3":
                     self._attach_h3_vae_weights(chain["vaePath"])
                 else:
                     self.attach_wan_vae(chain["vaePath"], family=chain["vaeFamily"])
+            else:
+                #: ⭐ **视觉塔** ✓✗（Edit 2511 ✓）：和语言塔**同一个文件** ✓（``visual.*`` 714 张量 ✓）
+                #: ⇒ 路径直接复用 ``textWeights`` ✓，不另开一个链字段 ✗（那样两处路径会各自漂 ✓）。
+                self.attach_qwen25vl_vision(chain["textWeights"])
         #: ⭐⭐ **装完、且装载栈退干净之后**再还一次显存 ✓✗（这一句是 2026-11-01 端到端的关键 ✓）。
         #: 为什么装载函数自己末尾那句不够 ✗✗：那时它的**局部变量还活着** ✓（物化中转 ✓、
         #: `WeightLoadReport` 握着的引用 ✓）⇒ allocator 看那些块「还在用」⇒ `empty_cache()` **一个字节不还** ✓✗。
@@ -4306,7 +6928,7 @@ class TorchBackend:
         * DiT 形态（非 H3）只核 ``视频 spatial_scale`` ↔ `config.vae_scale` ✓（H3 那几条不适用 ✗）。
 
         ⚠️ 仍是**两个来源相互印证** ✗，**不是权重事实** ✗：两边一起错仍会漏 ✓ ⇒ 真权重到手后要按元数据
-        再核一次 ✓（见 `PENDING_PARTS` ✓）。
+        再核一次 ✓（见 `IMPLEMENTATION_HISTORY` ✓）。
         ⚠️ 挂载**顺序**两向都守 ✓：先挂 VAE 后装权重（`load_weights` 里再查一次 ✓）/ 先装权重后挂 ✓。
         """
         h3_dims = self._trunk_latent_dims()
@@ -4342,12 +6964,17 @@ class TorchBackend:
                 #    `decoder.conv_in` 会在解码那一刻炸 ✓（报 「given groups=1, weight [512,4,…]」✓ ——
                 #    指不到「挂错族」✓），更阴的是**同是 16 通道**却缩放系数不同的两族 ✓✗：
                 #    形状全对 ✓、图发灰 ✓、不报错 ✓✗。通道这一条先拦掉错族的绝大多数 ✓。
-                dit_channels = int(self._config_value("in_channels", 0) or 0)
+                #: ⚠️ 与 :meth:`latent_shape` **同一格** ✓✗：带条件的族（SEEDVR2 ✓）`in_channels`
+                #: 是「潜变量 ＋ 条件」拼起来的宽度（33 ✓），不是潜通道（16 ✓）⇒ 照它核会把
+                #: **正确的** VAE 判成挂错族 ✓✗（16 ≠ 33 ⇒ 当场拒 ✓）。
+                dit_channels = int(self._config_value("latent_channels", 0)
+                                   or self._config_value("in_channels", 0) or 0)
                 if dit_channels:
                     pairs.append((
                         "视频", "latent_channels", dit_channels,
-                        "DiT 配置里的 `in_channels` ✓（= `x_embedder` 入维 ÷ patch² ✓；"
-                        "Z-Image = 16 ✓）",
+                        "DiT 配置里的 `latent_channels` ✓（没有这格才退回 `in_channels` ✓"
+                        "—— 后者是 `x_embedder` 入维 ÷ patch² ✓，带条件的族会多出条件通道 ✗；"
+                        "Z-Image = 16 ✓ / SEEDVR2 潜 16 ✓ 而入口 33 ✓）",
                         "**挂错族的 VAE** ✗（SDXL 4 通道 ✗ / Flux 16 通道 ✓ / H3 走上面那条 ✗）"
                         "—— 解码当场在 `conv_in` 上炸 ✓，且报错不指向挂载代码 ✓✗"))
         if (audio is not None or self._audioVaeConfig is not None) and h3_dims:
@@ -4446,6 +7073,75 @@ class TorchBackend:
                                if self._audioVaeConfig is not None else None),
         }
 
+    def _decode_music3(self, latents: Any) -> dict[str, Any]:
+        """音频潜变量 ``(B,128,T)`` → **波形** ``(B,2,512·T)`` ✓（不是帧 ✓✗）。
+
+        ## 为什么这一族在 :meth:`decode` 里**提前 return** ✗✗
+
+        通用那条路后面全是**视频**口径 ✓：``frames`` → ``(B,T,3,H,W)`` ✓、``frameCount`` ✓、
+        ``fps`` 由 plan 来 ✓…… 一样都对不上音频 ✓。硬走通也不是"顺手兼容" ✓，
+        而是把"音频被当成 1 帧高的视频"这种**形状全对语义全错**的东西放出去 ✓✗。
+
+        三处必须核 ✓：
+        ① **通道 = 128** ✓（DAV 的 ``latentChannels`` ✓）—— 128 也是 **2×64** ✓，所以一条
+           ``(B,64,8,8,H,W)`` 式的错 reshape 完全塞得进同一个数 ✓（这不是假想 ✗）；
+        ② **必须是 3 维** ✓：采样侧给它的是 ``(B,128,T)`` ✓（``latent_shape`` 已认 3 维 ✓）；
+           万一上游塞了 ``(B,1,128,T)`` ✓，这里**只**允许这一种 4 维形态并当场压平 ✓；
+        ③ **反缩放 = 恒等** ✓：交给 :func:`vae_music3.decode_latents` ✓（它会自己核
+           ``latent_formats.minimax_music3.scale_factor`` 还是不是 1.0 ✓ —— 有人改成 0.3611
+           那里就当场报错 ✓，不静默出一段音量偏差 3 倍的声音 ✓✗）。
+        """
+        self._gate()
+        torch = self._torch()
+        from app.services.engine import vae_music3 as vae_music3_mod  # noqa: PLC0415
+
+        spec = self._vaeConfig
+        want_ch = int(getattr(spec, "latent_channels", 0) or 0)
+        if not want_ch:
+            raise TorchBackendUnavailable(
+                "``music3-real`` 缺**通道事实** ✗（``_vaeConfig.latent_channels`` 没记下来 ✓）"
+                "　⇒ 重挂一次 ``attach_music3_dav()`` ✓", reason="pending")
+        shape_note = ""
+        if latents.dim() == 4:
+            if int(latents.shape[1]) != 1:
+                raise TorchBackendUnavailable(
+                    f"Music3 的潜变量是 3 维 ✗（``(B,{want_ch},T)`` ✓），现在是 {tuple(latents.shape)} ✓"
+                    " —— 4 维只放过 ``(B,1,C,T)`` 这一种空维形态 ✓", reason="pending")
+            latents = latents[:, 0]
+            shape_note = "（4 维 `(B,1,C,T)` 已压平成 3 维 ✓）"
+        if latents.dim() != 3:
+            raise TorchBackendUnavailable(
+                f"Music3 的潜变量要 3 维 ✗（``(B,{want_ch},T)`` ✓），现在是 "
+                f"{tuple(latents.shape)} ✓", reason="pending")
+        if int(latents.shape[1]) != want_ch:
+            raise TorchBackendUnavailable(
+                f"Music3 潜变量通道 {int(latents.shape[1])} ✗ ≠ DAV 的 {want_ch} ✓"
+                f"（{tuple(latents.shape)} ✓）—— 这一族是**音频**潜变量 ✓，拿视频那套解出来的"
+                "是 64 通道的空间图 ✓✗", reason="pending")
+        wave = vae_music3_mod.decode_latents(self._vae, latents)
+        #: ⚠️ 回落值**只能**取 ``MUSIC3_DAV_FACTS["sampleRate"]`` ✓✗（2026-11-06 首次真跑：
+        #: 这里写过 ``vae_music3_mod.SAMPLE_RATE`` ✓ —— 那个名字**从来不存在** ✓，
+        #: 于是整条解码在最后一步炸成 AttributeError ✓，前面四环全绿也救不回来 ✓）。
+        rate = int(getattr(spec, "sample_rate", 0)
+                   or vae_music3_mod.MUSIC3_DAV_FACTS["sampleRate"])
+        channels = int(wave.shape[1])
+        samples = int(wave.shape[-1])
+        seconds = float(samples) / float(rate)
+        return {
+            "frames": None,
+            "audioWaveform": wave[0] if int(wave.shape[0]) == 1 else wave,
+            "sampleRate": rate,
+            "audioChannels": channels,
+            "audioSamples": samples,
+            "audioSeconds": seconds,
+            "real": True,
+            "vae": "music3-real",
+            "note": (
+                f"**真** Music3 DAV ✓：{int(latents.shape[1])} 通道 × {int(latents.shape[-1])} 潜帧 ✓"
+                f" ⇒ {channels} 声道 × {samples} 样本 ✓（{seconds:.2f} 秒 @ {rate} Hz ✓、"
+                f"反缩放**恒等** ✓）{shape_note}"),
+        }
+
     def decode(self, latents: Any, plan: Any, request: Any) -> dict[str, Any]:
         """**VAE 解码**（挂了 VAE ✓）或只回真张量事实（没挂 ✓）—— 都如实标注 ✓。
 
@@ -4459,8 +7155,41 @@ class TorchBackend:
         if isinstance(latents, dict) and "video" in latents and "audio" in latents:
             return self._decode_dual(latents)
         if self._vae is not None:
+            #: ⚠️ **解码前的口径对账** ✓✗（2026-11-01 ✓）：DiT 族的潜空间口径 与 已挂 VAE 的
+            #: 反缩放口径 必须同族 ✓ —— 16ch 的 ``wan21`` 与 16ch 的 ``qwen_image`` **形状完全相同** ✓、
+            #: 只差 mean/std ✓⇒ 挂错了 ⇒ 图整体偏色/发灰 ✓、形状全对 ✓、一个错都不报 ✓✗。
+            #: 未知（族没表态 / 老路 VAE / 名字不在表里）⇒ 不拦 ✓，但那是"没检查"✓✗ 不是绿灯 ✓。
+            _vae_format: str | None = None
+            if self._vaeKind == "flux-real":
+                _vae_format = dit_build.contract_of("flux").latent_format
+            elif self._vaeKind == "wan21-real" and self._vaeLatents:
+                _vae_format = self._vaeLatents[2]
+            elif self._vaeKind == "h3-real":
+                #: ⚠️ H3 的骨架不走装配表 ✓，但它的口径**是知道的** ✓（`latent_formats.h3_video` ✓）
+                #: ⇒ 从 :func:`dit_build.latent_format_of` 取 ✓，别因为"不在 BUILDERS"就整条跳过 ✗✗。
+                _vae_format = dit_build.latent_format_of("h3")
+            elif self._vaeKind == "seedvr2-real":
+                #: ⚠️ 这一族**必须在表里** ✓（它是 `BUILDERS["seedvr2"]` 的正牌装配族 ✓）——
+                #: 与 Wan 的 16ch 形状完全相同、只差 ``× 0.9152`` 那一格 ✓ ⇒ 挂错族**不报错**、
+                #: 只是整片偏亮发糊 ✓✗。对账走契约里的规范名 ✓（`latent_formats.SeedVR2` ✓）。
+                _vae_format = dit_build.contract_of("seedvr2").latent_format
+            elif self._vaeKind == "music3-real":
+                #: ⚠️ 音频族也要对账 ✓：它只有 **128 通道 × T** ✓，形状上与任何视频族都不像 ✓，
+                #: 但对账是**便宜且不需要额外知识**的一步 ✓ —— 留着它，才有"挂错族当场拒" ✓。
+                _vae_format = dit_build.contract_of("music3").latent_format
+            _mismatch = dit_build.latent_format_problem(getattr(self, "_ditFamily", None), _vae_format)
+            if _mismatch:
+                raise TorchBackendUnavailable(_mismatch, reason="attach")
+            #: ⭐ **Music3 在口径对账之后立刻分出去** ✓（2026-11-06 ✓）：下面整段是**视频**口径
+            #: （``frames``/``frameCount``/``fps`` ✓），音频没有一样对得上 ✓✗。
+            if self._vaeKind == "music3-real":
+                return self._decode_music3(latents)
             torch = self._torch()
             alpha_dropped = False
+            #: 省显存旋钮这一拍**实际**用了什么 ✓✗（``None`` ⇒ 全关、逐位那条路 ✓）。
+            #: 只有 ``wan21-real``（空间 tile / attn chunk ✓）与 ``seedvr2-real``（时间分块 ✓）
+            #: 会写它 ✓（别的族没有这些旋钮 ✓ —— 不在这里假装有 ✗）。
+            tiling_note: dict[str, Any] | None = None
             if self._vaeKind == "flux-real":
                 # ⚠️ 真 Flux VAE **必须**走 ``decode_latents`` ✗（内部先 `(latents − shift)/scale` ✓）
                 #    —— 直接 ``self._vae.decode`` 会跳过 0.3611/0.1159 ✓✗：形状全对 ✓、图发灰 ✓、
@@ -4481,17 +7210,163 @@ class TorchBackend:
                         "　⇒ 重挂一次 ``attach_wan_vae()`` ✓；⚠️ 别拿恒等换算顶上 ✗✗"
                         "（解码照跑、图发灰、不报错 ✓✗）", reason="pending")
                 latents_mean, latents_std, family = self._vaeLatents
-                with torch.no_grad():
-                    frames = vae_wan_mod.decode_latents(
-                        self._vae, latents, family=family,
-                        mean=latents_mean, std=latents_std, to_unit=False)
+                #: ⭐ 两个省显存旋钮 ✓✗（2026-11-02 ✓）：**默认全关** ✓ ⇒ ``tile=None`` 走旧路径 ✓、
+                #: 逐位不变 ✓。开了才改数值 ✓（见 :meth:`set_vae_tiling` 的两条实测差 ✓）。
+                #: ⚠️ ``fallback`` 只在**真 OOM** 时降档重试 ✓ —— 不预先降档 ✗：那个画布明明
+                #: 装得下的时候（实测 2048×1536 要 20.96 GiB / 卡 22.49 ✓）悄悄分块就是白掉质量 ✓✗。
+                _knobs = dict(self._vaeTiling)
+                _tile, _halo, _chunk = _knobs["tile"], _knobs["halo"], _knobs["attnChunk"]
+
+                def _decode(tile, halo, chunk):
+                    with torch.no_grad():
+                        return vae_wan_mod.decode_latents(
+                            self._vae, latents, family=family,
+                            mean=latents_mean, std=latents_std, to_unit=False,
+                            tile=tile, halo=halo, attn_chunk=chunk)
+
+                try:
+                    frames = _decode(_tile, _halo, _chunk)
+                    if _tile is not None or _chunk is not None:
+                        tiling_note = {"tile": _tile, "halo": _halo, "attnChunk": _chunk,
+                                       "reason": "configured"}
+                except RuntimeError as exc:
+                    #: ⚠️ 只接**显存**这一种 ✗（:func:`_is_oom` ✓）：别的错降档也救不了 ✓，
+                    #: 盖上"已降档"反而把真 bug 埋掉 ✓✗。
+                    if not (_knobs["fallback"] and _is_oom(exc)
+                            and (_tile is None or _chunk is None)):
+                        raise
+                    #: 先腾地方再重试 ✓ —— 这一拍 ``latents`` 还活着 ✓，不腾会**同一处**再 OOM ✓✗。
+                    frames = None
+                    self._trim_cuda()
+                    _tile = _tile or vae_wan_mod.SUGGESTED_TILE
+                    _chunk = _chunk or vae_wan_mod.SUGGESTED_ATTN_CHUNK
+                    try:
+                        frames = _decode(_tile, None, _chunk)
+                    except RuntimeError as retry_exc:
+                        if not _is_oom(retry_exc):
+                            raise
+                        raise TorchBackendUnavailable(
+                            f"VAE 解码**显存仍不够** ✗：已降到 ``tile={_tile}`` + "
+                            f"``attn_chunk={_chunk}`` 仍 OOM ✓（原报错：{exc} ✓）"
+                            f"　⇒ 这次画布是真的超了 ✓ —— 降分辨率，别去降精度/压 cfg ✗✗",
+                            reason="resource") from retry_exc
+                    tiling_note = {"tile": _tile, "halo": None, "attnChunk": _chunk,
+                                   "reason": "oom", "error": str(exc)[:200]}
                 # ⚠️ 这族的 ``head`` 出 **4 通道 RGBA** ✓✗（2026-10-31 实测：`media.write_image`
                 #    只认 ``(B,3,H,W)`` ⇒ 落盘那一步才炸 ✓，报得还像"形状给错了" ✓✗）。
                 #    第 4 通道是 alpha ✓，出图**必须丢** ✓ —— `decode_latents` 保留它只是为了把
                 #    「4 通道」这个族事实留在张量上 ✓，投影到 RGB 是**这一步**的职责 ✓。
+                #: ⚠️ 但**不是每个 wan21-real 的 head 都是 4 通道** ✗（2026-11-01 ✓）：Krea2 用的
+                #: ``qwen_image_vae`` 是 **3 通道** ✓ ⇒ 判据只能是**实测通道数** ✓（写死族名 ⇒
+                #: 把 3 通道当 4 通道丢第一个通道 ⇒ 图变红蓝错位 ✓✗、不报错 ✓）。
                 alpha_dropped = int(frames.shape[1]) == 4
                 if alpha_dropped:
                     frames = frames[:, :3]
+                real = True
+            elif self._vaeKind == "seedvr2-real":
+                # ⚠️ 同理 ✗：这一族**必须**走 ``decode_latents`` ✓（内部先 ``÷ 0.9152`` 回 VAE 空间 ✓）
+                #    —— 直接 ``self._vae.decode`` 会把**模型空间**潜变量当 VAE 空间解 ✓✗：
+                #    形状全对 ✓、整片偏亮发糊 ✓、一个错都不报 ✓✗（见 `vae_seedvr2` 模块头 ✓）。
+                #    输出是 **[-1, 1]** ✓（与 Wan 同口径 ✓，落盘那一步再投影 ✓）。
+                from app.services.engine import vae_seedvr2 as vae_seedvr2_mod  # noqa: PLC0415
+                #: ``temporalChunk`` 只在这一族有效 ✓（它是**解码器调用级**的时间切块 ✓，
+                #: 每块带块外真实上文 ⇒ 结果与整段相等 ✓，不是拿数值换显存 ✓）。
+                _knobs = dict(self._vaeTiling)
+                _temporal_chunk = _knobs["temporalChunk"]
+                #: 显式配过就不自降 ✓（创作者点名要的档位，慢也该照办 ✓，只如实回报 ✓）；
+                #: 但**上一轮自己降下来的**不算显式 ✓✗ —— 那条还得能继续降 ✓。
+                _explicit = (_temporal_chunk is not None
+                             and _temporal_chunk != self._vaeAutoChunk)
+                #: 溢出探测：``reserved > 物理显存`` ＝ 驱动已经把一部分落到**主机内存** ✓✗
+                #: （Windows 的 sysmem fallback ✓）—— 这一步**不会**报 OOM ✓，只会慢到 28 倍 ✓。
+                _can_probe = bool(torch.cuda.is_available()) and (
+                    self._device_torch().type == "cuda")
+                _card_bytes = (torch.cuda.get_device_properties(
+                    torch.cuda.current_device()).total_memory if _can_probe else 0)
+                if _can_probe:
+                    if self._vaeSpilled:
+                        #: 上一轮把块散到主机内存了 ✓ ⇒ 开跑前先还 ✓（否则这一轮照样颠簸 ✓✗）。
+                        torch.cuda.synchronize()
+                        self._trim_cuda()
+                        self._vaeSpilled = False
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats()
+
+                def _decode_temporal(chunk: int | None) -> Any:
+                    with torch.no_grad():
+                        return vae_seedvr2_mod.decode_latents(
+                            self._vae, latents, family="seedvr2", to_unit=False,
+                            temporal_chunk=chunk)
+
+                try:
+                    frames = _decode_temporal(_temporal_chunk)
+                    if _temporal_chunk:
+                        tiling_note = {"tile": None, "halo": None, "attnChunk": None,
+                                       "temporalChunk": _temporal_chunk,
+                                       "reason": "configured" if _explicit else "auto",
+                                       "exact": True}
+                except RuntimeError as exc:
+                    #: ⚠️ 这一族的兜底**与 wan21 那族不是一回事** ✓✗：那边降 tile 是**换字节** ✓✗，
+                    #: 这边降的是**时间分块** ⇒ 只降峰值、**不动数值** ✓ ⇒ 兜底不换画质 ✓（
+                    #: 实测 `engine_seedvr2_vae_test` ⑫ 与整段 `≤1e-5` ✓）。这条正是 336 秒 / 47.60 GiB
+                    #: 那次「全程在 OOM 重试里打滚」的**唯一**无损出路 ✓✗。
+                    #: 判据仍只接**真 OOM** ✓（:func:`_is_oom` ✓）：别的错降档救不了 ✓，盖上"已降档"
+                    #: 反而把真 bug 埋掉 ✓✗。
+                    if not (_knobs["fallback"] and _is_oom(exc) and _temporal_chunk is None):
+                        raise
+                    #: ⭐ 不是「降一档就收工」✗✗：峰值 ≈ 与**每块像素帧数**（``4L``）成正比 ✓，
+                    #: 而 ``SUGGESTED_TEMPORAL_CHUNK=4`` 在 720×480 这种真分辨率下**自己就可能不够** ✓
+                    #: （一块 17 像素帧 ≈ 19 GiB ✓）。所以按 :func:`vae_seedvr2.chunk_ladder` 一档档减半 ✓，
+                    #: 每档都先腾地方 ✓ —— 这一拍 ``latents`` 还活着 ✓，不腾会**同一处**再 OOM ✓✗。
+                    frames = None
+                    _trail: list[int] = []
+                    for _step in vae_seedvr2_mod.chunk_ladder():
+                        self._trim_cuda()
+                        try:
+                            frames = _decode_temporal(_step)
+                        except RuntimeError as retry_exc:
+                            if not _is_oom(retry_exc):
+                                raise
+                            _trail.append(_step)
+                            continue
+                        _temporal_chunk = _step
+                        break
+                    if frames is None:
+                        raise TorchBackendUnavailable(
+                            f"SEEDVR2 解码**显存仍不够** ✗：``temporalChunk`` 已试遍 "
+                            f"{_trail} 潜帧（最后是 1，一块只 1 像素帧 ✓）仍 OOM ✓"
+                            f"（原报错：{exc} ✓）"
+                            f"　⇒ 这次是真的超了 ✓ —— 降像素帧数/分辨率，别去降精度 ✗✗"
+                            f"（修复族的输出分辨率就是交付物 ✓）",
+                            reason="resource") from exc
+                    tiling_note = {"tile": None, "halo": None, "attnChunk": None,
+                                   "temporalChunk": _temporal_chunk, "reason": "oom",
+                                   "exact": True, "error": str(exc)[:200],
+                                   "tried": [*_trail, _temporal_chunk]}
+                #: ⭐ 溢出（没报 OOM 但 reserved 超过物理显存 ⇒ 已落到主机内存）⇒ **自降一档并记住** ✓：
+                #: 这一次的 231 秒已经花掉了 ✓，不必下次再花一遍 ✓。判据与估算见
+                #: :func:`vae_seedvr2.shrink_for_peak` ✓；显式配置的档位不擅自动 ✓，只回报 ✓。
+                if _can_probe:
+                    _peak = torch.cuda.max_memory_reserved()
+                    _shrunk = vae_seedvr2_mod.shrink_for_peak(
+                        _temporal_chunk or vae_seedvr2_mod.SUGGESTED_TEMPORAL_CHUNK,
+                        _peak, _card_bytes)
+                    if _shrunk is not None:
+                        if not _explicit:
+                            self._vaeTiling["temporalChunk"] = _shrunk
+                            self._vaeAutoChunk = _shrunk
+                        self._vaeSpilled = True
+                        if tiling_note is None:
+                            tiling_note = {"tile": None, "halo": None, "attnChunk": None,
+                                           "temporalChunk": _temporal_chunk,
+                                           "reason": "spill",
+                                           "exact": bool(_temporal_chunk)}
+                        tiling_note["spilled"] = True
+                        tiling_note["peakReservedGiB"] = round(_peak / 2**30, 2)
+                        tiling_note["nextTemporalChunk"] = _shrunk
+                        #: ``applied=False`` ＝ 他点名要的档位，我们只是**建议**降到这个数 ✓✗
+                        #: （没替他改 ✓）—— 读回执的人据此决定要不要改 ✓。
+                        tiling_note["applied"] = not _explicit
                 real = True
             else:
                 with torch.no_grad():
@@ -4501,9 +7376,21 @@ class TorchBackend:
             frame_count = int(frames.shape[2]) if len(tuple(frames.shape)) == 5 else 1
             # ⚠️ 族名要**逐族点名** ✗（此前是二选一 "Flux / 否则 H3" ✓✗ ⇒ 挂了 2.1 的 VAE 也会
             #    被写成 H3 ✓✗，报告里看不出到底哪族解的 ✓）。
-            kind_label = {"flux-real": "Flux ✓",
-                          "wan21-real": "Qwen-Image 2.1（Wan 2.2 layout，64 通道）✓"}.get(
-                              self._vaeKind, "H3 ✓")
+            #: ⚠️ ``wan21-real`` 不再是「2.1 那一个文件」✗（2026-11-01 ✓）：2.1 是
+            #: ``qwen_image_2.1_vae``（64ch ✓）、Krea2 是 ``qwen_image_vae``（16ch ✓）⇒ 标签按
+            #: **实测通道数 + 记下来的 family** 拼 ✓（写死「64 通道」会把 Krea2 的解码说成 2.1 ✓✗）。
+            _wan_label = "Wan layout ✓"
+            if self._vaeLatents:
+                from app.services.engine import vae_wan as vae_wan_mod  # noqa: PLC0415
+                _fam = self._vaeLatents[2]
+                _dim = (self._vaeConfig.z_dim if self._vaeConfig is not None else 0)
+                #: 族名 → 人话标题 ✓（``qwen_image21`` ⇒ 「Qwen-Image 2.1」✓）；
+                #: 没登记的族原样回显 ✓（不猜 ✗）。
+                _wan_label = (f"**{vae_wan_mod.family_title(_fam)}**（Wan layout，{_dim} 通道，"
+                              f"族名 ``{_fam}``）✓")
+            kind_label = {"flux-real": "Flux ✓", "wan21-real": _wan_label,
+                          "seedvr2-real": "SEEDVR2 视频修复 VAE ✓"}.get(
+                self._vaeKind, "H3 ✓")
             return {
                 "synthetic": not real,      # 真张量 ✓ + **真 VAE** ✓ ⇒ 这就是真画面 ✓
                 "note": ("真 torch 张量 + **真 VAE**（"
@@ -4514,6 +7401,9 @@ class TorchBackend:
                          "真 torch 张量 + 参考 VAE ✓，但 VAE **未经训练** ✗ ⇒ 画面是噪声 ✓"
                          "（验的是管道 ✓；接真权重后这里换成训练好的 VAE ✓）"),
                 "vaeKind": self._vaeKind,
+                #: 省显存旋钮的**实际**用法 ✓✗（``None`` ⇒ 全关、逐位 ✓；非空 ⇒ 产物字节会变 ✓）。
+                #: ⚠️ 必须跟着回执走 ✗：开了却说"没开" ⇒ 复现不出同一张图时无从判断原因 ✓✗。
+                "vaeTiling": tiling_note,
                 "frames": frames, "frameCount": frame_count,
                 "shape": list(frames.shape), "dtype": str(frames.dtype),
                 "device": str(frames.device), "vaeConfig": self._vaeConfig.to_dict()
@@ -4526,6 +7416,82 @@ class TorchBackend:
             "shape": list(latents.shape), "dtype": str(latents.dtype), "device": str(latents.device),
             "norm": round(float(latents.norm()), 6),
             "preview": [round(float(value), 4) for value in latents[:8].tolist()],
+        }
+
+    def encode_pixels(self, pixels: Any, plan: Any = None, *,
+                      pixel_range: str = "minus_one_to_one") -> dict[str, Any]:
+        """**像素 → 潜变量** ✓ —— SEEDVR2 修复链的**入口一步** ✓（见 :mod:`vae_seedvr2` ✓）。
+
+        为什么需要它 ✗（不能拿 :meth:`decode` 反着调 ✓）：编码器**不是**解码器的镜像入口 ✓ ——
+        出 **32** 通道（16 均值 + 16 logvar ✓）、要**取前 16** ✓、且没有 ``quant_conv`` ✓。
+        直接 ``self._vae.encode`` ✗ 会漏掉 ``× 0.9152`` ✓✗（形状全对 ✓、潜变量整体小一圈 ✓、
+        修完画面发灰 ✓、一个错都不报 ✓✗）。
+
+        ⚠️ **只**给 ``seedvr2-real`` ✓（本仓五族真 VAE 里只有它在链路上需要「像素进」✓）：
+        - ``flux-real`` / ``wan21-real`` 是**出图**那一侧 ✓（像素由 DiT 直接给 ✓）；
+        - ``h3-real`` 双流要音频侧（:meth:`_decode_dual` ✓）；
+        - 其余族的「编码」在管线里由「首帧条件图」另走一条 ✓。
+
+        ⚠️ **像素口径**（``pixel_range`` ✓，写错同样"不报错只是整片偏灰" ✓✗）：
+        ``"minus_one_to_one"``（默认 ✓，与 :meth:`decode` 的输出**同口径** ✓ ⇒ 往返自洽 ✓）
+        / ``"zero_to_one"``（8bit 帧的 [0,1] 归一 ✓，这里替你 ``×2−1`` ✓）。**别**自己先乘一半 ✗。
+
+        ⚠️ **帧数必须 4n+1** ✓（时间 ÷4 ＋ 因果补边 ✓）：不合规 ⇒ :mod:`vae_seedvr2` 当场拒
+        并给最近两个合法值 ✓（**别**在这里替调用方补帧 ✗ —— 补边会不会进 mask、动的是哪条时间轴，
+        是**修链**该决定的事 ✓）。
+        """
+        self._gate()
+        if self._vaeKind != "seedvr2-real" or self._vae is None:
+            raise TorchBackendUnavailable(
+                f"``encode_pixels`` **只**给 ``seedvr2-real`` 用 ✗（当前 VAE："
+                f"``{self._vaeKind or '未挂'}`` ✓）—— 修复链的入口一步要 SEEDVR2 的 VAE ✓"
+                f"（``vae/SEEDVR2/ema_vae_fp16.safetensors`` ✓）：先 ``attach_seedvr2_vae(path)`` ✓；"
+                f"⚠️ 别拿 Wan/Flux 的 VAE 顶替 ✗✗：形状（16ch / 8×）**一样** ✓、"
+                f"只差 ``× 0.9152`` 与 32→16 取均值 ✓ ⇒ 跑得下去、潜变量整体不对 ✓✗",
+                reason="attach")
+        #: ⚠️ 与 :meth:`decode` 同一条设备纪律 ✓：[0,1] 帧常在 CPU 上拼 ✓、
+        #: VAE 在 `self._device` 上 ✓ ⇒ 混设备必炸 ✗，报错还是那串 `aten::` ✗。
+        self._require_own_device("encode_pixels", pixels=pixels)
+        if pixel_range not in ("minus_one_to_one", "zero_to_one"):
+            raise TorchBackendUnavailable(
+                f"``pixel_range`` 只认 ``minus_one_to_one`` / ``zero_to_one`` ✗"
+                f"（收到 {pixel_range!r} ✓）—— 别自己先做半程归一 ✗", reason="pending")
+        torch = self._torch()
+        from app.services.engine import vae_seedvr2 as vae_seedvr2_mod  # noqa: PLC0415
+
+        if not hasattr(pixels, "dim") or int(pixels.dim()) != 5:
+            raise TorchBackendUnavailable(
+                f"``encode_pixels`` 要 **(B,3,T,H,W)** 的 5D 帧批 ✗（收到形状 "
+                f"{tuple(getattr(pixels, 'shape', ()))} ✓）—— 单帧 4D 也要先补 T=1 ✓"
+                f"（但 T=1 合法 ✓：1 = 4·0+1 ✓）", reason="pending")
+        frames = int(pixels.shape[2])
+        #: 帧号铁律在这儿先问一遍 ✓（不合规 ⇒ 人话拒绝并给最近合法值 ✓，见 `latent_frames` ✓）。
+        latent_frames = vae_seedvr2_mod.latent_frames(frames, self._vaeConfig)
+        work = pixels.to(self._device)
+        if pixel_range == "zero_to_one":
+            work = work.mul(2).sub(1)
+        with torch.no_grad():
+            latents = vae_seedvr2_mod.encode_latents(self._vae, work, family="seedvr2").float()
+        #: ⚠️ 回的是**模型空间**潜变量 ✓（已 ×0.9152 ✓，与 DiT 的输入同口径 ✓）——
+        #: 调用方**别**再乘一次 ✗（`:meth:`decode` 会再 ÷ 回来 ✓✗）。
+        return {
+            "latents": latents,
+            "modelSpace": True,
+            "vaeKind": self._vaeKind,
+            "scaleFactor": float(self._vaeConfig.scale_factor)
+            if self._vaeConfig is not None else None,
+            "shape": list(latents.shape),
+            "dtype": str(latents.dtype),
+            "device": str(latents.device),
+            "frames": frames,
+            "latentFrames": latent_frames,
+            "spatialScale": int(getattr(self._vaeConfig, "spatial_scale", 0)),
+            "temporalScale": int(getattr(self._vaeConfig, "temporal_scale", 0)),
+            "pixelRange": pixel_range,
+            "note": (f"像素 → 潜变量 ✓（真 SEEDVR2 VAE ✓，{frames} 帧 ⇒ {latent_frames} 潜帧 ✓ "
+                     f"＝ 4n+1 ✓；已按 ×{float(self._vaeConfig.scale_factor):.4f} 进模型空间 ✓ "
+                     f"—— 调用方**别**再乘一次 ✗；解回像素走 ``decode`` ✓ 会自动 ÷ 回来 ✓）")
+            if self._vaeConfig is not None else "像素 → 潜变量 ✓（真 SEEDVR2 VAE ✓）",
         }
 
     def write(self, outputs: dict[str, Any], plan: Any, request: Any) -> dict[str, Any]:
@@ -4562,13 +7528,41 @@ class TorchBackend:
             target = where / f"video_seed{int(request.seed)}.mp4"
             report = media_mod.write_video(frames, target, fps=int(plan.fps or 24),
                                            value_range="-1..1")
+            # ⚠️ 2026-11-01 修 ✗✗（接 SEEDVR2 修复线时踩到 ✓）：这里原先把 ``synthetic=True``
+            #    与「画面来自**未训练**的参考 VAE ✗」**写死** ✓ —— 5 维帧此前只可能来自参考 VAE ✓，
+            #    接上真视频 VAE（SEEDVR2 ``seedvr2-real`` ✓）之后这句话就成了假证 ✓✗：
+            #    手里握着**真 VAE 解码**的成品像素 ✓，落盘回执却说"噪声" ✓（教训与 4 维 PNG 那次
+            #    同形 ✓：`synthetic` 必须由**产出方**（`decode`）说了算 ✓，不在这里替它表态 ✓）。
+            synthetic = bool(outputs.get("synthetic", True))
+            #: ⚠️ 2026-11-04 修 ✗✗（H3 端到端实测踩到 ✓）：``synthetic`` 是**画面 ∧ 音频**的合取 ✓
+            #    （见 `_decode_dual` ✓），而这里原先把 ``synthetic`` 直接当成"画面的成色"来写话 ✓✗ ——
+            #    于是 H3 **视频侧已经是真 VAE**（``vaeKind="h3-real"`` ✓、24ch/16×/4× ✓）、
+            #    只有**音频侧**还没真件（``audioVaeKind="reference-untrained"`` ✓）时，
+            #    落盘回执照样写「画面来自未训练的参考 VAE」✗ —— **画面这半句是假证** ✓✗。
+            #    口径：各自按**各自的 kind** 表态 ✓（都是 REAL_VAE_KINDS 才算真 ✓），
+            #    不替任何一侧代言 ✓；`synthetic` 本身仍原样透传 ✓（它是合取、不会被这句改 ✓）。
+            vae_kind = str(outputs.get("vaeKind") or "")
+            audio_kind = str(outputs.get("audioVaeKind") or "")
+            video_real = vae_kind in self.REAL_VAE_KINDS
+            audio_real = audio_kind in self.REAL_VAE_KINDS
+            picture_note = (
+                (f"，画面来自**真 VAE 解码** ✓（`{vae_kind}` ✓）" if vae_kind else
+                 "，画面来自**真 VAE 解码** ✓") if video_real else
+                ("，画面来自**未训练**的参考 VAE ✗" if vae_kind else
+                 "，画面来自**没挂 VAE** 的占位解码 ✗"))
+            if waveform is not None:
+                sound_note = (
+                    (f"；音频来自**真音频 VAE** ✓（`{audio_kind}` ✓）" if audio_kind else
+                     "；音频来自**真音频 VAE** ✓") if audio_real else
+                    "；音频仍是**参考实现**的噪声 ✗（`synthetic` 因此为 True ✗ —— 与画面无关 ✓）")
+            else:
+                sound_note = ""
             result: dict[str, Any] = {
-                # ⚠️ 文件是真的 ✓ 但内容仍是**未训练 VAE** 的产物 ✗ ⇒ `synthetic` 保持 True ✓
-                "synthetic": True, "realTensors": True, "realFile": True,
+                "synthetic": synthetic, "realTensors": True, "realFile": True,
                 "videoPath": str(target), "primaryPath": str(target),
                 "video": report,
                 "artifacts": [{"kind": "video", "path": str(target), "bytes": report["bytes"]}],
-                "note": "**真 mp4** ✓（ffprobe 可复核 ✓），但画面来自**未训练**的参考 VAE ✗",
+                "note": "**真 mp4** ✓（ffprobe 可复核 ✓）" + picture_note + sound_note,
             }
             if waveform is not None:
                 # ⚠️ 双流：音频**单独落 wav** ✓（真 16-bit PCM ✓ 标准库 ✓）—— 不塞进 mp4 ✗：
@@ -4586,6 +7580,25 @@ class TorchBackend:
                 result["note"] = (str(result["note"])
                                   + "＋ **真 wav** ✓（同一份音频的两条各自落盘 ✓）")
             return result
+        if waveform is not None and hasattr(waveform, "shape"):
+            #: ⭐ **纯音频**（Music3 ✓，2026-11-06 补 ✗✗）：上面两条都是"有画面"的分支 ✓ ——
+            #: 音频族**没有帧** ✓（``decode`` 的 ``frames`` 是 ``None`` ✓），于是此前会一路掉到
+            #: 最后的 JSON 清单 ✓✗：VAE 真解出了波形 ✓、回执照样写"占位产物 ✗" ✓、盘上只有一个
+            #: ``torch_stub_seed*.json`` ✓ —— 与 4 维 PNG 那次（Z-Image ✓）是**同一个坑** ✓✗。
+            #: ⚠️ 顺序必须**在** 5 维之后 ✓：H3 双流是 5 维 ＋ 音频 ✓，它要的是 mp4 ＋ 另落 wav ✓。
+            target = where / f"audio_seed{int(request.seed)}.wav"
+            rate = int(outputs.get("sampleRate") or 44100)
+            report = media_mod.write_wav(waveform, target, sample_rate=rate)
+            synthetic = bool(outputs.get("synthetic", True))
+            return {
+                "synthetic": synthetic, "realTensors": True, "realFile": True,
+                "audioPath": str(target), "primaryPath": str(target), "audio": report,
+                "artifacts": [{"kind": "audio", "path": str(target), "bytes": report["bytes"]}],
+                "note": ("**真 wav** ✓（" + ("真 DAV ✓ ⇒ 这就是成品音频 ✓" if not synthetic
+                                             else "DAV 未接 ✗ ⇒ 只是占位波形 ✓")
+                         + f"；{int(outputs.get('audioSamples') or 0)} 样本 @ {rate} Hz ✓"
+                         + "；这一族**没有画面** ✓ —— 不要拿 ``primaryUrl`` 当视频用 ✗✗）"),
+            }
         target = where / f"torch_stub_seed{int(request.seed)}.json"
         target.write_text(json.dumps({
             "synthetic": True,

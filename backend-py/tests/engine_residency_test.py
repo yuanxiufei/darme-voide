@@ -336,6 +336,136 @@ def case_budget_from_cuda() -> None:
         check("没卡 ⇒ 预算 0（不许瞎猜一个数）", budget == 0, budget)
 
 
+def case_reserve_by_kind() -> None:
+    """⑥ 余量**按件**给 ✓✗（2026-11-01 加 ✓）—— 25% 一刀切把文本塔白扔 4.8 GiB 的那条。
+
+    判据四件：
+      ① DiT 仍是 25%（它的激活真能到十几 GiB，**不许**被这次改动动到 ✓✗）；
+      ② 文本塔 / VAE 的余量**明显更小**（激活只有 0.1–0.4 GiB ✓）；
+      ③ 不认识的件类型退回 25%（认不出就往保守那侧倒 ✓，宁可慢不许 OOM）；
+      ④ 落到真实数字上：同一张卡，文本塔按 ``kind="te"`` 能上卡的字节**必须更多** ✓。
+    """
+    check("⑥ 余量：DiT 仍是 25%（大激活那族不许被这次改动动到）",
+          r.reserve_for("dit") == r.DEFAULT_RESERVE, r.reserve_for("dit"))
+    check("⑥ 余量：文本塔/VAE 明显小于 25%（激活只有 0.1–0.4 GiB）",
+          r.reserve_for("te") <= 0.06 and r.reserve_for("vae") <= 0.06,
+          (r.reserve_for("te"), r.reserve_for("vae")))
+    check("⑥ 余量：不认识的件类型**退回** 25%（认不出就往保守侧倒）",
+          all(r.reserve_for(name) == r.DEFAULT_RESERVE
+              for name in (None, "", "unknown-part", "h3-text")),
+          [r.reserve_for(name) for name in (None, "unknown-part", "h3-text")])
+    # ④ 同一批组、同一张卡：``te`` 那一档必须切出**更多**卡上字节（这是这次改动的目的 ✓）
+    probe = _Tiny(dim=16, depth=3)
+    groups = r.survey(probe)
+    if HAS_CUDA:
+        dit_budget = r.budget_from_cuda(torch, reserve=r.reserve_for("dit"))
+        te_budget = r.budget_from_cuda(torch, reserve=r.reserve_for("te"))
+        check("⑥ 文本塔的预算**大于** DiT 的（余量小 ⇒ 能用的显存多）",
+              te_budget > dit_budget, (_bytes(te_budget), _bytes(dit_budget)))
+        check("⑥ `plan` 在 te 预算下卡上字节 ≥ DiT 预算下（切分数学跟着预算走 ✓）",
+              r.plan(groups, te_budget).gpu_bytes >= r.plan(groups, dit_budget).gpu_bytes,
+              (r.plan(groups, te_budget).gpu_bytes, r.plan(groups, dit_budget).gpu_bytes))
+        # 25.44 GiB 的 H3 文本塔：按 25% 只上卡 61%，按 5% 应到 75% 以上 ✓（这条是这次改动的账）
+        need = int(25.44 * 2**30)
+        huge = [r.Group(name=f"layers.{i}", nbytes=need // 40, layers=1) for i in range(40)]
+        old_share = r.plan(huge, dit_budget).gpu_bytes / need
+        new_share = r.plan(huge, te_budget).gpu_bytes / need
+        check("⑥ 25.44 GiB 的塔：按 DiT 余量只上卡 <65%，按文本塔余量 ≥75%",
+              old_share < 0.65 <= new_share, (round(old_share, 3), round(new_share, 3)))
+    import inspect  # noqa: PLC0415 —— 只在判签名时用 ✓
+    params = inspect.signature(r.place).parameters
+    check("⑥ `place(kind=)`/`reserve=` 都是可选且默认 None ⇒ 老调用方行为零变化",
+          params["kind"].default is None and params["reserve"].default is None,
+          {name: params[name].default for name in ("kind", "reserve")})
+
+
+def case_budget_decompose() -> None:
+    """⑦ 预算**拆成三段** ✓✗（2026-11-02 加 ✓，口径取自 `src/plan/planner.cpp`）。
+
+    判据盯六件：
+
+      ① 三段加起来**必须是**那个数 ✓✗（分解不许凭空多一字节或少一字节 ✓）；
+      ② ``reserve=0`` ⇒ 余量 **0** ✓（"我明确不要余量"不许被下限偷偷改掉 ✓✗）；
+      ③ 比例缩没时（小卡 × 小件档）**补下限** ✓（30 MiB 的余量等于没留 ✓✗）；
+      ④ ``fixed_bytes`` 只扣 ``effective`` ✓、不动 ``margin`` ✓（两件事分开报才有用 ✓）；
+      ⑤ 「切分救不了」与「没有显存」是**两个布尔** ✓✗（``refused`` 只在前者置真 ✓）；
+      ⑥ 新参数默认值 ⇒ 老调用方零变化 ✓（这一条决定这次改动能不能合 ✗✗）。
+    """
+    import inspect  # noqa: PLC0415 —— 只在判签名/薄壳时用 ✓
+
+    usable = 20 * 2**30
+    dit = r.decompose(usable, kind="dit")
+    check("⑦ 分解：usable ＝ margin ＋ fixed ＋ effective（不多不少一字节）",
+          dit.margin + dit.fixed + dit.effective == dit.usable, dit.to_dict())
+    check("⑦ 分解：dit 25% ⇒ 余量 5 GiB、真正能给权重 15 GiB",
+          (dit.margin, dit.effective) == (5 * 2**30, 15 * 2**30), dit.to_dict())
+
+    zero = r.decompose(usable, reserve=0.0)
+    check("⑦ reserve=0 ⇒ 余量 0（下限不许偷偷改掉调用方的决定）",
+          (zero.margin, zero.effective) == (0, usable), zero.to_dict())
+
+    tiny = r.decompose(600 * 2**20, kind="te")
+    check("⑦ 小卡按 5% 只有 30 MiB ⇒ 补到下限 256 MiB（余量不许等于没留）",
+          tiny.margin == r.MIN_MARGIN_BYTES and tiny.effective == 600 * 2**20 - r.MIN_MARGIN_BYTES,
+          tiny.to_dict())
+
+    fixed = r.decompose(usable, kind="dit", fixed_bytes=2 * 2**30)
+    check("⑦ fixed 只扣 effective、不动 margin（余量 5 ＋ 钉死 2 ＋ 权重 13）",
+          (fixed.margin, fixed.fixed, fixed.effective)
+          == (5 * 2**30, 2 * 2**30, 13 * 2**30), fixed.to_dict())
+
+    probe = _Tiny(dim=16, depth=3)
+    groups = r.survey(probe)
+    non_layer = sum(g.nbytes for g in groups if not g.is_layer)
+    refused = r.plan(groups, non_layer - 1)
+    check("⑦ 连非层参数都放不下 ⇒ refused=True 且 fits=False（切分真救不了）",
+          refused.refused is True and refused.fits is False,
+          (refused.refused, refused.fits, refused.reason))
+    roomy = r.plan(groups, non_layer + 10**9)
+    check("⑦ 正常切分 ⇒ refused=False（不许把「卡上装得少」当成拒绝）",
+          roomy.refused is False and roomy.fits is True, roomy.refused)
+    dead = r.plan(groups, 0)
+    check("⑦ 没有显存 ⇒ fits=False 但 refused=**False**（「去插卡」不是「换档位」）",
+          dead.fits is False and dead.refused is False,
+          (dead.fits, dead.refused, dead.reason))
+    contradictory: BaseException | None = None
+    try:
+        r.Plan(budget=1, on_gpu=(), on_cpu=("a",), gpu_bytes=0, cpu_bytes=1,
+               fits=True, reason="", refused=True)
+    except ValueError as exc:  # noqa: PERF203 —— 就是要抓它 ✓
+        contradictory = exc
+    check("⑦「拒绝」与「切成了」互斥（手写矛盾 Plan 当场拒，不许报告自打脸）",
+          isinstance(contradictory, ValueError), contradictory)
+
+    raised: BaseException | None = None
+    try:
+        r.place(probe, main_device="cpu", budget=non_layer - 1, on_refuse="raise")
+    except r.BudgetRefused as exc:  # noqa: PERF203 —— 就是要抓它 ✓
+        raised = exc
+    check("⑦ on_refuse=\"raise\" ⇒ 真抛 BudgetRefused（不是只写一句 note）",
+          isinstance(raised, r.BudgetRefused), type(raised).__name__)
+
+    lax = r.place(probe, main_device="cpu", budget=non_layer - 1)
+    lax_report = lax.report()
+    check("⑦ 默认 on_refuse=\"cpu\" ⇒ 老行为：照样装、报告里 refused 看得见",
+          lax_report.get("refused") is True and lax_report.get("fits") is False, lax_report)
+
+    explicit = r.place(probe, main_device="cpu", budget=4 * 2**30,
+                       fixed_bytes=1 * 2**30)
+    info = explicit.report().get("budget") or {}
+    check("⑦ 显式预算 ＋ fixed ⇒ 报告给出分解（source=explicit、余量 0、扣完 3 GiB）",
+          info.get("source") == "explicit" and info.get("fixedGiB") == 1.0
+          and info.get("effectiveGiB") == 3.0 and info.get("reserve") == 0.0, info)
+
+    params = inspect.signature(r.place).parameters
+    check("⑦ place 新参数默认 0 / \"cpu\" ⇒ 老调用方行为零变化",
+          params["fixed_bytes"].default == 0 and params["on_refuse"].default == "cpu",
+          {name: params[name].default for name in ("fixed_bytes", "on_refuse")})
+    src = inspect.getsource(r.budget_from_cuda)
+    check("⑦ budget_from_cuda 只是薄壳（读数只在 budget_of_cuda 一处，不许各写一份）",
+          "budget_of_cuda" in src and "mem_get_info" not in src, src[:120])
+
+
 def main() -> int:
     case_plan()
     case_layer_names()
@@ -344,6 +474,8 @@ def main() -> int:
     case_no_split_no_hooks()
     case_backend()
     case_budget_from_cuda()
+    case_reserve_by_kind()
+    case_budget_decompose()
     width = max(len(name) for name, _, _ in _RESULTS)
     fails = 0
     for name, ok, detail in _RESULTS:

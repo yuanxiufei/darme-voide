@@ -1,6 +1,6 @@
 """**JoyCaption 自动打标** ✓ —— 模型封装 + 批量打标（LoRAMaster 移植 ✓）。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/dataset_manager/AutoCaptioning.py``
+出处（参考实现 ✓）：``LoRAMaster/dataset_manager/AutoCaptioning.py``
 
 * 量化表 :data:`QUANTIZATION_CONFIGS` —— 第 100~111 行 ✓（``nf4`` 带
   ``llm_int8_skip_modules=["vision_tower", "multi_modal_projector"]`` ✓，见第 265 行 ✓）；

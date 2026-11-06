@@ -104,6 +104,53 @@ _DUAL_STREAM_NOTE = (
     "（本仓不猜取整口径与时间压缩比 ✗ —— 要原生音频就在服务 settings 里显式配上 ✓）"
 )
 
+
+def _image_stage_names() -> str:
+    """五档出图 stage 的**人话清单** ✓（报错文案用 ✓）。
+
+    ⚠️ 这里**不手抄** ✗（``int8_offload`` 漏过一次 ✓）：值从 :mod:`pipeline` 的常量取 ✓。
+    函数内 import ✓ 是因为 bridge 要在业务模块的 import 期保持轻 ✓（不连带引擎的依赖图 ✓）。
+
+    ⚠️ **必须是「运行时装得下的那几档」的同一份清单** ✗✗（2026-11-01 审查抓的 ✓）：
+    本函数原先只列四档（漏 ``qwen_image`` 2512 ✓），而 `runtime.ensure_loaded` 有**五条**
+    出图装配线 ✓ —— 用户选 2512 ⇒ 报错文案里"根本没有这一档"是**假话** ✓✗，
+    等于把「支持但没接线」讲成「不支持」✓✗。清单条数与
+    :func:`chain_stages` 的条数由测试对账 ✓（两边都从 ``pipeline`` 取 ✓，不许各抄一份 ✗）。
+    """
+    from . import pipeline  # noqa: PLC0415
+
+    names = (pipeline.IMAGE_STAGE, pipeline.ZIMAGE_STAGE, pipeline.QWEN21_STAGE,
+             pipeline.QWEN_IMAGE_STAGE, pipeline.KREA2_STAGE)
+    return " / ".join(f"``{name}``" for name in names)
+
+
+def _chain_stages() -> tuple[str, ...]:
+    """**三件套出图链**那几个 stage ✓（DiT ＋ 文本塔 ＋ VAE ✓，2.1 / 2512 / Krea2 另要词表 ✓）。
+
+    ⚠️ 与 `runtime.ensure_loaded` 的装配线**逐条对齐** ✗✗：那边有五条出图线 ✓
+    （SDXL ✓ / Z-Image ✓ / 2.1 ✓ / **2512** ✓ / Krea2 ✓），本函数给出除 SDXL 外的四条 ✓
+    （SDXL 走四件套 ✓、口子不同 ✓）。漏一条的症状是**选那一档直接被拒** ✓✗，
+    而 `runtime` 明明装得下 ✓ —— 「支持但没接线」比"不支持"难查得多 ✓✗。
+    """
+    from . import pipeline  # noqa: PLC0415
+
+    return (pipeline.ZIMAGE_STAGE, pipeline.QWEN21_STAGE,
+            pipeline.QWEN_IMAGE_STAGE, pipeline.KREA2_STAGE)
+
+
+def _wan22_stage() -> str:
+    """**Wan 2.2 I2V** 的 stage 名 ✓（``"wan22"`` ✓，值仍从 ``pipeline`` 取 ✓ 不手抄 ✗）。
+
+    ⚠️ 它**不进** :func:`_chain_stages` ✗✗（那份是「DiT ＋ 文本塔 ＋ VAE」的**出图**三件套 ✓）：
+    Wan2.2 是**首帧 ⇒ 视频** ✓、要**四格**（``ditPath`` 高噪 ＋ ``ditPath2`` 低噪 ＋
+    ``textWeights`` UMT5 ＋ ``imageVaeWeights`` Wan2.1 VAE ✓）、而且请求**必须带首帧** ✓。
+    塞进出图名单 ⇒ 出图服务的 ``allowed`` 白名单会把它当"能出静帧"的档 ✓✗。
+    """
+    from . import pipeline  # noqa: PLC0415
+
+    return pipeline.WAN22_STAGE
+
+
 _CAMEL_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
 
 
@@ -303,6 +350,12 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
     """
     settings = normalize_settings(config)
     wanted = str(stage or VIDEO_STAGE).strip().lower()
+    #: ⚠️ **三件套出图链**（2026-11-01 ✓）：Z-Image / Qwen-Image 2.1 / **Qwen-Image 2512** /
+    #: Krea2 都是「DiT ＋ 文本塔 ＋ VAE」三条权重拼的一条链 ✓（2.1 / 2512 / Krea2 另要词表 ✓）。
+    #: stage 常量从 `pipeline` **取**、不在这里手抄 ✗（``int8_offload`` 漏过一次 ✓）——
+    #: 所以是**函数内** import ✓：bridge 保持轻 ✓（业务模块 import 它时不连带引擎的依赖图 ✓）。
+    chain_stages = _chain_stages()
+
     if wanted == IMAGE_STAGE:
         image_path, _image_source = resolve_sdxl_path(settings)
         assembly: dict[str, Any] = {"stage": IMAGE_STAGE, "dit_path": image_path}
@@ -312,9 +365,41 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
         #    （口径同 :func:`resolve_sdxl_path` ✓：早报早好，别装作能跑 ✓）。
         tokenizer_path, _tokenizer_source = resolve_tokenizer_path(settings)
         assembly["tokenizer_path"] = tokenizer_path
-    else:
+    elif wanted in chain_stages:
+        # ⚠️ **DiT 必须显式给** ✗✗：:func:`resolve_dit_path` 探的是**视频** DiT（fl2va / ref2va ✓），
+        #    拿它填这条链就是「装得进去、跑得出来、结果全错」✓✗（同下面那句 ⚠️ 的理由 ✓）。
+        #    缺 ``ditPath`` ⇒ **不塞这个键** ✓，让 `runtime._ensure_zimage_loaded` /
+        #    `._ensure_qwen21_loaded` / `._ensure_qwen_image_loaded` / `._ensure_krea2_loaded`
+        #    当场拒并点名缺哪格 ✓ —— 在这里猜一个"看起来对"的 DiT 是最贵的省事法 ✗✗。
+        assembly = {"stage": wanted}
+        dit_path = str(settings.get("dit_path") or "").strip()
+        if dit_path:
+            assembly["dit_path"] = dit_path
+    elif wanted == _wan22_stage():
+        # ⭐ **Wan 2.2 I2V**（2026-11-02 ✓）：四格**全部只转手、不补默认** ✗✗ ——
+        #    ⚠️ 尤其**不许**走 :func:`resolve_dit_path` ✗：它探的是 **H3** 的
+        #    ``dit_fl2va_int8`` / ``dit_ref2va_int8`` ✓，那份入口是 16 通道流式 DiT ✓，
+        #    塞给 `_ensure_wan22_loaded` 会在「核 36 通道」那一步被拒 ✓（幸好拒了 ✓）——
+        #    但更糟的是**先在盘上找到了** ⇒ 报错读起来像"权重坏了"而不是"配错了" ✓✗。
+        #    缺格就**不塞这个键** ✓，让 `runtime._ensure_wan22_loaded` 当场点名缺哪几格 ✓。
+        assembly = {"stage": wanted}
+        for key in ("dit_path", "dit_path2"):
+            val = str(settings.get(key) or "").strip()
+            if val:
+                assembly[key] = val
+    elif wanted == VIDEO_STAGE:
         dit_path, _source = resolve_dit_path(settings)
         assembly = {"stage": VIDEO_STAGE, "dit_path": dit_path}
+    else:
+        # ⚠️ 原来这里是 ``else:`` ⇒ 任何**没认过**的 stage 都被**静默改写**成 h3 ✓✗
+        #    （2026-11-01 审查抓的 ✓：``assembly_from_config(cfg, stage="krea2")`` 会返回
+        #    ``stage="h3"`` 外加一份探测出来的**视频** DiT ✓ —— 这比报错危险得多 ✓✗，
+        #    因为它装得进去、跑得出来、出的是「视频首帧」而调用方以为在出图 ✓✗）。现在当场拒 ✓。
+        raise ValueError(
+            f"装配 stage 只认 ``{VIDEO_STAGE}`` / ``{_wan22_stage()}`` / {_image_stage_names()} ✓，"
+            f"收到 {wanted!r} ✗"
+            "（⚠️ 猜错的后果不是报错 ✗，是「装得进去、跑得出来、结果全错」✓✗）"
+        )
 
     tokenizer = str(settings.get("tokenizer_path") or "").strip()
     if tokenizer and not assembly.get("tokenizer_path"):
@@ -351,12 +436,13 @@ def assembly_from_config(config: Mapping[str, Any] | None, *,
     if vae_device:
         assembly["video_vae_device"] = vae_device
 
-    # ⭐ Z-Image / Qwen-Image 2.1 的两格（2026-10-31 ✓）：这两档都是**三份权重**拼的一条链 ✓，
-    #    DiT 走 `ditPath` ✓，另两份各占一格 ✓（2.1 另要 `tokenizerPath` ✓，上面那段一并转手 ✓）。
+    # ⭐ Z-Image / Qwen-Image 2.1 / Qwen-Image 2512 / Krea2 的两格（2026-10-31 ✓）：都是
+    #    **三份权重**拼的一条链 ✓，DiT 走 `ditPath` ✓，另两份各占一格 ✓（2.1 / 2512 / Krea2
+    #    另要 `tokenizerPath` ✓，上面那段一并转手 ✓）。
     #    ⚠️ 这里**只转手、不补默认** ✗✗（盘上同名的 `qwen_3_vl_32b` / `qwen_image_vae` 都不是它们 ✓；
     #    2.1 的 64 通道 VAE 与 `qwen_image_vae` 是**同族不同代** ✓✗）——
-    #    缺格让 `runtime._ensure_zimage_loaded` / `._ensure_qwen21_loaded` 当场拒 ✓
-    #    （拒的时候会说清缺哪个 ✓），比在这里猜一个"看起来对"的路径强得多 ✓✗。
+    #    缺格让 `runtime` 那四条装配线当场拒 ✓（拒的时候会说清缺哪个 ✓），
+    #    比在这里猜一个"看起来对"的路径强得多 ✓✗。
     for key in ("text_weights", "image_vae_weights"):
         val = str(settings.get(key) or "").strip()
         if val and not assembly.get(key):
@@ -703,7 +789,7 @@ async def run_job(request: Any, assembly: Mapping[str, Any], *,
             "对不上就是「装得进去、跑得出来、结果全错」✓✗。\n"
             "  · 怎么修：``assembly_from_config(config, stage=…)`` 与 "
             "``request_from_image_record(…, stage=…)`` 传**同一个**值 ✓"
-            f"（视频 ``{VIDEO_STAGE}`` / 出图 ``{IMAGE_STAGE}`` ✓）。"
+            f"（视频 ``{VIDEO_STAGE}`` / 出图 {_image_stage_names()} ✓）。"
         )
 
     # ⚠️ 2026-09-26 修 ✓：``submit`` 的 ``stage`` **必须跟着传** ✗✗ —— 不传就按它自己的默认 ``h3`` ✓

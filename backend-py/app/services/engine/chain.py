@@ -429,7 +429,7 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
 
     给 :class:`h3_edit.ContinuationPin` ⇒ 走**续拍** ✓：段与段之间交的是**尾部潜变量** ✓
     （下一段的头部锚 ✓ 逐位 ✓ 见 :meth:`torch_backend.init_dual_latents` ✓）而不是**一帧 PNG** ✓。
-    事实来源：``reference/ComfyUI-H3-Multishot/h3_extend.py`` 的 context_pin 口径 ✓。
+    事实来源：``h3_extend.py`` 的 context_pin 口径 ✓。
 
     ⚠️ 三条同步口径（不说清就会"看着像续拍、其实是拼接"✓✗）：
     1. ``overlap_frames`` 要**等于** ``continuation.pin_frames`` ✗ —— 钉进下一段头部的那段

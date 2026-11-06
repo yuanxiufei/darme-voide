@@ -211,7 +211,7 @@ If a limit here disagrees with `spec/metadata.yml`, the spec wins — and this d
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `display-name-zh` | ✅ | Concise, accurate Chinese display name with no legacy 10-character hard cap. See **`references/NAMING.md`** |
+| `display-name-zh` | ✅ | Concise, accurate Chinese display name with no legacy 10-character hard cap. See **`references/NAMING.md`** (Chinese edition: **`references/NAMING.cn.md`**) |
 | `version` | ✅ | Semantic version `MAJOR.MINOR.PATCH` |
 | `tag-en` | ✅ | **Legacy field** — English old category, free-form string (non-empty only, no longer enum-checked). Current classification lives in `complete-tags-en` |
 | `tag-cn` | ✅ | **Legacy field** — Chinese old category, free-form string (non-empty only) |

@@ -532,6 +532,17 @@ class QwenImageDiT(nn.Module):
                 ref_method: str | None = None) -> Tensor:
         """``ref_latents`` 是 **token 串联** ✓（``cat(dim=1)`` ✓），不是通道拼接 ✗。"""
         shape = self.shape
+        #: ⚠️ 潜变量**故意是 f32**（``torch.randn`` 的默认 ✓、采样全程保持 f32 ✓ 更准 ✓），
+        #: 而权重是 bf16/fp16 ✓ ⇒ **必须在这里对齐到权重精度** ✗✗：不做的话 ``img_in`` 当场报
+        #: ``mat1 and mat2 must have the same dtype, but got Float and BFloat16`` ✓ ——
+        #: 报错指向 ``nn.Linear`` ✓，读起来像「权重坏了」✓，其实是「精度没对齐」✓
+        #: （2026-11-01 真权重首跑踩到 ✓；同 :meth:`dit_lumina.LuminaDiT.forward` ✓）。
+        #: ⚠️ 反过来把采样侧的潜变量降精度**不是**等价修法 ✗（那会丢掉逐步累积的精度 ✓）。
+        dtype = self.img_in.weight.dtype
+        latents = latents.to(dtype)
+        context = context.to(dtype)
+        if ref_latents:
+            ref_latents = [ref.to(dtype) for ref in ref_latents]
         b = latents.shape[0]
         t = timesteps.reshape(1) if timesteps.dim() == 0 else timesteps.reshape(-1)
         if t.numel() == 1 and b > 1:

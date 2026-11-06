@@ -158,6 +158,7 @@ def _registry_drift() -> list[str]:
         AGENT_DEFAULT_NAMES,
         AGENT_PHASES,
         HOST_TOOL_NAMES,
+        live_host_tool_names,
     )
 
     agents_dir = _SRC_ROOT / "agents"
@@ -171,8 +172,24 @@ def _registry_drift() -> list[str]:
         )
     ts_only = sorted(tool_ids - set(HOST_TOOL_NAMES))
     py_only = sorted(set(HOST_TOOL_NAMES) - tool_ids)
-    if ts_only or py_only:
-        problems.append(f"宿主工具名漂移：TS 独有 {ts_only} ／ Python 独有 {py_only}")
+    # ⚠️ 这道守卫的对照物是**冻结的 TS 快照**，它定格于 ``backend/``（Node）被删除那一刻 ——
+    # Python 侧此后新增的工具它一律看不见（2026-11-06 实测漏 3 个：``search_script_library``
+    # 与 ``list_skill_refs``／``read_skill_ref``）。所以「TS 里没有」不再是罪证，只要求
+    # 「确有真实工厂产出」；反过来「真实工具没进清单」必须当场红 —— 那一项会让 ``/skills``
+    # 把**存在**的工具报成 ``missingTools``，徽标反倒成了假警报。
+    live = live_host_tool_names()
+    unbaked = sorted(set(py_only) - live)
+    if ts_only or unbaked:
+        problems.append(
+            f"宿主工具名漂移：TS 独有 {ts_only} ／ 清单里查无实据 {unbaked}"
+            f"（Python 新增、确有工厂的：{sorted(set(py_only) & live)}）"
+        )
+    missing_from_list = sorted(live - set(HOST_TOOL_NAMES))
+    if missing_from_list:
+        problems.append(
+            f"真实工具未进 HOST_TOOL_NAMES：{missing_from_list}"
+            f" ⇒ /skills 会把它们误报成「缺工具」（徽标在说谎）"
+        )
 
     index_src = (agents_dir / "index.ts").read_text(encoding="utf-8")
 
@@ -665,9 +682,32 @@ _JSON_DUMPS_ALLOW = {
 #:   也不发给厂商、也不当 HTTP 响应体 ⇒ 不承担「镜像紧凑性」义务 ✓（与 `dryrun.py` 同一类 ✓）。
 #: * ``services/engine/loader.py`` —— 那一处是**同一条装配 spec 的去重键** ✓
 #:   （`json.dumps(spec, sort_keys=True)` 只在本进程内存里活一次 ✓，从不落盘、从不外出 ✓）。
+#: * ``services/knowledge_feed.py`` —— 导出集的**落盘件** ✓：``items.jsonl`` 是 jsonl（一行一条，
+#:   ``(", ", ": ")`` 只是行内空白）、``manifest.json`` 用 ``indent=2`` 是给人和 ``cat`` 看的。
+#:   两者都**只由本仓 ``resolve_dataset`` 读回**、**没有 Node 对应物** ✗、不进共用 DB 列、
+#:   不发厂商、不当响应体 ⇒ 不承担「镜像紧凑性」义务 ✓（与 ``dryrun.py`` 同一类 ✓）。
+#: * ``services/training_registry.py`` —— ``_dump()`` 写的是 ``training-registry.sqlite`` 的
+#:   ``*_json`` 列 ✓：那是**A 侧派生表**（Node 不读、``CREATE TABLE`` 也归本仓），列里的字符串
+#:   只由本仓 ``_loads()`` 解回 ✓ ⇒ 同属「不外发」✓。
+#: * ``services/knowledge_distill.py`` —— 两处都不是「字符串形态的 JSON」✗：
+#:   ``prompt_for()`` 是拼**提示词正文**（``f"统计：{json.dumps(...)}"``，给人/模型读的散文）、
+#:   ``_template_entry()`` 是写进经验 ``body`` 的**中文句子**（是要落库的正文，不是要被解析的数据）
+#:   ⇒ 都没有「镜像紧凑性」义务 ✓。
+#: * ``services/engine/tuning.py`` —— ``tuning.json`` 是**人手编辑**的配置文件（``indent=2``、
+#:   写完还 ``temp.replace`` 原子替换 ✓）：镜像的是「人写给人看的 JSON」而不是 ``JSON.stringify``
+#:   ⇒ 同上 ✗。
+#: * ``routers/repair.py`` 与 ``services/repair_skill.py`` —— 前者把**提案**写成盘上的
+#:   ``proposal-<id>.json``（``indent=1``，要能直接在 git diff 里读 ✓），后者把上下文塞进
+#:   **Markdown 围栏代码块**（那是技能说明书的正文 ✓）⇒ 两处都**没有 Node 对应物** ✗。
 _JSON_DUMPS_ALLOW_PATHS = {
     "services/engine/__main__.py",
     "services/engine/loader.py",
+    "services/knowledge_feed.py",
+    "services/knowledge_distill.py",
+    "services/training_registry.py",
+    "services/engine/tuning.py",
+    "routers/repair.py",
+    "services/repair_skill.py",
 }
 
 
@@ -1017,24 +1057,32 @@ def main() -> int:
 
     print(f"\n{'FAIL' if shadow else 'OK'}: 被吞掉的未迁移端点 {len(shadow)} 条")
 
-    drift = (
-        _registry_drift()
-        + _prompt_utils_drift()
-        + _adapters_drift()
-        + _text_generation_drift()
-        + _visual_graph_drift()
-        + _prompt_tables_drift()
-        + _prompt_blocks_drift()
-        + _json_dumps_drift()
-        + _query_param_drift()
-        + _agent_types_drift()
-        + _agent_prompts_drift()
-        + _numeric_thresholds_drift()
-        + _subagent_registry_drift()
+    #: 按**族**收集（不只是摊平 ✗）：摊平后分不清「3 族各 1 条」与「1 族 3 条」✓，
+    #: 收尾的 `SUMMARY:` 也就没法说实话 ✓。
+    families = (
+        ("REGISTRY", _registry_drift()),
+        ("PROMPT_UTILS", _prompt_utils_drift()),
+        ("ADAPTERS", _adapters_drift()),
+        ("TEXT_GENERATION", _text_generation_drift()),
+        ("VISUAL_GRAPH", _visual_graph_drift()),
+        ("PROMPT_TABLES", _prompt_tables_drift()),
+        ("PROMPT_BLOCKS", _prompt_blocks_drift()),
+        ("JSON_DUMPS", _json_dumps_drift()),
+        ("QUERY_PARAM", _query_param_drift()),
+        ("AGENT_TYPES", _agent_types_drift()),
+        ("AGENT_PROMPTS", _agent_prompts_drift()),
+        ("NUMERIC_THRESHOLDS", _numeric_thresholds_drift()),
+        ("SUBAGENT_REGISTRY", _subagent_registry_drift()),
     )
+    drift = [line for _name, lines in families for line in lines]
     for line in drift:
         print(f"  DRIFT   {line}")
-    print(f"{'FAIL' if drift else 'OK'}: 镜像常量漂移 {len(drift)} 条")
+    print(f"{'FAIL' if drift else 'OK'}: 镜像常量漂移 {len(drift)} 条（{len(families)} 族）")
+    #: ⚠️ 收尾口径是**硬要求** ✗✗（`run_all.py` 抬头那条 ✓，守口径见 `structure_test` ㊈ ✓）：
+    #: 本套原先只印两行 `OK:` / `FAIL:` ✓✗ ⇒ 全量表里**项数恒为 0**（"这套不存在" ✗）。
+    total = 1 + len(families)
+    failed = (1 if shadow else 0) + sum(1 for _name, lines in families if lines)
+    print(f"SUMMARY: {total - failed}/{total} passed")
     return 1 if (shadow or drift) else 0
 
 

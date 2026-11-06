@@ -121,17 +121,20 @@ def case_strict() -> None:
         #    后来 `dit_generic.py` 把 krea2 的骨架写出来了（`ENGINE_STATE` 多了一行 ✓），这条测试就
         #    变成"红得对、但说的是另一件事" ✓✗（它其实在测"ENGINE_STATE 里有没有 krea2" ✓）。
         # ⇒ 直接喂**纯函数** `blocked()` 造两个典型 ✓：没通路的族 + 有通路但配套件缺的族 ✓。
-        report = script.summarise([fake_file("flux", label="Flux"),
+        # ⚠️ 反例族要用**任何表里都没有**的名字 ✓✗：`flux` 在 2026-11-01 补上了骨架
+        #    （`dit_flux.py` ✓ ＋ `dit_build.BUILDERS["flux"]` ✓）⇒ 再拿它当"没通路"的例子
+        #    就变成「红得对、测的却是另一件事」✓✗ —— 这坑本文件 ② 的注释已经踩过一次 ✓。
+        report = script.summarise([fake_file("mystery", label="Mystery"),
                                    fake_file("h3", buildable=False, label="MiniMax H3")], root=root)
-        check("③ 拦「没通路」的族（flux 骨架没写 ✓）—— H3 这种专用族有通路 ⇒ 不拦 ✓",
-              script.blocked(report) == ["flux"], script.blocked(report))
+        check("③ 拦「没通路」的族（`mystery` 不在任何表里 ✓）—— H3 这种专用族有通路 ⇒ 不拦 ✓",
+              script.blocked(report) == ["mystery"], script.blocked(report))
         handmade = {"families": {
             "krea2": {"companions": {"missing": []}},                      # 有通路、配套齐 ⇒ 放 ✓
-            "flux": {"companions": {"missing": []}},                       # 没通路 ⇒ 拦 ✓
+            "mystery": {"companions": {"missing": []}},                    # 没通路 ⇒ 拦 ✓
             "sdxl": {"companions": {"missing": ["缺 vae：`x`"]}},          # 有通路但配套缺 ⇒ 也拦 ✓
         }}
         check("③ 拦**两类**：没通路 ✓ + 配套件缺 ✓（缺 TE/VAE 就是跑不起来，与骨架缺是两回事 ✓）",
-              script.blocked(handmade) == ["flux", "sdxl"], script.blocked(handmade))
+              script.blocked(handmade) == ["mystery", "sdxl"], script.blocked(handmade))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -140,8 +143,9 @@ def case_strict() -> None:
 def case_render() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        # 同 ③：别拿"现在恰好有通路"的族当反例 ⇒ 用 flux（骨架确实还没写 ✓）
-        report = script.summarise([fake_file("flux", label="Flux", unknown=("heads",))], root=root,
+        # 同 ③：别拿"现在恰好有通路"的族当反例 ⇒ 用**任何表里都没有**的 `mystery`
+        # （`flux` 2026-11-01 起有骨架了 ✓ ⇒ 它现在该出现在「有通路」那一栏 ✓）。
+        report = script.summarise([fake_file("mystery", label="Mystery", unknown=("heads",))], root=root,
                                   unrecognised=[{"path": "<某>.safetensors", "why": "键名不在指纹里"}])
     text = script.render(report)
     check("④ 认不出的单列一节，且**不写**成能跑 ✓",

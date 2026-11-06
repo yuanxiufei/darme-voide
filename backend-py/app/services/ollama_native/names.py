@@ -1,4 +1,4 @@
-"""模型名的解析与规范化 —— 逐函数移植 ``reference/ollama/types/model/name.go``。
+"""模型名的解析与规范化 —— 逐函数移植 ``types/model/name.go``。
 
 ollama 的模型名允许 12 种写法（``llama3`` / ``user/llama3`` /
 ``localhost:5000/ns/llama3:v2`` …），落盘时又必须变成

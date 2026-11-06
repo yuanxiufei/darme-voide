@@ -27,6 +27,7 @@ sys.path.insert(0, str(BACKEND_PY))
 from app.services.engine import keyframes as keyframes_mod  # noqa: E402
 from app.services.engine import pipeline as pipe  # noqa: E402
 from app.services.engine import upscale as upscale_mod  # noqa: E402
+from app.services.engine import vae_h3  # noqa: E402
 from app.services.engine.dryrun import DryRunBackend, TinyTensor  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, object]] = []
@@ -90,8 +91,20 @@ def case_plan() -> None:
           unknown is not None and "可用" in str(unknown), unknown)
 
     with_compression = pipe.build_plan(req(temporal_compression=4))
+    #: 期望值**不许写死**。2026-11-04 起 h3 走「17 帧一组、组内 5 倍压缩」的分段算式
+    #: `5*ceil(T/17)-3`，此前用的通用式 `(T-1)/4+1` 对 h3 是错的：124 帧算出 31，
+    #: 交给 H3 的 VAE 只能解回 103 帧 —— 计划 5.17 秒、成片 4.29 秒，而且**一步都不报错**。
+    #: 这里原先写死 `== 31`，公式改对之后它就一直红着（168 次静默丢帧的活证）。
+    #: 改成「拿 VAE 自己的算式当期望值」＋「必须闭环」，公式再改这条也不会过期。
+    _h3_lat = vae_h3.latents_for_frames(with_compression.frames)
     check("⑩ 给了 temporalCompression ⇒ 算出潜空间帧数 ✓",
-          with_compression.latent_frames == 31, with_compression.latent_frames)
+          with_compression.latent_frames == _h3_lat,
+          (with_compression.latent_frames, _h3_lat, with_compression.frames))
+    check("⑩' 潜帧数必须能被 H3 VAE 解回原帧数（解不回来＝静默丢帧）",
+          vae_h3.frames_for_latents(with_compression.latent_frames) == with_compression.frames,
+          (with_compression.latent_frames,
+           vae_h3.frames_for_latents(with_compression.latent_frames),
+           with_compression.frames))
     without = pipe.build_plan(req())
     check("⑩' 没给 ⇒ **不猜**，如实警告（潜空间帧数未知 ✓）",
           without.latent_frames is None and any("temporalCompression" in item
@@ -113,6 +126,42 @@ def _plan_error(request: pipe.GenerationRequest) -> Exception | None:
 # ══════════════════════════════════════════════════════════════════════════
 # ② 干跑整条管线
 # ══════════════════════════════════════════════════════════════════════════
+def case_schedule_names() -> None:
+    """㉕ `schedule=` 收工作流的档名 ✓（``simple`` / ``beta`` ✓），EDM 档名**不拒单**但会说清楚 ✓。
+
+    ⚠️ 为什么"不拒单" ✗：工作流 JSON 里 ``KSampler.scheduler`` 可能是 ``karras``/``normal``
+    这类 EDM 档名 ✓，而本引擎的各族 σ 都是 **flow** 域 ✓（恒在 [0,1] ✓）—— 直接拒单会让
+    「照工作流参数原样跑」在这条路上断死 ✓✗；静默按 EDM 跑又会让 σ 越过 1 ✓✗。
+    ⇒ 按 flow 跑 **＋ 回执写明"这个档名没接、按 flow 算"** ✓。
+    """
+    plain = pipe.build_plan(req(steps=8, schedule="simple"))
+    check("㉕ `schedule=simple` ⇒ 收下 ✓、σ 长度 = 步数+1 ✓、σ₀ = 1 ✓、末位 0 ✓、严格递减 ✓",
+          len(plain.sigmas) == 9 and plain.sigmas[0] == 1.0 and plain.sigmas[-1] == 0.0
+          and all(a > b for a, b in zip(plain.sigmas[:-1], plain.sigmas[1:])), plain.sigmas)
+
+    bent = pipe.build_plan(req(steps=8, schedule="beta"))
+    check("㉕′ `schedule=beta` ⇒ 收下 ✓（长度可 < 步数+1 ✓：`rint` 撞车合并 ✓）、末位 0 ✓",
+          len(bent.sigmas) <= 9 and bent.sigmas[-1] == 0.0
+          and all(a > b for a, b in zip(bent.sigmas[:-1], bent.sigmas[1:])), bent.sigmas)
+
+    flow = pipe.build_plan(req(steps=8))
+    outlier = pipe.build_plan(req(steps=8, schedule="karras"))
+    check("㉕″ 视频侧没接的档名（`karras`）⇒ **不拒单** ✓、照跑 ✓、且回执**如实报「域不重叠」** ✓✗"
+          "（静默 ⇒ 用户以为 karras 生效了 ✓✗；口径见 `engine_video_schedule_test` ③⁵③⁶ ✓）",
+          outlier.sigmas != flow.sigmas and max(outlier.sigmas) > 1.0
+          and any("域不重叠" in text or "不在 flow" in text or "超出 flow" in text
+                  for text in outlier.warnings), outlier.warnings[:2])
+
+    # ⚠️ **图族**相反：EDM 名**按 flow 跑** ✓（图族整条链路只认得 flow 域 ✓，照跑会出糊图 ✗）
+    image_flow = pipe.build_plan(req(prompt="a cat", stage=pipe.QWEN_IMAGE_STAGE, steps=8))
+    image_edm = pipe.build_plan(req(prompt="a cat", stage=pipe.QWEN_IMAGE_STAGE, steps=8,
+                                    schedule="karras"))
+    check("㉕‴ ⭐ 图族碰到 EDM 名 ⇒ **按 flow 跑**（σ 与默认逐位相同 ✓）＋ 回执写明已换 ✓✗"
+          "（照 EDM 跑 ⇒ σ>1 ⇒ `t<0` ⇒ 出糊图 ✗✗，而日志全绿 ✓）",
+          image_edm.sigmas == image_flow.sigmas
+          and any("karras" in text for text in image_edm.warnings), image_edm.warnings[:2])
+
+
 def case_end_to_end() -> None:
     backend = DryRunBackend()
     request = req(steps=6)
@@ -170,6 +219,14 @@ def case_algorithm_really_runs() -> None:
           _preview(req(seed=11)) != _preview(req(seed=12)), "")
     check("㉔ 提示词变了 ⇒ 结果也变（否则「同种子就同结果」会掩盖条件没生效 ✗）",
           _preview(req(prompt="另一个场景")) != _preview(req()), "")
+
+    # ⭐⭐ 2026-11-01 新补的三档（名字直接照抄工作流 ✓）——判据同 ㉑：**必须彼此不同** ✓✗。
+    # 「注册了」不等于「接上了」✓✗：`SAMPLERS` 里加个名字、`sample()` 里忘记分派时，
+    # 全仓测试都绿、只有出图会静默退回 euler ✓（同名不同结果才是真接线 ✓）。
+    fresh = {name: _preview(req(steps=8, sampler=name))
+             for name in ("res_multistep", "er_sde", "lcm")}
+    check("㉔′ ⭐ `res_multistep` / `er_sde` / `lcm` 三档结果**两两不同** ✓ 且都与 `euler` 不同 ✓",
+          len({*fresh.values(), outs["euler"]}) == 4, {k: v[:2] for k, v in fresh.items()})
 
 
 class _CountingNoise(DryRunBackend):
@@ -965,8 +1022,218 @@ def case_torch_backend() -> None:
           described["device"])
 
 
+def case_img2img_mix() -> None:
+    """图生图那**另一半** ✓：起点 latent 必须由参考图编码而来 ✓✗。
+
+    为什么单独钉 ✗：``denoise<1`` 的错法**全程不报错** ✓ —— σ 梯子截短了 ✓、步数也对 ✓、
+    图也出得来 ✓，只是那张图与参考图**毫无关系**（起点是纯噪声 ✓）✓✗。所以这里钉的是
+    **公式** ``σ0·noise + (1−σ0)·ref``（参考实现 ``noise_scaling`` ✓）而不是"跑通了" ✓。
+    """
+    from app.services.engine import torch_backend as tb
+
+    backend = tb.TorchBackend()
+    if not backend.describe()["available"]:
+        skip("torch 未安装 ⇒ 图生图混合（真张量）跳过 ✓")
+        return
+    import torch  # noqa: PLC0415  （已确认 ready ✓）
+
+    plan = pipe.build_plan(req(stage="zimage", steps=8))
+    # ⚠️ σ0 从 **``sigmas[0]``** 读 ✓（不是 ``start_sigma`` ✗）：起跑那一格的真源是梯子首值 ✓，
+    #    两处都设成 0.55 才与「denoise=0.55 截尾后」的真实计划一致 ✓。
+    plan.denoise, plan.start_sigma, plan.init_from = 0.55, 0.55, "image"
+    plan.sigmas = [0.55, 0.2, 0.05, 0.0]
+
+    class _MixStub(tb.TorchBackend):
+        """只替换「参考图 ⇒ latent」那一步 ✓（公式与形状守卫走**真代码** ✓）。"""
+
+        def __init__(self, ref: float, shape: tuple[int, ...]) -> None:
+            self._device = "cpu"
+            self._ref = float(ref)
+            self._shape = shape
+
+        def _torch(self) -> Any:
+            return torch
+
+        def latent_shape(self, _plan: Any) -> tuple[int, ...]:
+            return self._shape
+
+        def init_image_latents(self, _plan: Any, _request: Any) -> Any:
+            return torch.full(self._shape, self._ref)
+
+    stub = _MixStub(3.0, (1, 4, 8, 8))
+    noise = torch.ones(1, 4, 8, 8)
+    mixed = stub._mix_init_image(noise, plan, req())
+    check("⑭''' 起点按 ``σ0·noise + (1−σ0)·ref`` 混 ✓（σ0=0.55、ref=3 ⇒ 恰好 1.9 ✓ "
+          "少混一项 / 用 1−σ0 反了都到不了这个数 ✗✗）",
+          abs(float(mixed[0, 0, 0, 0]) - 1.9) < 1e-6, float(mixed[0, 0, 0, 0]))
+
+    plan.init_from = "noise"
+    check("⑮''' ``init_from='noise'`` ⇒ **原样返回** ✓（纯文生图路径逐位不变 ✓ 不白跑一遍 VAE ✗）",
+          bool(stub._mix_init_image(noise, plan, req()).equal(noise)), "")
+
+    plan.init_from = "image"
+    wrong = _MixStub(3.0, (1, 4, 9, 9))
+    check("⑯''' 起点 latent 与噪声形状不一致 ⇒ **当场拒** ✗（广播成同一张 = 死图且不报错 ✗✗）",
+          "形状不一致" in str(_err(lambda: wrong._mix_init_image(noise, plan, req()))),
+          str(_err(lambda: wrong._mix_init_image(noise, plan, req())))[:70])
+
+    real = tb.TorchBackend()
+    check("⑰''' ``initImage`` 空 ⇒ 拒 ✗（起点不是可选美化项 ✓✗）",
+          "空的" in str(_err(lambda: real.init_image_latents(plan, req(init_image=None)))),
+          str(_err(lambda: real.init_image_latents(plan, req(init_image=None))))[:70])
+
+    # ── ⭐ `init` 段：图生图的起点要 VAE ✓✗（2026-11-02 真跑逼出来的 ✓）─────────────
+    #   `PHASE_PARTS` 原本只有 encode→text / sample→dit / decode→vae ✓ ⇒ 分时驻留的族
+    #   （2512 / 2.1 / krea2 ✓）在 init 这一拍手上**只有 TE** ✓、VAE 要到 decode 才装 ✓
+    #   ⇒ 图生图必报「没挂 VAE ✗ ⇒ 没法把图片编码成潜变量」✓（真跑实测 ✓）。
+    #   ⚠️ 单测里 VAE 是**常驻替身** ✓ ⇒ 老判据永远试不出来 ✓✗，只能钉「表里有这一段」✓。
+    import ast as _ast
+
+    _parts = dict(getattr(tb.TorchBackend, "PHASE_PARTS", {}) or {})
+    check("⑰'''' `PHASE_PARTS` 有 `init` 段且含 text（不重读 16 GiB 的 TE ✓）",
+          tuple(_parts.get("init") or ()) == ("text", "vae"), _parts)
+    _tree = _ast.parse((BACKEND_PY / "app/services/engine/pipeline.py").read_text(encoding="utf-8"))
+    _guarded = ""
+    for _node in _ast.walk(_tree):
+        if not isinstance(_node, _ast.If) or "init_image" not in _ast.unparse(_node.test):
+            continue
+        for _sub in _ast.walk(_node):
+            if (isinstance(_sub, _ast.Call) and getattr(_sub.func, "id", "") == "_backend_phase"
+                    and len(_sub.args) >= 2 and _ast.unparse(_sub.args[1]) == "'init'"):
+                _guarded = _ast.unparse(_node.test)
+    check("⑰''''' 只在 `initImage` 非空时申请 `init` 段（纯文生图不多跑一趟换装 ✓）",
+          _guarded == "request.init_image",
+          _guarded or "pipeline 里找不到 `if request.init_image:` 包住 `_backend_phase(..., \"init\")`")
+
+    # ── 4 维族（Z-Image / Qwen-Image 2.1 ✓ 没有时间维）必须**跟着族交维数** ✓✗ ─────
+    original_load = tb.media_mod.load_image_tensor
+    seen: dict[str, Any] = {}
+
+    def _fake_load(path: str, **kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        seen.update(kwargs)
+        return torch.zeros(1, 3, 1, 32, 32), {"width": kwargs.get("width"), "height": kwargs.get("height")}
+
+    class _EncStub(tb.TorchBackend):
+        """``latent_shape``（DiT 要的）与 ``_encode_pixels``（VAE 给的）**分开给** ✓✗ ——
+        混成一个数就永远对得上 ✓（那样「通道/高/宽 对不上」这条守卫根本试不出来 ✓）。"""
+
+        def __init__(self, shape: tuple[int, ...], encoded: tuple[int, int, int] | None = None) -> None:
+            self._device = "cpu"
+            self._shape = shape
+            self._encoded = encoded or (shape[1], shape[-2], shape[-1])
+
+        def _torch(self) -> Any:
+            return torch
+
+        def _gate(self) -> None:
+            return None
+
+        def latent_shape(self, _plan: Any) -> tuple[int, ...]:
+            return self._shape
+
+        def _encode_pixels(self, _frames: Any) -> Any:
+            channels, height, width = self._encoded
+            return torch.zeros(1, channels, 1, height, width)
+
+    tb.media_mod.load_image_tensor = _fake_load  # type: ignore[assignment]
+    try:
+        four = _EncStub((1, 16, 32, 32)).init_image_latents(plan, req(init_image="x.png"))
+        five = _EncStub((1, 16, 1, 32, 32)).init_image_latents(plan, req(init_image="x.png"))
+        mismatch = _err(lambda: _EncStub((1, 16, 16, 16), encoded=(16, 32, 32))
+                        .init_image_latents(plan, req(init_image="x.png")))
+    finally:
+        tb.media_mod.load_image_tensor = original_load  # type: ignore[assignment]
+    check("⑱''' 4 维族 ⇒ 起点 latent 也**是 4 维** ✓、5 维族 ⇒ 5 维 ✓（一律造 5 维会让图族 "
+          "patchify 报 expected 4D ✓ 指不到「起点给错」 ✗✗）",
+          tuple(four.shape) == (1, 16, 32, 32) and tuple(five.shape) == (1, 16, 1, 32, 32),
+          (tuple(four.shape), tuple(five.shape)))
+    check("⑲''' 读参考图按**画布尺寸**取 ✓（``plan.width/height`` ✓ 不是原图尺寸 ✗ "
+          "—— 尺寸不一致会在混合那步才炸 ✓ 且指向噪声 ✗）",
+          (seen.get("width"), seen.get("height")) == (plan.width, plan.height), seen)
+    check("⑳''' 编码出的「通道/高/宽」对不上 ⇒ **点名三个维度**报 ✗（不是一句「形状错」✗）",
+          "通道/高/宽" in str(mismatch), str(mismatch)[:80])
+
+
+def case_unused_references() -> None:
+    """参考图**只有 H3 双流真吃** ✓ —— 其余档必须**说出来**（静默忽略＝用户以为在按图改 ✗✗）。
+
+    为什么值得单列：画布上最自然的动作就是「连一张图 → 点生成」✓，而图片四档
+    （zimage / krea2 / qwen_image / qwen_image21）与 wan22 都**一个字节都不读**
+    ``reference_frames`` ✓✗ ⇒ 不说的话，用户拿到一张与参考图无关的新图，
+    且**没有任何日志**能看出这一点 ✓✗（本仓最恨的一类）。
+    """
+    frames = ("参考一.png", "参考二.png")
+    for stage in (pipe.ZIMAGE_STAGE, pipe.KREA2_STAGE, pipe.QWEN21_STAGE, pipe.QWEN_IMAGE_STAGE):
+        plan = pipe.build_plan(pipe.GenerationRequest(
+            prompt="p", stage=stage, reference_frames=frames), weights_bytes=None)
+        joined = "\n".join(plan.warnings)
+        check(f"⑳〰 {stage} 收到 2 路参考图 ⇒ **如实说被忽略**（并指路 Edit 工作流 / initImage）",
+              "referenceFrames" in joined and "忽略" in joined and "initImage" in joined,
+              joined[-260:])
+
+    # ⭐ 反向：H3 双流**真吃**参考图 ⇒ 不许把它也报成"忽略" ✗（那会让人以为这档废了）
+    h3_plan = pipe.build_plan(pipe.GenerationRequest(
+        prompt="p", stage=pipe.VIDEO_STAGE, reference_frames=frames), weights_bytes=None)
+    check("⑳〰 H3 双流**不报**「参考图被忽略」（它走 ref2va、真用得上 ✓）",
+          "referenceFrames" not in "\n".join(h3_plan.warnings),
+          "\n".join(h3_plan.warnings)[-260:])
+
+    # ⭐ 没给参考图时不许无中生有（一条警告都不该多）
+    bare = pipe.build_plan(pipe.GenerationRequest(prompt="p", stage=pipe.ZIMAGE_STAGE), weights_bytes=None)
+    check("⑳〰 没给参考图 ⇒ 不出这条警告（不做无用的提示）",
+          "referenceFrames" not in "\n".join(bare.warnings), bare.warnings)
+
+
+def case_off_official_canvas() -> None:
+    """**显式**给一个远离官方档位的像素预算 ⇒ 必须如实说（不拦 ✓ 但不许沉默 ✓✗）。
+
+    为什么值得单列 ✗：各族的 `_fill_*_plan` 只在「像素预算**等于** `GenerationRequest` 的默认
+    0.65」时才换成官方档 ✓ —— 用户明写 0.2 MP 就原样照跑 ✓。实测 zimage 0.2 MP @16:9
+    落 **608×336**（官方 1024² 的 1/5 面积 ✓），而训练档位外的尺寸是拿**没训过**的区域换画质 ✓：
+    症状是构图崩 / 多主体重复 / 细节糊，**一声不响** ✓✗。
+    """
+    def warnings_of(stage: str, mp: float) -> str:
+        plan = pipe.build_plan(pipe.GenerationRequest(
+            prompt="p", stage=stage, megapixels=mp), weights_bytes=None)
+        return "\n".join(plan.warnings)
+
+    low = warnings_of(pipe.ZIMAGE_STAGE, 0.2)
+    check("⑳〸 zimage 0.2 MP ⇒ 报「低于训练档位 + 没训过的区域」（不报错但结果会崩）",
+          "低于" in low and "没训过" in low, low[-300:])
+
+    # ⭐ 反向（不瞎报）：1.0 MP 就是官方档 ⇒ 一条都不该出
+    ok = warnings_of(pipe.ZIMAGE_STAGE, 1.0)
+    check("⑳〸 zimage 1.0 MP = 官方档 ⇒ **不报**（判据不许见谁都喊）",
+          "低于" not in ok and "高于" not in ok, ok[-300:])
+
+    high = warnings_of(pipe.ZIMAGE_STAGE, 3.0)
+    check("⑳〸 zimage 3 MP ⇒ 报「高于训练档位」（两个方向都要管，不只管小图）",
+          "高于" in high, high[-300:])
+
+    for stage, title in ((pipe.KREA2_STAGE, "Krea2"), (pipe.QWEN21_STAGE, "Qwen-Image 2.1")):
+        joined = warnings_of(stage, 0.2)
+        check(f"⑳〸 {title} 0.2 MP ⇒ 同样如实报（三族共用 `_warn_off_official_canvas`）",
+              "低于" in joined and "没训过" in joined, joined[-300:])
+
+    # ⭐ `target`（用途档位）是**有出处**的画布 ⇒ 不许再拿"偏离官方"去质疑它 ✗
+    framed = pipe.build_plan(pipe.GenerationRequest(
+        prompt="p", stage=pipe.KREA2_STAGE, target="character-sheet"), weights_bytes=None)
+    check("⑳〸 走 `target` 档位时**不报**偏离官方（那是生产线实测画布，不是用户乱填）",
+          "没训过" not in "\n".join(framed.warnings),
+          "\n".join(framed.warnings)[-300:])
+
+
+def _err(fn: Any) -> Exception | None:
+    try:
+        fn()
+    except Exception as err:  # noqa: BLE001
+        return err
+    return None
+
+
 def main() -> int:
     case_plan()
+    case_schedule_names()
     case_end_to_end()
     case_algorithm_really_runs()
     case_stochastic_samplers()
@@ -976,6 +1243,9 @@ def main() -> int:
     case_guidance()
     case_conditioning()
     case_torch_backend()
+    case_img2img_mix()
+    case_unused_references()
+    case_off_official_canvas()
     case_api()
 
     failures = [item for item in _RESULTS if not item[1]]

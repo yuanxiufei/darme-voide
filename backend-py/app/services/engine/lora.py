@@ -597,10 +597,40 @@ def read_tensors(path: str | Path, *, torch_module: Any = None) -> dict[str, Any
     return tensors
 
 
-def _bypass_hook(_module: Any, inputs: Any, output: Any, *, delta: LoraDelta,
+def _patch_reference(module: Any, source: Any = None) -> Any:
+    """钩子每次前向要往哪块张量上对齐 ⇒ 优先**浮点权重** ✓，退而用当次输入 ✓（``None`` ⇒ 只判权重 ✓）。
+
+    ⚠️ 别对齐到 ``module.weight`` 就走 ✗✗：``Int8Linear`` 的 ``weight`` 是 int8 ✓✗
+    （对它 ``.to(dtype)`` 得到整数量化因子 ✓），旧代码正是这么写的 ✓ —— 只是 merge 路的
+    选路让它没露头 ✓。
+    ⚠️ **别在调用点先算 ``module.parameters()`` 当兜底** ✗✗：那等于每次挂载都多要一次遍历 ✓，
+    而且轻量替身（只有 ``weight`` 没有 ``parameters()`` 的测试模块 ✓）会当场 ``AttributeError`` ✓。
+    """
+    weight = getattr(module, "weight", None)
+    if weight is None:
+        return source if hasattr(source, "dtype") else None
+    is_float = getattr(weight, "is_floating_point", None)
+    if callable(is_float) and not is_float():
+        #: 整数权重（``Int8Linear`` 的 int8 ✓）⇒ **不能**当对齐参考 ✓，退到当次输入 ✓
+        return source if hasattr(source, "dtype") else None
+    return weight
+
+
+def _bypass_hook(module: Any, inputs: Any, output: Any, *, delta: LoraDelta,
                  strength: float, ops: TensorOps) -> Any:
-    """``nn.Linear`` 的前向钩子 ✓ —— ``out + up(down(x))·scale`` ✓（in-place 加到刚算出的 out ✓）。"""
+    """``nn.Linear`` 的前向钩子 ✓ —— ``out + up(down(x))·scale`` ✓（in-place 加到刚算出的 out ✓）。
+
+    ⭐ **每次前向当场对齐** ✓（2026-11-01 补 ✗✗）：LoRA 因子是**挂载**（补丁）而非折进权重 ✓，
+    所以它和权重是**两份**东西 ✓ —— 权重随后能被搬走 ✓✗：``enter_phase`` 换装 ✗、
+    ``balanced`` 分时驻留的 split ✗、``module.to(dtype)`` ✗。搬迁只动 ``_parameters`` ✓，
+    **动不到钩子闭包里的因子** ✗ ⇒ 只在装载时对齐一次的写法，搬完就
+    ``Expected all tensors to be on the same device`` ✓✗（报错指向前向，根因在换装 ✓）。
+    对齐在「已一致」时是零拷贝（``.to()`` 返回自身 ✓）⇒ 每层每步多两次属性比对 ✓。
+    """
     source = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
+    reference = _patch_reference(module, source)
+    if reference is not None:
+        delta = _align_delta(delta, reference)
     return bypass_output(output, source, delta, strength, ops=ops)
 
 
@@ -650,11 +680,17 @@ def apply_to_model(model: Any, report: LoraReport, *, strength: float = 1.0,
         if path == "runtime":
             result.runtime.append(f"{name}（{reason} ✗）")
             continue
-        # ⚠️ 因子必须**先搬到目标层**再做运算 ✗✗（显存路必崩 ✓，见 :func:`_align_delta` ✓）
-        weight = getattr(module, "weight", None)
-        reference = weight if weight is not None else next(iter(module.parameters(recurse=False)), None)
-        delta = _align_delta(delta, reference)
+        #: ⚠️ 因子必须**先搬到目标层**再做运算 ✗✗（显存路必崩 ✓，见 :func:`_align_delta` ✓）。
+        #: 兜底顺序：浮点权重 ✓ → 本层第一个参数 ✓ —— 但**只在真有需要时**才去遍历 ✓✗
+        #: （轻量替身没有 ``parameters()`` ✓；每次挂载都多遍历一遍也没好处 ✓）。
+        reference = _patch_reference(module)
+        if reference is None:
+            params = getattr(module, "parameters", None)
+            reference = next(iter(params(recurse=False)), None) if callable(params) else None
+        if reference is not None:
+            delta = _align_delta(delta, reference)
         if path == "merge":
+            weight = getattr(module, "weight", None)
             if weight is None:
                 result.missing.append(f"{name}（要 merge 但 {target} 没有 weight ✗）")
                 continue

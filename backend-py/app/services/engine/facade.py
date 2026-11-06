@@ -54,7 +54,19 @@ API_VERSION = "1.0.0"
 #: 4 = `capabilities().devicePolicy` 新增（2026-10-31 ✓）—— 同上 ✓✗。这一栏补的是
 #:     「**凭什么**把这条链放在这台设备上」✓：此前只有各条的 `device`（结论 ✓）⇒ 一次
 #:     显存降级会被读成「这台机器不支持 GPU」✓✗（读的人只能猜 ✓）。
-SCHEMA_VERSION = 4
+#: 5 = `status().canGenerate` / `status().codeGaps` 新增（2026-11-01 ✓）—— 同上 ✓✗。
+#:     `canGenerate` 此前是**写死 `False`** ✓✗：装了整链、真出过 mp4 之后
+#:     `GET /engine/runtime` 仍报「不能出片」✓✗（那是 UI 的自述口 ✓ ⇒ 读起来像整个引擎都用不了 ✗）；
+#:     `codeGaps` 则把「**代码里还没写**的能力」与 `pendingParts`（**这台还没装**）拆开 ✓✗
+#:     —— 混成一格就看不出该去修代码还是该去装权重 ✓（`pendingParts` 原先把 75 行**沿革散文**
+#:     当缺口报出去过 ✓✗）。⚠️ 名字刻意不叫 `knownGaps` ✗：那个键在 `capabilities()` 里是
+#:     **环境**缺口（dict 列表 ✓）⇒ 同名不同形会让前端把两件事当一件读 ✓✗（见 `torch_backend.CODE_GAPS` ✓）。
+#: 6 = `capabilities()` 新增 `samplers` / `schedules` / `profiles` / `canvasStages` /
+#:     `attentionBackends`（2026-11-01 ✓）—— 同上 ✓✗。这一栏补的是「**认哪些**名字」✓：
+#:     此前前端想知道采样器 / 调度器 / 画布档位，只能读 `pipeline` 源码猜 ✓✗ ——
+#:     猜错**不报错**，静默按默认跑 ✓✗（`karras` 套 flow 模型就是这一类 ✓）。
+#:     `profiles[]` 里 `requiresInitImage` 是派生量 ✓（`denoise<1` ⇒ 必须连 `initImage` ✓）。
+SCHEMA_VERSION = 6
 
 #: 错误码（WBS-1.2：机器可判，不是只有一句中文）。
 CODES: dict[str, str] = {
@@ -148,7 +160,11 @@ def capabilities() -> dict[str, Any]:
     混成一个 `supported` 就是许空头（WBS §12 硬/软阈值口径）。
     """
     from . import inventory as inv  # noqa: PLC0415
+    from . import canvas as canvas_mod  # noqa: PLC0415
+    from . import profiles as profiles_mod  # noqa: PLC0415
     from . import quant  # noqa: PLC0415
+    from . import sampler as sampler_mod  # noqa: PLC0415
+    from . import schedules as schedules_mod  # noqa: PLC0415
     from . import torch_backend as tb  # noqa: PLC0415
     from . import device_policy as policy_mod  # noqa: PLC0415
 
@@ -162,7 +178,22 @@ def capabilities() -> dict[str, Any]:
         "python": platform.python_version(),
         "stages": sorted(inv.STAGE_FILTERS),
         #: 已验证：都只依赖文件头 / 纯 Python（无需 torch）
-        "operations": ["capabilities", "plan", "readiness", "inspect_weights", "manifest", "status"],
+        "operations": ["capabilities", "plan", "canvas_plan", "readiness", "inspect_weights",
+                       "manifest", "status"],
+        #: ⭐ **可选值的清单**（2026-11-01 ✓）：这一栏以前**没有** ✗ ⇒ 调用方只能读代码猜
+        #: 「支持哪些采样器 / 调度器 / 用途档」✓✗ —— 猜错的代价是 400 ✓，而在**没校验**的路径上
+        #: 就是静默出图（采样器名拼错会被当成默认 ✓✗）。值**从注册表取** ✓ 不手抄 ✗（手抄必漂移 ✓）。
+        "samplers": sorted(sampler_mod.SAMPLERS),
+        "schedules": sorted(schedules_mod.SCHEDULES),
+        #: 用途档位（画布 + 该档的采样档 ✓，出处写了工作流文件名 ✓）—— 见 :data:`profiles.PROFILES` ✓
+        "profiles": profiles_mod.as_capabilities(),
+        #: 每个 stage 的**几何纪律** ✓（吸附步长 + 尺寸算法 ✓）—— 客户端据此能把宽高算对 ✓，
+        #: 不必去试"16 还是 32" ✓✗。
+        "canvasStages": {stage: {"grid": grid, "scheme": scheme}
+                         for stage, (grid, scheme) in canvas_mod.STAGE_CANVAS.items()},
+        #: ⚠️ **只有 torch 内置的 sdpa** ✓ —— ``kitchen`` / 块稀疏**还没实现** ✗✗（列出来是骗人 ✗）：
+        #: 本仓 21 处直调 ``F.scaled_dot_product_attention`` ✓，没有后端抽象 ✓✗。
+        "attentionBackends": {"available": ["sdpa"], "missing": ["kitchen", "block-sparse"]},
         #: 有实现但**没有性能与长稳验收**（WBS §12：骨架期不产出 GPU 数字）
         "unverified": ["generate（进程内推理缺性能基线与 60 分钟稳定性验收）",
                        "training（本仓未实现训练闭环）"],
@@ -208,9 +239,10 @@ def capabilities() -> dict[str, Any]:
                 f"（慢，但跑得完 ✓）",
                 f"需求未知且显存占用 ≥ {policy_mod.HARD_USED_RATIO * 100:g}% ⇒ 转移到 CPU",
             ],
-            #: 两本账必须分开报 ✓✗：`part` 是**分时**账（2.1 三段各占一段 ✓）、
-            #: `chain` 是**整链同驻**账（Z-Image 三件同时占满 ✓）。混在一起报，
-            #: 读者会按"最重的单件"去估 ⇒ 差 4.5 GiB 就 OOM ✓✗（Z-Image 实测踩过 ✓）。
+            #: 四本账必须分开报 ✓✗：`part` 是**分时**账（2.1 三段各占一段 ✓）、
+            #: `chain` 是**整链同驻**账（Z-Image 三件同时占满 ✓）、`qwenImagePart` 与 `krea2Part`
+            #: 是另两族的**分时**账 ✓。混在一起报，读者会按"最重的单件"去估 ⇒ 差 4.5 GiB 就 OOM ✓✗
+            #: （Z-Image 实测踩过 ✓）；而族与族之间键名相同 ⇒ 并进去只会留最后写的那本 ✓✗。
             "needGiB": {
                 "part": dict(tb.TorchBackend.PART_NEED_GIB),
                 "chain": dict(tb.TorchBackend.CHAIN_NEED_GIB),
@@ -218,6 +250,13 @@ def capabilities() -> dict[str, Any]:
                 #: 不能并进 `part` ✗：两族的键名一样（`dit`/`text`/`vae` ✓）⇒ 并进去必然互相覆盖 ✓✗，
                 #: 2512 的 38.05 会被 2.1 的 13.26 顶掉 ✓ ⇒ 读者按 13.26 估余量 ⇒ 装到一半 OOM ✓✗。
                 "qwenImagePart": dict(tb.TorchBackend.QWEN_IMAGE_PART_NEED_GIB),
+                #: ⚠️ 第四本 ✓✗（2026-11-01 补 ✓）：Krea2 的**分时账**（12.57 / 7.5 / 0.24 ✓）。
+                #: 它**不能**并进 `part` ✗：键名同样是 `dit` / `text` / `vae` ✓ ⇒ 并进去必然互相覆盖 ✓✗。
+                #: 覆盖后的偏差方向还**不是**保守的 ✗：`dit` 会从 12.57 被顶成 13.26（多算 0.7 ✓）、
+                #: 但 `text` 会从 7.5 被顶成 14.79（**少算** 7.3 ✓✗）⇒ 读者按 2.1 的账估 Krea2
+                #: 的余量，会把「其实装得下」判成「装不下」✓，反过来在 `part` 被 Krea2 顶掉时
+                #: 又把 2.1 的 text 14.79 当成 7.5 ⇒ **真 OOM** ✓✗。
+                "krea2Part": dict(tb.TorchBackend.KREA2_PART_NEED_GIB),
             },
         },
         "catalog": {

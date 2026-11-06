@@ -7,9 +7,11 @@
 2. **「这个文件是不是我要的」**——几十 GB 的 safetensors，**只读头部**几 KB 就能报出
    张量清单/形状/精度 ✓，不用等到加载时才炸 ✗。
 
+* ``GET /api/v1/engine/capabilities`` 引擎能力表（认哪些值 / 几何纪律 / 量化族 / 设备策略 ✓ 纯静态 ✓）
 * ``GET /api/v1/engine/readiness``  某阶段的就绪报告（``?stage=h3|image|audio|text`` ✓）
 * ``POST /api/v1/engine/inspect``   体检**任意** safetensors 文件（body: ``{"path": "..."}`` ✓）
 * ``POST /api/v1/engine/plan``      生成请求 → **具体数字**（尺寸/帧数/σ 序列 ✓ 不跑推理 ✓）
+* ``POST /api/v1/engine/canvas-plan``  **画布计划**（多大/为什么/改过哪边 ✓ 含用途档位 ✓ 不跑推理 ✓）
 * ``POST /api/v1/engine/dry-run``   用**干跑后端**把整条管线走一遍（验编排 ✓ 输出标 ``synthetic`` ✗）
 
 **运行时**（2026-09-26 起 ✓ —— 这一组才是「真跑」那条路 ✓）：
@@ -24,8 +26,13 @@
 ⚠️ ``dry-run`` **不生成真画面** ✗（零依赖小向量 ✓）⇒ 返回值里 ``synthetic: true`` ✓，
 前端必须据此打标，**不许**当成生成结果展示 ✗。
 ⚠️ ``generate`` 走**进程内**运行时（:mod:`app.services.engine.runtime` ✓）—— **不用 ComfyUI /
-SD WebUI / Ollama** ✓、不起任何子进程 ✓；但它**同样**标 ``synthetic`` ✓✗：主 DiT 权重是真的 ✓，
-参考 TE / VAE **未经训练** ✗ ⇒ 产物是真文件 + 噪声画面 ✓（真权重到位前不许改口 ✗）。
+SD WebUI / Ollama** ✓、不起任何子进程 ✓；⚠️ 产物**真不真按「已装件」算** ✗✗（2026-11-01 ✓，
+旧文档写死「同样标 synthetic」**已失真** ✗）：装的是参考 TE / VAE（未训练 ✓）⇒ ``synthetic: true``
+＋ 噪声画面 ✓；装的是**真权重** VAE（``torch_backend.REAL_VAE_KINDS`` ✓）⇒ ``synthetic: false``
+＋ 真画面 ✓。两个方向都不许说谎 ✗：把「参考件跑通」说成「真模型出片」✗，把真出片说成噪声 ✗。
+⚠️ 三格**分开报**（混成一格就看不出该去装权重还是改代码 ✓✗）：``canGenerate``（此刻能不能出片 ✓）、
+``pendingParts``（**这台**还没装什么 ✓）、``codeGaps``（**代码**里还没写什么 ✓）——
+``/engine/backends`` 的 ``torch`` 与 ``/engine/runtime`` 两处同源（:data:`torch_backend.CODE_GAPS` ✓）。
 """
 from __future__ import annotations
 
@@ -40,6 +47,7 @@ from ..core.config import get_storage_root
 from ..core.response import bad_request, success
 from ..core.request_utils import read_json
 from ..services.engine import bridge
+from ..services.engine import canvas as canvas_mod
 from ..services.engine import conditioning
 from ..services.engine import device_policy as policy_mod
 from ..services.engine import facade
@@ -51,10 +59,15 @@ from ..services.engine import residency as residency_mod
 from ..services.engine import runtime
 from ..services.engine import upscale as upscaler
 from ..services.engine import pipeline as pipe
+from ..services.engine import profiles as profiles_mod
 from ..services.engine import safetensors as st
 from ..services.engine.dryrun import DryRunBackend
 from ..services.engine.runtime import engine_runtime
-from ..services.engine.torch_backend import TorchBackend, TorchBackendUnavailable
+from ..services.engine.torch_backend import (
+    TorchBackend,
+    TorchBackendUnavailable,
+    normalize_vae_tiling,
+)
 
 router = APIRouter(prefix="/api/v1/engine", tags=["engine"])
 
@@ -79,6 +92,25 @@ _REQUEST_KEYS: dict[str, str] = {
     "temporalCompression": "temporal_compression",
     "firstFrame": "first_frame", "referenceFrames": "reference_frames",
     "outputsDir": "outputs_dir",
+    # ⭐ 2026-11-01：这三格**以前不在表里** ⇒ 前端送了也被**静默丢掉** ✓✗（不报错 ✓）
+    # ``target`` 是用途名 ✓（引擎自己查 :data:`engine.profiles.PROFILES` 算画布 ✓）；
+    # ``denoise`` 是起始噪声比例 ✓（<1 ⇒ σ 梯子截尾 + 从 ``initImage`` 起跑 ✓，
+    # 两样**必须同时给** ✓ —— 缺一样当场拒 ✓，见 ``pipeline.build_plan`` 的理由 ✓）；
+    # ``initImage`` 是图生图的**起点图** ✓（≠ ``referenceFrames`` ✓ 那份是条件 ✓ 这份是起点 ✓）；
+    # ``canvas`` 走 :func:`_canvas_from` ✓（对象 ✓ 不是标量 ✓ ⇒ 不在这张标量映射表里 ✗）。
+    "target": "target", "purpose": "target", "denoise": "denoise",
+    "initImage": "init_image", "init_image": "init_image",
+    # ⭐ ``stage`` 以前也**不在**这张表里 ✓✗（``_ASSEMBLY_KEYS`` 有 ✓ 但那是真跑那条路 ✓）——
+    # 后果：``/engine/plan`` 传 ``"stage": "qwen_image"`` 会被**静默忽略** ✓✗，永远按 ``h3`` 算
+    # σ/帧数 ✓（前端拿着图片请求却看到 124 帧 ✓）。画布档位也按 stage 查 ✓ ⇒ 必须收 ✓。
+    "stage": "stage",
+    # ⭐ ``lyrics`` 以前也**不在**这张表里 ✓✗（2026-11-06 接 Music3 时发现 ✓）：
+    # 后果与上面 ``stage`` 那条**完全同形** ✓ —— 前端送 ``"lyrics": "……"`` ⇒ 被**静默丢掉** ✓✗，
+    # ``request.lyrics`` 恒空字符串 ✓ ⇒ 管线以为"用户要纯器乐" ✓、`plan.warnings` 里那句
+    # 「没给歌词 ⇒ 按纯器乐出 ✓」还理直气壮 ✓✗。**不报错、只是没唱** ✓ —— 最坏的一类 ✓。
+    # ⚠️ 别把它并进 ``prompt`` ✗：参考侧是**两条支路** ✓（caption 走 `<|caption_start|>` ✓、
+    # 歌词走自己的段落 ✓），拼成一句 ⇒ 模型把歌词当描述念一遍 ✓✗（见 `te_music3.build_prompt` ✓）。
+    "lyrics": "lyrics",
 }
 
 
@@ -141,6 +173,75 @@ def _upscale_from(body: dict[str, Any]) -> Any:
         refine_steps=refine_steps, refine_denoise=refine_denoise)
 
 
+def _canvas_from(body: dict[str, Any]) -> Any:
+    """请求里的 ``canvas``（``/engine/canvas-plan`` 的产物 ✓）⇒ :class:`canvas.CanvasPlan` ✓。
+
+    ⚠️ 与 ``upscale`` **同一条纪律** ✗：画布**由计划层定** ✓，管线只执行 ✓ ——
+    在请求侧再判一次"该吸到几"就又是「两处口径」✓✗。
+
+    ⚠️ 收到的是**像素** ✓ 但我**不直接信** ✗：按 ``stage`` 的吸附步长再过一遍
+    :func:`canvas.plan_canvas` ✓（幂等 ✓ —— 已合法的宽高过一遍不变 ✓；
+    被人手改坏的 1343×769 会被吸回 1344×768 并**如实写进 notes** ✓）。
+    """
+    raw = body.get("canvas") or body.get("canvasPlan")
+    if raw in (None, "", {}, False):
+        return None
+    if not isinstance(raw, dict):
+        raise pipe.StageError(
+            "plan", f"canvas 必须是对象（收到 {type(raw).__name__} ✓）—— "
+                    "先调 ``/engine/canvas-plan`` 拿计划 ✓，别自己拼 ✗")
+    try:
+        width = int(raw.get("width"))
+        height = int(raw.get("height"))
+    except (TypeError, ValueError) as err:
+        raise pipe.StageError(
+            "plan", f"canvas 的 width/height 必须是整数 ✗（收到 "
+                    f"{raw.get('width')!r}/{raw.get('height')!r} ✓）") from err
+    stage = str(body.get("stage") or pipe.VIDEO_STAGE)
+    try:
+        planned = canvas_mod.plan_canvas(stage, width=width, height=height)
+    except ValueError as err:
+        raise pipe.StageError("plan", str(err), cause=err) from err
+    extra = tuple(str(item) for item in raw.get("notes") or ())
+    profile = raw.get("profile")
+    if not extra and not profile:
+        return planned
+    return canvas_mod.CanvasPlan(
+        width=planned.width, height=planned.height, megapixels=planned.megapixels,
+        ratio=planned.ratio, grid=planned.grid, scheme=planned.scheme,
+        source=str(raw.get("source") or planned.source),
+        profile=profile or planned.profile, notes=planned.notes + extra)
+
+
+def _canvas_from_pixels(body: dict[str, Any], stage: str) -> Any:
+    """顶层 ``width`` + ``height`` ⇒ :class:`canvas.CanvasPlan` ✓（与 ``canvas`` 同一条纪律 ✓）。
+
+    ⚠️ 这两格原来**根本不在** ``_REQUEST_KEYS`` 里 ✓✗ ⇒ 直接给像素的调用方（脚本 / CLI / 别的客户端 ✓）
+    送了也被**静默丢掉** ✓，产物按 ``megapixels × ratio`` 的**默认画布**出 ✓
+    —— 症状是"尺寸不对"而不是报错 ✓✗（实测：要 768×768，拿到 1360×768 ✓）。
+
+    吸附与合法性仍只问 :func:`canvas.plan_canvas` ✓（这里**不**再算一遍步长 ✓✗）。
+    """
+    raw_w, raw_h = body.get("width"), body.get("height")
+    has_w, has_h = raw_w not in (None, ""), raw_h not in (None, "")
+    if not has_w and not has_h:
+        return None
+    if has_w != has_h:
+        raise pipe.StageError(
+            "plan",
+            f"尺寸只给了 {'width' if has_w else 'height'} ✗ —— 另一边**不猜** ✓"
+            f"（猜出来的比例必然是别的用途 ✓）⇒ 两个都给，或改用 canvas ✓")
+    try:
+        width, height = int(raw_w), int(raw_h)
+    except (TypeError, ValueError) as err:
+        raise pipe.StageError(
+            "plan", f"width/height 必须是整数 ✗（收到 {raw_w!r}/{raw_h!r} ✓）") from err
+    try:
+        return canvas_mod.plan_canvas(stage, width=width, height=height)
+    except ValueError as err:
+        raise pipe.StageError("plan", str(err), cause=err) from err
+
+
 def _generation_request(body: dict[str, Any]) -> pipe.GenerationRequest:
     """JSON → :class:`GenerationRequest` ✓（按前端 camelCase 收，缺项走默认 ✓）。"""
     values: dict[str, Any] = {}
@@ -152,6 +253,14 @@ def _generation_request(body: dict[str, Any]) -> pipe.GenerationRequest:
         values["ratio"] = tuple(float(item) for item in values["ratio"] if item is not None)
     if "reference_frames" in values and isinstance(values["reference_frames"], list):
         values["reference_frames"] = tuple(str(item) for item in values["reference_frames"])
+
+    # ⚠️ ``dryRun`` 原来**不在** ``_REQUEST_KEYS`` 里 ✓✗ ⇒ 回执 ``request.dry_run`` 恒 ``false``
+    #    （实测复现 ✓），而真 dry 靠 ``assembly["dryRun"]`` ✓ —— 同一个开关两个说法 ✓✗。
+    #    布尔必须**严格解析** ✗：``"false"`` 在 Python 里是 truthy ✓，``bool()`` 会把关读成开 ✓✗。
+    for flag_key in ("dryRun", "dry_run"):
+        if flag_key in body and body[flag_key] not in (None, ""):
+            values["dry_run"] = _as_bool(flag_key, body[flag_key])
+            break
 
     guidance_values: dict[str, Any] = {}
     for source, target in _GUIDANCE_KEYS.items():
@@ -181,7 +290,57 @@ def _generation_request(body: dict[str, Any]) -> pipe.GenerationRequest:
     upscale = _upscale_from(body)
     if upscale is not None:
         values["upscale"] = upscale
+    planned_canvas = _canvas_from(body)
+    if planned_canvas is None:
+        # ⚠️ ``canvas`` 与顶层 ``width/height`` 是**同一件事的两种写法** ✓ ⇒ 只认一个 ✓
+        planned_canvas = _canvas_from_pixels(
+            body, str(values.get("stage") or body.get("stage") or pipe.VIDEO_STAGE))
+    if planned_canvas is not None:
+        values["canvas"] = planned_canvas
+    # ⭐ 画布素材是**本仓 URL** ✓，引擎只读**本机文件** ✗ ⇒ 在这里换成绝对路径 ✓。
+    #    不做这步的后果：``/uploads/x.png`` 被当相对路径喂给 `Image.open` ⇒
+    #    报 "No such file"，而用户会以为"参考图没上传成功" ✓✗（其实在盘上 ✓）。
+    if values.get("first_frame"):
+        values["first_frame"] = _local_media(str(values["first_frame"]), what="首帧")
+    if values.get("init_image"):
+        values["init_image"] = _local_media(str(values["init_image"]), what="起点图")
+    if values.get("reference_frames"):
+        values["reference_frames"] = tuple(
+            _local_media(str(item), what="参考帧") for item in values["reference_frames"])
     return pipe.GenerationRequest(**values)
+
+
+def _local_media(value: str, *, what: str = "素材") -> str:
+    """画布素材地址 → **本机路径** ✓（引擎只读本地文件 ✗ 不吃 URL ✓）。
+
+    三种写法：
+    * 绝对路径 ⇒ **原样**（存不存在由管线读文件时说 ✓ —— 这里再判一次只会多一种报错口径 ✗）；
+    * ``/uploads/…`` / ``static/…`` ⇒ 解析成绝对路径 ✓，**不在盘上就拒** ✗✗
+      （这是本仓发出来的地址 ✓，解析不到 = 画布那张卡被清掉了 ✓，早说是帮忙 ✓）；
+    * 裸文件名（``首帧.png`` 这种）⇒ **原样放行** ✓（那是调用方自己的口径 ✓，
+      在这里改语义会把既有调用打成 400 ✗）；
+    * 远程 URL ⇒ **当场拒** ✗✗（下载是 `comfyui.stage_reference_uploads` 那条路的活 ✓，
+      在这里悄悄 `httpx.get` 会把一次外部依赖藏进生成调用里 ✓✗）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return text
+    if text.startswith(("http://", "https://")):
+        raise pipe.StageError(
+            "plan", f"{what}只认**本机文件** ✗，不接受远程地址：{text[:80]} ✓"
+                    "（先上传到画布素材再引用 ✓）")
+    path = Path(text)
+    if path.is_absolute():
+        return str(path)
+    relative = text.lstrip("/").replace("\\", "/")
+    if not relative.startswith(("uploads/", "static/")):
+        return text
+    from ..services.file_storage import get_absolute_path  # 局部 import ✓（避免循环 ✓）
+
+    resolved = Path(get_absolute_path(relative))
+    if not resolved.is_file():
+        raise pipe.StageError("plan", f"{what}不在盘上：{text} ✓（画布上那张卡是不是被清掉了？）")
+    return str(resolved)
 
 
 @router.get("/readiness")
@@ -339,7 +498,12 @@ async def upscale_plan(request: Request) -> Any:
     if raw_path:
         try:
             metadata, _header = st.read_header(raw_path)
-            contract = upscaler.read_upscaler_contract(metadata)
+            # ⚠️ 用 ``load_upscaler_contract``（读 + **结构核** ✓）而不是 ``read_upscaler_contract`` ✗：
+            #    后者只解出契约 ⇒ 缺字段的契约会被这条接口当成「2× 可做」**静默绿灯** ✓✗
+            #    （真跑时张量层按默认值建网络 ⇒ 形状自洽、与真权重不是一套 ✓✗）。
+            #    结构不合法 ⇒ 与"读不出来"**同一档**处理 ✓：``contract=None`` ⇒ 下面按
+            #    ``plan_upscale`` 的规则**回退普通模式** ✓ 并把真因写进 ``contractError`` ✓。
+            contract = upscaler.load_upscaler_contract(metadata)
         except (FileNotFoundError, IsADirectoryError) as err:
             contract_error = f"放大器权重读不到（{type(err).__name__}: {err} ✓）"
         except Exception as err:  # noqa: BLE001 —— 格式/契约不合法 ⇒ **回退普通 + 给理由** ✓ 不是 500 ✗
@@ -385,12 +549,155 @@ async def upscale_plan(request: Request) -> Any:
                     "weightsPath": raw_path or None})
 
 
+@router.post("/canvas-plan")
+async def canvas_plan(request: Request) -> Any:
+    """**画布计划** ✓：这次出多大、为什么是这个数、吸附时改了哪边 ✓（纯几何 ✓ **不跑推理** ✗、**不读权重** ✗）。
+
+    三种入口（二选一 ✓，同时给 ⇒ 400 ✗ 不猜优先级 ✗）：
+
+    * ``target``（``"character-sheet"`` ✓）⇒ 查 :data:`engine.profiles.PROFILES` ✓ 并回执 ``sampling``
+      （该档的步数/cfg/采样器 ✓ —— 前端可以直接照抄 ✓）；
+    * ``megapixels`` + ``ratio`` ⇒ 按该 ``stage`` 的算法算 ✓（``zimage``/``krea2`` 走 ``ResolutionSelector`` ✓，
+      ``qwen_image``/``qwen_image21``/``h3`` 走 ``megapixels`` ✓ —— 见 ``canvas.STAGE_CANVAS`` ✓）；
+    * ``width`` + ``height`` ⇒ 只做吸附 ✓（两个都给才收 ✓）。
+
+    三条口径（与 ``/upscale-plan`` 同风格 ✓）：
+    1. ⭐ **吸附步长按族给** ✓：``h3`` 32 ✓、``sdxl`` 8 ✓、图族 16 ✓ —— 全局一个数是错的 ✓✗；
+    2. ⭐ **``1344×768`` 与 ``16:9`` 不闭合**（1.75 vs 1.778 ✓）⇒ 档位命中时**像素优先** ✓，
+       比例差 >3% 才按档位面积重算 ✓ 且 ``notes`` 写明 ✓（不悄悄换画幅 ✗）；
+    3. ⭐ **表里没定画布的档 ⇒ 400** ✗（H3 由导演台出画布 ✓）—— 本仓**不猜**一个"看着合理"的数 ✓✗。
+    """
+    body = await read_json(request)
+    stage = str(body.get("stage") or pipe.VIDEO_STAGE)
+    # ⚠️ ``purpose`` / ``profile`` 都当 ``target`` 收 ✓（前端三种叫法都见过 ✓）；空串视为没给 ✓。
+    target = next((str(body[key]) for key in ("target", "purpose", "profile")
+                   if body.get(key) not in (None, "")), None)
+
+    raw_mp = body.get("megapixels") if body.get("megapixels") not in (None, "") else body.get("megapixelsBudget")
+    try:
+        megapixels = float(raw_mp) if raw_mp not in (None, "") else None
+    except (TypeError, ValueError):
+        return bad_request(f"megapixels 必须是数字（收到 {raw_mp!r} ✗）")
+
+    raw_ratio: Any = body.get("ratio") if body.get("ratio") not in (None, "") else body.get("aspectRatio")
+    if isinstance(raw_ratio, (list, tuple)):
+        try:
+            raw_ratio = tuple(float(item) for item in raw_ratio if item is not None)
+        except (TypeError, ValueError):
+            return bad_request(f"ratio 列表必须是数字（收到 {raw_ratio!r} ✗）")
+    elif isinstance(raw_ratio, str) and not raw_ratio.strip():
+        raw_ratio = None
+
+    try:
+        width = int(body["width"]) if body.get("width") not in (None, "") else None
+        height = int(body["height"]) if body.get("height") not in (None, "") else None
+    except (TypeError, ValueError):
+        return bad_request(
+            f"width/height 必须是整数（收到 {body.get('width')!r}/{body.get('height')!r} ✗）")
+
+    try:
+        planned = canvas_mod.plan_canvas(stage, target=target, megapixels=megapixels,
+                                         ratio=raw_ratio, width=width, height=height)
+    except ValueError as err:
+        return bad_request(str(err))
+
+    payload: dict[str, Any] = planned.to_dict()
+    payload["availableTargets"] = [item.to_dict() for item in profiles_mod.for_stage(stage)
+                                   ] if stage in canvas_mod.STAGE_CANVAS else []
+    if planned.profile:
+        entry = profiles_mod.PROFILES[planned.profile]
+        payload["label"] = entry.label
+        # ⚠️ 这几格是**该档的采样档** ✓（用不用由调用方定 ✓）—— 回执里给出来是为了
+        #    「照工作流跑」不必再手抄四个数 ✓（抄漏一个就是糊图且不报错 ✓✗）。
+        payload["sampling"] = {"steps": entry.steps, "cfg": entry.cfg,
+                              "sampler": entry.sampler, "schedule": entry.schedule,
+                              "denoise": entry.denoise,
+                              # ⚠️ ``denoise<1`` 的档（``storyboard-last`` ✓ 0.55）**必须**
+                              #    连 ``initImage`` 一起传 ✓✗ —— 提前说清 ✓，否则前端照抄这份
+                              #    ``sampling`` 会撞一个看不懂的 400 ✓。
+                              "requiresInitImage": entry.requires_init_image}
+    payload["stages"] = sorted(canvas_mod.STAGE_CANVAS)
+    return success(payload)
+
+
+@router.get("/stages")
+def engine_stages() -> Any:
+    """**可跑档位** ✓（画布"选哪一档"就读它）：每档挑到哪些件、缺什么、要多少 GiB ✓。
+
+    ⚠️ 纯读清单 + ``stat`` 文件 ✓（**不装权重** ✗、**不占显存** ✗）⇒ 画布一打开就问一次，
+    毫秒级 ✓。与 :func:`inventory.assembly_for_stage` 走**同一条**解析 ✓ ——
+    这里显示"会挑到哪几件"，提交时挑到的就是那几件 ✓（两处不一致 = 显示一套、跑另一套 ✗）。
+    """
+    plan = [
+        (pipe.ZIMAGE_STAGE, "Z-Image（文生图）"),
+        (pipe.KREA2_STAGE, "Krea2（文生图）"),
+        (pipe.QWEN21_STAGE, "Qwen-Image 2.1（文生图）"),
+        (pipe.QWEN_IMAGE_STAGE, "Qwen-Image 2512（文生图）"),
+        (pipe.WAN22_STAGE, "Wan 2.2 I2V（首帧 → 视频）"),
+        (pipe.VIDEO_STAGE, "H3 双流（文生视频 + 音频）"),
+        #: ⭐ **Music3**（2026-11-06 加 ✓）：⚠️ 标签**必须**写明产物是音频 ✗✗ ——
+        #: 上面五档全是画面 ✓，前端把「有 stage 就有画面」当默认 ✓✗（同一张卡片渲染 ✓、
+        #: 预览拿 `primaryUrl` 当 video 用 ✓）⇒ 它拿到的是 `.wav` ✓，症状是「预览黑了」✓✗
+        #: （不是"没跑出来"✓）。所以标签里带「**音频**」✓，让用户看一眼就知道该拿什么 ✓。
+        #: ⚠️ 同理 ``fits`` 也算得出来：13.34 GiB < 22.49 ✓ ⇒ 本档是**唯一**一条
+        #: 「件齐 且 装得下 且 不用分时」的音乐线 ✓。
+        (pipe.MUSIC3_STAGE, "Music3（文生音乐 · **产物是音频**，不是画面）"),
+    ]
+    rows: list[dict[str, Any]] = []
+    for stage, label in plan:
+        assembly, note = _auto_assembly(stage, {})
+        #: 只回**文件名** ✓：完整路径是本机事实，前端拿它没用 ✓（排障走 ``/readiness`` ✓）
+        components = {key: Path(str(value)).name for key, value in assembly.items()
+                      if isinstance(value, str) and key.endswith(("_path", "weights"))}
+        ready = inv.readiness(stage)
+        vram = ready.get("vram") or {}
+        rows.append({
+            "stage": stage,
+            "label": label,
+            "components": components,
+            #: ``ready`` ＝ **件齐**（清单层面 ✓）；``fits`` ＝ **装得下**（显存层面 ✓）——
+            #: 两者分开报 ✗✗：``qwen_image`` 件齐但 47 GiB 装不下 24 GB 卡 ✓，
+            #: 合成一个布尔值就会让画布以为"能跑"，点下去装到一半 OOM ✓。
+            "ready": bool(ready.get("ready")),
+            "fits": vram.get("fits"),
+            "estimatedGiB": vram.get("estimatedGiB"),
+            "requiredGiB": ready.get("requiredWeightsGiB"),
+            "missing": ready.get("missingRequired") or [],
+            "note": note or None,
+        })
+    return success({"stages": rows})
+
+
+@router.get("/capabilities")
+def engine_capabilities() -> Any:
+    """**引擎能力表** ✓ —— 这台引擎认哪些值、每族的几何纪律、量化族、设备策略 ✓（**纯静态** ✗ 不读卡 ✗）。
+
+    ⚠️ 这条路由以前**没有** ✗✗（``facade.capabilities()`` 只被内部用 ✓）：后果是前端想知道
+    「支持哪些采样器 / 调度器 / 用途档 / 吸附步长」只能**读代码猜** ✓✗ —— 猜错的代价在
+    **没校验**的路径上就是「静默按默认跑」✓✗（采样器拼错不报错，出图却和以为的不是一回事 ✓）。
+
+    三条口径：
+    1. ⭐ **零副作用** ✗✗：不 import torch ✓、不读权重 ✓、**不探显存** ✓（卡况在 ``GET /engine/runtime``
+       的 ``devicePolicy`` ✓ —— 混进来这张表就随机器负载变 ✓✗，落盘事实也没法与它对账 ✓）；
+    2. ⭐ 值**从注册表取** ✓ 不手抄 ✗（``samplers``/``schedules``/``profiles`` 各只有一个真源 ✓，
+       手抄一份必漂移 ✓）；
+    3. ⭐ **能力 ≠ 已验收** ✗：``unverified`` 单列 ✓（能装能跑一次，和有性能基线是两件事 ✓）。
+    """
+    return success(facade.capabilities())
+
+
 @router.get("/backends")
 def backends() -> Any:
     """**推理后端现状** ✓ —— 现在能跑什么、要装什么、装完还差什么 ✓。
 
     这条接口专治一种含糊：只说「后端不可用」✗ ⇒ 分不清是**依赖没装**（去装包 ✓）
     还是**实现待写**（去写代码 ✓）。两者治法完全不同 ✗（见 `torch_backend` 的 ``reason`` ✓）。
+
+    ⚠️ ``torch`` 那一份里的三格**各答一件事** ✗✗（2026-11-01 ✓）：``canGenerate``（此刻能不能出片 ✓，
+    按**已装件**算 ⇒ 装齐就是 ``true``）、``pendingParts``（**这台**还缺哪几件 ✓）、
+    ``codeGaps``（**代码**里还没写的能力 ✓ —— 它不是 ``knownGaps`` ✗，后者是 ``capabilities()``
+    的**环境**缺口 ✓）。曾经 ``canGenerate`` **写死** ``false``、``pendingParts`` 塞的是一堆**沿革散文**
+    ⇒ 装了整链、真出过 mp4 之后本接口仍报「不能出片」✓✗（UI 唯一的自述口 ✓ ⇒ 整条引擎看着都不能用 ✗）。
     """
     return success({
         "dryrun": {
@@ -489,6 +796,10 @@ async def dry_run(request: Request) -> Any:
 _ASSEMBLY_KEYS: dict[str, str] = {
     "stage": "stage",
     "ditPath": "dit_path", "dit_path": "dit_path",
+    # ⭐ **第二份主干** ✓（2026-11-02 加 ✓）：Wan2.2 I2V 是**双专家** ✓ —— `ditPath` 高噪、
+    #    `ditPath2` 低噪 ✓。⚠️ 不进这张表 ⇒ 传了被**静默丢掉** ✓✗，采样中途换装时"低噪那份"仍是
+    #    高噪 ✓（症状＝后段细节照样糊，且一条报错都没有 ✓✗）。
+    "ditPath2": "dit_path2", "dit_path2": "dit_path2",
     "tokenizerPath": "tokenizer_path", "tokenizer_path": "tokenizer_path",
     "device": "device",
     "audioLatentMode": "audio_latent_mode", "audio_latent_mode": "audio_latent_mode",
@@ -500,6 +811,12 @@ _ASSEMBLY_KEYS: dict[str, str] = {
     "realVideoVae": "real_video_vae", "real_video_vae": "real_video_vae",
     "videoVaeDevice": "video_vae_device", "video_vae_device": "video_vae_device",
     "videoVaeWeights": "video_vae_weights", "video_vae_weights": "video_vae_weights",
+    # ⭐ **音频** VAE 两格 ✓（2026-11-04 ✓）：H3 是双流 ✓，音轨走的是**另一族** VAE ✓✗
+    #    （DAC 血统编码 ＋ BigVGAN 解码 ✓），视频那份顶不了 ✓ —— 上面三条只管画面 ✓。
+    #    ⚠️ 不加进这张表 ⇒ 传了被**静默丢掉** ✓✗，然后 `_attach_reference_audio_vae` 照旧挂
+    #    参考实现 ⇒ **音轨是噪声而回执不报** ✓✗（正是上面 `int8Offload` 那条同款漂移 ✓）。
+    "realAudioVae": "real_audio_vae", "real_audio_vae": "real_audio_vae",
+    "audioVaeWeights": "audio_vae_weights", "audio_vae_weights": "audio_vae_weights",
     # ⭐ Z-Image 那两格 ✓（2026-10-31 ✓）：`stage=zimage` 要**三份权重** ✓ —— DiT 走 `ditPath` ✓，
     #    另两份在这里 ✓。⚠️ 不加进这张表 ⇒ 传了也被**静默丢掉** ✓✗，然后装配报「缺 textWeights」✓✗
     #    —— 用户明明给了，报错却说没给（正是 2026-10-29 `int8_offload` 那次漂移的同款 ✓）。
@@ -525,6 +842,13 @@ _ASSEMBLY_KEYS: dict[str, str] = {
     #    是**同一个函数** ✓，不在这里手抄 ✗✗）。两种写法都收：`loras`（清单）/ `lora`（单条）。
     #    ⚠️ 值这里先原样搬 ✓，真正归一在 `_assembly_from` 后面那段（要读 `modelsDir` ✓）。
     "loras": "loras", "lora": "loras",
+    # ⭐ **VAE 解码省显存旋钮** ✓（2026-11-02 收 ✓）：对象形
+    #    `{"tile": 512, "halo": 16, "attnChunk": 1024, "fallback": true}` ✓ ——
+    #    合法键与取值全归 `torch_backend.normalize_vae_tiling` ✓（下面 `_assembly_from`
+    #    里**调一次** ✓✗，白名单**只搬不改** ✗ —— 否则同一份规则又在这里手抄一遍 ✓✗）。
+    #    ⚠️ 不进这张表 ⇒ 传了被**静默丢掉** ✓✗，用户以为"已经分块了"、其实全程整张解 ✓✗，
+    #    3072×2304 上照样 OOM 且回执里查不到任何线索 ✓✗。
+    "vaeTiling": "vae_tiling", "vae_tiling": "vae_tiling",
     "force": "force",
 }
 
@@ -539,6 +863,30 @@ def _bool_from(body: dict[str, Any], *names: str) -> bool | None:
         if name in body and body[name] not in (None, ""):
             return _as_bool(name, body[name])
     return None
+
+
+def _auto_assembly(stage: str, explicit: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """**显式优先、缺的从清单补** ✓ ⇒ ``(装配参数, 说明)``。
+
+    为什么需要它：画布/前端只该报「跑哪一档」✓ —— 让它填
+    ``ditPath`` / ``textWeights`` / ``imageVaeWeights`` / ``tokenizerPath`` 四格路径，
+    等于把清单解析搬到前端 ✗（一份清单两处解析，迟早漂 ✓✗）。
+
+    ⚠️ ``note`` **不进装配** ✗✗：``ensure_loaded`` 只认白名单键 ✓，多一个键就是
+    ``TypeError`` ⇒ 整个请求 500 ✓✗（这个坑本仓踩过：白名单漏一项就静默丢参数 ✓）。
+    所以说明单独返回，由调用方放进回执 ✓。
+    """
+    auto = inv.assembly_for_stage(stage)
+    note = str(auto.pop("note", "") or "")
+    merged: dict[str, Any] = {**auto, **explicit}
+    merged["stage"] = stage
+    return merged, note
+
+
+def _stage_of(body: dict[str, Any], assembly: dict[str, Any]) -> str:
+    """这次要跑哪一档 ✓（显式 ``stage`` > 装配里的 > 默认视频 ✓）。"""
+    raw = assembly.get("stage") or body.get("stage") or "h3"
+    return str(raw).strip().lower()
 
 
 def _flag(body: dict[str, Any], name: str, default: bool = False) -> bool:
@@ -575,7 +923,7 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
         if target in values or source not in body or body[source] in (None, ""):
             continue
         values[target] = body[source]
-    for key in ("dit_path", "tokenizer_path", "device", "stage",
+    for key in ("dit_path", "dit_path2", "tokenizer_path", "device", "stage",
                 "video_vae_device", "video_vae_weights",
                 "text_weights", "image_vae_weights"):
         if key in values:
@@ -619,6 +967,21 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
             values["policy"] = policy_mod.normalize_policy(values["policy"])
         except ValueError as err:
             raise pipe.StageError("load", str(err)) from err
+    if "vae_tiling" in values:
+        # ⚠️ 同上 ✗✗：**在路由层就归一**（不是留到 `ensure_loaded` ✓）—— 拼错的键 / 非数字
+        #    要 **400**、不是 **500** ✓；而 `normalize_vae_tiling` 抛的是 `ValueError` ✓，
+        #    `/load` 不接它 ⇒ 漏出去就是「服务器错误」✓✗（用户只是把 `attnChunk` 拼成了
+        #    `attn_chunks` ✓，该被告知合法的键有哪些 ✓）。
+        #    ⚠️ 归一仍调**同一个函数** ✓（`torch_backend.normalize_vae_tiling` ✓）⇒
+        #    「哪个键算数」只有一份 ✓，不在这里手抄 ✗（白名单**只搬不改** ✓）。
+        try:
+            values["vae_tiling"] = normalize_vae_tiling(values["vae_tiling"])
+        except ValueError as err:
+            raise pipe.StageError("load", str(err)) from err
+        #: 全关就等于没配 ✓（装配默认本来就是全关 ✓）⇒ 不往 `values` 里放一个"假配置" ✗
+        #: （放了会让装载键多一格、白装一遍 ✓✗）。
+        if values["vae_tiling"] == normalize_vae_tiling(None):
+            values.pop("vae_tiling")
     if "audio_latent_mode" in values:
         mode = str(values["audio_latent_mode"]).strip()
         # ⚠️ 不认的口径**必须报错** ✗（静默当成单流 = 用户以为双流开着 ✓✗）
@@ -627,7 +990,7 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
                 "plan", f"未知 audioLatentMode {mode!r} ✗ ⇒ 只能是 "
                         f"{' / '.join(_AUDIO_LATENT_MODES)} ✓（不给 ⇒ 双流不启用 ✓）")
         values["audio_latent_mode"] = mode
-    for key in ("attach_video_vae", "attach_audio_vae", "real_video_vae",
+    for key in ("attach_video_vae", "attach_audio_vae", "real_video_vae", "real_audio_vae",
                 "int8_offload", "force"):
         if key in values:
             values[key] = _as_bool(key, values[key])
@@ -653,6 +1016,22 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
 def _default_outputs_dir() -> Path:
     """产物默认落 ``<数据根>/static/engine`` ✓ —— 这样前端能直接用 ``/static`` 取 ✓。"""
     return Path(get_storage_root()) / "engine"
+
+
+def _with_urls(task: dict[str, Any] | None) -> dict[str, Any] | None:
+    """任务回执补 ``primaryUrl`` ✓ —— ``primaryPath`` 是**本机绝对路径** ✗，前端拿它没用 ✓。
+
+    只转 ``<数据根>/static`` 下的产物 ✓：别的目录（调用方自给的 ``outputsDir`` ✓）不在
+    静态挂载里 ✗，硬转 URL 只会 404 ✓✗（比不给更误导 ✓）。
+    """
+    if not isinstance(task, dict) or not task.get("primaryPath"):
+        return task
+    root = Path(get_storage_root()).resolve()
+    try:
+        rel = Path(str(task["primaryPath"])).resolve().relative_to(root)
+    except ValueError:
+        return task
+    return {**task, "primaryUrl": f"/static/{rel.as_posix()}"}
 
 
 @router.get("/runtime")
@@ -703,10 +1082,47 @@ async def load_runtime(request: Request) -> Any:
       比如显式给了 ``device`` ✓）。两者答的是不同问题 ✓✗：前者答"现在什么状态"，
       后者答"这次为什么整条链落在 CPU 上" ✓（只看 ``device`` 会把一次降级读成能力缺失 ✓✗）；
     * ``runtime.devicePolicy`` —— 同上那份实况 ✓（前端轮询 ``GET /engine/runtime`` 时读它 ✓）。
+
+    ## VAE 解码省显存 ``vaeTiling`` ✓（2026-11-02 ✓，不写就是**全关** ✓）
+
+    对象形，五个键都可省 ✓：``{"tile": 512, "halo": 16, "attnChunk": 1024, "temporalChunk": 8,
+    "fallback": true}``（``attn_chunk`` / ``temporal_chunk`` 这种 snake 写法也认 ✓）。
+
+    * ``tile`` —— **像素**口径（与 ComfyUI ``VAEDecodeTiled`` 同 ✓），切「全图注意力**之后**」
+      的 up 链 ✓；``halo`` 是不用的重叠边（给 0 也会被抬到感受野下限 ✓ —— 这条**不信调用方** ✗）；
+    * ``attnChunk`` —— 注意力按 **query** 分块 ✓（数学上无近似 ✓）；
+    * ``temporalChunk`` —— **只对 SEEDVR2 那族**有效 ✓，单位是**潜帧** ✓：沿时间维切块解码 ✓，
+      每块带**块外真实上文** ⇒ 结果与整段**相等** ✓✗（`engine_seedvr2_vae_test` ⑫ 兜住 ✓）；
+      给别的族就是闲着 ✓（不报错 ✗）；
+    * ``fallback``（**默认 true** ✓）—— 只在**真 OOM** 时降档重试 ✓，回执里 ``reason="oom"`` ✓。
+      ⚠️ **降的是哪一档，按族不同** ✓✗：Wan 那族降 ``tile``/``attnChunk`` ⇒ **字节会变** ✗；
+      SEEDVR2 那族降的是 ``temporalChunk`` 阶梯（``4→2→1`` ✓，整条试遍仍 OOM 才报人话 ✓）⇒
+      **不动数值** ✓，回执里多一格 ``"exact": true`` ✓（两种降档要分开读，别拿 "reason=oom"
+      一个词推断画质变没变 ✗✗）。
+      ⭐ SEEDVR2 那族还有一条**不靠 OOM** 的兜底 ✓✗：这份卡实测 ``chunk=4`` **不报 OOM 而是溢出到
+      主机内存**（``reserved`` 86.67 GiB ≫ 卡 22.49，只慢 28 倍）⇒ 解码后量 ``max_memory_reserved()``，
+      超过物理显存就按 ``shrink_for_peak()`` **一次跳到该降的档**并记进后续调用 ✓，回执里是
+      ``"spilled": true, "peakReservedGiB": 86.67, "nextTemporalChunk": 1, "applied": true`` ✓；
+      自动降的那次下一轮会写 ``reason="auto"`` ✓（不是你配的 ⇒ 别当成 ``configured`` ✗）；
+      你**显式**配的档位我们只回报不擅改 ✓（此时 ``applied: false`` ✓）。
+
+    ⚠️ **前两个一开就换字节** ✗✗（``temporalChunk`` **不在**这一列 ✓：它与整段逐位相等 ✓）：
+    2048×1536 fp32 实测 ``tile`` 相对差 **5.8e-03**（halo 加到 24
+    也消不掉 ✓：cuDNN 按窗口尺寸选算法 ✓）、``attnChunk`` 只有与 SDPA 内部分块对齐时才逐位 ✓
+    （小画布逐位 ✓、2048×1536 差 8.55e-03 ✓）⇒ **想逐像素复现就别开** ✓，或开完把回执里的
+    ``vaeTiling`` 一起记下来 ✓✗（不然下一次复现不出同一张图时无从判断原因 ✓）。
+    省多少：8× 那份 2048×1536 从 **20.96 GiB** ⇒ ``attnChunk=1024`` **3.94** ⇒ 再叠
+    ``tile=512`` **1.03 GiB** ✓（3072×2304 整张解会 OOM ✓）。
+
+    ⚠️ 它**进装载键** ✓：改旋钮 ⇒ 重装一次（``reused=false`` ✓）。理由是一份后端只存一套设置 ✗
+    —— 不进键就是"给了新旋钮却悄悄还是旧值" ✓✗。全关（或不写）等于没配 ✓、白装一遍是不会发生的 ✗。
     """
     body = await read_json(request)
     try:
         assembly = _assembly_from(body)
+        # ⭐ 与 ``/generate`` 同一条口 ✓：只报档位就能装 ✓（缺的件从清单解析 ✓，
+        #    解析不到 ⇒ runtime 当场点名缺哪格 ✓ —— 不在这里猜路径 ✗）
+        assembly, auto_note = _auto_assembly(_stage_of(body, assembly), assembly)
     except pipe.StageError as err:
         return bad_request(str(err))
     try:
@@ -715,7 +1131,8 @@ async def load_runtime(request: Request) -> Any:
         return _engine_error(facade.translate(err))
     except TorchBackendUnavailable as err:
         return bad_request(f"{err}（reason={getattr(err, 'reason', 'pending')} ✓）")
-    return success({"loadReport": report, "runtime": engine_runtime.status()})
+    return success({"loadReport": report, "runtime": engine_runtime.status(),
+                    "autoNote": auto_note or None})
 
 
 @router.post("/unload")
@@ -753,13 +1170,47 @@ async def generate(request: Request) -> Any:
     if not str(body.get("outputsDir") or body.get("outputs_dir") or "").strip():
         # ⚠️ 默认给**数据根下的 engine 目录** ✓：不给 ⇒ 管线落到临时目录 ✓✗（前端取不到 ✓）
         body = {**body, "outputsDir": str(_default_outputs_dir())}
+    stage_key = "h3"
+    auto_note = ""
     try:
         generation = _generation_request(body)
         assembly = _assembly_from(body)
+        # ⭐ 只报「哪一档」也能跑 ✓：显式路径优先 ✓，缺的从清单解析 ✓（解析不到就不塞 ✓）
+        stage_key = _stage_of(body, assembly)
+        assembly, auto_note = _auto_assembly(stage_key, assembly)
         # ⚠️ ``dryRun: "false"`` 被 ``bool()`` 读成 **True** ⇒ 出一段**假画面** ✓✗，
         #    而用户以为自己关着 ✓✗（产物还标 synthetic ✓ 但没人看标签 ✓）⇒ 严格解析 ✓。
         assembly["dryRun"] = _flag(body, "dryRun")
         wait = _flag(body, "wait")
+        # ⭐ **H3 缺取整口径 ⇒ 提交时就拒** ✗✗（2026-11-02 真跑抓的 ✓）：
+        # H3 形态**没有单流前向** ✓（`denoise` 只喂得起一路 ✗）⇒ `audioLatentMode` 不给
+        # ⇒ 装载照过（**20 秒白装** ✓✗）、采样第 0 步才炸 ✓，报错还落在「主干少参数」上 ✓✗
+        # （读起来像模型坏了 ✗）。stage-only 那条路（`assembly_for_stage("h3")`）拿的是
+        # **空设置** ⇒ 永远不带这格 ⇒ 画布点 H3 必撞 ✓✗。⇒ 在**提交前**点名缺什么 ✓。
+        if (stage_key == pipe.VIDEO_STAGE and not assembly.get("dryRun")
+                and not str(assembly.get("audio_latent_mode") or "").strip()):
+            return bad_request(
+                "H3 双流**必须给音频潜帧的取整口径** ✗：请求里加 ``\"audioLatentMode\": "
+                "\"round\"``（或 ceil / floor ✓）——「秒数 → 音频潜帧数」的取整方式**没有默认值** ✗✗"
+                "（`geometry.audio_latent_frames` 的纪律 ✓：没核过的口径不许猜 ✓）。"
+                "不给这格的后果是：装载照过（约 20 秒 ✓）、**采样第 0 步才失败** ✓✗，"
+                "报错还读起来像「主干坏了」✗ —— 所以在这里提前拦 ✓")
+        # ⭐ 同一条纪律的**第二格** ✗✗（2026-11-02 同一次真跑抓的 ✓）：双流的 `init_dual_latents`
+        #    要把像素帧数换算成**视频潜帧数** ✓，`temporalCompression` 不给 ⇒ init 阶段才炸 ✓✗
+        #    （H3 的视频 VAE 是 **4 倍时间压缩** ✓ —— `pipeline` / `h3_edit` 全线都是 4 ✓）。
+        if (stage_key == pipe.VIDEO_STAGE and not assembly.get("dryRun")
+                and str(assembly.get("audio_latent_mode") or "").strip()
+                and not body.get("temporalCompression") and not body.get("temporal_compression")):
+            return bad_request(
+                "H3 双流**必须给视频的时间压缩比** ✗：请求里加 ``\"temporalCompression\": 4``"
+                "（H3 的视频 VAE 是 4 倍时间压缩 ✓ ✓✗）—— 本仓不猜压缩比 ✗✗"
+                "（`geometry.latent_frames` 的纪律 ✓）。不给 ⇒ 装载照过、init 阶段才失败 ✓✗")
+        if (stage_key == pipe.VIDEO_STAGE and not assembly.get("dryRun")
+                and assembly.get("attach_audio_vae") is False):
+            return bad_request(
+                "H3 双流**必须挂音频 VAE** ✗（``attachAudioVae: false`` 是自断双流 ✓✗）："
+                "H3 形态没有单流前向 ✓ ⇒ 关掉音频 VAE ⇒ 装载照过、采样必炸 ✓✗ —— "
+                "要只出画面请走 `wan22` / `seedvr2` 那两档 ✓，别关这一格 ✗")
     except pipe.StageError as err:
         return bad_request(str(err))
     try:
@@ -769,7 +1220,8 @@ async def generate(request: Request) -> Any:
         #: ⚠️ 队满**必须当场说**（E3.1 背压）✗：不接住就是 500 ✓✗ —— 前端看到「服务器错误」，
         #: 既不知道「没入队」也不知道「该等一会儿再试」✓。这里翻成 400 + `E_ENGINE_BUSY` ✓。
         return _engine_error(facade.translate(err))
-    poll = {"taskId": task_id, "pollUrl": f"/api/v1/engine/tasks/{task_id}"}
+    poll = {"taskId": task_id, "pollUrl": f"/api/v1/engine/tasks/{task_id}",
+            "stage": stage_key, "autoNote": auto_note or None}
     if not wait:
         return success({**poll, "status": "queued", "waited": False, "synthetic": True})
     try:
@@ -777,7 +1229,7 @@ async def generate(request: Request) -> Any:
     except (TypeError, ValueError):
         return bad_request(f"timeoutSeconds 不是数字（收到 {body.get('timeoutSeconds')!r} ✗）")
     task = engine_runtime.wait(task_id, timeout=timeout)
-    return success({**poll, "waited": True, "timeoutSeconds": timeout, "task": task})
+    return success({**poll, "waited": True, "timeoutSeconds": timeout, "task": _with_urls(task)})
 
 
 @router.get("/tasks")
@@ -792,7 +1244,7 @@ def get_engine_task(task_id: str, events_limit_raw: int = Query(200, alias="even
     task = engine_runtime.get_task(task_id, events_limit=max(0, int(events_limit_raw)))
     if task is None:
         return bad_request(f"没有这个任务 {task_id!r} ✓（列表见 /api/v1/engine/tasks ✓）")
-    return success(task)
+    return success(_with_urls(task))
 
 
 @router.post("/tasks/{task_id}/cancel")

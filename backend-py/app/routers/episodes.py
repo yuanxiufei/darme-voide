@@ -11,6 +11,8 @@ GET     ``/{id}/scenes``                     该集关联场景
 GET     ``/{episode_id}/storyboards``        该集分镜（含角色/服装/道具关联）
 GET     ``/{id}/pipeline-status``            流水线十步进度
 GET     ``/{id}/script-fingerprint``         剧本指纹门禁状态
+GET     ``/{id}/script-scenes``              该集剧本切出来的场次（含 stale 判定）
+POST    ``/{id}/script-scenes``              解析/重建该集场次（幂等：指纹未变即跳过）
 POST    ``/{id}/continue-script``            剧本续写（``text-generation`` 的 LLM 链路）
 POST    ``/{id}/consistency-qc``             图像连续性检测（report 模式，本地 dHash 比对）
 ======  ==================================  ==================================
@@ -29,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Connection
 
@@ -58,6 +60,7 @@ from ..services.script_fingerprint import (
     check_episode_fingerprint,
     refresh_episode_script_hash,
 )
+from ..services.script_scenes import list_episode_scenes, parse_episode_scenes
 from ..services.task_logger import log_task_error
 from ..services.text_generation import continue_script
 
@@ -474,6 +477,46 @@ def get_script_fingerprint(episode_id: str, conn: Connection = Depends(get_conn)
 # ---------------------------------------------------------------------------
 # POST /{id}/continue-script — AI 续写剧本（原始内容或格式化剧本）
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# GET/POST /{id}/script-scenes — 该集剧本的场次结构（编剧层，不是 scenes 那套生产单位）
+# ---------------------------------------------------------------------------
+
+@router.get("/{episode_id}/script-scenes")
+def get_script_scenes(episode_id: str, conn: Connection = Depends(get_conn)):
+    """该集剧本切出来的场次（场号 / 内外景 / 地点 / 出场角色 / 正文偏移）。
+
+    ⚠️ **不是** ``GET /{id}/scenes``：后者是视觉生产单位（配图、分镜数、氛围），
+    这里是编剧结构单位。两者同形不同义，别混用。
+
+    ``stale=true`` 表示剧本已改动、这份结构过期 —— 重新解析前不要拿它拆分镜。
+    """
+    try:
+        eid = parse_param_id(episode_id)
+        if eid is None:
+            return not_found("Invalid episode id")
+        return success(list_episode_scenes(conn, eid))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
+
+@router.post("/{episode_id}/script-scenes")
+def build_script_scenes(episode_id: str, force: bool = Query(False, description="指纹未变也强制重算"),
+                        conn: Connection = Depends(get_tx)):
+    """解析/重建该集场次（幂等）。
+
+    放在 ``episodes`` 域而不是 ``knowledge`` 域，是因为它写的是**项目事实**（``darme.db``），
+    而 ``knowledge`` 域的全部端点都是只读。解析器本身仍是
+    ``services/scene_parser``（纯函数、不调模型），A 侧库内剧本走的是同一个函数。
+    """
+    try:
+        eid = parse_param_id(episode_id)
+        if eid is None:
+            return not_found("Invalid episode id")
+        return success(parse_episode_scenes(conn, eid, force=bool(force)))
+    except Exception as exc:  # noqa: BLE001
+        return bad_request(str(exc))
+
 
 @router.post("/{episode_id}/continue-script")
 async def continue_episode_script(episode_id: str, request: Request,

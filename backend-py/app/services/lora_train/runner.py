@@ -1,6 +1,6 @@
 """**子进程运行器** —— 训练/预缓存真正是怎么被跑起来的 ✓（LoRAMaster 移植 ✓）。
 
-出处（参考实现 ✓）：``reference/lora/LoRAMaster/wan_lora_train.py`` 等 5 个脚本里的
+出处（参考实现 ✓）：``LoRAMaster/wan_lora_train.py`` 等 5 个脚本里的
 ``subprocess.Popen(..., stdout=PIPE, stderr=STDOUT, text=True, env=env, encoding='utf-8',
 errors='ignore')`` ✓、``terminate_process_tree()`` ✓、``stop_caching()`` / ``stop_train()`` ✓。
 

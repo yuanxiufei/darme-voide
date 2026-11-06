@@ -64,14 +64,14 @@ If the user did not provide a reference, derive the inspiration profile from the
 
 ### 4. Choose a style anchor (optional)
 
-The 8 style files are reference points for motion language. They contribute: motion rhythm, easing, transition vocabulary, music mood template, geometry vocabulary. They do **NOT** contribute colors, typography, or photography mood — those come from the brand profile.
+The 8 style files are reference points for motion language. They live in `references/styles/`, one per letter — read `references/styles/A.md` … `references/styles/H.md` before scoring or anchoring; each opens with a "When to anchor here" line and a motion signature. They contribute: motion rhythm, easing, transition vocabulary, music mood template, geometry vocabulary. They do **NOT** contribute colors, typography, or photography mood — those come from the brand profile.
 
 Procedure:
 
 1. If the user named a style, anchor to it.
-2. Otherwise, score each of the 8 against the brand profile. See `style-matching.md`.
+2. Otherwise, score each of the 8 against the brand profile. See `references/style-matching.md`.
 3. If a strong match (>70%): suggest, ask once, anchor.
-4. If no match or all weak: do **not** anchor to any style. Derive a custom style from the brand + inspiration profiles (see `custom-style.md`).
+4. If no match or all weak: do **not** anchor to any style. Derive a custom style from the brand + inspiration profiles (see `references/custom-style.md`).
 5. Record in `<workspace>/ui-motion/style_anchor.json` with `anchor: "A" | "B" | … | "H" | "custom"`. If custom, include a `custom_spec` block.
 
 ### 5. Build the storyboard
@@ -181,6 +181,7 @@ The chat reply follows this structure:
 - **Stitch fails on missing ffmpeg** → ship the raw clips + brand_profile.json.
 - **The user wants > 15s** → numbered continuation segments with tail-frame handoff and one post-generated BGM. See `long-form.md`.
 - **The brand doesn't match any style** → use the custom path. Don't force a fit.
+- **The user asks for a revision** ("make it more on-brand", "more product-y", "premium feel") → work the matching case in `references/common-adaptations.md` before touching anything; most pushes are solved by correcting the brand profile, not the style anchor.
 
 ## Windows (win32) platform notes
 

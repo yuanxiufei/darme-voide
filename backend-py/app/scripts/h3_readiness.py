@@ -213,7 +213,7 @@ if __name__ == "__main__":
     # ⚠️ Windows 上**必加** ✗✗（2026-09-25 实测 ✓）：py3.14 及以前 stdout 仍按**本地代码页**
     #    （本机 GBK ✓）编码 ✗（PEP 686 的 UTF-8 默认要 **3.15** ✓）⇒ 本脚本满屏 ✓/✗ 符号，
     #    **裸跑第一条 `print` 就 `UnicodeEncodeError` 崩** ✓✗（连「① 环境」都打不出来 ✗）。
-    #    ⚠️ 而它正是 `PENDING_PARTS` 让人「**上机前先跑一次**」的那条命令 ✗ ⇒ 等于「上机当天才发现跑不起来」✓✗。
+    #    ⚠️ 而它正是 `IMPLEMENTATION_HISTORY` 让人「**上机前先跑一次**」的那条命令 ✗ ⇒ 等于「上机当天才发现跑不起来」✓✗。
     #    ⚠️ 全量自检**看不出来**：`run_all.py` 给子进程兜了 `PYTHONIOENCODING=utf-8` ✓（见那边注释 ✓）
     #    ⇒ 全量绿、裸跑崩 ✓✗。⇒ 与本仓 `check_memory.py` 同一写法 ✓（对齐惯例 ✓ 别各写一套 ✗）。
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

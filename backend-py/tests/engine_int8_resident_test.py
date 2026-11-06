@@ -444,11 +444,12 @@ def case_int8_ledger() -> None:
         return tb._int8_residency_problems(module, SimpleNamespace(int8Resident=resident))
 
     ledger, problem = _ledger(Pair(), 2)
-    check("⑧ 两个常驻层 ＋ 文件侧 2 个 int8 权重 ⇒ **无问题** ✓，账目四项都在 ✓"
-          "（这条检查本身得不误杀 ✓ 才有用 ✓）",
+    check("⑧ 两个常驻层 ＋ 文件侧 2 个 int8 权重 ⇒ **无问题** ✓，账目五项都在 ✓"
+          "（这条检查本身得不误杀 ✓ 才有用 ✓；2026-11-02 增 `int4Resident` 子计数 ✓ ——"
+          "它**不算**进 `int8Resident` 之外 ✓，两者是子集关系 ✓）",
           problem is None
           and ledger == {"layers": 2, "int8Params": 2, "int8OnCpu": 2, "int8OnGpu": 0,
-                         "int8Resident": 2},
+                         "int8Resident": 2, "int4Resident": 0},
           (ledger, problem))
 
     ledger, problem = _ledger(Pair(), 1)

@@ -21,6 +21,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 判据还没跑就崩在第一条打印上 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
 from app.services.engine import vae_tiling as vt  # noqa: E402
 
 try:
@@ -167,6 +173,25 @@ def case_decode_wrapper() -> None:
           (tuple(got.shape), float((got - want).abs().max())))
     check("⑧′ 默认档就是 ComfyUI 的 512/64 ✓",
           vt.TILE_DEFAULTS == {"tile": 512, "overlap": 64}, vt.TILE_DEFAULTS)
+
+    #: ⚠️ **VAE 解码要显式给 `out_channels`** ✓✗：解码器是「4 个潜通道 → 3 个像素通道」✓，
+    #: 不传就按**输入**通道核每块形状 ✓ ⇒ 真解码器每块都当场报「预期 (1,4,…) 实际 (1,3,…)」✓
+    #: （那句话会把人引去查 upscale ✓，其实只差这一格 ✓）。
+    got3 = vt.decode_latents_tiled(
+        lambda t: t.repeat_interleave(8, -1).repeat_interleave(8, -2)[:, :3],
+        latents, spatial_scale=8, tile=64, overlap=16, out_channels=3)
+    check("⑧″ 解码器改通道数（4→3）⇒ 给 `out_channels=3` 才拼得回来 ✓",
+          tuple(got3.shape) == (1, 3, 128, 160),
+          tuple(got3.shape))
+    try:
+        vt.decode_latents_tiled(
+            lambda t: t.repeat_interleave(8, -1).repeat_interleave(8, -2)[:, :3],
+            latents, spatial_scale=8, tile=64, overlap=16)
+    except vt.TileError:
+        check("⑧‴ 不给 `out_channels` ⇒ 当场报错 ✗（不按输入通道糊过去 ✓✗）", True)
+    else:
+        check("⑧‴ 不给 `out_channels` ⇒ 当场报错 ✗（不按输入通道糊过去 ✓✗）", False,
+              "没报错")
 
 
 def main() -> int:

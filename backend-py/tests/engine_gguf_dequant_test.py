@@ -15,9 +15,14 @@
 5. **F16/F32/BF16 直接转换** ✓；
 6. ⭐ **真文件**：`Q4_K_M` 是**混合**方案 ✓（F32/Q4_K/Q6_K 三种）、白名单**覆盖率 100%** ✓、
    真 Q6_K 张量有限非零 ✓、**跨量化对拍** corr > 0.99 ✓（不靠自写期望值 ✓）；
-7. ⭐ **未实现的 k-quant（Q5_K）⇒ 具名拒绝** ✗（不静默当 F32 ✗ —— 那会装出「数值全错的权重」✗）。
+7. ⭐⭐ **Q5_K** ✓：与 Q4_K 的唯一差别是「第 5 bit 在 ``qh`` 里」✓ ⇒ 手造块精确值钉住
+   （``sc=63/min=63/第5bit=1`` ⇒ 每元素 ``1*63*(0+16) - 0.5*63 = 976.5`` ✓）、
+   ``qh`` 的位号按段分派 ✓、列 32 为空时前后半必须差 16 ✓（少解一位就凑不出 ✓）；
+8. ⭐ **真文件**：`Krea2/krea2_turbo-Q4_K_M.gguf` 里有 **63 张 Q5_K** ✓（``file_type`` 却写 Q4_K_M ✓）
+   ⇒ 白名单覆盖率 100% ✓、真 Q5_K 张量有限非零 ✓；
+9. ⭐ **仍未实现的 k-quant（Q2_K/Q3_K）⇒ 具名拒绝** ✗（不静默当 F32 ✗ —— 那会装出「数值全错的权重」✗）。
 
-⚠️ 本套只保证「盘上那个 Q4_K_M 文件里出现的类型全覆盖」✗ —— Q2_K/Q3_K/Q5_K/Q8_K 仍会拒绝 ✓；
+⚠️ 本套只保证「盘上那几个 GGUF 文件里出现的类型全覆盖」✗ —— Q2_K/Q3_K/Q8_K 仍会拒绝 ✓；
 ⚠️ 端到端「GGUF 文件 → llm.LlmModel」的权重名映射**不在本套** ✓（见 ``engine_gguf_to_llm_test`` ✓）。
 
 运行::
@@ -156,6 +161,95 @@ def case_q6_k() -> None:
           _raises(lambda: dq.dequantize_tensor(b"\x00" * 200, 14, 256)))
 
 
+def _q5_block(d: float = 1.0, dmin: float = 0.5, scales: bytes = b"\xff" * 12,
+              qh: bytes = b"\x00" * 32, qs: bytes = b"\x11" * 128) -> bytes:
+    """造一个 Q5_K 块 ✓（顺序是 **d → dmin → scales[12] → qh[32] → qs[128]** ✓ = 176 字节 ✓）。
+
+    ⚠️ ``d`` 与 ``dmin`` 都**打头** ✓ —— 与 Q6_K 的「``d`` 在块尾」相反 ✗✗，照 Q6_K 的习惯排会
+    得到「形状对、数值全错」的产物 ✓✗。
+    """
+    return (np.array([d], dtype="<f2").tobytes() + np.array([dmin], dtype="<f2").tobytes()
+            + bytes(scales) + bytes(qh) + bytes(qs))
+
+
+def case_q5_k() -> None:
+    # d=1 / dmin=0.5 / scales 全 0xFF（sc=mn=63）/ qh 全 0（无第 5 bit）/ qs 全 0x11（q=1）
+    #   ⇒ y = 1*63*1 − 0.5*63 = 31.5 ✓（与 Q4_K 手造块**同一个值** ✓ = 两族的 y 公式同源 ✓）
+    out = dq.dequantize_tensor(_q5_block(), 13, 256)
+    check("⑤ ⭐⭐ Q5_K 字节布局 ✓（d/dmin 打头 ✓、qh 全 0 ⇒ 与 Q4_K 同值 31.5 ✓）",
+          out.shape == (256,) and np.allclose(out, 31.5),
+          (float(out[0]), float(out[128]), float(out[-1])))
+
+    # qh 全 0xFF ⇒ 第 5 bit 全 1 ⇒ q = 1 + 16 = 17 ⇒ y = 63*17 − 31.5 = 1039.5 ✓
+    out = dq.dequantize_tensor(_q5_block(qh=b"\xff" * 32), 13, 256)
+    check("⑤′ ⭐⭐ Q5_K 第 5 bit 真的进值 ✓（qh=0xFF ⇒ 17 ⇒ 1039.5 ✓；漏解 ⇒ 还是 31.5 ✗✗）",
+          np.allclose(out, 1039.5), (float(out[0]), float(out[255])))
+
+    # qs=0x32（低 2 / 高 3）+ qh 全 1 ⇒ 低半 = 2+16 = 18 ⇒ 1102.5、高半 = 3+16 = 19 ⇒ 1165.5
+    out = dq.dequantize_tensor(_q5_block(qh=b"\xff" * 32, qs=b"\x32" * 128), 13, 256)
+    check("⑤″ Q5_K 低/高 4-bit 与第 5 bit **同时**生效 ✓（前半 1102.5 / 后半 1165.5 ✓）",
+          np.allclose(out[:32], 1102.5) and np.allclose(out[32:64], 1165.5)
+          and np.allclose(out[192:224], 1102.5) and np.allclose(out[224:256], 1165.5),
+          (float(out[0]), float(out[32])))
+
+    # 位号分派：qh 置 **bit0 + bit2** ⇒ 只有「段 0」（列 0…31）与「段 2」（列 64…95）抬升 ✓，
+    # 段 1/3/4…7 纹丝不动 ✓ —— 这才能区分「位号 = 段号」与「位号 = 常量/0」✗✗。
+    # ⚠️ 段号 = 列 ÷ 32 ✓（= 2×组号 + 高低半 ✓），**不是「偶数段都是 bit0」** ✗ ——
+    # 组 2 的低半是 bit 4 ✓、组 1 的高半是 bit 3 ✓，写成「偶数段 ⇒ bit0」会把自己的实现判错 ✗✗。
+    out = dq.dequantize_tensor(_q5_block(qh=b"\x05" * 32), 13, 256)
+    expected = np.full(256, 31.5, dtype=np.float32)
+    expected[0:32] = 1039.5
+    expected[64:96] = 1039.5
+    check("⑤‴ ⭐ Q5_K 第 5 bit 的位号 = **段号** ✓（qh=0x05 ⇒ 只有段 0（列 0…31）与段 2"
+          "（列 64…95）抬升 ✓；常量位移会抬错段 ✗✗）",
+          np.allclose(out, expected),
+          (float(out[0]), float(out[32]), float(out[64]), float(out[96]),
+           float(out[128])))
+
+    # qh 的 32 字节按列循环：只有 qh[0..15] 全置位 ⇒ 每 32 列里**前 16 列**抬升 ✓
+    out = dq.dequantize_tensor(_q5_block(qh=b"\xff" * 16 + b"\x00" * 16), 13, 256)
+    expected = np.where(np.arange(256) % 32 < 16, 1039.5, 31.5).astype(np.float32)
+    check("⑤⁗ Q5_K 的 qh **按列循环**取 ✓（``qh[c % 32]`` ✓：qh[0..15]=0xFF ⇒ 每 32 列"
+          "前 16 列抬升、后 16 列不动 ✓；按列号直接索引会越界/全错 ✗）",
+          np.allclose(out, expected),
+          (float(out[0]), float(out[15]), float(out[16]), float(out[32]), float(out[48])))
+
+    check("⑤⁗′ Q5_K 块不整除 ⇒ 拒 ✗",
+          _raises(lambda: dq.dequantize_tensor(_q5_block(), 13, 128)))
+    check("⑤⁗″ Q5_K 数据不够 176 字节 ⇒ 拒 ✗（不越界当 0 ✗）",
+          _raises(lambda: dq.dequantize_tensor(b"\x00" * 170, 13, 256)))
+
+
+def _q5_k_reference(data: bytes, numel: int) -> np.ndarray:
+    """Q5_K 的**逐块参考版** ✓（llama.cpp ``dequantize_row_q5_K`` 的直译 ✓）—— 只用来对拍 ✗。
+
+    ⚠️ 这里刻意用**标量版的 ``u1/u2`` 掩码左移**（1,2 → 4,8 → 16,32 → 64,128 ✓），
+    与向量化版的 ``(qh >> 段号) & 1`` **写法不同** ✓ —— 两版对拍才有意义 ✓（照抄同一个式子
+    对拍等于什么都没验 ✗）。
+    """
+    out = np.empty(numel, dtype=np.float32)
+    for index in range(numel // 256):
+        base = index * 176
+        d = np.float32(np.frombuffer(data, dtype="<f2", count=1, offset=base)[0])
+        dmin = np.float32(np.frombuffer(data, dtype="<f2", count=1, offset=base + 2)[0])
+        scales = np.frombuffer(data, dtype=np.uint8, count=12, offset=base + 4)
+        qh = np.frombuffer(data, dtype=np.uint8, count=32, offset=base + 16)
+        qs = np.frombuffer(data, dtype=np.uint8, count=128, offset=base + 48)
+        y = out[index * 256:(index + 1) * 256]
+        u1, u2 = 1, 2
+        for j in range(4):                       # 每 64 元素一对 6-bit scale/min ✓
+            sc1, mn1 = dq._get_scale_min_k4(2 * j, scales)
+            sc2, mn2 = dq._get_scale_min_k4(2 * j + 1, scales)
+            lane = qs[j * 32:(j + 1) * 32]
+            low_half = ((lane & 0x0F) + np.where(qh & u1, 16, 0)).astype(np.uint8)
+            high_half = ((lane >> 4) + np.where(qh & u2, 16, 0)).astype(np.uint8)
+            y[j * 64:j * 64 + 32] = d * sc1 * low_half.astype(np.float32) - dmin * mn1
+            y[j * 64 + 32:j * 64 + 64] = d * sc2 * high_half.astype(np.float32) - dmin * mn2
+            u1 <<= 2
+            u2 <<= 2
+    return out
+
+
 def case_real_file() -> None:
     """真 GGUF 核验 ✓（文件不在本机就 **skip 并说明** ✓，不算失败 ✗）。
 
@@ -192,7 +286,40 @@ def case_real_file() -> None:
           and bool(np.isfinite(values).all()) and float(np.abs(values).mean()) > 0,
           (name, info.tensors[name].shape, float(np.abs(values).mean())))
 
+    case_real_file_q5_k(models)
     case_cross_quant(models)
+
+
+def case_real_file_q5_k(models: Path) -> None:
+    """⭐ 第二个真文件：`Q4_K_M` 里混 **Q5_K** ✓ —— 「M 后缀只有 Q4_K+Q6_K」是错的口径 ✗✗。
+
+    盘上实测：432 张量 = F32 167 / F16 1 / **Q5_K 63** / Q4_K 201 ✓，而 ``general.file_type``
+    明写 ``Q4_K_M`` ✓。只补 Q6_K 的白名单在这个文件上**仍然装不进** ✗ —— 与上一轮同一个坑 ✓。
+    """
+    path = models / "diffusion_models" / "Krea2" / "krea2_turbo-Q4_K_M.gguf"
+    if not path.exists():
+        check("⑤⁗⁗⁗ 真文件 Q5_K 核验（本机无样例文件 ⇒ **skip** ✓ 不算通过 ✗）", True, "skipped")
+        return
+    info = gguf_mod.inspect(path)
+    counts = dict(info.dtype_counts or {})
+    q5 = [name for name, tensor in info.tensors.items() if tensor.type_id == 13]
+    check("⑤⁗⁗⁗ ⭐⭐ **Q4_K_M 里混 Q5_K**（实测 432 张量 = F32 167 + F16 1 + Q5_K 63 + Q4_K 201 ✓）"
+          "⇒ 只实现 Q4_K/Q6_K 时这文件装不进 ✓✗",
+          counts.get("Q5_K", 0) > 0, (path.name, counts))
+
+    known = set(dq.SUPPORTED_DEQUANT.values())
+    unknown = {name: n for name, n in counts.items() if name not in known}
+    check("⑤⁗⁗⁗′ ⭐ 补了 Q5_K 之后，该文件**类型覆盖率 100%** ✓", not unknown,
+          (sorted(counts), unknown))
+
+    if not q5:
+        return
+    name = sorted(q5, key=lambda n: info.tensors[n].numel)[len(q5) // 2]
+    values = _read_tensor(path, info, name)
+    check("⑤⁗⁗⁗″ 真 Q5_K 张量反量化 ⇒ 无 NaN/Inf、非零、长度 == numel ✓",
+          values.shape == (info.tensors[name].numel,)
+          and bool(np.isfinite(values).all()) and float(np.abs(values).mean()) > 0,
+          (name, info.tensors[name].shape, round(float(np.abs(values).mean()), 5)))
 
 
 def case_cross_quant(models: Path) -> None:
@@ -287,9 +414,10 @@ def _q6_k_reference(data: bytes, numel: int) -> np.ndarray:
 def _random_blocks(kind: str, nblock: int, seed: int = 20261029) -> bytes:
     """随机块 ✓（``d``/``dmin`` 取有限正数 ⇒ 不会出 NaN 让 ``allclose`` 假通过 ✗）。"""
     rng = np.random.default_rng(seed)
-    block = 144 if kind == "q4" else 210
+    block = {"q4": 144, "q5": 176, "q6": 210}[kind]
     blob = rng.integers(0, 256, size=(nblock, block), dtype=np.uint8)
-    scale_at = (0, 2) if kind == "q4" else (208,)       # d / dmin 的位置 ✓（Q6_K 在块尾 ✓）
+    # d / dmin 的位置 ✓：Q4_K 与 Q5_K **都打头** ✓、Q6_K 在**块尾** ✓✗
+    scale_at = {"q4": (0, 2), "q5": (0, 2), "q6": (208,)}[kind]
     for offset in scale_at:
         blob[:, offset:offset + 2] = np.frombuffer(
             rng.uniform(0.01, 2.0, size=nblock).astype("<f2").tobytes(),
@@ -311,6 +439,7 @@ def case_vectorized_matches_reference() -> None:
           (sc_vec.shape, int((sc_vec != sc_ref).sum()), int((mn_vec != mn_ref).sum())))
 
     for kind, type_id, ref, name in (("q4", 12, _q4_k_reference, "Q4_K"),
+                                     ("q5", 13, _q5_k_reference, "Q5_K"),
                                      ("q6", 14, _q6_k_reference, "Q6_K")):
         blob = _random_blocks(kind, 4097)
         out = dq.dequantize_tensor(blob, type_id, 4097 * 256)
@@ -323,8 +452,12 @@ def case_vectorized_matches_reference() -> None:
 
 
 def case_unsupported() -> None:
-    check("④ ⭐ 未实现的 Q5_K ⇒ 具名拒绝 ✗（不静默当 F32 ✗）",
-          _raises(lambda: dq.dequantize_tensor(b"\x00" * 176, 13, 256)))
+    # ⚠️ 2026-11-01：Q5_K（13）已实现 ⇒ 具名拒绝的样例必须换成**仍未实现**的类型 ✓✗，
+    # 否则这条判据会变成「拒绝了一个已经能解的类型」的假绿 ✗。
+    check("④ ⭐ 未实现的 Q2_K（10）⇒ 具名拒绝 ✗（不静默当 F32 ✗）",
+          _raises(lambda: dq.dequantize_tensor(b"\x00" * 84, 10, 256)))
+    check("④″ 未实现的 Q3_K（11）⇒ 具名拒绝 ✗",
+          _raises(lambda: dq.dequantize_tensor(b"\x00" * 110, 11, 256)))
     check("④′ 块不整除（Q4_K numel=128）⇒ 拒 ✗",
           _raises(lambda: dq.dequantize_tensor(b"\x00" * 144, 12, 128)))
 
@@ -334,6 +467,7 @@ def main() -> int:
     case_q8_0()
     case_q4_k()
     case_q6_k()
+    case_q5_k()
     case_vectorized_matches_reference()
     case_real_file()
     case_unsupported()

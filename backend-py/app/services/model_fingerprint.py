@@ -6,7 +6,7 @@
    也可以把名字贴到完全另一份权重上。仓里早先的「视频模型识别」靠 ``local_model_scan`` 的
    文件名规则表（`wan-video-gguf` 之类，confidence=high/medium）—— 那是**启发式**，
    命不中就漏、改名就瞎。真正硬的判据只有权重本身：**key 名 + 张量形状**。
-2. **ComfyUI 自己就是这么判的**（真源：``reference/comfy-org/ComfyUI/comfy/model_detection.py``
+2. **ComfyUI 自己就是这么判的**（真源：``ComfyUI/comfy/model_detection.py``
    的 ``detect_unet_config``），本模块把那套判据**按字面量移植**，每条都能追到上游。
 3. **代价是读几十 KB，不是读几 GB**。``safetensors`` 头是「8 字节小端长度 + JSON」，
    ``gguf`` 头是「magic + 版本 + kv 表」—— 只在前若干 MB。实测本机 52 个权重文件

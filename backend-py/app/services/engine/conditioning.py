@@ -79,6 +79,26 @@ class H3TaskError(ConditioningError):
     """本段该走哪条 H3 条件路径**判不出来 / 装不上** ✓ ⇒ 宁可当场拒 ✗（见 :func:`select_h3_task` ✓）。"""
 
 
+def _as_int(value: Any, label: str, *, minimum: int | None = None) -> int:
+    """**数目类**参数 → 整数 ✓；不是整数（小数 / 字符串 / ``bool`` ✓）⇒ 当场拒 ✗✗。
+
+    ⚠️ 为什么不用 ``int(value)`` 了事 ✗✗（2026-11-01 修 ✓）：``int()`` 会**静默截断** ✓✗ ——
+    ``video_declaration(2.5)`` 声明成「2 路」✓、``keep=-2`` 被 ``max(0, …)`` 夹成 0 ✓，
+    两种都是**用户写了什么、系统做了别的事** ✓✗，与本模块「宁可拒，不猜」的纪律正好相反 ✗。
+    ``2.0`` 这种**整数值浮点**照收 ✓（前端 JSON 常见 ✓），``2.5`` 拒 ✗。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConditioningError(
+            f"{label} 必须是整数 ✗，实得 {value!r} ✓（``bool`` / 字符串都不收 ✓ —— 有值 ≠ 是对的类型 ✓✗）")
+    number = int(value)
+    if number != value:
+        raise ConditioningError(
+            f"{label} 必须是整数 ✗，实得 {value!r} ✓ —— ⚠️ 截断会把「2.5 路参考」静默当成「2 路」✗✗")
+    if minimum is not None and number < minimum:
+        raise ConditioningError(f"{label} 不能小于 {minimum} ✗（收到 {value!r} ✓）")
+    return number
+
+
 #: 参考关系的**协议词** ✓ —— 逐字 ✓（模型按它决定「怎么用」这路参考素材 ✓；写错等于没声明 ✗）。
 #: * ``fully_copy``：整轨 1:1 复用（配音当最终音轨 ✓ 画面对口型 ✓）；
 #: * ``partially_copy``：只复用**对话层** ✓，环境音/音效/配乐由模型新生成 ✓；
@@ -133,10 +153,11 @@ def _check_audio_refs(refs: Sequence[AudioReference]) -> list[AudioReference]:
                 f"参考关系 {ref.relation!r} 不在协议词里 ✗ ⇒ 只能是 "
                 + " / ".join(AUDIO_RELATIONSHIPS)
                 + " ✓（协议词写错等于**没声明** ✗ —— 模型会忽略这路参考 ✓✗）")
-        if ref.index < 1 or ref.speaker < 1:
-            raise ConditioningError(
-                f"编号必须从 1 起（收到 index={ref.index}, speaker={ref.speaker} ✗）"
-                f" —— ``<Audio 0>`` 不是合法标签 ✓✗")
+        # ⚠️ 编号必须是**真整数** ✗✗（2026-11-01 补 ✓）：``index=1.5`` ⇒ 拼出 ``<Audio 1.5>``
+        #    ✓✗ —— 那不是合法标签 ✓，模型照旧忽略这路参考 ✓，而提示词里**看着像声明过** ✓✗
+        #    （与「只写 ``<Audio 1>`` 不算声明」是同一类静默失效 ✓）；``bool`` 同理（``True``→``<Audio True>`` ✗）。
+        _as_int(ref.index, "``AudioReference.index``", minimum=1)
+        _as_int(ref.speaker, "``AudioReference.speaker``", minimum=1)
         if ref.index in seen:
             raise ConditioningError(
                 f"<Audio {ref.index}> 声明了两次 ✗ ⇒ 同一路参考只能出现一次 ✓"
@@ -208,14 +229,14 @@ def video_declaration(count: int, *, soundtracks: int = 0,
     调用方负责 ✓）；② 声轨自己**必须**声明 ✓ —— 只把帧串接进去、不声明它的音轨 ⇒ 模型不知道
     那条音轨存在 ✓✗（与音频那条同形状的静默错 ✓）。
     """
-    total = int(count)
+    total = _as_int(count, "参考视频路数")
     if total < 1:
         raise ConditioningError(f"参考视频路数必须 ≥1（收到 {count} ✗）—— 没有就别声明 ✓")
     if total > MAX_REFERENCE_VIDEOS:
         raise ConditioningError(
             f"参考视频 {total} 路超过上限 {MAX_REFERENCE_VIDEOS} 路 ✗ ⇒ H3 原生只接 3 路 ✓"
             f"（多出来的会被忽略 ✓✗）")
-    sound = int(soundtracks or 0)
+    sound = _as_int(soundtracks or 0, "声轨路数")
     if sound < 0 or sound > total:
         raise ConditioningError(
             f"声轨路数 {soundtracks} 超出范围 ✗ ⇒ 只能是 0..{total} ✓（声轨是**视频**的音轨 ✓，"
@@ -279,7 +300,9 @@ def declaration_plan(prompt: str, *, audio_refs: Sequence[AudioReference] = (),
         plan_audio, audio_reason = False, "提示词里已有保留声明（retention_analysis / fully_copy ✓）⇒ 不重复追加 ✓"
     else:
         plan_audio, audio_reason = True, None
-    if int(video_count) <= 0:
+    # ⚠️ 这里也走严格整数 ✓（2026-11-01 补 ✓）：``int(0.5) <= 0`` 会让「给了半路参考视频」**静默变成
+    #    不声明** ✗✗ —— 该报错的地方报错 ✓，别让调用方的单位错误一路无声到出片 ✓。
+    if _as_int(video_count or 0, "参考视频路数", minimum=0) <= 0:
         plan_video, video_reason = False, None
     elif "retention_analysis" in text and "<Video" in text:
         plan_video, video_reason = False, "提示词里同时有 retention_analysis 与 <Video ✓ ⇒ 视为用户已写 ✓"
@@ -359,7 +382,9 @@ def validate_markup(prompt: str, *, pictures: int = 0, audios: int = 0, videos: 
 
     ⚠️ 只报「引用了但没有」那半边 ✓；「有素材却没引用」不报 ✗（旁白类素材很常见 ✓）。
     """
-    available = {"Picture": int(pictures), "Audio": int(audios), "Video": int(videos)}
+    available = {"Picture": _as_int(pictures, "参考图数量", minimum=0),
+                 "Audio": _as_int(audios, "参考音频数量", minimum=0),
+                 "Video": _as_int(videos, "参考视频数量", minimum=0)}
     for kind, numbers in markup_references(prompt).items():
         limit = available.get(kind, 0)
         too_big = [number for number in numbers if number > limit]
@@ -376,9 +401,7 @@ def picture_slots(*, tail: bool, images: int) -> list[tuple[int, str]]:
     ⚠️ 口径：**续接尾帧排最前** ✓，然后才是本段上传的图 ✓（参考实现口径 ✓）——
     所以「取消续接尾帧」会让后面所有编号**前移一格** ✗（提示词里手写的 ``@图N`` 会指错 ✓✗）。
     """
-    count = int(images)
-    if count < 0:
-        raise ConditioningError(f"上传图数量不能为负（收到 {images} ✗）")
+    count = _as_int(images, "上传图数量", minimum=0)
     table: list[tuple[int, str]] = []
     if tail:
         table.append((1, "续接尾帧"))
@@ -392,9 +415,7 @@ def audio_slots(*, segment_audio: bool, voices: int) -> list[tuple[int, str]]:
 
     ⚠️ 口径：本段音频的「参考音频驱动」占第 1 路时，**音色槽编号自动从 A2 起** ✓（参考实现口径 ✓）。
     """
-    count = int(voices)
-    if count < 0:
-        raise ConditioningError(f"音色槽数量不能为负（收到 {voices} ✗）")
+    count = _as_int(voices, "音色槽数量", minimum=0)
     table: list[tuple[int, str]] = []
     if segment_audio:
         table.append((1, "本段配音（参考驱动）"))
@@ -465,18 +486,31 @@ def latent_frames_for(frames: int, temporal_compression: int | None) -> int:
             "猜错会把首帧放到错误的潜帧上 ✗。请在请求里显式给出 ✓。")
     from . import geometry
 
-    return geometry.latent_frames(int(frames), temporal_compression=int(temporal_compression))
+    # ⚠️ 帧数走本模块的严格整数 ✓、``geometry`` 的 ``ValueError`` 也翻成 ``ConditioningError`` ✗
+    #    （本模块对外只报一种错 ✓ —— 否则调用方按 ``except ConditioningError`` 写就会漏接 ✓✗）。
+    try:
+        return geometry.latent_frames(_as_int(frames, "请求帧数", minimum=1),
+                                      temporal_compression=_as_int(temporal_compression,
+                                                                   "``temporalCompression``", minimum=1))
+    except ValueError as err:
+        raise ConditioningError(f"帧数 / 压缩比对不上 ✗：{err}") from err
 
 
 def first_frame_mask(latent_frames: int, config: ConditioningConfig | None = None) -> list[float]:
-    """算出**每个潜帧的权重** ✓（长度 = ``latent_frames`` ✓；越界取值会**报错**而不是截断 ✗）。"""
+    """算出**每个潜帧的权重** ✓（长度 = ``latent_frames`` ✓；越界取值会**报错**而不是截断 ✗）。
+
+    ⚠️ 三条「说是不截断、代码却在截断」的病根都在这里修掉了 ✗✗（2026-11-01 复核 ✓）：
+    ① ``total = max(1, int(latent_frames))`` ⇒ ``latent_frames=0`` 被夹成 1 ✓✗，返回一条
+       长 1 的掩码，与真潜变量长度**对不上** ✓（症状是后端报"掩码长度不符"，看着像后端坏了 ✗）；
+    ② ``fade = max(0, int(config.fade))`` ⇒ 负 ``fade`` 先被夹成 0 ✓，紧接的
+       ``if fade < 0`` 判据**永远进不去** ✓✗（写了检查、却检查不到任何东西 ✗）；
+    ③ 两者都是把用户给的数**悄悄换成另一个数** ✓✗ —— 与本模块「宁可拒，不猜」相反 ✗。
+    """
     config = config or ConditioningConfig()
-    total = max(1, int(latent_frames))
-    keep = int(config.keep)
-    fade = max(0, int(config.fade))
+    total = _as_int(latent_frames, "潜帧数", minimum=1)
+    keep = _as_int(config.keep, "``keep``", minimum=0)
+    fade = _as_int(config.fade, "``fade``", minimum=0)
     strength = float(config.strength)
-    if keep < 0 or fade < 0:
-        raise ConditioningError(f"keep/fade 不能为负（收到 keep={keep}, fade={fade} ✗）")
     if not 0.0 <= strength <= 1.0:
         raise ConditioningError(f"strength 必须落在 0..1（收到 {strength} ✗）")
     if keep > total:

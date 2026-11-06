@@ -1,4 +1,4 @@
-"""预取自检 ✓（移植自 `reference/airllm` ✓，2026-11-01 ✓）。
+"""预取自检 ✓（移植自 `airllm` 上游 ✓，2026-11-01 ✓）。
 
 **为什么单独一份** ✗：这套东西不读权重 ✓、不 import torch ✓ ⇒ 任何机器全绿 ✓。
 
@@ -15,6 +15,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+#: ⚠️ cp936 控制台下 ``✓`` 会 ``UnicodeEncodeError`` ⇒ 判据还没跑就崩在第一条打印上 ✗
+#: （``run_all`` 已重配 stdout，只有单独跑才露头 ⇒ 每个 ``__main__`` 测试都自带这一句 ✓）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 
 from app.services.engine import prefetch as pf  # noqa: E402
 

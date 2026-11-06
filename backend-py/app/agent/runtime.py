@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -60,7 +61,7 @@ from app.services.task_logger import (
 )
 from app.services.vendor_errors import fetch_with_retry, format_vendor_http_error
 from app.services.visual_graph import build_visual_graph_guidance
-from app.services import rhythm_phase
+from app.services import knowledge_feed, rhythm_phase
 from app.mcp.client import discover_mcp_tools
 from app.agent import context_budget
 from app.agent.protocol import build_protocol_contract, parse_agent_protocol
@@ -69,14 +70,19 @@ from app.agent.tool import ToolRegistry
 from app.agent.tools.corpus_tools import create_corpus_tools
 from app.agent.tools.extract_tools import create_extract_tools
 from app.agent.tools.grid_prompt_tools import create_grid_prompt_tools
+from app.agent.tools.knowledge_tools import create_knowledge_tools
+from app.agent.tools.library_tools import create_library_tools
 from app.agent.tools.script_tools import create_script_tools
+from app.agent.tools.skill_ref_tools import create_skill_ref_tools
 from app.agent.tools.storyboard_tools import create_storyboard_tools
 from app.agent.tools.voice_tools import create_voice_tools
 
 __all__ = [
     "AgentRunResult",
     "TokenUsage",
+    "append_knowledge_feed",
     "append_style_profile",
+    "assemble_full_instructions",
     "assemble_instructions",
     "backoff_delay",
     "build_agent_config",
@@ -84,8 +90,10 @@ __all__ = [
     "create_agent_tools",
     "extract_token_usage",
     "model_candidates",
+    "knowledge_feed_enabled",
     "normalize_tool_nick",
     "normalize_tool_output",
+    "record_knowledge_usage",
     "run_agent_with_instructions",
     "run_agent_with_retry",
 ]
@@ -107,6 +115,65 @@ DEFAULT_TEMPERATURE = 0.7
 
 #: ``append_style_profile`` 追加的分节标题（**逐字与 TS 一致**）
 STYLE_PROFILE_HEADER = "\n\n【项目风格 Profile（house style，最高优先级，必须遵守）】"
+
+#: 知识投喂（L1）的开关环境变量。**默认关** —— 关着的时候 system prompt 逐字不变，
+#: 所以「加了知识闭环」这件事本身不会悄悄改变任何一条既有产出。
+#: 打开方式：``KNOWLEDGE_FEED=1``；先跑 ``GET /api/v1/knowledge-loop/feed/preview`` 看会注入什么。
+KNOWLEDGE_FEED_ENV = "KNOWLEDGE_FEED"
+
+#: 注入分节的标题（与风格 Profile 的写法一致：先声明它是参考、再声明优先级低）
+KNOWLEDGE_FEED_HEADER = (
+    "\n\n【本仓既往经验（自动注入，仅供参考；与上文规则冲突时以上文为准）】"
+)
+
+
+def knowledge_feed_enabled() -> bool:
+    """L1 是否开启（读环境变量，每次现算 ⇒ 不用重启也能改，且测试可控）。"""
+    return str(os.environ.get(KNOWLEDGE_FEED_ENV) or "").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
+def append_knowledge_feed(agent_type: str, instructions: str,
+                          injected: list[str] | None = None) -> str:
+    """把台账里 ``accepted`` 的成法追加到 system prompt 末尾（P2）。
+
+    三条克制：
+    * **默认关**（见 ``KNOWLEDGE_FEED_ENV``）—— 这是唯一会改变模型输入的环节；
+    * 只取 ``title + 首句``，预算 1200 字（``knowledge_feed.DEFAULT_BUDGET``）——
+      全文留在库里等 L2 检索，塞满提示词会让模型开始背规则、丢掉当前戏的细节；
+    * 台账不可用时**静默跳过**（只记一条 warn）：统计坏了不该让创作跑不动。
+
+    ``injected`` 为调用方给的列表，真正写进 prompt 的条目 id 会追加进去，
+    供 run 结束后 ``record_injection`` 记 usage（没有这一步 ``lift`` 永远算不出来）。
+    """
+    if not knowledge_feed_enabled():
+        return instructions
+    try:
+        compiled = knowledge_feed.compile_for_prompt(agent_type)
+    except Exception as err:  # noqa: BLE001 —— 投喂失败不该阻断创作
+        log_task_warn("AgentFactory", "knowledge-feed-failed", {
+            "agentType": agent_type, "error": str(err),
+        })
+        return instructions
+    if not compiled.get("text"):
+        return instructions
+    if injected is not None:
+        injected.extend(compiled.get("entries") or [])
+    tail = "（已按预算截断，需要全文请用 search_knowledge）" if compiled.get("truncated") else ""
+    return f"{instructions}{KNOWLEDGE_FEED_HEADER}\n{compiled['text']}{tail}"
+
+
+def record_knowledge_usage(entry_ids: list[str], trace: Any, outcome: str) -> None:
+    """把「这次用到的知识」记进台账（``run_id`` 用 trace 句柄的 id，可回查原始日志）。"""
+    if not entry_ids:
+        return
+    try:
+        knowledge_feed.record_injection(
+            entry_ids, run_id=f"trace:Agent/{getattr(trace, 'trace_id', '')}", outcome=outcome)
+    except Exception as err:  # noqa: BLE001
+        log_task_warn("AgentFactory", "knowledge-usage-failed", {
+            "error": str(err), "outcome": outcome, "entries": len(entry_ids),
+        })
 
 #: 只有**空串**要丢掉（``filter(Boolean)``）；``None`` 同样丢
 _SKIP = (None, "")
@@ -331,7 +398,16 @@ def _tool_factory(tool_set: str) -> Callable[..., ToolRegistry | None]:
 @_tool_factory("script")
 def _tools_script(conn: Connection, type: str, episode_id: int,
                   drama_id: int) -> ToolRegistry:
-    return _as_registry(create_script_tools(episode_id))
+    # 改剧本要查「结构怎么落、这类桥段别人怎么写」⇒ 挂第三方剧本/编剧知识库
+    # （⚠️ 知识库目录已 gitignore，缺失时工具自身降级返回 available:false）
+    # 技能库的方法论正文在 references/ 里（加载器只注入 SKILL.md）⇒ 再挂附件按需读取
+    return ToolRegistry.of(
+        _as_registry(create_script_tools(episode_id)),
+        _as_registry(create_library_tools()),
+        _as_registry(create_skill_ref_tools()),
+        #: 本仓自己的经验台账（读写）：外部资料查 library，内部经验查 knowledge
+        _as_registry(create_knowledge_tools(episode_id, drama_id)),
+    )
 
 
 @_tool_factory("extract")
@@ -345,9 +421,14 @@ def _tools_storyboard(conn: Connection, type: str, episode_id: int,
                       drama_id: int) -> ToolRegistry:
     # 这两个 Agent 需要「找相似镜头」的参考 ⇒ 额外挂语料检索工具
     # （⚠️ 语料目录已 gitignore，缺失时工具自身降级返回 available:false）
+    # 定镜头语言/表演/打戏节奏时还要查 137 份专项方法 ⇒ 再挂知识库检索
+    # 技能库里的镜头语法/打戏编排正文同理 ⇒ 挂附件按需读取
     return ToolRegistry.of(
         _as_registry(create_storyboard_tools(episode_id, drama_id)),
         _as_registry(create_corpus_tools()),
+        _as_registry(create_library_tools()),
+        _as_registry(create_skill_ref_tools()),
+        _as_registry(create_knowledge_tools(episode_id, drama_id)),
     )
 
 
@@ -360,9 +441,14 @@ def _tools_voice(conn: Connection, type: str, episode_id: int,
 @_tool_factory("grid")
 def _tools_grid(conn: Connection, type: str, episode_id: int,
                 drama_id: int) -> ToolRegistry:
+    # 出图提示词要查的是**专项写法**（造型库 / 提示词库 / 运镜实例库）⇒ 与分镜线同样挂
+    # 知识库检索。此前只挂语料（9000 条真实视频提示词）⇒ 造型、光位、镜头语法这类
+    # 「别人怎么写过」的问题在这条线上无出口，只能靠模型自己编。
     return ToolRegistry.of(
         _as_registry(create_grid_prompt_tools(episode_id, drama_id)),
         _as_registry(create_corpus_tools()),
+        _as_registry(create_library_tools()),
+        _as_registry(create_knowledge_tools(episode_id, drama_id)),
     )
 
 
@@ -479,8 +565,12 @@ def append_style_profile(
 def assemble_full_instructions(
     conn: Connection, type: str, episode_id: int, drama_id: int,
     base_instructions: str, skill_instructions: str | None,
+    injected: list[str] | None = None,
 ) -> str:
-    """最终 system prompt 的**唯一组装点**：``base → skill → 协议契约 → 风格注入``。
+    """最终 system prompt 的**唯一组装点**：``base → skill → 协议契约 → 风格注入 → 经验注入``。
+
+    最后一段（经验注入，``KNOWLEDGE_FEED=1`` 才生效）也挂在这里，正是为了让两个入口
+    **不可能分叉**：任何绕过本函数自行拼提示词的写法都会立刻表现为「知识不生效」。
 
     ⚠️ 为什么必须只有一个（历史缺陷，2026-09-25 修）：
     这里曾经有**两个组装点** —— ``build_agent_config`` 算出了带风格 Profile 的
@@ -492,10 +582,13 @@ def assemble_full_instructions(
     这类缺陷不会报错、不会失败，只表现为「模型不遵守风格约束」——
     所以改为两条路径共用本函数，结构上不可能再分叉。
     """
-    return append_style_profile(
+    text = append_style_profile(
         conn, type, episode_id, drama_id,
         assemble_instructions(base_instructions, skill_instructions),
     )
+    #: 知识投喂放在**最后**：风格 Profile 是硬约束，经验只是参考。
+    #: 开关默认关 ⇒ 关着时返回值与历史逐字相同。
+    return append_knowledge_feed(type, text, injected)
 
 
 def build_agent_config(
@@ -793,6 +886,8 @@ async def _run_openai_tool_loop(
     tool_results_out: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
     text = ""
+    # 思考内容（各家字段名不统一：``reasoning_content`` / ``reasoning`` ✓）—— 与 ollama 原生那条同口径 ✓
+    thinking_parts: list[str] = []
     nudged = False
 
     for _ in range(max(1, int(max_steps))):
@@ -837,6 +932,13 @@ async def _run_openai_tool_loop(
         choices = data.get("choices") or []
         assistant = (choices[0].get("message") or {}) if choices else {}
         text = assistant.get("content") or ""
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            reason = assistant.get(key)
+            if isinstance(reason, str) and reason.strip():
+                thinking_parts.append(reason)
+                steps.append({"thinking": reason})
+                log_task_progress("Agent", "thinking", {"chars": len(reason), "head": reason[:120]})
+                break
         calls = assistant.get("tool_calls") or []
         if not calls:
             if _need_write_nudge(tool_calls_out, text, nudged, tools):
@@ -858,7 +960,9 @@ async def _run_openai_tool_loop(
             rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
             messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": rendered})
 
-    return {"text": text, "tool_calls": tool_calls_out, "tool_results": tool_results_out,
+    # ``thinking`` 是**思考流水**（可能与正文无关 ✓）：不拼进 ``text`` ✗（拼了就污染写回/协议解析 ✗）
+    return {"text": text, "thinking": "".join(thinking_parts),
+            "tool_calls": tool_calls_out, "tool_results": tool_results_out,
             "steps": steps}
 
 
@@ -893,6 +997,10 @@ async def _run_ollama_tool_loop(
     tool_results_out: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
     text = ""
+    # ⚠️ 思考模型（qwen3 等）的原生回复把推理放在 ``message.thinking`` ✓，**不是** ``content`` ✗。
+    #    以前这里只读 ``content`` ⇒ ①思考内容整段丢掉 ✓✗；②更要命的是**正文为空时无从判断原因** ✗，
+    #    只能看到「模型什么都没说」✓（本仓那条「OpenAI 兼容口 content 恒空」的老坑就是这个形状 ✓）。
+    thinking_parts: list[str] = []
     nudged = False
 
     for _ in range(max(1, int(max_steps))):
@@ -941,6 +1049,12 @@ async def _run_ollama_tool_loop(
 
         assistant = data.get("message") if isinstance(data.get("message"), dict) else {}
         text = assistant.get("content") or ""
+        think = assistant.get("thinking")
+        if isinstance(think, str) and think.strip():
+            thinking_parts.append(think)
+            steps.append({"thinking": think})
+            # 只记**长度和开头** ✓：思考内容动辄几千字 ✗，整段进日志会把有用的行埋掉 ✗
+            log_task_progress("Agent", "thinking", {"chars": len(think), "head": think[:120]})
         calls = assistant.get("tool_calls") or []
         if not calls:
             if _need_write_nudge(tool_calls_out, text, nudged, tools):
@@ -963,7 +1077,9 @@ async def _run_ollama_tool_loop(
             rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
             messages.append({"role": "tool", "tool_name": name, "content": rendered})
 
-    return {"text": text, "tool_calls": tool_calls_out, "tool_results": tool_results_out,
+    # ``thinking`` 是**思考流水**（可能与正文无关 ✓）：不拼进 ``text`` ✗（拼了就污染写回/协议解析 ✗）
+    return {"text": text, "thinking": "".join(thinking_parts),
+            "tool_calls": tool_calls_out, "tool_results": tool_results_out,
             "steps": steps}
 
 
@@ -978,6 +1094,9 @@ class AgentRunResult:
     protocol: dict[str, Any] | None
     protocol_errors: list[str]
     usage: TokenUsage | None
+    #: 思考流水（2026-11-01 补 ✓）：qwen3 类模型把推理写在 ``message.thinking`` ✓，
+    #: 以前直接丢弃 ⇒ 正文为空时看不出是「模型没答」还是「只有思考没有正文」✗。**不进 ``text``** ✓。
+    thinking: str = ""
 
 
 Generate = Callable[..., Awaitable[dict[str, Any]]]
@@ -1020,8 +1139,10 @@ async def run_agent_with_instructions(
     skill_instructions = load_agent_skills(
         type, built.db_config.skills if built.db_config is not None else None
     )
+    fed_ids: list[str] = []
     full_instructions = assemble_full_instructions(
         conn, type, episode_id, drama_id, instructions, skill_instructions,
+        injected=fed_ids,
     )
 
     models = model_candidates(built.text_config, built.db_config.model if built.db_config else None)
@@ -1065,6 +1186,7 @@ async def run_agent_with_instructions(
                 protocol = parsed.get("protocol")
                 errors = list(parsed.get("errors") or [])
 
+                record_knowledge_usage(fed_ids, trace, "ok")
                 trace.success("completed", {
                     "model": model_name,
                     "toolCalls": len(result.get("tool_calls") or []),
@@ -1082,6 +1204,7 @@ async def run_agent_with_instructions(
                     protocol=protocol,
                     protocol_errors=errors,
                     usage=usage,
+                    thinking=str(result.get("thinking") or ""),
                 )
             except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
                 last_error = err
@@ -1092,6 +1215,7 @@ async def run_agent_with_instructions(
                     trace.error("fatal-error", {
                         "attempt": attempt + 1, "model": model_name, "error": str(err),
                     })
+                    record_knowledge_usage(fed_ids, trace, "failed")
                     raise
 
                 # 瞬态：先同模型指数退避，耗尽后换下一个模型
@@ -1113,6 +1237,7 @@ async def run_agent_with_instructions(
                 break
 
     log_task_error("Agent", "run-failed", {"agentType": type, "error": str(last_error)})
+    record_knowledge_usage(fed_ids, trace, "failed")
     if last_error is not None:
         raise last_error
     raise ValueError("All models failed")

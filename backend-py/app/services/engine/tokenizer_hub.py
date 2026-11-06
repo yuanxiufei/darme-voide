@@ -610,6 +610,145 @@ def find_h3_tokenizer() -> dict[str, Any] | None:
     return None
 
 
+#: 出图四档的文本塔 ⇒ 各自该用哪一份词表 ✓（落点目录名 / HF 仓库名 = **发布方写的事实** ✓）。
+#:
+#: ⚠️⚠️ 四档**不许共用一份词表** ✗✗：Qwen3-4B / Qwen3.5-9B / Qwen2.5-VL-7B / Qwen3-VL-4B 的
+#: vocab 与特殊 token 各不相同 ✓ —— 喂错族「装得上、编得出、**id 全错**」，且一条报错都没有 ✗
+#: （比缺词表难查一个量级 ✓✗）。唯一例外：``Qwen2.5-7B-Instruct`` 与 ``Qwen2.5-VL-7B``
+#: 是**同一份词表**（Qwen2.5 家族统一 BBPE ✓）⇒ 2512 那行把它列为现成候选 ✓。
+STAGE_TOKENIZERS: dict[str, dict[str, Any]] = {
+    "zimage": {
+        "subdir": "qwen3_4b",
+        "repos": ("Qwen/Qwen3-4B",),
+        "why": "Z-Image 的文本塔是 Qwen3-4B",
+    },
+    "krea2": {
+        "subdir": "qwen3vl_4b",
+        "repos": ("Qwen/Qwen3-VL-4B",),
+        "why": "Krea2 的文本塔是 Qwen3-VL-4B（12 层隐状态栈）",
+    },
+    "qwen_image21": {
+        "subdir": "qwen35_9b",
+        "repos": ("Qwen/Qwen3.5-9B",),
+        "why": "Qwen-Image 2.1 的文本塔是 Qwen3.5-9B 混合塔",
+    },
+    "qwen_image": {
+        "subdir": "qwen25_vl_7b",
+        "repos": ("Qwen/Qwen2.5-VL-7B", "Qwen/Qwen2.5-7B-Instruct"),
+        "why": "Qwen-Image 2512 的文本塔是 Qwen2.5-VL-7B（与 Qwen2.5-7B-Instruct 同一份词表 ✓）",
+    },
+}
+
+
+def _tokenizer_files_present(directory: Path) -> bool:
+    """目录里**真有词表文件** ✓ —— ``tokenizer.json`` 或 ``vocab.json``＋``merges.txt`` ✓。
+
+    只核 ``tokenizer_config.json`` 不行 ✗：一个空目录（只有 config）也能过 ✓✗，
+    错误要拖到几十秒后的 encode 阶段才炸，报错还读起来像"权重坏了" ✗。
+    """
+    if (directory / "tokenizer.json").is_file():
+        return True
+    return (directory / "vocab.json").is_file() and (directory / "merges.txt").is_file()
+
+
+def _tokenizer_class_of(directory: Path) -> str | None:
+    """目录自报的 ``tokenizer_class`` ✓（没有 / 读不了 ⇒ ``None`` ⇒ **不用它** ✗）。"""
+    try:
+        declared = json.loads(
+            (directory / "tokenizer_config.json").read_text(encoding="utf-8")
+        ).get("tokenizer_class")
+    except (OSError, ValueError):
+        return None
+    return declared if isinstance(declared, str) else None
+
+
+def _stage_tokenizer_dirs(spec: dict[str, Any]) -> list[tuple[Path, str]]:
+    """某档词表的**本地候选目录** ✓（模型根 ⇒ 仓内 ✓，带来历 ✓ —— 与 :func:`_tokenizer_dirs` 同构 ✓）。"""
+    subdir = str(spec["subdir"])
+    found: list[tuple[Path, str]] = []
+    try:  # 懒导入 ✓（inventory 那条链很重 ✓）
+        from . import inventory  # noqa: PLC0415
+
+        root = inventory.models_dir()
+    except Exception:  # noqa: BLE001 —— 探测失败只该「找不到」，不该炸 ✓
+        root = None
+    if root is not None:
+        found.append((root / "tokenizers" / subdir, f"<模型根>/tokenizers/{subdir}"))
+    repo = Path(__file__).resolve().parents[4]      # …/darme-voide ✓（与 _tokenizer_dirs 同一口径 ✓）
+    found.append((repo / "models" / "tokenizers" / subdir, f"models/tokenizers/{subdir}"))
+    return found
+
+
+def _hf_caches() -> list[Path]:
+    """HF 缓存目录候选 ✓ —— 仓内那份（``tokenizers_tuning`` 的口径 ✓）⇒ 环境变量 ⇒ 用户级默认 ✓。
+
+    ⚠️ **不能只查仓内** ✗✗：本仓把 ``HF_HOME`` 定到 ``data/hf-cache`` ✓（部署口径 ✓），
+    但开发机上**其他工具**装的模型（比如 ``Qwen2.5-7B-Instruct`` 的词表 ✓）在用户级
+    ``~/.cache/huggingface/hub`` ✓ —— 只查仓内 ⇒ 明明盘上有词表却报"缺" ✓✗。
+    """
+    found: list[Path] = []
+    primary = _default_cache_dir()
+    if primary:
+        found.append(Path(primary))
+    import os  # noqa: PLC0415
+
+    env_hub = os.environ.get("HF_HUB_CACHE")
+    if env_hub:
+        found.append(Path(env_hub))
+    env_home = os.environ.get("HF_HOME")
+    if env_home:
+        found.append(Path(env_home) / "hub")
+    found.append(Path.home() / ".cache" / "huggingface" / "hub")
+    unique: list[Path] = []
+    for item in found:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def _hf_snapshot_dirs(repo: str) -> list[Path]:
+    """HF 缓存里某仓库的快照目录 ✓（按 mtime 倒序 ✓；不在盘上 ⇒ 空表 ✓）。"""
+    snapshots: list[Path] = []
+    for cache in _hf_caches():
+        base = cache / f"models--{repo.replace('/', '--')}" / "snapshots"
+        if not base.is_dir():
+            continue
+        snapshots.extend(item for item in base.iterdir() if item.is_dir())
+    return sorted(snapshots, key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def find_tokenizer_for_stage(stage: str) -> dict[str, Any] | None:
+    """按**档位**找一份属于该族的词表 ⇒ ``{"path", "tokenizerClass", "source"}``；没有 ⇒ ``None`` ✓。
+
+    与 :func:`find_h3_tokenizer` 的分工 ✗✗：那个只认 H3 的 Qwen3-VL-32B 一个落点 ✗；
+    这里按 :data:`STAGE_TOKENIZERS` 逐档认 ✗（**目录名 / HF 仓库名**是发布方事实 ✓ ——
+    ``tokenizer_class`` 四档全是 ``Qwen2Tokenizer`` ✗，单靠它**分不出族** ✓✗，
+    只能当第二道闸：排掉 Llama / CLIP 那种明显错族 ✓）。
+
+    查找顺序：模型根 ``tokenizers/<subdir>`` ⇒ 仓内 ``models/tokenizers/<subdir>``
+    ⇒ HF 缓存快照 ✓。三处都**双判**：文件真在 ✓ ＋ ``tokenizer_class`` 认识 ✓
+    （任一不满足 ⇒ **不用它** ✗ —— 宁可让运行时点名缺词表 ✓）。
+    """
+    spec = STAGE_TOKENIZERS.get(str(stage or "").strip().lower())
+    if not spec:
+        return None
+    for directory, source in _stage_tokenizer_dirs(spec):
+        if not _tokenizer_files_present(directory):
+            continue
+        declared = _tokenizer_class_of(directory)
+        if declared in H3_TOKENIZER_CLASSES:
+            return {"path": str(directory), "tokenizerClass": declared, "source": source}
+    for repo in spec["repos"]:
+        for snapshot in _hf_snapshot_dirs(str(repo)):
+            if not _tokenizer_files_present(snapshot):
+                continue
+            declared = _tokenizer_class_of(snapshot)
+            if declared in H3_TOKENIZER_CLASSES:
+                return {"path": str(snapshot), "tokenizerClass": declared,
+                        "source": f"HF 缓存 {repo}"}
+    return None
+
+
 def _load_from_reference(cfg: HubConfig, target: str, *, form: dict[str, Any] | None = None,
                          hint: str = "") -> TokenizerHub:
     """走 `transformers` ✓（**用法层优化由 :mod:`.tokenizers_tuning` 统一落** ✓：离线 ✓
