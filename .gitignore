@@ -44,9 +44,33 @@ data/_backup_*/
 data/static/
 data/storage/
 data/traces/
+# 知识库运行索引：`outcome_index.rebuild()` 可随时重建，且每次跑图/跑歌都会改写 ⇒ 入库等于让工作区永远脏
+data/knowledge/
+# 后端自己那棵 data/（含 OCR 覆盖层 library-overlay.sqlite）：纯机器数据，`backend-py/data/` 下没有任何源码
+# ⚠️ 注意 `data/ocr/` 这条是**锚定仓库根**的（gitignore 规则里带斜杠即锚定），所以上面那行必须单独写，
+#    否则 backend-py/data/ocr/library-overlay.sqlite 会漏成未跟踪文件
+backend-py/data/
 
 # Prompt corpora (third-party text, copyright — reference only, never commit)
 data/prompt-corpus/
+
+# 知识库 OCR sidecar：扫描件 OCR 出来的正文（几百 MB，且 `ocr_index.py` 可重新生成）
+# schema 与检索层见 backend-py/app/services/script_library.py（OCR_DB）
+data/ocr/
+
+# 本地模型权重（PaddleOCR-VL ≈1.8 GiB；由 ocr_vlm_fetch.py --fetch 重新下载，不入库）
+data/models/
+
+# 第三方剧本知识库（29 GB 二进制，**版权不明 ⇒ 只读参考，绝不入仓**）
+# 检索层见 backend-py/app/services/script_library.py；缺它时该源降级为 available=false。
+# ⚠️ 名字是中文目录，`git` 不关心编码，但 `Path` 在 Windows 上要按 UTF-8 读 ⇒ 别改成本地别名。
+# 2026-11-04：方法料已按创作者「有用的资料必须进系统」移入 `data/playbook/`，
+# 并**从忽略名单移除** —— 它不是 29 GB 二进制，且只有进仓，
+# 新克隆的仓库里知识库与 search_script_library 才不是空的。
+# 2026-11-06 实核并首次入库：139 份 md / 1.47 MiB（同日 `git add data/playbook` 落地）。
+# ⚠️ 这条注释与「已入库」是一体的：若将来把 playbook 重新写回忽略名单，新克隆又会是空知识库。
+# 旧名 `参考/`、`方法语料/`、`data/method-library/` 均已删除，不再忽略。
+剧本知识库/
 
 # Config
 configs/config.yaml
@@ -72,6 +96,8 @@ local-deploy-plan.md
 models.yaml
 
 # Reference projects (downloaded for learning)
+# ⚠️ 2026-11-04：整棵已删除，仓内不再有任何代码/测试依赖它（详见 docs/reference-audit.md）。
+#    条目保留只为「将来误放回去也不入库」。
 reference/
 
 # Local model services cloned by backend-py/scripts/model_manager.py（机器相关，不入库）
@@ -80,3 +106,11 @@ reference/
 #    注意：git 的规则是「父目录被排除则子文件无法再包含」⇒ 必须先 `/*` 再反向包含 h3/。
 backend-py/app/local_services/*
 !backend-py/app/local_services/h3/
+
+# 后端引擎真跑产物（图片/视频/一次性 JSON 快照 + 验收脚本）：由 /engine/generate 与手动脚本生成，机器相关，不入库
+backend-py/output/
+# 后端调试草稿区（probe 脚本与 txt/png/onnx 备份；一次性、跑完即弃）。
+# 打包侧 desktop/scripts/sync-backend.mjs 的 EXCLUDE_DIRS 已排除它，别把草稿塞进发行包。
+backend-py/_bench/
+# 下载的分词器文件（merges.txt/vocab.json 合计约 16 MB，机器数据；引擎按显式路径读取，代码里零硬编码）
+models/tokenizers/
