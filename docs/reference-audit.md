@@ -508,6 +508,7 @@ OOM」那道闸门拿掉 ⇒ ⑬ 第二条报红；复原后全绿。★这条�
 | `llama_index` / `haystack` 的 Document／Node／Store／Component 抽象 | 创作者原话「抽象会反向绑架你的数据模型」；本仓已有 `script_catalog` 的国家·类型·奖项·权限字段契约与 `script_library` 的回执形状，套一层抽象只会多一层翻译 ✓✗ |
 | `RAGFlow` 的文档解析链（OCR／版面／表格）与「带引用的检索」 | 解析链要 ES／MySQL／Redis／MinIO 四件；引用回溯本仓 `open_document` 已有**页号＋块号**，不缺 ✓ |
 | `RAGFlow` 按文档类型的切片模板（法律／论文／手册／表格…） | 本仓只有 md 小节这一种形态，模板分派无对象；只取 `token.go` 里那份**与文档类型无关**的拼窗契约 ✓ |
+| `anything-llm` / `RAGFlow` 的「数据根在线切换」（设置页换盘、把已有数据搬过去） | 两边都**没有这一件**：anything-llm 的存储根是 `process.env.STORAGE_DIR`（全仓只有读取侧，`updateENV` 改的是 `.env` 配置项，进程内要重启才生效）、也没有「把已有 documents 搬到新根」的实现；RAGFlow 的 `STORAGE_IMPL.move` 是**对象存储层的单文件移动**（`file_api_service.py`），数据根本身由 docker 卷决定。**运行时边搬边换指的迁移、以及「搬之前先算目标盘够不够」这层，两边都没有** ⇒ 本仓 `data_storage.change_data_root` 的迁移清单与空间预检是自建（理由写在模块文件头第 7 条），不是漏抄 ✓✗ |
 
 ### 7.4 验收
 
