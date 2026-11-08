@@ -30,7 +30,7 @@ from typing import Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection, Engine
 
-from .config import get_db_path
+from .config import ensure_db_layout, get_db_dir, get_db_path
 from .models import metadata
 
 
@@ -154,6 +154,12 @@ def _ensure_tables(eng: Engine, *, fresh: bool) -> None:
         print(f"[db-py] reusing existing db: {_db_path}")
 
 
+# ⚠️ 先搬库、再算路径 ✗（顺序反了会**新建一个空库**到 ``db/`` 下，而真实库还躺在数据根顶层 ✓✗，
+# 症状和「数据全丢」一模一样、且找不回来）。``ensure_db_layout`` 幂等，老库已迁过就什么都不做 ✓。
+migrated = ensure_db_layout()
+if migrated:
+    print(f"[db-py] 库文件已迁入 {get_db_dir()}（旧版散在数据根顶层）：{', '.join(migrated)}")
+
 _db_path = Path(get_db_path())
 _db_path.parent.mkdir(parents=True, exist_ok=True)
 _is_fresh_db = not _db_path.exists()
@@ -178,6 +184,9 @@ def reopen_engine() -> None:
     """
     global engine, _db_path, _is_fresh_db
     engine.dispose()
+    migrated = ensure_db_layout()  # 切到一个「还没整理过」的旧数据根时同样要搬 ✓（同上：先搬再算 ✓）
+    if migrated:
+        print(f"[db-py] 库文件已迁入 {get_db_dir()}：{', '.join(migrated)}")
     _db_path = Path(get_db_path())
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     _is_fresh_db = not _db_path.exists()

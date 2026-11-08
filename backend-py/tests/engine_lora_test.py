@@ -557,8 +557,26 @@ def case_reuse_gate() -> None:
             runtime_mod.EngineRuntime._ensure_loaded_internal).parameters  # noqa: SLF001
         defaults = {name: param.default for name, param in params.items()
                     if name != "self" and param.default is not inspect.Parameter.empty}
-        return runtime_mod._load_key(**{**defaults, "stage": "h3", "dit_path": dit,
-                                        "loras": runtime_mod._lora_key(list(loras))})
+        #: ⚠️ 剖面那两格**参数名与键名不同** ✗✗：`ensure_loaded` 拼进 `_load_key` 的是
+        #: `profile=<归一后的档名>` ✓（见那行的注释：不进键就会「换了档却复用上一档的布局」✓），
+        #: 而 internal 的签名里它叫 `profile_name` / `profile_applied` ✓✗ ⇒ 照签名手拼会把
+        #: `profile_name='auto'` 当键字段、把真正的 `profile` 漏掉 ⇒ **同一套装配算出两个键** ✓
+        #: （症状同样是"复用门"正例在忙时 `EngineBusy` ✓，但**报错指向忙、不指向键** ✓✗）。
+        #: `profile_applied` 不必进键 ✓：它生效的部分已经按 `policy` / `vae_tiling` 两格进键了 ✓。
+        defaults.pop("profile_name", None)
+        defaults.pop("profile_applied", None)
+        #: ⚠️ 三格**必须走产品那几个归一函数** ✗✗（``_load_key`` 只做 repr 打包 ✓，不归一 ✓）：
+        #: 照签名默认值手拼 ⇒ ``policy=None`` / ``vae_tiling=None``，而 ``ensure_loaded`` 进键的
+        #: 是 ``_policy_key(None) == 'auto'`` 与 ``_vae_tiling_key(None) == ()`` ✓✗ ⇒ **同键被算成
+        #: "换了装配"** ✓（症状＝"复用门"正例在忙时直接 ``EngineBusy`` ✓，本该直接复用 ✓）。
+        return runtime_mod._load_key(**{
+            **defaults, "stage": "h3", "dit_path": dit, "profile": "auto",
+            "loras": runtime_mod._lora_key(list(loras)),
+            "policy": runtime_mod._policy_key(defaults.get("policy")),
+            "vae_tiling": runtime_mod._vae_tiling_key(defaults.get("vae_tiling")),
+            "gpu_layers": runtime_mod.residency_mod.normalize_gpu_layers(
+                defaults.get("gpu_layers")),
+        })
 
     def _installed() -> Any:
         #: 假装"已按 strength=0.5 装好" ✓ —— `_backend` 只要非 None ✓（复用门不看它的类型 ✓）

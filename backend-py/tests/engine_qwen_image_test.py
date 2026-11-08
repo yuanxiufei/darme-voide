@@ -587,11 +587,16 @@ def case_per_file_need() -> None:
 
     #: ⚠️ 接线 ✗✗：算对了却只在回执里写、决策仍读原表 ⇒ 白改 ✓（两条调用口都得吃校正后的表 ✓）。
     source = inspect.getsource(rt.EngineRuntime._ensure_qwen_image_loaded)
-    check("⑩⁴ 装配线**真的**按文件精度取需求 ✓✗（`part_need_gib(...)` ✓ —— 2026-11-02 起它涵盖 "
-          "int8 / int4 / plain 三档 ✓，旧 `resident_need_gib` 只认 int8 ⇒ 装配线不许再用它 ✗），"
+    check("⑩⁴ 装配线**真的**按文件精度取需求 ✓✗（走**单一出口** `stage_part_need(\"qwen_image\", \"dit\", …)` ✓"
+          "—— 2026-11-07 起「哪件按哪档量、挂不挂常驻壳、按不按文件精算」收在 "
+          "`torch_backend.STAGE_PART_SPECS` ✓，它再转 `part_need_gib` 涵盖 int8 / int4 / plain 三档 ✓，"
+          "旧 `resident_need_gib` 只认 int8 ⇒ 装配线不许再用它 ✗；"
+          "**也不许在这条线里手写 assume/adapter** ✗ —— 那等于又开第二本账 ✓✗），"
           "且 `decide_for` 与 `declare_chain` **两处都吃校正后的表** ✓✗"
           "（只改一处 ⇒ 装配报整份上卡、`sample` 段又切 ✓）",
-          "part_need_gib(" in source and "resident_need_gib(" not in source
+          "stage_part_need(" in source and "resident_need_gib(" not in source
+          and '"qwen_image", "dit"' in source
+          and "part_need_gib(" not in source
           and "need_gib=part_need)" in source
           and "part_need_gib=part_need)" in source, "")
     check("⑩⁵ 校正只动 `dit` 一格 ✓（TE 16.1 / VAE 0.24 / 视觉塔 1.35 三项一个都不许被顺手改 ✗）",

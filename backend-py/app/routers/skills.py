@@ -39,6 +39,7 @@ from ..services.agent_registry import (
     get_default_name,
     get_host_tool_names,
 )
+from ..services import skill_usage
 from ..services.skill_parser import ParsedSkill, parse_skill, render_skill
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
@@ -374,6 +375,33 @@ def skills_meta():
                 "charBudget": skill_char_budget(),
                 "sources": sources,
                 "coreCount": core_count,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return internal_error(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# GET /skills/usage（**必须早于 /{skill_id}**，同 /meta）
+# ---------------------------------------------------------------------------
+
+@router.get("/usage")
+def skills_usage(agentType: str | None = None, minSamples: int | None = None):
+    """每个 skill 的注入次数、被裁次数、注入后跑次的成功率。
+
+    ⚠️ ``okRate`` 是「注入了它的跑次里成功的比例」，**不是命中率／贡献度** ——
+    本仓没有「模型读没读它」的观测通路，硬算一个就是编。``judged=false`` 表示样本不足、
+    还没有结论（不是"没用"）。这两个措辞由后端随回执一起给出，前端不该另编一套。
+    """
+    try:
+        threshold = skill_usage.MIN_SAMPLES if minSamples is None else max(1, int(minSamples))
+        return success(
+            {
+                "skills": skill_usage.summary(agent_type=agentType, min_samples=threshold),
+                "stats": skill_usage.stats(),
+                "minSamples": threshold,
+                "lowOkRate": skill_usage.LOW_OK_RATE,
+                "note": "okRate = 注入该 skill 的跑次成功率（相关，不是因果）",
             }
         )
     except Exception as exc:  # noqa: BLE001

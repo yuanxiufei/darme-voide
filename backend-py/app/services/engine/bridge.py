@@ -60,10 +60,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ...core.config import get_storage_root
-from ..file_storage import get_absolute_path, parse_data_url
+from ...core.config import get_data_root, get_storage_root
+from ...core.media import get_absolute_path, parse_data_url
 from ..task_logger import log_task_error, log_task_progress, log_task_warn
 from . import device_policy
+from . import hooks
+from . import output_paths
 from . import residency as residency_mod
 
 __all__ = [
@@ -553,9 +555,21 @@ def lora_specs_from_settings(settings: Mapping[str, Any]) -> list[Any]:
     return specs
 
 
-def outputs_dir_for(kind: str, record_id: Any) -> Path:
-    """引擎产物落点 ✓：``<storageRoot>/engine/<kind>-<id>/`` ✓（**在数据目录里** ✓ 好被 /static 服务 ✓）。"""
-    return Path(get_storage_root()) / "engine" / f"{kind}-{record_id}"
+def outputs_dir_for(kind: str, record_id: Any, *, dry_run: bool = False) -> Path:
+    """引擎产物落点 ✓：``<storageRoot>/engine/<kind>-<id>/`` ✓（**在数据目录里** ✓ 好被 /static 服务 ✓）。
+
+    ⚠️ ``dry_run`` 走**另一处** ✓✗（2026-11-07 补 ✓）：干跑报告是**调试凭据** ✓，不是产物 ✗ ——
+    落到 ``static`` 之下就会被 ``/static`` 服务出去 ✓，前端/用户拿它当一个"成品链接"点开
+    （里面是 JSON ✓✗）。所以改落 ``<dataRoot>/engine-dryrun/<kind>-<id>/`` ✓：
+    **仍在数据目录里** ✓（备份/清理/配额口径一致 ✓），但**不在 ``static`` 之下** ✓
+    ⇒ ``_with_urls`` 天然转不出 URL ✓、静态挂载也够不着 ✓，而路径照样能打开 ✓。
+    """
+    #: ⚠️ 两棵树的**根**只认 :mod:`output_paths` ✓✗（2026-11-07 收口 ✓）：业务通路口径
+    #: 与「没给落点」的兜底口径必须是同一棵树 ✓，否则盘上会出现两个 `engine/` ✓ ——
+    #: 这里只补一层 `<kind>-<id>` ✓（同 seed 连跑不互相覆盖 ✓）。
+    if dry_run:
+        return output_paths.dryrun_root() / f"{kind}-{record_id}"
+    return output_paths.outputs_root() / f"{kind}-{record_id}"
 
 
 def static_relative(path: str | Path) -> str:
@@ -764,6 +778,46 @@ def artifact_paths(task: Mapping[str, Any] | None) -> dict[str, str | None]:
     }
 
 
+def _remember_record(task_type: str, record_id: Any, stage: str, task_id: str) -> None:
+    """记下「这条业务记录是谁出的」⇒ 跑次索引的 ``records`` 表（缺口 6 的唯一归因键）。
+
+    为什么非得在这里写 ✗✗：QC 写回时手上只有 ``video_generation_id`` ✓，
+    而"哪个引擎档 / 用了几步"只存在于 ``engine:<taskId>`` 那条跑次上 ✓ ——
+    两边的公共键**只有这一刻**在手上（刚拿到 ``taskId`` ✓）。过了这行就永远对不上了 ✗。
+
+    ⚠️ 走 :mod:`hooks` 那唯一的接线口 ✓✗（2026-11-08 改 ✓）：原先这里 late import
+    ``outcome_index`` ✓ —— 形式上躲开了顶层依赖，方向仍是**引擎 → 服务层** ✓✗（独立性契约 ②
+    扫 ``ast.walk``，函数里的 import 同样算越界；纯引擎进程里这一步还会把 sqlite 与业务表拖起来 ✓）。
+    现在服务层把 ``outcome_index`` 登记成 ``run_index``（``app/main.py`` ✓），引擎只查表 ✓。
+
+    ⚠️ 没登记 ⇒ **如实说没接入** ✓✗（warn 里点名 ``run_index``）：这条通路在纯引擎进程里
+    本来就没有数据源 ✓，但「没接入」与「记了但失败」是两件事 ✓，混在一起就没人查得动了 ✓✗。
+
+    失败只记一条 warn ✓：少一条归因只是"这一族少一条质检统计"✓，
+    **不能**让它把已经提交成功的生成带崩 ✗。
+    """
+    kind = "video" if "video" in str(task_type or "").lower() else (
+        "image" if "image" in str(task_type or "").lower() else "")
+    if not kind or record_id in (None, ""):
+        return
+    index = hooks.get("run_index")
+    if index is None:
+        ok, reason = False, ("跑次索引没接入（``hooks`` 没登记 ``run_index`` ⇒ 这条归因没记上）"
+                             " —— 见 ``app/main.py`` 的启动登记")
+    else:
+        try:
+            ok = bool(index.link_record(kind, record_id, stage, run_id=f"engine:{task_id}"))
+        except Exception as exc:  # noqa: BLE001 - 记账失败不影响生成 ✓
+            ok = False
+            reason = str(exc)
+        else:
+            reason = "" if ok else "记账未成功（缺参 / 库不可用）"
+    if not ok:
+        log_task_warn(task_type, "engine-record-link",
+                      {"id": record_id, "stage": stage, "engineTaskId": task_id,
+                       "reason": reason})
+
+
 async def run_job(request: Any, assembly: Mapping[str, Any], *,
                   task_type: str, record_id: Any, label: str = "") -> dict[str, Any]:
     """提交给**进程内**引擎 ✓ ⇒ 等它跑完 ✓ ⇒ 返回任务事实 ✓；失败**抛错** ✗（交给业务侧的收口 ✓）。
@@ -801,6 +855,9 @@ async def run_job(request: Any, assembly: Mapping[str, Any], *,
     log_task_progress(task_type, "engine-submit",
                       {"id": record_id, "engineTaskId": task_id,
                        "stage": wanted, "assembly": dict(assembly)})
+    # 缺口 6：**就在这里**记下"这条记录是谁出的" ✓ —— 再往后一步，``video_generation_id``
+    # 与 ``stage`` 就再也碰不到一起了 ✗（QC 那边只有记录 id ✓，引擎那边只有 taskId ✓）。
+    _remember_record(task_type, record_id, wanted, task_id)
 
     emitted = 0
     while True:

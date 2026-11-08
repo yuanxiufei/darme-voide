@@ -172,8 +172,12 @@ def case_flow_auto() -> None:
     width, height = geometry.size_for_megapixels(0.65, "16:9")
     side = latent_formats.get_latent_format("h3_video").spatial_downscale_ratio
     seq = ((height // side) // 2) * ((width // side) // 2)
-    frames = geometry.latent_frames(geometry.snap_frames(5.0, fps=geometry.H3_FPS),
-                                    temporal_compression=4)
+    #: ⚠️ 潜帧数走 :func:`pipeline.h3_latent_frames` ✗✗（**不是** ``geometry.latent_frames`` ✓）：
+    #: H3 真视频 VAE 是 **17 帧一段、末段丢 3 格** ⇒ 口径 ``5·ceil(T/17) − 3`` ✓（124 帧 ⇒ 37 ✓）；
+    #: 通用式 ``(T−1)//4+1`` 给 **31** ✓✗ ⇒ 同一个请求两条路算出两个 α ✓（症状＝本节的 ④ / ⑦‴
+    #: 只差一点点、一条报错都没有 ✓✗ —— α 只影响前几步的弯曲度，画面"看着还行" ✓）。
+    frames = pipeline.h3_latent_frames(geometry.snap_frames(5.0, fps=geometry.H3_FPS),
+                                       temporal_compression=4)
     alpha = schedules.flow_shift_for_sequence(seq, frames=frames)
 
     plan = pipeline.build_plan(_request(schedule="flow:auto"))
@@ -255,8 +259,12 @@ def case_flow_resolver() -> None:
     width, height = geometry.size_for_megapixels(0.65, "16:9")
     side = latent_formats.get_latent_format("h3_video").spatial_downscale_ratio
     seq = ((height // side) // 2) * ((width // side) // 2)
-    frames = geometry.latent_frames(geometry.snap_frames(5.0, fps=geometry.H3_FPS),
-                                    temporal_compression=4)
+    #: ⚠️ 潜帧数走 :func:`pipeline.h3_latent_frames` ✗✗（**不是** ``geometry.latent_frames`` ✓）：
+    #: H3 真视频 VAE 是 **17 帧一段、末段丢 3 格** ⇒ 口径 ``5·ceil(T/17) − 3`` ✓（124 帧 ⇒ 37 ✓）；
+    #: 通用式 ``(T−1)//4+1`` 给 **31** ✓✗ ⇒ 同一个请求两条路算出两个 α ✓（症状＝本节的 ④ / ⑦‴
+    #: 只差一点点、一条报错都没有 ✓✗ —— α 只影响前几步的弯曲度，画面"看着还行" ✓）。
+    frames = pipeline.h3_latent_frames(geometry.snap_frames(5.0, fps=geometry.H3_FPS),
+                                       temporal_compression=4)
     want = schedules.flow_shift_for_sequence(seq, frames=frames)
     got = pipeline.video_flow_shift_for(_request(schedule="flow:auto"))
     check("⑦‴ flow:auto 只给 request 也能算 ✓（二采没有 plan 可借 ✓ 这条就是它的通路 ✓）",

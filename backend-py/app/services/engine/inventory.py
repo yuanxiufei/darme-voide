@@ -16,7 +16,8 @@
   ``size_gib`` / ``required`` ✓；⚠️ ``file_path`` 是**远端仓库内**的路径 ✗ —— 只用来拼下载直链 ✓，
   **本地落点只看 ``kind`` + ``filename``** ✓，见 :func:`component_path` ✓）；
 * 目录：``configs/model-paths.json`` 的 ``models_dir`` ✓（解析优先级由
-  :func:`app.services.local_model_scan.get_model_paths` 统一提供 ✓ 与本仓其它地方同一份来源 ✓）；
+  :func:`app.core.model_paths.models_dir` 统一提供 ✓ —— 与扫描层 ``local_model_scan.get_default_roots()``
+  的第一个根**同一个函数** ✓；2026-11-08 之前它借的是服务层的 ``get_model_paths()`` ✗）；
 * 校验：:mod:`app.services.engine.safetensors`（纯 Python ✓）与
   :mod:`app.services.engine.gguf`（纯 Python ✓，2026-09-20 起支持 ✓）。
 * H3 键名核对：:mod:`app.services.engine.h3_keys`（纯 Python ✓ torch-free ✓
@@ -34,7 +35,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..local_model_scan import get_model_paths
+from ...core import model_paths as core_model_paths
 from . import gguf as gguf_mod
 from . import h3_form
 from . import h3_keys
@@ -164,8 +165,15 @@ def load_catalog() -> dict[str, Any]:
 
 
 def models_dir() -> Path | None:
-    """清单里声明的模型根目录（空 ⇒ ``None`` ✓）。"""
-    value = str(get_model_paths().get("models_dir") or "").strip()
+    """清单里声明的模型根目录（空 ⇒ ``None`` ✓）。
+
+    ⚠️ 走 :func:`app.core.model_paths.models_dir` ✓✗ —— 那是**配置面**的唯一真源（``MODELS_DIR`` >
+    ``model-paths.json`` > ``<data_root>/models`` ✓），与扫描层的第一个根**同一个函数** ✓。
+    2026-11-08 之前这里借 ``local_model_scan.get_model_paths()``（服务层 ✓）⇒ 引擎答一句「模型根
+    在哪」都得先把扫描层拽起来 ✓✗；配置面搬进 ``app.core`` 后本口零服务层依赖 ✓
+    （引擎为模型根**还剩**的那条在 :func:`candidate_roots`：它要 ComfyUI 探测与生态落点表 ✓）。
+    """
+    value = str(core_model_paths.models_dir() or "").strip()
     return Path(value) if value else None
 
 

@@ -134,12 +134,15 @@ def main() -> int:
           (unit / "sub2").is_dir() and not any((unit / "sub2").iterdir()))
 
     # ── ③ 迁移失败必须回滚（数据根与 engine 都不动） ──
-    # ⚠️ **必须先造出可复制的内容**：迁移分支里 `static/` 与 `traces/` 都是「存在才复制」，
-    #    夹具空着的话打桩的 `_copy_tree` 根本不会被调用 ⇒ 迁移反而成功、断言全错位
-    #    （我第一版就踩了这个：回滚用例「通过」了，实际是它压根没跑到迁移）。
+    # ⚠️ **必须先造出可复制的内容**：迁移分支里 `static/`、`traces/`、`lora-train/` 都是
+    #    「存在才复制」，夹具空着的话打桩的 `_copy_tree` 根本不会被调用 ⇒ 迁移反而成功、
+    #    断言全错位（我第一版就踩了这个：回滚用例「通过」了，实际是它压根没跑到迁移）。
     _seed(_ROOT0, "static/a.png", "IMG")
     _seed(_ROOT0, "traces/run.jsonl", '{"t":1}')
-    old_db_size = (_ROOT0 / "drama.db").stat().st_size
+    _seed(_ROOT0, "lora-train/settings.toml", "LR")
+    # ⚠️ 库在 ``<数据根>/db/`` 下（2026-11-07 分层：顶层只放目录、不放散文件）——
+    #    这行曾是 ``_ROOT0 / "drama.db"``，切根后当场 FileNotFoundError。
+    old_db_size = (_ROOT0 / "db" / "drama.db").stat().st_size
 
     original_tree = ds._copy_tree
     ds._copy_tree = lambda _s, _t: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -151,24 +154,49 @@ def main() -> int:
     check("回滚: 数据根**仍是旧根**", Path(config.get_data_root()).resolve() == _ROOT0,
           config.get_data_root())
     check("回滚: engine 重新指回旧库",
-          Path(db.engine.url.database).resolve() == (_ROOT0 / "drama.db").resolve(),
+          Path(db.engine.url.database).resolve() == (_ROOT0 / "db" / "drama.db").resolve(),
           db.engine.url.database)
 
     # ── ④ 正常切换 + 迁移（复制，旧目录保留） ──
     info = ds.change_data_root(str(_TARGET_A))
 
     check("迁移: 数据根切到目标目录", Path(info["dataRoot"]).resolve() == _TARGET_A, info["dataRoot"])
-    check("迁移: db / static / traces 三样都复制到新根",
-          (_TARGET_A / "drama.db").is_file()
-          and (_TARGET_A / "static" / "a.png").read_text(encoding="utf-8") == "IMG"
-          and (_TARGET_A / "traces" / "run.jsonl").read_text(encoding="utf-8") == '{"t":1}',
+    # ⚠️ 每项先 `is_file()` 再读：漏复制时**必须报红**，不能 `read_text` 抛
+    #    `FileNotFoundError` 把整套炸掉 —— 那样反向验证只会看到一条 traceback、
+    #    后面的判据全不跑（2026-11-07 实测踩到）。
+    def _content(path: Path) -> str:
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    check("迁移: db / static / traces / lora-train 四样都复制到新根",
+          (_TARGET_A / "db" / "drama.db").is_file()
+          and _content(_TARGET_A / "static" / "a.png") == "IMG"
+          and _content(_TARGET_A / "traces" / "run.jsonl") == '{"t":1}'
+          and _content(_TARGET_A / "lora-train" / "settings.toml") == "LR",
           sorted(p.name for p in _TARGET_A.iterdir()))
+    # ⚠️ 「四样」里 `lora-train` 是 2026-11-07 补的：手调的参数 + 训出来的权重**不可重建**
+    #    （重训是几小时卡时），而 `lora_train.config.data_dir()` 就是 `<dataRoot>/lora-train`
+    #    且会 `mkdir` ⇒ 不同步的话新根下是个**空目录**，用户看到「训练集和权重全没了」，
+    #    旧数据还在旧根却没人指向 ✓✗。对照：`models/` / `hf-cache/` 能重下、
+    #    `knowledge/` / `materialized/` 能重算 ⇒ 那几个故意不搬。
     # ⚠️ **别比主库文件体积**：WAL 模式 + `close_engine()` 会触发检查点 ⇒ 同一个库在
     #    「复制前 / 复制后」体积都会变（本次实测 4096 → 159744）。要比就比**逻辑等价**。
-    check("迁移: 是**复制**不是移动（旧库与旧 static 都还在）",
-          (_ROOT0 / "drama.db").is_file() and (_ROOT0 / "static" / "a.png").is_file(),
+    check("迁移: 是**复制**不是移动（旧库、旧 static、旧 lora-train 都还在）",
+          (_ROOT0 / "db" / "drama.db").is_file()
+          and (_ROOT0 / "static" / "a.png").is_file()
+          and (_ROOT0 / "lora-train" / "settings.toml").is_file(),
           sorted(p.name for p in _ROOT0.iterdir()))
-    old_engine = create_engine(f"sqlite+pysqlite:///{(_ROOT0 / 'drama.db').as_posix()}")
+    # ── ⑨ 复制清单是**双向**的：该搬的真搬了（上面 ④），不该搬的不许混进来 ──
+    # 白名单从 3 个 if 提成 `data_storage.MIGRATED_TREE_SUBDIRS` 之后，这里同时钉住
+    # 「表里是哪些」与「表里不许有哪些」—— 后者防的是有人为"补齐"把 models/hf-cache
+    # 也加进去：一次切根白搬几十 GB，而这些目录不搬**不会丢东西** ✓。
+    check("⑨ 整目录搬的白名单＝('traces','lora-train')（db/static/覆盖层各有覆盖口，单独算）",
+          ds.MIGRATED_TREE_SUBDIRS == ("traces", "lora-train"), ds.MIGRATED_TREE_SUBDIRS)
+    check("⑨ 能重下/重算/重跑的目录**不许**进白名单（也不许重复收录 static/db）",
+          not set(ds.MIGRATED_TREE_SUBDIRS)
+          & {"models", "hf-cache", "knowledge", "materialized", "engine-dryrun", "repair",
+             "static", "db"},
+          ds.MIGRATED_TREE_SUBDIRS)
+    old_engine = create_engine(f"sqlite+pysqlite:///{(_ROOT0 / 'db' / 'drama.db').as_posix()}")
     try:
         check("迁移: 新旧两库**逻辑等价**（都能打开且表结构在）",
               inspect(old_engine).has_table("dramas") and inspect(db.engine).has_table("dramas"),
@@ -181,11 +209,11 @@ def main() -> int:
     check("迁移: info.dbExists / storageExists 都为真",
           info["dbExists"] and info["storageExists"])
     check("切换后: get_db_path / get_storage_root 都跟着变",
-          Path(config.get_db_path()).resolve() == (_TARGET_A / "drama.db").resolve()
+          Path(config.get_db_path()).resolve() == (_TARGET_A / "db" / "drama.db").resolve()
           and Path(config.get_storage_root()).resolve() == (_TARGET_A / "static").resolve(),
           (config.get_db_path(), config.get_storage_root()))
     check("切换后: engine 指向新库（reopen_engine 生效）",
-          Path(db.engine.url.database).resolve() == (_TARGET_A / "drama.db").resolve(),
+          Path(db.engine.url.database).resolve() == (_TARGET_A / "db" / "drama.db").resolve(),
           db.engine.url.database)
     check("切换后: 新库可用（表结构就位）",
           inspect(db.engine).has_table("dramas"), inspect(db.engine).get_table_names()[:6])

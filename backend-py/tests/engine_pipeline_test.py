@@ -22,6 +22,11 @@ from typing import Any
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
+#: ⚠️ 干跑报告**必须**隔离到临时树 ✓✗（`output_paths.ENV_DRYRUN_OVERRIDE`）：
+#: 本套的 `outputs_dir` 是 `mkdtemp(prefix="engine_pipe_")` 随机目录 ✓，以前没人设这个环境
+#: 变量 ⇒ 每次跑完都往**真数据根** `data/engine-dryrun/` 里留 29 个 `engine_pipe_xxxx/` ✓✗
+#: （2026-11-07 实测积了 29 个 ✓，全部创建在同一秒 ✓）。用 `setdefault` 让外层脚本能覆盖 ✓。
+os.environ.setdefault("DARME_ENGINE_DRYRUN", tempfile.mkdtemp(prefix="dryrun_pipe_"))
 sys.path.insert(0, str(BACKEND_PY))
 
 from app.services.engine import keyframes as keyframes_mod  # noqa: E402

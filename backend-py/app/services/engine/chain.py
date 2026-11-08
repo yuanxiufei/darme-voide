@@ -32,13 +32,12 @@
 """
 from __future__ import annotations
 
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import geometry, media as media_mod, segments as segments_mod
+from . import geometry, media as media_mod, output_paths, segments as segments_mod
 
 __all__ = ["ChainError", "ChainPlan", "DEFAULT_OVERLAP_FRAMES", "H3_NATIVE_MAX_FRAMES",
            "NORM_DEFAULTS", "assemble_chain", "needs_chain", "normalize_chain",
@@ -459,8 +458,10 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
         raise ChainError("这个请求单段就够 ✓ ⇒ 不该走 run_chain ✓"
                          "（调用方先看 needs_chain ✓ —— 两处同源 ✓）")
     fps = int(plan.fps)
-    root = Path(request.outputs_dir) if getattr(request, "outputs_dir", None) else Path(
-        tempfile.mkdtemp(prefix="engine_chain_"))
+    #: ⚠️ 兜底**不再** `tempfile.mkdtemp` ✗（分段产物一散就找不回来 ✓✗）；统一走
+    #: :mod:`output_paths` ✓ ⇒ `<storageRoot>/engine/chain/` ✓（`/static` 服务得到 ✓）。
+    root = Path(request.outputs_dir) if getattr(request, "outputs_dir", None) else \
+        output_paths.fallback_outputs_dir("chain")
     root.mkdir(parents=True, exist_ok=True)
     parts: list[Any] = []
     runs: list[dict[str, Any]] = []
@@ -565,9 +566,11 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
                          for row in runs if row.get("videoPath")]),
         "chain": {
             "plan": plan.to_dict(), "report": chain_report, "segmentRuns": runs,
-            "audio": {"note": "各段音频（双流时 ✓）落在**各自那一节**的目录里 ✓；"
-                              "本仓口径是音轨不塞进 mp4 ✓（见 media.write_video 的 ``-an`` ✓）"
-                              "⇒ 成片暂不带音轨 ✓ —— 如实说明 ✓ 不假装有 ✗"},
+            "audio": {"note": "各段音频（双流时 ✓）落在**各自那一节**的产物目录里 ✓"
+                              "（段 mp4 自带音轨 ✓ ＋ 原样 wav ✓）；"
+                              "成片只把**画面**按各段 ``keepTo`` 裁好首尾相接 ✓，"
+                              "**音轨没跟着拼** ✗ ⇒ 成片这一条**不带音轨** ✓ —— 如实说明 ✓ 不假装有 ✗"
+                              "（要成片带音轨得按 ``keepTo/fps`` 逐段裁音轨再拼 ✓ —— 目前未做 ✗）"},
         },
         "note": "**多段成片**：真 mp4 ✓（ffprobe 可复核 ✓）；各段产物**同时保留** ✓ 便于逐段核对 ✓",
     }

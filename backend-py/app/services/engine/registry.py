@@ -258,6 +258,24 @@ STAGES: dict[str, StageSpec] = {
               "readiness 会空就绪（`ready=True` 是「没有问题」、不是「有东西」，见 unclaimed_categories）；"
               "TTS 本身不在引擎内（走 provider），引擎这层只有混音 audio_mix"),
     ),
+    #: ⭐ **Music3 文生音乐** 单列一档 ✓（2026-11-06 接线 ✓，2026-11-07 补登记 ✓）。
+    #: ⚠️ 与 ``audio``（混音 ✓）**不是一回事** ✗：那条只有 ``audio_mix`` ✓，本档是「三件权重一条链」
+    #: 真生成波形 ✓（DiT 4.58 GiB 音频 3 维潜变量 ＋ 语义塔 8.57 GiB ＋ DAV 0.20 GiB ✓，同驻 13.34 GiB ✓）。
+    #: ⚠️ 三件**不许并进 ``audio`` 档** ✗✗（见 ``inventory.STAGE_FILTERS["music3"]`` 的注释 ✓：
+    #: 合档会凭空多报 13.34 GiB 到别的链上 ✓）。
+    "music3": StageSpec(
+        name="music3", category="audio",
+        capabilities=("audio.generate",),
+        deps=("torch", "numpy", "safetensors"),
+        minVersions=(("torch", "2.0.0"),),
+        note=("Music3 **文生音乐**（本仓唯一一条**输出不是画面**的线 ✓）：`ditPath` ＋ `textWeights` ＋ "
+              "`audioVaeWeights`（**DAV** ✓ 不是图像 VAE ✗），缺一格必拒（不猜路径）；"
+              "⚠️ 词表**焊在语义塔权重里** ✓（safetensors 的 `tokenizer_json` 键 ✓）⇒ 盘上**没有** "
+              "`tokenizer.json` ✗，别去找（找不到＝正确 ✓）；"
+              "⚠️ 三件同驻 ≈13.34 GiB、采样 σ 走 `normal` 等距（flow shift **1.0** ⇒ 恒等 ✓），"
+              "步数少不会更好、`cfg` 只有 1.0 才有官方口径；"
+              "⚠️ 5 秒档约 74 秒、20 秒档约 269 秒（24GB 卡实测 ✓）、输出 44.1 kHz 立体声")
+    ),
     "text": StageSpec(
         name="text", category="text",
         capabilities=("text.generate",),

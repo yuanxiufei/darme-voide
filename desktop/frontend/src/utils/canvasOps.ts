@@ -58,13 +58,42 @@ export interface SkippedOp {
   reason: string
 }
 
+/** CAS 冲突 ✓ —— 这批 op 是按**旧画布**算出来的，整批没落地。 */
+export interface ApplyConflict {
+  /** 调用方以为画布停在哪一版 */
+  baseRevision: number
+  /** 画布实际停在哪一版 */
+  currentRevision: number
+}
+
 export interface ApplyResult {
   applied: number
   skipped: SkippedOp[]
+  /** 有值 ⇒ **一条都没落**，调用方应提示用户重看计划 ✗ */
+  conflict?: ApplyConflict
+  /** 有值 ⇒ 这批 op 之前已经落过，本次是**重放**，`applied` 记的是上次的条数 ✓ */
+  replayed?: boolean
 }
 
 const MIN_SCALE = 0.2
 const MAX_SCALE = 3
+
+/** 幂等簿的上限 ✓ —— 只留最近若干批，防止长会话把内存吃光 */
+const APPLIED_LIMIT = 50
+
+/**
+ * 已落地的批次 ✓（`applyId` ⇒ 结果）。
+ *
+ * 为什么需要它：一份被确认的计划可能因为「用户手滑点两下确认」或「网络重试」
+ * 而送到这里两次。没有这张簿，第二次会**再建一套节点**（id 相同则覆盖，看着没事；
+ * 但 `connect_nodes`/`select_nodes` 会重复计数，`run_generation` 更是会重复起任务 ✗）。
+ */
+const appliedBatches = new Map<string, ApplyResult>()
+
+/** 清空幂等簿 ✓（测试用；正常流程不必调） */
+export function resetAppliedBatches(): void {
+  appliedBatches.clear()
+}
 
 /** 与 `useCanvas` 的 `uid()` 同形（时间戳 + 随机，避免与既有 id 撞车） */
 function uid(prefix: string): string {
@@ -79,13 +108,43 @@ function finite(value: unknown, fallback = 0): number {
 /**
  * 应用一批 op ✓。**不做整批回滚** —— op 之间常有先后依赖（先建节点再连线），
  * 逐条落地 + 逐条记 `skipped` 比整批放弃对用户更有用；要撤销请用画布的撤销栈。
+ *
+ * 但有两件事是**整批**判的，因为它们不是「某一条 op 坏了」，而是「这批 op 不该落」：
+ *
+ * - ``applyId``：同 id 的批次只落一次，重放直接返回上次结果（``replayed: true``）✓；
+ * - ``baseRevision``：与当前画布版本不符 ⇒ 整批拒绝，返回 ``conflict`` ✓。
+ *   典型场景：AI 出一份计划要 30 秒，用户等不及自己拖了两个节点 ——
+ *   那批 op 是按旧画布算的坐标与连线，硬落就是错位加断线 ✗。
  */
 export function applyCanvasOps(
   ops: CanvasOp[],
-  handlers: { onGenerate?: (op: CanvasOp) => void } = {},
+  handlers: {
+    onGenerate?: (op: CanvasOp) => void
+    /** 幂等键 ✓（计划 id 天然合适） */
+    applyId?: string
+    /** 这批 op 是基于哪一版画布算的 ✓（不给 = 不校验，兼容老调用方） */
+    baseRevision?: number
+  } = {},
 ): ApplyResult {
   const canvas = useCanvas()
   const result: ApplyResult = { applied: 0, skipped: [] }
+
+  if (handlers.applyId) {
+    const previous = appliedBatches.get(handlers.applyId)
+    if (previous) return { ...previous, replayed: true }
+  }
+
+  if (handlers.baseRevision !== undefined) {
+    const current = canvas.revision.value
+    if (current !== handlers.baseRevision) {
+      // 一条都不落：半批落地比整批不落更难收拾 ✓
+      return {
+        applied: 0,
+        skipped: ops.map((op) => ({ op, reason: '画布已被修改，这批动作已过期' })),
+        conflict: { baseRevision: handlers.baseRevision, currentRevision: current },
+      }
+    }
+  }
 
   for (const op of ops) {
     try {
@@ -200,6 +259,17 @@ export function applyCanvasOps(
       }
     } catch (error) {
       result.skipped.push({ op, reason: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  if (handlers.applyId) {
+    // 记的是**这一次**的结果（含 skipped）—— 重放时如实返回「上次落了 N 条、跳了 M 条」，
+    // 而不是假装又成功了一次 ✓
+    appliedBatches.set(handlers.applyId, { applied: result.applied, skipped: result.skipped })
+    while (appliedBatches.size > APPLIED_LIMIT) {
+      const oldest = appliedBatches.keys().next()
+      if (oldest.done) break
+      appliedBatches.delete(oldest.value)
     }
   }
 

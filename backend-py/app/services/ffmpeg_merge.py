@@ -4,7 +4,9 @@
 
 流水线（``do_merge``）：
 
-1. ``concat`` 列表文件（``<storage>/temp/<uuid>.txt``，每行 ``file '<绝对路径>'``）；
+1. ``concat`` 列表文件（**一次调用的中转件** ⇒ ``tempfile.TemporaryDirectory()``，每行
+   ``file '<绝对路径>'``；**不进 ``<storage>/temp``** —— 那是要发 URL、要随数据根备份的
+   产物区，中转件落进去只会在进程异常时永久累积 ✗）；
 2. ffmpeg concat 拼接：``-f concat -safe 0 -fflags +genpts -c:v libx264 -preset medium
    -crf 23 -c:a aac -ar 48000 -b:a 192k -movflags +faststart``，随后删列表文件；
 3. **统一配乐**（``mix_bgm``，一条 BGM 贯穿全片）：``-stream_loop -1`` 循环 + 音量/首尾淡入淡出
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -156,32 +159,26 @@ async def _normalize_loudness(video_path: str) -> str:
 async def _do_merge(
     merge_id: int, episode_id: int, videos: list[str], bgm: dict[str, Any] | None
 ) -> None:
-    # 生成 concat 列表文件
-    list_dir = Path(get_storage_root()) / "temp"
-    list_dir.mkdir(parents=True, exist_ok=True)
-    list_path = str(list_dir / f"{uuid4()}.txt")
-    Path(list_path).write_text(
-        "\n".join(f"file '{_to_abs_path(v)}'" for v in videos), encoding="utf-8"
-    )
-
     output_dir = Path(get_storage_root()) / "merged"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_filename = f"{uuid4()}.mp4"
     output_path = str(output_dir / output_filename)
 
-    try:
+    # concat 列表是**一次 ffmpeg 调用**的中转件 ✓ ⇒ ``TemporaryDirectory``（出了 with 自动删 ✓，
+    # 成败都删 ✓）。**不落 ``<storage>/temp``** ✗：那是要发 URL、要随数据根备份的产物区 ✓，
+    # 中转件放进去一旦进程被杀就永久留一份没人认领的 ``<uuid>.txt`` ✓✗（判据
+    # ``output_layout_test`` ①：``temp`` 已从 ``STATIC_DIRS`` 撤下 ⇒ 再往那儿写即刻报红 ✓）。
+    with tempfile.TemporaryDirectory(prefix="darme-merge-") as tmp_dir:
+        list_path = str(Path(tmp_dir) / "concat.txt")
+        Path(list_path).write_text(
+            "\n".join(f"file '{_to_abs_path(v)}'" for v in videos), encoding="utf-8"
+        )
         await _run_ffmpeg([
             "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
             "-fflags", "+genpts", "-c:v", "libx264", "-preset", "medium", "-crf", "23",
             "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart",
             output_path,
         ])
-    finally:
-        # 清理临时文件（**无论成败**：Node 只在成功后删，这里更保守一点，不留垃圾）
-        try:
-            Path(list_path).unlink()
-        except OSError:
-            pass
 
     # 统一配乐混音（失败回退无 BGM 版本）
     final_path = output_path

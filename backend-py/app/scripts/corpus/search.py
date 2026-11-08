@@ -35,7 +35,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]  # depth-adjusted-to-app
-JSONL = ROOT / "data" / "prompt-corpus" / "_normalized" / "prompts.jsonl"
+#: 2026-11-07：从 ``data/prompt-corpus`` 迁到顶层 ``corpus/``（见 ``normalize.py`` 同处注释）。
+JSONL = ROOT / "corpus" / "prompt-corpus" / "_normalized" / "prompts.jsonl"
 
 LATIN_RE = re.compile(r"[a-z0-9][a-z0-9._-]+")
 NON_CJK_RE = re.compile(r"[^\u4e00-\u9fff]+")
@@ -92,7 +93,7 @@ def main() -> int:
         return 2
 
     if not JSONL.exists():
-        print("缺少 data/prompt-corpus/_normalized/prompts.jsonl —— "
+        print("缺少 corpus/prompt-corpus/_normalized/prompts.jsonl —— "
               "先跑 python backend-py/app/scripts/corpus/normalize.py", file=sys.stderr)
         return 2
 

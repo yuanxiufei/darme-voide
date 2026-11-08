@@ -10,7 +10,7 @@
   把两者分开：本脚本只负责「把原始字节拿到本地并记账」，解析器随后按实测定稿。
 
 落盘约定（沿用项目既有规矩，见 ``backend-py/app/scripts/README.md``）
-  ``data/prompt-corpus/<源 id>/raw/<原始相对路径>``   ← 原始文件（该目录已 gitignore）
+  ``corpus/prompt-corpus/<源 id>/raw/<原始相对路径>``   ← 原始文件（该目录已 gitignore）
   来源 / 许可 / 采集时间以 ``SOURCES`` 表 + ``tmp/fetch-raw.log`` 留痕。
 
 ⚠️ 原始文件因第三方版权**不得入库**（CC BY 4.0 要求署名）⇒ 溯源按本文件的 ``SOURCES`` 表重建。
@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]  # depth-adjusted-to-app
-CORPUS = ROOT / "data" / "prompt-corpus"
+#: 2026-11-07：从 ``data/prompt-corpus`` 迁到顶层 ``corpus/``（见 ``normalize.py`` 同处注释）。
+CORPUS = ROOT / "corpus" / "prompt-corpus"
 FORCE = "--force" in sys.argv
 ONLY = next((arg[7:] for arg in sys.argv if arg.startswith("--only=")), "")
 USER_AGENT = "voide-darme-corpus-fetch/1.0"

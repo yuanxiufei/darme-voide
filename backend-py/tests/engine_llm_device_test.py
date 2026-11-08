@@ -246,8 +246,13 @@ def case_loader_device() -> None:
     original_inspect, original_read = g2l.gguf_mod.inspect, g2l._read_tensor
     g2l.gguf_mod.inspect = lambda path: info                        # type: ignore[assignment]
     g2l._read_tensor = lambda path, info, tensor: tensor             # type: ignore[assignment]
+    # ⚠️ ``materialize=False`` 是**本用例的边界** ✓✗：这条假 ``info`` 的 ``tensors`` 直接就是裸数组 ✓，
+    # 而物化计划（``gguf_to_llm._plan_specs`` 读 ``tensor.type_id``）打的是**真** TensorInfo ✓ ——
+    # 真文件那条路由 ``engine_materialize_test`` 的 ``_fake_info`` 判 ✓。本用例只判**设备/数值** ✓
+    # （装到 cpu/cuda 值不许变 ✓ + 不写死 cpu ✗），掺进物化只会让两件事互相顶 ✗。
     try:
-        cpu_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device="cpu", dtype="float32")
+        cpu_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device="cpu", dtype="float32",
+                                          materialize=False)
         # ⚠️ 逐张量核**值** ✓：装完的参数必须等于当初造数据时的那一份 ✓（转置在装载里被还原 ⇒ 原样 ✓）
         expected = {name: _arr(tuple(tensor.shape), 0.01 * index)
                     for index, (name, tensor) in enumerate(reference.state_dict().items())}
@@ -263,14 +268,16 @@ def case_loader_device() -> None:
             skip("⑤″ 装载到 CUDA（参数真在卡上 + 与 CPU 逐张量相同）", "本机没有 CUDA 卡")
             return
         device = f"cuda:{torch.cuda.current_device()}"
-        gpu_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device=device, dtype="float32")
+        gpu_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device=device, dtype="float32",
+                                           materialize=False)
         check("⑤″ ⭐ 装载到卡上：参数 ``.device.type == cuda`` ✓（流式 copy_ 跨设备 ✓ 没有写死 cpu ✗）",
               all(parameter.device.type == "cuda" for parameter in gpu_model.parameters()))
         same = all(torch.equal(a.detach().cpu(), b.detach().cpu())
                    for a, b in zip(cpu_model.state_dict().values(), gpu_model.state_dict().values()))
         check("⑤‴ ⭐ CPU 装出来的与 GPU 装出来的**逐张量相同** ✓（同一条装载路径 ✓）", same)
 
-        low_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device=device, dtype="bfloat16")
+        low_model = g2l.load_llm_from_gguf("<fake>", CONFIG, device=device, dtype="bfloat16",
+                                           materialize=False)
         check("⑤⁴ 装载时 ``dtype`` 直达 ✓（装完就是 bf16 ✓ —— 不是装完再转 ✗）",
               next(low_model.parameters()).dtype is torch.bfloat16
               and next(low_model.parameters()).device.type == "cuda")

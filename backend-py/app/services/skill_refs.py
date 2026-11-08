@@ -5,7 +5,7 @@
 
 ``app/agent/skills.py::load_agent_skills`` 只读每个 skill 的 ``SKILL.md``，
 于是 ``references/`` 下的正文**没有任何通路会去读** —— 那批文件等于死料。
-外部技能库（``data/playbook/film-expert-bridge``）的 ``combat/``／``general/``／``ultimate/``
+外部技能库（``corpus/playbook/film-expert-bridge``）的 ``combat/``／``general/``／``ultimate/``
 133 份素材正是这种形态：搬进本仓若没有读取通路，就是「看起来装了很多、其实一份也用不上」。
 
 同一件事本仓已经踩过一次：``docs/feature-map.md`` 里 ``/scenes`` 那条写着

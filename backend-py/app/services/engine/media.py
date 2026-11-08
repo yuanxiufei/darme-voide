@@ -19,6 +19,7 @@ H.264/H.265 编码器**不在 Python 生态里** ✓（PyAV 也要带 ffmpeg 库
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import wave
@@ -97,9 +98,54 @@ def _normalize(frames: Any, value_range: str) -> tuple[Any, int, int, int, int]:
     return array.permute(0, 2, 3, 4, 1).numpy().astype(np.uint8), batch, count, height, width
 
 
+def _metadata_pairs(metadata: Any) -> list[tuple[str, str]]:
+    """``{k: v}`` → ``[(k, v), …]`` ✓（**归一化键名** ✓ + 换行压平 ✓）。
+
+    ⚠️ 键名归一化是必需的 ✓✗：``-metadata`` 的键是容器规范的一部分 ✓，带空格/中文的键名
+    在 mp4 muxer 上会**静默丢弃** ✓✗ ⇒ 只留 ``[0-9A-Za-z_.-]`` ✓（值原样保留 ✓）。
+    """
+    if not metadata:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for key, value in dict(metadata).items():
+        name = re.sub(r"[^0-9A-Za-z_.-]", "_", str(key)).strip("_")
+        if not name or value is None:
+            continue
+        pairs.append((name, str(value).replace(chr(10), " ").replace(chr(13), " ")))
+    return pairs
+
+
+def _png_info(metadata: Any) -> Any:
+    """``{k: v}`` → :class:`PIL.PngImagePlugin.PngInfo` ✓（写进 PNG 的 iTXt 块 ✓ 可复读 ✓）。"""
+    if not metadata:
+        return None
+    from PIL import PngImagePlugin  # noqa: PLC0415
+
+    info = PngImagePlugin.PngInfo()
+    for key, value in dict(metadata).items():
+        name = str(key).strip()
+        if not name or value is None:
+            continue
+        info.add_text(name, str(value))
+    return info
+
+
 def write_video(frames: Any, path: str | Path, *, fps: int = 24, value_range: str = "-1..1",
-                crf: int = 18, preset: str = "veryfast", pix_fmt: str = "yuv420p") -> dict[str, Any]:
-    """帧张量 → **真 mp4** ✓；返回可复核的事实（宽/高/fps/时长/字节 ✓，来自 :func:`probe` ✓）。"""
+                crf: int = 18, preset: str = "veryfast", pix_fmt: str = "yuv420p",
+                audio: str | Path | None = None,
+                metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """帧张量 → **真 mp4** ✓；返回可复核的事实（宽/高/fps/时长/字节 ✓，来自 :func:`probe` ✓）。
+
+    ``audio``：给了就把**这条音轨混进同一个 mp4** ✓（H3 双流的正解 ✓ —— 见下），
+    不给就仍是纯视频轨 ✓（``-an`` ✓，默认路径一字未变 ✓）。
+    ``metadata``：写进容器 ✓（任务号/提示词摘要等 ✓，事后 ``ffprobe -show_format`` 可读回 ✓）。
+
+    ⚠️ **音画长度天然不等**（H3 的音频塔一段只吐 ~0.2 秒 ✓ 而画面 1.6 秒 ✓）⇒ 混流时
+    ``apad`` 把音轨补静音到画面长度 ✓ 再用 ``-t <画面秒数>`` 硬性截断 ✓：
+    两路等长 ✓、容器时长 = 画面时长 ✓，画面一帧不少 ✓。
+    （实测**不能**用 ``-shortest`` ✓✗：``apad`` 补出来的音轨没有尽头 ⇒ 12 帧 0.5 秒的画面出了 0.992 秒的成片 ✓。）
+    音轨**原样另存**的 wav 不受影响 ✓（要干净音频仍读那条 ✓）。
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     array, batch, count, height, width = _normalize(frames, value_range)
@@ -111,10 +157,35 @@ def write_video(frames: Any, path: str | Path, *, fps: int = 24, value_range: st
         _tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
         "-r", str(int(fps)), "-i", "-",
-        "-an",                                   # 视频轨专用 ✓（音频走 write_wav ✓ 再合成是后续事 ✓）
-        "-c:v", "libx264", "-pix_fmt", pix_fmt, "-crf", str(int(crf)), "-preset", preset,
-        str(target),
     ]
+    if audio is None:
+        command.append("-an")                    # 纯视频轨 ✓（音频要单独落 wav 时走这条路 ✓）
+    else:
+        source = Path(audio)
+        if not source.exists():
+            raise MediaError(f"要混入的音轨不存在 ✗：{source}（先落 wav 再混 ✓）")
+        # ⚠️ 长度收尾**必须用 ``-t``（画面秒数）** ✓✗ —— 实测 ``apad`` ＋ ``-shortest`` 并不以画面收尾 ✓✗：
+        #    ``apad`` 补出来的音轨没有尽头 ✓，容器时长会跟着音轨涨（12 帧 0.5 秒的画面 ⇒ 成片 0.992 秒 ✓），
+        #    播放器在尾部多停半秒 ✓。``-t`` 是**确定的**：画面 12 帧 @24 ⇒ 0.5 秒 ✓，
+        #    音轨被 apad 补到 0.5 秒再被 ``-t`` 截断 ✓ ⇒ 两路等长 ✓、容器时长 = 画面时长 ✓。
+        command += [
+            "-i", str(source),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-af", "apad",                       # 音轨补静音到画面长度 ✓（不补 ⇒ 音轨先结束 ✗）
+            "-c:a", "aac", "-b:a", "192k",
+            "-t", f"{float(count) / float(int(fps)):.6f}",
+        ]
+    pairs = _metadata_pairs(metadata)
+    command += [
+        "-c:v", "libx264", "-pix_fmt", pix_fmt, "-crf", str(int(crf)), "-preset", preset,
+    ]
+    for name, value in pairs:
+        command += ["-metadata", f"{name}={value}"]
+    # ⚠️ ``use_metadata_tags`` 不是可选优化 ✓✗：mp4 muxer **只认**自己那几张固定标签
+    #    （title/comment/artist… ✓），其余键**直接丢掉且不报错** ✓✗（实测 ``engineTask`` 消失 ✓）。
+    #    带上这个 movflag 才会落进 ``mdta`` 键表 ✓ —— 元数据"写了但其实没写"正是本轮要消灭的静默失败 ✓。
+    command += ["-movflags", "+faststart+use_metadata_tags" if pairs else "+faststart",
+                str(target)]
     try:
         done = subprocess.run(command, input=array.tobytes(), capture_output=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as err:
@@ -127,6 +198,21 @@ def write_video(frames: Any, path: str | Path, *, fps: int = 24, value_range: st
     report = probe(target)
     report["requestedFrames"] = int(count)
     report["valueRange"] = value_range
+    report["audioMuxed"] = bool(audio is not None)
+    if pairs:
+        # ⚠️ 送了不等于写进去了 ✓✗（见上面 movflag 的注释 ✓）⇒ 用 ffprobe 读回来的 tags 当场对账 ✓
+        landed = {str(key).lower() for key in (report.get("tags") or {})}
+        missing = [name for name, _ in pairs if name.lower() not in landed]
+        report["metadataKeys"] = [name for name, _ in pairs]
+        report["metadataDropped"] = missing
+    if audio is not None:
+        # ⚠️ ffmpeg 返回 0 不等于音轨真在里面 ✓（map 写错只会**静默丢一路** ✓✗）⇒ 用 ffprobe 当场核 ✓
+        if not report.get("hasAudio"):
+            raise MediaError(
+                f"要求混入音轨，但产物里没有音频流 ✗：{target}（ffprobe 读不到 audio ✓）"
+                f"—— 静默丢音轨必须当失败处理 ✓")
+        report["audioSource"] = str(Path(audio))
+        report["audioDurationSeconds"] = report.get("audioDurationSeconds")
     return report
 
 
@@ -147,6 +233,8 @@ def probe(path: str | Path) -> dict[str, Any]:
     audio = next((item for item in streams if item.get("codec_type") == "audio"), {})
     duration = payload.get("format", {}).get("duration")
     frames = video.get("nb_frames")
+    # ⚠️ 没有音频流 ⇒ ``音频时长`` 必须是 ``None`` ✓✗（回落成容器时长就是**把画面上报成音轨** ✓✗）
+    audio_duration = (audio.get("duration") or duration) if audio else None
     return {
         "path": str(target), "bytes": target.stat().st_size,
         "width": int(video.get("width") or 0), "height": int(video.get("height") or 0),
@@ -156,6 +244,13 @@ def probe(path: str | Path) -> dict[str, Any]:
         "durationSeconds": round(float(duration), 4) if duration else None,
         "nbFrames": int(frames) if frames else None,
         "hasAudio": bool(audio),
+        # 音轨事实：混流后**同一份报告**就能核"里面那条音轨是什么" ✓（不必再 ffprobe 一次 ✓）
+        "audioCodec": audio.get("codec_name"),
+        "audioChannels": int(audio.get("channels") or 0) or None,
+        "audioSampleRate": int(audio.get("sample_rate") or 0) or None,
+        "audioDurationSeconds": round(float(audio_duration), 4) if audio_duration else None,
+        # 容器标签 ✓（判断"元数据到底写进去了没有"只能靠它 ✓ —— 送了不等于写了 ✗）
+        "tags": dict(payload.get("format", {}).get("tags") or {}),
     }
 
 
@@ -207,7 +302,8 @@ def load_image_tensor(path: str | Path, *, width: int, height: int,
 
 
 def write_image(frames: Any, path: str | Path, *, index: int = 0,
-                value_range: str = "-1..1") -> dict[str, Any]:
+                value_range: str = "-1..1", metadata: dict[str, Any] | None = None,
+                blank_std: float = 1.0) -> dict[str, Any]:
     """帧张量 → **真 PNG** ✓（调试/预览用 ✓）。
 
     两种入参都认 ✓：
@@ -216,6 +312,11 @@ def write_image(frames: Any, path: str | Path, *, index: int = 0,
 
     ⚠️ 2026-10-31 补 4 维 ✓：Z-Image 这类**图模型**的 VAE 解出来就是 4 维 ✓，此前这里一刀切判 5 维 ✓✗
     ⇒ **真图落不了盘** ✓✗（而且报错指向"帧张量形状"，看不出是"这是图不是片"✓）。
+
+    ``metadata``：写进 PNG 的 iTXt ✓（提示词/种子/参数摘要 ✓ —— 图脱离作业单后仍能自证怎么来的 ✓）。
+    ``blank_std``：**空白图判据** ✓ —— 像素标准差低于它就标 ``degraded`` ✓（纯黑/纯白/一片灰 ⇒ 标准差 ≈ 0 ✓）。
+    归一化错、VAE 没解出内容、张量全零这几种失败**都不会抛异常** ✓✗，只落一张"看着正常"的纯色图 ✗
+    ⇒ 这里给出机器可读的 ``std`` ✓（**报而不拦** ✓：阈值是创作口径 ✓，拦不拦由调用方定 ✓）。
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -239,11 +340,23 @@ def write_image(frames: Any, path: str | Path, *, index: int = 0,
     scaled = (frame.clamp(-1.0, 1.0) + 1.0) * 0.5 if kind in ("-1..1", "[-1,1]") \
         else frame.clamp(0.0, 1.0)
     array = (scaled.detach().to("cpu", dtype=torch.float32).permute(1, 2, 0).numpy() * 255.0)
+    pixels = array.round().clip(0.0, 255.0).astype(np.uint8)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(array.round().astype(np.uint8), "RGB").save(target)
+    info = _png_info(metadata)
+    picture = Image.fromarray(pixels, "RGB")
+    if info is not None:
+        picture.save(target, pnginfo=info)
+    else:
+        picture.save(target)
+    # 空白图判据 ✓：标准差按 **0..255 的像素**算 ✓（纯色 ⇒ 0 ✓；正常画面通常 30+ ✓）
+    spread = float(pixels.std())
     return {"path": str(target), "bytes": target.stat().st_size, "index": int(index),
-            "width": int(width), "height": int(height)}
+            "width": int(width), "height": int(height),
+            "mean": round(float(pixels.mean()), 3), "std": round(spread, 3),
+            "blank": spread < float(blank_std),
+            "degraded": spread < float(blank_std),
+            "metadataKeys": sorted(str(key) for key in dict(metadata or {}))}
 
 
 def load_video_tensor(path: str | Path, *, value_range: str = "-1..1") -> tuple[Any, dict[str, Any]]:

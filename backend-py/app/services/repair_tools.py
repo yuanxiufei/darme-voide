@@ -48,9 +48,12 @@ MAX_PROPOSAL_FILES = 8
 MAX_LIST_DEPTH = 4
 
 #: **绝不进入**的目录段 ✓ —— 命中任意一段就跳过（不是"只准这几段"）
+#: 2026-11-07：随 ``data/`` 分层补 ``indexes`` / ``corpus`` —— 前者是 2 GB 派生 sqlite
+#: （Search 的 rglob 会白扫一遍），后者是随仓语料（Agent 要读走 ``search_script_library``，
+#: 不该从工作区直接改源文件）。旧结构下这两类都在 ``data/`` 里、被那一段顺手挡住了。
 DENY_SEGMENTS: frozenset[str] = frozenset({
     ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-    "data", "models", "backups", ".repair-backups", ".assistant-backups",
+    "data", "models", "indexes", "corpus", "backups", ".repair-backups", ".assistant-backups",
     ".update-backup", "output", "outputs", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".nuxt", ".output",
 })
@@ -108,7 +111,7 @@ def resolve_inside(root: Path, relative: str) -> Path:
         raise RepairError(f"只接受相对路径：{relative}")
     target = (root_resolved / candidate).resolve()
     # ⚠️ 用「相对路径是否以 .. 开头」判，而不是 startswith 字符串比较：
-    # `C:\x\ab` 与 `C:\x\a` 的字符串前缀会假命中 ✓✗
+    # `…\x\ab` 与 `…\x\a` 的字符串前缀会假命中 ✓✗
     try:
         target.relative_to(root_resolved)
     except ValueError as err:

@@ -1,0 +1,46 @@
+{
+  "id": "grid-prompt-001",
+  "kind": "grid_prompt",
+  "statement": {
+    "shots": [
+      {
+        "number": 1,
+        "title": "走廊疾行",
+        "scene": "市医院走廊",
+        "action": "林晚抱着病历小跑进手术室，额角沁着汗，走廊顶灯在身后拉出长影",
+        "dialogue": "林晚：（喘）顾医生，三床病人指标异常！"
+      },
+      {
+        "number": 2,
+        "title": "监护仪蓝光",
+        "scene": "手术室",
+        "action": "顾沉头也不抬，只淡淡扫了一眼心电监护仪，绿色波形映在他侧脸上",
+        "dialogue": "顾沉：（沉声）准备除颤，肾上腺素一毫克静推。"
+      },
+      {
+        "number": 3,
+        "title": "深夜推门",
+        "scene": "深夜值班室",
+        "action": "林晚推开虚掩的门，撞见顾沉正对着一张泛黄病历出神，台灯把桌面照成一小块暖黄",
+        "dialogue": "林晚：（轻声）顾医生，你……还好吗？"
+      },
+      {
+        "number": 4,
+        "title": "合上病历",
+        "scene": "深夜值班室",
+        "action": "顾沉迅速合上病历，指尖压住封面，目光恢复冷峻，逆光只剩轮廓",
+        "dialogue": "顾沉：（冷淡）出去。"
+      }
+    ],
+    "rows": 2,
+    "cols": 2,
+    "mode": "first_frame"
+  },
+  "rubric": {
+    "rows": 2,
+    "cols": 2,
+    "minGridPromptLength": 120,
+    "minCellPromptLength": 40,
+    "forbiddenTags": ["[", "<", "TODO", "xxx"]
+  }
+}

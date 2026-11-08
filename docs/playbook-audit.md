@@ -1,4 +1,4 @@
-# `data/playbook` 检查与消化记录
+# `corpus/playbook` 检查与消化记录
 
 > 与 [`reference-audit.md`](reference-audit.md)（七仓代码审计）分工不同：那份看**代码**能不能借，
 > 这份看**素材**哪些该消化成判据、哪些只当检索原料。
@@ -6,7 +6,7 @@
 
 ## 一、它到底是什么
 
-`data/playbook/` 自 2026-11-04 起随仓库分发，**开箱可检索**（不在 `.gitignore` 里）。
+`corpus/playbook/` 自 2026-11-04 起随仓库分发，**开箱可检索**（不在 `.gitignore` 里）。
 索引入口是 `backend-py/app/services/script_library.py`，`source="playbook"` 就在这里检索。
 
 实测（同日）：
@@ -21,7 +21,7 @@
 | 合计 | **137 份 / 2333 小节 / 575 261 字符**（当日快照是 2332／574 224，本轮给索引加 §0.4 后各 +1） | |
 
 后两类共 11 份卡在定义缝里：它们和 `app/skills/*/references/` 同性质（判据摘要），却住在
-"原料库"下。**裁定：留在原处不搬。** 注意理由不是「不能动」—— 整个 `data/playbook/` 按
+"原料库"下。**裁定：留在原处不搬。** 注意理由不是「不能动」—— 整个 `corpus/playbook/` 按
 2026-11-04 创作者裁定是**本项目的可维护资产**（可改、可重写，见其 README「定位」）；
 不搬是因为层身份不同（判据摘要该被直接引用，不该混进检索被切块打散），不是因为它只读。
 详见 §四。
@@ -75,18 +75,23 @@
 
 ## 六、本轮顺带落的守卫与标注
 
-1. **`data/playbook/README.md` 结构节**已标清「原料 / 规约摘要」两类混居（`modules/` 7 份、
+1. **`corpus/playbook/README.md` 结构节**已标清「原料 / 规约摘要」两类混居（`modules/` 7 份、
    `film-cinedance/references/` 4 份），并写明裁定与理由。
 2. **`backend-py/tests/script_library_test.py`** 新增两条：README「规模」行的份数/小节必须
    等于 `_playbook_report()`；根目录不留散落 md。已反向验证——把 `137` 改成 `999` 立刻
    `FAIL`（当时输出 `(('999','2332'), 137, 2332)`）。没有新建 `playbook_test.py`：同一文件已有大量
    playbook 断言，新建还得去 `run_all.py` 登记两处。
-3. **定位改判（2026-11-04 创作者裁定）**：`data/playbook/` 从"外部课程包只读快照"改为
+3. **定位改判（2026-11-04 创作者裁定）**：`corpus/playbook/` 从"外部课程包只读快照"改为
    **本项目数据层的可维护资产**——可改、可重写，改动走 code review。
    - 根 `README.md` 的 `data/` 一行原先写「SQLite 数据库 + 生成资源文件（机器数据，不入库）」，
      与实际矛盾（playbook 入库、`drama.db`／`static`／`traces`／`ocr`／`models` 不入库），
      已改为两类分列。
-   - `data/playbook/README.md` 开头加「定位」与两层分工表（原料层放资料／判据层放怎么用），
+   - **2026-11-07 再改一次，而且这次不是措辞问题、是分层问题**：`data/` 只保留「跟着数据根
+     走」的运行时数据，其余按性质拆成三个顶层 —— `playbook/` ⇒ `corpus/playbook/`（随仓语料）、
+     三只派生索引 ⇒ `indexes/`（可重建）、OCR 权重 ⇒ `models/`（可重下，与 `models/tokenizers/`
+     合流）。判据只有一条，写在 `backend-py/app/core/config.py` 的数据根说明里：
+     **跟着数据根走 ⇒ `data/`；锚定仓库根 ⇒ 各自独立的顶层**。
+   - `corpus/playbook/README.md` 开头加「定位」与两层分工表（原料层放资料／判据层放怎么用），
      「维护」节补修改纪律（加/改/删/整包替换的手续，以及改完要跑哪个测试）。
    - 硬边界不变：来源与许可不明 ⇒ **对外输出不许搬运原文句子**（`THIRD_PARTY_NOTICES.md` §六）。
      "可修改"是把别人的资料改成本项目的写法，不是把别人的句子搬进产品。
@@ -109,7 +114,7 @@
 ## 八、目录扁平化（2026-11-04）
 
 **问题**：最深一条路径是
-`data/playbook/packs/film-expert-bridge/references/library/combat/战场场景库/x.md` —— 从仓库根
+`corpus/playbook/packs/film-expert-bridge/references/library/combat/战场场景库/x.md` —— 从仓库根
 算 9 段、6 层目录，而其中 `packs/`／`references/`／`library/` 三层对检索与理解都没有贡献。
 `references/` 尤其坏：它和判据层 `app/skills/*/references/` **同名不同义**，最容易被认错。
 
@@ -522,7 +527,7 @@ check("... §1 族表份数合计 == 该层实际原料数（份数写错就是�
   带 `/` 的一律不算——那是跨层引用，不是本级的份数。
 - **§7 是两族合写**（「动作与打斗（2 份）＋ 画法方法（2 份）」），声明数取该行**所有**「（N 份）」之和 = 4。
 
-**反向验证两种坏法**（都只动 `data/playbook/` 里那一个 md，改完全字节复原）：
+**反向验证两种坏法**（都只动 `corpus/playbook/` 里那一个 md，改完全字节复原）：
 1. **两错相消**：角色造型 `7→9`、场景 `4→2`（合计仍 38）⇒ **合计判据 PASS**、多重集判据
    **FAIL**，detail 直接摊出 `[2,2,2,2,2,4,4,5,6,9]` 与 `[2,2,2,2,4,4,4,5,6,7]`；81/82。
 2. **小节自声明错**：§5 抬头 `场景（4 份）→（5 份）` ⇒ 两条新判据都 FAIL（`('份数不符','5. 场景（5 份）',5,4)`），

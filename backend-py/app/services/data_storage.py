@@ -99,6 +99,27 @@ def _copy_tree(source: str, target: str) -> None:
     shutil.copytree(source, target, dirs_exist_ok=True)
 
 
+#: 切根时**整目录搬走**的 ``<dataRoot>`` 子目录（元组顺序＝复制顺序）—— 单一真源 ✓
+#:
+#: 收录判据只有一条：**丢了算不算得回来** ✓
+#:   * ``traces/``     —— 跑批观测。重跑能再有，但"当时那次为什么长这样"只有它有 ⇒ 搬
+#:   * ``lora-train/`` —— 手调参数 + 训出来的 ``*.safetensors``。重训是几小时卡时，
+#:                        且 ``lora_train.config.data_dir()`` 会在新根 ``mkdir`` 出空目录
+#:                        ⇒ 不搬的症状是「切个目录，训练集和权重全没了」而旧数据还在旧根 ✓✗
+#:
+#: **故意不搬**（写下来是为了防后人「顺手补齐」✓✗）：``models/`` 与 ``hf-cache/`` 能重下、
+#: ``knowledge/`` 与 ``materialized/`` 能重算、``engine-dryrun/`` 与 ``repair/`` 能重跑/重诊断。
+#: 这些一次切根白搬几十 GB（慢、占盘），而不搬**不会丢东西**。
+#:
+#: 为什么 ``db`` / ``static`` / ``library-overlay`` 不在表里：三者各有覆盖口
+#: （``DB_PATH`` / ``STORAGE_PATH`` / 覆盖层的模块常量），只能各自走
+#: ``get_db_path()`` / ``get_storage_root()`` / 显式路径算，不能按 ``old_root / 名字`` 拼 ✓✗。
+#:
+#: 判据：``tests/storage_change_test.py`` ⑨ 双向核对 —— 表内每个名字真的搬了（④ 那条），
+#: 且表**不许**混进上面那批「能重下/重算」的目录。
+MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train")
+
+
 def _write_probe(directory: str) -> None:
     """可写性探针（单独成函数：自检要能打桩出「不可写」分支）。"""
     probe = os.path.join(directory, f".write-test-{int(time.time() * 1000)}")
@@ -147,8 +168,16 @@ def change_data_root(new_root_raw: Any, migrate: bool = True) -> dict[str, Any]:
     except OSError as exc:
         raise ValueError("目录不可写，请检查权限或更换目录") from exc
 
-    new_db_path = str(new_root / "drama.db")
+    # ⚠️ 库一律落在新根的 ``db/`` 下（与 ``config.get_db_path`` 同源 ✓）：
+    # 这里若仍写 ``new_root / "drama.db"``，切根后的 ``reopen_engine`` 会去 ``db/`` 找不到库 ⇒
+    # **当场建一个空库**，用户看到的就是「切了目录数据全没了」✓✗（复制过的文件还躺在顶层没人读）。
+    new_db_path = str(new_root / config.DB_SUBDIR / "drama.db")
     new_storage_path = str(new_root / "static")
+
+    # ``library-overlay.sqlite`` 也跟数据根走（编辑/上传台账，不可重建 ✓）——
+    # 切根时不同步它 ⇒ 换台机器/换个盘之后「知识库的编辑与上传记录全没了」✓✗。
+    old_overlay_path = str(old_root / config.DB_SUBDIR / "library-overlay.sqlite")
+    new_overlay_path = str(new_root / config.DB_SUBDIR / "library-overlay.sqlite")
 
     # 迁移旧数据（复制）。⚠️ 只认字面量 False 才跳过（TS 是 `opts.migrate !== false`）
     if migrate is not False:
@@ -157,11 +186,15 @@ def change_data_root(new_root_raw: Any, migrate: bool = True) -> dict[str, Any]:
         try:
             if os.path.exists(old_db_path):
                 copy_db_files(old_db_path, new_db_path)
+            if os.path.exists(old_overlay_path):
+                copy_db_files(old_overlay_path, new_overlay_path)
             if os.path.exists(old_storage_path):
                 _copy_tree(old_storage_path, new_storage_path)
-            old_traces_path = str(old_root / "traces")
-            if os.path.exists(old_traces_path):
-                _copy_tree(old_traces_path, str(new_root / "traces"))
+            # 其余「整目录搬」的走单一真源（收录理由与被排除项都写在常量的注释里）
+            for _sub in MIGRATED_TREE_SUBDIRS:
+                _src = str(old_root / _sub)
+                if os.path.exists(_src):
+                    _copy_tree(_src, str(new_root / _sub))
         except Exception as exc:  # noqa: BLE001
             # 迁移失败回滚：重新打开旧数据库（数据根尚未切换）
             try:
@@ -175,5 +208,10 @@ def change_data_root(new_root_raw: Any, migrate: bool = True) -> dict[str, Any]:
 
     # 重开连接并指向新库（库文件不存在时顺手建表，同 TS 的 reopenDatabase + rebuildDb）
     reopen_engine()
+
+    # 知识库覆盖层是模块级常量 ⇒ 也要跟着换根，否则编辑/上传台账继续读写旧目录
+    from . import library_overlay  # noqa: PLC0415 —— 只为避开 services 包内的导入环
+
+    library_overlay.resync_path()
 
     return get_storage_info()

@@ -28,11 +28,10 @@ import hashlib
 import json
 import math
 import random
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from . import latent_container as lc
+from . import output_paths
 from .pipeline import GenerationPlan, GenerationRequest
 
 __all__ = ["DryRunBackend", "TinyAVLatents", "TinyStream", "TinyTensor"]
@@ -252,9 +251,12 @@ class DryRunBackend:
     def write(self, outputs: dict[str, Any], plan: GenerationPlan,
               request: GenerationRequest) -> dict[str, Any]:
         """落盘**干跑报告 JSON** ✓（不是视频 ✗ —— 名字与 ``kind`` 都把这点写明 ✓）。"""
-        where = Path(request.outputs_dir) if request.outputs_dir else Path(
-            tempfile.mkdtemp(prefix="engine_dryrun_"))
-        where.mkdir(parents=True, exist_ok=True)
+        #: ⚠️ 兜底**不再** `tempfile.mkdtemp` ✗（每次一个新目录 ⇒ 报告散在 %TEMP% ✓✗）；
+        #: 统一走 :mod:`output_paths` ✓ ⇒ `<dataRoot>/engine-dryrun/<stage>/` ✓（不在 `static` 下 ✓）。
+        #: ⚠️ 调用方给的 `outputs_dir` **也不照落** ✗（2026-11-07 修 ✓）：业务通路给的是
+        #: `<storageRoot>/engine/<kind>-<id>` ✓ ⇒ 照落就是「报告进 `static`」✓✗，
+        #: 而 `request.outputs_dir` 里记的仍是调用方原值 ✓（runtime 不替它改道 ✓）。
+        where = output_paths.report_dir(request.outputs_dir, getattr(request, "stage", None))
         target = where / f"dryrun_seed{int(request.seed)}.json"
         payload = {
             "synthetic": True,

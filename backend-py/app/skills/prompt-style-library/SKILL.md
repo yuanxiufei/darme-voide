@@ -164,7 +164,7 @@ PromptHero / Promptomania / Film-Grab 六个来源的用法）。
 **这些站点你访问不了**，本文件不再罗列 —— 你的任务是用**已有词表**组合出提示词，
 而不是去查资料。缺词时优先用第 2–4 节里的近义锚点，或向用户说明缺少哪个维度的词。
 
-**项目内已有**（`data/playbook/`，随仓库分发、**可直接检索**）：`film-cinedance`（镜头调度与
+**项目内已有**（`corpus/playbook/`，随仓库分发、**可直接检索**）：`film-cinedance`（镜头调度与
 运镜）与 `film-expert-bridge`（`references/library/general` 38 份：男女造型库、古风/都市人物设定库、
 场景模板、运镜实例、情绪表达、特效与施法手势）。取法：
 

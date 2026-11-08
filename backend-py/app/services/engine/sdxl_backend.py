@@ -56,6 +56,8 @@ except ImportError:  # pragma: no cover - 无 torch 环境只走纯数学自检 
 
 from app.core import cpu_budget
 
+from . import output_paths
+
 __all__ = [
     "SDXL_CLIP_G_KEY_PREFIX",
     "SDXL_CLIP_L_KEY_PREFIX",
@@ -789,8 +791,10 @@ class SdxlBackend:
 
     def output_path(self, plan: Any, request: Any) -> Path:
         """输出路径 ✓（**确定性** ✓：同 seed + 同尺寸 ⇒ 同文件名 ✓，便于复现与自检 ✓）。"""
+        #: ⚠️ 兜底**不再** `Path.cwd()/"outputs"` ✗（cwd 一变就换个地方 ✓✗）；统一走
+        #: :mod:`output_paths` ✓ ⇒ 与其余引擎产物同一个根 ✓。
         base = Path(request.outputs_dir) if getattr(request, "outputs_dir", None) else \
-            Path.cwd() / "outputs"
+            output_paths.fallback_outputs_dir("sdxl")
         return base / f"sdxl-{int(request.seed)}-{int(plan.width)}x{int(plan.height)}.png"
 
     def describe(self) -> dict[str, Any]:

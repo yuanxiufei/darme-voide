@@ -36,17 +36,30 @@ desktop/    — Tauri 2 桌面壳 + 独立 Vite 前端（3014）。前端是 fro
 backend/    — ❌ 已于 2026-09-15 **删除**（Node/Hono 后端；能力全部迁至 backend-py/，
               守卫靠 backend-py/tests/frozen_ts_source.py 的 TS 快照继续做「Python vs TS 当初」比对）
 configs/    — config.yaml 配置文件 + ComfyUI 工作流/提示词资源
-data/       — 项目数据根。**两类混住，别一概当「机器数据」**：
-              · 入库、可维护的资产：`playbook/`（137 份方法原料，定位与修改纪律见其 README）
-              · 不入库的机器数据：`drama.db*`、`static/`、`traces/`、`ocr/`、`models/`
+data/       — **运行时数据根**（= 你的作品目录，备份它）。顶层只放目录、不放散文件：
+              `db/` 所有 SQLite（`drama.db` 作品库 ＋ 它的 `.bak-*` ＋ `library-overlay.sqlite`
+              知识库编辑/上传台账，**两者都不可重建**）、`static/` 图片/音频/视频、`traces/` Agent
+              轨迹、`knowledge/` 知识闭环派生库、`engine-dryrun/` 干跑凭据、`materialized/` LLM
+              反量化权重缓存（可重建，几 GB 级）。逐层说明见 `data/README.md`。
+              可被设置页「数据存储」整体切到别的盘（写仓库根的 `.data-root`）⇒ 这里只放
+              **跟着数据根走**的东西。
+corpus/     — **随仓库分发的语料**（入库，clone 就有）。`playbook/` 137 份方法原料，
+              是知识库检索与 `search_script_library(source="playbook")` 的源（纪律见其 README）；
+              `prompt-corpus/` 可选，第三方版权、不入库。
+indexes/    — **知识库派生索引**（不入库，可 `--redo`/`--all` 重建，但要跑数小时）。
+              `library-ocr.sqlite`／`library-extra.sqlite`／`library-scenes.sqlite` 三只 sqlite。
+models/     — **本仓携带的模型素材**（不入库，可重下）。按用途分目录：`ocr/` OCR 权重（1.8 GiB）、
+              `tokenizers/` 三份 Qwen 词表（18 MB）。⚠️ 与 `<dataRoot>/models`（model_manager 下载的
+              几十 GB 出图权重）**不是一处**：那边是运行时数据、跟着数据根走。见 `models/README.md`。
 backend-py/app/        — 后端代码包（装配 main.py + 平台层 core/ + HTTP 层 routers/ + 业务层 services/
                         + Agent 运行时 agent/ + MCP 客户端 mcp/；层间**单向依赖**由
                         backend-py/tests/layering_test.py 机械守卫）
 backend-py/app/skills/     — Agent 技能（自有 SKILL.md + 外部技能库，约定见 backend-py/app/skills/README.md）
 backend-py/app/local_services/ — 本地服务根（模型工具链 `git clone` 的第三方服务 + 项目自带 h3 8765 薄封装）
 docs/       — 设计与审计文档（分层/契约/迁移证据都落这里，不散在代码注释里）
-models/     — 模型清单与分词器等机器相关素材（大文件与 `models/tokenizers/` 不入库）
 benchmarks/ — Agent 评估基准用例（4 份 JSON）
+logs/       — 运行日志暂存区（`backend.out.log` 那类「手动起服务 `/` 跑全量」的屏幕输出，
+              **全可删**、永不入库；2026-11-07 之前它们摊在仓库根上）。见 `logs/README.md`。
 ```
 
 ### 🎥 作品展示 / Demo Videos
@@ -109,9 +122,13 @@ benchmarks/ — Agent 评估基准用例（4 份 JSON）
 
 | 类型 | 支持厂商 |
 |---|---|
-| **图片** | OpenAI、Gemini、MiniMax、火山引擎、阿里、第三方代理 |
-| **视频** | MiniMax、火山引擎/Seedance、Vidu、阿里 |
-| **TTS** | MiniMax |
+| **文本** | OpenAI 兼容（OpenAI / OpenRouter / 火山引擎 / 阿里 / MiniMax / chatfire）、Gemini、Ollama（走原生 `/api/chat`，不走 OpenAI 兼容端点） |
+| **图片** | OpenAI、Gemini、MiniMax、火山引擎、阿里、第三方代理（chatfire）、本地 SD WebUI（`local-sd`）、本地 ComfyUI（`comfyui`） |
+| **视频** | MiniMax（本地 H3 改 baseUrl 指向 localhost 同一条路）、火山引擎/Seedance、Vidu、阿里 |
+| **TTS** | MiniMax、CosyVoice、本机薄封装 `local-tts`（edge-tts 在线音色 / Windows SAPI 离线） |
+
+> 注册表的唯一真源是 `backend-py/app/services/adapters/registry.py`（四个 `*_adapters` 字典）；
+> 上表是它的镜像，**新增厂商只改那里**。
 
 ---
 
@@ -185,11 +202,15 @@ ai:
 # git clone <你的仓库地址>
 cd darme-voide
 
-# 安装后端依赖
-cd backend && npm install
+# 安装后端依赖（Python 3.12，与 Dockerfile 的 python:3.12-slim 同基线；
+# Node 后端已于 2026-09-15 删除，没有 npm install 这一步）
+cd backend-py
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
+cd ..
 
 # 安装前端依赖
-cd ../frontend && npm install
+cd frontend && npm install && cd ..
 ```
 
 ### 🎯 启动项目
@@ -228,7 +249,8 @@ cd ../backend-py && .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790
 
 ### 🗄️ 数据库
 
-数据库表在首次启动时自动创建，无需手动迁移。默认路径 `data/drama.db`，可通过环境变量覆盖：
+数据库表在首次启动时自动创建，无需手动迁移。默认路径 `data/db/drama.db`（2026-11-07 从 `data/` 根下
+迁入 `db/`，旧位置会在启动时自动搬过来），可通过环境变量覆盖：
 
 ```bash
 DB_PATH=/path/to/your.db .venv\Scripts\python.exe -m uvicorn app.main:app --port 5790   # 在 backend-py/ 下

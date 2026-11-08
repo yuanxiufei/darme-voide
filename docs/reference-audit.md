@@ -538,9 +538,48 @@ OOM」那道闸门拿掉 ⇒ ⑬ 第二条报红；复原后全绿。★这条�
 《世界电影 2014-09》《外国当代剧作选（4）》）的前 5 页，`get_text()` 全部 `chars=0`、
 `page.get_images()` 有图 ⇒ 纯扫描件。供应商那 2262 份也只覆盖了有文字层的那批。
 
-处理方式（不当成「以后再说」）：本仓建 **sidecar**（`data/ocr/library-ocr.sqlite`），
+处理方式（不当成「以后再说」）：本仓建 **sidecar**（`indexes/library-ocr.sqlite`），
 `app/scripts/corpus/ocr_index.py` 逐页 OCR 写入，检索层两库按秩合并、`from` 标出处。
 真机实测：RapidOCR 150 dpi 约 **0.9–3.5 s/页**（首份含模型加载），中文识别干净
 （「毫无防备」「泥淖」「序列是经常被忽略的一个重要利器」全部正确）；
 17.5 万页全量约 **44 小时**，去掉期刊那 10 万页后剩约 **19 小时**。
 **判定**：这件事必须在本仓做，七个参考仓里没有一个能替（它们都假设输入已有文字层）✓。
+
+## 八、七仓现况复核（2026-11-07）
+
+一句话：**§一的判定不变**（领域错位、只搬口径）✓ —— 本节只补一层「仓还在不在、多久没动、
+许可有没有变」✓✗，因为 §一 的 HEAD 是 **2026-11-01 当次采集**，不是「最后提交」✗。
+
+| 仓 | 存在／归档 | 最后推送（API） | 许可（API `license.spdx_id`） | ★ | 与 §一 的差 |
+|---|---|---|---|---|---|
+| `Niko1221/Strata` | 在／未归档 | 2026-11-06 | `MIT` | 41.1k | 一周内有推送（§一 记 10-31） |
+| `lyogavin/airllm` | 在／未归档 | 2026-11-06 | `Apache-2.0` | 41.9k | 同上（记 10-31） |
+| `Edge0-AI/Edge0` | 在／未归档 | 2026-11-06 | `Apache-2.0` | 9.1k | 同上（记 10-29） |
+| `antirez/ds4` | 在／未归档 | 2026-11-03 | `MIT` | 24.3k | 同上（记 10-30） |
+| `giannisanni/pulsar` | 在／未归档 | 2026-09-01 | **`NOASSERTION`** | 83 | 许可字段变了（§一 记 MIT）⚠️ |
+| `Heman10x-NGU/expert-stream` | 在／未归档 | 2026-08-15 | **`NOASSERTION`** | 1 | 许可字段变了（§一 记 MIT）⚠️ |
+| `GOBA-AI-Labs/moe-stream` | 在／未归档 | 2026-02-22 | `Apache-2.0` | 3 | 无（双许可，API 只认一把 ✓） |
+
+三处要更正／注意：
+
+1. **四个仓一周内有推送** ⇒ §一 记的 HEAD sha 仍是**有效的溯源凭据** ✓（按 sha 取回的是同一棵树 ✓），
+   但**不许**写成「它们最后停在哪」✗。
+2. `pulsar` 与 `expert-stream` 的 API 现在报 `NOASSERTION`（GitHub 的识别器认不出那份文件）✓✗。
+   本仓留档 `docs/third-party/expert-stream-LICENSE.txt` 是**标准 MIT 全文**（1340 B，
+   `Copyright (c) 2026 Hemant Kumar`）⇒ 实质性判断仍是 MIT ✓，但**「GitHub 字段」不能当许可依据** ✗。
+   ⚠️ 下次动 `expert-stream`（`win_io.py` 那条无缓冲 IO）之前先取 raw `LICENSE` 复核：要么识别失败、
+   要么上游改过 ✓✗。`pulsar` 未搬任何代码 ⇒ 零合规面 ✓。
+3. `moe-stream` API 只见 `Apache-2.0` —— 与 §一 记的「`LICENSE-APACHE` ＋ `LICENSE-MIT` 双许可」一致 ✓
+   （GitHub 只认一把，别据此断言「它只有 Apache」✓✗）。
+
+**没做的事（不影响上述判定，如实记）**：没有重新克隆七个仓（11-04 已删那份 8.5 GiB 副本）、
+没有装依赖、没有编译、没有跑任何一个模型；作者口径（Edge0「2.5 GB 跑 35B」、airllm「4 GB 跑 2.8T」、
+expert-stream「16 GB 跑 284B」、moe-stream「24 GB Mac 跑 80B」）**仍未在本机实测** ⇒ 不许当实测引用 ✓✗。
+要复核按 §一 的 sha 重取即可，不必重扫。
+
+**七个研究方向 → 本仓落点**（全部已在 §二／§三 落过，此处只作索引）：SSD 流式 ⇒ `win_io.py`
+（无缓冲 ＋ `OVERLAPPED` 乱序，实测 +23%）＋ `foresight.py`；逐层加载 ⇒ `residency.split/park`；
+CPU/GPU 分流 ⇒ `device_policy.decide()` 三档 ＋ `host_cache.py`；预测预取 ⇒ `foresight.py`
+（DiT 下一层**确定**，不需要预测器 ⇒ 七仓的 prerouter／热度打分**无落点** ✗）；
+**KV cache 量化** 与 **投机解码** ⇒ 本仓**不适用** ✗（无跨调用 KV 复用、DiT 无 token 链）；
+**MoE 专家流** ⇒ **不适用** ✗（DiT 每步用**全部**权重，没有「专家热度」可省）。

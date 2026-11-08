@@ -59,10 +59,16 @@ from ..services.engine import residency as residency_mod
 from ..services.engine import runtime
 from ..services.engine import upscale as upscaler
 from ..services.engine import pipeline as pipe
+#: ⚠️ 两个 `profile*` 是**两件事** ✗✗，别互相认成对方：
+#: ``profiles_mod`` ＝ **出图档**（`character-sheet` / `scene-card` … ✓，键是画面长什么样 ✓）；
+#: ``machine_profile`` ＝ **机器档**（`auto`/`gpu`/`l1`/`l2`/`cpu` ✓，说的是这台机器多大 ✓）—— G1 ✓。
+from ..services.engine import profile as machine_profile
 from ..services.engine import profiles as profiles_mod
 from ..services.engine import safetensors as st
 from ..services.engine.dryrun import DryRunBackend
 from ..services.engine.runtime import engine_runtime
+#: ⚠️ 项目侧服务 ✓（只有它许读业务库 ✓）：``fromLedger=true`` 时要取跑次样本 ✓
+from ..services import engine_readiness
 from ..services.engine.torch_backend import (
     TorchBackend,
     TorchBackendUnavailable,
@@ -744,6 +750,63 @@ def load_plan(
         return _engine_error(err)
 
 
+@router.get("/feasibility")
+def engine_feasibility(
+    stage: str = "h3",
+    models_dir: str | None = None,
+    policy: str = "auto",
+    capacity_gib_raw: str | None = Query(None, alias="capacityGiB"),
+    size: str | None = Query(None),
+    from_ledger: bool = Query(False, alias="fromLedger"),
+) -> Any:
+    """**这台机器能不能跑这条链** ✓ —— 「权重驻留 vs 本机预算」＋ 结论四档 ✓。
+
+    与两个邻居的分工（别混 ✗）：
+
+    * ``GET /readiness`` ＝ 件**齐不齐**（盘上有没有 ✓）；
+    * ``GET /load-plan`` ＝ 装齐之后**怎么排班**（按**文件字节** ✓ —— 那是"读进来多少" ✗）；
+    * **本端点** ＝ 装完**占多少** ✓ ⇒ ``verdict`` ＝ ``perfect`` / ``good`` / ``marginal`` / ``too_tight`` ✓。
+
+    ⚠️ 只算**权重** ✓：``activation.basis`` 恒 ``"unknown"``（本仓没有逐族激活峰值实测表 ✓）⇒
+    ``perfect`` 会**降一档**报 ``good`` ✓（``downgraded=true`` 能在回执里看见 ✓）。
+
+    ``capacityGiB`` ⇒ 假装卡只有这么大 ✓（"如果我买 16G 卡跑得动吗" ✓）：这时**丢开真读数**、
+    按**空卡**算 ✓，回执 ``have.assumed=true`` ✓✗；**不填**就用当前真读数 ✓（低配模拟
+    ``DARME_FAKE_GPU_TOTAL_GIB`` 也在这条路上生效 ✓）。
+
+    ``size``（2026-11-07 加 ✓，形如 ``1024x1024``）⇒ 回执多一格 ``size{asked,snapped,absorbed,
+    step,scheme,megapixels,note}`` ✓ —— **吸附口径直接委托 `canvas.plan_canvas`** ✓✗（逐族步长：
+    ``h3`` 32 / ``sdxl`` 8 / 图族 16 ✓，且是**就近**取整 ✓ 不是向上 ✓）。
+    ⚠️ 这一格**只报几何、不参与 verdict** ✗：本仓没有逐族激活峰值表 ⇒ 分辨率进不了判据 ✓
+    （假装它进去，等于把一个估算包装成结论 ✓✗）。不接画布覆盖的族（``wan22`` / ``seedvr2`` /
+    ``music3``）会**明说**并给 ``snapped=null`` ✓（不编一个数 ✓）。
+    """
+    if not inv.STAGE_FILTERS.get(stage):
+        return bad_request(f"未知阶段 {stage!r}；可用：{sorted(inv.STAGE_FILTERS)}")
+    capacity: float | None = None
+    if capacity_gib_raw:
+        try:
+            capacity = float(capacity_gib_raw)
+        except ValueError:
+            return bad_request(f"capacityGiB={capacity_gib_raw!r} 不是数字 ✗（要 GiB 数，例如 `16` ✓）")
+        if not capacity > 0:
+            return bad_request(f"capacityGiB={capacity_gib_raw!r} 必须为正 ✗")
+    root = Path(models_dir) if models_dir else None
+    #: ⚠️ 走**门面**（E1.3 唯一入口 ✓）：CLI 与 HTTP 必须同一份结论 ✓ —— 直接调 feasibility 就
+    #: 会让「CLI 说能跑、HTTP 说不能」这类偏差有机会出现 ✓✗。
+    #: ``fromLedger`` ⇒ 交给**服务层**（`:mod:`app.services.engine_readiness`）取跑次样本 ✓ ——
+    #: 内核 `facade.feasibility` 只**收**样本、绝不读库 ✓✗（库是业务侧的 ✓）。
+    try:
+        if from_ledger:
+            return success(engine_readiness.task_feasibility(
+                stage, root=root, capacity_gib=capacity, policy=policy, size=size,
+                use_ledger=True))
+        return success(facade.feasibility(stage, root=root, capacity_gib=capacity, policy=policy,
+                                          size=size))
+    except facade.EngineError as err:
+        return _engine_error(err)
+
+
 @router.post("/plan")
 async def plan_prediction(request: Request) -> Any:
     """生成请求 → **具体数字**（尺寸 / 帧数 / σ 序列 / 警告 ✓），**不跑推理** ✓。
@@ -832,11 +895,22 @@ _ASSEMBLY_KEYS: dict[str, str] = {
     #    取值清单在 `residency.MODES` ✓，这里**只搬不改** ✗，校验在下面对 `residency` 那段 ✓。
     "residency": "residency",
     "residencyBudgetMib": "residency_budget_mib", "residency_budget_mib": "residency_budget_mib",
+    # ⭐ **上卡层数** ✓（2026-11-07 加 ✓，§4.1 ✓）：``null``/不传 = 按预算自算 ✓、``0`` = 整份留内存 ✓、
+    #    ``n`` = 前 n 层上卡 ✓（口径单一真源 = `residency.normalize_gpu_layers` ✓，白名单**只搬不改** ✗）。
+    #    ⚠️ 不进这张表 ⇒ 传了也被**静默丢掉** ✓✗ —— 用户以为限了层数、其实还是 auto ✓✗。
+    "gpuLayers": "gpu_layers", "gpu_layers": "gpu_layers",
     # ⭐ **设备策略** ✓（2026-10-31 加 ✓）：`auto`（默认，GPU 优先、压力大才转移）/ `gpu` / `cpu`
     #    / `balanced` ✓ —— 合法清单在 `device_policy.POLICIES` ✓，归一与校验都交给
     #    `normalize_policy` ✓（在下面 `_assembly_from` 里**调一次** ✓✗，白名单**只搬不改** ✗
     #    —— 否则同一份合法值又在这里手抄一遍 ✓✗）。
     "policy": "policy", "devicePolicy": "policy", "device_policy": "policy",
+    # ⭐ **机器档** ✓（2026-11-07 加 ✓，G1 ✓）：`auto` / `gpu` / `l1`（8 GiB 卡 / 32 GB 内存）/
+    #    `l2`（6 GiB / 16 GB）/ `cpu` ✓ —— `auto` / `gpu` 是**不预设** ✓，`l1`/`l2`/`cpu` 才动旋钮 ✓。
+    #    ⚠️ 与 `policy` 是**两个层次** ✗✗：`profile` 说"这台机器大概什么样"、`policy` 说"这一件放哪" ✓；
+    #    两个都给 ⇒ `policy` 赢 ✓、被压掉的项进回执 `profileIgnored=true` ✓（见 `engine/profile.py` ✓）。
+    #    ⚠️ 归一在下面 `_assembly_from` 里**调同一个函数** ✓（`profile.normalize_profile` ✓）⇒
+    #    别名表（`8g` / `6g` / `nocuda` …）只有一份 ✓，白名单**只搬不改** ✗。
+    "profile": "profile",
     # ⚠️ `loras`（2026-10-29 收 ✓）：以前**故意不收** ✗（裸透传会跳过归一 ✗），改成
     #    **收下来再走同一份归一** ✓ —— `bridge.lora_specs_from_settings` ✓（跟 config 那条路
     #    是**同一个函数** ✓，不在这里手抄 ✗✗）。两种写法都收：`loras`（清单）/ `lora`（单条）。
@@ -955,6 +1029,21 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
             raise pipe.StageError(
                 "plan", "给了 `residencyBudgetMib` 但 **`residency` 没开** ✗ ⇒ 预算无处可用 ✓"
                         "（要联合跑就同时给 `residency: split` 或 `park` ✓）")
+    if "gpu_layers" in values:
+        # ⚠️ 与上面 `residencyBudgetMib` **不同**：那一项"给了却不生效"是死配置 ✗（当场 400 ✓），
+        # 这一项给了会**自己把 `residency` 顶开成 `split`** ✓（见 `TorchBackend.__init__` ✓）——
+        # 因为 `off` 那条路根本不调 `residency.place` ✓ ⇒ 旋钮会被静默吞掉 ✓✗。
+        # 既然能自洽，就不要拦 ✓；回执里 `residencyOpenedBy="gpuLayers"` 会说明是它顶开的 ✓。
+        # ⚠️ 归一仍调**同一个函数** ✓（`residency.normalize_gpu_layers` ✓）⇒ 口径只有一份 ✓；
+        # 抛的是 `ValueError` ⇒ 在这里转成 **400** ✓（漏出去就成了 500 ✗）。
+        try:
+            values["gpu_layers"] = residency_mod.normalize_gpu_layers(values["gpu_layers"])
+        except ValueError as err:
+            raise pipe.StageError("load", str(err)) from err
+        #: ``None`` = 没提 ✓（例如显式写 ``"auto"`` ✓）⇒ **不往 `values` 里留一格** ✗：
+        #: 留着会让装载键多一格、白装一遍 ✓✗（与上面 `vae_tiling` 全关时 pop 掉同一条规矩 ✓）。
+        if values["gpu_layers"] is None:
+            values.pop("gpu_layers")
     if "policy" in values:
         # ⚠️ 在这里就归一 ✗✗（**不**留到 `ensure_loaded` ✓）：拼错要 **400**、不是 **500** ✓ ——
         #    `normalize_policy` 抛的是 `ValueError` ✓，而 `/load` 只接 `EngineBusy` /
@@ -982,6 +1071,19 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
         #: （放了会让装载键多一格、白装一遍 ✓✗）。
         if values["vae_tiling"] == normalize_vae_tiling(None):
             values.pop("vae_tiling")
+    if "profile" in values:
+        # ⚠️ 同上 ✗✗：拼错要在**路由层**报 400 ✓ —— `normalize_profile` 抛 `ValueError` ✓，
+        #    `/load` 只接 `EngineBusy` / `TorchBackendUnavailable` ⇒ 漏出去就是 500 ✓✗，
+        #    用户只是把 `l1` 写成了 `low1` ✓（合法值与别名清单就在错误消息里 ✓）。
+        #    ⚠️ 归一仍调**同一个函数** ✓ ⇒ 别名只有一份 ✓，这里不手抄 ✗。
+        try:
+            values["profile"] = machine_profile.normalize_profile(values["profile"])
+        except ValueError as err:
+            raise pipe.StageError("load", str(err)) from err
+        #: `auto` ＝ **不预设** ✓（与不写这一项逐字同效 ✓）⇒ 不往 `values` 里放一个"假配置" ✗
+        #: （放了会让装载键多一格、换回默认档时白装一遍 ✓✗）。
+        if values["profile"] == "auto":
+            values.pop("profile")
     if "audio_latent_mode" in values:
         mode = str(values["audio_latent_mode"]).strip()
         # ⚠️ 不认的口径**必须报错** ✗（静默当成单流 = 用户以为双流开着 ✓✗）
@@ -1013,29 +1115,32 @@ def _assembly_from(body: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
-def _default_outputs_dir() -> Path:
-    """产物默认落 ``<数据根>/static/engine`` ✓ —— 这样前端能直接用 ``/static`` 取 ✓。"""
-    return Path(get_storage_root()) / "engine"
-
-
 def _with_urls(task: dict[str, Any] | None) -> dict[str, Any] | None:
     """任务回执补 ``primaryUrl`` ✓ —— ``primaryPath`` 是**本机绝对路径** ✗，前端拿它没用 ✓。
 
     只转 ``<数据根>/static`` 下的产物 ✓：别的目录（调用方自给的 ``outputsDir`` ✓）不在
     静态挂载里 ✗，硬转 URL 只会 404 ✓✗（比不给更误导 ✓）。
+
+    ⚠️ 还只转**媒体**后缀 ✓✗（2026-11-07 补 ✓）：干跑报告 / 张量清单是 ``.json`` ✓ ——
+    它们是**凭据**不是产物 ✗，给个 ``primaryUrl`` 等于请前端把一份 JSON 当成品打开 ✓✗。
     """
     if not isinstance(task, dict) or not task.get("primaryPath"):
         return task
+    path = Path(str(task["primaryPath"]))
+    #: ⚠️ "什么算媒体"只问 :meth:`EngineRuntime.kind_of_path` ✓（这里是同一个问题 ✓，
+    #:   自己再列一张后缀表就是第二真源 ✓✗ —— ``.json`` 迟早被当成品发出去 ✓）。
+    if runtime.EngineRuntime.kind_of_path(path) is None:
+        return task
     root = Path(get_storage_root()).resolve()
     try:
-        rel = Path(str(task["primaryPath"])).resolve().relative_to(root)
+        rel = path.resolve().relative_to(root)
     except ValueError:
         return task
     return {**task, "primaryUrl": f"/static/{rel.as_posix()}"}
 
 
 @router.get("/runtime")
-def runtime_status() -> Any:
+def runtime_status(profile: str | None = Query(default=None)) -> Any:
     """运行时现状 ✓：依赖齐不齐 / 装了哪几个组件 / 忙不忙 / 队列 + 最近任务 ✓。
 
     ⚠️ ``available=false`` 与 ``loaded.dit=false`` 是**两件事** ✗：前者是 ``torch`` 没装 ✓，
@@ -1043,9 +1148,25 @@ def runtime_status() -> Any:
 
     ⚠️ 走**门面** `status()`（E1.3 唯一入口）：CLI 的 `status` 与本路返回**同一份事实** ✓，
     并多带 `schemaVersion` / `apiVersion` ✓（旧字段一个不少 ✓）。
+
+    ## 机器档 |profile| 与预算 |budgets| ✓（2026-11-07 加 ✓，G1 ✓）
+
+    ``?profile=l1`` 只回答「**这一档下**这台机器有多少预算」✓ —— 不装载、不改任何东西 ✓✗
+    （``applied`` 里那几格要等 ``POST /load`` 才真生效 ✓）。不传 ⇒ 用**最后一次装载**的档 ✓
+    （从没装过 ⇒ ``auto`` ✓）。回执里的 ``budgets.source`` 如实说是哪几栏**真读数**
+    （``cuda+host`` / ``cuda`` / ``host`` / ``none`` ✓ —— 测不到就 ``null``，**不写 0** ✗），
+    ``budgets.assumed`` 才是档位**假设**的两格 ✓（两者混读就会把"我以为有 8 GiB"当成实测 ✓✗）。
+    档位与实测差太多 ⇒ ``budgets.hint`` 一句人话 ✓（只提示、不拦 ✗）。
+    ⚠️ 不认的档位名 ⇒ **400** ✓（不静默回落 ``auto`` ✗ —— 那会让"我选了 L1"变成假话 ✓✗）。
     """
+    key = None
+    if profile is not None:
+        try:
+            key = machine_profile.normalize_profile(profile)
+        except ValueError as err:
+            return bad_request(str(err))
     try:
-        return success(facade.status())
+        return success(facade.status(profile=key))
     except facade.EngineError as err:
         return _engine_error(err)
 
@@ -1073,6 +1194,27 @@ async def load_runtime(request: Request) -> Any:
     ⚠️ 拼错**当场 400** ✓✗（不静默回落 ``auto`` ✗ —— 回落的后果是「你以为钉了 gpu、其实被挪去 CPU」✓✗）。
     ⚠️ 同时给了显式 ``device`` ⇒ **以 device 为准、策略不动它** ✗（钉死的设备是调用方的决定 ✓）；
     此时 ``policy`` 只影响**后续阶段**（``enter_phase`` 换装时）✓。
+
+    ## 上卡层数 ``gpuLayers`` ✓（2026-11-07 ✓，不写 = 按预算自算 ✓）
+
+    * **不写** / ``null`` / ``"auto"`` ⇒ **按预算自算** ✓（能塞多少塞多少 ✓，老行为一字不变 ✓）；
+    * ``0`` ⇒ **整份留内存** ✓（一层都不上卡 ✓，等价 ``park`` 的稳态 ✓；这**不是**装不上 ✗）；
+    * ``n`` ⇒ **前 n 层在卡上** ✓、其余留内存 ✓（预算只当**上限** ✓ —— 预算富余也**不多切** ✗）。
+
+    ⚠️ 与 ``policy=auto`` 是**两回事** ✗✗：那个问"这件放哪" ✓，这个说"卡上摆几层" ✓ ——
+    给了 ``gpuLayers`` 就由它说了算 ✓，``policy`` 不再替它挑层 ✓。
+    ⚠️ 给了数但预算装不下 ⇒ **按装得下的层数切** ✓（``capped=true`` ✓、``granted`` 如实报 ✓），
+    **不退回 auto** ✗✗（"要 30 层、卡只给 12 层"不该变成"一层都别上"✗）。
+    ⚠️ 只给 ``gpuLayers``、``residency`` 还是默认 ``off`` ⇒ **自动开成 `split`** ✓
+    （``off`` 那条路不调 `residency.place` ✓ ⇒ 旋钮会被静默吞掉 ✓✗；回执 ``residencyOpenedBy``
+    会写明是它顶开的 ✓。为什么是 ``split`` 不是 ``park`` 可算 ✓：0 层时两者稳态相同 ✓，
+    非 0 层时 ``park`` 每步要整层来回搬 ✓）。
+    ⚠️ 负数 / ``true`` / ``3.5`` / 拼错的串 ⇒ **400** ✓（本仓**不抄** llama.cpp 的
+    ``n_gpu_layers=-1`` ＝全上卡 ✓ —— 全上卡写个够大的数 ✓，「没意见」就别传 ✓）。
+    ⚠️ **进装载键** ✓：改了它 ⇒ 重装一次 ✓（``reused=false`` ✓）
+    —— 同一份权重、同一张卡，「卡上 3 层」与「按预算自算」是两套布局 ✓✗。
+    ⚠️ SDXL 那条线（``stage=image``）**没有可切的层** ✗ ⇒ 回执里 ``gpuLayers.granted=null`` ✓
+    （不许报 0 ✗ —— 0 的意思是"一层都不上卡"✓）。
 
     ## 回执里怎么读「为什么在这台设备上」✓
 
@@ -1167,9 +1309,10 @@ async def generate(request: Request) -> Any:
     ⚠️ 产物仍是 ``synthetic`` ✓✗（参考 TE / VAE 未训练 ✗）—— 前端必须打标 ✗。
     """
     body = await read_json(request)
-    if not str(body.get("outputsDir") or body.get("outputs_dir") or "").strip():
-        # ⚠️ 默认给**数据根下的 engine 目录** ✓：不给 ⇒ 管线落到临时目录 ✓✗（前端取不到 ✓）
-        body = {**body, "outputsDir": str(_default_outputs_dir())}
+    # ⚠️ 2026-11-07 改 ✓：**路由不再自己拼落点** ✗ —— 调用方没给 ``outputsDir`` 时由
+    #    ``EngineRuntime.submit`` 按 ``<kind>-<taskId>`` 建子目录 ✓（与业务通路
+    #    ``bridge.outputs_dir_for`` 同一口径 ✓）。此前这里一律注入 ``<数据根>/engine`` ✓✗
+    #    ⇒ 同一个 seed 连跑三次**互相覆盖** ✓✗（盘上三个 ``video_seed777.mp4`` 分别 10/34/39 帧 ✓）。
     stage_key = "h3"
     auto_note = ""
     try:

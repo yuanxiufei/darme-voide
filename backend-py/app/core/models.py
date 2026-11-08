@@ -365,6 +365,38 @@ agent_configs = Table(
     _txt("deleted_at"),
 )
 
+#: 优化史：**一轮优化到底提升了多少**。
+#:
+#: 建这张表的原因是一条具体回答不出来的问题：优化器把每一轮的分数写进
+#: ``benchmarks/history/<ts>.json``，而「当前生效的提示词」在 ``agent_configs`` —— 两边都没有
+#: ``version``/``parent_version``/``score``，于是「这次改动提升了多少」「v4 是拿什么分换来的」
+#: 「回滚过几次」全靠人去翻一堆带时间戳的 JSON，且 ``agent_configs`` 被覆盖后连对比基准都没了。
+#:
+#: 三个字段是刻意分开的（合起来就把问题又糊掉了）：
+#: * ``accepted`` —— 候选分是否**严格高于**当时的 best（优化器自己的判决）
+#: * ``persisted`` —— 该版本是否真的写成 ``agent_configs`` 的默认值（判决 ≠ 生效）
+#: * ``target`` —— 优化的是**什么**（``system_prompt`` 与 ``params``（温度）两格已通；
+#:   工具集/技能绑定/QC 阈值/引擎参数仍未开，见 ``docs/knowledge-loop.md`` §1 缺口 4）
+agent_optimizations = Table(
+    "agent_optimizations", metadata,
+    _pk(),
+    _txt("agent_type", nn=True),
+    _txt("case_id"),
+    _txt("target", nn=True),
+    _int("version", nn=True),
+    _int("parent_version"),
+    _real("score_before"),
+    _real("score_after"),
+    _real("delta"),
+    _bool("accepted", False),
+    _bool("persisted", False),
+    _txt("reason"),
+    _txt("runtime_model"),
+    _txt("prompt_sha"),
+    _txt("evidence"),
+    _txt("created_at", nn=True),
+)
+
 # ===== 生成任务 =====
 
 image_generations = Table(
@@ -488,6 +520,27 @@ video_quality_checks = Table(
     _txt("issues"),
     _txt("dimensions"),
     _txt("status", default="pending"),
+    _txt("created_at", nn=True),
+    _txt("updated_at", nn=True),
+)
+
+#: 质检的**人工复核结论**（知识闭环 §4.3 的"命中率分母"）。
+#: 为什么单开一张表而不是给 ``video_quality_checks`` 加一列 ✗：
+#: ① 「漏报」没有对应的 issue 行可挂（该报没报 ⇒ 盘上根本没那条 issue）；
+#: ② 一次复核要逐 code 判（同一镜头既可能黑场判对、又被判响度误报）；
+#: ③ 复核是**事实层**（只追加/覆盖单条），不该跟着 QC 记录一起被重跑覆盖 ✗。
+#: 唯一性由服务层做（``(check_id, code)`` 覆盖式 upsert）✓ —— 不建 UNIQUE 索引是
+#: 为了旧库不用手工补索引（``plan_schema_upgrade`` 只补列、不补索引 ✓）。
+qc_reviews = Table(
+    "qc_reviews", metadata,
+    _pk(),
+    _int("check_id", nn=True),
+    _int("storyboard_id"),
+    _int("video_generation_id"),
+    _txt("code", nn=True),
+    _txt("verdict", nn=True),
+    _txt("note"),
+    _txt("reviewer"),
     _txt("created_at", nn=True),
     _txt("updated_at", nn=True),
 )
@@ -803,7 +856,17 @@ script_scene_docs = Table(
 
 #: 仅 Python 侧新增、Node ``schema.ts`` 里没有的表。自检脚本比对"表数量与 Node 一致"时
 #: 必须排除它们，否则会把**有意新增**误报成"多了一张表"。
-PYTHON_ONLY_TABLES = ("script_scenes", "script_scene_docs")
+#:
+#: ⚠️ 这里是**单一真源**：``tests/smoke_test.py`` 的白名单直接读这份，别在测试里再手抄一遍
+#: （抄两份的后果实测过：`script_scenes`/`script_scene_docs` 两表在 models 里登记了、测试里漏了，
+#: 于是「表数量 == 29 + 白名单」永远差 2，红得像真缺陷）。
+#: 逐条来历：
+#: * ``script_scenes`` / ``script_scene_docs``：剧本分场正文与整篇文档（Python 侧新增）
+#: * ``comfyui_runs``：把「跑一次工作流」记成项目的一等公民（可选链路，2026-09-17）
+#: * ``qc_reviews``：质检 issue 的人工复核结论 —— 阈值命中率的分母（2026-11-07）
+#: * ``agent_optimizations``：每一轮优化的判决与分数变化 —— 回答"这次改动提升了多少"（2026-11-07）
+PYTHON_ONLY_TABLES = ("script_scenes", "script_scene_docs", "comfyui_runs", "qc_reviews",
+                      "agent_optimizations")
 
 #: Node 侧 ``schema.ts`` 的全部表，供自检脚本比对「表数量是否与 Node 一致」。
 ALL_TABLES = tuple(name for name in metadata.tables if name not in PYTHON_ONLY_TABLES)

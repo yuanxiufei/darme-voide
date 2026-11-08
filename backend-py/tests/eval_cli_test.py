@@ -57,9 +57,9 @@ def main() -> int:  # noqa: C901
     check("基准: 该目录真实存在且与 backend/ 无关", cat.benchmarks_dir().is_dir())
 
     files = sorted(p.name for p in cat.benchmarks_dir().iterdir() if p.suffix == ".json")
-    check("基准: 4 个 case JSON 就位", files == [
-        "extractor.json", "script-rewriter.json", "storyboard-breaker.json",
-        "voice-assigner.json"], files)
+    check("基准: 5 个 case JSON 就位", files == [
+        "extractor.json", "grid-prompt.json", "script-rewriter.json",
+        "storyboard-breaker.json", "voice-assigner.json"], files)
     # ⚠️ 只在 Node 侧还在时比对（**删 `backend/` 之后这条自动跳过**，不能再红）
     legacy_dir = PROJECT_ROOT / "backend" / "benchmarks"
     if legacy_dir.is_dir():
@@ -70,10 +70,11 @@ def main() -> int:  # noqa: C901
         print("[skip] backend/ 已删除：跳过「与 Node 侧逐字节一致」比对")
 
     cases = cat.list_benchmark_cases()
-    # ⚠️ 这四条以**真实数据**为准（我先前按文件名猜的 id/kind 是错的）
-    check("基准: 扫描出 4 条，kind→agentType 映射正确",
+    # ⚠️ 这几条以**真实数据**为准（我先前按文件名猜的 id/kind 是错的）
+    check("基准: 扫描出 5 条，kind→agentType 映射正确",
           sorted((c["id"], c["kind"], c["agentType"]) for c in cases) == sorted([
               ("ext-case-001", "extractor", "extractor"),
+              ("grid-prompt-001", "grid_prompt", "grid_prompt_generator"),
               ("script-rewriter-001", "script_rewriter", "script_rewriter"),
               ("sb-case-001", "storyboard", "storyboard_breaker"),
               ("voice-assigner-001", "voice_assigner", "voice_assigner"),

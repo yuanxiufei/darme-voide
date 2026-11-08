@@ -40,7 +40,7 @@ content/prompts/2026-01/[id]-[slug].md     ← 数据本体（按月分目录）
 static/prompts/2026-01/[id]-[slug]/
     ├── cover.jpg                          ← 4.88GB 的体积来源
     └── video.mp4
-data/models.yaml                           ← 模型定义
+models.yaml                           ← 模型定义
 data/tags.yaml                             ← 标签定义
 ```
 
@@ -109,7 +109,7 @@ curl.exe -L -o metadata.jsonl \
   https://hf-mirror.com/datasets/GokuScraper/seedance-2-prompts-datasets/resolve/main/metadata.jsonl
 ```
 
-**✅ 已于 2026-09-12 下载**：`data/prompt-corpus/seedance2/metadata.jsonl`（`data/prompt-corpus/` 已 gitignore，
+**✅ 已于 2026-09-12 下载**：`corpus/prompt-corpus/seedance2/metadata.jsonl`（`corpus/prompt-corpus/` 已 gitignore，
 第三方文本不入库；分析脚本在 `backend-py/app/scripts/corpus/`）。
 
 **实测数据结构（比预期好）**：
@@ -172,7 +172,7 @@ ds = load_dataset("WenhaoWang/TIP-I2V", split="Subset", streaming=True)
 ```
 第 1 步 ✅ 已完成（2026-09-12）
   下载 Seedance2 metadata.jsonl（37.58 MB，CC BY 4.0）
-  → 8755 条中文原始提示词，已落盘 data/prompt-corpus/seedance2/
+  → 8755 条中文原始提示词，已落盘 corpus/prompt-corpus/seedance2/
      （分析脚本 backend-py/app/scripts/corpus/analyze*.py）
   → 已提炼词频与模板，写入 skill 第 6.10 节
      （分析见 docs/seedance2-corpus-analysis.md）

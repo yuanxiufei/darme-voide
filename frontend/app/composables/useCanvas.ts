@@ -106,6 +106,14 @@ export interface CanvasViewport {
 export interface CanvasDoc {
   /** 结构版本 ✓（老档没有这个键 ⇒ 当 1 ✓） */
   version?: number
+  /**
+   * **内容版本** ✓ —— 每变一次内容 +1（单调，不回落）。与 `version` 完全不同：
+   * 那是「文件格式第几版」，这是「这份画布被改过几次」。
+   *
+   * 它是给 CAS 用的：AI 出草案时记下当时的 `revision`，落地前比一次 —— 对不上说明
+   * 这期间用户自己动过画布，那批 op 是按旧画布算的，直接落会覆盖/错位 ✗。
+   */
+  revision?: number
   nodes: CanvasNode[]
   edges: CanvasEdge[]
   viewport: CanvasViewport
@@ -122,7 +130,15 @@ const nodes = ref<CanvasNode[]>([])
 const edges = ref<CanvasEdge[]>([])
 const viewport = ref<CanvasViewport>({ x: 0, y: 0, scale: 1 })
 const selection = ref<string[]>([])
+/**
+ * 画布内容版本 ✓（单调递增，**只随 nodes/edges 变**）。
+ *
+ * 为什么**不**把 viewport 算进去：平移放大不改变画布内容，把视口算进版本会让
+ * 「用户滚了下滚轮」被当成「画布被改了」，于是 AI 草案每次确认都报冲突 ✗。
+ */
+const revision = ref(0)
 let hydrated = false
+let revisionWatched = false
 let timer: ReturnType<typeof setTimeout> | null = null
 
 // 默认尺寸走单一真源（源 `NODE_DEFAULT_SIZE` ✓）：自己再拍一套会让同一张图被压扁 ✗
@@ -166,7 +182,12 @@ function persist() {
   // 拖动会连续触发 ⇒ 防抖，别每帧写一次 localStorage ✗
   timer = setTimeout(() => {
     try {
-      const doc: CanvasDoc = { nodes: nodes.value, edges: edges.value, viewport: viewport.value }
+      const doc: CanvasDoc = {
+        nodes: nodes.value,
+        edges: edges.value,
+        viewport: viewport.value,
+        revision: revision.value,
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(doc))
     } catch {
       // 隐私模式 / 配额满：画布照用，只是不落盘（不弹错打断创作 ✗）
@@ -273,16 +294,41 @@ function normalizeDoc(raw: unknown, strict: boolean): CanvasDoc {
   return { nodes, edges, viewport: { x: finite(doc.viewport?.x), y: finite(doc.viewport?.y), scale } }
 }
 
+/**
+ * 版本号自增 ✓ —— **只注册一次**（模块级单例），并且**同步**生效。
+ *
+ * 两个细节都是必要的：
+ *
+ * - 只注册一次：`useCanvas()` 会被多个组件各调一次，若在 `useCanvas()` 里 watch，
+ *   同一次改动会按调用次数重复 +1。单调递增本身不算错，但版本号跳得莫名其妙 ✓✗；
+ * - 同步：CAS 靠它判「草案期间画布有没有被改」。若等防抖（300ms）再涨，
+ *   AI 计划正好在这段窗口里落地就会拿旧版本号比对通过 —— 冲突漏判 ✗。
+ */
+function watchRevision() {
+  if (revisionWatched) return
+  revisionWatched = true
+  watch([nodes, edges], () => {
+    revision.value += 1
+  }, { deep: true, flush: 'sync' })
+}
+
 function hydrate() {
   if (hydrated) return
   hydrated = true
+  // 先挂 watch 再灌数据：灌进来的这批也会触发一次 +1，但那**不是**用户改动，
+  // 所以紧接着用落盘的 revision 覆盖它 ✓（顺序不能反，否则 hydrate 完版本会多 1）
+  watchRevision()
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return
-    const doc = normalizeDoc(JSON.parse(raw), false)
+    const parsed = JSON.parse(raw)
+    const doc = normalizeDoc(parsed, false)
     nodes.value = doc.nodes
     edges.value = doc.edges
     viewport.value = doc.viewport
+    const stored = Number(parsed?.revision)
+    // 老档没有 revision ⇒ 从 0 起。**不猜**它被改过几次 ✓
+    revision.value = Number.isFinite(stored) && stored > 0 ? Math.floor(stored) : 0
   } catch {
     // 坏档就当没有，不拦着进页面 ✗
   }
@@ -470,6 +516,8 @@ export function useCanvas() {
     edges,
     viewport,
     selection,
+    /** 内容版本 ✓（CAS 用；只随 nodes/edges 变，视口不算） */
+    revision,
     addNode,
     updateNode,
     removeNodes,
@@ -491,3 +539,15 @@ export function useCanvas() {
     toScreen,
   }
 }
+
+/**
+ * 当前画布内容版本 ✓（不建 composable 也能读）。
+ *
+ * 给 `applyCanvasOps` 用：它要做 CAS，但不需要拿整个画布 API；
+ * 走 `useCanvas()` 会在 utils 层制造循环依赖（`canvasOps` ↔ `useCanvas` 已经互引）✗。
+ */
+export function canvasRevision(): number {
+  hydrate()
+  return revision.value
+}
+

@@ -16,7 +16,12 @@ dist/
 .env.local
 
 # Logs
+# 运行日志统一收在仓库根的 logs/（谁写/能不能删见 logs/README.md）；这条整类挡住即可，
+# 该目录下只有 README.md 会入库。
 *.log
+# 重定向出来的 stderr 兜底 —— 全仓现存的 .err 无一例外都是日志（实测 `*.log` 挡不住
+# `backend-py/logs/_regress_all.err`，漏这一个就够 `git add -A` 带进一个空文件）
+*.err
 
 # Python
 __pycache__/
@@ -34,40 +39,102 @@ Thumbs.db
 # Data (database and uploaded files)
 # 数据根目录标记（`POST /storage/change` 写入；内容是**机器相关的绝对路径**，不入库）
 .data-root
-data/drama.db
-data/drama.db-wal
-data/drama.db-shm
+# SQLite 一律住在 `<dataRoot>/db/`（2026-11-07 起，见 data/README.md 与 config.DB_SUBDIR）：
+#   drama.db / drama.db-wal / drama.db-shm / drama.db.bak-<时间戳> / library-overlay.sqlite(+wal/shm)
+# 一条整目录规则就够 —— 这个目录里**全是**机器本地数据，没有一样该进仓。
+# 特意不再逐文件名列举：列举式规则漏一个就是「`git add -A` 整片入库」（旧版就漏过 materialized）。
+data/db/
+# ⚠️ `data/public.sql` 是**已退役落点**（早期把库导出成 .sql 的手工产物）：全仓代码零引用、
+#    盘上也没有。规则**留着**不是还有谁在写它，而是挡旧数据根里的遗留副本 —— 那是库的整份
+#    拷贝，入库等于把几十 MB 二进制塞进 git ✓✗。别拿它当"还有落点"的证据。
 data/public.sql
-data/*.bak*
 # 数据库整目录备份（如 data/_backup_20261027-203105/）：机器数据，不入库
 data/_backup_*/
 data/static/
+# ⚠️ `data/storage/` 同样是**已退役落点**：storage root 现在就是 `static/`
+#    （`get_storage_root()` 直接返回 `<dataRoot>/static`，2026-11-07 起），没有任何代码
+#    再往 `<dataRoot>/storage/` 写。规则只为挡旧根遗留，找落点请看下一行的 `static/`。
 data/storage/
 data/traces/
 # 知识库运行索引：`outcome_index.rebuild()` 可随时重建，且每次跑图/跑歌都会改写 ⇒ 入库等于让工作区永远脏
 data/knowledge/
-# 后端自己那棵 data/（含 OCR 覆盖层 library-overlay.sqlite）：纯机器数据，`backend-py/data/` 下没有任何源码
-# ⚠️ 注意 `data/ocr/` 这条是**锚定仓库根**的（gitignore 规则里带斜杠即锚定），所以上面那行必须单独写，
-#    否则 backend-py/data/ocr/library-overlay.sqlite 会漏成未跟踪文件
+# 画布计划的落盘档（`canvas_plan_store` 写 `<dataRoot>/canvas/plans/<id>.json`）：每存一次计划就多一份、
+# 随手动改画布而变 ⇒ 机器本地数据，不入库（2026-11-08 补：此前没有这条，`git add -A` 会把它整片带进去）。
+data/canvas/
+# `backend-py/data/` 这棵**已经没有源码也没有数据**（2026-11-07 整个删掉：覆盖层库原先因
+# `parents[2]` 算错落在这里，与三个兄弟库分居两处，现已迁回仓根 `data/library-overlay.sqlite`）。
+# 规则留着防复发 —— 再有人往 `backend-py/` 里塞数据根，当场被挡。
+# ⚠️ 带斜杠的规则**锚定仓库根**，所以上面那些 `data/...` 规则挡不住 `backend-py/data/`，必须单独写。
 backend-py/data/
 
 # Prompt corpora (third-party text, copyright — reference only, never commit)
-data/prompt-corpus/
+corpus/prompt-corpus/
 
-# 知识库 OCR sidecar：扫描件 OCR 出来的正文（几百 MB，且 `ocr_index.py` 可重新生成）
-# schema 与检索层见 backend-py/app/services/script_library.py（OCR_DB）
-data/ocr/
+# 知识库派生索引：`indexes/` 整棵不入库 —— library-ocr（1.36 GB）/ library-extra（635 MB）/
+# library-scenes（82 MB）三只 sqlite，都是 `ocr_index.py --redo` / `lib_index.py --all` 的产物。
+# 落点见 backend-py/app/services/script_library.py（OCR_DB / EXTRA_DB）与 scene_index.py（SCENES_DB）。
+# ⚠️ 可重建 ≠ 可随手删：OCR 那只要跑数小时。不可重建的第四库（library-overlay）在 `data/` 下。
+indexes/
 
-# 本地模型权重（PaddleOCR-VL ≈1.8 GiB；由 ocr_vlm_fetch.py --fetch 重新下载，不入库）
+# 引擎干跑（dryRun）报告 —— `<dataRoot>/engine-dryrun/<stage>/`（兜底）与 `<kind>-<taskId>/`（业务）的调试凭据。
+# 落点见 backend-py/app/services/engine/output_paths.py::dryrun_root（刻意不进 static：
+# 报告是 JSON，落进 static 就会被 /static 服务出去、被当成"成品链接"点开）。
+# ⚠️ 2026-11-07 补：此前这里的三份 `dryrun_seed*.json` 是「未跟踪、又没被忽略」⇒
+#    一次 `git add -A` 就整片入库（data/ 下其余目录早有对应条目，只漏了这一条）。
+data/engine-dryrun/
+
+# LLM 反量化权重缓存 —— `<dataRoot>/materialized/`（实测 2 份 / 7.7 GB）。
+# 由 backend-py/app/services/engine/materialize.py 写入，删了下次跑图会自动重算，属纯派生。
+# ⚠️ 2026-11-07 补：与上面 engine-dryrun 同一个坑 —— 未跟踪又没被忽略 ⇒ `git add -A` 会试图吞 7.6 GB。
+data/materialized/
+
+# 出图权重 —— `<dataRoot>/models/`（model_manager 下到**数据根**的几十 GB，随数据根迁移；
+# 删了要重下 ⇒ 属运行时数据，不是仓内素材）。
+# ⚠️ 2026-11-07 补：与 engine-dryrun / materialized 是同一个坑，但这条**此前根本没有规则** ——
+#    下面 `models/ocr/`、`models/tokenizers/` 只挡**仓根**那两个，一个字节也没挡住 `data/models/`。
+# ⚠️ 必须写 `data/models/`（带斜杠锚定仓库根）：写成裸 `models/` 会连仓根要入库的素材一起挡掉。
+#    判据见 tests/output_layout_test.py ②′（`DATA_DIRS` 每个名字都得有 `data/<名>/`）。
 data/models/
+
+# HuggingFace 下载缓存 —— `<dataRoot>/hf-cache/`（`engine/tokenizers_tuning.py::default_cache_dir`
+# 把它设成 `HF_HOME` ⇒ 只要 transformers 一跑就会往里写模型/词表，几个 GB 起）。
+# ⚠️ 2026-11-07 补：这条此前**既不在本文件、也不在** `output_layout_test` 的 `DATA_DIRS` ✓✗ ——
+#    它躲过了 ② 的 AST 扫描，因为写法是 `Path(root) / "hf-cache"`（`root` 是局部变量，
+#    不是 `get_data_root()` 调用）⇒ 判据只认「调用 / 常量」那种拼法，见下条注释。
+#    删了下次用到自动重下，属纯派生 ⇒ 不该入库、也不随切根迁移。
+data/hf-cache/
+
+# 实验/探针产物 —— `<dataRoot>/experiments/<实验名>/`（2026-11-07 收口）。
+# `backend-py/_bench/*.py` 那些一次性探针（music3_sing / _probe_low_spec_* 等）跑出来的图/片/歌落这里。
+# ⚠️ 与 `static/` 的分界：`static/` 是**要发 URL、随数据根备份**的成品；这里是不上线、不发 URL、
+#    切数据根也不搬的实验产物（判据见 tests/output_layout_test.py ⑦：代码目录下的 output 存在即红）。
+# ⚠️ 与 `backend-py/_bench/` 的分界：那边是**脚本与日志**（草稿），这边是**产物**（图/片/歌）。
+data/experiments/
+
+# 落点登记表（backend-py/app/core/config.py 的 docstring）里还有**尚未产生**的目录，
+# 提前挡住同一个坑（未跟踪又没被忽略 ⇒ `git add -A` 整片入库）：
+#   `data/repair/`     —— routers/repair.py 的修复建议与快照
+#   `data/lora-train/` —— lora_train.config.data_dir（训练集 + 步进预览，可能几百 MB）
+data/repair/
+data/lora-train/
+
+# 本地模型素材（不入库）：`models/` 按**用途**分两个子目录 ——
+#   `models/ocr/`          PaddleOCR-VL-1.6（1.8 GiB，`ocr_vlm_fetch.py --fetch` 可重下）
+#   `models/tokenizers/`   三档出图工作流的 Qwen 词表（约 18 MB，见下方条目）
+# 逐层说明见 models/README.md。
+# ⚠️ 与 `<dataRoot>/models` **不是一处**：那边是 model_manager 下载的几十 GB 出图权重（运行时数据，
+#    跟着数据根迁移）；这里是锚定仓库根的仓内素材，不随数据根走。
+models/ocr/
 
 # 第三方剧本知识库（29 GB 二进制，**版权不明 ⇒ 只读参考，绝不入仓**）
 # 检索层见 backend-py/app/services/script_library.py；缺它时该源降级为 available=false。
 # ⚠️ 名字是中文目录，`git` 不关心编码，但 `Path` 在 Windows 上要按 UTF-8 读 ⇒ 别改成本地别名。
-# 2026-11-04：方法料已按创作者「有用的资料必须进系统」移入 `data/playbook/`，
+# 2026-11-04：方法料已按创作者「有用的资料必须进系统」移入 playbook 目录，
 # 并**从忽略名单移除** —— 它不是 29 GB 二进制，且只有进仓，
 # 新克隆的仓库里知识库与 search_script_library 才不是空的。
-# 2026-11-06 实核并首次入库：139 份 md / 1.47 MiB（同日 `git add data/playbook` 落地）。
+# 2026-11-06 实核并首次入库：139 份 md / 1.47 MiB。
+# 2026-11-07 从 `data/playbook/` 整棵迁到 `corpus/playbook/`（离开会随数据根迁移的 `data/`，
+#   按「仓库里有 ⇒ corpus/」的判据归位；落点见 script_library.PLAYBOOK_ROOT）。
 # ⚠️ 这条注释与「已入库」是一体的：若将来把 playbook 重新写回忽略名单，新克隆又会是空知识库。
 # 旧名 `参考/`、`方法语料/`、`data/method-library/` 均已删除，不再忽略。
 剧本知识库/
@@ -107,10 +174,19 @@ reference/
 backend-py/app/local_services/*
 !backend-py/app/local_services/h3/
 
-# 后端引擎真跑产物（图片/视频/一次性 JSON 快照 + 验收脚本）：由 /engine/generate 与手动脚本生成，机器相关，不入库
+# ⚠️ 2026-11-07 **已退役**：`backend-py/output/` 这个「后端产物区」取消了（创作者：「生成的统一进 data 下」）。
+#    实验/探针产物改落 `<dataRoot>/experiments/<实验名>/`（见上方条目），成品仍落 `<dataRoot>/static/`。
+#    规则保留作**兜底**：谁再往代码目录里建产物区，这条先挡住不被提交，同时判据 ⑦ 会当场报红。
 backend-py/output/
 # 后端调试草稿区（probe 脚本与 txt/png/onnx 备份；一次性、跑完即弃）。
 # 打包侧 desktop/scripts/sync-backend.mjs 的 EXCLUDE_DIRS 已排除它，别把草稿塞进发行包。
 backend-py/_bench/
+# 后端**现场证据区**：全量测试日志（`run_all_*.log`，tests/run_all.py 的账要指得回它们）、
+# 手工探针脚本、跑命令的 .cmd。⚠️ 只许放日志与脚本 —— **媒体产物一律进
+# `<dataRoot>/experiments/<实验名>/`**（落 tmp 会随 tmp 一起被当垃圾清）。
+# 2026-11-07 实测里面曾躺着 `out_seedvr2/video_seed20260101.mp4` 与 `probe_image_out/sdxl-*.png`，
+# 已收进 `<dataRoot>/experiments/{seedvr2,sdxl-probe}/`；判据见 `tests/output_layout_test.py` ⑨。
+# 上方通用 `tmp/` 规则也会命中这里，但**别靠它**：那条一改，这些现场证据就会混进提交。
+backend-py/tmp/
 # 下载的分词器文件（merges.txt/vocab.json 合计约 16 MB，机器数据；引擎按显式路径读取，代码里零硬编码）
 models/tokenizers/

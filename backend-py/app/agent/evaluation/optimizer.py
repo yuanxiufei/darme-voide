@@ -7,7 +7,13 @@ evidence（评测报告）→ hypothesis（失分维度）→ candidate（LLM �
 
 ⚠️ **防作弊隔离**：优化器只能看到「维度名 + 分数」，看不到 rubric 的金标准（如「漏提了谁」）
 —— ``format_feedback`` **故意不输出 detail**（detail 里可能含金标准答案）。候选提示词直接
-传入评测器、**不写 DB**，回滚零成本（无 tar.gz 快照的必要）。
+传入评测器、**不写 DB**（优化史只存 sha1 指纹与分数 ✓，全文仍在 ``history/*.json``），
+回滚零成本（无 tar.gz 快照的必要）。
+
+⚠️ 第六处保真点：每一轮都写一行 ``agent_optimizations``（``services/optimization_log.py``）✓——
+``history/*.json`` 是**按 case 覆盖**的（同名文件重跑即冲掉 ✗），而 ``agent_configs`` 是**覆盖式**
+落库（上一次生效的提示词与分数当场就没了 ✗）；两边都不回答「这次改动提升了多少」。写口失败
+只记 warn、不中断优化 ✓（长跑任务不许被日志拖废）。
 
 ⚠️ 五处保真点：
 
@@ -30,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
 from app.core.models import agent_configs
+from app.services import optimization_log
 from app.services.agent_prompts import get_default_instructions
 from app.agent.evaluation.catalog import benchmarks_dir
 from app.services.agent_registry import get_default_name
@@ -175,6 +182,8 @@ async def optimize_agent_prompt(
     history_dir = options.get("historyDir") or str(benchmarks_dir() / "history")
     auto_persist = (options["autoPersist"] if options.get("autoPersist") is not None else True)
     reference_prompt = get_default_instructions(agent_type)
+    #: 优化史的行键之一（同一个 agent 会跑不同 case，分数不可跨 case 比 ✓）。
+    case_id = str(case_def.get("id") or "")
 
     # 1. 评测 Reference 基准（v0）
     print("\n===== 评测 Reference 提示词（v0，当前默认）=====")
@@ -218,6 +227,15 @@ async def optimize_agent_prompt(
                 "prompt": candidate,
                 "dimensions": candidate_report["dimensions"],
             })
+            # 不可比的一轮也进优化史 ✓：它没被采纳，但"评测中途换了模型"这件事本身必须留痕 ✗
+            # （否则从页面上只看到"这几轮分数都没涨"⇒ 误判成提示词改得不好 ✗）。
+            optimization_log.record(
+                conn, agent_type=agent_type, version=version, case_id=case_id,
+                parent_version=history["best"]["version"],
+                score_before=history["best"]["score"], score_after=candidate_report["total"],
+                accepted=False, reason="runtime_mismatch", runtime_model=str(candidate_model or ""),
+                prompt=candidate, evidence=candidate_report["dimensions"],
+            )
             continue
 
         accepted = candidate_report["total"] > history["best"]["score"]
@@ -228,6 +246,19 @@ async def optimize_agent_prompt(
             "prompt": candidate,
             "dimensions": candidate_report["dimensions"],
         })
+
+        # 每一轮（不论采纳还是回滚）都进优化史 ✓：只记"被采纳的那几版"就答不了
+        # 「试了 5 轮、涨了多少」✗ —— 分母（试过几次）跟分子（成了几次）一样是结论的一部分 ✓。
+        # ⚠️ ``score_before`` 取**当时的 best 分数**（不是 Reference 分数 ✗）：连续晋升时
+        #    第 3 轮要跟 v2 比，跟 v0 比会把"v2 已经涨过的那部分"重复计入 delta ✗。
+        optimization_log.record(
+            conn, agent_type=agent_type, version=version, case_id=case_id,
+            parent_version=history["best"]["version"],
+            score_before=history["best"]["score"], score_after=candidate_report["total"],
+            accepted=accepted, reason="accepted" if accepted else "no_gain",
+            runtime_model=str(candidate_model or ""), prompt=candidate,
+            evidence=candidate_report["dimensions"],
+        )
 
         if accepted:
             print(f"[ACCEPT] {candidate_report['total']} > 最佳 {history['best']['score']}，"
@@ -253,12 +284,17 @@ async def optimize_agent_prompt(
     if auto_persist and history["best"]["version"] > 0 \
             and history["best"]["score"] > history["reference"]["score"]:
         candidate_cfg = build_persist_candidate(conn, agent_type, history["best"]["prompt"])
-        row = persist_agent_config(candidate_cfg)
+        # ⚠️ 必须传 ``conn``：本连接此刻还攥着上面那些优化史 INSERT 的写锁（SQLite WAL 只允许
+        #    一个写者）⇒ 另开连接做这条 UPSERT 会白等 busy_timeout 再抛 ``database is locked``。
+        row = persist_agent_config(candidate_cfg, conn)
         history["persisted"] = {
             "version": history["best"]["version"],
             "score": history["best"]["score"],
             "name": row.name,
         }
+        # 判决 ≠ 生效 ✓：这一版真的写进了 ``agent_configs``，优化史上要能看出来 ✗。
+        optimization_log.mark_persisted(conn, agent_type=agent_type,
+                                        version=history["best"]["version"], case_id=case_id)
         print(f"[PERSIST] 最佳候选 v{history['best']['version']} 已自动落库"
               f"（agent_type={agent_type}, name={row.name}）")
     else:

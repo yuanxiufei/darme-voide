@@ -3,12 +3,12 @@
 Node 后端零自动化测试，Python 侧不能重蹈覆辙：每迁一个域，就把它加进这里。
 这个脚本守住三件在迁移中最容易静默走样的事：
 
-1. **模式核对**：把 SQLAlchemy 的表/列定义与真实 ``data/drama.db`` 的 ``PRAGMA table_info``
+1. **模式核对**：把 SQLAlchemy 的表/列定义与真实 ``data/db/drama.db`` 的 ``PRAGMA table_info``
    逐列比对，并与 Node 的 ``db/index.ts`` 的建表清单交叉印证。
    比对照 ``schema.ts`` 更硬 —— DB 才是运行时真相。
 2. **契约核对**：起 TestClient 打真实接口，确认响应信封（``code``/``data``/``message``）、
    状态码、**错误文案逐字**与 Node 版一致（前端直接展示 ``message``，措辞变了就是回归）。
-3. **写操作隔离**：所有写操作都发生在 ``data/drama.db`` 的**副本**上，真实库全程只读。
+3. **写操作隔离**：所有写操作都发生在 ``data/db/drama.db`` 的**副本**上，真实库全程只读。
 
 用法（在 ``backend-py`` 目录下）::
 
@@ -40,7 +40,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
 REPO = BACKEND_PY.parent
-REAL_DB = REPO / "data" / "drama.db"
+REAL_DB = REPO / "data" / "db" / "drama.db"
 
 if not REAL_DB.exists():
     print(f"FAIL  real db not found: {REAL_DB}")
@@ -73,16 +73,20 @@ def check(name: str, ok: bool, extra: str = "") -> None:
 # ---------------------------------------------------------------------------
 # 0) 隔离库：真实库只读，写操作全部落在副本上
 # ---------------------------------------------------------------------------
-shutil.copy2(REAL_DB, _smoke_root / "drama.db")
+# ⚠️ 副本要落在 ``<DATA_ROOT>/db/`` 下（不是根下）✗：后面 ``DATA_ROOT=_smoke_root``，
+# 后端按 ``get_db_path`` 只会去 ``_smoke_root/db/drama.db`` 找 —— 副本搁在根下读不到，
+# 当场建个空库 ⇒ 整轮「模式核对」变成对着空库比，全是假绿 ✓✗。
+(_smoke_root / "db").mkdir(parents=True, exist_ok=True)
+shutil.copy2(REAL_DB, _smoke_root / "db" / "drama.db")
 log(f"real db (readonly source): {REAL_DB}")
-log(f"smoke db (writable copy) : {_smoke_root / 'drama.db'}")
+log(f"smoke db (writable copy) : {_smoke_root / 'db' / 'drama.db'}")
 
 os.environ["DATA_ROOT"] = str(_smoke_root)
 os.environ.setdefault("PROXY_TO_NODE", "0")
 sys.path.insert(0, str(BACKEND_PY))
 
 from app.core.config import PROJECT_ROOT, get_data_root, get_db_path, server, skills_dir  # noqa: E402
-from app.core.models import metadata  # noqa: E402
+from app.core.models import PYTHON_ONLY_TABLES, metadata  # noqa: E402
 
 check("config: PROJECT_ROOT == repo root", PROJECT_ROOT == REPO, str(PROJECT_ROOT))
 # ⚠️ 必须比较 resolve() 后的路径：Windows 上 tempfile.mkdtemp() 返回 8.3 短路径
@@ -90,7 +94,10 @@ check("config: PROJECT_ROOT == repo root", PROJECT_ROOT == REPO, str(PROJECT_ROO
 # 直接子串比较会假红。
 check(
     "config: db path points into smoke root",
-    Path(get_db_path()).resolve().parent == _smoke_root.resolve(),
+    # 2026-11-07 分层：库在 ``<数据根>/db/`` 下 ⇒ 判据是「祖父 = 沙箱根、父 = db/」，
+    # 原先写的是 ``.parent == _smoke_root``（库还躺在数据根顶层时才对）。
+    Path(get_db_path()).resolve().parent == (_smoke_root / "db").resolve()
+    and Path(get_db_path()).resolve().parent.parent == _smoke_root.resolve(),
     get_db_path(),
 )
 check("config: python port != node port (5789)", server["port"] != 5789, str(server["port"]))
@@ -120,9 +127,11 @@ LEGACY_DB_ONLY_TABLES = {"assets", "props"}
 # ⚠️ 为什么加白名单而不是改快照：快照的**全部价值**就是「它 immutable」✗ ——
 #    去改 `db/index.ts` / `db/schema.ts` 的快照，等于把这个守卫废掉 ✗。
 #    用白名单则两全：**承认有意的新增** ✓，同时**任何其它意外表依旧报警** ✓。
-# 2026-09-17 起：`comfyui_runs`（把「跑一次工作流」记成项目的一等公民：状态机/崩溃恢复/记账 ✓，
-# 属 `services/comfyui.py` + `routers/comfyui.py` 那条**可选**链路 ✓）。
-PY_ONLY_TABLES = {"comfyui_runs"}
+# ⚠️ 名单本身**不在这里抄**：单一真源是 `app/core/models.py::PYTHON_ONLY_TABLES`
+#    （`comfyui_runs` / `qc_reviews` / `script_scenes` / `script_scene_docs`）。
+#    抄两份的后果实测过：models 里登记了、这里漏了 ⇒「表数量 == 29 + 白名单」永远差几张，
+#    红得像真缺陷，而下一个人还得逐个翻表定义去找哪张是"有意新增"。
+PY_ONLY_TABLES = set(PYTHON_ONLY_TABLES)
 
 
 # ---------------------------------------------------------------------------

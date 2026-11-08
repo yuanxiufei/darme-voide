@@ -7,25 +7,25 @@
   ``99-索引与检索规则/curated-screenplay-methods.sqlite``（``chunks`` 是 fts5 **trigram** 表，
   128166 个片段）。本模块**只读**它：不重建、不写入、不复制 —— 重建会让「索引里 5403 部」
   与「盘上到底几部」变成两本账。
-* ``PLAYBOOK``：``data/playbook/`` —— 实测 **137 份 md / 2300+ 小节**，按来源目录分成两棵
+* ``PLAYBOOK``：``corpus/playbook/`` —— 实测 **137 份 md / 2300+ 小节**，按来源目录分成两棵
   （``film-expert-bridge/``、``film-cinedance/``，白名单见 :data:`PLAYBOOK_DIRS`；**目录名即
   ``skill=`` 取值**）。里面**没有** ``SKILL.md``，本仓不加载它、只检索 —— 别与 ``app/skills/``
   混淆，那才是能注入的技能。
   **本仓自带、随仓库分发**（2026-11-04 从 gitignore 的 ``方法语料/`` 移入）：知识库页面与
   ``search_script_library`` 开箱可用，不再依赖作者机器上的外部安装。来源/版本/许可与
-  前后端用法写在 ``data/playbook/README.md``（根目录直属 md 是元数据，不进索引、不计未索引数）。
+  前后端用法写在 ``corpus/playbook/README.md``（根目录直属 md 是元数据，不进索引、不计未索引数）。
   内容按用途分两半：**判据**已消化进本仓 ``app/skills/*/references/``（表演、镜头、审片、
   真人质感、声音、打戏六份，可直接出稿）；**原料**（招式库、造型库、特效库、分镜规范、
   情绪实例、技法资料库）留在原处供 ``search_script_library`` 检索。
   2026-11-04 创作者「有用的抄没用的删」，清掉 94 份课程机制件 —— 安装脚本／交互菜单
   （``catalog/*/选项.md``）／专家路由与项目模板（``ai-film-router`` 等 8 个 skill）／
-  飞书下载入口／他人机器路径（``D:\\绘画教程``）／已抄完的源文件／课程文档三份，
+  飞书下载入口／他人机器上的目录路径（不复述）／已抄完的源文件／课程文档三份，
   267 文件 4.6 MiB → 137 文件 1.48 MiB。按 ``#`` 小节切块、超过
   :data:`PLAYBOOK_SECTION_MAX` 再切窗，然后在**进程内**建命中表（毫秒级）。
 
 三处「不装样子」的口径（与 ``agent/tools/corpus_tools.py`` 同源纪律）：
 
-1. **旧盘路径必须重映射**：索引里的 ``path`` 是建库机器上的 ``G:\\电影剧本\\…`` ⇒ 一律按
+1. **旧盘路径必须重映射**：索引里的 ``path`` 是建库机器上的旧盘符绝对路径（形如 ``…\\电影剧本\\…``）⇒ 一律按
    :data:`LOCAL_MARKER` 截尾拼回本仓 :data:`LIBRARY_ROOT`，并**逐条**回报 ``onDisk``。
    搬过盘的机器上 ``onDisk=false`` 是明话，不许当成「找到了一条参考」。
 2. **隔离目录不参与检索**：``90-隔离与待审/`` 是供应商的待审桶（**当前库内 0 条**，但那是数据
@@ -78,30 +78,38 @@ __all__ = [
 #: 知识库根（第三方资料；``SCRIPT_LIBRARY_ROOT`` 可指到别处，测试夹具也用它）
 LIBRARY_ROOT = Path(os.environ.get("SCRIPT_LIBRARY_ROOT")
                     or (PROJECT_ROOT / "剧本知识库" / "全球热门与获奖影视剧本知识库"))
-#: 方法语料根（``SCRIPT_PLAYBOOK_ROOT`` 可把根指向外部副本）。到此为止搬了四次：
+#: 方法语料根（``SCRIPT_PLAYBOOK_ROOT`` 可把根指向外部副本）。到此为止搬了五次：
 #: ``参考/`` → ``方法语料/AI STUDIO洋子-V3.3.1-热修版/`` → ``data/method-library/…``
-#: → **``data/playbook/``**。前三处的毛病各不一样：前两处被 gitignore（版权存疑、只读参考），
-#: 第三处虽进了仓，名字却带空格 / 大写 / 中文版本号 —— 与 ``data/`` 其余目录（models、ocr、
-#: static、traces，一律小写英文）不一致，路径里那句 ``AI STUDIO洋子…`` 每引用一次都要抄一遍。
+#: → ``data/playbook/`` → **``corpus/playbook/``**。前三处的毛病各不一样：前两处被
+#: gitignore（版权存疑、只读参考），第三处虽进了仓，名字却带空格 / 大写 / 中文版本号 ——
+#: 与仓库其余目录（一律小写英文）不一致，路径里那句 ``AI STUDIO洋子…`` 每引用一次都要抄一遍。
 #: 实际后果是**新克隆的仓库里 playbook 源为空** ⇒ 知识库页面与 ``search_script_library``
 #: 一起降级成 ``available=false``，等于「资料在作者机器上、系统里没有」。2026-11-04 创作者
-#: 裁定：有用的资料必须进系统（前后端 / data / 知识库任一），故落到此处随仓库分发；
-#: 来源、版本、许可与前后端用法写在 ``data/playbook/README.md``，不再靠目录名携带版本。
+#: 裁定：有用的资料必须进系统（前后端 / data / 知识库任一），故落到此处随仓库分发。
+#:
+#: ⚠️ 2026-11-07 第五次搬家（``data/playbook/`` ⇒ ``corpus/playbook/``）：``data/`` 是
+#: **运行时数据根**（能被 ``.data-root`` / ``DATA_ROOT`` 切到别的盘），而语料是本仓随仓库
+#: 分发的**源资产** —— 既不随数据根走，也不该在「备份我的作品数据」时被一起卷走。两者同居
+#: ``data/`` 会让「备份 data/」的含义变得不明确，故语料独立成顶层 ``corpus/``。
+#: 来源、版本、许可与前后端用法写在 ``corpus/playbook/README.md``，不靠目录名携带版本。
 PLAYBOOK_ROOT = Path(os.environ.get("SCRIPT_PLAYBOOK_ROOT")
-                     or (PROJECT_ROOT / "data" / "playbook"))
+                     or (PROJECT_ROOT / "corpus" / "playbook"))
 #: 供应商预建的 fts5 索引（**唯一真源**）
 METHODS_DB = LIBRARY_ROOT / "99-索引与检索规则" / "curated-screenplay-methods.sqlite"
 #: 本仓自建的 **OCR sidecar**：主库里 3139 份扫描件没有正文块（`withText 2262/5403`），
 #: 由 ``app/scripts/corpus/ocr_index.py`` 逐页 OCR 补进来。**不写供应商那份**（只读），
 #: 也不改它的 schema —— 两库同构，检索时按秩合并，``from`` 字段标明这条出自哪一库。
+#: 落点 ``indexes/``（2026-11-07 从 ``data/ocr/`` 迁出）：这两只与 ``library-scenes`` 都是
+#: **可重建的派生索引**，与 ``data/``（不可重建、必须备份）分开 —— 备份作品数据不必带上
+#: 这 2 GB；但重建要跑数小时，所以也别当「缓存」随手删（见 ``indexes/`` 目录名而非 cache）。
 OCR_DB = Path(os.environ.get("SCRIPT_LIBRARY_OCR_DB")
-              or (PROJECT_ROOT / "data" / "ocr" / "library-ocr.sqlite"))
+              or (PROJECT_ROOT / "indexes" / "library-ocr.sqlite"))
 #: 本仓第三个库（``app/scripts/corpus/lib_index.py``）：补**主库压根没登记**的格式。
 #: OCR sidecar 只认「主库登记了但没正文」的扫描件，而 ``.doc``（Word 97-2003，CSV 里
 #: 873 份标「格式暂不支持全文索引」）主库里连行都没有 ⇒ 走不到那条线。
 #: 同构 schema、同一条纪律：供应商那份只读，补出来的东西只进本仓文件。
 EXTRA_DB = Path(os.environ.get("SCRIPT_LIBRARY_EXTRA_DB")
-                or (PROJECT_ROOT / "data" / "ocr" / "library-extra.sqlite"))
+                or (PROJECT_ROOT / "indexes" / "library-extra.sqlite"))
 
 #: 库里路径的锚点：它**右边**就是相对本仓 ``LIBRARY_ROOT`` 的路径
 LOCAL_MARKER = "全球热门与获奖影视剧本知识库"
@@ -194,7 +202,7 @@ _NO_DB_HINT = (
     "或用环境变量 SCRIPT_LIBRARY_ROOT 指向它；该目录是第三方资料、已 gitignore，不入库。"
 )
 _NO_PLAYBOOK_HINT = (
-    "参考方法文本缺失（或路径不对）：本仓自带「data/playbook/」（随仓库分发），"
+    "参考方法文本缺失（或路径不对）：本仓自带「corpus/playbook/」（随仓库分发），"
     "缺失时先确认该目录是否被清掉；"
     "或用环境变量 SCRIPT_PLAYBOOK_ROOT 指向外部副本。"
 )
@@ -210,7 +218,7 @@ _RESULT_NOTE = (
 
 
 def resolve_local(raw_path: str, root: Path | None = None) -> Path | None:
-    """库里那条 ``G:\\电影剧本\\…`` → 本仓路径；无锚点返回 ``None``（**不猜**）。"""
+    """库里那条建库机器的旧盘符路径（形如 ``…\\电影剧本\\…``）→ 本仓路径；无锚点返回 ``None``（**不猜**）。"""
     text = (raw_path or "").replace("/", "\\")
     index = text.find(LOCAL_MARKER)
     if index < 0:
@@ -225,7 +233,7 @@ def _on_disk(raw_path: str) -> tuple[bool, str]:
     """``(onDisk, relativePath)``：相对路径统一正斜杠（跨平台可比对）。
 
     ``library-extra.sqlite``（含本仓上传件）里存的是**库根下的相对路径**
-    （``00-本仓补录/x.txt``），没有 ``G:\\…\\知识库`` 那段锚点 ⇒ :func:`resolve_local`
+    （``00-本仓补录/x.txt``），没有旧盘符那段 ``…\\知识库`` 锚点 ⇒ :func:`resolve_local`
     按设计返回 ``None``（不猜）。这里补一条明确可判的旁路：**本来就是相对路径**（无盘符、
     无 UNC 前缀、不以 ``/`` 开头）就当它是库根下的路径。不补这条，上传件的回执会一路
     自相矛盾 —— 清单里 ``onDisk=false``、``hardDeletable=false``、删不动也打不开。
@@ -1136,7 +1144,7 @@ MAX_DEPTH = 3
 
 
 def _rel_of(raw: str) -> str:
-    """``G:\\…\\全球热门与获奖影视剧本知识库\\08-…\\x.pdf`` → ``08-…/x.pdf``。"""
+    """旧盘符绝对路径（形如 ``…\\全球热门与获奖影视剧本知识库\\08-…\\x.pdf``）→ ``08-…/x.pdf``。"""
     return script_catalog.normalize(raw, LOCAL_MARKER) or ""
 
 
@@ -1418,20 +1426,26 @@ def library_report() -> dict[str, Any]:
 def _playbook_target(raw: str) -> tuple[Path, str] | None:
     """把路径解析成 playbook 里的一份 md（不是方法正文就返回 ``None``，交回原路）。
 
-    认三种写法：检索结果里的相对路径（``film-expert-bridge/…``）、带 ``data/playbook/`` 前缀的、
-    以及绝对路径。目录穿越（``../``、解析后跑出根外）在这里就拒 —— 收窄后必须仍在
+    认三种写法：检索结果里的相对路径（``film-expert-bridge/…``）、带 ``corpus/playbook/``
+    前缀的、以及绝对路径。目录穿越（``../``、解析后跑出根外）在这里就拒 —— 收窄后必须仍在
     :data:`PLAYBOOK_DIRS` 白名单子树内，否则这个口子就成了任意文件读取。
+
+    ⚠️ 旧前缀 ``data/playbook/`` 也认（2026-11-07 迁到 ``corpus/playbook/`` 之前生成的检索
+    回执、前端缓存、用户书签里都是旧写法）。**兼容只是读旧值，产出的一律是新路径**。
     """
     text = (raw or "").strip().replace("\\", "/")
     if not text:
         return None
     base = Path(PLAYBOOK_ROOT).resolve()
-    marker = "/data/playbook/"
+    marker = "/corpus/playbook/"
     cut = text.rfind(marker)
     if cut >= 0:
         text = text[cut + len(marker):]
-    elif text.startswith("data/playbook/"):
-        text = text[len("data/playbook/"):]
+    else:
+        for prefix in ("corpus/playbook/", "data/playbook/"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
     text = text.lstrip("/")
     if text.startswith("./"):
         text = text[2:]
@@ -1496,7 +1510,7 @@ def open_document(path: str, *, offset: int = 0, limit: int = 20,
     为什么必须有这个口子：``search`` 只给 400 字片段，模型引用时得能自己再往下看（页号、
     块号都在），否则「有引用」只是一句空话。这也让 CLI/HTP 能拿同一份数据核账。
 
-    ``path`` 接受检索结果里的相对路径，也接受带 ``G:\\…`` 前缀的原始路径（统一走
+    ``path`` 接受检索结果里的相对路径，也接受建库机器旧盘符前缀的原始路径（统一走
     :func:`script_catalog.normalize`）。
 
     **两份来源都认**：先看是不是 playbook 的方法 md（:func:`_playbook_target`，命中就直接
@@ -1549,7 +1563,7 @@ def _open_on(conn: sqlite3.Connection, rel: str, *, offset: int, limit: int,
              chars: int, origin: str) -> dict[str, Any]:
     """在**单个库**上翻原文（``open_document`` 的两库循环调用它）。"""
     #: ``replace(path, '\', '/')`` 是必须的：三个库的 ``path`` 写法不同 —— 供应商库与
-    #: OCR sidecar 存的是 Windows 原始路径（``G:\…\x.pdf``，走 ``_rel_of`` 归一），而
+    #: OCR sidecar 存的是 Windows 原始路径（建库机器的旧盘符绝对路径，走 ``_rel_of`` 归一），而
     #: ``library-extra.sqlite``（含本仓上传件）存的是**正斜杠的相对路径**。只把查询词换成
     #: 反斜杠（``_like(rel.replace("/", "\\"))``）在 extra 上恒不命中 ⇒ 症状正是
     #: 「清单里看得到、点进去说没有这份、也改不了」。

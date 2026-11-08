@@ -150,6 +150,53 @@ def case_eos(torch) -> None:
           tuple(out.shape) == (1, 2 + 32) or out.shape[1] < 2 + 32, tuple(out.shape))
 
 
+def case_generate_memory(torch) -> None:
+    """⑦ 系列 ⭐⭐ **显存/图**两条：`generate_llm` 必须关梯度 ✓ 且长提示词必须分块 ✓✗（2026-11-07 修）。
+
+    背景（真机踩出来的 ✓）：``generate_llm`` 原来**没有** ``torch.inference_mode()`` ✓，参数默认
+    ``requires_grad=True`` ⇒ 每一步前向都在建 autograd 图 ✗，36 层中间量（注意力分数最大 ✓）被
+    backward 节点吊住 ✓✗。4B / 3205 词元实测 **94.62 GiB**（卡 22.49 GiB ✗ —— WDDM 甩进共享内存
+    硬撑 60 秒才 OOM ✓）。⚠️ 这两条**都不是**"结果错了"，所以下面的 ①②④ 全绿也发现不了 ✗✗ ——
+    必须直接问「前向时梯度开着吗」「一次喂了多少词元」✓（钩子里看得见 ✓，不用靠显存读数 ✓）。
+    """
+    model = llm_mod.build_llm(CONFIG)
+    torch.manual_seed(4)
+    ids = torch.randint(0, CONFIG.vocab_size, (1, 7))
+    seen: list[tuple[int, bool, bool]] = []
+
+    def _hook(module, args) -> None:       # noqa: ANN001 —— 钩子签名由 torch 定 ✓
+        seen.append((int(args[0].shape[1]), torch.is_grad_enabled(),
+                     torch.is_inference_mode_enabled()))
+
+    handle = model.blocks[0].register_forward_pre_hook(_hook)
+    try:
+        # 反向验证 ✓：钩子自己得看得见「裸前向时梯度是开的 ✓」—— 否则下面那串 False 可能只是钩子没挂上 ✗
+        model(ids)
+        plain = list(seen)
+        seen.clear()
+        chunked = llm_mod.generate_llm(model, ids, max_new_tokens=4, temperature=0, prefill_chunk=3)
+        first_run = list(seen)
+        seen.clear()
+        one_shot = llm_mod.generate_llm(model, ids, max_new_tokens=4, temperature=0, prefill_chunk=7)
+    finally:
+        handle.remove()
+
+    check("⑦ ⭐ 钩子自己有效 ✓（裸 ``model(ids)`` 那次看得到「梯度开着」✗✗）",
+          bool(plain) and plain[0][1] is True, plain[:1])
+    check("⑦′ ⭐⭐ ``generate_llm`` 全程**关梯度** ✓（前向里 ``is_grad_enabled()`` 全 False + 在 "
+          "``inference_mode`` 里 ✓ ⇒ 中间量不被 backward 吊住 ✗✗）",
+          bool(first_run) and all(not grad and inf for _, grad, inf in first_run),
+          [item for item in first_run if item[1]][:3])
+    check("⑦″ ⭐ 提示词按 ``prefill_chunk`` 分块 ✓（7 词元 / 每块 3 ⇒ 3+3+1 ✓，每块都不超 ✓）",
+          [length for length, _, _ in first_run[:3]] == [3, 3, 1],
+          [length for length, _, _ in first_run][:5])
+    check("⑦‴ ⭐⭐ 分块预填充与「一次吃完」**逐 token 相同** ✓（数学等价 ✓ —— 分块不许改结果 ✗✗）",
+          torch.equal(chunked, one_shot), (chunked.tolist(), one_shot.tolist()))
+    check("⑦⁴ 非法 ``prefill_chunk``（0）⇒ 当场拒 ✗（静默退回老路径 = 长提示词照爆 ✗✗）",
+          _raises(lambda: llm_mod.generate_llm(model, ids, max_new_tokens=1,
+                                               prefill_chunk=0)))
+
+
 def _raises(fn) -> bool:
     try:
         fn()
@@ -169,6 +216,7 @@ def main() -> int:
         case_kv_cache(torch)
         case_generate(torch)
         case_eos(torch)
+        case_generate_memory(torch)
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

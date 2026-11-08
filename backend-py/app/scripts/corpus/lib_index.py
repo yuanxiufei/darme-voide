@@ -20,11 +20,14 @@ fts5 ``chunks`` trigram），检索层按秩合并第三库、每条结果带 ``
 抽文本按扩展名分派
 ------------------
 =================  =========================================================
-``.txt/.md/.csv``  直接解码（BOM → UTF-16 → UTF-8 → GB18030 回落）
+``.txt/.md/.srt``  直接解码（BOM → UTF-16 → UTF-8 → GB18030 回落）
 ``.doc``           ``antiword -m UTF-8.txt``（本机 Git/mingw64 自带；缺则整批跳过并明说）
                    文件路径打不开时**拷到 ASCII 临时路径再试一次**（见 ``_doc_text``）
 ``.docx``          zipfile 读 ``word/document.xml``，按 ``<w:p>`` 分段
-``.pdf``           **不归本脚本**：扫描件走 ``ocr_index.py``，本脚本明说跳过
+``.pdf``           ``pypdfium2`` 抽**文字层**（12/12 实测；扫描件抽不满仍判 quarantine
+                   交 ``ocr_index.py``）—— 选型凭据见 ``_pdf_text``
+``.html/.htm``     ``HTMLParser`` 剥标签（``<script>/<style>`` 整段丢）
+``.pptx``          zipfile 读 ``ppt/slides/slideN.xml`` 的 ``<a:t>``
 ``.epub/.chm/...`` 明说跳过（无可靠纯文本通道，别装作抽到了）
 =================  =========================================================
 
@@ -57,6 +60,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 from app.core.config import PROJECT_ROOT
@@ -79,13 +83,26 @@ TEXT_EXTS = (".txt", ".md", ".srt")
 DOC_EXTS = (".doc",)
 DOCX_EXTS = (".docx",)
 RTF_EXTS = (".rtf",)  # 内置解析器已落地（见 ``_rtf_text``），不再是"无可靠通道"
+#: 2026-11-07 起 PDF 归本脚本：抽**文字层**（``pypdfium2``），扫描件抽不满仍判
+#: ``quarantine`` 交 ``ocr_index.py``。选型凭据见 ``_pdf_text`` 的对比表。
+PDF_EXTS = (".pdf",)
+HTML_EXTS = (".html", ".htm")
+PPTX_EXTS = (".pptx",)
+
+#: **单一真源**：「本脚本登记了抽文本通道」的全部扩展名。
+#: 三处必须都读它，抄第二份就会分裂 —— 2026-11-07 实测过的原样事故：
+#: ``_extract`` 已能抽 ``.pdf``，而 ``_candidates`` 的白名单还是手抄的旧四组
+#: ⇒ 批量扫库时 25 份（19 份 PDF ＋ 6 份 HTML）被记成「未登记抽文本通道」静默跳过，
+#: 只有界面上传那条路能用（两边行为不一致，且报错文案还是「这个格式不支持」）。
+SUPPORTED_EXTS = (TEXT_EXTS + DOC_EXTS + DOCX_EXTS + RTF_EXTS
+                  + PDF_EXTS + HTML_EXTS + PPTX_EXTS)
 
 #: 明确不归本脚本的扩展名：写在这里是为了**输出里能说明白**，而不是静默漏掉。
 HANDLED_ELSEWHERE = {
     ".csv": "登记表/清单，不是语料（收了会让「查询来源」命中一堆目录清单）",
     ".log": "运行日志，不是语料",
-    ".pdf": "PDF 走 ocr_index.py（扫描件需 OCR，文本层抽取也在那条线上）",
     ".epub": "无可靠纯文本通道，未做",
+    ".ppt": "旧二进制 PPT（OLE2），无可靠纯文本通道；另存 .pptx 后归本脚本",
     ".chm": "无可靠纯文本通道，未做",
     ".mobi": "无可靠纯文本通道，未做",
     ".azw3": "无可靠纯文本通道，未做",
@@ -95,8 +112,14 @@ HANDLED_ELSEWHERE = {
     ".png": "图片，属资产不属语料",
 }
 
+#: 与 ``services/script_library.EXTRA_DB`` **同一个文件** ✓（默认值手抄两处，故这里必须同步 ✗）。
+#:
+#: ⚠️ 2026-11-07 修漂移：原先默认写成 ``PROJECT_ROOT/data/ocr/library-extra.sqlite`` ——
+#: 那是「派生索引还住在 ``data/``」时代的旧落点；2026-11-07 三只派生库已整体迁到 ``indexes/`` ✓，
+#: 本文件当时没跟着改 ✗ ⇒ 这里建的库与后端读的库是**两个不同文件**，
+#: 症状是「索引跑完了，检索还是说没有」✓✗（不报错，各写各的）。
 EXTRA_DB = Path(os.environ.get("SCRIPT_LIBRARY_EXTRA_DB")
-                or (PROJECT_ROOT / "data" / "ocr" / "library-extra.sqlite"))
+                or (PROJECT_ROOT / "indexes" / "library-extra.sqlite"))
 
 _SKIP_TOP = ("90-隔离与待审", "99-索引与检索规则")
 _SKIP_SUB = ("不进索引-原始与待审",)
@@ -142,7 +165,8 @@ def _connect(*, writable: bool = False) -> sqlite3.Connection:
 def _covered_split() -> tuple[set[str], set[str]]:
     """返回 ``(主库＋OCR 已覆盖, 本库已收录)``，两拨**必须分开**。
 
-    主库 ``documents.path`` 是**旧盘符绝对路径**（``G:\\电影剧本\\…``），不能直接比 ——
+    主库 ``documents.path`` 是**建库机器上的旧盘符绝对路径**（形如 ``…\\电影剧本\\…``），
+    不能直接比 ——
     走 ``script_library._on_disk`` 拿锚点右边那段，与 sidecar 的相对路径同域。
 
     合并成一个集合会让 ``--force`` 变成假开关：``_candidates`` 在算候选时就把「本库
@@ -209,7 +233,7 @@ def _candidates(*, substr: str = "", force: bool = False) -> tuple[list[dict], d
             skipped[f"{ext} {HANDLED_ELSEWHERE[ext]}"] = skipped.get(
                 f"{ext} {HANDLED_ELSEWHERE[ext]}", 0) + 1
             continue
-        if ext not in TEXT_EXTS + DOC_EXTS + DOCX_EXTS + RTF_EXTS:
+        if ext not in SUPPORTED_EXTS:
             skipped[f"{ext or '(无扩展名)'} 未登记抽文本通道"] = skipped.get(
                 f"{ext or '(无扩展名)'} 未登记抽文本通道", 0) + 1
             continue
@@ -249,11 +273,15 @@ def _decode(data: bytes) -> tuple[str, str]:
 
 
 def _antiword() -> str | None:
+    # 候选目录只取**标准安装位**（Program Files 系 / ``LOCALAPPDATA``）＋ ``ANTIWORD_HOME``
+    # 覆盖自定义安装；不写死任何盘符路径（换台机器就是废字，且那是本仓「扫描路径一律不写死」
+    # 的硬口径）。原先那两条本机目录候选把反斜杠写成了两遍（转义错值 ⇒ 路径不成立），
+    # 从没命中过 ⇒ 删掉零损失。
     exe = os.environ.get("ANTIWORD_EXE") or shutil.which("antiword")
     if exe and Path(exe).exists():
         return exe
     for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
-                 r"D:\\app", r"C:\\app"):
+                 os.environ.get("LOCALAPPDATA"), os.environ.get("ANTIWORD_HOME")):
         if not base:
             continue
         for rel in ("Git/mingw64/bin/antiword.exe", "Git/usr/bin/antiword.exe"):
@@ -282,7 +310,9 @@ def _antiword_env(exe: str) -> dict[str, str]:
 
 def _ascii_tempdir() -> str | None:
     """纯 ASCII 的临时目录（antiword 打不开非 ASCII 路径）。找不到就返回 ``None``。"""
-    for cand in (tempfile.gettempdir(), r"C:\Windows\Temp", os.environ.get("TEMP")):
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir")
+    system_temp = str(Path(system_root) / "Temp") if system_root else None
+    for cand in (tempfile.gettempdir(), system_temp, os.environ.get("TEMP")):
         if not cand:
             continue
         try:
@@ -706,6 +736,146 @@ def _docx_text(path: Path) -> tuple[str, str]:
     return "\n".join(out), "docx-xml"
 
 
+class _HtmlStripper(HTMLParser):
+    """``<script>/<style>`` 整段丢、块级标签变换行 —— 只留人读得到的字。
+
+    不用正则剥标签：``<a href="x>y">`` 与 ``<td>`` 里的 ``<`` 都会让正则错位，
+    而 ``HTMLParser`` 自带容错（库里 6 份 HTML 是从网页另存的剧本，闭包不齐）。
+    """
+
+    _SKIP = ("script", "style")
+    _BLOCK = ("p", "div", "br", "li", "tr", "td", "th", "h1", "h2", "h3", "h4",
+              "h5", "h6", "section", "article", "pre", "blockquote", "table")
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in self._SKIP:
+            self._skip += 1
+        elif tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skip = max(0, self._skip - 1)
+        elif tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        #: ⚠️ 纯空白也要留 —— 行内标签两侧的空格是**词的一部分**：
+        #: ``<p>INT. HOTEL <i>— DAY</i></p>`` 若把 ``"HOTEL "`` 的尾空格 strip 掉，
+        #: 抽出来就是 ``HOTEL— DAY``（英文剧本整篇词粘连，BM25 再也切不出词）。
+        #: 这里只管攒，行首行尾的空白在 :func:`_html_text` 里统一收。
+        if not self._skip:
+            self.parts.append(data)
+
+
+def _html_text(path: Path) -> tuple[str, str]:
+    """``.html/.htm`` → 正文（剥标签）。网页存下来的剧本靠这条进检索。"""
+    text, enc = _decode(path.read_bytes())
+    stripper = _HtmlStripper()
+    stripper.feed(text)
+    stripper.close()
+    raw = "".join(stripper.parts)
+    #: 行内空白压成一个、行首行尾收干净、空行丢掉（块级标签已经各占一行了）。
+    lines = [re.sub(r"[ \t\u3000\xa0]+", " ", line).strip() for line in raw.split("\n")]
+    return "\n".join(line for line in lines if line), f"html-{enc}"
+
+
+def _pptx_text(path: Path) -> tuple[str, str]:
+    """``.pptx`` → 正文：``ppt/slides/slideN.xml`` 里按 ``<a:t>`` 抽文字。
+
+    与 ``_docx_text`` 同一条路数（zipfile + XML 正则），不引 python-pptx：
+    抽文字只需要 ``<a:t>`` 一种标签（属性容错，见下），多引一个库只为读几段字不划算。
+    纯图 PPT（讲座海报）抽不出字 ⇒ 如实报错，由 ``_build`` 判 quarantine。
+    """
+    with zipfile.ZipFile(path) as zf:
+        names = [n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        names.sort(key=lambda n: int(re.search(r"slide(\d+)\.xml$", n).group(1)))
+        out: list[str] = []
+        for name in names:
+            xml = zf.read(name).decode("utf-8", "replace")
+            #: 属性容错：schema 上 ``a:t`` 不带属性，但见过产出方写
+            #: ``<a:t xml:space="preserve">`` —— 与 ``_docx_text`` 的 ``<w:t[^>]*>`` 同口径。
+            runs = re.findall(r"<a:t(?:\s[^>]*)?>(.*?)</a:t>", xml, re.S)
+            if runs:
+                out.append("\n".join(html.unescape(run) for run in runs))
+    body = "\n\n".join(out)
+    if not body.strip():
+        raise RuntimeError(f"{len(names)} 页 slide 里没抽出文字（可能是纯图 PPT）")
+    return body, "pptx-xml"
+
+
+#: PDF 两端对齐的副产物：汉字之间被塞进单空格（**只删 CJK 与 CJK 标点两侧的**，
+#: 英文单词间空格一个不动）。这不是排版洁癖，是检索失效 —— 实测库内三份 PDF：
+#: 《证人席》标题抽成 ``证 人 席``（搜「证人席」命中 0）、《纳德和西敏》269 处
+#: （``世 界/电 影``）、川端论文 2070 处（``关于电影 与文学的一 点思索``）。
+_CJK_GAP = re.compile(
+    r"(?<=[\u4e00-\u9fff])[ \u3000]+(?=[\u4e00-\u9fff\u3000-\u303f\uff01-\uff60])"
+    r"|(?<=[\u3000-\u303f\uff01-\uff60])[ \u3000]+(?=[\u4e00-\u9fff])"
+)
+
+
+def _cjk_deglue(text: str) -> str:
+    """去掉汉字/中文标点两侧的填充空格。**只给 PDF 通道用**。
+
+    不并进 ``_tidy_text``：那条路是 ``.doc/.docx/.txt`` 共用的，改它会让已入库
+    的 873 份 ``.doc`` 摘要口径一起漂（台账按字节/摘要核验，会集体失配）。
+    """
+    return _CJK_GAP.sub("", text)
+
+
+def _pdf_text(path: Path) -> tuple[str, str]:
+    """``.pdf`` → 正文：只抽**文字层**，OCR 仍归 ``ocr_index.py``。
+
+    为什么是 ``pypdfium2`` 而不是另外两条现成路 —— 2026-11-07 用库内 12 份真实
+    剧本/期刊 PDF 实测（同批、同机、``random.seed(20261107)``）：
+
+    ==================  ==========  ==========  ================================
+    通道                成功/12     平均耗时    实测问题
+    ==================  ==========  ==========  ================================
+    ``pdfminer.six``    9/12        0.5–3.8 s   **表格化**：每行套 ``| … |``，剧本
+                                              正文被切成单元格（English 剧本
+                                              39.8 万字里大半是管道符与填充空格）；
+                                              3 份非标 PDF 直接抛 ``No /Root object``
+    ``PyMuPDF``         12/12       0.08 s      **AGPL-3.0** —— 进主链路即传染
+    ``pypdfium2``       12/12       0.08 s      Apache-2.0 / BSD-3，输出干净行
+    ==================  ==========  ==========  ================================
+
+    所以这里只认 pypdfium2（本仓主依赖唯一新增）；``markitdown`` 那套更适合
+    Office/HTML，不用在 PDF 上 —— 它的表格化对"按行切块 + BM25/trigram"是负收益。
+
+    扫描件（如 290 字的图册）抽不满 ``MIN_CHARS`` ⇒ ``_build`` 判 quarantine，
+    与旧口径一致：库里"有这本书"和"这本书能被搜到"仍是两件事。
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:  # pragma: no cover —— 主依赖缺失属环境问题
+        raise RuntimeError("缺 pypdfium2（pip install pypdfium2），PDF 文字层抽不出") from exc
+    try:
+        doc = pdfium.PdfDocument(path)
+    except Exception as exc:  # noqa: BLE001 —— 打包成一句人话，别让调用方读 pdfium 内部
+        raise RuntimeError(f"pypdfium2 打不开这份 PDF：{exc}") from exc
+    pages: list[str] = []
+    try:
+        for page in doc:
+            textpage = page.get_textpage()
+            try:
+                pages.append(textpage.get_text_range())
+            finally:
+                textpage.close()
+                page.close()
+    finally:
+        doc.close()
+    body = _cjk_deglue("\n\x0c\n".join(pages)).strip()
+    if not body:
+        raise RuntimeError(f"{len(pages)} 页都没有文字层（扫描件，需走 OCR 线）")
+    return body, "pypdfium2"
+
+
 def _extract(item: dict) -> tuple[str, str]:
     ext = item["extension"]
     path: Path = item["local"]
@@ -715,6 +885,12 @@ def _extract(item: dict) -> tuple[str, str]:
         return _docx_text(path)
     if ext in RTF_EXTS:
         return _rtf_text(path.read_bytes()), "rtf"
+    if ext in PDF_EXTS:
+        return _pdf_text(path)
+    if ext in HTML_EXTS:
+        return _html_text(path)
+    if ext in PPTX_EXTS:
+        return _pptx_text(path)
     data = path.read_bytes()
     text, enc = _decode(data)
     if ext in (".md", ".csv", ".srt", ".log"):
@@ -880,7 +1056,7 @@ def prune(*, apply: bool = False) -> dict:
                 why = "落在判据排除的目录里"
             elif ext in HANDLED_ELSEWHERE:
                 why = f"扩展名已登记不归本库：{HANDLED_ELSEWHERE[ext]}"
-            elif ext not in TEXT_EXTS + DOC_EXTS + DOCX_EXTS + RTF_EXTS:
+            elif ext not in SUPPORTED_EXTS:
                 why = "扩展名不在本库抽文本通道内"
             elif not (root / rel).exists():
                 why = "盘上已找不到该文件"

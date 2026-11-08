@@ -30,7 +30,7 @@ reject 的页才进这里重读，两遍结果按 ``ocr_vlm.decide`` 取优。�
 配置全部来自环境变量（进程池是 spawn 的，只认环境变量）::
 
     OCR_VLM_BACKEND=local            # http（默认）| local
-    OCR_VLM_MODEL_PATH=<目录>        # 默认 data/models/PaddleOCR-VL-1.6
+    OCR_VLM_MODEL_PATH=<目录>        # 默认 models/ocr/PaddleOCR-VL-1.6
     OCR_VLM_MIN_FREE_GIB=3.0         # 加载前要求的显存余量
     OCR_VLM_MAX_PIXELS=             # 可选，限制视觉 token 上限（大页可降速）
 """
@@ -57,9 +57,17 @@ MIN_FREE_GIB = 3.0
 
 
 def default_model_dir() -> Path:
-    """默认权重落点，与 ``ocr_vlm_fetch.default_dir()`` 同一坐标（**1.6**）。"""
+    """默认权重落点，与 ``ocr_vlm_fetch.default_dir()`` 同一坐标（**1.6**，在 ``models/ocr/`` 下）。
+
+    2026-11-07 两次归位：
+    1) 从 ``data/models/`` 迁到顶层 ``models/`` —— 仓根早已有 ``models/tokenizers/``
+       （三档出图工作流的 Qwen 词表），OCR 权重却又住在 ``data/models/``，同一类东西两个根。
+    2) 在 ``models/`` 内按**用途分目录**：OCR 权重进 ``models/ocr/``，词表留在 ``models/tokenizers/``
+       —— 不分类时 ``models/`` 根下「两个 tokenizer 目录 + 一个 OCR 目录」混排，
+       看目录名分不出谁是干什么的（见 ``models/README.md``）。
+    """
     backend_py = Path(__file__).resolve().parents[3]
-    return backend_py.parent / "data" / "models" / "PaddleOCR-VL-1.6"
+    return backend_py.parent / "models" / "ocr" / "PaddleOCR-VL-1.6"
 
 
 def free_gib() -> float | None:

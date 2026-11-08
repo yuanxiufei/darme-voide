@@ -9,6 +9,8 @@
 2. ⭐⭐ **产出逐字可核** ✓：ChatML 骨架逐字相等 ✓（含 assistant 前缀 ✓ / 不给 system 就不编造 ✓）；
 3. ⭐⭐ **本层不内置骨架** ✗✗：模块级没有模板常量 ✓、空元数据拿不到 ✓；
 4. ⭐ **渲染失败 ⇒ 拒** ✗（未定义变量 / 空 messages / 形状不对 / 缺 role / ``raise_exception`` ✓）；
+4′. ⭐ **缺 ``jinja2`` ⇒ 具名拒** ✗（不是裸 ``ModuleNotFoundError`` 冒出去 ✗✗ —— 调用方按
+   ``ChatTemplateError`` 捕获时会漏 ✓✗；2026-11-07 校正 ✓）；
 5. ⭐ **接线**：有骨架 ⇒ encode 收到骨架文本 ✓；没有 ⇒ **老行为一字未动** ✓；坏了 ⇒ generate 拒 ✗；
    ``describe`` 如实报 ✓。
 
@@ -122,6 +124,29 @@ def case_render_refuses() -> None:
                   needle="只收 user ✓"))
 
 
+def case_missing_jinja2() -> None:
+    """④⁗ ⭐ 缺 ``jinja2`` ⇒ **具名拒** ✗（不是裸 ``ModuleNotFoundError`` 冒出去 ✗✗）。
+
+    2026-11-07 校正：``_compile`` 的两行 import 原先在 try **之外** ✗ ⇒ 报的是裸
+    ``ModuleNotFoundError`` ✓✗，调用方按 ``ChatTemplateError`` 捕获时**漏过去**，且看不出怎么装 ✗。
+    本段用「往 ``sys.modules`` 塞 ``None``」屏蔽依赖 ✓（``import jinja2`` 会当场 halt ✓），
+    跑完复原并把 ``lru_cache`` 清掉 ✓（否则后续用例吃缓存 ✓✗）。
+    """
+    saved = {name: mod for name, mod in list(sys.modules.items())
+             if name == "jinja2" or name.startswith("jinja2.")}
+    for name in list(saved):
+        del sys.modules[name]
+    sys.modules["jinja2"] = None          # type: ignore[assignment] —— 让 import 直接失败 ✓
+    chat_template._compile.cache_clear()
+    try:
+        check("④⁗ ⭐ 缺 jinja2 ⇒ 抛 ChatTemplateError 且点名装法 ✗（不是裸 ImportError ✗✗）",
+              _raises(lambda: _from(QWEN_LIKE), needle="jinja2"))
+    finally:
+        sys.modules.pop("jinja2", None)
+        sys.modules.update(saved)
+        chat_template._compile.cache_clear()
+
+
 def _torch_available() -> bool:
     """⚠️ 缺 torch ⇒ 本段**显式 SKIP 打印** ✓（SKIP ≠ 通过 ✗）。
 
@@ -192,6 +217,7 @@ def main() -> int:
     case_render_exact()
     case_no_builtin()
     case_render_refuses()
+    case_missing_jinja2()
     case_backend_wiring()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

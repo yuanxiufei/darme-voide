@@ -113,13 +113,15 @@ def case_bitwise_equal(root: Path) -> None:
           "**权重侧与激活侧** scale ✓ —— 不吃掉它们就会全落进 `unexpected` ✓✗，"
           "而吃掉了不计数就是**静默** ✓✗）—— 四个都是**只读计数** ✓，且都只统计"
           "「被吃掉的配套张量」✗ 不是权重 ✓；2026-11-02 再增 `int4Resident` ✓"
-          "（4bit 打包常驻层的子计数 ✓ —— 它的参数也是 int8 ✓，合计数里看不出「说好 4bit、实际按 int8 乘」✓✗））",
+          "（4bit 打包常驻层的子计数 ✓ —— 它的参数也是 int8 ✓，合计数里看不出「说好 4bit、实际按 int8 乘」✓✗）；"
+          "2026-11-07 再增 `skipped` / `int8Skipped` ✓（内存这一级卸掉多少键、其中多少本来是 int8 常驻层 ✓"
+          "—— 少了这两格，回执里只看得到 `loadedKeys` 变小 ✓✗，读不出「是策略卸的还是真缺」✓✗）",
           set(report.to_dict()) == {
               "path", "complete", "loadedKeys", "sourceKeys", "targetKeys", "missing",
               "missingCount", "unexpected", "unexpectedCount", "shapeMismatch",
               "shapeMismatchCount", "renamed", "dtypeCasts", "dequant", "error",
               "consumedQuantMeta", "int8Resident", "int4Resident", "consumedNvfp4",
-              "consumedScales"},
+              "consumedScales", "skipped", "int8Skipped"},
           sorted(report.to_dict()))
 
 

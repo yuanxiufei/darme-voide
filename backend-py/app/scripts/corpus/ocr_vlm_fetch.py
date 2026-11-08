@@ -52,9 +52,16 @@ REQUIRED_FILES = ("config.json", "preprocessor_config.json", "tokenizer_config.j
 
 
 def default_dir() -> Path:
-    """默认落点：``<仓库根>/data/models/PaddleOCR-VL-1.6``（与 ``data/ocr`` 同级）。"""
+    """默认落点：``<仓库根>/models/ocr/PaddleOCR-VL-1.6``（与 ``models/tokenizers`` 并列）。
+
+    2026-11-07 两次归位：
+    1) 从 ``<仓库根>/data/models/`` 迁到顶层 ``models/`` —— 仓根本来就有 ``models/tokenizers/``
+       （三档出图工作流的 Qwen 词表），OCR 权重却另住 ``data/models/``，同一类东西两个根。
+    2) 在 ``models/`` 内按用途分目录：OCR 进 ``models/ocr/``、词表留 ``models/tokenizers/``
+       —— 分类依据与判断过程见 ``models/README.md``。
+    """
     backend_py = Path(__file__).resolve().parents[3]  # corpus → scripts → app → backend-py
-    return backend_py.parent / "data" / "models" / "PaddleOCR-VL-1.6"
+    return backend_py.parent / "models" / "ocr" / "PaddleOCR-VL-1.6"
 
 
 def inspect(dest: Path | str | None = None) -> dict:
@@ -114,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         description="下载/校验 PaddleOCR-VL 权重（走镜像，只要 transformers 用的 safetensors）")
-    parser.add_argument("--dest", default="", help="落点目录（默认 data/models/PaddleOCR-VL）")
+    parser.add_argument("--dest", default="", help="落点目录（默认 models/ocr/PaddleOCR-VL-1.6）")
     parser.add_argument("--repo", default=REPO, help=f"上游仓库（默认 {REPO}）")
     parser.add_argument("--mirror", default=MIRROR,
                         help="下载镜像；传空字符串则用官方站点（默认走镜像）")

@@ -3,7 +3,8 @@
 路由注册顺序是**语义的一部分**，不要随意调整：
 
 1. ``GET /api/v1/health``
-2. 已迁移的业务域（当前只有 ``/api/v1/dramas``）
+2. 已迁移的业务域（**已全量迁完**：``tests/route_parity_test.py`` 机械扫描
+   **224 条端点、0 条未迁移**，``include_router`` 53 条挂在 48 个 router 模块上）
 3. ``/static/*``           —— 生成文件（Range 分段，视频进度条依赖）
 4. ``/api/v1/{path}``      —— **兜底**：未迁移的域 → 反代 Node（或返回 501）
 5. ``/webhooks/{path}``    —— 同上（Node 侧挂在 /api/v1 之外）
@@ -11,6 +12,9 @@
 
 第 4/5 步就是绞杀者模式的接缝：**已迁移的域由 Python 服务，未迁移的域透明转发给 Node**，
 每迁完一个域就把它的路由注册上去，Node 侧对应模块即可停用 —— 全程系统可用、随时可回退。
+
+⚠️ 上面是**迁移期**的口径 ✓；**现在（2026-11-07）已全迁完** ⇒ 4/5 只剩一件事：把**拼错的路径**
+回成 501 并指出去哪儿补（`PROXY_TO_NODE` 默认 0；真开成 1 只会得到 502，因为 Node 已删 ✗✗）。
 """
 
 from __future__ import annotations
@@ -23,7 +27,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles  # noqa: F401  (保留给后续完全迁移后使用)
+
+# ⚠️ 静态文件**刻意不用** `StaticFiles`：`serve_static()` 走 `FileResponse`
+#    （Starlette 原生 Range / If-Range / 416，`<video>` 才拖得动进度条）。
+#    这条导入原本挂在「保留给后续完全迁移后使用」，而迁移 2026-09-15 已完成、
+#    `StaticFiles` 一次都没用到 ⇒ 2026-11-07 删除该死导入，别再引回来。
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .http_logger import request_logger
@@ -89,6 +97,8 @@ from app.agent.auto_pipeline import recover_auto_pipeline_on_startup
 from app.agent.evaluation_scheduler import start_evaluation_scheduler
 from app.services.knowledge_scheduler import start as start_knowledge_scheduler
 from app.services.comfyui import recover_runs_on_startup as recover_comfyui_runs_on_startup
+from app.services.export_service import sweep_stale_exports
+from app.services.engine import hooks as engine_hooks
 from .routers.mcp import router as mcp_router
 from .routers.repair import router as repair_router  # 修复域（提案/应用/回滚，源 assistant-runtime）
 from .routers.canvas import router as canvas_router  # 画布工具域（工具调用→op，源 canvas-agent）
@@ -116,6 +126,15 @@ STATIC_MIME: dict[str, str] = {
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 启动日志刻意用 ASCII：Windows 控制台默认代码页会把中文打成乱码（见 .codebuddy/memory）
     init_proxy_client()
+    # 引擎 ↔ 服务层的**单向接线**（见 `app/services/engine/hooks.py`）：引擎侧只查这张表，
+    # **不** import 服务层（独立性契约，判定在 `tests/engine_independence_test.py` ②）。
+    # 登记的三个源都是「引擎要读、但属于业务层」的数据：跑次索引 / 知识台账 / 质检复核。
+    # ⚠️ 不登记不会报错，而是引擎**如实说"没接入"**（建议不给候选、证据核不过 ⇒ 拒写）——
+    # 这是有意的：静默按 0 条处理会让「没数据」看起来像「没问题」✗✗。
+    from app.services import knowledge_ledger, outcome_index, qc_reviews  # noqa: PLC0415
+
+    engine_hooks.provide(run_index=outcome_index, ledger=knowledge_ledger,
+                         qc_reviews=qc_reviews)
     # 评测→优化 无人值守调度器（**默认关闭**，仅 evaluation.auto_optimize.enabled=true 时启动；
     # 关闭时只打一条 warn —— 与原 TS 的 index.ts 行为一致）
     start_evaluation_scheduler()
@@ -129,6 +148,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     recover_auto_pipeline_on_startup()
     # ComfyUI 工作流运行**崩溃恢复**：把中断的运行收尾（**绝不重提交** ✓ 避免重复占卡）
     recover_comfyui_runs_on_startup()
+    # 导出包的**启动兜底**（与上面两条同属崩溃恢复语义）：导出包是"一次请求的中转件"，
+    # 正常由 `routers/export.py` 的 BackgroundTask 删 ✓；但进程被强杀 / 客户端半路断开时
+    # 会留在 `<temp>/darme-export/` ✓✗。`build_export_zip` 建包前虽然也扫一遍，可用户
+    # 可能几个月不再导出 ⇒ 靠它永远等不到 ✓✗（那包可能有几十 GB）。
+    # 启动清一次是**唯一的**兜底时机；清不掉（文件被别人占着）不阻断启动 ✓。
+    try:
+        _swept = sweep_stale_exports()
+    except Exception as exc:  # noqa: BLE001 —— 清理失败绝不能让服务起不来
+        _swept = []
+        print(f"[export] stale sweep skipped: {type(exc).__name__}")
+    print(f"[export] stale export packages swept: {len(_swept)}")
     if PROXY_TO_NODE:
         print(f"[py] strangler ON: unmigrated domains -> {NODE_BACKEND_URL}")
     else:
@@ -254,7 +284,8 @@ app.include_router(export_router)
 app.include_router(lora_train_router)
 app.include_router(knowledge_router)
 app.include_router(knowledge_loop_router)
-# 下一个域迁完后在这里 include（ai-configs / 本地模型 / evaluation / ...）
+# ⚠️ 53 条注册到此为止 —— **已经没有「待迁移域」**（`route_parity_test` 实测 0 未迁移）。
+# 新增 router 就紧接上一行 include；下面只剩兜底通道（未命中的 /api/v1/* 才走委派）。
 
 
 # ---------------------------------------------------------------------------

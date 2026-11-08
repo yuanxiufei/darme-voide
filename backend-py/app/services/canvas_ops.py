@@ -48,13 +48,17 @@ __all__ = [
     "OP_TYPES",
     "PLUGIN_TYPE_PATTERN",
     "REFERENCE_PATTERN",
+    "SCENES",
+    "SCENE_TOOL_SETS",
     "TOOL_NAMES",
     "build_request",
     "compact_snapshot",
     "next_canvas_x",
     "node_type_problem",
     "registered_plugin_node_types",
+    "scene_problems",
     "tool_schemas",
+    "tools_for_scene",
     "validate_ops",
 ]
 
@@ -208,6 +212,72 @@ DROPPED_TOOLS: dict[str, str] = {
 #: 给 LLM 的工具名（顺序稳定：读 → 写 → 生成）
 TOOL_NAMES: tuple[str, ...] = tuple(TOOLS)
 
+# ---------------------------------------------------------------- 场景工具面（收敛 + 守卫）
+
+#: 场景名 ✓。**只列真实存在的宿主**：多一个就得多一处调用方，否则是死配置 ✗
+SCENES: tuple[str, ...] = ("chat", "canvas")
+
+#: 各场景能看见哪些工具 ✓ —— 与 ``canvas_agent.build_canvas_tools`` 的过滤口径是同一份。
+#:
+#: 为什么要收敛：22 个工具一次性摊给模型，它在「帮我把这句话变成一张图」时也会去翻
+#: ``canvas_move_nodes`` / ``canvas_set_viewport`` 这些它压根不该动的旋钮 ⇒ 步数全花在试探上。
+#: 对话场景只留「读 ＋ 整批落地」四件：要精细排版就该切到画布场景，而不是给对话放宽权限 ✓。
+#: 画布场景给**全量**（= ``TOOL_NAMES``），因为它就是那张画布的编辑器 ✓。
+SCENE_TOOL_SETS: dict[str, frozenset[str]] = {
+    "chat": frozenset(
+        {
+            "canvas_get_state",
+            "canvas_get_selection",
+            "canvas_export_snapshot",
+            "canvas_apply_ops",
+        }
+    ),
+    "canvas": frozenset(TOOL_NAMES),
+}
+
+
+def scene_problems(scene: str) -> list[str]:
+    """场景配置自身的毛病 ⇒ 错误文案列表；空表示健康 ✓。
+
+    ⚠️ **必须查的两件事**（都是「静默归零」的前置条件，参考 dramaclaw 的教训）：
+
+    1. 白名单里点名了工具表里**没有**的名字 ⇒ 配置漂移。它不会报错，只会让过滤结果
+       悄悄少几条 —— 于是模型该有的能力凭空消失，而日志里一切正常 ✗；
+    2. 白名单与工具表**交集为空** ⇒ 模型拿到 0 个工具，仍能正常回话、正常结束，
+       表现是「AI 说它做不到」而不是「配置错了」✗。
+
+    两条都当场报错，不允许用「反正返回空表也不崩」敷衍过去 ✓。
+    """
+    if scene not in SCENE_TOOL_SETS:
+        return [f"未知场景：{scene!r}（允许 {', '.join(SCENES)}）"]
+    allowed = SCENE_TOOL_SETS[scene]
+    problems: list[str] = []
+    unknown = sorted(allowed - set(TOOL_NAMES))
+    if unknown:
+        problems.append(
+            f"场景 {scene} 的白名单点名了不存在的工具：{', '.join(unknown)}"
+            f"（工具表只有 {len(TOOL_NAMES)} 个，键空间必须同族）"
+        )
+    if not (allowed & set(TOOL_NAMES)):
+        problems.append(
+            f"场景 {scene} 的白名单与工具表交集为空 ⇒ 模型会拿到 0 个工具且不报错"
+            f"（白名单 {len(allowed)} 条，工具表 {len(TOOL_NAMES)} 条，命名族对不上）"
+        )
+    return problems
+
+
+def tools_for_scene(scene: str) -> tuple[str, ...]:
+    """场景可见的工具名（保持 ``TOOL_NAMES`` 的顺序）✓；配置有病直接抛 ``ValueError``。
+
+    抛而不是返回空表：空工具表是个**合法但致命**的返回值，调用方无从分辨
+    「这个场景就该没有工具」和「我把名字写错了」✗。
+    """
+    problems = scene_problems(scene)
+    if problems:
+        raise ValueError("；".join(problems))
+    allowed = SCENE_TOOL_SETS[scene]
+    return tuple(name for name in TOOL_NAMES if name in allowed)
+
 
 #: 参数类型表 —— **单一真源**：`/canvas/tools` 与画布 Agent 的工具注册都读这里。
 #:
@@ -230,18 +300,25 @@ def param_schema(key: str, description: str) -> dict[str, Any]:
     return {"type": "string", "description": description}
 
 
-def tool_schemas() -> list[dict]:
-    """OpenAI/Anthropic 通用的 function-calling 形态（本仓不引 zod，直接给 JSON Schema）✓。"""
+def tool_schemas(scene: str | None = None) -> list[dict]:
+    """OpenAI/Anthropic 通用的 function-calling 形态（本仓不引 zod，直接给 JSON Schema）✓。
+
+    ``scene`` 给了就只出该场景可见的那几条（顺序同 ``tools_for_scene``）✓；
+    不给 = 全量（老调用方的口径不变，不破坏既有契约 ✓）。
+    """
+    names = list(TOOL_NAMES) if scene is None else list(tools_for_scene(scene))
     return [
         {
             "name": name,
-            "description": description,
+            "description": TOOLS[name][0],
             "parameters": {
                 "type": "object",
-                "properties": {key: param_schema(key, desc) for key, desc in params.items()},
+                "properties": {
+                    key: param_schema(key, desc) for key, desc in TOOLS[name][1].items()
+                },
             },
         }
-        for name, (description, params) in TOOLS.items()
+        for name in names
     ]
 
 

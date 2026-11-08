@@ -63,7 +63,7 @@ from .engine import tuning
 from .file_storage import get_absolute_path
 from .task_logger import log_task_warn
 
-__all__ = ["ISSUE_CODES", "TECH_QC_THRESHOLDS", "probe_video_technical_spec",
+__all__ = ["ISSUE_CODES", "ISSUE_THRESHOLDS", "TECH_QC_THRESHOLDS", "probe_video_technical_spec",
            "qc_thresholds", "run_technical_qc"]
 
 #: 硬性数值标准（可调）
@@ -95,6 +95,32 @@ ISSUE_CODES: dict[str, str] = {
     "audio.loudness": "集成响度偏离目标",
     "fps.low": "帧率低于下限",
     "duration.mismatch": "时长与分镜声明偏差过大",
+}
+
+#: ``code`` → 它**对应的那个阈值**（人工复核出「误报/漏报」之后，要动的就是这一格 ✓）。
+#:
+#: 为什么这张表必须存在 ✗：命中率统计只知道「``black`` 误报 7 次」✓，但要说「所以把
+#: ``blackminduration`` 从 0.25 调高」就必须知道 **code 与阈值字段的对应关系与方向** ✓✗ ——
+#: 没有它，候选生成只能退化成「有误报就去动某个字段」= 编 ✗。
+#:
+#: 字段名是 ``tuning.TUNABLES`` 里 ``("qc", …)`` 的小写名 ✓（那边是**唯一**可写白名单；
+#: 本表不登记字段值、也不登记区间 ✓ —— 两处都抄一份必然漂 ✗）。
+#: ``relax`` 是「**放宽**（少报、少误杀）该把这个字段往哪边动」✓：
+#: 门槛类（minDuration / tolerance / 上限 dBTP）放宽是**调高** ✓，下限类（fpsMin）放宽是**调低** ✓。
+#: ``aux`` 是同一族里**配合**看的另一格 ✓（黑场还涉及 pix_th、冻帧还涉及噪声阈值）——
+#: 它不参与候选生成 ✗，只用于页面提示「主字段调完还不对，再看这一格」✓。
+#: ⚠️ ``spec.unreadable`` / ``spec.probe_failed`` **有意不登记** ✓：那是探测失败，不是判据
+#: ⇒ 它们「误报」的正确处置是修 ffprobe / 换容器，不是动阈值 ✗（登记即误导 ✓✗）。
+ISSUE_THRESHOLDS: dict[str, dict[str, str]] = {
+    "black": {"field": "blackminduration", "relax": "raise",
+              "aux": "blackpixthreshold"},
+    "freeze": {"field": "freezeminduration", "relax": "raise",
+               "aux": "freezenoisethreshold"},
+    "audio.true_peak": {"field": "truepeakdb", "relax": "raise"},
+    "audio.loudness": {"field": "loudnesstolerance", "relax": "raise",
+                       "aux": "loudnesstarget"},
+    "fps.low": {"field": "fpsmin", "relax": "lower"},
+    "duration.mismatch": {"field": "durationtolerancesec", "relax": "raise"},
 }
 
 
@@ -520,6 +546,7 @@ def _index_qc_run(*, storyboard_id: Any, video_generation_id: Any, episode_id: A
         codes = [str(item.get("code")) for item in issues
                  if isinstance(item, dict) and item.get("code")]
         error_code = codes[0] if codes else None
+        producer = _producer_of(video_generation_id)
         outcome_index.record_run({
             # 同一次成品重跑质检要**覆盖**同一条，不能堆出 N 条（否则失败率被自己的重试污染）
             "run_id": f"qc:{storyboard_id}:{video_generation_id}",
@@ -544,10 +571,40 @@ def _index_qc_run(*, storyboard_id: Any, video_generation_id: Any, episode_id: A
                 "fps": spec.get("fps"),
                 "hasAudio": spec.get("hasAudio"),
                 "issueCodes": codes,
+                # 缺口 6：这一条质检说的是**哪一族引擎**出的片 ✓（查不到就**不带这两格** ✓，
+                # 不是填 null —— 云 provider 的片没有"引擎档"这个概念，填了就等着被算进某族）
+                **producer,
             },
         })
     except Exception:  # noqa: BLE001
         pass
+
+
+def _producer_of(video_generation_id: Any) -> dict[str, Any]:
+    """这次成片是**哪一族引擎**出的：``{"producerStage": …, "engineRunId": …}``。
+
+    「哪一族」由 ``engine/bridge.run_job`` 在提交成功那一刻登记进 ``outcome_index.records``
+    （那时 ``stage`` 与 ``taskId`` 都在手上 ✓）。云 provider 的片查不到 ⇒ 返回 ``{}``
+    ✓——**不许**回落到"最近一次引擎档"之类的猜测：归因猜错比不归因更坏 ✗
+    （它会让某一族的质检通过率把别人的片算进来，然后拿这个结论去降这一族的步数）。
+    """
+    key = str(video_generation_id or "").strip()
+    if not key:
+        return {}
+    try:
+        from . import outcome_index
+
+        found = outcome_index.record_of("video", key)
+    except Exception:  # noqa: BLE001 - 归因失败不影响质检结论
+        return {}
+    if not found:
+        return {}
+    out: dict[str, Any] = {}
+    if found.get("stage"):
+        out["producerStage"] = found["stage"]
+    if found.get("runId"):
+        out["engineRunId"] = found["runId"]
+    return out
 
 
 def run_technical_qc(conn: Connection, storyboard_id: Any,

@@ -11,7 +11,9 @@
    ⇒ 这里先用 ``js_round`` 再转整；
 3. ``isFilled`` 的**五分类**：``null/undefined`` 假、字符串看 ``trim()`` 后非空、
    数字看 ``Number.isFinite``、数组看**长度非零**、其余（对象）**一律算填了**；
-4. 四个评分器返回的 ``caseId`` 都是**空串**（由 ``evaluator`` 事后填）—— 别"顺手"塞 case id；
+4. 五个评分器返回的 ``caseId`` 都是**空串**（由 ``evaluator`` 事后填）—— 别"顺手"塞 case id；
+   第五个 ``score_grid_prompts``（宫格提示词）是本仓新增，TS 侧没有对拍对象：它的判据不求"像 TS"，
+   只求"能判死真问题"（长度 / 格数 / 中文占比 / 占位符 / 格间复制，五维全硬判据）；
 5. ``scoreVoiceAssignment`` 的「角色 ID 合法无重复」会算出**可能为负**的比率
    （``in_legal - dup`` 可小于 0）⇒ 必须 ``max(0, min(1, rate))`` **夹紧**。
 
@@ -26,10 +28,29 @@ from app.core.response import js_round
 
 __all__ = [
     "score_extraction",
+    "score_grid_prompts",
     "score_script_rewrite",
     "score_storyboards",
     "score_voice_assignment",
 ]
+
+#: 宫格评分里"中文"的判据（CJK 汉字 + 假名）。英文提示词是硬要求 ——
+#: 混进中文会让出图侧的中文渲染变成乱码字块，而 Agent 自己不会报错。
+_CJK = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+
+#: 中文占比阈值：宫格 Agent 的系统提示词**自己规定**要把位置写成「格1」、参考图写成「图片1」、
+#: 骨架里还有「首帧 / 尾帧」这类中文标签 ⇒ 按「含中文即扣」判，会把**完全合规**的产出判成不合格。
+#: 标签在一条 60 字符的提示词里占个位数百分比，而真写成中文散文一定在 40% 以上 ⇒
+#: 判据用**占比**而不是"有没有"（15% 这条线留了三倍余量，两边都不擦边）。
+_CJK_RATIO_MAX = 0.15
+
+
+def _cjk_ratio(text: str) -> float:
+    """CJK 字符占比（空文本按 0 —— 空不是"中文太多"，长度维会单独罚它）。"""
+    body = str(text or "")
+    if not body:
+        return 0.0
+    return len(_CJK.findall(body)) / len(body)
 
 
 def _round1(value: float) -> float:
@@ -366,3 +387,86 @@ def score_voice_assignment(
     ))
 
     return _report("voice_assigner", dims)
+
+
+# ===========================================================================
+# 宫格提示词评分（5 维 / 100 分，2026-11-07 补 —— 知识闭环缺口 8）
+# ===========================================================================
+
+
+def score_grid_prompts(payload: dict[str, Any] | None, rubric: dict[str, Any]) -> dict[str, Any]:
+    """宫格提示词评分。
+
+    ⚠️ 五个维度**全部是硬判据**（长度 / 格数 / 中文占比 / 是否残留模板 / 格间是否复制），
+    没有一条是"看着像不像好提示词"✨ —— 因为那类判据在本仓没有金标准，
+    打出来的分会看着很专业、其实不可复核（缺口 8 的教训就是这么来的）。
+
+    ``payload`` 用的是**生产同一套**解析结果（``services/grid_payload.find_grid_payload``）；
+    给 ``None`` ＝ Agent 压根没产出可识别载荷 ⇒ 五维全 0（不是"跳过"✓）。
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    grid_prompt = str(payload.get("grid_prompt") or "")
+    cells = [item for item in (payload.get("cell_prompts") or []) if isinstance(item, dict)]
+    cell_texts = [str(item.get("prompt") or "") for item in cells]
+
+    dims: list[dict[str, Any]] = []
+
+    # 1. 提示词长度（25 分）—— 整体与单格各占一半份额；不足按比例给（不四舍五入到 0/满）
+    min_grid = int(rubric.get("minGridPromptLength") or 120)
+    min_cell = int(rubric.get("minCellPromptLength") or 40)
+    grid_len = len(grid_prompt.strip())
+    grid_rate = 1.0 if grid_len >= min_grid else (grid_len / min_grid if min_grid else 0.0)
+    short_cells = [text for text in cell_texts if len(text.strip()) < min_cell]
+    cell_rate = ((len(cell_texts) - len(short_cells)) / len(cell_texts)) if cell_texts else 0.0
+    rate = (max(0.0, min(1.0, grid_rate)) + max(0.0, min(1.0, cell_rate))) / 2
+    dims.append(_dim(
+        "提示词长度", _round1(rate * 25), 25,
+        f"grid_prompt {grid_len} 字符（期望 ≥ {min_grid}）；"
+        f"{len(cell_texts) - len(short_cells)}/{len(cell_texts)} 格 ≥ {min_cell} 字符",
+    ))
+
+    # 2. 格数吻合（25 分）—— 多了少了都扣（多余格意味着模型在凑数）
+    rows = int(rubric.get("rows") or 0)
+    cols = int(rubric.get("cols") or 0)
+    want = rows * cols
+    got = len(cells)
+    matched = (min(got, want) / max(got, want, 1)) if want else 0.0
+    dims.append(_dim(
+        "格数吻合", _round1(matched * 25), 25,
+        f"{got} 格（期望 {rows}×{cols}={want}）",
+    ))
+
+    # 3. 英文提示词（20 分）—— 中文占比超阈值即算不合格（阈值含义见 ``_CJK_RATIO_MAX``）
+    texts = cell_texts + [grid_prompt]
+    chinese = [index for index, text in enumerate(texts) if _cjk_ratio(text) > _CJK_RATIO_MAX]
+    rate = ((len(texts) - len(chinese)) / len(texts)) if cell_texts else 0.0
+    dims.append(_dim(
+        "英文提示词", _round1(rate * 20), 20,
+        (f"{len(chinese)}/{len(texts)} 处中文占比超 {_CJK_RATIO_MAX:.0%}（末位是整体提示词）"
+         if chinese else f"中文占比均 < {_CJK_RATIO_MAX:.0%}（只有格号/图片号这类合规标签）"),
+    ))
+
+    # 4. 无模板残留（15 分）—— `[...]` / `TODO` / `xxx` / `<...>` 这类占位符
+    # ⚠️ 分母是**全部待判文本、含空的**，分子只数「非空且干净」：空产出它不是"没有占位符"，
+    # 否则 payload=None 时这一维会白送 15 分（空串里当然搜不到 `[`），总分成了一条假绿。
+    tags = [str(tag) for tag in (rubric.get("forbiddenTags") or ("[", "<", "TODO", "xxx"))]
+    all_texts = cell_texts + [grid_prompt]
+    clean = [text for text in all_texts
+             if text.strip() and not any(tag and tag in text for tag in tags)]
+    dirty = [index for index, text in enumerate(all_texts)
+             if any(tag and tag in text for tag in tags)]
+    rate = (len(clean) / len(all_texts)) if any(text.strip() for text in all_texts) else 0.0
+    dims.append(_dim(
+        "无模板残留", _round1(rate * 15), 15,
+        f"{len(dirty)} 处残留占位符（{'/'.join(tags)}）" if dirty else "无占位符残留",
+    ))
+
+    # 5. 格间不重复（15 分）—— 同一句复制 N 遍会让每格出几乎一样的图
+    unique = len(set(text.strip() for text in cell_texts if text.strip()))
+    rate = (unique / len(cell_texts)) if cell_texts else 0.0
+    dims.append(_dim(
+        "格间不重复", _round1(rate * 15), 15,
+        f"{unique}/{len(cell_texts)} 格提示词互不相同",
+    ))
+
+    return _report("grid_prompt", dims)

@@ -11,6 +11,15 @@
    异步版随时可取消，取消即抛 ``ScanCancelledError``；
 4. **路径安全**：下载/删除都必须限制在「模型存储目录」内（防路径穿越），且不许删根目录。
 
+**第五类（2026-11-08 补）：模型根「只有一句话」**——`models_dir` 的优先级（`MODELS_DIR` > 配置
+文件 > `<data_root>/models`）只许写在 `app/core/model_paths.py` 一处；引擎答「模型根在哪」
+（`engine.inventory.models_dir()`）与扫描层第一个根必须是**同一个函数**，各写一遍就会「体检说这里、
+加载说那里」。本套对此钉四件事：① 静态守卫（除登记在案的**带理由副本** `scripts/model_manager.py`
+外，别处再读 `MODELS_DIR` 即红）；② 副本与本尊**逐档对拍**（设环境变量 / 只配文件 / 都不给，抄歪
+一档就红）；③ 配置面三个使用者（读 / 写 / `models_dir`）在 `local_model_scan` 里**每一处**调用都
+必须传 `path=` 隔离口（AST 判；漏一处 ⇒ 自检换掉的文件对它不生效，端点判据读到真配置而假绿）；
+④ 换 `MODELS_DIR` 时 `get_model_paths` / `core.models_dir` / `get_default_roots()[0]` 一起改口。
+
 扫描全部在**临时目录树**上做（不碰真实磁盘），下载/网络全部打桩（**不打网络**）。
 
 运行::
@@ -20,6 +29,8 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import importlib.util
 import json
 import os
 import re
@@ -335,6 +346,168 @@ def main() -> int:  # noqa: C901
           + str(len(exempt)) + " 条**显式带理由**的豁免 ✓：" + " / ".join(sorted(exempt)) + " ✓）",
           not offenders, offenders)
 
+    # ⚠️ 守卫（2026-11-08 ✓）：**模型根**的优先级「``MODELS_DIR`` > 配置 > ``<data_root>/models``」
+    #    只许写在 ``core/model_paths.py`` **一处** ✗✗ —— 引擎答「模型根在哪」（``inventory.models_dir``）
+    #    与扫描层的第一个根（``get_default_roots()[0]``）**必须是同一个函数** ✓；各写一遍就必然漂：
+    #    体检说「这里有」、加载说「那里没有」✗，而且两边各自都「看着对」⇒ 只有真跑才露头 ✗✗。
+    #    ⚠️ 判据盯「谁在**读**这个环境变量」，不盯文档里提到它（注释/docstring 里写名字是正常的 ✓）。
+    reader = re.compile(r"""environ(?:\.get)?[\(\[]\s*["']MODELS_DIR["']""")
+    canonical = app_root / "core" / "model_paths.py"
+    #: 允许存在的**副本** ✓（**每条必须带理由 + 对拍函数名** ✓ —— 不是「眼睛一闭加白名单」✗）：
+    #: ⚠️ 登记 **≠ 放行** ✗✗：下面逐个与本尊**逐档对拍**（设环境变量 / 只配文件 / 都不给），
+    #: 抄歪一档（比如把 ``MODELS_DIR`` 挪到配置后面）当场红 ✓。
+    #: 撤销条件：该文件改成 ``import app.core.model_paths`` 后，把这条删掉（守卫会因此变严，是好事）。
+    echoes = {
+        "scripts/model_manager.py": {
+            "why": "``scripts/`` 只吃标准库、**不 import ``app.*``**（见 ``scripts/README.md`` 的"
+                   "「依赖关系」，与运行链靠 subprocess 解耦）⇒ 这一档优先级只能手抄；"
+                   "另多一档 CLI ``--models-dir``（运行链没有这个入口）",
+            "probe": "resolve_models_dir",
+            "default": "default_models_dir",
+        },
+    }
+    dup: dict[str, list[str]] = {}
+    for path in sorted(app_root.rglob("*.py")):
+        rel = path.relative_to(app_root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if rel == "core/model_paths.py" or not reader.search(text):
+            continue
+        if rel in echoes:
+            continue
+        dup[rel] = sorted({match.group(0) for match in reader.finditer(text)})
+    check("守卫: ``MODELS_DIR`` 的优先级只写在 ``core/model_paths.py`` 一处"
+          "（别处再读一遍 = 两本账 ✗；唯一例外是 "
+          + " / ".join(sorted(echoes)) + " 这份**带理由的副本** ✓，且它下面还要逐档对拍 ✓）",
+          not dup, dup)
+    check("守卫: 那份实现**真在** ``core/model_paths.py`` 里（删了它守卫也不许变绿 ✗）",
+          canonical.exists() and bool(reader.search(canonical.read_text(encoding="utf-8"))),
+          str(canonical))
+
+    # 功能判据：三处同源 —— 换一个 ``MODELS_DIR``，扫描层与引擎必须**一起**改口 ✓
+    from app.core import model_paths as core_paths
+
+    with tempfile.TemporaryDirectory() as moved:
+        with_env = os.environ.get("MODELS_DIR")
+        os.environ["MODELS_DIR"] = moved
+        try:
+            agree = {
+                "paths": ls.get_model_paths().get("models_dir"),
+                "core": core_paths.models_dir(),
+                "default": ls.default_models_dir(),
+                "roots0": (ls.get_default_roots() or [""])[0],
+            }
+        finally:
+            if with_env is None:
+                os.environ.pop("MODELS_DIR", None)
+            else:
+                os.environ["MODELS_DIR"] = with_env
+    moved_key = os.path.normcase(moved)
+    check("根: ``MODELS_DIR`` 一动，``get_model_paths`` / ``core.models_dir`` / "
+          "``get_default_roots()[0]`` **一起**改口（同源 ✓✗）",
+          os.path.normcase(agree["paths"] or "") == moved_key == os.path.normcase(agree["core"])
+          and os.path.normcase(agree["roots0"] or "") == moved_key, agree)
+    check("根: ``default_models_dir()`` 是 ``<data_root>/models``、**不**跟 ``MODELS_DIR`` 跑 "
+          "（它是默认值，不是解析口 ✓✗）",
+          os.path.normcase(agree["default"]) != moved_key
+          and Path(agree["default"]).name == "models", agree["default"])
+
+    # ⚠️ 守卫（2026-11-08 ✓）：配置面有三个使用者（``read_paths_config`` / ``write_paths_config`` /
+    #    ``models_dir``）⇒ ``local_model_scan`` 里**每一处**调用都必须把 ``path=`` 那个隔离口传下去 ✓✗。
+    #    漏一个就是「自检换掉的文件只对另外两个生效，而它仍去读真身」⇒ 端点自检读到真配置、判据假绿 ✓✗
+    #    （本轮实测：``get_model_paths()`` 漏传 ⇒ ``PUT /roots`` 两条判据红，而「真配置文件一字未动」
+    #    那条**仍然是绿**的 ✓✗）。这里用 AST 判，不用正则（注释里写 ``model_paths.models_dir()`` 是正常的 ✓）。
+    scan_src = (app_root / "services" / "local_model_scan.py").read_text(encoding="utf-8")
+    unported: list[str] = []
+    for node in ast.walk(ast.parse(scan_src)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"read_paths_config", "write_paths_config", "models_dir"}:
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Name) and owner.id == "model_paths"):
+            continue
+        if not any(kw.arg == "path" for kw in node.keywords):
+            unported.append(f"{node.func.attr}@L{node.lineno}")
+    check("守卫: ``local_model_scan`` 调配置面三件时**都传了** ``path=`` 隔离口 ✓✗"
+          "（漏一处 ⇒ 自检换掉的文件对它不生效，端点判据就会读到真配置 ✓✗）",
+          not unported, unported)
+
+    # ⭐ 副本对拍（2026-11-08 ✓）：上表登记进来的副本**必须与本尊逐档一致** ✓✗ ——
+    #    只判「它读过这个环境变量」是不够的 ✗：把 ``MODELS_DIR`` 挪到配置文件**后面**、
+    #    或漏掉 ``<data_root>/models`` 这一档回落，照样能通过上面那条 ✗✗（那才是真正会漂的形状）。
+    #    ⇒ 三档情形各算一次，**逐字**比（本尊 vs 副本）。
+    echo_mods: dict[str, object] = {}
+    for rel, spec in sorted(echoes.items()):
+        target = app_root / rel
+        loader = importlib.util.spec_from_file_location(
+            "_echo_" + rel.replace("/", "_").removesuffix(".py"), target)
+        module = importlib.util.module_from_spec(loader)  # type: ignore[arg-type]
+        loader.loader.exec_module(module)  # type: ignore[union-attr]
+        echo_mods[rel] = module
+
+    echo_cfg = os.path.join(TREE, "cfg-models")
+    echo_env = os.path.join(TREE, "env-models")
+    echo_cli = os.path.join(TREE, "cli-models")
+
+    def _same(left: object, right: object) -> bool:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+
+    echo_rows: dict[str, dict[str, object]] = {}
+    saved_reader = core_paths.read_paths_config
+    saved_echo_env = os.environ.get("MODELS_DIR")
+    try:
+        for label, env_value, cfg in (
+                ("设了 MODELS_DIR", echo_env, {"models_dir": echo_cfg}),
+                ("没设环境变量、只配了文件", "", {"models_dir": echo_cfg}),
+                ("两者都没有 ⇒ 落 <data_root>/models", "", {}),
+        ):
+            if env_value:
+                os.environ["MODELS_DIR"] = env_value
+            else:
+                os.environ.pop("MODELS_DIR", None)
+            #: ⚠️ ``models_dir(*, path=...)`` 会把 ``path`` 透传进来 ⇒ 替身必须收得下这个关键字 ✓✗
+            #: （只写 ``lambda: {...}`` 会让本判据自己 TypeError 崩掉，而不是报红 ✓）。
+            core_paths.read_paths_config = lambda *_a, cfg=cfg, **_k: dict(cfg)  # type: ignore[assignment]
+            for rel, module in echo_mods.items():
+                echo_rows[f"{label} · {rel}"] = {
+                    "副本": getattr(module, echoes[rel]["probe"])(None, dict(cfg)),
+                    "本尊": core_paths.models_dir(),
+                }
+    finally:
+        core_paths.read_paths_config = saved_reader  # type: ignore[assignment]
+        if saved_echo_env is None:
+            os.environ.pop("MODELS_DIR", None)
+        else:
+            os.environ["MODELS_DIR"] = saved_echo_env
+    drifted = {key: row for key, row in echo_rows.items() if not _same(row["副本"], row["本尊"])}
+    check("副本对拍: 登记的那份副本与本尊**三档逐字一致** ✓✗（环境变量 / 只配文件 / 都不给；"
+          "挪顺序、漏回落都会在这里露头 ✗）", len(echo_rows) == 3 * len(echoes) and not drifted,
+          drifted or echo_rows)
+
+    # 副本的**默认值**也得是同口径（它自带一份 ``_default_data_root`` ✗ —— 那是最容易各算一遍的地方）
+    default_rows = {
+        rel: {"副本": getattr(module, echoes[rel]["default"])(), "本尊": core_paths.default_models_dir()}
+        for rel, module in echo_mods.items()
+    }
+    check("副本对拍: 副本的 ``<data_root>/models`` 与本尊**同口径** ✓✗"
+          "（脚本自带一份 data_root 解析 ⇒ 标记文件 / ``DATA_ROOT`` 那两档要一起对）",
+          all(_same(row["副本"], row["本尊"]) for row in default_rows.values()), default_rows)
+
+    # 副本的**多出来的那一档**（CLI）也得真的赢过环境变量 —— 否则「命令行优先」是句空话 ✗
+    cli_rows = {}
+    saved_cli_env = os.environ.get("MODELS_DIR")
+    os.environ["MODELS_DIR"] = echo_env
+    try:
+        for rel, module in echo_mods.items():
+            cli_rows[rel] = getattr(module, echoes[rel]["probe"])(echo_cli, {})
+    finally:
+        if saved_cli_env is None:
+            os.environ.pop("MODELS_DIR", None)
+        else:
+            os.environ["MODELS_DIR"] = saved_cli_env
+    check("副本对拍: 副本多出的 CLI 档**真赢过** ``MODELS_DIR`` ✓（本尊没有这个入口 ✗ ⇒ 这档只核副本自己）",
+          all(_same(value, echo_cli) for value in cli_rows.values()), cli_rows)
+
     # ⚠️ 静态守卫（2026-09-26 用户口径 ✓）：``reference/`` 是**开发期脚手架** ✗ ——
     #    用户原话：「等项目完善了之后 …\reference 这里是要**删除**的」✗ ⇒ 谁都不许把它当
     #    **长期落点**写进代码 ✗（删完就全成悬空引用 ✗✗）。
@@ -468,6 +641,12 @@ def main() -> int:  # noqa: C901
           isinstance(client.get("/api/v1/local-models/drives").json()["data"]["drives"], list))
 
     # PUT /roots —— ⚠️ 改的是 configs/model-paths.json，自检里换成临时文件，别污染仓库
+    #: ⚠️「换掉的文件只有**读**生效」曾经是假绿 ✓✗：``_write_paths_config`` 直连 ``model_paths``
+    #: 时，一次 ``PUT /roots`` 就把真配置的 ``models_dir`` 冲掉、还塞进一条 ``%TEMP%`` 的
+    #: ``extra_roots``（2026-11-08 盘上实测，且 ``configs/`` 是**入库**文件 ⇒ 一提交就带出去）✓✗。
+    #: 所以下面不只判「临时文件写对了」，还要判**真身一字未动** ✓。
+    real_config = Path(ls._paths_config_file())
+    real_before = real_config.read_text(encoding="utf-8") if real_config.exists() else None
     config_file = os.path.join(TREE, "model-paths.json")
     original_paths_file = ls._paths_config_file
     ls._paths_config_file = lambda: config_file
@@ -479,7 +658,8 @@ def main() -> int:  # noqa: C901
               put_ok)
         check("端点: PUT /roots 落盘的 extra_roots 与 paths.models_dir 都对",
               ls.get_extra_roots() == [os.path.abspath(TREE)]
-              and ls.get_model_paths()["models_dir"] == TREE)
+              and ls.get_model_paths()["models_dir"] == TREE,
+              (ls.get_extra_roots(), ls.get_model_paths()))
         client.put("/api/v1/local-models/roots", json={"models_dir": ""})
         check("端点: PUT /roots 传**空串** = 清空该字段（partial 更新 ⇒ 回落到默认 <data_root>/models ✓）",
               ls.get_model_paths()["models_dir"] == ls.default_models_dir())
@@ -488,6 +668,10 @@ def main() -> int:  # noqa: C901
               ls.get_extra_roots() == [os.path.abspath(TREE)])
     finally:
         ls._paths_config_file = original_paths_file
+    real_after = real_config.read_text(encoding="utf-8") if real_config.exists() else None
+    check("端点: PUT /roots 只写临时文件 ⇒ 真 ``configs/model-paths.json`` **一字未动** ✓✗"
+          "（隔离失效的症状：``models_dir`` 被冲掉、``extra_roots`` 多一条 ``%TEMP%`` 路径 ✓✗）",
+          real_before == real_after, (real_before, real_after))
 
     # ---- POST /register ----
     check("端点: POST /register 空 models -> 400 `models 不能为空`",

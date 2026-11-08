@@ -85,6 +85,19 @@ def os_sysconf(name: str) -> int:  # pragma: no cover - 平台分支
     return int(os.sysconf(name))
 
 
+def _fake_host(available: int, total: int) -> tuple[int, int]:
+    """低配模拟（G4）✓：假装内存只有 N GiB ⇒ ``(可用, 总量)`` ✓（**占用原样保留** ✓）。
+
+    ⚠️ 这一处必须接 ✗✗：`ensure_host_room` / `assign` 判"内存够不够"全靠它 ✓，
+    不接的话模拟出来的 8 GiB 卡配 96 GiB 内存 ✓ ⇒ 该拒的装载被放行 ✓✗（模拟只模拟了半台机器 ✗）。
+    """
+    fake = device_policy.fake_total_bytes(device_policy.FAKE_HOST_TOTAL_ENV)
+    if fake is None:
+        return available, total
+    total, avail = device_policy.fake_memory(fake, total, available)
+    return avail, total
+
+
 def host_memory() -> tuple[int, int] | None:
     """宿主**物理内存** ``(free, total)`` 字节 ✓；量不到 ⇒ ``None`` ✓（不猜 ✗）。
 
@@ -116,10 +129,10 @@ def host_memory() -> tuple[int, int] | None:
             status.dwLength = ctypes.sizeof(_MemoryStatusEx)
             if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                 return None
-            return int(status.ullAvailPhys), int(status.ullTotalPhys)
+            return _fake_host(int(status.ullAvailPhys), int(status.ullTotalPhys))
         page = int(os_sysconf("SC_PAGE_SIZE"))  # noqa: F821 —— 见下面的 `os_sysconf`
         available = int(os_sysconf("SC_AVPHYS_PAGES"))  # noqa: F821
-        return page * available, page * int(os_sysconf("SC_PHYS_PAGES"))  # noqa: F821
+        return _fake_host(page * available, page * int(os_sysconf("SC_PHYS_PAGES")))  # noqa: F821
     except Exception:  # noqa: BLE001 —— 读数失败不是致命错 ✓（退回"未知" ✓ 见 `assign` ✓）
         return None
 

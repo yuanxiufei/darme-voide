@@ -4,7 +4,9 @@
 ==========================================
 定过的规矩：**A 侧可重建、B 侧不可重建**。``kb_scenes`` 是纯派生（``DELETE`` 后重跑即可），
 放进项目库会：① 被计算进备份体积；② 被 ``db_upgrade.py`` 当成项目结构去补列；③ 用户切换
-数据根时莫名其妙跟着跑丢。所以它跟 OCR sidecar 同住：``data/ocr/library-scenes.sqlite``。
+数据根时莫名其妙跟着跑丢。所以它跟 OCR sidecar 同住：``indexes/library-scenes.sqlite``
+（2026-11-07 从 ``data/ocr/`` 迁出 —— ``data/`` 留给「不可重建、必须备份」的东西，
+三只派生索引统一进 ``indexes/``；重建要跑数小时，所以也别当缓存随手删）。
 
 对齐键是 ``path``（相对库根）**不是** ``document_id`` —— 供应商库与本仓 sidecar 各自编号，
 同一份剧本在两库里 id 不同，只有 path 是两库共同的锚。
@@ -36,8 +38,9 @@ __all__ = [
 ]
 
 #: 派生索引的落点（``SCRIPT_LIBRARY_SCENES_DB`` 可覆盖，测试夹具也用它）
+#: 2026-11-07：从 ``data/ocr/`` 迁到 ``indexes/``（与 ``library-ocr`` / ``library-extra`` 同住）。
 SCENES_DB = Path(os.environ.get("SCRIPT_LIBRARY_SCENES_DB")
-                 or (PROJECT_ROOT / "data" / "ocr" / "library-scenes.sqlite"))
+                 or (PROJECT_ROOT / "indexes" / "library-scenes.sqlite"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scene_docs (
@@ -84,7 +87,7 @@ CREATE INDEX IF NOT EXISTS scenes_by_path ON scenes(path, scene_no);
 def _like_literal(value: str) -> str:
     """把字符串转成 LIKE 的**字面量**（配合 ``ESCAPE '\\'``）。
 
-    ``documents.path`` 存的是历史机位路径（``G:\\电影剧本\\...``），本仓只能按"完整路径的
+    ``documents.path`` 存的是建库机器上的旧盘符路径（形如 ``…\\电影剧本\\...``），本仓只能按"完整路径的
     尾巴"反查 —— 但 ``LIKE`` 里 ``_`` 是单字符通配、``%`` 是任意串，文件名一旦含下划线
     （``EP001_终稿.pdf`` 很常见）就会**匹配到另一份**，还不是报错，是静默给错文本。
     所以三个字符全部转义。反斜杠必须最先处理，否则会把后面加的转义符再转义一遍。

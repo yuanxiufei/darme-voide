@@ -165,7 +165,7 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 3. **refs 会随重渲染失效**：点导航 `e25`（Skill）却没跳转（`location.pathname` 仍是 `/`）⇒
    要验证某个路由，**直接 `goto <路由>`** 比点导航稳。
 
-它做三件事：把表/列定义与真实 `data/drama.db` 的 `PRAGMA table_info` 逐列比对（并与 **TS 快照**里的
+它做三件事：把表/列定义与真实 `data/db/drama.db` 的 `PRAGMA table_info` 逐列比对（并与 **TS 快照**里的
 `db/index.ts` 建表清单交叉印证 —— Node 已删 ⇒ 走 `frozen_ts_source.py`）、打真实接口核对响应信封与**错误文案逐字**、写操作全部落在
 数据库副本上（真实库只读）。报告落在系统临时目录，路径在结尾打印。
 
@@ -194,8 +194,9 @@ playwright-cli close                            # 记得收尾（浏览器 + 后
 > | `tests/` | **行为契约自检**（`run_all.py` = 权威清单） | 开发者 | 人 / CI；**不参与产品运行时** | ❌（已在 `app/` 内，`COPY backend-py/app` 覆盖） |
 > | `app/scripts/` | **仓库守卫 + 工具链 + 语料**（四类，见 `scripts/README.md`） | 开发者 | `.githooks/pre-commit`、人；**不 `import app.*`** | ❌ |
 > | `app/local_services/` | **本地服务根**（clone 来的第三方服务 + 自带 `h3` / `cosyvoice` 薄封装） | `scripts/model_manager.py --runtime git`（**机器相关**） | 后端经 subprocess / HTTP | ❌ |
-> | `output/` | **引擎真跑产物**（PNG / MP4 / 一次性 JSON 快照；不是代码、不是配置） | `/engine/generate` 与 `_run_qwen_image.py` 之类手动入口 | 人（当真跑验收证据看） | ❌（已 gitignore） |
+> | ~~`output/`~~ | **已退役**（2026-11-07 产物统一进 `<dataRoot>/`：成品 `static/`、实验 `experiments/<实验名>/`）—— 目录已在盘上消失，`.gitignore` 那条留作兜底 | — | 判据 ⑦ **反着判**：存在即红 | ❌（已 gitignore） |
 > | `_bench/` | **调试草稿区**（一次性 probe 脚本 + txt/png/csv 账；跑完即弃） | 人 | 人；`desktop/scripts/sync-backend.mjs` 打包时按 `EXCLUDE_DIRS` 排除 | ❌（已 gitignore） |
+> | `tmp/` | **一次跑暂存区**（起服务/跑全量的 `.log`、一次性 probe 脚本与 `.cmd`、`tests/freeze_ts_snapshot.py --dump tmp/frozen_ts` 之类的物化落点） | 人 + 测试脚本 | 人；`sync-backend.mjs` 同样排除 | ❌（已 gitignore） |
 >
 > **结论：不需要再套一层**（`src/`、`assets/`、`tools/` 之类只会把「哪棵树属于哪种生命周期」重新搅浑）。
 > `Dockerfile` 的 COPY 面已经把「运行时必需」与「开发期工具」分开了 —— 这张表就是那个事实的展开。
@@ -400,7 +401,8 @@ backend-py/
    ├─ storage_change_test.py  数据根切换 + 存储 2 端点（复制/回滚/零副作用，38 用例）
    ├─ dockerfile_contract_test.py 生产镜像布局一致性（Dockerfile/compose 路径/端口/子包不单独 COPY ↔ 代码常量，
    │                            含 `.dockerignore` 整根排除大目录，37 用例）
-   ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，5 用例）
+   ├─ frontend_api_coverage_test.py **前端调用点 ↔ 后端路由覆盖**（删库后唯一后端的安全网，12 用例：
+   │                            两端合扫 / 含 PATCH / query 键逐个核后端是否声明 / 注释先遮蔽且认引号 / 两道反套套逻辑）
    ├─ contract_mirror_test.py  **共享契约镜像**（contracts.ts ↔ 后端 + 前端 dev 代理端口，8 用例）
    ├─ route_parity_test.py      路径 + 常量守卫（防「未迁移端点被参数路由吞掉」与镜像漂移）
    ├─ assets_layout_test.py     资产布局守卫（skills/scripts/local_services 在 app/ 内 + 常量权威，12 用例）
@@ -408,8 +410,9 @@ backend-py/
    │                            `numeric` 组顶层零依赖 / 模块头 ≥8 词 / 仓库根无空壳 / 说明里的 `app/…py` 不腐烂 /
    │                            每个 engine 模块**有生产调用者或登记为欠账** / `docs/feature-map.md`
    │                            点到 `app/` 每一个 `.py` / 盘上每份 `tests/*_test.py` 都进了
-   │                            `run_all.py::TESTS`；零 torch / 生成物不入库（`output/` `_bench/`
-   │                            `models/tokenizers/` 必须被 `.gitignore` 整目录挡住，包根不散落脚本）
+   │                            `run_all.py::TESTS`；零 torch / 生成物不入库（`_bench/`
+   │                            `data/experiments/` `models/tokenizers/` 必须被 `.gitignore` 整目录挡住，
+   │                            包根不散落脚本）
    │                            —— 这 10 类事故原先**没有任何测试会失败**；用例数不写死，跑了就知道）
    ├─ h3_chain_test.py          本地 H3 链**接缝契约**（适配器 ↔ 8765 薄封装；含「阶段2 未接线」缺口断言，13 用例）
    ├─ local_services_live_test.py 本地服务**活体**接缝（ollama 真推理 9 用例；未启动的服务显式 SKIP）

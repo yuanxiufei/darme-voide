@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, select
@@ -38,10 +39,12 @@ from app.core.models import (
     storyboards,
 )
 from app.core.response import now
+from app.services.grid_payload import find_grid_payload
 from app.services.storyboard_helpers import delete_storyboard_children
 from app.agent.runtime import run_agent_with_instructions
 from app.agent.evaluation.scorer import (
     score_extraction,
+    score_grid_prompts,
     score_script_rewrite,
     score_storyboards,
     score_voice_assignment,
@@ -49,16 +52,19 @@ from app.agent.evaluation.scorer import (
 
 __all__ = [
     "EXTRACTOR_MESSAGE",
+    "GRID_PROMPT_MESSAGE",
     "SCRIPT_REWRITER_MESSAGE",
     "STORYBOARD_MESSAGE",
     "VOICE_ASSIGNER_MESSAGE",
     "cleanup_case",
     "evaluate_case",
     "extract_characters",
+    "extract_grid_payload",
     "extract_scenes",
     "extract_script",
     "extract_storyboards",
     "extract_voice_assignments",
+    "grid_prompt_message",
     "norm_tool_name",
     "seed_case",
 ]
@@ -68,6 +74,36 @@ STORYBOARD_MESSAGE = "请对当前集剧本进行分镜拆解并保存。"
 EXTRACTOR_MESSAGE = "请提取当前集剧本中出现的角色和场景并保存。"
 SCRIPT_REWRITER_MESSAGE = "请将当前集的原始内容改写为格式化剧本并保存。"
 VOICE_ASSIGNER_MESSAGE = "请为当前剧组的角色分配合适的音色。"
+
+#: 宫格这个 kind **没有**固定消息（TS 侧也没有）：镜头 id 与格数得现拼。
+#: 措辞与 ``routers/grid.py::try_agent_grid_prompt`` 的 9 段拼装同源 —— 评测要走线上那条路，
+#: 消息写另一套就是「评测的输入和生产的输入不是同一个东西」。参考图映射段此处恒空
+#: （seed 的镜头没有出图 ⇒ 本来就没有参考图），按原口径**空段丢弃**。
+GRID_PROMPT_MESSAGE = (
+    "请为宫格图生成提示词，并优先调用工具完成。\n"
+    "选中镜头ID：{shot_ids}\n"
+    "行数：{rows}\n"
+    "列数：{cols}\n"
+    "模式：{mode}\n"
+    "当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，"
+    "例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。\n"
+    "必须严格按 {rows}x{cols} 生成，总共 exactly {total} visible panels。不要合并格子，不要缺格。\n"
+    '必须返回 JSON，结构为：{{"grid_prompt":"...","cell_prompts":'
+    '[{{"shot_number":1,"frame_type":"first_frame","prompt":"..."}}]}}'
+)
+
+
+def grid_prompt_message(
+    shot_ids: list[int], rows: int, cols: int, mode: str,
+) -> str:
+    """按 ``GRID_PROMPT_MESSAGE`` 拼出这一跑的用户消息（镜头 id 走紧凑 JSON）。"""
+    return GRID_PROMPT_MESSAGE.format(
+        shot_ids=json.dumps(list(shot_ids), ensure_ascii=False, separators=(",", ":")),
+        rows=rows,
+        cols=cols,
+        mode=mode,
+        total=rows * cols,
+    )
 
 
 def norm_tool_name(name: Any) -> str:
@@ -82,10 +118,17 @@ def seed_case(
     content: str | None = None,
     characters_in: list[dict[str, Any]] | None = None,
     scenes_in: list[dict[str, Any]] | None = None,
+    shots_in: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """建一套**临时**剧组数据，返回 ``{dramaId, episodeId, legal:{characterIds, sceneIds}}``。
+    """建一套**临时**剧组数据，返回 ``{dramaId, episodeId, legal:{characterIds, sceneIds},
+    shotIds:[…]}``。
 
     ⚠️ 每个 insert 一个短事务（见模块头第 1 点）。
+
+    ``shots_in``（``grid_prompt`` 这个 kind 才用）把基准里的镜头落成**真实** ``storyboards``
+    行 —— 宫格 Agent 的工具 ``read_shots_for_grid`` 只按 **id** 查库（它会再按
+    ``storyboard_number`` 反查一次），把镜头直接塞进消息里它读不到。字段口径见
+    ``types.STATEMENT_KEYS_BY_KIND["grid_prompt"]``。
     """
     ts = now()
 
@@ -134,10 +177,26 @@ def seed_case(
                 episode_id=episode_id, scene_id=scene_id, created_at=ts,
             ))
 
+    shot_ids: list[int] = []
+    for item in shots_in or []:
+        with engine.begin() as conn:
+            shot_ids.append(int(conn.execute(storyboards.insert().values(
+                episode_id=episode_id,
+                # ``number`` 是基准里的镜头号；缺省按落库顺序补，避免 NN 约束炸掉整个 case
+                storyboard_number=int(item.get("number") or (len(shot_ids) + 1)),
+                title=item.get("title"),
+                location=item.get("scene"),
+                shot_type=item.get("shot_type"),
+                action=item.get("action"),
+                dialogue=item.get("dialogue"),
+                created_at=ts, updated_at=ts,
+            )).lastrowid))
+
     return {
         "dramaId": drama_id,
         "episodeId": episode_id,
         "legal": {"characterIds": character_ids, "sceneIds": scene_ids},
+        "shotIds": shot_ids,
     }
 
 
@@ -219,14 +278,34 @@ def extract_voice_assignments(tool_calls: list[dict[str, Any]]) -> list[dict[str
     return collected
 
 
+def extract_grid_payload(result: Any) -> dict[str, Any] | None:
+    """宫格产出：**先看工具结果、再看正文**（与 ``routers/grid.py`` 同序）。
+
+    ⚠️ 解析走 ``services.grid_payload.find_grid_payload`` —— **单一真源**。在这里另写一遍
+    "评测自己认的格式"，线上换一种写法时评测会照旧打高分，那是最典型的假绿。
+    """
+    return (find_grid_payload(getattr(result, "tool_results", None))
+            or find_grid_payload(getattr(result, "text", None)))
+
+
 async def evaluate_case(
-    conn: Connection, case_def: dict[str, Any], instructions: str
+    conn: Connection,
+    case_def: dict[str, Any],
+    instructions: str,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """用指定 ``instructions`` 评测一个 case，返回确定性评分报告（``caseId`` / ``runtimeModel`` 已填）。
 
     **不依赖、也不修改 DB 里的 ``agent_configs``**（候选提示词直接传入）。
-    未知 ``kind`` 返回 ``None``（TS 的 switch 没有 default ⇒ 落到 undefined）。
+
+    ``settings``：本次 run 的生成参数覆盖（``{"temperature": 0.0}``）。它只影响**这一跑**、
+    不落库 —— 参数调优（``param_optimizer``）靠它做到「同一份提示词、只换温度」；
+    不传就是 DB 里那套（老调用方行为零变化）。未知 ``kind`` 返回 ``None``（TS 的 switch
+    没有 default ⇒ 落到 undefined）。
     """
+    # 空 dict 视同没传：``{"modelSettings": {}}`` 与不传在 runtime 里等价，但少一层误导
+    run_options: dict[str, Any] = {"modelSettings": settings} if settings else {}
+
     kind = case_def.get("kind")
     statement = case_def.get("statement") or {}
     rubric = case_def.get("rubric") or {}
@@ -240,7 +319,7 @@ async def evaluate_case(
         try:
             result = await run_agent_with_instructions(
                 conn, "storyboard_breaker", seed["episodeId"], seed["dramaId"],
-                instructions, STORYBOARD_MESSAGE,
+                instructions, STORYBOARD_MESSAGE, run_options,
             )
             shots = extract_storyboards(result.tool_calls)
             report = score_storyboards(shots, rubric, seed["legal"])
@@ -255,7 +334,7 @@ async def evaluate_case(
         try:
             result = await run_agent_with_instructions(
                 conn, "extractor", seed["episodeId"], seed["dramaId"],
-                instructions, EXTRACTOR_MESSAGE,
+                instructions, EXTRACTOR_MESSAGE, run_options,
             )
             report = score_extraction(
                 extract_characters(result.tool_calls), extract_scenes(result.tool_calls), rubric
@@ -271,7 +350,7 @@ async def evaluate_case(
         try:
             result = await run_agent_with_instructions(
                 conn, "script_rewriter", seed["episodeId"], seed["dramaId"],
-                instructions, SCRIPT_REWRITER_MESSAGE,
+                instructions, SCRIPT_REWRITER_MESSAGE, run_options,
             )
             report = score_script_rewrite(extract_script(result.tool_calls), rubric)
             report["caseId"] = case_id
@@ -292,11 +371,29 @@ async def evaluate_case(
         try:
             result = await run_agent_with_instructions(
                 conn, "voice_assigner", seed["episodeId"], seed["dramaId"],
-                instructions, VOICE_ASSIGNER_MESSAGE,
+                instructions, VOICE_ASSIGNER_MESSAGE, run_options,
             )
             report = score_voice_assignment(
                 extract_voice_assignments(result.tool_calls), rubric, seed["legal"]
             )
+            report["caseId"] = case_id
+            report["runtimeModel"] = result.model
+            return report
+        finally:
+            cleanup_case(seed)
+
+    if kind == "grid_prompt":
+        rows = int(statement.get("rows") or rubric.get("rows") or 0)
+        cols = int(statement.get("cols") or rubric.get("cols") or 0)
+        mode = str(statement.get("mode") or "first_frame")
+        seed = seed_case(case_id=case_id, shots_in=statement.get("shots"))
+        try:
+            result = await run_agent_with_instructions(
+                conn, "grid_prompt_generator", seed["episodeId"], seed["dramaId"],
+                instructions, grid_prompt_message(seed["shotIds"], rows, cols, mode),
+                run_options,
+            )
+            report = score_grid_prompts(extract_grid_payload(result), rubric)
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
             return report

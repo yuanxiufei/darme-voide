@@ -114,7 +114,11 @@ def case_norm_symmetry() -> None:
         def encode(self, frames: Any) -> Any:
             return frames
 
-        def decode(self, latents: Any) -> Any:
+        def decode(self, latents: Any, **_knobs: Any) -> Any:
+            #: ``WanVAE.decode`` 的契约带三个 tiling 旋钮（``tile`` / ``halo`` / ``attn_chunk`` ✓，
+            #: 默认全 ``None`` ⇒ 走旧路径 ✓）⇒ 桩也得收 ✓；恒等桩不做滑窗，收下即丢 ✓。
+            #: ⚠️ 桩只收位置参数会让「产品扩了接口」表现为**桩报 TypeError** ✓✗ ——
+            #: 那是测试跟不上契约，不是编码侧算错 ✓。
             return latents
 
     mean = (0.5, -0.5, 0.25, 1.0)

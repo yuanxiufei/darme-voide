@@ -1,6 +1,6 @@
 # 打戏镜头规格与破招放大
 
-来源：`data/playbook/film-expert-bridge/combat/打戏系统交接包.md`
+来源：`corpus/playbook/film-expert-bridge/combat/打戏系统交接包.md`
 的 §6「镜头系统核心规则」/ §7.5–7.7「有效中景裁切、镜头衔接链、破招放大」/ §12.1「执行层净化」。
 原文那套的 `SKILL.md` 已不在仓内，**铁律正文只在交接包里存留**，此份是提炼后的判据，不是原文摘抄。
 

@@ -122,7 +122,7 @@ agents: []
 日常出稿这三份够用。
 
 要更细的招式连段范例与形态细节，再去原料库检索（见下）：
-`data/playbook/film-expert-bridge/`
+`corpus/playbook/film-expert-bridge/`
 （general 38 份 ＋ combat 77 份 ＋ ultimate 11 份）。那份目录**随仓库分发、开箱可检索**（来源与许可见
 `THIRD_PARTY_NOTICES.md` §六）。
 
@@ -131,7 +131,7 @@ agents: []
 
 **查法**：用工具 `search_script_library`。
 
-- `source="playbook"` 就是在原料库里检索（`data/playbook/` 下的 `film-expert-bridge/` 与
+- `source="playbook"` 就是在原料库里检索（`corpus/playbook/` 下的 `film-expert-bridge/` 与
   `film-cinedance/` 在索引里，`combat/` 就在前者下面 —— 那 126 份**本来就可检索**，不需要副本）；
   再加 `path_contains="combat/"` 把范围收进打戏素材（写 `combat/` 带斜杠，才不会连
   `modules/combat.md` 那份规约摘要一起捞进来）。

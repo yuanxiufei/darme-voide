@@ -66,6 +66,7 @@ class FakeRuntime:
         self.raise_error = raise_error
         self.calls: list[dict] = []
         self.seed_visible: bool | None = None
+        self.shot_rows: int | None = None
 
     async def __call__(self, conn, agent_type, episode_id, drama_id, instructions, message, *a, **kw):
         self.calls.append({
@@ -77,6 +78,10 @@ class FakeRuntime:
             row = probe.execute(
                 select(episodes.c.id).where(episodes.c.id == episode_id)
             ).first()
+            # 宫格 Agent 的工具只按 id 查库 ⇒ 镜头必须在**跑之前**就是真行
+            self.shot_rows = len(probe.execute(
+                select(storyboards.c.id).where(storyboards.c.episode_id == episode_id)
+            ).all())
         self.seed_visible = row is not None
         if self.raise_error is not None:
             raise self.raise_error
@@ -84,6 +89,11 @@ class FakeRuntime:
         class _Result:
             model = FAKE_MODEL
             text = "{}"
+            tool_results = [
+                {"toolName": call["toolName"],
+                 "result": json.dumps(call.get("args") or {}, ensure_ascii=False)}
+                for call in self.tool_calls
+            ]
 
         result = _Result()
         result.tool_calls = self.tool_calls  # type: ignore[attr-defined]
@@ -246,10 +256,43 @@ def main() -> int:  # noqa: C901
               and out["caseId"] == case_id and out["kind"] == case["kind"]
               and fake_kind.seed_visible is True,
               (fake_kind.calls[0]["agentType"], out["caseId"]))
+    # 宫格（第 5 类）：产出要从**工具结果**里解析，且基准镜头必须真落成 storyboards 行
+    grid_prompt_text = (
+        "A 2x2 four-panel cinematic grid of a hospital night shift, exactly 4 visible panels, "
+        "consistent characters and style, cold corridor light, cinematic quality."
+    )
+    grid_cells = [
+        {"shot_number": index + 1, "frame_type": "first_frame",
+         "prompt": f"Panel {index + 1}: a cinematic medium shot inside the hospital at night, "
+                   "cold teal light, consistent art style."}
+        for index in range(4)
+    ]
+    case_grid = cat.load_case_by_id("grid-prompt-001")
+    fake_grid = FakeRuntime([{
+        "toolName": "generate_grid_prompt",
+        "args": {"grid_prompt": grid_prompt_text, "cell_prompts": grid_cells,
+                 "reference_assets": []},
+    }])
+    ev.run_agent_with_instructions = fake_grid  # type: ignore[assignment]
+    out_grid = asyncio.run(ev.evaluate_case(conn=None, case_def=case_grid, instructions="p"))  # type: ignore[arg-type]
+    grid_message = fake_grid.calls[0]["message"]
+    check("宫格: 走 grid_prompt_generator，消息按 2x2 + 模式拼好（含 exactly 4 visible panels）",
+          fake_grid.calls[0]["agentType"] == "grid_prompt_generator"
+          and "行数：2" in grid_message and "列数：2" in grid_message
+          and "模式：first_frame" in grid_message
+          and "exactly 4 visible panels" in grid_message,
+          grid_message[:80])
+    check("宫格: 基准的 4 个镜头在 Agent 跑之前已是**真实 storyboards 行**（工具只按 id 查库）",
+          fake_grid.shot_rows == 4, fake_grid.shot_rows)
+    check("宫格: 产出从 tool_results 解析 -> 满分 100，且报告带 caseId/kind",
+          out_grid is not None and out_grid["total"] == 100
+          and out_grid["caseId"] == "grid-prompt-001" and out_grid["kind"] == "grid_prompt",
+          (out_grid or {}).get("total"))
+
     with engine.begin() as conn:
         leaked2 = len(conn.execute(select(dramas.c.id)
                                    .where(dramas.c.title.like("[bench]%"))).all())
-    check("执行: 四个 kind 跑完后**没有任何残留**剧组", leaked2 == 0, leaked2)
+    check("执行: 五个 kind 跑完后**没有任何残留**剧组", leaked2 == 0, leaked2)
 
     unknown = asyncio.run(ev.evaluate_case(
         conn=None, case_def={"id": "x", "kind": "没有这种", "statement": {}, "rubric": {}},  # type: ignore[arg-type]
@@ -274,8 +317,8 @@ def main() -> int:  # noqa: C901
     # ================= 端点 =================
     client = TestClient(app)
     cases = client.get("/api/v1/evaluation/cases")
-    check("端点: GET /cases -> 200 成功信封 + 四个 case 元信息",
-          cases.status_code == 200 and len(cases.json()["data"]) == 4
+    check("端点: GET /cases -> 200 成功信封 + 五个 case 元信息",
+          cases.status_code == 200 and len(cases.json()["data"]) == 5
           and all(set(m) == {"id", "kind", "agentType"} for m in cases.json()["data"]),
           cases.json().get("data"))
 

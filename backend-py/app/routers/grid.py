@@ -26,7 +26,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -38,6 +37,7 @@ from ..core.db import get_conn, get_tx
 from ..core.models import image_generations, storyboards
 from ..core.request_utils import read_json
 from ..core.response import bad_request, not_found, now, parse_param_id, success
+from ..services import grid_payload
 from ..services.grid_split import split_grid_image
 from ..services.image_generation import generate_image
 from ..services.prompt_utils import (
@@ -57,96 +57,12 @@ CELL_WIDTH = 960
 CELL_HEIGHT = 540
 
 
-def _extract_json_candidate(text: str) -> str:
-    """从模型正文里抠 JSON：优先 ```` ```json ```` 围栏，其次第一个 ``{...}``。"""
-    fenced = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
-    if fenced and fenced.group(1):
-        return fenced.group(1).strip()
-    plain = re.search(r"\{[\s\S]*\}", text)
-    return plain.group(0).strip() if plain else ""
-
-
-def _normalize_grid_payload(payload: Any) -> dict[str, Any] | None:
-    """把「可能带 camelCase / 缺字段」的载荷归一成 ``{grid_prompt, cell_prompts}``。"""
-    if not isinstance(payload, dict):
-        return None
-
-    raw_grid = payload.get("grid_prompt")
-    if not isinstance(raw_grid, str):
-        raw_grid = payload.get("gridPrompt")
-    grid_prompt = raw_grid.strip() if isinstance(raw_grid, str) else ""
-
-    raw_cells = payload.get("cell_prompts")
-    if not isinstance(raw_cells, list):
-        raw_cells = payload.get("cellPrompts")
-    raw_cells = raw_cells if isinstance(raw_cells, list) else []
-
-    cell_prompts = []
-    for cell in raw_cells:
-        cell = cell if isinstance(cell, dict) else {}
-        # `Number(x ?? y ?? 0) || 0` —— NaN / 0 都归 0
-        number = cell.get("shot_number")
-        if number is None:
-            number = cell.get("shotNumber")
-        try:
-            shot_number = int(float(number)) if number is not None else 0
-        except (TypeError, ValueError):
-            shot_number = 0
-        frame_type = cell.get("frame_type")
-        if frame_type is None:
-            frame_type = cell.get("frameType")
-        prompt = str(cell.get("prompt") or "").strip()
-        entry = {
-            "shot_number": shot_number,
-            "frame_type": str(frame_type if frame_type is not None else "first_frame"),
-            "prompt": prompt,
-        }
-        if entry["prompt"]:
-            cell_prompts.append(entry)
-
-    if not grid_prompt:
-        return None
-    return {"grid_prompt": grid_prompt, "cell_prompts": cell_prompts}
-
-
-def _find_grid_payload(value: Any) -> dict[str, Any] | None:
-    """递归找宫格载荷（字符串会先尝试 JSON 解析 / 抠 JSON）。"""
-    if value is None:
-        return None
-
-    normalized = _normalize_grid_payload(value)
-    if normalized:
-        return normalized
-
-    if isinstance(value, str):
-        trimmed = value.strip()
-        if not trimmed or trimmed == "null":
-            return None
-        try:
-            return _find_grid_payload(json.loads(trimmed))
-        except (ValueError, TypeError):
-            candidate = _extract_json_candidate(trimmed)
-            if not candidate:
-                return None
-            try:
-                return _find_grid_payload(json.loads(candidate))
-            except (ValueError, TypeError):
-                return None
-
-    if isinstance(value, list):
-        for item in value:
-            found = _find_grid_payload(item)
-            if found:
-                return found
-        return None
-
-    if isinstance(value, dict):
-        for nested in value.values():
-            found = _find_grid_payload(nested)
-            if found:
-                return found
-
-    return None
+#: 宫格载荷的抽取/归一**单一真源**在 ``services/grid_payload.py``（2026-11-07 上收）。
+#: 起因：评测面（``agent/evaluation``）要按**生产同一套**口径解析宫格产出，两边各写一份
+#: 就是"评测对着自己定义的格式打分"那种假绿。这里只留同名别名，内部调用与既有测试零改动。
+_extract_json_candidate = grid_payload.extract_json_candidate
+_normalize_grid_payload = grid_payload.normalize_grid_payload
+_find_grid_payload = grid_payload.find_grid_payload
 
 
 async def try_agent_grid_prompt(

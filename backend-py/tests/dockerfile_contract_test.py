@@ -114,15 +114,18 @@ def main() -> int:
 
     # ⑦b 构建上下文里的大目录（2026-11-04 实测）：docker 把**整个工作区**打成上下文送 daemon，
     #     与 `COPY` 什么**无关** ⇒ 不排除就等于每次 build 先搬十几 GB（`desktop/src-tauri/target`
-    #     6.5 GB、`data/models` 3.68 GB、`data/ocr` 1.36 GB）。
+    #     6.5 GB、`models/` 3.6 GB、`indexes/` 2 GB）。
     #     ⚠️ 判**整行规则**而不是子串：`"data" in ignore` 会被「数据根… data/ocr」这类注释行或
     #     `data/static` 半条规则满足 ⇒ 看着绿、其实整根没挡 ✗（这正是本轮修掉的那处）
     rules = {ln.strip() for ln in ignore.splitlines()
              if ln.strip() and not ln.lstrip().startswith("#")}
     for big, why in (("desktop", "Rust 编译产物 6.5 GB；前端阶段只要 frontend/"),
-                     ("data", "媒体与模型 5 GB（VOLUME 挂宿主，镜像里只 mkdir）"),
-                     ("models", "词表 16 MB"), ("benchmarks", "评估用例 JSON"),
-                     ("backend-py/output", "引擎真跑产物"),
+                     ("data", "运行时数据 5 GB（VOLUME 挂宿主，镜像里只 mkdir）"),
+                     ("models", "模型素材：词表 18 MB + OCR 权重 1.8 GiB/份"),
+                     ("indexes", "知识库派生索引 2 GB（容器内没有知识库正文）"),
+                     ("corpus", "语料：playbook 2 MB + prompt-corpus 第三方文本"),
+                     ("benchmarks", "评估用例 JSON"),
+                     ("backend-py/output", "已退役的产物区（2026-11-07 产物统一进 <dataRoot>/；规则留作兜底）"),
                      ("backend-py/_bench", "调试草稿区")):
         check(f"dockerignore: 整根排除 {big}（{why}）", big in rules, sorted(rules))
 

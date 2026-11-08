@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import facade
+from . import facade, hooks
 
 EXIT_OK = 0
 EXIT_NOT_READY = 1
@@ -40,6 +40,10 @@ def _emit(payload: dict[str, Any], *, as_json: bool, text: str = "") -> None:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     data = facade.capabilities()
     backend = data["backend"]
+    #: ⭐ 接线状态（进程态）**只挂在这里**，不进 `capabilities()` —— 那是静态能力表
+    #: （`engine_env_docs_test` 拿它跟 `docs/env/*.json` 逐字段对，两次跑必须逐字相同 ✓）。
+    wiring = hooks.status()
+    data = dict(data, wiring=wiring)
     lines = [
         f"engine   : {data['engine']}  api={data['apiVersion']}  schema={data['schemaVersion']}",
         f"python   : {data['python']}",
@@ -55,6 +59,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         f"未验收   : {', '.join(data['unverified'])}",
         "边界     : " + "；".join(data["limits"]),
     ]
+    #: ⚠️ 未登记**不是故障**：纯引擎进程（CLI / 单测 / 画布只做装配）本来就没有服务层那一步 ✓。
+    #: 但也不能一句"正常"带过 ✓✗ —— 少登记一个源的症状是「建议为空 / 证据核不过 / 拒写」，
+    #: 外部读起来跟「本来就没有数据」一模一样 ✓，所以这里必须点明是**降级**而不是没数据 ✓。
+    if wiring["allProvided"]:
+        #: ⚠️ 别拿 `wiring['sources']` 去查 `registered` ✓✗ —— 反验时抓到过：两处各说各话
+        #: 时这里抛 `KeyError`，**诊断命令自己炸了**。诊断口的原则是「状态再烂也只报不炸」✓。
+        tags = ", ".join(f"{wiring['registered'][n]}@{n}" for n in wiring["registered"]) or "无"
+        lines.append(f"接线     : {len(wiring['sources'])} 个源全部登记 ✓（{tags}）")
+    else:
+        lines.append(f"接线     : 未登记 {', '.join(wiring['missing'])}"
+                     + (f"；已登记 {', '.join(wiring['registered'])}" if wiring["registered"] else "")
+                     + "　⇒ 用到它们的口会答「没接入」（**不是**没有数据 ✓✗）")
+        lines.append("           纯引擎进程没有服务层登记属常态 ✓；Web 通路由 app/main.py 登记 ✓")
     #: ⭐ 环境既知缺口（E0.1）：**空数组不等于已验收**，只是「没有已知前提缺失」
     gaps = data.get("knownGaps") or []
     lines.append("既知缺口 : " + ("无 ✓（≠ 已验收）" if not gaps
@@ -162,8 +179,89 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_feasibility(args: argparse.Namespace) -> int:
+    """§5.1／§5.3：**这台机器跑这一档要多少、跑不跑得动** ✓ ⇒ 退出码机器可判 ✓。
+
+    退出码与 :func:`_cmd_readiness` **同口径** ✓✗（0＝能跑 / 1＝跑不了 / 2＝参数错）：
+
+    * ``perfect`` / ``good`` ⇒ **0** ✓（权重装得下 ✓）；
+    * ``marginal`` ⇒ **0**，但**一定要看 ``degraded``** ✓（能跑、要联合驻留或被挤到 CPU ⇒ 慢 ✓）；
+    * ``too_tight`` ⇒ **1** ✓（权重本身放不下 ⇒ 装不起来，与"慢"是两件事 ✓）。
+
+    ⚠️ 不给 ``--strict`` 时 ``marginal`` 判 0 是**有意的** ✗：它跑得动 ✓，判 1 会让 CI 把
+    "这台机器能出图、只是慢"当成"跑不了" ✓✗。要拿"必须宽裕"当门槛 ⇒ ``--strict`` ✓。
+    """
+    samples: list[float] | None = None
+    matched = 0
+    if args.measure:
+        try:
+            samples = [float(part) * 1000.0 for part in str(args.measure).replace("，", ",").split(",")
+                       if part.strip()]
+        except ValueError as err:
+            raise facade.EngineError(f"--measure 只认秒数（逗号分隔，如 `95,102,88`），收到 "
+                                     f"{args.measure!r}", code="E_BAD_CONFIG") from err
+        if not samples:
+            raise facade.EngineError("--measure 给了空清单 ⇒ 要秒数，如 `--measure 95,102`",
+                                    code="E_BAD_CONFIG")
+        matched = len(samples)
+    data = facade.feasibility(args.stage, root=args.root, capacity_gib=args.capacity,
+                              policy=args.policy, size=args.size,
+                              samples=samples, matched=matched)
+    verdict = str(data.get("verdict") or "")
+    decision = data.get("decision") or {}
+    ok = verdict != "too_tight" if not args.strict else verdict in ("perfect", "good")
+    if args.json:
+        _emit(data, as_json=True)
+        return EXIT_OK if ok else EXIT_NOT_READY
+    print(f"阶段 {data['stage']}  ⇒ {verdict}（policy={data.get('policy')}）")
+    if data.get("verdictWhy"):
+        print(f"        {data['verdictWhy']}")
+    if data.get("downgraded"):
+        print(f"  ! 降档：{data.get('downgradeWhy')}")
+    need, have = data.get("need") or {}, data.get("have") or {}
+    print(f"  要  卡上峰值 {need.get('gpuGiB')} GiB（三件合计 {need.get('sumGiB')} GiB，"
+          f"装法 {need.get('mode')}）")
+    print(f"  有  卡 {have.get('gpuTotalGiB')} GiB（空闲 {have.get('gpuFreeGiB')}）"
+          f" / 内存 {have.get('hostFreeGiB')}/{have.get('hostTotalGiB')} GiB")
+    if decision:
+        print(f"  判  device={decision.get('device')}　residency={decision.get('residency')}"
+              f"　degraded={decision.get('degraded')}")
+        if decision.get("reason"):
+            print(f"        {decision['reason']}")
+    size = data.get("size") or {}
+    if size:
+        detail = size.get("problem") or size.get("note") or ""
+        print(f"  尺寸 {size.get('asked')} ⇒ {size.get('snapped') or '不吸附'}"
+              f"（步长 {size.get('step')}，{size.get('megapixels')} MP）"
+              + (f"　! {detail}" if detail else ""))
+    estimate = data.get("estimate") or {}
+    run = estimate.get("runSeconds") or {}
+    sample_note = f"　样本 {estimate.get('samples')}（闸门 {estimate.get('minSamples')}）"
+    if run:
+        print(f"  估时 整任务 p50 {run.get('p50')} 秒 / p95 {run.get('p95')} 秒{sample_note}")
+    else:
+        print(f"  估时 整任务 未知（basis={estimate.get('basis')}）{sample_note}")
+    if estimate.get("note"):
+        print(f"        {estimate['note']}")
+    for text in data.get("advice") or []:
+        print(f"  建议 {text}")
+    return EXIT_OK if ok else EXIT_NOT_READY
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
-    data = facade.status()
+    #: ⭐ 机器档（G1）✓：``--profile`` 只影响 ``budgets`` 那一栏 ✓ —— **不改装载** ✗（要改档得重装 ✓）。
+    #: ⚠️ 拼错**当场报用法错**（退出 2 ✓）✗✗：不归一就往下传 ⇒ `EngineRuntime.status` 抛 `ValueError` ⇒
+    #: 落到 ``main`` 最后那条兜底 ⇒ 退出 3 且写「E_INTERNAL」✓✗ —— 用户只是把 `l1` 写成了 `low1` ✓。
+    key = args.profile
+    if key is not None:
+        from . import profile as machine_profile  # noqa: PLC0415
+
+        try:
+            key = machine_profile.normalize_profile(key)
+        except ValueError as err:
+            raise facade.EngineError(str(err), code="E_BAD_CONFIG",
+                                     hint=f"可用：{sorted(machine_profile.PROFILES)}") from err
+    data = facade.status(profile=key)
     if args.json:
         _emit(data, as_json=True)
     else:
@@ -172,6 +270,23 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print("  已装: " + (", ".join(k for k, v in loaded.items() if v) or "无"))
         if data.get("vram"):
             print(f"  显存: {data['vram']}")
+        #: 档位与预算两行分开打 ✓✗：``assumed`` 是**假设**、``gpuGiB`` 是**实测** ✓
+        #: （混一行读就会把「我以为有 8 GiB」当成真读数 ✓✗）。
+        prof = data.get("profile") or {}
+        budget = data.get("budgets") or {}
+        if prof:
+            print(f"  机器档: {prof.get('profile')}（来源 {prof.get('source')}）"
+                  f"  配额 {budget.get('hostRatio')}")
+        if budget:
+            def _gib(value: Any) -> str:
+                return "未知" if value is None else f"{value} GiB"
+
+            print(f"  卡: {_gib(budget.get('gpuGiB'))}（可用 {_gib(budget.get('gpuFreeGiB'))}）"
+                  f"  内存: {_gib(budget.get('hostGiB'))}（可用 {_gib(budget.get('hostFreeGiB'))}）"
+                  f"  配额 {_gib(budget.get('hostQuotaGiB'))}"
+                  f"　读数 source={budget.get('source')}")
+            if budget.get("hint"):
+                print(f"  ! {budget['hint']}")
     return EXIT_OK
 
 
@@ -204,6 +319,27 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--capacity", type=float, default=None, help="显存容量 GiB")
         item.set_defaults(func=func)
 
+    #: ⭐ §5.1／§5.3：**任务级可行性**（能不能跑 + 要多少 + 估时）✓
+    #: ⚠️ 名字**不是** ``plan`` ✗✗：`plan` 早就被"装载计划"占了 ✓（退出码语义＝件齐不齐 ✓）——
+    #: 把它的退出码改成 verdict 会让既有脚本把"缺件"读成"卡不够" ✓✗。本命令的名字与
+    #: ``GET /engine/feasibility``、``facade.feasibility`` **同一个词** ✓（三处同源 ✓）。
+    feasible = _child("feasibility", "能不能跑（verdict + 要多少 + 估时 + 尺寸吸附）")
+    feasible.add_argument("--stage", default="h3", help="阶段（默认 h3）")
+    feasible.add_argument("--root", default=None, help="钉死权重根目录（默认按清单+探测）")
+    feasible.add_argument("--capacity", type=float, default=None,
+                          help="假装卡只有这么大（GiB；不给就用真读数）")
+    feasible.add_argument("--policy", default="auto", help="auto/gpu/cpu/balanced（默认 auto）")
+    feasible.add_argument("--size", default=None, help="目标尺寸，如 1024x1024（吸附口径委托画布）")
+    feasible.add_argument("--measure", default=None,
+                          help="实测整任务秒数（逗号分隔，如 `95,102,88`）⇒ 估时用实测而不是表")
+    #: ⚠️ 有意**不**提供 ``--from-ledger`` ✗✗：跑次台账在业务库 ✓，而本模块是**引擎内核**
+    #: （`feasibility.py` 纯函数 ✓、零 IO ✓）。要从台账取样本 ⇒ 走**服务层**
+    #: `app.services.engine_readiness.task_feasibility(use_ledger=True)` ✓ 或
+    #: `GET /engine/feasibility?fromLedger=true` ✓ —— 那两处才许碰库 ✓。
+    feasible.add_argument("--strict", action="store_true",
+                          help="只认 perfect/good（marginal 也判 1；用在「必须宽裕」的闸门上）")
+    feasible.set_defaults(func=_cmd_feasibility)
+
     inspect = _child("inspect", "单文件核对")
     inspect.add_argument("path")
     inspect.set_defaults(func=_cmd_inspect)
@@ -214,7 +350,10 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--out", default=None, help="写到文件而不是 stdout")
     manifest.set_defaults(func=_cmd_manifest)
 
-    status = _child("status", "运行时事实")
+    status = _child("status", "运行时事实（含机器档与预算）")
+    #: ⚠️ ``--profile`` 只换**预算那几行** ✓，不装载 ✗ —— 与 ``GET /engine/runtime?profile=`` 同一份事实 ✓
+    status.add_argument("--profile", default=None,
+                        help="机器档 auto/gpu/l1/l2/cpu（只影响 budgets，不装载）")
     status.set_defaults(func=_cmd_status)
     return parser
 

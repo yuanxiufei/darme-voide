@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "apiVersion": "1.0.0",
   "engine": "darme-engine (in-process)",
   "python": "3.12.10",
@@ -120,11 +120,15 @@
     "scaleSuffixes": [
       ".weight_scale_inv",
       ".weight_scale",
+      ".scale_weight",
       ".scales",
       ".scale",
       ".scale_inv"
     ],
     "supportedFormats": [
+      "convrot_w4a4",
+      "float8_e4m3fn",
+      "float8_e5m2",
       "nvfp4"
     ],
     "unsupportedFamilies": [],

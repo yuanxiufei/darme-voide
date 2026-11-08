@@ -55,14 +55,15 @@ def main() -> int:  # noqa: C901
           set(et.LITERAL_KINDS) == set(et.AGENT_BY_KIND) == set(et.STATEMENT_KEYS_BY_KIND)
           and set(et.AGENT_BY_KIND) == set(et.RUBRIC_KEYS_BY_KIND),
           (et.LITERAL_KINDS, list(et.AGENT_BY_KIND)))
-    check("契约: 四种 kind 的映射值就是 Agent 类型",
+    check("契约: 五种 kind 的映射值就是 Agent 类型",
           et.AGENT_BY_KIND == {"storyboard": "storyboard_breaker", "extractor": "extractor",
                                "script_rewriter": "script_rewriter",
-                               "voice_assigner": "voice_assigner"})
+                               "voice_assigner": "voice_assigner",
+                               "grid_prompt": "grid_prompt_generator"})
 
     metas = cat.list_benchmark_cases()
-    check("目录: 基准目录里 4 个 case 都能列出（只有 id/kind/agentType 三个键）",
-          len(metas) == 4
+    check("目录: 基准目录里 5 个 case 都能列出（只有 id/kind/agentType 三个键）",
+          len(metas) == 5
           and all(set(m) == {"id", "kind", "agentType"} for m in metas),
           metas)
     check("目录: agentType 由 kind 映射得出（不是文件里的字段说了算）",
@@ -81,7 +82,7 @@ def main() -> int:  # noqa: C901
         if not ok:
             shapes_ok = False
             detail.append((kind, sorted(case), sorted(case["statement"]), sorted(case["rubric"])))
-    check("契约: 四个真实 case 的 statement/rubric 键与记录完全一致", shapes_ok, detail)
+    check("契约: 五个真实 case 的 statement/rubric 键与记录完全一致", shapes_ok, detail)
     check("目录: 未知 id -> None（不抛）", cat.load_case_by_id("没有这个 case") is None)
 
     # 目录定位与容错
@@ -298,6 +299,86 @@ def main() -> int:  # noqa: C901
           [r["kind"] for r in (perfect, perfect_ex, perfect_sw, perfect_vo)]
           == ["storyboard", "extractor", "script_rewriter", "voice_assigner"]
           and all(r["caseId"] == "" for r in (perfect, perfect_ex, perfect_sw, perfect_vo)))
+
+    # ================= 宫格提示词评分（缺口 8 第 5 类基准） =================
+    rubric_gp = {"rows": 2, "cols": 2, "minGridPromptLength": 120,
+                 "minCellPromptLength": 40, "forbiddenTags": ["[", "<", "TODO", "xxx"]}
+    grid_text = (
+        "A 2x2 four-panel cinematic grid of a hospital night shift. exactly 4 visible panels, "
+        "no merged panels, no missing panels, consistent art style, cinematic quality, "
+        "cold teal corridor light with warm desk lamp accents."
+    )
+    assert len(grid_text) >= 120
+
+    def _grid_case(cells: list[str], grid: str = grid_text) -> dict:
+        return {"grid_prompt": grid, "cell_prompts": [
+            {"shot_number": index + 1, "frame_type": "first_frame", "prompt": text}
+            for index, text in enumerate(cells)
+        ]}
+
+    #: 合规产出：英文散文里带「格1／图片1」这类**系统提示词自己规定**的中文标签
+    LABELED = [
+        "格1（row 1 col 1）: medium shot, a young nurse runs down the hospital corridor "
+        "holding a chart, sweat on her temple, cold overhead light.",
+        "格2（row 1 col 2）: close-up, a surgeon glances at the ECG monitor, green waveform "
+        "reflected on his cheek, low-key lighting.",
+        "格3（row 2 col 1）: wide shot, the nurse pushes a half-open door at night and sees him "
+        "staring at a yellowed medical record, warm desk lamp.",
+        "格4（row 2 col 2）: backlit silhouette, the surgeon closes the record, cold gaze, "
+        "rim light on his shoulders, cinematic quality.",
+    ]
+    perfect_gp = sc.score_grid_prompts(_grid_case(LABELED), rubric_gp)
+    check("宫格: 合规产出 -> 100 分、权重 25/25/20/15/15、kind=grid_prompt",
+          perfect_gp["total"] == 100
+          and [d["max"] for d in perfect_gp["dimensions"]] == [25, 25, 20, 15, 15]
+          and [d["name"] for d in perfect_gp["dimensions"]]
+          == ["提示词长度", "格数吻合", "英文提示词", "无模板残留", "格间不重复"]
+          and perfect_gp["kind"] == "grid_prompt" and perfect_gp["caseId"] == "",
+          (perfect_gp["total"], [d["score"] for d in perfect_gp["dimensions"]]))
+    check("宫格: **合规中文标签不扣分** —— 「格1」这类标签占比个位数（< 15%）",
+          perfect_gp["dimensions"][2]["score"] == 20,
+          perfect_gp["dimensions"][2])
+
+    check("宫格: payload=None -> **五维全 0**（不是「跳过」，没产出就是没分）",
+          sc.score_grid_prompts(None, rubric_gp)["total"] == 0
+          and [d["score"] for d in sc.score_grid_prompts(None, rubric_gp)["dimensions"]]
+          == [0, 0, 0, 0, 0])
+
+    short = sc.score_grid_prompts(_grid_case(["too short"] * 1 + LABELED[1:]), rubric_gp)
+    check("宫格: 单格过短 -> 长度维按比例（整体满 + 单格 3/4 ⇒ (1+0.75)/2×25 = 21.9）",
+          short["dimensions"][0]["score"] == 21.9
+          and "3/4 格 ≥ 40 字符" in short["dimensions"][0]["detail"],
+          short["dimensions"][0])
+
+    fewer = sc.score_grid_prompts(_grid_case(LABELED[:3]), rubric_gp)
+    check("宫格: 少一格 -> 格数维 3/4（18.8 分）且 detail 写明期望 2×2=4",
+          fewer["dimensions"][1]["score"] == 18.8
+          and "3 格（期望 2×2=4）" in fewer["dimensions"][1]["detail"],
+          fewer["dimensions"][1])
+
+    chinese = sc.score_grid_prompts(
+        _grid_case(["林晚抱着病历小跑进手术室，额角还沁着汗珠，顶灯在身后拉出长影。"] + LABELED[1:]),
+        rubric_gp)
+    check("宫格: 真写成中文散文 -> 英文维 4/5（16 分），不是「带中文一律 0」",
+          chinese["dimensions"][2]["score"] == 16
+          and chinese["dimensions"][2]["detail"].startswith("1/5"),
+          chinese["dimensions"][2])
+
+    dirty = sc.score_grid_prompts(
+        _grid_case(LABELED[:3] + ["[describe the fourth panel here] a cold corridor at night"]),
+        rubric_gp)
+    check("宫格: 占位符残留 -> 无模板维 4/5（12 分）并点名标签集",
+          dirty["dimensions"][3]["score"] == 12 and "残留占位符" in dirty["dimensions"][3]["detail"],
+          dirty["dimensions"][3])
+
+    dup = sc.score_grid_prompts(_grid_case([LABELED[0]] * 4), rubric_gp)
+    check("宫格: 四格复制同一句 -> 格间不重复 1/4（3.8 分）",
+          dup["dimensions"][4]["score"] == 3.8 and dup["dimensions"][4]["detail"].startswith("1/4"),
+          dup["dimensions"][4])
+
+    check("宫格: 五个评分器的 kind 各自正确",
+          [r["kind"] for r in (perfect, perfect_ex, perfect_sw, perfect_vo, perfect_gp)]
+          == ["storyboard", "extractor", "script_rewriter", "voice_assigner", "grid_prompt"])
 
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]

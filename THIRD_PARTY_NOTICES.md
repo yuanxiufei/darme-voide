@@ -99,6 +99,7 @@ SDXL 官方仓、SEEDVR2 视频修复（ByteDance SeedVR 系）），再分发�
 | safetensors | 0.8.0 | Apache-2.0 | `License ::` 分类器（该包 `License` 字段为空） |
 | pillow | 13.0.0 | MIT-CMU | `License` |
 | transformers | 5.21.0 | Apache 2.0 License | `License`（上游写法如此） |
+| pypdfium2 | 5.15.0 | BSD-3-Clause, Apache-2.0, dependency licenses | `License`（上游把 PDFium 的 BSD-3 与自身 Apache-2.0 并列，照抄） |
 
 ⚠️ 三者口径注意：
 
@@ -127,6 +128,25 @@ SDXL 官方仓、SEEDVR2 视频修复（ByteDance SeedVR 系）），再分发�
    （`app/services/engine/win_io.py` / `prefetch.py`），`Strata`＋`ds4` 只贡献**一个公式**
    （`gguf_dequant.py::_dequant_q5_k`）⇒ 已登记在下面第五节，
    许可原文随代码入仓 `docs/third-party/`；除这三条外，`reference/` 仍不进产物链路。
+
+4. ~~**`ocr_index.py`（扫描件 OCR 线）按需 `import fitz`，即 PyMuPDF —— AGPL-3.0**~~
+   ✅ **2026-11-07 已摘掉**：那条线现在与主链路共用 `pypdfium2`（BSD-3/Apache-2.0）——
+   取文字层 `get_textpage().get_text_range()`、渲染 `page.render(scale=dpi/72, rev_byteorder=True)`、
+   数页数 `len(doc)` 三件事 PDFium 都做得了，`page.get_pixmap()` 换成 `PdfPage.render()` 即可，
+   没理由为省二十行代码背 AGPL。同批改动：`requirements-ocr.txt` 的 `pymupdf>=1.24.0` →
+   `pypdfium2>=4.0`；`tests/ocr_index_test.py` 造 PDF 样本从 fitz 改成**手写最小 PDF**
+   （生成器与被测实现同库，测的就是那个库自己）；`tests/ocr_engine_smoke.py` 改走
+   `ocr_index._pdf_open/_pdf_page_image`，不再自带一份渲染。
+   ⇒ **本仓产品代码与测试代码的 AGPL 使用已清零**。仅剩 `backend-py/_bench/` 下 **14 个**
+   一次性体检脚本（`scan_all.py`／`scan_textlayer.py`／`scan_risk.py`／`probe_accuracy.py`
+   及 `probe_moji*` 等）仍 `import fitz` —— 它们 `git ls-files` **零登记**、不随安装包分发、
+   不被任何测试调用，成果是 `_bench/*.txt` 里那批语料质量数字（文档引用时可回溯），不构成分发面。
+    ✅ **2026-11-07 同日也一并迁走**：新增 `_bench/pdfium_compat.py`（`pypdfium2` 之上的极薄
+    同名适配层，只实现这 14 份真用到的 `open/page_count/doc[i]/get_text("text")/get_pixmap/
+    is_encrypted`），脚本侧只把 `import fitz` 换成 `import pdfium_compat as fitz`，调用处一字未改
+    ⇒ **连本地体检脚本也不再需要 PyMuPDF，全仓 `import fitz` 归零**。两处口径差写在适配层模块头：
+    PDFium 没有「是否加密」旗标（要密码的文件打不开 ⇒ 能打开即 `False`）、`get_text_range()`
+    不按块补换行（数字数／找乱码等价，别拿它跟库内 `chunks` 逐行 diff）。
 
 ## 四、机器判据
 
@@ -168,7 +188,7 @@ SDXL 官方仓、SEEDVR2 视频修复（ByteDance SeedVR 系）），再分发�
 Q5_K 那条另有判据：`tests/engine_gguf_dequant_test.py` 的 ⑤ 系列（手造块精确值 ＋ 与标量参考版
 4097 块随机字节**逐位对拍** ＋ 盘上 `krea2_turbo-Q4_K_M.gguf` 的 63 张真 Q5_K 张量）。
 
-### 五·补：仓内词表资产（`models/tokenizers/`）
+### 五·补：词表资产（`models/tokenizers/`，**本地素材、不入库**）
 
 `models/tokenizers/{qwen3_4b,qwen3vl_4b,qwen35_9b}/`（2026-11-02 落）＝ Qwen 官方 HF 仓库的
 分词器三件（`tokenizer_config.json`＋`vocab.json`＋`merges.txt`；**Apache-2.0**；经 hf-mirror.com
@@ -183,7 +203,7 @@ Q5_K 那条另有判据：`tests/engine_gguf_dequant_test.py` 的 ⑤ 系列（�
 | 目录 | 是什么 | 来源 / 许可 | 本仓怎么用 |
 |---|---|---|---|
 | `剧本知识库/` | 供应商预建的影视剧本资料库：约 29 GB 原文（PDF/剧本/写作书）＋一份 SQLite `fts5 trigram` 索引（5403 条文档 / 128166 片段） | **来源与许可均不明**（随盘到货，无 LICENSE、无 README 出处） | **只读**：不起副本、不重建索引、不改文件。检索层 `app/services/script_library.py` 以 `mode=ro` 打开那份索引；Agent 工具 `search_script_library` 与 CLI `app/scripts/corpus/library.py` 共用它。仅作**写法与结构**参考，输出不许搬运原文句子 |
-| `data/playbook/` | 137 份方法类 Markdown（招式库、造型库、特效库、分镜规范、技法资料库等**原料**），无自带索引、无代码；`film-expert-bridge/` 下另有 combat 77 ＋ ultimate 11 份专项素材（2026-11-04 扁平化：原 `packs/film-expert-bridge/references/library/`，`packs`／`references`／`library` 三层壳已删） | **来源与许可均不明**（课程包随盘到货，无 LICENSE） | **2026-11-04 起入仓分发**（1.48 MiB，创作者裁定「有用的资料必须进系统（前后端 / data / 知识库任一）」）：`search_playbook()` 在进程内按小节切块打分（2-gram 加权），不落中间产物；Agent 走 `search_script_library(source="playbook")`，知识库页面走 `/api/v1/knowledge/*`（同源）。skill 侧另装**归纳出的判据**八份：`video-prompt-library/references/` 下 `shot-directing.md`／`performance-directing.md`／`review-and-repair.md`／`human-texture.md`、`audio-prompt-library/references/mix-layers.md`、`wuxia-action/combat-choreography/references/` 下 `hit-reaction-and-moves.md`／`shot-spec-and-break.md`／`action-vocabulary.md`，不依赖本目录也能出稿。同日清理：先删空壳模板／安装脚本／宣传图／导出 docx（4.6 → 1.9 MiB），再清 94 份课程机制件（交互菜单／专家路由与项目模板／飞书下载入口／他人机器路径／已抄完的源文件／课程文档），267 → 137 文件 |
+| `corpus/playbook/` | 137 份方法类 Markdown（招式库、造型库、特效库、分镜规范、技法资料库等**原料**），无自带索引、无代码；`film-expert-bridge/` 下另有 combat 77 ＋ ultimate 11 份专项素材（2026-11-04 扁平化：原 `packs/film-expert-bridge/references/library/`，`packs`／`references`／`library` 三层壳已删） | **来源与许可均不明**（课程包随盘到货，无 LICENSE） | **2026-11-04 起入仓分发**（1.48 MiB，创作者裁定「有用的资料必须进系统（前后端 / data / 知识库任一）」）：`search_playbook()` 在进程内按小节切块打分（2-gram 加权），不落中间产物；Agent 走 `search_script_library(source="playbook")`，知识库页面走 `/api/v1/knowledge/*`（同源）。skill 侧另装**归纳出的判据**八份：`video-prompt-library/references/` 下 `shot-directing.md`／`performance-directing.md`／`review-and-repair.md`／`human-texture.md`、`audio-prompt-library/references/mix-layers.md`、`wuxia-action/combat-choreography/references/` 下 `hit-reaction-and-moves.md`／`shot-spec-and-break.md`／`action-vocabulary.md`，不依赖本目录也能出稿。同日清理：先删空壳模板／安装脚本／宣传图／导出 docx（4.6 → 1.9 MiB），再清 94 份课程机制件（交互菜单／专家路由与项目模板／飞书下载入口／他人机器路径／已抄完的源文件／课程文档），267 → 137 文件 |
 
 只有 `剧本知识库/` 还在 `.gitignore` 里（29 GB 二进制、版权不明 ⇒ 只读参考，绝不入仓）。
 方法语料 137 份 md 已入库：它只有 1.48 MiB，而入库前的实际后果是**新克隆的仓库里知识库页面与

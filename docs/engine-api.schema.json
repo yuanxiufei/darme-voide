@@ -6,7 +6,7 @@
     "只登记**顶层**与**关键嵌套**（不是全字段树）：全树会随内部实现抖动，顶层才是对外承诺。"
   ],
   "apiVersion": "1.0.0",
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "interfaces": {
     "capabilities": {
       "top": ["apiVersion", "attentionBackends", "backend", "canvasStages", "catalog", "devicePolicy",
@@ -40,16 +40,22 @@
       }
     },
     "status": {
-      "top": ["apiVersion", "available", "backend", "busy", "cache", "canGenerate", "codeGaps",
-              "current", "dependencies",
-              "device", "deviceSource", "externalDependencies", "loadReport", "loaded", "lora",
-              "name", "note", "pendingParts", "queued", "queueLimit", "reason", "schemaVersion",
-              "synthetic", "taskHistoryLimit", "tasks"],
+      "top": ["apiVersion", "available", "backend", "budgets", "busy", "cache", "canGenerate",
+              "codeGaps", "current", "dependencies",
+              "device", "deviceSource", "diskCache", "externalDependencies", "loadReport", "loaded",
+              "lora", "name", "note", "pendingParts", "profile", "queued", "queueLimit", "reason",
+              "schemaVersion", "synthetic", "taskHistoryLimit", "tasks"],
       "nested": {
         "loaded": ["audioVae", "dit", "textEncoder", "vae"],
         "cache": ["evictions", "hits", "misses", "note", "recent", "scope", "since"],
         "lora": ["deduped", "entries", "entryCount", "freed", "freedBytes", "hits", "misses",
-                 "note", "recent", "refTotal", "scope", "since", "tensorBytes", "tensorBytesUnknown"]
+                 "note", "recent", "refTotal", "scope", "since", "tensorBytes", "tensorBytesUnknown"],
+        "budgets": ["assumed", "gpuFreeGiB", "gpuGiB", "hint", "hostFreeGiB", "hostGiB",
+                    "hostQuotaGiB", "hostRatio", "profile", "source"],
+        "profile": ["known", "note", "profile", "source"],
+        "diskCache": ["dir", "diskGiB", "enabled", "failed", "files", "freeGiB", "hitGiB", "hits",
+                      "lastReason", "limitGiB", "misses", "note", "refused", "sidecars",
+                      "writeGiB", "written"]
       }
     },
     "inspect_weights": {

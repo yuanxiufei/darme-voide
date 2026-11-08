@@ -12,10 +12,12 @@ ffprobe 探测路径**不打桩但走不到**（种子里给显式 duration，�
 """
 from __future__ import annotations
 
+import ast
 import io
 import os
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -29,11 +31,14 @@ from app.main import app  # noqa: E402
 from app.core.models import characters, dramas, episodes, scenes, storyboards  # noqa: E402
 from app.core.response import now  # noqa: E402
 from app.services.export_service import (  # noqa: E402
+    EXPORT_TMP_PREFIX,
     build_export_zip,
     collect_drama_export_files,
+    export_tmp_dir,
     ext_of,
     sanitize_name,
     seconds_to_timecode,
+    sweep_stale_exports,
     to_local_abs_path,
 )
 from app.services.frame_extractor import to_abs_media_path  # noqa: E402
@@ -199,6 +204,61 @@ def main() -> int:  # noqa: C901
     with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as archive:
         check("端点: 返回的字节是**合法 ZIP**，内含成片",
               archive.namelist() == ["videos/ep01_第一集_开场.mp4"])
+
+    # ── 落点与泄漏（2026-11-07）──────────────────────────────────────────────
+    root = export_tmp_dir()
+    check("落点: 导出包在**专属**子目录 `<系统临时>/darme-export` 下（不是 %TEMP% 根上）",
+          Path(root) == Path(tempfile.gettempdir()) / EXPORT_TMP_PREFIX and Path(root).is_dir(), root)
+    probe_media = _write_media("export_probe/a.txt", b"x")
+    produced = build_export_zip([{"absPath": probe_media, "zipPath": "a.txt"}], sweep=False)
+    check("落点: `build_export_zip` 真把包写进专属子目录",
+          Path(produced).parent == Path(root), produced)
+    os.remove(produced)
+
+    stale = Path(root) / "export-stale-probe.zip"
+    fresh = Path(root) / "export-fresh-probe.zip"
+    other = Path(root) / "keep-me.txt"
+    for item in (stale, fresh, other):
+        item.write_bytes(b"x")
+    old = 8 * 3600
+    os.utime(stale, (time.time() - old, time.time() - old))
+    removed = sweep_stale_exports()
+    check("清扫: 只清超龄 `*.zip`，新鲜件与非 zip 一律不动",
+          str(stale) in removed and fresh.exists() and other.exists(), {"removed": removed})
+    fresh.unlink()
+    other.unlink()
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "export.py").read_text(
+        encoding="utf-8")
+    check("泄漏: 两个导出端点的 `except` 都自己删临时包（background 在异常路径跑不到）",
+          src.count("if zip_path:") == 2 and src.count("_remove_quietly(zip_path)") >= 2,
+          {"if zip_path": src.count("if zip_path:"),
+           "remove": src.count("_remove_quietly(zip_path)")})
+
+    # 启动兜底（2026-11-07）：清扫原先**只在建包前**跑 ⇒ 用户几个月不导出就永远等不到，
+    # 而躺着的那包可能几十 GB ✓✗。lifespan 里必须也有一次，且必须被 try 包住
+    # （清理失败绝不能让服务起不来 ✓）。
+    main_src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
+        encoding="utf-8")
+    lifespan_fn = next(
+        (n for n in ast.parse(main_src).body
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan"),
+        None,
+    )
+
+    def _calls_sweep(node: ast.AST) -> bool:
+        return any(
+            isinstance(c, ast.Call) and getattr(c.func, "id", None) == "sweep_stale_exports"
+            for c in ast.walk(node)
+        )
+
+    check("兜底: `main.py` 的 lifespan 启动时清一次陈旧导出包（只靠建包前清扫等不到）",
+          lifespan_fn is not None and _calls_sweep(lifespan_fn),
+          "lifespan 里没接启动兜底")
+    guarded = lifespan_fn is not None and any(
+        isinstance(n, ast.Try) and _calls_sweep(n) for n in ast.walk(lifespan_fn)
+    )
+    check("兜底: 那次清扫被 `try` 包住（清不掉不阻断启动）", guarded, "裸调用会让清理失败拖死启动")
 
     failed_items = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

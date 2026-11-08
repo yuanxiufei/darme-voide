@@ -6,8 +6,13 @@
 * ``GET  /api/v1/evaluation/cases``  列出可用基准 case（id / kind / agentType）；
 * ``POST /api/v1/evaluation/evaluate/{case_id}``  用 **Reference 提示词**评测指定 case；
 * ``POST /optimize/{case_id}``、``GET /scheduler``、``POST /run`` —— 优化器与调度器均已实现。
+* ``POST /tune/{case_id}`` —— **本仓新增**（Node 侧没有）：参数调优（温度），见
+  ``agent/evaluation/param_optimizer.py``。缺口 4 第一格，不是 TS 对齐项。
+* ``POST /film/{episode_id}`` —— **本仓新增**：成片评测（评"这一集能不能交片"），
+  见 ``agent/evaluation/film_check.py``。缺口 8 的另一半，不是 TS 对齐项。
 
-⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册仅 1 条**：``storage/change``）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册 0 条** ——
+早先此处写「未注册仅 1 条：``storage/change``」，那条后来已迁）。
 
 ⚠️ 这 3 条**不需要显式委派**：显式委派只用于「会被已注册的**参数路由遮蔽**」的路径
 （如 ``GET /agent-configs/defaults`` 被 ``/{config_id}`` 吞掉）。这里 ``/optimize/{id}``、
@@ -31,7 +36,10 @@ from ..core.response import bad_request, not_found, success
 from ..services.agent_prompts import get_default_instructions
 from app.agent.evaluation.catalog import list_benchmark_cases, load_case_by_id
 from app.agent.evaluation.evaluator import evaluate_case
+from app.agent.evaluation.film_check import score_episode
 from app.agent.evaluation.optimizer import optimize_agent_prompt
+from app.agent.evaluation import tune_runtime
+from app.agent.evaluation.param_optimizer import normalize_options
 from app.agent.evaluation_scheduler import get_scheduler_state, run_evaluation_cycle
 from app.agent.evaluation.types import AGENT_BY_KIND
 from ..services.task_logger import log_task_error
@@ -60,6 +68,31 @@ async def evaluate_one(case_id: str, conn: Connection = Depends(get_conn)):
         return success(report)
     except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
         log_task_error("EvaluationAPI", "evaluate", {"error": str(err)})
+        return bad_request(str(err) or str(err.__class__.__name__))
+
+
+@router.post("/film/{episode_id}")
+def evaluate_film(episode_id: str, record: bool = True, conn: Connection = Depends(get_conn)):
+    """**成片评测**（知识闭环缺口 8 的另一半，**本仓新增**，不是 TS 对齐项）。
+
+    与上面四条的分工：那四条评的是**产出层**（提示词写得好不好、结构化输出够不够），
+    这条评的是**成片**（这一集真的能交片吗）。判据全部来自已经发生的事实 ——
+    分镜计划、最新成片、技术 QC 已量过的规格与 issue、人工复核已判过的结论，
+    **不重跑 ffmpeg**、**不调模型**、**不自造主观分**（理由见 ``film_check`` 模块抬头）。
+
+    ``record=false`` 时只出报告、不落 ``kind="eval"`` 跑次（用于"先看一眼"）。
+    ⚠️ 两处失败形态：``episode_id`` 不是正整数 → **400**（不是 404 —— 这是参数错，
+    不是"这一集不存在"）；成片/质检一条都没有 → **200 但 verdict=empty**，
+    因为"这集还没开工"是**事实**，不是错误。
+    """
+    try:
+        text_id = str(episode_id or "").strip()
+        if not text_id.isdigit() or int(text_id) <= 0:
+            return bad_request(f"episodeId 必须是正整数：{episode_id!r}")
+        report = score_episode(conn, int(text_id), record=record)
+        return success(report)
+    except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
+        log_task_error("EvaluationAPI", "film", {"error": str(err)})
         return bad_request(str(err) or str(err.__class__.__name__))
 
 
@@ -99,6 +132,100 @@ async def optimize_one(case_id: str, request: Request, conn: Connection = Depend
     except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
         log_task_error("EvaluationAPI", "optimize", {"error": str(err)})
         return bad_request(str(err) or str(err.__class__.__name__))
+
+
+@router.post("/tune/{case_id}")
+async def tune_params(case_id: str, request: Request):
+    """参数调优（缺口 4 第一格）：**同一份提示词**只换温度，按「均值涨幅 > 抖动带」判采纳。
+
+    body（可选）：``{repeat?, max_candidates?, auto_persist?, wait?, timeoutSeconds?}``。
+
+    ⚠️ **默认入队，不当场跑**（2026-11-07 改）：真机实测一轮 4 跑 = **423.9 秒**，挂在同步返回链上
+    的结果是「代理先超时、后台还在烧卡」—— 界面报失败而日志显示跑完，是最难查的一种。故：
+
+    * 默认 ⇒ 立刻返回 ``{taskId, status:"queued", queuePosition, pollUrl}``，进度查
+      ``GET /tune/{taskId}``（``doneRuns`` / ``totalRuns`` / ``stage`` / 跑完的 ``receipt``）；
+    * ``wait=true`` ⇒ 等同旧行为：等它跑完再返回回执（``timeoutSeconds``，默认 900 秒，
+      超时回当时快照并标 ``timedOut``，**任务本身不会因此停**）。脚本/探针用它最省事；
+    * 同一个 (agent, case) 已在队列里 ⇒ 不重复入队，返回 ``deduped=true``（同一份提示词跑第二遍
+      只是再烧七分钟）。
+
+    ⚠️ 三条参数口径（**在入队前**就验完，验不过根本不会进队列）：
+    ① ``repeat`` 默认 2，``< 2`` 是**硬错**（400）而不是悄悄抬到 2 —— 单次评测分不清「换温度了」
+    与「这次恰好抖高了」，替调用方改参数等于替他撒谎；
+    ② ``max_candidates`` 可以是 0（=只测基线，不下候选，用于先量抖动带）；
+    ③ ``auto_persist !== false`` ⇒ 只有显式 false 才关。
+    """
+    try:
+        case_def = load_case_by_id(case_id)
+        if case_def is None:
+            return not_found(f"未知基准 case：{case_id}")
+        agent_type = AGENT_BY_KIND.get(case_def.get("kind") or "")
+        if not agent_type:
+            return bad_request(f"未知 case kind：{case_def.get('kind')}")
+
+        body = await read_json(request)
+        options: dict[str, object] = {"autoPersist": body.get("auto_persist") is not False}
+        for src, dst in (("repeat", "repeat"), ("max_candidates", "maxCandidates")):
+            value = body.get(src)
+            is_integer_like = (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and float(value).is_integer()
+            )
+            # 给了非法值就**不认**（回默认），而不是 400：与 /optimize 的 iterations 同一口径。
+            # 唯一例外是 repeat<2 —— 那是口径错不是笔误，交给 normalize_options 当场拒。
+            if is_integer_like and value >= 0:
+                options[dst] = int(value)
+        # ⚠️ 校验只此一处（``normalize_options``）：入队时放行、排到才炸的那种错要烧掉前面的评测
+        options = normalize_options(options)
+
+        if not bool(body.get("wait")):
+            queued = tune_runtime.submit(
+                case_id=case_id, case_def=case_def, agent_type=agent_type, options=options,
+            )
+            return success(queued)
+
+        try:
+            timeout = float(body.get("timeoutSeconds") or body.get("timeout_seconds") or 0) or 900.0
+        except (TypeError, ValueError):
+            return bad_request(f"timeoutSeconds 不是数字（收到 {body.get('timeoutSeconds')!r} ✗）")
+        started = tune_runtime.submit(
+            case_id=case_id, case_def=case_def, agent_type=agent_type, options=options,
+        )
+        done = tune_runtime.wait(str(started["taskId"]), timeout=timeout)
+        if done is None:
+            return not_found(f"未知调优任务：{started['taskId']}")
+        if done.get("status") == "failed":
+            return bad_request(str(done.get("error") or "调优失败"))
+        return success({**done, "waited": True})
+    except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
+        log_task_error("EvaluationAPI", "tune", {"error": str(err)})
+        return bad_request(str(err) or str(err.__class__.__name__))
+
+
+@router.get("/tune")
+def list_tune_tasks(limit: int = 20):
+    """最近的调优任务（新的在前 —— 进程重启即清空，见 ``tune_runtime`` 模块头）。"""
+    return success({"tasks": tune_runtime.list_tasks(limit=limit)})
+
+
+@router.get("/tune/{task_id}")
+def tune_task(task_id: str):
+    """调优任务进度 / 回执：``status`` + ``doneRuns``/``totalRuns`` + ``stage``；跑完带 ``receipt``。"""
+    snapshot = tune_runtime.get(task_id)
+    if snapshot is None:
+        return not_found(f"未知调优任务：{task_id}")
+    return success(snapshot)
+
+
+@router.post("/tune/{task_id}/cancel")
+def cancel_tune_task(task_id: str):
+    """取消（**只在两次评测之间生效** —— 一次真模型生成从外面掐不断，见 ``tune_runtime`` 模块头）。"""
+    snapshot = tune_runtime.cancel(task_id)
+    if snapshot is None:
+        return not_found(f"未知调优任务：{task_id}")
+    return success(snapshot)
 
 
 @router.get("/scheduler")

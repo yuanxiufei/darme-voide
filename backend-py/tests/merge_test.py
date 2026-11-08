@@ -189,9 +189,10 @@ def main() -> int:  # noqa: C901
           concat_call[-1].replace("\\", "/").find("/merged/") >= 0
           and concat_call[-1].endswith(".mp4"), concat_call[-1])
     check(
-        "清理: concat 列表文件用完即删（temp 目录不留垃圾）",
-        not list((Path(get_storage_root()) / "temp").glob("*.txt")),
-        list((Path(get_storage_root()) / "temp").glob("*")),
+        "清理: concat 清单是**一次调用的中转件**（`TemporaryDirectory`）—— 压根不往 `static/temp` 写",
+        not (Path(get_storage_root()) / "temp").exists(),
+        list((Path(get_storage_root()) / "temp").glob("*"))
+        if (Path(get_storage_root()) / "temp").is_dir() else "目录都没建 ✓",
     )
 
     bgm_call = _FFMPEG_CALLS[1]

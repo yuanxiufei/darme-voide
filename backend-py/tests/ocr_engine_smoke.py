@@ -19,8 +19,7 @@ from pathlib import Path
 BACKEND_PY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_PY))
 
-import fitz  # noqa: E402
-import numpy as np  # noqa: E402
+import contextlib  # noqa: E402
 
 from app.scripts.corpus import ocr_index as oi  # noqa: E402
 from app.scripts.corpus import ocr_layout as ol  # noqa: E402
@@ -34,7 +33,11 @@ def main() -> int:
             pass
 
     needle = sys.argv[1] if len(sys.argv) > 1 else ""
-    plan = oi._pending()
+    #: 只要 PDF：待做队列里还混着 docx／图片，直接按页数挑会挑到 `.docx` 然后开 PDF 时抛
+    #: `PdfiumError: Data format error`（2026-11-07 实测就这么栽了一次），而本合同线里
+    #: 「扫描件」只有 PDF 这一种 —— 冒烟要验的是 PDF 的渲染 + OCR。
+    plan = [entry for entry in oi._pending()
+            if (entry.get("extension") or Path(entry["rel"]).suffix).lower() == ".pdf"]
     if needle:
         #: 指定子串时挑**页数最多**的一份：期刊的双栏/三栏版式出现在厚刊里
         plan = [entry for entry in plan if needle in entry["path"] or needle in entry["rel"]]
@@ -56,13 +59,12 @@ def main() -> int:
     print(f"抽样：{item['rel']}")
     print(f"      盘上 {item.get('pages')} 页 · {Path(local).stat().st_size / 1e6:.1f} MB")
     ocr = oi._new_engine()
-    document = fitz.open(local)
-    try:
-        for page_no in range(1, min(2, document.page_count) + 1):
+    with contextlib.closing(oi._pdf_open(local)) as document:
+        #: 直接走 ``oi`` 自己的渲染口（而不是在这儿另写一份 frombuffer）：冒烟要验的正是
+        #: 「产品代码那条渲染路」—— 字节序、dpi 换算、通道数都在那里面，另写一遍就白测了。
+        for page_no in range(1, min(2, len(document)) + 1):
             page = document[page_no - 1]
-            pix = page.get_pixmap(dpi=150)
-            image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                pix.height, pix.width, pix.n)
+            image = oi._pdf_page_image(page, 150)
 
             lines, elapsed = ocr(image)
             report = ol.analyze(lines or [], image.shape[1])
@@ -79,8 +81,6 @@ def main() -> int:
             if not text.strip():
                 print("  ✗ 冒烟失败：这页没出字")
                 return 1
-    finally:
-        document.close()
     print("\n冒烟通过：真实链路（含 numpy 框、分栏判定）无异常")
     return 0
 

@@ -379,15 +379,58 @@ def case_assembly_keys() -> None:
           and "vae_tiling" not in tchunk_off,
           {"camel": tchunk, "snake": tchunk_snake, "off": tchunk_off})
 
+    #: ⭐ **上卡层数** `gpuLayers`（2026-11-07 ✓，§4.1 ✓）：`null`/不传 = 按预算自算 ✓、
+    #: `0` = 整份留内存 ✓、`n` = 前 n 层 ✓。⚠️ 它**不在**白名单里时会被静默丢掉 ✓✗ ——
+    #: 用户以为限了层数、实际还是 auto ✓（这条判据盯的就是"搬不搬得过去"✓）。
+    layers_camel = engine_router._assembly_from({"gpuLayers": 3})  # noqa: SLF001
+    layers_snake = engine_router._assembly_from({"gpu_layers": "12"})  # noqa: SLF001
+    layers_float = engine_router._assembly_from({"gpuLayers": 8.0})  # noqa: SLF001
+    layers_zero = engine_router._assembly_from({"gpuLayers": 0})  # noqa: SLF001
+    layers_auto = engine_router._assembly_from({"gpuLayers": "auto"})  # noqa: SLF001
+    layers_absent = engine_router._assembly_from({})  # noqa: SLF001
+    check("⑪¹⁶ ⭐ `gpuLayers` 两种写法都透到 `ensure_loaded` ✓ 且**转成 int** ✓"
+          "（`\"12\"` 透成字符串 ⇒ 装载键里两种写法两个键 ✓✗）；`0` 收成 0 ✓（**不是**「没提」✗）；"
+          "`\"auto\"` / 不传 ⇒ **键不出现** ✓（走签名默认 None ✓，不塞一个假数进装载键 ✓✗）",
+          layers_camel.get("gpu_layers") == 3 and layers_snake.get("gpu_layers") == 12
+          and layers_float.get("gpu_layers") == 8 and layers_zero.get("gpu_layers") == 0
+          and "gpu_layers" not in layers_auto and "gpu_layers" not in layers_absent,
+          {"camel": layers_camel, "snake": layers_snake, "float": layers_float,
+           "zero": layers_zero, "auto": layers_auto, "absent": layers_absent})
+
+    layers_bad: list[object] = []
+    for bad_layers in ({"gpuLayers": -1}, {"gpuLayers": 3.5}, {"gpuLayers": "abc"},
+                       {"gpuLayers": True}):
+        try:
+            engine_router._assembly_from(bad_layers)  # noqa: SLF001
+        except pipe_mod.StageError as err:
+            layers_bad.append(err)
+        except Exception as err:  # noqa: BLE001 —— 漏成 500 的那条路要能被抓到 ✓
+            layers_bad.append(err)
+    check("⑪¹⁷ ⚠️ `gpuLayers` 坏值（-1 / 3.5 / 'abc' / true）⇒ **400（`StageError`）** ✓✗，"
+          "不是 500 ✓、更不是静默回落 auto ✗（回落的后果＝「以为只上 3 层、其实全塞进来」✓✗）",
+          len(layers_bad) == 4
+          and all(isinstance(err, pipe_mod.StageError) for err in layers_bad),
+          [repr(err)[:80] for err in layers_bad])
+
+    lone_layers = engine_router._assembly_from({"gpuLayers": 2})  # noqa: SLF001
+    check("⑪¹⁸ ⭐ 只给 `gpuLayers`、`residency` 没开 ⇒ **照收、不报错** ✓✗"
+          "（跟 `residencyBudgetMib` 那条**正好相反** ✓：预算离了模式没处用＝死配置 ✓，"
+          "层数自己能顶开 `residency=split` ✓ —— `off` 那条路不调 `residency.place` ✓，"
+          "旋钮会被静默吞掉 ✓✗）；`residency` 仍然**不出现** ✓（由后端顶开、不在装配层改口 ✓）",
+          lone_layers.get("gpu_layers") == 2 and "residency" not in lone_layers,
+          lone_layers)
+
     doc = engine_router.load_runtime.__doc__ or ""
-    check("⑪¹² `/load` 的文档写全四档策略 + 两格回执 + `vaeTiling` ✓✗"
+    check("⑪¹² `/load` 的文档写全四档策略 + 两格回执 + `vaeTiling` + `gpuLayers` ✓✗"
           "（文档不写＝这个开关等于不存在 ✓）",
           all(word in doc for word in ("auto", "gpu", "cpu", "balanced"))
           and "chainDevicePolicy" in doc and "devicePolicy" in doc
-          and "vaeTiling" in doc and "attnChunk" in doc and "temporalChunk" in doc,
+          and "vaeTiling" in doc and "attnChunk" in doc and "temporalChunk" in doc
+          and "gpuLayers" in doc and "residencyOpenedBy" in doc and "capped" in doc,
           [word for word in ("auto", "gpu", "cpu", "balanced",
                              "chainDevicePolicy", "devicePolicy",
-                             "vaeTiling", "attnChunk", "temporalChunk") if word not in doc])
+                             "vaeTiling", "attnChunk", "temporalChunk",
+                             "gpuLayers", "residencyOpenedBy", "capped") if word not in doc])
 
     flag_bad: Exception | None = None
     try:

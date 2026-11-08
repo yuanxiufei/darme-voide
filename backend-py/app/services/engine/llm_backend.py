@@ -77,8 +77,24 @@ class _Aborted(Exception):
     """
 
 
+def _context_length_of(metadata: Any) -> int:
+    """元数据 ⇒ **上下文窗口** ✓（``<arch>.context_length`` ✓）；没有 ⇒ ``0`` ✓（**不猜** ✗）。
+
+    ⚠️ 键名前缀随架构变（``qwen3.context_length`` / ``llama.context_length`` ✓）⇒ 按**后缀**认 ✓，
+    并且只认第一个非零整数 ✓（同一份元数据里没有第二个同名语义键 ✓）。
+    """
+    for key, value in (metadata or {}).items():
+        if not str(key).endswith(".context_length"):
+            continue
+        if isinstance(value, bool):        # bool 是 int 的子类 ⇒ 必须先挡 ✓
+            continue
+        if isinstance(value, (int, float)) and int(value) > 0:
+            return int(value)
+    return 0
+
+
 class LlmBackend:
-    """自研文本后端 ✓（``describe`` / ``load`` / ``generate`` ✓）。"""
+    """自研文本后端 ✓（``describe`` / ``load`` / ``generate`` / ``generate_messages`` ✓）。"""
 
     name = "llm"
     #: 张量与推理都是**真的** ✓（不是 dryrun 的假张量 ✗）—— 但**没装真权重时 generate 会拒** ✗
@@ -103,6 +119,12 @@ class LlmBackend:
         self._chat_template: chat_template.ChatTemplate | None = None
         self._chat_template_error: str = ""
         self._chat_template_note: str = "未读取 ✓（load() 之后才有结论 ✓）"
+        #: 反量化产物缓存（G3 ✓）的结论 ✓：``None`` = **还没装载** ✓（≠ "没命中" ✗）——
+        #: 装载后**原样**搬 :attr:`gguf_to_llm` 挂的 ``model.materialized`` ✓（不在这里重算口径 ✗）。
+        self._materialized: dict[str, Any] | None = None
+        #: 权重声明的**上下文窗口** ✓（GGUF 元数据的 ``<arch>.context_length`` ✓）——``0`` = 没声明 ✓。
+        #: 只用来「超窗当场拒」✗，**不拿它当默认出生成长度** ✗（那是调用方的 ``max_new_tokens`` ✓）。
+        self._context_length: int = 0
 
     # ── 自述 ✓
     def describe(self) -> dict[str, Any]:
@@ -139,6 +161,9 @@ class LlmBackend:
             "dtypeRequested": self._dtype_request or "auto",
             "dtype": self._dtype,
             "devices": devices.get("devices", []) if devices else [],
+            #: G3 反量化产物缓存 ✓：``None`` = **还没装载** ✓（不是"没命中" ✗）；
+            #: 装载后是 ``{hit, gib, path, reason, ...}`` ✓ / 显式关掉时 ``{enabled: False, reason}`` ✓。
+            "materialize": self._materialized,
             "chatTemplate": {
                 "present": self._chat_template is not None,
                 "origin": self._chat_template.origin if self._chat_template is not None else "",
@@ -180,6 +205,9 @@ class LlmBackend:
                 actual = llm_mod.model_device(self._model)
                 self._device = str(actual)
                 self._dtype = str(next(self._model.parameters()).dtype).replace("torch.", "")
+                #: ⭐ 如实抬出来 ✓：命中/物化/放弃哪个、凭什么 ✓ —— 否则「这次快了 31 秒」
+                #: 是缓存起了作用还是权重变小了，看回执的人分不出来 ✗✗（G3 的可见面 ✓）。
+                self._materialized = dict(getattr(self._model, "materialized", None) or {}) or None
             if self._hub is None:
                 source, note = self._tokenizer_source()
                 if source is None:
@@ -190,6 +218,7 @@ class LlmBackend:
             self._hub = None
             self._device = ""
             self._dtype = ""
+            self._materialized = None      # 装载失败 ⇒ 没有「这次的缓存结论」✓ 不留上一次的 ✗✗
             self._load_error = str(err)
             raise
         self._read_chat_template()
@@ -227,6 +256,70 @@ class LlmBackend:
         # 用 **token 数**裁 ✓（不按文本找 ⇒ 不受空白/特殊 token 解码差异影响 ✓）。
         new_tokens = out[0][len(ids):].tolist()
         return self._hub.decode(new_tokens, skip_special_tokens=True).strip()
+
+    # ── 多轮 + 工具声明 ✓（2026-11-07 补 ✓）
+    def generate_messages(self, messages: Any, *, tools: Any = None, documents: Any = None,
+                          extra: Any = None, temperature: float = 1.0,
+                          max_new_tokens: int = 256, top_p: float = 1.0, top_k: int = 0,
+                          seed: int | None = None) -> str:
+        """**多轮消息 + 工具声明** ⇒ 续写文本 ✓（agent 工具循环的底层口 ✓）。
+
+        与 :meth:`generate` 只差一件事 ✓：``generate`` 自己把 ``(prompt, system)`` 拼成
+        ``system+user`` 两条消息 ✗ ⇒ 表达不了「assistant 调过工具 / tool 回了结果」这类历史 ✓✗。
+        这里**原样收消息列表** ✓（含 ``role="tool"`` 与 ``assistant.tool_calls`` ✓），
+        ``tools`` 按 OpenAI 形状透传给骨架 ✓（Qwen3/Hermes 系骨架自己会渲染成
+        ``<tools>`` 声明 + 要求 ``<tool_call>`` 输出 ✓）。
+
+        ⚠️ **权重不带 chat 模板 ⇒ 当场拒** ✗✗：没有骨架就没有「工具声明」这段，模型看见的
+        只是几条裸文本 ✓✗ ⇒ 工具名/参数格式全靠猜 ✓✗，而调用方会以为自己在用原生 function
+        calling ✗。**不静默回落裸拼接** ✓（与 :meth:`_build_prompt_text` 同一条纪律 ✓）。
+
+        ⚠️ **超窗当场拒** ✗✗（:meth:`_guard_context` ✓）：本层宁可报错也不让采样在半路
+        越界或由后端静默截断 ✓ —— 截断掉的往往是开头那段 system/工具声明 ✓✗，
+        症状是「模型突然不按格式走」且**没有任何报错** ✓✗。
+        """
+        if self._model is None or self._hub is None:
+            raise LlmBackendUnavailable(self.describe()["reason"] or "模型/词表未装载 ✗（先 load() ✓）")
+        if self._chat_template_error:
+            raise chat_template.ChatTemplateError(self._chat_template_error)
+        if self._chat_template is None:
+            raise chat_template.ChatTemplateError(
+                "权重元数据里**没有 chat 模板** ✗ ⇒ 多轮消息没有骨架可渲染 ✓（本层不内置任何"
+                "模型骨架 ✗、也不拼裸文本 ✗）—— 换一份自带模板的 GGUF ✓")
+
+        import torch  # noqa: PLC0415
+
+        extra_vars: dict[str, Any] = {}
+        if self._enable_thinking is not None:
+            extra_vars["enable_thinking"] = bool(self._enable_thinking)
+        if extra:
+            extra_vars.update(dict(extra))
+        tokens = getattr(self._hub, "special_tokens", None) or {}
+        text = self._chat_template.render(
+            messages,
+            bos_token=tokens.get("bos_token", ""), eos_token=tokens.get("eos_token", ""),
+            tools=tools, documents=documents, extra=extra_vars)
+        ids = self._hub.encode(text, add_special_tokens=False)
+        self._guard_context(len(ids), max_new_tokens)
+        device = llm_mod.model_device(self._model)
+        out = llm_mod.generate_llm(
+            self._model, torch.tensor([ids], dtype=torch.long, device=device),
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, top_k=top_k, eos_id=self._config.eos_id, seed=seed,
+        )
+        return self._hub.decode(out[0][len(ids):].tolist(), skip_special_tokens=True).strip()
+
+    def _guard_context(self, prompt_tokens: int, max_new_tokens: int) -> None:
+        """``prompt + 新生`` 超权重窗口 ⇒ **拒** ✗（``0`` = 权重没声明窗口 ⇒ 不检查 ✓ 不猜 ✗）。"""
+        limit = int(self._context_length or 0)
+        if not limit:
+            return
+        total = int(prompt_tokens) + int(max_new_tokens)
+        if total > limit:
+            raise llm_mod.LlmError(
+                f"上下文超窗 ✗：提示词 {prompt_tokens} + 预留生成 {max_new_tokens} = {total} 词元，"
+                f"超过权重窗口 {limit} ✗ ⇒ **不静默截断** ✗（减 ``maxOutputTokens`` ✓、"
+                f"或收短历史/工具声明 ✓）")
 
     # ── 流式生成 ✓（2026-11-01 补）
     def generate_stream(self, prompt: str, *, system: str | None = None,
@@ -349,6 +442,8 @@ class LlmBackend:
         self._chat_template_error = ""
         try:
             info = gguf.inspect(self._gguf_path or "")
+            # 顺手取窗口长度 ✓（同一份 metadata 只读一次 ✓ —— 另开一次 inspect 要重读文件头 ✓✗）
+            self._context_length = _context_length_of(info.metadata)
             self._chat_template = chat_template.ChatTemplate.from_metadata(info.metadata)
         except chat_template.ChatTemplateError as err:
             self._chat_template_error = str(err)

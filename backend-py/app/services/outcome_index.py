@@ -46,12 +46,20 @@ __all__ = [
     "query",
     "count",
     "exists",
+    "get",
     "stats",
     "samples",
+    "link_record",
+    "record_of",
 ]
 
 #: ``kind`` 的取值（新增一类跑次要先登记在这里，否则 ``record_run`` 拒收）
-KINDS = ("agent", "image", "video", "tts", "qc", "train", "repair")
+#:
+#: ``eval``（2026-11-07 补，知识闭环缺口 8 的另一半）：**评测跑次** —— 基准 case 与成片评测
+#: 都落这一类。为什么不让它借用 ``agent`` ✗：基准 case 跑的是 agent，但成片评测**根本不跑
+#: agent**（它是拿已有的成片与已有的质检结论算账）；混进 ``agent`` 会让「agent 成功率」把
+#: 一次没调模型的评测算进去 ⇒ 那个数字从此不可比 ✓✗。
+KINDS = ("agent", "image", "video", "tts", "qc", "train", "repair", "eval")
 
 #: ``status`` 的取值（三档不够用时要先想清楚"partial"和"failed"的区别，别再加第四档）
 STATUSES = ("ok", "failed", "partial")
@@ -116,6 +124,14 @@ CREATE TABLE IF NOT EXISTS index_state (
     size INTEGER,
     run_id TEXT,
     updated_ns INTEGER
+);
+CREATE TABLE IF NOT EXISTS records (
+    record_type TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    run_id TEXT,
+    updated_ns INTEGER,
+    PRIMARY KEY (record_type, record_id)
 );
 """
 
@@ -590,6 +606,90 @@ def exists(run_id: str) -> bool:
             return row is not None
     except sqlite3.Error:
         return False
+
+
+def get(run_id: str) -> dict[str, Any] | None:
+    """按 ``run_id`` 取**一行**（含解好的 ``meta``）；查不到 / 库坏返回 ``None``。
+
+    为什么不复用 :func:`query`：它按时间倒序 + 白名单过滤，问的是"最近哪些跑次"，
+    拿不到"指定这一条"；而质检反哺要的是「这条 QC 说的那次生成用了多少步」——
+    必须按 id 直取，不能靠时间窗猜。
+    """
+    key = _text(run_id)
+    if not key:
+        return None
+    try:
+        with _connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ? LIMIT 1", [key]).fetchone()
+    except sqlite3.Error:
+        return None
+    return _row_to_item(row) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# 业务记录 ⇒ 生产它的那一档（质检反哺的归因键）
+# ---------------------------------------------------------------------------
+
+#: ``records.record_type`` 的取值（与业务表同名：``video_generations`` / ``images``）
+RECORD_TYPES = ("video", "image")
+
+
+def link_record(record_type: str, record_id: Any, stage: str, *,
+                run_id: str | None = None) -> bool:
+    """记下「这条业务记录是谁出的」：``(记录类型, 记录 id) ⇒ (引擎档, 引擎跑次)``。
+
+    为什么要这张表 ✗✗：**QC 行和引擎行没有共同键** ✓——``technical_qc`` 手上只有
+    ``video_generation_id`` ✓，而"用了几步 / 哪个引擎档"在 ``engine:<taskId>`` 那行上 ✓；
+    ``video_generations.task_id`` 是给**云 provider** 存的轮询号 ✗（引擎这条路本来就不写它 ✓），
+    所以两个方向都 join 不上 ✓✗。表由 ``bridge.run_job`` 在提交成功的那一刻写 ✓
+    （那时 ``stage`` 与 ``taskId`` 都在手上 ✓）。
+
+    返回 ``False`` ＝没写成（缺参 / 库不可用）——调用方按「这次归因不了」处理即可，
+    **不要**因此让生成失败：少一条归因只是少一条统计 ✓。
+    """
+    kind = _text(record_type)
+    rid = _text(record_id)
+    name = _text(stage)
+    if kind not in RECORD_TYPES or rid is None or not name:
+        return False
+    sql = ("INSERT INTO records (record_type, record_id, stage, run_id, updated_ns) "
+           "VALUES (?,?,?,?,?) ON CONFLICT(record_type, record_id) DO UPDATE SET "
+           "stage=excluded.stage, run_id=excluded.run_id, updated_ns=excluded.updated_ns")
+    try:
+        with _connect() as conn:
+            conn.execute(sql, [kind, rid, name, _text(run_id),
+                               _to_ns(datetime.now(timezone.utc).isoformat())])
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def record_of(record_type: str, record_id: Any) -> dict[str, Any] | None:
+    """这条业务记录是谁出的：``{"recordType","recordId","stage","runId","updatedNs"}``。
+
+    没登记返回 ``None``（**不编一个 stage**）—— 云 provider 出的片本来就没有"引擎档"，
+    硬填一格会让「这一族的质检通过率」把别人的片算进来 ✓✗。
+    """
+    kind = _text(record_type)
+    rid = _text(record_id)
+    if kind not in RECORD_TYPES or rid is None:
+        return None
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT record_type, record_id, stage, run_id, updated_ns FROM records "
+                "WHERE record_type = ? AND record_id = ? LIMIT 1", [kind, rid]).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return {
+        "recordType": row["record_type"],
+        "recordId": row["record_id"],
+        "stage": row["stage"],
+        "runId": row["run_id"],
+        "updatedNs": row["updated_ns"],
+    }
 
 
 def _percentile(values: list[float], ratio: float) -> float | None:

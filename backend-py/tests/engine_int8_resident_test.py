@@ -440,16 +440,20 @@ def case_int8_ledger() -> None:
             self.b = h3.Int8Linear(2 * 256, 64, bias=True, scale_shape=(64,), convrot=256,
                                    dtype=torch.bfloat16)
 
-    def _ledger(module: Any, resident: int) -> tuple[dict[str, Any], str | None]:
-        return tb._int8_residency_problems(module, SimpleNamespace(int8Resident=resident))
+    def _ledger(module: Any, resident: int, skipped: int = 0,
+                restorer: Any = "有") -> tuple[dict[str, Any], str | None]:
+        #: ``restorer=None`` 表示「卸下去的层填不回来」✓（默认给个占位 ✓ 表示还原器在 ✓）
+        return tb._int8_residency_problems(
+            module, SimpleNamespace(int8Resident=resident, int8Skipped=skipped,
+                                    restorer=None if restorer is None else object()))
 
     ledger, problem = _ledger(Pair(), 2)
-    check("⑧ 两个常驻层 ＋ 文件侧 2 个 int8 权重 ⇒ **无问题** ✓，账目五项都在 ✓"
+    check("⑧ 两个常驻层 ＋ 文件侧 2 个 int8 权重 ⇒ **无问题** ✓，账目六项都在 ✓"
           "（这条检查本身得不误杀 ✓ 才有用 ✓；2026-11-02 增 `int4Resident` 子计数 ✓ ——"
-          "它**不算**进 `int8Resident` 之外 ✓，两者是子集关系 ✓）",
+          "它**不算**进 `int8Resident` 之外 ✓，两者是子集关系 ✓；2026-11-07 增 `int8Skipped` ✓）",
           problem is None
           and ledger == {"layers": 2, "int8Params": 2, "int8OnCpu": 2, "int8OnGpu": 0,
-                         "int8Resident": 2, "int4Resident": 0},
+                         "int8Resident": 2, "int8Skipped": 0, "int4Resident": 0},
           (ledger, problem))
 
     ledger, problem = _ledger(Pair(), 1)
@@ -469,6 +473,26 @@ def case_int8_ledger() -> None:
     check("⑧‴ **不误杀** ✓：文件侧 3 > 层数 2（将来出现非 Linear 的 int8 品类，如量化 embedding ✓）"
           "⇒ 不报错 ✓（只查漏装 `resident < layers` ✓，不查多 ✗）",
           problem is None, (ledger, problem))
+
+    # ⭐ 2026-11-07：分母必须算上「卸到内存/盘上」的那几层 ✓✗ ——
+    #    真机实测：假 8 GiB 卡装 Krea2，224 层里 **88 层写进去、136 层卸下去** ⇒
+    #    旧分母只取 `int8Resident=88` ⇒ 判「差的 136 层会按 bf16 落盘」⇒ **整份拒装** ✗✗，
+    #    而同一台机器同一条文件 `residency="off"`（不卸层）5.7 s 就装得进去 ✓
+    #    ⇒ 是判据错，不是权重错 ✓。卸得越省、越被判成装不上 ✗✗。
+    ledger, problem = _ledger(Pair(), 1, skipped=1)
+    check("⑧⁗ ⭐⭐ **卸下去的那层也算交代清了** ✓：`int8Resident=1 + int8Skipped=1 = 2 层` ⇒ 不报错 ✓"
+          "（带还原器 ✓）—— 反过来：这里若仍按旧分母判，就是「内存这一级越省、越装不上」✗✗",
+          problem is None and ledger["int8Skipped"] == 1 and ledger["int8Resident"] == 1,
+          (ledger, problem))
+
+    ledger, problem = _ledger(Pair(), 1, skipped=1, restorer=None)
+    check("⑧⁵ ⭐⭐ **卸了但填不回来 ＝ 洞** ✓✗：`int8Skipped>0` 而 `restorer is None` ⇒ **照样拒装** ✓"
+          "（放宽分母不等于放过真洞 ✓ —— 那层的权重在盘上，前向到它就是空壳 ✗✗）",
+          problem is not None and "填不回来" in problem, (ledger, problem))
+
+    ledger, problem = _ledger(Pair(), 0, skipped=1)
+    check("⑧⁶ 只有 1 层被卸、另 1 层既没写进去也没卸 ⇒ 仍报错 ✓（分母不是「>= 1」的糊弄 ✓）",
+          problem is not None and "差的 1 层" in problem and "1 层卸到" in problem, (ledger, problem))
 
 
 # ══════════════════════════════════════════════════════════════════════════

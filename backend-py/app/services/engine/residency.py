@@ -43,6 +43,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Sequence
 
+from . import device_policy
+
 from . import foresight as foresee_mod
 from . import host_cache as host_mod
 
@@ -220,6 +222,15 @@ class Plan:
     spilled: tuple[str, ...] = ()
     #: 卸掉的字节数 ✓（``cpu_bytes`` 已扣掉它 ✓ ⇒ ``guard`` 核内存时核的是**实际要占的**✓）。
     spillBytes: int = 0
+    #: ⭐ ``gpuLayers`` 那条旋钮的**账** ✓✗（2026-11-07 加 ✓）—— ``None`` ⇒ 调用方**没给过数** ✓
+    #: （走的是按预算自算 ✓）；给了数就**两个都填** ✓：要几层 / 实际切到卡上几层 ✓。
+    #: ⚠️ 两个都填、**不合成一个** ✗✗：``requested=9999``（"我全要"）与 ``requested=10`` 是两种
+    #: 完全不同的意图 ✓，而 ``granted`` 恰好可能都是全上卡 ✓ ⇒ 只留一个数就分不清 ✓。
+    requestedLayers: int | None = None
+    grantedLayers: int | None = None
+    #: 要了 N 层、实际没给够 ✓（被预算截断 / 连层都放不下 ✓）—— **不是**"退回 auto" ✗✗：
+    #: 切法仍是"按你给的那个数从前往后取" ✓，只是取不满 ✓，理由写在 ``reason`` 里 ✓。
+    capped: bool = False
 
     def __post_init__(self) -> None:
         """``refused`` 与 ``fits`` **互斥** ✓✗（2026-11-02 加 ✓）。
@@ -247,6 +258,19 @@ class Plan:
     def needs_split(self) -> bool:
         """需不需要 hook —— 全在一处时**一根 hook 都不挂** ✓（老路零开销 ✓）。"""
         return bool(self.on_cpu) and bool(self.on_gpu)
+
+    @property
+    def gpuLayers(self) -> dict[str, int | bool | None]:
+        """``gpuLayers`` 那条旋钮的回执 ✓（``requested=null`` ⇒ 这一跑**没给过数** ✓）。
+
+        ⚠️ 三格缺一不可 ✗✗：``requested``（你要几层）/ ``granted``（真切了几层）/
+        ``capped``（要到了没 ✓）—— 只报 ``granted`` 的话，"全要"与"要 10 层恰好都全上卡"分不开 ✓✗。
+        """
+        return {
+            "requested": self.requestedLayers,
+            "granted": self.grantedLayers if self.requestedLayers is not None else None,
+            "capped": bool(self.capped),
+        }
 
     def transfer_bytes(self, mode: str = "split") -> int | None:
         """每次前向的**过界搬运量**（单程；双向就 ×2 ✓）。
@@ -333,8 +357,55 @@ def survey(module: Any) -> list[Group]:
     return groups
 
 
+def normalize_gpu_layers(value: Any) -> int | None:
+    """``gpuLayers`` 的取值口径 ⇒ **单一真源** ✓✗（2026-11-07 加 ✓）。
+
+    | 给什么 | 意思 | 拒绝的写法 |
+    |---|---|---|
+    | ``None`` / 空串 | **没提** ⇒ 按预算自算 ✓（老路零变化 ✓） | —— |
+    | ``0`` | 一层都不上卡 ⇒ 整份留内存 ✓（等价 ``park`` 的稳态 ✓） | ``-1``（"负数＝auto"是 llama.cpp 的口径 ✗，本仓不抄 ✓） |
+    | ``n ≥ 层数`` | 全上卡 ✓ | —— |
+    | ``n`` | 前 ``n`` 层上卡 ✓ | ``true/false``（布尔不是层数 ✗）/ ``3.5``（半层 ✗）/ ``"abc"`` |
+
+    ⚠️ 为什么**不学** ``n_gpu_layers=-1`` ✗✗：那是 llama.cpp 的"全上卡"约定 ✓，与本仓
+    ``policy=auto`` 的"按预算自算"只差一个字 ✓✗ —— 同一条命令里 ``-1`` 一种含义、``auto``
+    另一种含义，运维一定会填错 ✓。本仓只认**非负整数** ＋ ``None`` ✓，"全上卡"写个够大的数 ✓
+    （``--gpu-layers 999`` 也行 ✓，回执里 ``granted`` 会如实报实际层数 ✓）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("gpuLayers 只认非负整数（true/false 不是层数 ✗）；"
+                         "「全上卡」写一个够大的整数 ✓，「没意见」就别传 ✓")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.lower() in ("auto", "none", "null"):
+            return None
+        try:
+            number = int(text, 10)
+        except ValueError as err:
+            raise ValueError(f"gpuLayers 认不了 {value!r} ✗：要非负整数（如 0 / 12 / 999）✓，"
+                             "或者干脆不传 ✓") from err
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not float(value).is_integer():
+            raise ValueError(f"gpuLayers={value!r} 不是整数 ✗：层是**整块**切的 ✓，"
+                             "半层没有意义 ✓")
+        number = int(value)
+    else:
+        raise ValueError(f"gpuLayers 认不了 {type(value).__name__} ✗：要非负整数 ✓")
+    if number < 0:
+        raise ValueError(f"gpuLayers={number} 是负数 ✗：本仓**不抄** llama.cpp 的"
+                         "「-1＝全上卡」✓ —— 全上卡写个够大的数 ✓、不想管就别传 ✓")
+    return number
+
+
 def plan(groups: Iterable[Group], budget: int, *, reason: str = "",
-         budget_info: dict[str, Any] | None = None) -> Plan:
+         budget_info: dict[str, Any] | None = None,
+         gpu_layers: Any = None) -> Plan:
     """按预算切分：**非层参数先上卡**，然后层按前向顺序依次上卡，装不下就停。
 
     ⚠️ 为什么「依次上卡」而不是「挑小的塞」✗：层是**串行**用的 ✓ —— 卡上若是 0,1,2,5,6 这种
@@ -342,10 +413,20 @@ def plan(groups: Iterable[Group], budget: int, *, reason: str = "",
 
     ``budget_info``（2026-11-02 加 ✓）＝:meth:`Budget.to_dict` ✓，**只进报告、不参与切分** ✓：
     切分只认 ``budget`` 这一个数 ✓（两处都用它 ⇒ 口径不会分叉 ✓）。
+
+    ``gpu_layers``（2026-11-07 加 ✓）＝对外那条 ``gpuLayers`` 旋钮 ✓：
+
+    * ``None`` ⇒ **老路零变化** ✓（按预算自算，回执里 ``requestedLayers=None`` ✓）；
+    * 给了数 ⇒ **层数说了算、预算只做上限** ✓✗ —— 与"按预算自算"有本质区别：
+      自算是"能塞多少塞多少" ✓，给数是"我只要 N 层" ✓（预算富余也**不多切** ✓）。
     """
     items = list(groups)
     layer_bytes = sum(g.nbytes for g in items if g.is_layer)
     total_bytes = sum(g.nbytes for g in items)
+    asked = normalize_gpu_layers(gpu_layers)
+    if asked is not None:
+        return _plan_by_layers(items, int(budget), asked, layer_bytes, total_bytes,
+                               budget_info, reason)
     if budget <= 0:
         return Plan(budget=budget, on_gpu=(), on_cpu=tuple(g.name for g in items),
                     gpu_bytes=0, cpu_bytes=total_bytes, fits=False,
@@ -377,6 +458,74 @@ def plan(groups: Iterable[Group], budget: int, *, reason: str = "",
     return Plan(budget=budget, on_gpu=tuple(on_gpu), on_cpu=tuple(on_cpu),
                 gpu_bytes=gpu_bytes, cpu_bytes=cpu_bytes, fits=True, reason=text,
                 layer_bytes=layer_bytes, budgetInfo=budget_info)
+
+
+def _plan_by_layers(items: list[Group], budget: int, asked: int, layer_bytes: int,
+                    total_bytes: int, budget_info: dict[str, Any] | None,
+                    reason: str) -> Plan:
+    """``gpuLayers=asked`` 的切法 ✓✗（**层数说了算** ✓；预算只当上限 ✓）。
+
+    ⚠️ 三处最容易写错的地方 ✗✗：
+
+    ① ``asked=0`` ⇒ **不是**"切分失败" ✓✗：它是调用方明确要"整份留内存" ✓ ——
+       ``refused`` 必须留 ``False`` ✓（``refused`` 的含义是"切分救不了这件" ✗，会把人引去查卡 ✓）；
+    ② ``asked`` 比实有层数还大 ⇒ **全上卡** ✓，且 ``capped=False`` ✓（没被截断，是本来就没那么多 ✓）；
+    ③ 预算不够 ⇒ ``granted < asked`` ＋ ``capped=True`` ＋ ``fits=True`` ✓✗ ——
+       联合**是成立的**（部分层在卡上 ✓），只是没给满 ✓；这里若把 ``fits`` 置 False，
+       :func:`place` 会把整份退回 CPU ✓✗（"要 30 层、卡只装得下 12 层"就变成"一层都别上"✗）。
+    """
+    non_layers = [g for g in items if not g.is_layer]
+    layers = [g for g in items if g.is_layer]
+    names = tuple(g.name for g in items)
+    if asked == 0:
+        return Plan(budget=budget, on_gpu=(), on_cpu=names, gpu_bytes=0, cpu_bytes=total_bytes,
+                    fits=False,
+                    reason=(reason or "") + "gpuLayers=0 ⇒ 整份留内存 ✓"
+                    "（等价 `park` 的稳态：一层都不上卡 ✓；这**不是**装载失败 ✗）",
+                    layer_bytes=layer_bytes, budgetInfo=budget_info,
+                    requestedLayers=0, grantedLayers=0)
+    if budget <= 0:
+        return Plan(budget=budget, on_gpu=(), on_cpu=names, gpu_bytes=0, cpu_bytes=total_bytes,
+                    fits=False,
+                    reason=(f"gpuLayers={asked} 要层上卡，可没有可用显存（预算 ≤ 0）⇒ "
+                            "一层也上不去 ✗（如实报 granted=0 ✓，不退回 auto ✗）"),
+                    layer_bytes=layer_bytes, budgetInfo=budget_info,
+                    requestedLayers=asked, grantedLayers=0, capped=True)
+    used = sum(g.nbytes for g in non_layers)
+    if used > budget:
+        return Plan(budget=budget, on_gpu=(), on_cpu=names, gpu_bytes=0, cpu_bytes=total_bytes,
+                    fits=False,
+                    reason=(f"gpuLayers={asked}：连非层参数（{used / 2**30:.2f} GiB）都超预算"
+                            f"（{budget / 2**30:.2f} GiB）⇒ 切分救不了 ✗"),
+                    layer_bytes=layer_bytes, budgetInfo=budget_info, refused=True,
+                    requestedLayers=asked, grantedLayers=0, capped=True)
+    on_gpu: list[str] = [g.name for g in non_layers]
+    granted = 0
+    target = min(asked, len(layers))
+    for group in layers:
+        if granted >= target or used + group.nbytes > budget:
+            break
+        used += group.nbytes
+        on_gpu.append(group.name)
+        granted += 1
+    capped = granted < target
+    on_cpu = [g.name for g in items if g.name not in set(on_gpu)]
+    gpu_bytes = sum(g.nbytes for g in items if g.name in set(on_gpu))
+    cpu_bytes = sum(g.nbytes for g in items if g.name in set(on_cpu))
+    if capped:
+        why = (f"gpuLayers={asked}：预算只装得下 {granted} 层（{budget / 2**30:.2f} GiB）⇒ "
+               f"按 {granted} 层切 ✓（**不是**退回 auto ✗：切法仍是「从前往后按你给的数取」✓）")
+    elif asked > len(layers):
+        why = (f"gpuLayers={asked} > 实有 {len(layers)} 层 ⇒ 全上卡 ✓"
+               f"（{gpu_bytes / 2**30:.2f} GiB）")
+    else:
+        why = f"gpuLayers={asked} ⇒ 前 {granted} 层在卡上 ✓（{gpu_bytes / 2**30:.2f} GiB）"
+    if reason:
+        why = f"{reason}；{why}"
+    return Plan(budget=budget, on_gpu=tuple(on_gpu), on_cpu=tuple(on_cpu),
+                gpu_bytes=gpu_bytes, cpu_bytes=cpu_bytes, fits=True, reason=why,
+                layer_bytes=layer_bytes, budgetInfo=budget_info,
+                requestedLayers=asked, grantedLayers=granted, capped=capped)
 
 
 class BudgetRefused(ValueError):
@@ -466,8 +615,14 @@ def budget_of_cuda(torch_mod: Any, *, reserve: float | None = None,
     """
     if not getattr(torch_mod.cuda, "is_available", lambda: False)():
         return None
+    #: ⭐ 读数走 `device_policy.cuda_memory` 这**一处** ✓✗（2026-11-07 收口 ✓）：
+    #: 低配模拟（`DARME_FAKE_GPU_TOTAL_GIB`）必须同时作用于「决策」与「切分预算」✓ ——
+    #: 只接 `probe()` 会让决策说 8 GiB、预算照 22.49 GiB 装 ✓✗（那正是模拟最该抓的错 ✓）。
+    mem = device_policy.cuda_memory(torch_mod, index)
+    if mem is None:
+        return None  # pragma: no cover - 老驱动 / 不支持的设备
+    _total, free, _faked = mem
     try:
-        free, _total = torch_mod.cuda.mem_get_info(index)
         reusable = max(0, int(torch_mod.cuda.memory_reserved(index))
                        - int(torch_mod.cuda.memory_allocated(index)))
     except Exception:  # pragma: no cover - 老驱动 / 不支持的设备
@@ -604,6 +759,9 @@ class Handle:
             "fits": self.plan.fits,
             #: 预算分解 ✓（``None`` ⇒ 调用方直接给了一个数、没有分解可看 ✓ 不编 ✗）
             "budget": self.plan.budgetInfo,
+            #: ⭐ ``gpuLayers`` 那条旋钮的账 ✓✗（``requested=null`` ＝ **没给过数** ✓，
+            #: 走的是按预算自算 ✓ —— 不许把它读成"要 0 层"✗✗，0 层是 ``requested=0`` ✓）
+            "gpuLayers": self.plan.gpuLayers,
             #: ⭐ 内存这一级 ✓（``None`` ＝ **没启用** ✓，不是"装得下" ✗✗ —— 两者都不报卸层 ✓，
             #: 可一个是有上限不触发 ✓、一个是根本没上限 ✓；混在一起读就会误以为内存受控 ✓）
             "hostCache": None if self.hostCache is None else {
@@ -1248,7 +1406,7 @@ def place(module: Any, *, main_device: Any, budget: int | None = None,
           kind: str | None = None, guard: Any = None, fixed_bytes: int = 0,
           on_refuse: str = "cpu", host_cache: Any = None,
           reload: Callable[[str], dict[str, Any]] | None = None,
-          foresight: Any = None) -> Handle:
+          foresight: Any = None, gpu_layers: Any = None) -> Handle:
     """一步到位：盘预算（不给就按当前空闲显存算 ✓）⇒ 切分 ⇒ 摆参数 ⇒ 挂 hook ✓。
 
     返回的 :class:`Handle` 自己带报告 ✓（``handle.report()`` ✓）—— 装载方照抄进
@@ -1287,6 +1445,9 @@ def place(module: Any, *, main_device: Any, budget: int | None = None,
     """
     if on_refuse not in REFUSE_MODES:
         raise ValueError(f"on_refuse 只认 {' / '.join(REFUSE_MODES)}，拿到 {on_refuse!r}")
+    #: ⚠️ 在**最前面**归一 ✗✗：``gpuLayers="abc"`` 这种坏值必须在**读卡况之前**就拒 ✓ ——
+    #: 先读卡再报「参数错」会让日志里多出一串"读到 22.49 GiB"的噪声 ✓（看着像读卡失败 ✗）。
+    asked_layers = normalize_gpu_layers(gpu_layers)
     groups = survey(module)
     detail: Budget | None = None
     if budget is None:
@@ -1326,11 +1487,17 @@ def place(module: Any, *, main_device: Any, budget: int | None = None,
     if budget <= 0:  # 没卡 ⇒ 就是 CPU 单机，如实全留内存 ✓（不假装联合 ✗）
         chosen = Plan(budget=0, on_gpu=(), on_cpu=tuple(g.name for g in groups),
                       gpu_bytes=0, cpu_bytes=sum(g.nbytes for g in groups), fits=True,
-                      reason="没有可用显存 ⇒ 整份在内存里（CPU 单机路径 ✓）",
+                      reason=("没有可用显存 ⇒ 整份在内存里（CPU 单机路径 ✓）"
+                              + ("" if asked_layers is None else
+                                 f"；gpuLayers={asked_layers} 想上卡也没卡 ✓ 如实报 granted=0 ✓")),
                       layer_bytes=sum(g.nbytes for g in groups if g.is_layer),
-                      budgetInfo=None if detail is None else detail.to_dict())
+                      budgetInfo=None if detail is None else detail.to_dict(),
+                      requestedLayers=asked_layers,
+                      grantedLayers=None if asked_layers is None else 0,
+                      capped=asked_layers is not None and asked_layers > 0)
     else:
-        chosen = plan(groups, budget, budget_info=None if detail is None else detail.to_dict())
+        chosen = plan(groups, budget, budget_info=None if detail is None else detail.to_dict(),
+                      gpu_layers=asked_layers)
     if chosen.refused and on_refuse == "raise":
         raise BudgetRefused(
             f"切分**救不了**这件 ✓✗：{chosen.reason}"

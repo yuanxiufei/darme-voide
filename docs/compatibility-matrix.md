@@ -74,5 +74,5 @@ No broken requirements found.
 
 ⚠️ 这两份文件**没有读者**（代码里 0 处引用，见判据 ④），所以它们最容易悄悄过期 ✓✗ ——
 实测就抓到过一次：旧 `hardware-report.json` 是 `schemaVersion: 1`，还把 `transformers` 记成
-「可选缺失」、把 `convrot` 记成「未实现」、`modelsDir` 还指向旧的 `data/models` ✓✗。
+「可选缺失」、把 `convrot` 记成「未实现」、`modelsDir` 还指向旧的 `models` ✓✗。
 现在由 `tests/engine_env_docs_test.py` 逐项对账：**改了代码忘了刷文件 ⇒ 红** ✓。

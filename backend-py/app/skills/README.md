@@ -36,7 +36,7 @@ backend-py/app/skills/
 ```
 
 > `wuxia-action` 两个 skill 的方法来源是原料库的 combat 77 份 ＋ ultimate 11 份
-> （`data/playbook/film-expert-bridge/`），
+> （`corpus/playbook/film-expert-bridge/`），
 > 那份目录 2026-11-04 起**随仓库分发**（此前在 gitignore 的 `方法语料/` 里 ⇒ 新克隆的仓库检索为空）：
 > 本库仍只装归纳出的判据，查原文走 `search_script_library(source="playbook")`。
 > 同日「有用的抄没用的删」：打戏三件（受击反馈模板／打斗运镜 15 种／招式命名与距离节奏）

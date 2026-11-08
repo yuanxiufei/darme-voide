@@ -48,7 +48,12 @@ os.environ["KNOWLEDGE_LEDGER_DB"] = (TMP / "ledger.sqlite").as_posix()
 os.environ["DATA_ROOT"] = TMP.as_posix()
 
 from app.services import knowledge_ledger, outcome_index, technical_qc  # noqa: E402
-from app.services.engine import runtime, tuning  # noqa: E402
+from app.services.engine import hooks, runtime, tuning  # noqa: E402
+
+#: ⚠️ 2026-11-07：引擎读业务数据已改成**注入口**（`hooks.get("run_index"/"ledger")` ✓，
+#: 生产由 `app/main.py` 启动时登记 ✓）—— 本套必须补同一步 ✗：否则 ⑧/⑨/⑪ 会集体
+#: 「读到空」（`_scan()` 回 `available=False` 时 `suggest()` 不给候选 ✓），看起来像归因逻辑坏了 ✓✗。
+hooks.provide(run_index=outcome_index, ledger=knowledge_ledger)
 
 _RUNTIME_SRC = (BP / "app" / "services" / "engine" / "runtime.py").read_text(encoding="utf-8")
 _QC_SRC = (BP / "app" / "services" / "technical_qc.py").read_text(encoding="utf-8")

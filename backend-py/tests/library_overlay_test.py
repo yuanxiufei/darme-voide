@@ -267,10 +267,12 @@ def main() -> int:  # noqa: C901
     dup = ingest_mod.ingest("再来一份同名的正文，用来验证不覆盖。".encode("utf-8"), "补录.txt")
     check("上传: 同名不覆盖，自动落成 -2（用户重传不会悄悄盖掉上一份）",
           dup["status"] == "ingested" and dup["path"].endswith("-2.txt"), dup["path"])
-    pdf = ingest_mod.ingest(b"%PDF-1.4 fake", "剧本.pdf")
+    #: 样本必须挑**真不支持**的扩展名。2026-11-07 起 ``.pdf`` 已归第三库抽文字层，
+    #: 拿它当「不支持」的样本会让本条判据恒假（假 PDF 会落盘成 ``quarantined``）。
+    epub = ingest_mod.ingest(b"PK\x03\x04 not really an ebook", "剧本.epub")
     check("上传: 不支持的扩展名 rejected，并说明本库只收哪些类型",
-          pdf["status"] == "rejected" and "不支持" in pdf["reason"]
-          and "TXT" in pdf["reason"], pdf)
+          epub["status"] == "rejected" and "不支持" in epub["reason"]
+          and "TXT" in epub["reason"], epub)
     empty = ingest_mod.ingest(b"", "空.txt")
     check("上传: 0 字节 rejected", empty["status"] == "rejected"
           and "空文件" in empty["reason"], empty)
@@ -284,9 +286,16 @@ def main() -> int:  # noqa: C901
     junk_ok = (kb / junk["path"]).exists() if junk["path"] else False
     check("上传: 抽不出正文 quarantine（**文件在盘上**，不是 rejected）",
           junk["status"] == "quarantined" and junk_ok and "已落盘" in junk["reason"], junk)
+    #: 假 PDF（正文层抽不出，等同扫描件）**不是** ``rejected``：文件必须留在盘上，
+    #: 否则 ``ocr_index._extra_quarantined_docx()`` 那条 OCR 补救回路就永远收不到它。
+    scanned = ingest_mod.ingest(b"%PDF-1.4 fake but not a real pdf", "扫描件.pdf")
+    scanned_ok = (kb / scanned["path"]).exists() if scanned["path"] else False
+    check("上传: 抽不出字层的 PDF 走 quarantine（文件在盘上，留给 OCR 线接手）",
+          scanned["status"] == "quarantined" and scanned_ok
+          and "已落盘" in scanned["reason"], scanned)
     check("上传: rejected 的理由里**不**说「已落盘」（两档不许说成同一件事）",
-          "已落盘" not in pdf["reason"] and "已落盘" not in empty["reason"],
-          [pdf["reason"], empty["reason"]])
+          "已落盘" not in epub["reason"] and "已落盘" not in empty["reason"],
+          [epub["reason"], empty["reason"]])
     check("上传: safe_name 挡住路径穿越、保住扩展名、过长截断",
           ingest_mod.safe_name("../../evil.doc") == "evil.doc"
           and ingest_mod.safe_name("a/b/c.doc") == "c.doc"
@@ -299,11 +308,11 @@ def main() -> int:  # noqa: C901
           {"ingested", "quarantined"} <= ledger and "rejected" not in ledger, ledger)
     report = sl.overlay_report()
     #: edits=3（故事第 2 块 ＋ 文档头标题 ＋ 上传件第 1 块；撤销掉的两条不该还在）、
-    #: uploads=3（补录.txt／补录-2.txt／垃圾.txt）—— ``rejected`` **不进台账**：
+    #: uploads=4（补录.txt／补录-2.txt／垃圾.txt／扫描件.pdf）—— ``rejected`` **不进台账**：
     #: 它没落盘，记进去只会让「盘上有多少补录件」对不上数。
     check("盘点: edits/tombstones/uploads 三个计数与操作次数对得上",
           report["available"] and report["edits"] == 3 and report["tombstones"] == 0
-          and report["uploads"] == 3 and report["writableSources"] == ["curated", "ocr", "extra"],
+          and report["uploads"] == 4 and report["writableSources"] == ["curated", "ocr", "extra"],
           {key: report[key] for key in ("edits", "tombstones", "uploads")})
 
     # ================= 8. 物理删上传件 =================

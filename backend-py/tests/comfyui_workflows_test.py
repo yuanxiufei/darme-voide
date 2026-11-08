@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
@@ -712,7 +714,21 @@ def case_registry_graph() -> None:
             check("⑧ 素材路径穿越必须拦（交给 file_storage 的穿越检查）",
                   "traversal" in str(exc).lower() or "穿越" in str(exc), str(exc))
     finally:
-        sample.unlink(missing_ok=True)
+        # ⚠️ 探针文件必须落在**系统临时目录**里删（2026-11-08 实测真坑）：
+        #   本仓在 CodeBuddy 的 `sitecustomize` 沙箱下跑，它把 `Path.unlink` 换成「移到回收站」
+        #   （`SHFileOperationW`），且**只对系统临时目录旁路成原生删除** ⇒ 删数据根下的文件要走
+        #   shell，长跑时偶发 `OSError: SHFileOperationW 失败: 0x2`，断言全过却退出码非 0。
+        #   `rename` 不在沙箱替换范围内 ⇒ 先挪进系统临时目录再删，两边都不留垃圾。
+        parking = Path(tempfile.mkdtemp(prefix="ref-probe-"))
+        try:
+            sample.replace(parking / sample.name)
+        except OSError:
+            pass
+        try:
+            (parking / sample.name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        shutil.rmtree(parking, ignore_errors=True)
 
     prepared = {"uploadedImages": [{"name": "already.png", "subfolder": ""}]}
     asyncio.run(svc.prepare_reference_media(prepared))

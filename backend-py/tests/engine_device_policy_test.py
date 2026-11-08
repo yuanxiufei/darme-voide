@@ -543,6 +543,122 @@ def case_split_forward() -> None:
           {"alive": alive() is not None, "beforeMiB": round(before / 2**20, 3),
            "afterMiB": round(after / 2**20, 3)})
 
+    # ⑨⁗ ⭐ **摆的是本体、存的是外壳** ⇒ 同一性判断认不出来 ✓✗（2026-11-07 真机抓到的第二处 ✓）。
+    #      Krea2 的文本塔就是这个形状：`attach_krea2_te` 摆 `module.tower` ✓（要让驻留看得到
+    #      `model.layers.N` ✓）、`self._textEncoder` 存的却是**外壳** `module` ✓（参数全在 tower ✓）。
+    #      ⇒ `holder.module is self._textEncoder` 恒 False ⇒ **把手永不摘** ⇒ hook 环吊着每一层 ⇒
+    #      卡上 6.41 GiB 一字节不退 ✓✗（实测：退 text 前后 `memory_allocated` 都是 6.41 GiB ✓）。
+    #      判据：按**摆放时记下的名字**（`_residencyOwnerWhat` ✓）认件 ✓，两条判据任一成立即摘 ✓。
+    class _Tower(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = nn.Linear(16, 16)
+            self.norm = nn.LayerNorm(16)
+
+    class _Stack(nn.Module):
+        """外壳：参数全在 ``self.tower`` ✓、自己没有一张量 ✓（同 `Krea2TextStack` ✓）。"""
+
+        def __init__(self, tower: nn.Module) -> None:
+            super().__init__()
+            self.tower = tower
+
+    wrapper_backend = tb.TorchBackend(device="cuda")
+    wrapper_backend._residency = "split"                    # noqa: SLF001
+    wrapper_backend._residencyBudgetMib = 0.06              # noqa: SLF001
+    tower = _Tower()
+    placed = wrapper_backend._place_with_residency(tower, what="te")   # noqa: SLF001
+    wrapper_backend._textEncoder = _Stack(tower)            # noqa: SLF001
+    #: 账本也按 ``what``（``"te"`` ✓）记 —— 退 ``"text"`` 时必须把它认成同一件 ✓✗
+    wrapper_backend._ledger.reserve("te", bytes_=4096, device="cuda")   # noqa: SLF001
+    live = weakref.ref(tower)
+    del tower
+    out = wrapper_backend.release_part("text")
+    _gc.collect()
+    torch.cuda.empty_cache()
+    check("⑨⁗ 摆的是**本体**、存的是**外壳** ⇒ 把手照样摘得掉 ✓✗（只比同一性 ⇒ "
+          "`holder.module is self._textEncoder` 恒 False ⇒ 一字节不退 ✓；账本 `te` 也得退 ✓）",
+          placed is not None and out.get("released") is True
+          and wrapper_backend._residencyHandle is None          # noqa: SLF001
+          and wrapper_backend._residencyOwnerWhat is None       # noqa: SLF001
+          and not wrapper_backend._ledger.items                 # noqa: SLF001
+          and live() is None,
+          {"placed": bool(placed), "released": out.get("released"),
+           "handle": wrapper_backend._residencyHandle is not None,
+           "owner": wrapper_backend._residencyOwnerWhat,
+           "ledger": sorted(wrapper_backend._ledger.items),
+           "alive": live() is not None})
+
+    # ⑨⁘ 反方向 ✓✗：退 `text` 时**不许**把 `dit` 的把手摘掉 ✓（按名字认件不是"见到就摘" ✗）。
+    other_backend = tb.TorchBackend(device="cuda")
+    other_backend._residency = "split"                      # noqa: SLF001
+    other_backend._residencyBudgetMib = 0.06                # noqa: SLF001
+    dit_module = _Tower()
+    other_backend._place_with_residency(dit_module, what="dit")        # noqa: SLF001
+    other_backend._textEncoder = _Stack(_Tower())           # noqa: SLF001
+    other_backend.release_part("text")
+    check("⑨⁘ 退 **text** 时不许掀掉 **dit** 的把手 ✓✗（按名字认件 ⇒ 别把"
+          "「认出来」写成「见到就摘」✓，那会把 DiT 的 hook 一起拆了 ⇒ 下次前向层不会再搬 ✓✗）",
+          other_backend._residencyHandle is not None          # noqa: SLF001
+          and other_backend._residencyOwnerWhat == "dit",     # noqa: SLF001
+          {"handle": other_backend._residencyHandle is not None,  # noqa: SLF001
+           "owner": other_backend._residencyOwnerWhat})           # noqa: SLF001
+
+
+def case_phase_missing_only() -> None:
+    """⑮ 换装那一拍**只把"还缺的那几件"**交给决策 ✓✗（2026-11-07 真机抓到 ✓）。
+
+    ⚠️ 为什么这不是"优化"而是**正确性** ✗✗：`decide_for` 的 `need` 是"这几件加起来多大" ✓，
+    而它的 `free` 是**此刻**卡上余量 ✓ —— 已在场那件**本身就占着** `free` 里被扣掉的那几 GiB ✓
+    ⇒ 按整份 `wanted` 算等于把它**数了两遍** ✓✗ ⇒ 需求虚高 ⇒ 判 `cpu/off` ⇒
+    `ensure_host_room` 要"整份进内存" ⇒ 宿主不够 ⇒ **整条链拒装** ✓✗。
+
+    实测（假 8 GiB 卡 ✓ / Krea2 ✓）：`init` 那拍 `text` 已在场（6.41 GiB ✓）、只差 0.24 GiB 的
+    `vae` ✓，却按「text+vae = 7.74 GiB」判 ⇒ 卡上只剩 0.38 GiB ⇒ 转 CPU ⇒ 要 7.74 GiB 内存
+    （宿主只剩 3.59 GiB ✓）⇒ 报「要整份放进内存」✓✗ ——
+    **看着像内存不够，其实只差一个 0.24 GiB 的 VAE** ✓✗（同机 `residency="off"` 装得进 ✓）。
+
+    这条用**替身**跑 ✓：真装载要读 8 GiB 权重 ✓，而这里要判的只是"交给决策的 `parts` 是谁" ✓。
+    """
+
+    class _Decision:
+        """只够 `enter_phase` 用的决策替身 ✓（`to_dict` 要进回执 ✓）。"""
+
+        device = "cuda"
+        residency = "split"
+
+        def to_dict(self) -> dict[str, Any]:
+            return {"device": self.device, "residency": self.residency}
+
+    backend = tb.TorchBackend.__new__(tb.TorchBackend)          # noqa: SLF001 —— 不跑 __init__ ✓
+    backend._chain = {"phaseParts": {"init": ("text", "vae")},  # noqa: SLF001
+                      "partNeedGiB": {"text": 7.5, "vae": 0.24},
+                      "keepParts": (),
+                      #: `vae` 那件要 `attach_wan_vae(**chain)` ✓ —— 替身也得把这两格给齐 ✗
+                      "vaePath": "fake-vae.safetensors", "vaeFamily": "wan21"}
+    backend._model = None                                       # noqa: SLF001
+    backend._textEncoder = object()                             # noqa: SLF001 —— 已在场 ✓
+    backend._vae = None                                         # noqa: SLF001 —— 缺这一件 ✓
+    backend._visionTower = None                                 # noqa: SLF001
+    backend._device = "cuda"                                    # noqa: SLF001
+    backend._residency = "split"                                # noqa: SLF001
+    seen: dict[str, Any] = {}
+
+    def _decide(parts: Any, **_kw: Any) -> _Decision:
+        seen["parts"] = tuple(parts)
+        return _Decision()
+
+    backend.decide_for = _decide                                 # noqa: SLF001
+    backend._apply_decision = lambda _d: None                   # noqa: SLF001
+    backend._relocate_keep_parts = lambda *_a, **_k: []         # noqa: SLF001
+    backend._trim_cuda = lambda: None                           # noqa: SLF001
+    backend.attach_wan_vae = lambda *_a, **_k: None             # noqa: SLF001
+    note = backend.enter_phase("init")
+    check("⑮ 已在场的那件**不许再算进需求** ✓✗（按整份 `wanted` 判 ⇒ `free` 里被扣了两遍 ⇒ "
+          "虚高 ⇒ 转 CPU ⇒ 报「要整份放进内存」✓——错的不是内存，是这一步把账做了两遍 ✓✗）",
+          seen.get("parts") == ("vae",)
+          and (note or {}).get("decision") is not None,
+          {"parts": seen.get("parts"), "note": (note or {}).get("device")})
+
 
 def case_hand_copies() -> None:
     """⑩ 「哪里还在手抄」✓：同一件事只许有**一份**实现 ✓✗（2026-10-31 ✓）。
@@ -971,10 +1087,17 @@ def case_need_by_file() -> None:
         "qwen_image": inspect.getsource(rt.EngineRuntime._ensure_qwen_image_loaded),
         "sdxl": inspect.getsource(rt._image_device_decision),
     }
-    missing = [name for name, text in sources.items() if "part_need_gib(" not in text]
+    missing = [name for name, text in sources.items() if "stage_part_need(" not in text]
     check("⑭⁵ 六条装配线（h3 / zimage / qwen21 / krea2 / qwen_image / sdxl）**都**按文件取需求 ✓✗"
-          "（漏一条 ⇒ 那条换量化档时仍按旧表判 ✓，症状是 OOM 或白白切一半到内存 ✓✗）",
+          "（且都走同一个出口 `stage_part_need(` ✓：漏一条 ⇒ 那条换量化档时仍按旧表判 ✓，"
+          "症状是 OOM 或白白切一半到内存 ✓✗）",
           not missing, {"缺": missing})
+
+    #: ⚠️ 反向 ✓✗：口径（`assume` / `adapter`）单点在 `STAGE_PART_SPECS` ✓ —— 装配线直调底层
+    #: `part_need_gib(` 就等于把口径写在调用方 ✓，预检（读过登记表 ✓）与真装载（绕过它 ✗）会各持一本账 ✓✗。
+    direct = [name for name, text in sources.items() if "part_need_gib(" in text]
+    check("⑭⁵′ 六条线都**不**直调底层 `part_need_gib(`（否则口径有两处真源）",
+          not direct, {"直调": direct})
 
 
 def quant_int4_stems(specs: dict[str, Any]) -> frozenset[str]:
@@ -995,6 +1118,7 @@ def main() -> int:
     case_zimage()
     case_residency_te()
     case_split_forward()
+    case_phase_missing_only()
     case_residency_kind()
     case_reserve_report()
     case_residency_total()

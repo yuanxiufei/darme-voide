@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = ["API_VERSION", "CODES", "Engine", "EngineError", "SCHEMA_VERSION",
-           "capabilities", "compat", "inspect_weights", "manifest_of", "plan",
+           "capabilities", "compat", "feasibility", "inspect_weights", "manifest_of", "plan",
            "readiness", "translate"]
 
 #: 门面 API 版本（语义化：MAJOR＝不兼容变化 / MINOR＝新增可选能力 / PATCH＝兼容修复）。
@@ -66,7 +66,12 @@ API_VERSION = "1.0.0"
 #:     此前前端想知道采样器 / 调度器 / 画布档位，只能读 `pipeline` 源码猜 ✓✗ ——
 #:     猜错**不报错**，静默按默认跑 ✓✗（`karras` 套 flow 模型就是这一类 ✓）。
 #:     `profiles[]` 里 `requiresInitImage` 是派生量 ✓（`denoise<1` ⇒ 必须连 `initImage` ✓）。
-SCHEMA_VERSION = 6
+#: 7 = `status()` 新增 `profile` / `budgets` / `diskCache`（2026-11-07 ✓，低配计划 §4.4／§5.2 ✓）
+#:     —— 同上 ✓✗。这一栏补的是「**这台机器够不够**」✓：此前只能读「装好了没有」（`loaded` ✓）⇒
+#:     8 GiB 卡上装 12.57 GiB 的 DiT 被拒之后，回执里说不出「是额度不够还是文件不对」✓✗；
+#:     `profile` 是机器档（≠ 出图档 `capabilities().profiles` ✓，同名不同义 ✓✗）、`budgets` 是
+#:     这一档下卡/内存各有多少能用 ✓、`diskCache` 是物化缓存占了多少盘 / 复用了几次 ✓。
+SCHEMA_VERSION = 7
 
 #: 错误码（WBS-1.2：机器可判，不是只有一句中文）。
 CODES: dict[str, str] = {
@@ -348,6 +353,99 @@ def plan(stage: str = "h3", *, root: str | Path | None = None,
     except Exception as err:  # noqa: BLE001 —— 边界上统一翻译
         raise _friendly(err) from err
     return {"schemaVersion": SCHEMA_VERSION, "apiVersion": API_VERSION, **data}
+
+
+def feasibility(stage: str = "h3", *, root: str | Path | None = None,
+                capacity_gib: float | None = None, policy: str = "auto",
+                size: str | None = None,
+                samples: list[float] | tuple[float, ...] | None = None,
+                matched: int | None = None) -> dict[str, Any]:
+    """**任务级可行性**：这台机器跑这条链，**权重驻留**够不够 ✓（不装载 ✓、不 import torch 也能答 ✓）。
+
+    三分工（别混 ✗）：
+
+    * :func:`readiness` ＝ 件**齐不齐**（盘上有没有、头部对不对 ✓）；
+    * :func:`plan` ＝ 装齐之后**怎么排班**（按**文件字节** ✓，那是"要读进来多少" ✗）；
+    * 本函数 ＝ **装完占多少** vs 本机预算 ⇒ ``verdict`` ✓。
+
+    ⚠️ ``activation.basis`` 恒为 ``"unknown"`` ✓（本仓没有逐族激活峰值实测表 ✓）⇒ ``verdict`` 只覆盖
+    权重这一半、且 ``perfect`` 会**降一档**报 ``good`` ✓（见 :mod:`feasibility` 模块头 ✓）。
+
+    ``size``（``"1040x1040"`` ✓）：给了就顺手报**这一档尺寸会不会被族改写** ✓ ——
+    权重判据与分辨率无关 ✓（激活峰值没有表 ✓），所以它**不参与 verdict** ✗，只把"你写 1000×1000、
+    实际会吸到 1040×1040"这类事实说到明处 ✓（详见 :func:`_size_note` ✓）。
+
+    ``samples``／``matched``：历史跑次的 ``elapsed_ms``（调用方从跑次台账取 ✓ —— 引擎内核不读业务库 ✓）
+    ⇒ 组装 ``estimate`` ✓。**不传就是 ``basis="unknown"`` ＋ 不给秒数** ✓（不是"0 秒" ✗✗）。
+    """
+    from . import feasibility as feasibility_mod  # noqa: PLC0415
+
+    _check_stage(stage)
+    try:
+        data = feasibility_mod.check(stage, root=Path(root) if root else None,
+                                     capacity_gib=capacity_gib, policy=policy)
+    except Exception as err:  # noqa: BLE001 —— 边界上统一翻译
+        raise _friendly(err) from err
+    data["size"] = _size_note(stage, size)
+    #: ⚠️ `estimate` **永远在** ✓（哪怕 unknown ✓）：缺席会被读成"这版没有这个能力" ✗✗，
+    #: 而 `basis="unknown"` 说的是"还没有度量" ✓ —— 两句话不一样 ✓。
+    data["estimate"] = feasibility_mod.estimate(stage=stage, samples=samples, matched=matched)
+    return {"schemaVersion": SCHEMA_VERSION, "apiVersion": API_VERSION, **data}
+
+
+def _size_note(stage: str, size: str | None) -> dict[str, Any] | None:
+    """这一档尺寸**会不会被族改写** ✓ ⇒ ``None`` 没给 / ``{asked, snapped, absorbed, step, scheme}``。
+
+    ⚠️⚠️ **不自己算吸附** ✗✗：直接问 :func:`canvas.plan_canvas` ✓ —— 它是"这次画布多大"的**唯一**真源 ✓。
+    这一格的教训是实测出来的 ✓：我第一版自己拍了「全族 16、一律**向上**吸」，跑出来
+    ``1000×1000 → 1008×1008`` ✓；而真源是 ``canvas._snap`` 的**就近**（``round``）✓ 与
+    ``STAGE_CANVAS`` 的**逐族步长**（``h3`` 32 / ``sdxl`` 8 / 图族 16）✓ ⇒ 同一对数会落到 **992×992** ✓✗。
+    再叠一层：``wan22``/``seedvr2``/``music3`` **根本不接画布覆盖** ✗ ⇒ 对它们报"会被吸"是纯造谣 ✓✗。
+
+    ⚠️ 只报**几何** ✓，不做**判据** ✗：给 4096×4096 也不会因此判"跑不了" ✓ —— 那要激活峰值表 ✓，
+    本仓没有 ✓（见模块头 ✓）。**说清边界**比多判一条更值 ✓。
+    """
+    if not size:
+        return None
+    from . import canvas as canvas_mod  # noqa: PLC0415
+
+    text = str(size).strip().lower().replace(" ", "")
+    bad = {"asked": str(size), "snapped": None, "absorbed": False, "step": 0, "scheme": ""}
+    for sep in ("x", "*", "×", ","):
+        if sep in text:
+            left, _, right = text.partition(sep)
+            break
+    else:
+        return {**bad, "problem": f"尺寸看不懂 ✗（要 ``宽x高`` ✓，比如 ``1024x1024`` ✓）：{size!r}"}
+    try:
+        width, height = int(float(left)), int(float(right))
+    except (TypeError, ValueError):
+        return {**bad, "problem": f"尺寸里不是数字 ✗（要 ``宽x高`` ✓）：{size!r}"}
+    if width <= 0 or height <= 0:
+        return {**bad, "problem": f"尺寸必须为正 ✗：{size!r}"}
+
+    key = str(stage).strip().lower()
+    if key not in canvas_mod.STAGE_CANVAS:
+        return {**bad, "asked": f"{width}x{height}",
+                "note": (f"``{stage}`` 这族**不接画布覆盖** ✓（不在 ``canvas.STAGE_CANVAS`` ✓）"
+                         "⇒ 尺寸这一栏不参与 ✓（别把「没报」读成「支持」✗）")}
+    try:
+        plan = canvas_mod.plan_canvas(key, width=width, height=height)
+    except ValueError as err:
+        return {**bad, "asked": f"{width}x{height}", "problem": f"画布不收 ✗：{err}"}
+    absorbed = (int(plan.width), int(plan.height)) != (width, height)
+    return {
+        "asked": f"{width}x{height}",
+        "snapped": f"{int(plan.width)}x{int(plan.height)}",
+        "absorbed": absorbed,
+        "step": int(plan.grid),
+        "scheme": str(plan.scheme),
+        #: ⚠️ `megapixels` 是**这个画布的**像素数 ✓（1328×1328 ≈ 1.76 MP ✓），不是用户传的预算 ✗
+        "megapixels": round(float(plan.megapixels), 4),
+        "notes": list(plan.notes or ()),
+        "note": (f"族步长 {int(plan.grid)} × **就近**吸 ✓ ⇒ 实际 {int(plan.width)}×{int(plan.height)} ✓"
+                 + ("（你给的数会被改 ✓ 别照抄 ``asked`` ✗）" if absorbed else "（不变 ✓）")),
+    }
 
 
 def readiness(stage: str = "h3", *, root: str | Path | None = None,
@@ -638,13 +736,16 @@ def compat(stage: str = "h3", *, root: str | Path | None = None,
         raise _friendly(err) from err
 
 
-def status() -> dict[str, Any]:
-    """运行时的**事实**（已装什么、跑没跑、显存占用）—— 只读、不触发装载。"""
+def status(profile: str | None = None) -> dict[str, Any]:
+    """运行时的**事实**（已装什么、跑没跑、显存占用）—— 只读、不触发装载。
+
+    ``profile`` 只影响 ``budgets`` 那一栏（按哪一档算预算 ✓，G1 ✓）；不给 ⇒ 用最后那次装载的档 ✓。
+    """
     from . import runtime as runtime_mod  # noqa: PLC0415
 
     try:
         return {"schemaVersion": SCHEMA_VERSION, "apiVersion": API_VERSION,
-                **runtime_mod.engine_runtime.status()}
+                **runtime_mod.engine_runtime.status(profile=profile)}
     except Exception as err:  # noqa: BLE001
         raise _friendly(err) from err
 

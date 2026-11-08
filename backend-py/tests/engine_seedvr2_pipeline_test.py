@@ -199,13 +199,21 @@ def case_write(where: Path) -> None:
     plan = pl.GenerationPlan(fps=FPS)
     backend = tb.TorchBackend(device="cpu")
     frames = torch.rand(1, 3, EXPECT_FRAMES, SOURCE_H, SOURCE_W) * 2 - 1
-    real = backend.write({"frames": frames, "synthetic": False}, plan, request)
+    real = backend.write({"frames": frames, "synthetic": False,
+                          "vaeKind": "seedvr2-real"}, plan, request)
     check("④ 真产物 ⇒ synthetic=False 且落真 mp4",
           real["synthetic"] is False and real.get("realFile") is True
           and "真 VAE 解码" in real["note"], (real["synthetic"], real["note"]))
-    noise = backend.write({"frames": frames, "synthetic": True}, plan, request)
+    noise = backend.write({"frames": frames, "synthetic": True,
+                           "vaeKind": "reference-untrained"}, plan, request)
     check("④ 仍保留旧口径（参考 VAE ⇒ 明说噪声）",
           noise["synthetic"] is True and "未训练" in noise["note"], noise["note"])
+    #: ⚠️ 反向：**别只信调用方递来的 ``synthetic``** ✗ —— 给了 ``synthetic=False`` 却没有
+    #: ``vaeKind``（＝没挂 VAE），回执必须如实说「占位解码」✓✗。只按标记表态会让
+    #: 「拿一组合成帧冒充真成品」静默通过 ✓（这正是这节的旧写法，已被这条反证挡掉 ✓）。
+    bare = backend.write({"frames": frames, "synthetic": False}, plan, request)
+    check("④ 没有 vaeKind ⇒ 回执如实说占位解码（不替调用方担保真画面）",
+          "占位解码" in bare["note"] and "真 VAE 解码" not in bare["note"], bare["note"])
 
 
 def main() -> int:

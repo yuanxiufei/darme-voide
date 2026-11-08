@@ -38,6 +38,9 @@ from typing import Any
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
+#: ⚠️ 干跑报告隔离到临时树 ✓✗（同 ``engine_pipeline_test`` 的理由）：
+#: 不设它 ⇒ `data/engine-dryrun/engine_runtime_xxxx/` 每次跑都多一个 ✓。
+os.environ.setdefault("DARME_ENGINE_DRYRUN", tempfile.mkdtemp(prefix="dryrun_rt_"))
 sys.path.insert(0, str(BACKEND_PY))
 
 from app.services.engine import h3_form  # noqa: E402
@@ -126,6 +129,23 @@ def case_status() -> None:
           and all(isinstance(item, dict) for item in caps["knownGaps"])
           and not any(item in caps["knownGaps"] for item in gaps),
           {"capabilities.knownGaps": caps.get("knownGaps"), "codeGaps": gaps})
+
+    #: ⭐ ①⁶ 物化缓存的账（§4.4 ✓ 2026-11-07 ✓）：**体积**与**次数**必须**同时**报 ✓✗。
+    #: 只报次数（"命中 3 次"）⇒ 用户不知道盘上压了 8 GiB ✓✗；只报体积 ⇒ 看不出这层有没有在起作用 ✓✗。
+    #: 三处易读错的默认值也要钉住：`enabled=False` 是**总开关关着** ✓（不是"没命中"✗）、
+    #: `limitGiB=None` 是**不限** ✓（不是"限了 0"✗）、`hits` 是**本进程**的 ✓（重启清零 ✓）。
+    cache = status.get("diskCache") or {}
+    check("①⁶ 自述: `diskCache` 同时给**体积**与**次数**（缺一个就变成半句话）",
+          all(key in cache for key in ("dir", "enabled", "files", "sidecars", "diskGiB",
+                                       "limitGiB", "freeGiB", "hits", "misses", "refused")),
+          sorted(cache))
+    check("①⁶ 自述: 读不到目录也**不编 0 GiB 假装量过**（`dir` 非空 + 数值是数字或 None）",
+          isinstance(cache.get("dir"), str) and bool(cache.get("dir"))
+          and isinstance(cache.get("diskGiB"), (int, float))
+          and isinstance(cache.get("hits"), int) and isinstance(cache.get("misses"), int),
+          cache)
+    check("①⁶ 自述: `enabled` 是**布尔**（关掉时必须能一眼读出是关着，而不是「0 次命中」）",
+          isinstance(cache.get("enabled"), bool), cache.get("enabled"))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1115,6 +1135,113 @@ def case_vae_tiling_wiring() -> None:
           {"调用数": len(chunk_calls), "带参": wired, "读旋钮": len(read_knob)})
 
 
+def case_gpu_layers_wiring() -> None:
+    """``gpuLayers`` 这条旋钮的**接线**与 `vae_tiling` 同形 ✓✗（2026-11-07 加 ✓，§4.1 ✓）。
+
+    ⚠️ 为什么必须静态判（不真装）✗✗：它坏起来**一声不响** ✓ —— 少写一处 `gpu_layers=gpu_layers`
+    ⇒ 那一档收下参数、构造后端时不传 ⇒ 后端 `_gpuLayers=None` ⇒ **按预算自算** ✓✗，
+    而回执里 `requested` 明明有你给的那个数 ✓ ⇒ 症状是「回执说切了、实际没切」✓✗。
+    真跑一遍也撞不到（除非恰好去看层数 ✓）。
+
+    判据五件：
+
+      ① 每条走 `TorchBackend` 的装配线**都收** `gpu_layers` 且**都传给**构造器 ✓；
+      ② 唯一的例外是出图那条（`SdxlBackend` 没有可切的层 ✓）—— 必须**恰好**只有它 ✗✗
+         （多一条就是在某个档位静默丢参 ✓）；
+      ③ `_ensure_loaded_internal` 往每一条装配线**都带上了**它 ✓；
+      ④ **两处** `_load_key` 都在键里 ✓（只改一处 ⇒ 一处判「已装」、另一处判「要重装」⇒ 抖动 ✓）；
+      ⑤ `ensure_loaded` 里**先归一、后拼键** ✓✗（顺序反了 ⇒ `"3"` 与 `3` 是两个键 ✓，
+         同一份布局白装两遍 ✓）。
+    """
+    import ast  # noqa: PLC0415
+
+    from app.services.engine import runtime as rt_mod  # noqa: PLC0415
+
+    path = Path(rt_mod.__file__)
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    cls = next(node for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "EngineRuntime")
+    funcs = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
+
+    loaders = {name: node for name, node in funcs.items()
+               if name == "_ensure_loaded_internal"
+               or (name.startswith("_ensure_") and name.endswith("_loaded"))}
+    #: ① 走 `TorchBackend` 的那几条：收了就必须传 ✓
+    no_param: list[str] = []
+    no_pass: list[str] = []
+    for name, node in sorted(loaders.items()):
+        args = {arg.arg for arg in node.args.args + node.args.kwonlyargs}
+        ctors = [call for call in ast.walk(node) if isinstance(call, ast.Call)
+                 and getattr(call.func, "id", "") == "TorchBackend"]
+        if not ctors:
+            continue                       #: 没构造 TorchBackend 的（出图那条）② 单独判 ✓
+        if "gpu_layers" not in args:
+            no_param.append(name)
+            continue
+        if not all(any(kw.arg == "gpu_layers" for kw in call.keywords) for call in ctors):
+            no_pass.append(name)
+    check("gpuLayers 接线: 每条走 TorchBackend 的装配线**都收** `gpu_layers` 且**都传给**构造器"
+          "（少一处 ⇒ 回执说切了、实际按 auto ✓✗）",
+          not no_param and not no_pass, {"少参数": no_param, "收了没传": no_pass})
+
+    #: ② 例外必须**只有**出图那条，而且是 `SdxlBackend` ✓
+    no_ctor = sorted(name for name, node in loaders.items()
+                     if not any(isinstance(call, ast.Call)
+                                and getattr(call.func, "id", "") == "TorchBackend"
+                                for call in ast.walk(node)))
+    sdxl = loaders.get("_ensure_image_loaded")
+    sdxl_src = ast.get_source_segment(source, sdxl) if sdxl is not None else ""
+    check("gpuLayers 例外只有出图那条（SdxlBackend 没有可切的层）",
+          no_ctor == ["_ensure_image_loaded"] and "SdxlBackend" in (sdxl_src or ""),
+          {"无 TorchBackend 的": no_ctor})
+
+    #: ③ 分派：每一处都要带 ✓
+    internal = loaders.get("_ensure_loaded_internal")
+    dispatch = [call for call in (ast.walk(internal) if internal is not None else [])
+                if isinstance(call, ast.Call)
+                and getattr(call.func, "attr", "").startswith("_ensure_")
+                and getattr(call.func, "attr", "").endswith("_loaded")]
+    missing = sorted({getattr(call.func, "attr", "?") for call in dispatch
+                      if not any(kw.arg == "gpu_layers" for kw in call.keywords)})
+    #: ⚠️ 例外**只有**出图那条（八处里少一处）✗✗ —— 若哪天出图也接上 residency 切分，
+    #: 这条会先红 ✓：那时把 `["_ensure_image_loaded"]` 改成 `[]` 就行 ✓（改之前先想清楚
+    #: `SdxlBackend` 有没有「层」这个概念 ✗）。
+    check("gpuLayers 分派: 八处里**只有**出图那条不带它（其余七条都带）",
+          len(dispatch) == 8 and missing == ["_ensure_image_loaded"],
+          {"分派数": len(dispatch), "漏": missing})
+
+    #: ④ 两处 `_load_key` 都要在键里 ✓
+    key_calls = [call for call in ast.walk(cls) if isinstance(call, ast.Call)
+                 and getattr(call.func, "id", "") == "_load_key"]
+    key_missing = [i for i, call in enumerate(key_calls)
+                   if not any(kw.arg == "gpu_layers" for kw in call.keywords)]
+    check("gpuLayers 进装载键: **两处** `_load_key` 都带 `gpu_layers`"
+          "（只改一处 ⇒ 抖动 ✓✗）",
+          len(key_calls) == 2 and not key_missing,
+          {"调用点": len(key_calls), "漏": key_missing})
+
+    #: ⑤ 先归一、后拼键 —— 靠**行号**判 ✓✗（顺序反了就是两个键 ✓，纯静态也能判 ✓）
+    ensure = funcs.get("ensure_loaded")
+    normalize_at: list[int] = []
+    key_at: list[int] = []
+    for node in (ast.walk(ensure) if ensure is not None else []):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "attr", "") or getattr(node.func, "id", "")
+        if name == "normalize_gpu_layers":
+            normalize_at.append(node.lineno)
+        if name == "_load_key":
+            key_at.append(node.lineno)
+    check("gpuLayers **先归一、后拼键**（顺序反了 ⇒ '3' 与 3 是两个键、同一布局白装两遍 ✓✗）",
+          bool(normalize_at) and bool(key_at) and min(normalize_at) < min(key_at),
+          {"归一": normalize_at, "拼键": key_at})
+
+    #: ⑥ 出图那条给了数要**如实报** granted=null（不许静默吞掉 ✗、不许报 0 ✗）
+    check("gpuLayers 出图那条：给了数时回执报 `granted=None`（**不是** 0 —— 0 是「一层都不上卡」）",
+          '"granted": None' in (source or "") and "没有可切的层" in (source or ""), None)
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="engine_runtime_"))
     case_status()
@@ -1127,6 +1254,7 @@ def main() -> int:
     case_load_ledger()
     case_cache_meter()
     case_vae_tiling_wiring()
+    case_gpu_layers_wiring()
     if not _have_torch():
         skip("缺 torch ⇒ 真装载 / 真产物 / 真卸载 跳过 ✓")
     elif not media_mod.have_ffmpeg():

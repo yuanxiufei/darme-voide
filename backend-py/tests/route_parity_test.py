@@ -67,8 +67,9 @@ MIGRATED: dict[str, str] = {
     "auto-pipeline.ts": "/api/v1/auto-pipeline",
     "localModels.ts": "/api/v1/local-models",
     "mcp.ts": "/api/v1/mcp",
-    # evaluation.ts：5 端点里已迁 2 个（cases / evaluate），另 3 个（optimize/scheduler/run）
-    # 依赖未迁件 ⇒ 由 catch-all 兜底（守卫会把它们算进「未注册」，正好当待办清单用）
+    # evaluation.ts：5 端点**全部已迁**（cases / evaluate / optimize / scheduler / run）。
+    # ⚠️ 早先此注写「另 3 个由 catch-all 兜底」，2026-09-15 已迁完、注释没跟上 ⇒ 2026-11-07 校正。
+    # 「还有哪些没迁」永远看本套件跑出来的「未迁移」计数（现为 0），别信任何手写清单。
     "evaluation.ts": "/api/v1/evaluation",
     "merge.ts": "/api/v1/merge",
     "grid.ts": "/api/v1/grid",
@@ -708,6 +709,15 @@ _JSON_DUMPS_ALLOW_PATHS = {
     "services/engine/tuning.py",
     "routers/repair.py",
     "services/repair_skill.py",
+    # 诊断快照（`repair/diagnose/<id>.json`）：**证据**而不是缓存 —— 要能被人直接打开看
+    # 「当时缺哪些键」（`indent=1` 有意 ✓）。没有 Node 对应物 ✗、不进共用 DB 列、不发厂商、
+    # 也不当 HTTP 响应体（`/diagnose` 回包里带的是摘要元数据，不是这份全文 ✓）。
+    "services/repair_closure.py",
+    # 引擎产物清单 `manifest.json`（2026-11-07 登记 ✓）：写进产物目录、`indent=2` 是给人和
+    # 编辑器直接打开看的 ✓。它**只由本仓读回**（产物台账），既不进共用 DB 列、也不发给厂商、
+    # 更不当 HTTP 响应体（回执里给的是 `manifestPath` 这个**路径字符串** ✓）⇒ 与 `dryrun.py`
+    # 同一类：**没有 Node 对应物** ✗ ⇒ 不承担「镜像紧凑性」义务 ✓。
+    "services/engine/torch_backend.py",
 }
 
 

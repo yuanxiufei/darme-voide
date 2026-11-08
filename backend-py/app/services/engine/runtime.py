@@ -41,16 +41,22 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, is_dataclass, replace
 from typing import Any, NoReturn
 
 from . import audio_vae as audio_vae_mod
 from . import chain
 from . import device_policy
 from . import dit_build
+from . import hooks
 from . import lora as lora_mod
 from . import lora_cache
+from . import materialize as materialize_mod
 from . import pipeline as pipe
+from . import profile as profile_mod
+from . import residency as residency_mod
+from . import scheduler as scheduler_mod
 from . import vae as vae_mod
 from .dryrun import DryRunBackend
 from .torch_backend import (
@@ -59,7 +65,7 @@ from .torch_backend import (
     TorchBackendUnavailable,
     dependency_status,
     normalize_vae_tiling,
-    part_need_gib,
+    stage_part_need,
     torch_available,
 )
 #: ⚠️ 判族常量**单独引** ✗（不整包铺开 ✓）：装配时要拿它核「`ditPath` 到底是不是 Z-Image」✓ ——
@@ -132,6 +138,75 @@ _KREA2_STAGE_NOTE = (
     "`vae/qwen_image_vae.safetensors`（**16 通道** ✓，与 2512 是**同一个文件** ✓，"
     "但反缩放取 **Wan21** 的 mean/std ✓ 不是 2512 的 ✗）。"
 )
+
+#: Krea2 **三件同时驻留**时的分段表 ✓（2026-11-07 加 ✓）—— 每一段都点名三件 ✓ ⇒
+#: :meth:`TorchBackend.enter_phase` 一件都不退 ✓（"要的都在场" ⇒ 只把不用的退掉 ⇒ 没有不用的 ✓）。
+#:
+#: ## 为什么要这一档 ✗✗（分时链的账是**每张图**都付一次 ✓）
+#:
+#: 分时链（``PHASE_PARTS`` ✓）换来的峰值是单件 12.57 GiB ✓，代价是 **encode 那一拍要把文本塔
+#: 从盘上重读一遍** ✓✗ —— 它跟提示词内容半点关系都没有 ✓。真卡实测（1056×1056 / 4 步 ✓）：
+#: 整链 **45.6 s** ＝ 装配 64.1 ＋ **encode 27.4** ＋ sample 16.8 ＋ decode 1.2 ✓ ⇒
+#: **六成时间花在换装上** ✓✗，而真正在采样的 4 步只有 16.8 s ✓。
+#:
+#: ## 什么时候能这么干 ✓
+#:
+#: 三件之和装得下就行 ✓ —— 但**别自己写阈值** ✗：走设备策略那一套（1 GiB 硬余量 ＋ 压力比 ✓），
+#: 判成 ``off`` 才启用 ✓。两档实测：
+#:
+#: * **int4 档**：5.98 ＋ 7.5 ＋ 0.24 ＝ **13.72 GiB** ✓ ⇒ 判 ``off`` ⇒ 全驻留 ✓（首张之后为零换装 ✓）；
+#: * **int8 档**：12.57 ＋ 7.5 ＋ 0.24 ＝ **20.31 GiB** ✓ ⇒ 余量不够 1024² 的激活 ✓ ⇒ 判 ``split``
+#:   ⇒ 老实分时 ✓（这一档分时才是正解 ✓，别硬凑全驻留 ✗，OOM 会落在采样第 1 步 ✓）。
+KREA2_ALL_RESIDENT_PHASES: dict[str, tuple[str, ...]] = {
+    "encode": ("dit", "text", "vae"),
+    "init": ("dit", "text", "vae"),
+    "sample": ("dit", "text", "vae"),
+    "decode": ("dit", "text", "vae"),
+}
+
+
+def _krea2_decision(backend: Any, parts: tuple[str, ...],
+                    part_need: dict[str, float]) -> str:
+    """问一次设备策略：**这几件一起**该 `off` / `split` / `park` ✓（判不出来就空串 ✓）。
+
+    ⚠️⚠️ **决策对象是 dataclass，不是 dict** ✗✗（2026-11-07 真跑抓到的 ✓）：写成
+    ``verdict.get("residency")`` 在 :class:`~.device_policy.Decision` 上抛 `AttributeError`
+    ✓，被 `except` 一兜就**静默变成"分时"** ✓✗ —— 症状是"全驻留永远不生效、回执一切正常"✓✗
+    （实测：int4 档 5.98 ＋ 7.5 ＋ 0.24 ＝ 13.72 GiB 明明判 `off` ✓，`enter_phase` 还是把
+    DiT 退了 ✓）。两种形状都认 ✓（测试用的桩件给 dict ✓，真后端给 `Decision` ✓）。
+    """
+    try:
+        verdict = backend.decide_for(tuple(parts), phase="assemble", need_gib=part_need)
+    except Exception:  # pragma: no cover - 判不出来就按老路 ✓（老路不会错，只是慢 ✓）
+        return ""
+    residency = (verdict.get("residency") if isinstance(verdict, dict)
+                 else getattr(verdict, "residency", None))
+    return str(residency or "")
+
+
+def _krea2_all_resident(backend: Any, part_need: dict[str, float]) -> bool:
+    """Krea2 三件**同时驻留**装得下吗 ✓（判据走设备策略 ✓，不自己写阈值 ✗）。"""
+    return _krea2_decision(backend, ("dit", "text", "vae"), part_need) == "off"
+
+
+def _krea2_keep_parts(backend: Any, part_need: dict[str, float], *,
+                      together: bool) -> tuple[str, ...]:
+    """哪几件该**停到内存**而不是退回盘上 ✓✗（2026-11-07 ✓）。
+
+    起因：int8 档三件加起来 20.31 GiB 挤不进 22.49 GiB 的卡 ⇒ 走分时 ✓，而 `sample` 那一拍
+    会把文本塔**退回盘上** ✓ ⇒ 下一张图再从盘上重读一遍 ✓✗（真卡实测 `换装 encode 19397 ms`／张 ✓，
+    与提示词内容无关 ✓）。可"退"与"读盘"是两件事 ✓：整份装得下的件完全可以**停到内存** ✓
+    （`_relocate_keep_parts` 只在卡↔内存之间搬 ✓），一个字节都不重读 ✓、数值逐位不变 ✓
+    ⇒ **不降质量** ✓（同一份权重字节 ✓，步数 / 精度 / 采样参数一律不动 ✓）。
+
+    ⚠️ 只许收**判成 `off`（整份装得下）**的件 ✗✗：`split`（分层搬运 ✓）的件一旦进了
+    `keepParts`，`_relocate_keep_parts` 会把它**整份**搬去 cpu 再**整份**搬回卡上 ✓✗ ——
+    分层计划当场作废 ✓、搬回时直接 OOM ✓（8 GiB 低配档正是这种 ✓）。
+    """
+    if together:
+        return ()          # 三件都常驻 ⇒ 一件都不用搬 ✓
+    return tuple(part for part in ("dit", "text", "vae")
+                 if _krea2_decision(backend, (part,), part_need) == "off")
 
 #: ⭐ SEEDVR2（视频修复）的装配说明 ✓ —— 这是本仓**第一套两件套** ✓（无文本塔 ✓）。
 #:
@@ -255,7 +330,9 @@ WAN22_I2V_IN_CHANNELS = 36
 #: ⚠️ 拿 2.1 的 ``{"dit": 13.26, "text": 14.79}`` 判 H3 ✗✗：DiT 少算 6.4 GiB ✓、TE 少算 10.6 GiB ✓
 #: ⇒ 决策说"装得下" ✓、`residency` 留 ``off`` ✓（= 不切 ✗）、装到一半 OOM ✓，且 OOM 落在
 #: **后装的那件**上 ✓✗（读起来像"TE 坏了" ✗，实际是两张表混用 ✓）。
-H3_PART_NEED_GIB: dict[str, float] = {"dit": 19.62, "text": 25.44, "vae": 5.2}
+#: ⚠️ 表值本体挂在 :attr:`TorchBackend.H3_PART_NEED_GIB` ✓（2026-11-07 收口 ✓：同一批 dict 对象 ✓、
+#: 这里只是名字别名 ✓）—— 预检（``feasibility``）经 ``TorchBackend.STAGE_NEED_TABLES`` 读的是**同一本账** ✓✗。
+H3_PART_NEED_GIB: dict[str, float] = TorchBackend.H3_PART_NEED_GIB
 
 _QWEN_IMAGE_STAGE_NOTE = (
     "Qwen-Image **2512 / Edit 2511** 的装配要**三份权重 + 一本词表** ✓：DiT（`ditPath` ✓）+ "
@@ -289,6 +366,18 @@ class EngineBusy(EngineUnavailable):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _request_field(request: Any, name: str) -> Any:
+    """按**两种形态**取请求字段：``dict`` 用键、其余用属性 ✓；都没有 ⇒ ``None`` ✓。
+
+    为什么非有不可 ✗：``submit(request: Any)`` 同时收 ``GenerationRequest``（dataclass ✓）
+    与直接给的 dict（HTTP 通路、各套件 ✓）。只写 ``getattr`` ⇒ dict 永远取不到值 ✓✗
+    （表现为「明明给了 outputs_dir，还是被改写成本任务子目录」）。
+    """
+    if isinstance(request, Mapping):
+        return request.get(name)
+    return getattr(request, name, None)
 
 
 def _env_int(name: str, default: int, *, low: int = 1) -> int:
@@ -386,6 +475,23 @@ class EngineTask:
 def _load_key(**kwargs: Any) -> tuple[Any, ...]:
     """装配参数的**可比较快照** ✓（dict 不可哈希 ✗ ⇒ 摊成排序元组 ✓）。"""
     return tuple(sorted((key, repr(value)) for key, value in kwargs.items()))
+
+
+def _policy_key(raw: Any) -> str:
+    """``policy`` 进键前的**归一** ✓（``None`` / ``"auto"`` / ``"gpu-first"`` 是**同一种** ✓✗）。
+
+    ⚠️ 为什么单独开一个函数 ✗✗（而不是在 :meth:`EngineRuntime.ensure_loaded` 里写
+    ``policy = device_policy.normalize_policy(policy)`` 就完事 ✓）：写成**先赋值**的形式时，
+    进键那一刻的 ``policy`` 是"上一行算出来的" ✓ —— 键的**形**只能靠读源码上下文才看得懂 ✓✗，
+    而读键的人（测试 ✓、以后加装配线的人 ✓）会按**函数签名默认值**去拼 ✓：
+    ``normalize_policy(None)`` 是 ``"auto"`` ✓✗ ⇒ 手拼出来的键是 ``policy='None'`` ✓，
+    与运行时的 ``policy='auto'`` **键不同** ✓✗ ⇒ 「同键复用」这条判据会**假失败** ✓
+    （症状＝明明摆了白盒状态却真的去装一遍 19 GiB ✓）。
+
+    写成 ``_load_key(policy=_policy_key(policy))`` 之后，「这一格怎么归一」**就写在建键那一行** ✓
+    （与 ``_vae_tiling_key`` / ``_lora_key`` 同一形状 ✓）⇒ 读键的人从函数名就能取到 ✓✗。
+    """
+    return device_policy.normalize_policy(raw)
 
 
 def _vae_tiling_key(raw: Any) -> tuple[tuple[str, Any], ...]:
@@ -746,10 +852,9 @@ def _image_device_decision(*, dit_path: str | None, device: str | None,
         need_bytes = 0
         try:
             if dit_path:
-                gib, need_why = part_need_gib(
-                    dit_path,
-                    fallback=os.stat(dit_path).st_size / device_policy.GIB,  # noqa: PTH116
-                    assume="plain")
+                gib, need_why = stage_part_need(
+                    "image", "dit", dit_path,
+                    fallback=os.stat(dit_path).st_size / device_policy.GIB)  # noqa: PTH116
                 need_bytes = int(gib * device_policy.GIB)
         except OSError:
             need_bytes = 0                  # 读不到 ⇒ 「需求未知」✓（不猜 ✗）
@@ -809,6 +914,36 @@ def _vram_facts() -> dict[str, Any] | None:
         }
     except Exception:  # noqa: BLE001 —— 台账拿不到**不许**把主流程搞崩 ✗
         return None
+
+
+def _budget_facts(profile_key: str) -> dict[str, Any]:
+    """这台机器**在这一档下**有多少预算 ✓（:func:`profile.budgets` 的唯一调用点 ✓，G1 ✓）。
+
+    ⚠️ 两处读数只走**既有入口** ✗✗，不在这里另立第二套（老账：两处读数分开写必漂 ✓✗）：
+
+    * 卡 ⇒ :func:`device_policy.probe` ✓ —— 它已含「allocator 里可复用的保留块」那条修正 ✓
+      （见 ``probe`` 里的长注释 ✓），自己 `mem_get_info` 会把余量读小 ✓✗；
+    * 内存 ⇒ :func:`scheduler.host_memory` ✓ —— 它已接 ``DARME_FAKE_HOST_GIB`` ✓（G4 夹具 ✓）。
+
+    ⚠️ `host_memory` 返回 ``(可用, 总量)`` ✓ 而 ``budgets`` 要 ``(总量, 可用)`` ✓✗ ⇒ 这里用**带名字**的
+    :class:`profile.HostMemory` 转一次 ✓（两个 ``tuple[int, int]`` 形状全同 ✓，顺序反了不报错 ✓、
+    只会把配额算虚高 ✓✗）。
+
+    ⚠️ 测不到就 ``None`` ✓：``budgets`` 会把 ``source`` 降成 ``cuda`` / ``host`` / ``none`` 并把数值写
+    ``null`` ✓ —— **不写 0** ✗（0 读起来像"一点都没有" ✓✗）。
+    """
+    try:
+        pressure = device_policy.probe()
+    except Exception:  # noqa: BLE001 —— 自述**不许**把 status 打挂 ✗
+        pressure = None
+    host: profile_mod.HostMemory | None = None
+    try:
+        mem = scheduler_mod.host_memory()
+    except Exception:  # noqa: BLE001
+        mem = None
+    if mem:
+        host = profile_mod.HostMemory(totalBytes=int(mem[1]), availBytes=int(mem[0]))
+    return profile_mod.budgets(profile_key, pressure=pressure, host=host)
 
 
 def _reclaim_cuda_cache() -> dict[str, Any]:
@@ -1014,12 +1149,27 @@ class EngineRuntime:
     #: 其余一律 ``image`` ✓（宁可粗一档，也别为"可能"编一个 kind ✗）。
     _KIND_BY_STAGE = {"h3": "video", "wan22": "video", "wan21": "video",
                       "seedvr2": "video", "music3": "tts"}
+    #: 图的后缀 ✓（不表里，因为**默认就是 image** ✓ —— 有这条才判得出"这根本不是媒体" ✓）。
+    _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"})
+
+    @classmethod
+    def kind_of_path(cls, path: Any) -> str | None:
+        """``path`` 是**媒体产物**就回 kind ✓；不是（``.json`` 干跑报告 / 张量清单 ✓）回 ``None`` ✓。
+
+        后缀→kind 的口径**只此一份** ✓：回执里"这个产物是什么"（:meth:`_run_kind` ✓）与
+        ``/engine/generate`` 里"该不该给 ``primaryUrl``"（``routers.engine._with_urls`` ✓）
+        是同一个问题 ✓✗ —— 各判一次迟早不一致 ✓（``.json`` 被当成品链接点开 ✓✗）。
+        """
+        suffix = os.path.splitext(str(path or ""))[1].lower()
+        if suffix in cls._IMAGE_SUFFIXES:
+            return "image"
+        return cls._KIND_BY_SUFFIX.get(suffix)
 
     @classmethod
     def _run_kind(cls, stage: str, outputs: dict[str, Any]) -> str:
         for value in outputs.values():
             if isinstance(value, str) and value:
-                kind = cls._KIND_BY_SUFFIX.get(os.path.splitext(value)[1].lower())
+                kind = cls.kind_of_path(value)
                 if kind:
                     return kind
         return cls._KIND_BY_STAGE.get(stage, "image")
@@ -1038,8 +1188,11 @@ class EngineRuntime:
         记账失败**绝不**影响出片（P0 只加事实，不是必需路径 ✓）⇒ 整段吞异常。
         """
         try:
-            from app.services import outcome_index
-
+            #: 跑次索引走**注入**（见 ``hooks`` ✓）：没登记就什么都不写 ✓（引擎可以单独跑 ✓），
+            #: 而不是"late import 一个服务层模块" ✓✗（那是引擎 → 服务层的反向依赖 ✓）。
+            outcome_index = hooks.get("run_index")
+            if outcome_index is None:
+                return
             result = task.result if isinstance(task.result, dict) else {}
             plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
             outputs = result.get("outputs") if isinstance(result.get("outputs"), dict) else {}
@@ -1078,6 +1231,28 @@ class EngineRuntime:
         """
         task = EngineTask(id=f"eng-{uuid.uuid4().hex[:12]}", stage=stage, request=request,
                           assembly=dict(assembly or {}), createdAt=_now_ms())
+        if not str(_request_field(request, "outputs_dir") or "").strip():
+            #: ⭐ 2026-11-07 补 ✓：没给落点 ⇒ **按任务建子目录** ✓✗ ——
+            #: 此前所有 `/engine/generate` 都落在同一个 ``<数据根>/engine`` ✓，
+            #: 产物名又只有 ``image_seed{N}`` / ``video_seed{N}`` ✓✗ ⇒ 同 seed 连跑三次
+            #: **互相覆盖** ✓（盘上三个 ``video_seed777.mp4`` 分别 10/34/39 帧 ✓，谁也说不清哪个是这次的 ✓）。
+            #: 落点口径**只认** ``bridge.outputs_dir_for`` ✓（业务通路用的也是它 ✓，
+            #: 在这里手拼一个 ``engine/<kind>-<id>`` = 埋一份会漂的第二真源 ✗✗）。
+            #: ⚠️ 干跑（``dryRun``）走 ``<数据根>/engine-dryrun/`` ✓：干跑报告是调试凭据 ✗，
+            #:    落进 ``static`` 就会被当成"成品链接"点开 ✓✗（见 ``outputs_dir_for`` ✓）。
+            #: ⚠️ 局部 import：``bridge`` 反向依赖本模块 ✓，模块级 import 会成环 ✗。
+            from . import bridge as bridge_mod  # noqa: PLC0415
+
+            target = str(bridge_mod.outputs_dir_for(self._run_kind(stage, {}), task.id,
+                                                    dry_run=bool(task.assembly.get("dryRun"))))
+            #: ⚠️ 两种形态都得改写 ✗：``submit(request: Any)`` 的契约允许 **dict**（HTTP 通路与
+            #: 各套件都传 dict ✓），只按 dataclass 调 ``replace()`` ⇒ dict 形态当场
+            #: ``TypeError: replace() should be called on dataclass instances`` ✓✗
+            #: （``engine_queue_backpressure_test`` 的 ① 正是这么炸的 ✓）。dict 走浅拷贝覆盖，
+            #: 不改调用方手里那个对象（调用方可能还要复用 ✓）。
+            request = (replace(request, outputs_dir=target) if is_dataclass(request)
+                       else {**(request or {}), "outputs_dir": target})
+            task.request = request
         with self._wake:
             #: ⚠️ 拒绝必须发生在**建 task 之前/之前不入表** ✗：先入表再判，被拒的请求仍留一条记录 ✓✗
             #: ⇒ 连点 100 次照样把 `_tasks` 撑到 100 条 ⇒ 背压白做 ✓✗（内存才是要防的那一头 ✓）。
@@ -1205,8 +1380,10 @@ class EngineRuntime:
                       dit_path2: str | None = None,
                       int8_offload: bool = False,
                       residency: str = "off", residency_budget_mib: float | None = None,
-                      policy: str = "auto",
+                      gpu_layers: Any = None,
+                      policy: str | None = None,
                       vae_tiling: Any = None,
+                      profile: str = "auto",
                       force: bool = False) -> dict[str, Any]:
         """把引擎**装齐** ✓（同名参数 ⇒ **复用**已装的 ✓）⇒ 返回装载报告 ✓。
 
@@ -1243,6 +1420,20 @@ class EngineRuntime:
         路由层转 400 ✓）；实的值写进回执 ``vaeTiling`` ✓。
         ⚠️ 它**也进装载键** ✓✗：一份后端只存一套设置 ✗ ⇒ 不进键就是「给了新旋钮却复用旧设置」✓✗
         （代价是改旋钮要重装一次 ✓，见 :func:`_vae_tiling_key` 的取舍说明 ✓）。
+
+        ``profile``（2026-11-07 新增 ✓，G1 ✓，**默认 ``auto`` ＝ 什么都不动** ✓✗）：机器档 ✓
+        （``auto`` / ``gpu`` / ``l1`` / ``l2`` / ``cpu`` ✓，见 :mod:`profile` ✓）。它的作用是
+        **在调用方没明说的地方**替这台机器表态 ✓：
+
+        * ``policy``：``cpu`` 档钉成 ``cpu`` ✓（机器没卡 ⇒ 不必让 ``auto`` 白试一次 OOM ✓）；
+        * ``host_cache`` 配额比例：``l1`` → 0.60、``l2`` → 0.50 ✓（32 / 16 GB 的机器上留着给激活 ✓）；
+        * ``vaeTiling.temporalChunk``：低配档 → 1 ✓（**不换字节** ✓，只慢 ✓）。
+
+        ⚠️⚠️ **冲突以 ``policy`` / ``vae_tiling`` 为准** ✗✗（§5.2 ✓）：调用方说了「这一件放哪」✓
+        就是更具体的话 ✓；档位被忽略的项写进回执 ``profile.ignored`` ✓（``profileIgnored=true`` ✓）。
+        ⚠️ 这就是 ``policy`` 的默认值从 ``"auto"`` 改成 ``None`` 的原因 ✗✗：值恒非空就**永远分不清**
+        「调用方明确要 auto」与「调用方没说话」✓✗ ⇒ 档位永远被当成冲突 ✗。
+        ⚠️ 档位**也进装载键** ✓✗：``hostRatio`` 改的是配额**上限** ✓ ⇒ 同一份权重在两档下的驻留布局不同 ✓✗。
         """
         #: ⚠️ 先**归一**再进键 ✗✗：``None`` / ``"auto"`` / ``"gpu-first"`` 是同一种策略 ✓，
         #: 但 ``repr`` 进键后是**三个不同的键** ✓✗ ⇒ 会白装三遍，而且 "改了个写法" 的复用键也不稳 ✓✗。
@@ -1250,6 +1441,25 @@ class EngineRuntime:
         policy = device_policy.normalize_policy(policy)
         #: 同理 ✓：``attn_chunk`` / ``attnChunk`` / ``0`` / ``None`` 都是一个意思 ✓（见 ``_vae_tiling_key`` ✓）
         vae_tiling = normalize_vae_tiling(vae_tiling)
+        #: ⭐ ``gpuLayers`` 归一 ✓✗（2026-11-07 ✓）—— **必须在拼键之前** ✗✗：不归一的话
+        #: ``gpu_layers=3`` 与 ``gpu_layers="3"`` 是两个键 ✓✗ ⇒ 同一份布局白装两遍 ✓，
+        #: 而"改了个写法"也会把复用打掉 ✓。坏值在这里**当场抛** ✓（路由层转 400 ✓，见
+        #: :func:`residency.normalize_gpu_layers` ✓）；**绝不静默回落 auto** ✗✗。
+        gpu_layers = residency_mod.normalize_gpu_layers(gpu_layers)
+        #: ⭐ 机器档展开 ✓（纯函数 ✓，不看读数 ✓）。⚠️ 必须**在归一之后**再过一遍 ✓✗：
+        #: ``resolve`` 要按「这一格调用方有没有明说」判冲突 ✓，拿未归一的原串判会把
+        #: ``{"attn_chunk": 0}`` 当成"没提 temporalChunk" ✓（那正好是本意 ✓）也会把
+        #: ``{"temporalChunk": None}`` 当成"提了" ✓✗。
+        profile_name = profile_mod.normalize_profile(profile)
+        resolved = profile_mod.resolve(profile_name, policy=policy, vae_tiling=vae_tiling)
+        applied = resolved["applied"]
+        if "policy" in applied:
+            policy = device_policy.normalize_policy(applied["policy"])
+        if "vaeTiling" in applied:
+            #: ⚠️ 合并方向别反 ✗✗：档位只**补**调用方没提的那一格 ✓（``{**调用方, **档位}`` 会
+            #: 让档位顶掉调用方的 tile ✓✗ —— 虽然 ``resolve`` 已经只在"没提"时才给 ✓，
+            #: 但合并写成"档位在前"就会把这个保护变成唯一依赖 ✓✗）。
+            vae_tiling = {**vae_tiling, **applied["vaeTiling"]}
         key = _load_key(stage=stage, dit_path=dit_path, tokenizer_path=tokenizer_path,
                         device=device, audio_latent_mode=audio_latent_mode,
                         attach_video_vae=attach_video_vae, attach_audio_vae=attach_audio_vae,
@@ -1263,14 +1473,26 @@ class EngineRuntime:
                         dit_path2=dit_path2,
                         int8_offload=int8_offload,
                         residency=residency, residency_budget_mib=residency_budget_mib,
+                        #: ⚠️ ``gpuLayers`` **必须进键** ✗✗（2026-11-07 ✓）：同一份权重、同一张卡，
+                        #: 「卡上 3 层」与「按预算自算」是**两套布局** ✓✗ ⇒ 不进键就会
+                        #: 「给了 gpuLayers 却复用上一套」✓✗，而且一声不响 ✓（症状＝层数没变 ✓）。
+                        gpu_layers=gpu_layers,
                         #: ⚠️ **策略必须进键** ✗✗：同一份权重、同一张卡，`auto` 与 `cpu` 装出来的
                         #: 是**两套设备布局** ✓（一个在卡上、一个在内存里 ✓）⇒ 不进键就会「改了策略却复用
                         #: 上一套」✓✗，而且一声不响 ✓✗（症状是"改了没效果"，比报错难查得多 ✓）。
-                        policy=policy,
+                        #: ⚠️ 归一**写在建键这一行** ✓（见 :func:`_policy_key` ✓）：``None`` 与 ``"auto"``
+                        #: 必须是同一个键 ✓，而"先赋值再进键"的写法会让读键的人按签名默认值拼出
+                        #: ``policy='None'`` ✓✗ ⇒ 同键被算成"换了装配" ✓（症状＝白盒摆了状态却真装一遍 ✓）。
+                        policy=_policy_key(policy),
                         loras=_lora_key(loras),
                         #: ⚠️ 旋钮进键的取舍见 :func:`_vae_tiling_key` ✓（一句话：一份后端只存
                         #: 一套设置 ✗ ⇒ 不进键就是"给了新旋钮却悄悄还是旧值" ✓✗）
-                        vae_tiling=_vae_tiling_key(vae_tiling))
+                        vae_tiling=_vae_tiling_key(vae_tiling),
+                        #: ⚠️ **档位必须进键** ✗✗（``hostRatio`` 改的是配额**上限** ✓ ⇒ 同一份权重
+                        #: 在两档下的驻留布局不同 ✓；且 ``_hostCaches`` 里那几本账按档位定死 ✓）——
+                        #: 不进键就会「换了档却复用上一档的布局」✓✗，一声不响 ✓✗。
+                        #: 用**归一后**的名字（``8G`` / ``l1`` 同一个键 ✓）。
+                        profile=profile_name)
         with self._lock:
             same = self._backend is not None and key == self._loadKeyTuple
             if same and not force:
@@ -1296,25 +1518,34 @@ class EngineRuntime:
                 #    —— 记在成功之后就会漏掉"装失败、旧的也丢了"这种最该看见的情形 ✓✗。
                 self._note_cache("eviction", key=self._loadKeyTuple,
                                  reason="换装配 ⇒ 先把旧的放掉 ✓（两套同时在内存里会 OOM ✓✗）")
-        return self._ensure_loaded_internal(stage=stage, dit_path=dit_path,
-                                            tokenizer_path=tokenizer_path, device=device,
-                                            audio_latent_mode=audio_latent_mode,
-                                            attach_video_vae=attach_video_vae,
-                                            attach_audio_vae=attach_audio_vae,
-                                            real_video_vae=real_video_vae,
-                                            video_vae_device=video_vae_device,
-                                            video_vae_weights=video_vae_weights,
-                                            real_audio_vae=real_audio_vae,
-                                            audio_vae_weights=audio_vae_weights,
-                                            text_weights=text_weights,
-                                            image_vae_weights=image_vae_weights,
-                                            dit_path2=dit_path2,
-                                            int8_offload=int8_offload,
-                                            residency=residency,
-                                            residency_budget_mib=residency_budget_mib,
-                                            policy=policy,
-                                            vae_tiling=vae_tiling,
-                                            loras=loras)
+        report = self._ensure_loaded_internal(stage=stage, dit_path=dit_path,
+                                             tokenizer_path=tokenizer_path, device=device,
+                                             audio_latent_mode=audio_latent_mode,
+                                             attach_video_vae=attach_video_vae,
+                                             attach_audio_vae=attach_audio_vae,
+                                             real_video_vae=real_video_vae,
+                                             video_vae_device=video_vae_device,
+                                             video_vae_weights=video_vae_weights,
+                                             real_audio_vae=real_audio_vae,
+                                             audio_vae_weights=audio_vae_weights,
+                                             text_weights=text_weights,
+                                             image_vae_weights=image_vae_weights,
+                                             dit_path2=dit_path2,
+                                             int8_offload=int8_offload,
+                                             residency=residency,
+                                             residency_budget_mib=residency_budget_mib,
+                                             gpu_layers=gpu_layers,
+                                             policy=policy,
+                                             vae_tiling=vae_tiling,
+                                             profile_name=profile_name,
+                                             profile_applied=applied,
+                                             loras=loras)
+        #: ⭐ 档位**如实进回执** ✓✗：包括 ``ignored``（被 policy/vaeTiling 顶掉的项 ✓）与
+        #: ``notWired``（看着像旋钮、其实没接线的那几项 ✓）—— 少了这两栏，用户只能凭
+        #: "我选了 l1" 猜实际改了什么 ✓✗。⚠️ ``report`` 与 ``self._loadReport`` 是**同一个 dict** ✓
+        #: （``_commit_load`` 存的引用 ✓）⇒ 这里加一格，``/engine/runtime`` 也一起有了 ✓。
+        report["profile"] = resolved
+        return report
 
     def _reset_loaded(self) -> bool:
         """丢掉当前装载的**三格账** ✓（``_backend`` / ``_loadKeyTuple`` / ``_loadReport``）
@@ -1383,6 +1614,14 @@ class EngineRuntime:
         tiling_of = getattr(backend, "vae_tiling", None)
         if callable(tiling_of):
             report["vaeTiling"] = dict(tiling_of())
+        #: ⭐ 预取深度**实际用了多深** ✓✗（§4.3 ✓，2026-11-07 ✓；同 `vaeTiling` 的理由 ⇒ 挂在这唯一的人口 ✓）。
+        #: 带 `disk` / `mbps` / `source` / `capped` 凭据 ✓ —— 「为什么是 2」必须读得出来 ✓✗（否则
+        #: 又变成「我以为它自适应了」✓）。一次没装（SDXL 不走这条装载）⇒ 不写这一格 ✓（不编 2 ✗）。
+        read_ahead_of = getattr(backend, "read_ahead", None)
+        if callable(read_ahead_of):
+            plan = dict(read_ahead_of() or {})
+            if plan:
+                report["readAhead"] = plan
         with self._lock:
             self._backend = backend
             self._loadKeyTuple = key
@@ -1405,8 +1644,11 @@ class EngineRuntime:
                                int8_offload: bool = False,
                                residency: str = "off",
                                residency_budget_mib: float | None = None,
-                               policy: str = "auto",
-                               vae_tiling: Any = None) -> dict[str, Any]:
+                               policy: str | None = None,
+                               vae_tiling: Any = None,
+                               gpu_layers: Any = None,
+                               profile_name: str = "auto",
+                               profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """真正装配 ✓（**不带排队守卫** ✗ —— worker 自己持有当前任务，见 :meth:`_execute` ✓）。
 
         顺序**按依赖来** ✓（⚠️ 不是随便排的 ✗）：主 DiT 先装 ✓ ⇒ ``attach_text_encoder`` 才能
@@ -1439,9 +1681,15 @@ class EngineRuntime:
                         dit_path2=dit_path2,
                         int8_offload=int8_offload,
                         residency=residency, residency_budget_mib=residency_budget_mib,
-                        policy=policy,
+                        #: ⚠️ ``gpuLayers`` **必须进键** ✗✗（2026-11-07 ✓）：同一份权重、同一张卡，
+                        #: 「卡上 3 层」与「按预算自算」是**两套布局** ✓✗ ⇒ 不进键就会
+                        #: 「给了 gpuLayers 却复用上一套」✓✗，而且一声不响 ✓（症状＝层数没变 ✓）。
+                        gpu_layers=gpu_layers,
+                        policy=_policy_key(policy),
                         loras=_lora_key(loras),
-                        vae_tiling=_vae_tiling_key(vae_tiling))
+                        vae_tiling=_vae_tiling_key(vae_tiling),
+                        #: ⚠️ 与 :meth:`ensure_loaded` 那条**逐字同键** ✓✗（两处都算键 ⇒ 不一致就永远不复用 ✓✗）
+                        profile=profile_name)
         with self._lock:
             if self._backend is not None and key == self._loadKeyTuple:
                 return {**dict(self._loadReport or {}), "reused": True}
@@ -1457,7 +1705,8 @@ class EngineRuntime:
             return self._ensure_zimage_loaded(
                 key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
                 text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
-                policy=policy, vae_tiling=vae_tiling, loras=loras)
+                policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.QWEN21_STAGE:
             # ⚠️ Qwen-Image 2.1 是**第四套组件** ✗（DiT 649 键 + Qwen3.5-9B + 64 通道 VAE ✓）——
@@ -1465,7 +1714,8 @@ class EngineRuntime:
             return self._ensure_qwen21_loaded(
                 key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
                 text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
-                policy=policy, vae_tiling=vae_tiling, loras=loras)
+                policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.QWEN_IMAGE_STAGE:
             #: ⚠️ **族名比较一律 `==`** ✗ 不许 `startswith` ✓：``"qwen_image21"`` 以
@@ -1477,7 +1727,8 @@ class EngineRuntime:
             return self._ensure_qwen_image_loaded(
                 key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
                 text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
-                policy=policy, vae_tiling=vae_tiling, loras=loras)
+                policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.KREA2_STAGE:
             #: ⚠️ **Krea2 是第六套组件** ✗（单流 12.82B DiT ＋ Qwen3-VL-4B **语言塔** ＋
@@ -1488,7 +1739,8 @@ class EngineRuntime:
             return self._ensure_krea2_loaded(
                 key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
                 text_weights=text_weights, image_vae_weights=image_vae_weights, device=device,
-                policy=policy, vae_tiling=vae_tiling, loras=loras)
+                policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.SEEDVR2_STAGE:
             #: ⚠️ **SEEDVR2 是第七套组件** ✗（3.39B DiT ＋ **自有 VAE** ✓）—— 与前六套的差别不是
@@ -1498,7 +1750,8 @@ class EngineRuntime:
             #: `tokenizerPath` **都不收** ✓（条件烤在权重里 ✓，见 `_SEEDVR2_STAGE_NOTE` ✓）。
             return self._ensure_seedvr2_loaded(
                 key=key, dit_path=dit_path, image_vae_weights=image_vae_weights,
-                device=device, policy=policy, vae_tiling=vae_tiling, loras=loras)
+                device=device, policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.MUSIC3_STAGE:
             #: ⚠️ **输出不是画面** ✗✗：这一条线解码出的是**波形** ✓（见 `_MUSIC3_STAGE_NOTE` ✓）。
@@ -1509,7 +1762,8 @@ class EngineRuntime:
             return self._ensure_music3_loaded(
                 key=key, dit_path=dit_path, text_weights=text_weights,
                 audio_vae_weights=audio_vae_weights, tokenizer_path=tokenizer_path,
-                device=device, policy=policy, vae_tiling=vae_tiling, loras=loras)
+                device=device, policy=policy, vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.WAN22_STAGE:
             #: ⚠️ **Wan 2.2 I2V 是第八套组件** ✗（14B 双专家 ＋ UMT5-XXL ＋ Wan2.1 VAE ✓）——
@@ -1519,14 +1773,17 @@ class EngineRuntime:
                 key=key, dit_path=dit_path, tokenizer_path=tokenizer_path,
                 text_weights=text_weights, image_vae_weights=image_vae_weights,
                 dit_path2=dit_path2, device=device, policy=policy,
-                vae_tiling=vae_tiling, loras=loras)
+                vae_tiling=vae_tiling, loras=loras, gpu_layers=gpu_layers,
+                profile_name=profile_name, profile_applied=profile_applied)
 
         if str(stage or "").strip().lower() == pipe.IMAGE_STAGE:
             # ⚠️ 出图是**另一套组件** ✗（SDXL 四件套 ✓ ≠ H3 DiT + 参考 TE/VAE ✓）⇒ 分开装配 ✓。
             report = self._ensure_image_loaded(key=key, dit_path=dit_path,
                                                tokenizer_path=tokenizer_path, device=device,
                                                policy=policy, vae_tiling=vae_tiling,
-                                               loras=loras)
+                                               loras=loras,
+                                               profile_name=profile_name,
+                                               profile_applied=profile_applied)
             if str(residency or "off").strip().lower() != "off":
                 # ⚠️ **不生效要说** ✗（同 `int8_offload` 在 DiT 上那条口径 ✓）：出图那条路（SDXL）
                 #    还没接联合驻留 ✓ —— 它本来也不需要（四件套几 GB ✓），但"配了没生效"必须看得见 ✗。
@@ -1534,6 +1791,16 @@ class EngineRuntime:
                     "mode": residency, "applied": False,
                     "note": "出图（SDXL 四件套）那条路**还没接**联合驻留 ✗ —— `residency` 只在 "
                             "H3 / DiT 视频那条路上生效 ✓（它本来就不需要：四件套几 GB ✓）"}
+            if gpu_layers is not None:
+                #: ⚠️ 同一条口径 ✓✗（2026-11-07 ✓）：SDXL 四件套走的是 `SdxlBackend` ✓，
+                #: 它**没有** residency 切分 ✓ ⇒ 没有「层」可切 ✓。给了数还一声不响是最坏的 ✓✗
+                #: ⇒ 这里如实报 ``granted=null`` ✗（不许报 0 ✗：0 的意思是"一层都不上卡"✓）。
+                report["gpuLayers"] = {
+                    "requested": gpu_layers, "granted": None, "capped": True,
+                    "note": "出图（SDXL 四件套）这条路**没有可切的层** ✗ —— `gpuLayers` 只在走 "
+                            "`residency` 的那几族（H3 / Z-Image / Qwen-Image 2.1·2512 / Krea2 / "
+                            "SEEDVR2 / Music3 / Wan2.2）生效 ✓；这里如实报 `granted=null`，"
+                            "**不是**「切了 0 层」✗（那个要写 `gpuLayers=0` ✓）"}
             return report
 
         # ⚠️ 装新的之前**先把旧的放掉** ✗✗（与 :meth:`_ensure_image_loaded` 同一条规矩 ✓）：
@@ -1561,7 +1828,10 @@ class EngineRuntime:
                                int8_offload=int8_offload,
                                residency=residency,
                                residency_budget_mib=residency_budget_mib,
-                               policy=policy, vae_tiling=vae_tiling)
+                               gpu_layers=gpu_layers,
+                               policy=policy, vae_tiling=vae_tiling,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         report: dict[str, Any] = {"stage": stage, "reused": False, "components": {},
                                   "replaced": had_previous, "synthetic": True}
         #: ⭐ 需求数**逐文件**算 ✓✗（2026-11-02 ✓）：`H3_PART_NEED_GIB` 的 19.62 / 25.44 是
@@ -1574,9 +1844,9 @@ class EngineRuntime:
         h3_sources: dict[str, Any] = {
             "vae": {"source": "table", "mode": "unknown", "table": h3_need["vae"],
                     "why": "常驻 VAE 由后端自己找文件 ⇒ 无从按路径精算 ✓，按表 5.20 GiB ✓"}}
-        for part, adapter, path_of in (("dit", "h3", dit_path), ("text", None, text_weights)):
-            gib, why = part_need_gib(path_of, fallback=h3_need[part],
-                                     adapter=adapter, assume="int8")
+        for part, path_of in (("dit", dit_path), ("text", text_weights)):
+            #: 口径（assume/adapter）不再内联 ✓ → `torch_backend.STAGE_PART_SPECS` 单一真源 ✓
+            gib, why = stage_part_need("h3", part, path_of, fallback=h3_need[part])
             h3_need[part] = round(float(gib), 2)
             h3_sources[part] = why
         try:
@@ -1693,7 +1963,9 @@ class EngineRuntime:
                              tokenizer_path: str | None,
                              device: str | None,
                              policy: str | None = None,
-                             loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                             loras: Any = None, vae_tiling: Any = None,
+                             profile_name: str = "auto",
+                             profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **SDXL 出图后端** ✓（``stage="sdxl"`` ✓ ⇒ :class:`~.sdxl_backend.SdxlBackend` ✓）。
 
         ⚠️ 与视频那条路**不是同一套组件** ✗✗：那边是 H3 DiT + 参考 TE/VAE ✓；
@@ -1759,6 +2031,16 @@ class EngineRuntime:
         #: ⭐ 装配期那次**设备决策** ✓✗（`auto` 下可能就是「卡上只剩 0.4 GiB ⇒ 转 CPU」✓）——
         #: 只报 `device` 会让人以为「这台机器只能 CPU」✓✗（与另两条装配线同一口径 ✓）。
         report["devicePolicy"] = decision
+        #: ⚠️ 档位在这条线上**只有一部分生效** ✗✗：`policy` 经 `_image_device_decision` 真吃 ✓，
+        #: 但 `hostRatio`（`host_cache` 配额）**用不上** ✗ —— SDXL 四件套全走
+        #: :class:`~.sdxl_backend.SdxlBackend` ✓，不经过 `torch_backend` 的 `_hostCaches` 账本 ✓。
+        #: 配了就必须**看得见没生效** ✓✗（同下面 `vaeTiling` 那条口径 ✓）—— 静默跳过等于骗人 ✓✗。
+        if (profile_applied or {}).get("hostRatio") is not None:
+            report["profileNote"] = {
+                "ignored": ["hostRatio"],
+                "note": "出图（SDXL 四件套）走 `SdxlBackend` ✗ —— 它没有 `host_cache` 那本账 ✓"
+                        "（DI/DiT 那条路才有 ✓）⇒ 档位的 `hostRatio` 在这条线上**不生效** ✓；"
+                        "`policy` 那一格仍然生效 ✓"}
         #: ⚠️ 与 `SdxlBackend.synthetic` 同一条诚实口径 ✓：**真权重**装齐 ⇒ False ✓
         report["note"] = ("SDXL 四件套（UNet / VAE / CLIP-L / CLIP-G）**全是真权重** ✓ ⇒ "
                           "`synthetic` 如实为 **False** ✓"
@@ -1783,7 +2065,10 @@ class EngineRuntime:
                               image_vae_weights: str | None,
                               device: str | None,
                               policy: str | None = None,
-                              loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                              loras: Any = None, vae_tiling: Any = None,
+                              gpu_layers: Any = None,
+                              profile_name: str = "auto",
+                              profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Z-Image 出图链** ✓（``stage=zimage`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 为什么是**单独一条线** ✗（不塞进 H3 / SDXL ✓）
@@ -1833,7 +2118,9 @@ class EngineRuntime:
         chain_sources: dict[str, Any] = {}
         chain_parts: dict[str, float] = {}
         for part, path_of in (("dit", dit_path), ("text", text_weights), ("vae", image_vae_weights)):
-            gib, why = part_need_gib(path_of, fallback=chain_table.get(part, 0.0), assume="plain")
+            #: 整链三件都按文件精算 ✓（口径见 `STAGE_PART_SPECS["zimage"]` ✓）
+            gib, why = stage_part_need("zimage", part, path_of,
+                                       fallback=chain_table.get(part, 0.0))
             chain_sources[part] = why
             chain_parts[part] = round(float(gib), 2)
         unread = [k for k, why in chain_sources.items() if why.get("mode") == "unknown"]
@@ -1841,7 +2128,10 @@ class EngineRuntime:
         decision = _zimage_device_decision(device=device, policy=policy, need_gib=need_gib)
         if decision is not None:
             device = decision["device"]
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         report: dict[str, Any] = {"stage": pipe.ZIMAGE_STAGE, "reused": False,
                                   "components": {}, "replaced": had_previous,
                                   "synthetic": False}
@@ -1904,7 +2194,10 @@ class EngineRuntime:
                               image_vae_weights: str | None,
                               device: str | None,
                               policy: str | None = None,
-                              loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                              loras: Any = None, vae_tiling: Any = None,
+                              gpu_layers: Any = None,
+                              profile_name: str = "auto",
+                              profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Qwen-Image 2.1 出图链** ✓（``stage=qwen_image21`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 为什么是**第四条线** ✗（不塞进 Z-Image / H3 / SDXL ✓）
@@ -1956,7 +2249,10 @@ class EngineRuntime:
 
         #: ⭐ 策略随装配下去 ✓✗：`policy="auto"`（默认）⇒ 装配这件时**现测**卡况 ✓，
         #: 卡上没地方就自动转 CPU / 联合 ✓（老路只看"有没有卡" ⇒ 卡满也硬上 ⇒ OOM ✗）。
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         #: ⭐ 装配这件之前按**整份需求**判一次 ✓✗（`PART_NEED_GIB["dit"] = 13.26` ✓）：构造期那次
         #: 的 need 是"**未知**" ✓ ⇒ 只能按占用率粗判 ✓，7 成占用照样敢上卡 ✓✗ ⇒ 装到一半 OOM ✓。
         #: 判成 `split` ⇒ 权重按层切给卡＋内存 ✓；判成 `cpu` ⇒ 整件在内存 ✓（慢，但不失败 ✓）。
@@ -1969,11 +2265,10 @@ class EngineRuntime:
         #: **bf16 那份**（`qwen_image_2.1_bf16.safetensors` 13.25 GiB ✓）量的 ✓；而 ``text 14.79``
         #: 是按 **int8 那份**（`qwen3.5_9b_...int8_convrot` 8.82 GiB ✓，只装语言塔 ⇒ 反量化后
         #: 14.79 ✓）量的 ✓。写反的后果：把 int8 的 DiT 判成 plain ⇒ 精算 6.76 只有一半 ✓✗。
-        for part, path_of, assume in (
-                ("dit", dit_path, "plain"),
-                ("text", text_weights, "int8"),
-                ("vae", image_vae_weights, "plain")):
-            gib, why = part_need_gib(path_of, fallback=part_need[part], assume=assume)
+        for part, path_of in (("dit", dit_path), ("text", text_weights),
+                              ("vae", image_vae_weights)):
+            gib, why = stage_part_need("qwen_image21", part, path_of,
+                                       fallback=part_need[part])
             part_need[part] = round(float(gib), 2)
             need_sources[part] = why
         backend._apply_decision(  # noqa: SLF001
@@ -2062,7 +2357,10 @@ class EngineRuntime:
                              image_vae_weights: str | None,
                              device: str | None,
                              policy: str | None = None,
-                             loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                             loras: Any = None, vae_tiling: Any = None,
+                             gpu_layers: Any = None,
+                             profile_name: str = "auto",
+                             profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Krea2 出图链** ✓（``stage=krea2`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 为什么是**另一条线** ✗（不并进 2512 / 2.1 ✓）
@@ -2106,7 +2404,10 @@ class EngineRuntime:
         had_previous = self._reset_loaded()
         _release_torch_cache()
 
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         #: ⭐ 三件需求**逐文件**算 ✓✗（2026-11-02 ✓）：`KREA2_PART_NEED_GIB` 的 12.57 是按
         #: **int8 档**（`krea2_turbo_int8_convrot.safetensors` ✓、224 层 `Int8Linear` 常驻 ✓）量的 ✓；
         #: 同族 **int4 档**反量化成 bf16 是 **23.89 GiB** ✓✗ ⇒ 拿 12.57 判「装得下」⇒ 整份上卡 ⇒
@@ -2114,14 +2415,23 @@ class EngineRuntime:
         #: 否则按文件精算（:func:`torch_backend.part_need_gib` ✓）。
         part_need = dict(TorchBackend.KREA2_PART_NEED_GIB)
         need_sources: dict[str, Any] = {}
-        for part, adapter, path_of in (("dit", "krea2", dit_path),
-                                       ("text", None, text_weights),
-                                       ("vae", None, image_vae_weights)):
-            gib, why = part_need_gib(
-                path_of, fallback=part_need[part], adapter=adapter,
-                assume="plain" if part == "vae" else "int8")
+        for part, path_of in (("dit", dit_path), ("text", text_weights),
+                              ("vae", image_vae_weights)):
+            #: dit 挂常驻壳、text 按 int8 表值、vae 按 plain ✓ —— 三件三种口径 ✓，
+            #: 全在 `STAGE_PART_SPECS["krea2"]` ✓（原先靠 `assume="plain" if part == "vae"` 现算 ✗）
+            gib, why = stage_part_need("krea2", part, path_of, fallback=part_need[part])
             part_need[part] = round(float(gib), 2)
             need_sources[part] = why
+        #: ⭐ **三件同时驻留**装得下吗 ✓✗（2026-11-07 ✓）—— 判在**装 DiT 之前** ✓：装完再测，
+        #: 12.57 GiB 已经压在卡上 ⇒ 读出来的余量是"假的紧" ✓✗（`enter_phase` 里那条注释同一条教训 ✓）。
+        #: ⚠️ 这里**只读**决策、不 `_apply_decision` ✗：装配那一拍要装的是 DiT 一件 ✓，
+        #: 把"整份"的决定应用上去会让 DiT 自己先被判成分层搬运 ✓✗（本族 DiT 是真装得下的 ✓）。
+        together = _krea2_all_resident(backend, part_need)
+        #: ⭐ 整份装得下的件**停到内存**、别退回盘上 ✓✗（2026-11-07 ✓）—— 理由见 `_krea2_keep_parts`
+        #: 的 docstring ✓：分时档每张图都要把文本塔**从盘上重读一遍**（实测 19.4 秒／张 ✓），
+        #: 而"退"与"读盘"本来是两件事 ✓。⚠️ 只收判成 `off` 的件 ✗✗（`split` 的件进去会
+        #: 整份搬来搬去、分层计划当场作废 ✓）。
+        keep_parts = _krea2_keep_parts(backend, part_need, together=together)
         #: ⭐ 装配前按**整份**需求真判一次 ✓✗：构造期那次 `decide_for(())` 的 need 是"未知" ✓ ⇒
         #: 卡上七成占用也敢上 ✓✗。（⚠️ 喂给它的必须是**同一份** `part_need` ✓ —— 只改一处 ⇒
         #: 装配报整份上卡、一进 `sample` 又按旧表重判成 `split` ✓✗，见 2026-11-01 那条坑 ✓。）
@@ -2160,14 +2470,20 @@ class EngineRuntime:
             report["partNeedGiB"] = dict(part_need)
             report["needSources"] = need_sources
             report["ditNeed"] = {"gib": part_need["dit"], **need_sources["dit"]}
-            # ② TE / VAE 分时 ✓（只登记 ✓，由管线在 encode / decode 边界换装 ✓）
-            report["components"]["textEncoder"] = {"phased": True, "loaded": False,
-                                                   "phase": "encode",
+            # ② TE / VAE 是否分时 ✓（只登记 ✓，由管线在 encode / decode 边界换装 ✓）
+            #: `phased` 三格如实写 ✓✗：全驻留档下它们**不是**"分时件" ✓，写 `True` 会让回执
+            #: 与实际不符 ✓（`enter_phase` 到时一件都不退 ✓）。
+            report["components"]["textEncoder"] = {"phased": not together,
+                                                   "loaded": False,
+                                                   "phase": ("resident" if together else "encode"),
                                                    "path": str(text_weights),
                                                    "tokenizer": str(tokenizer_path),
-                                                   "note": "只挂**语言塔** ✓、条件取 **12 层隐状态栈** ✓"}
-            report["components"]["vae"] = {"phased": True, "loaded": False,
-                                           "phase": "decode",
+                                                   "note": ("只挂**语言塔** ✓、条件取 **12 层隐状态栈** ✓"
+                                                            + ("；⭐ 与 DiT/VAE **同驻** ✓（首张装一次 ✓，之后零换装 ✓）"
+                                                               if together else ""))}
+            report["components"]["vae"] = {"phased": not together,
+                                           "loaded": False,
+                                           "phase": ("resident" if together else "decode"),
                                            "path": str(image_vae_weights),
                                            "note": "16 通道 ✓，反缩放取 **Wan21** ✓（不是 2512 的 ✗）"}
             report["chain"] = backend.declare_chain(
@@ -2179,7 +2495,15 @@ class EngineRuntime:
                 #: ``supported_models.Krea2`` 就是 ``latent_formats.Wan21`` ✓，而它的 VAE 文件
                 #: 是 16ch 的 ``qwen_image_vae`` ✓ —— **文件同、口径不同** ✓，所以只能按族查表 ✓。
                 vae_family=dit_build.contract_of("krea2").latent_format, text_kind="krea2",
-                part_need_gib=part_need)
+                part_need_gib=part_need,
+                #: ⭐ 装得下就**不分时** ✓（`KREA2_ALL_RESIDENT_PHASES` 那份表 ✓）；装不下给 `None` ✓
+                #: ⇒ `enter_phase` 用 `PHASE_PARTS` 那套互斥分时 ✓（老行为，零变化 ✓）。
+                phase_parts=(KREA2_ALL_RESIDENT_PHASES if together else None),
+                #: ⭐ 分时档里**整份装得下的件**用"停内存"顶掉"退回盘上" ✓✗（`keepParts` ✓）：
+                #: `enter_phase` 把它们在卡↔内存之间搬 ✓（`_relocate_keep_parts` ✓）——
+                #: **一个字节都不重读** ✓、数值逐位不变 ✓、步数与精度一律不动 ✓（不降质量 ✓）。
+                #: 空元组＝老行为 ✓（`together`、以及低配 `split` 档都是空 ✓）。
+                keep_parts=keep_parts)
         except BaseException as err:  # noqa: BLE001
             _abandon_assembly(backend, err, what="Krea2")
 
@@ -2191,16 +2515,33 @@ class EngineRuntime:
         report["phasedComponents"] = {"dit": bool(described.get("modelLoaded")),
                                       "textEncoder": bool(described.get("textEncoderLoaded")),
                                       "vae": bool(described.get("vaeLoaded"))}
+        #: 三件是不是**同驻**（不分时 ✓）—— 回执里要能一眼看出**这张图会不会付换装税** ✓✗。
+        report["allResident"] = bool(together)
+        #: 哪几件走"**停内存**"而不是"退回盘上" ✓✗ —— 分时档里这笔账直接决定"每张图要不要
+        #: 重读一遍权重" ✓（实测 19.4 秒／张 ✓）。空列表＝一件都不停 ✓（老行为 ✓）。
+        report["keepParts"] = list(keep_parts)
+        report["keptOnHost"] = {part: part in keep_parts for part in ("dit", "text", "vae")}
         report["note"] = (
             "Krea2 三份权重**全是真的** ✓（DiT 12.82B 参数 int8 常驻 ✓ / Qwen3-VL-4B 语言塔 ✓ / "
             "16 通道 VAE ✓）⇒ 出来的是**真图** ✓，`synthetic` 如实为 False ✓。"
             "出图走 `pipeline.run_sync(stage=\"krea2\")` ✓；"
             "⚠️ 采样 shift 是 **1.15** ✓（`pipeline.KREA2_FLOW_SHIFT` ✓，**不是** 2512 的 3.1 / "
             "2.1 的 0.69 ✗✗）⇒ 尺寸吸附到 16 ✓（VAE 8× × patch 2 ✓）。"
-            "⭐ DiT **必须**走 int8 常驻 ✓：12.82B 参数按 bf16 是 **23.9 GiB** ✗ > 卡 22.49 ✓✗，"
-            "常驻后 **12.57 GiB** ✓（回执 `int8Ledger` 里是逐层账 ✓）。"
-            "⭐ 三件仍**分时** ✓（12.57 ＋ 7.5 ＋ 0.24 ＝ 20.31 GiB ✓ 挤得进但没余量 ✓✗）"
-            "⇒ 峰值 = **12.57 GiB** ✓，TE 与 VAE 由管线在 encode / decode 边界换装 ✓。"
+            "⭐ 权重**必须**走低位常驻 ✓：12.82B 参数按 bf16 是 **23.9 GiB** ✗ > 卡 22.49 ✓✗，"
+            "int8 常驻后 **12.57 GiB** ✓、int4 档 **5.98 GiB** ✓（回执 `int8Ledger` / `int4Ledger` 是逐层账 ✓）。"
+            + ("⭐ 三件**同驻** ✓（`allResident=True` ✓）：首张装一次 ✓，之后 encode / sample / decode "
+               "**零换装** ✓ —— 换装税与提示词无关 ✓，分时链每张图都要重读一次文本塔 ✓✗。"
+               if together else
+               "⭐ 三件仍**分时** ✓（12.57 ＋ 7.5 ＋ 0.24 ＝ 20.31 GiB ✓ 挤得进但没余量 ✓✗）"
+               "⇒ 峰值 = **12.57 GiB** ✓，TE 与 VAE 由管线在 encode / decode 边界换装 ✓。"
+               + (f"⭐ 但 **{ '、'.join(keep_parts) or '无' }** 走 `keepParts` ✓"
+                  "（`keptOnHost` ✓）⇒ 换装只在**卡↔内存**之间搬 ✓、**一个字节都不重读** ✓✗"
+                  "（不改步数 / 精度 / 采样参数 ⇒ 出图逐位不变 ✓）。"
+                  if keep_parts else
+                  "（逐件都判成 `split` ⇒ 只能退回盘上重读 ✓✗：低配档的正解是加卡或换 int4 ✓。）")
+               + "〔要彻底免掉换装 ⇒ 换 int4 档（5.98 ＋ 7.5 ＋ 0.24 ＝ 13.72 GiB ✓），"
+               "它会被判成 `allResident` ✓〕")
+            +
             "⚠️ 两处**跨族**组合别记错 ✗：VAE 文件用 2512 那个 `qwen_image_vae` ✓（16 通道 ✓），"
             "反缩放却取 **Wan21** 的 mean/std ✓（给成 2512 的 ⇒ 图整体偏色、不报错 ✓✗）。"
         )
@@ -2211,7 +2552,10 @@ class EngineRuntime:
     def _ensure_seedvr2_loaded(self, *, key: tuple[Any, ...], dit_path: str | None,
                                image_vae_weights: str | None, device: str | None,
                                policy: str | None = None,
-                               loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                               loras: Any = None, vae_tiling: Any = None,
+                               gpu_layers: Any = None,
+                               profile_name: str = "auto",
+                               profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **SEEDVR2 视频修复链** ✓（``stage="seedvr2"`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 这条线为什么与前六条都不同 ✗
@@ -2246,14 +2590,16 @@ class EngineRuntime:
         had_previous = self._reset_loaded()
         _release_torch_cache()
 
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         part_need = dict(TorchBackend.SEEDVR2_PART_NEED_GIB)
         need_sources: dict[str, Any] = {}
         for part, path_of in (("dit", dit_path), ("vae", image_vae_weights)):
-            #: ⚠️ `adapter=None` ＋ `assume="plain"` ＝「表值是 bf16 档量出来的 ✓」⇒ 换成
-            #: int8 / int4 文件时它**会走精算** ✓（本线 DiT 不挂常驻壳 ✓ ⇒ 一律反量化成 bf16 ✓）。
-            gib, why = part_need_gib(path_of, fallback=part_need[part], adapter=None,
-                                     assume="plain")
+            #: ⚠️ 表值是 bf16 档量出来的、本线 DiT **不挂常驻壳** ✓ ⇒ 换成 int8/int4 文件时
+            #: 会走精算（一律反量化成 bf16 ✓）—— 这条口径在 `STAGE_PART_SPECS["seedvr2"]` ✓
+            gib, why = stage_part_need("seedvr2", part, path_of, fallback=part_need[part])
             part_need[part] = round(float(gib), 2)
             need_sources[part] = why
         backend._apply_decision(  # noqa: SLF001
@@ -2321,7 +2667,10 @@ class EngineRuntime:
                               tokenizer_path: str | None = None,
                               device: str | None = None,
                               policy: str | None = None,
-                              loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                              loras: Any = None, vae_tiling: Any = None,
+                              gpu_layers: Any = None,
+                              profile_name: str = "auto",
+                              profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Music3 音乐链** ✓（``stage="music3"`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 三件：DiT ＋ 语义塔 ＋ DAV（**没有词表这一格** ✗✗）
@@ -2377,15 +2726,17 @@ class EngineRuntime:
         had_previous = self._reset_loaded()
         _release_torch_cache()
 
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         part_need = dict(TorchBackend.MUSIC3_PART_NEED_GIB)
         need_sources: dict[str, Any] = {}
-        for part, path_of, assume in (
-                ("dit", dit_path, "plain"),        #: fp16 原样驻留 ✓
-                ("text", text_weights, "int8"),    #: 表值是按 int8_convrot 常驻量的 ✓
-                ("vae", audio_vae_weights, "plain")):
-            gib, why = part_need_gib(path_of, fallback=part_need[part], adapter=None,
-                                     assume=assume)
+        for part, path_of in (
+                ("dit", dit_path),                 #: fp16 原样驻留 ✓
+                ("text", text_weights),            #: 表值是按 int8_convrot 常驻量的 ✓
+                ("vae", audio_vae_weights)):
+            gib, why = stage_part_need("music3", part, path_of, fallback=part_need[part])
             part_need[part] = round(float(gib), 2)
             need_sources[part] = why
         backend._apply_decision(  # noqa: SLF001
@@ -2455,7 +2806,10 @@ class EngineRuntime:
                              dit_path2: str | None = None,
                              device: str | None = None,
                              policy: str | None = None,
-                             loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                             loras: Any = None, vae_tiling: Any = None,
+                             gpu_layers: Any = None,
+                             profile_name: str = "auto",
+                             profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Wan 2.2 I2V 视频链** ✓（``stage="wan22"`` ⇒ :class:`~.torch_backend.TorchBackend` ✓）。
 
         ## 四格（本仓**最多**的一条线 ✓✗）
@@ -2501,15 +2855,17 @@ class EngineRuntime:
         had_previous = self._reset_loaded()
         _release_torch_cache()
 
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         part_need = dict(TorchBackend.WAN22_PART_NEED_GIB)
         need_sources: dict[str, Any] = {}
         for part, path_of in (("dit", dit_path), ("text", text_weights),
                               ("vae", image_vae_weights)):
-            #: ⚠️ ``assume="plain"`` ＝「表值是 **bf16 档**量出来的 ✓」⇒ 换 fp8/int8 文件时它会
-            #: 走精算 ✓（fp8_scaled 是 2× / bf16 是 1× ✓，本方法不自己乘倍率 ✓）。
-            gib, why = part_need_gib(path_of, fallback=part_need[part], adapter=None,
-                                     assume="plain")
+            #: ⚠️ 表值是 **bf16 档**量出来的 ✓ ⇒ 换 fp8/int8 文件时走精算 ✓
+            #: （fp8_scaled 是 2× / bf16 是 1× ✓，本方法不自己乘倍率 ✓）—— 见 `STAGE_PART_SPECS` ✓
+            gib, why = stage_part_need("wan22", part, path_of, fallback=part_need[part])
             part_need[part] = round(float(gib), 2)
             need_sources[part] = why
         backend._apply_decision(  # noqa: SLF001
@@ -2617,7 +2973,10 @@ class EngineRuntime:
                                  image_vae_weights: str | None,
                                  device: str | None,
                                  policy: str | None = None,
-                                 loras: Any = None, vae_tiling: Any = None) -> dict[str, Any]:
+                                 loras: Any = None, vae_tiling: Any = None,
+                                 gpu_layers: Any = None,
+                                 profile_name: str = "auto",
+                                 profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
         """装 **Qwen-Image 2512 / Edit 2511 出图链** ✓（``stage=qwen_image`` ⇒
         :class:`~.torch_backend.TorchBackend` ✓）。
 
@@ -2679,10 +3038,11 @@ class EngineRuntime:
         #: 这一族盘上两种文件差 19 GiB ✓：2512 是 bf16 38.05 ✓、Edit 2511 是 840 层 int8 19.09 ✓。
         #: 拿 38.05 去判后者 ⇒ `auto` 判 `split` ⇒ 22.15 GiB 的权重留在内存里逐层爬 ✓✗
         #: （实测 gpu 15.9 / cpu 22.15 ✓，而卡其实整份装得下 ✓）。**判据没错，是需求数错了** ✓。
-        dit_need_gib, dit_need_why = part_need_gib(
-            str(dit_path), fallback=TorchBackend.QWEN_IMAGE_PART_NEED_GIB["dit"],
-            adapter="int8", assume="plain")
-        #: ⚠️ ``assume="plain"`` 是**表值的出处** ✓✗：`38.05 GiB` 是按 **bf16 那份（2512）**量的 ✓ ⇒
+        dit_need_gib, dit_need_why = stage_part_need(
+            "qwen_image", "dit", str(dit_path),
+            fallback=TorchBackend.QWEN_IMAGE_PART_NEED_GIB["dit"])
+        #: ⚠️ 表值的出处是 ``assume="plain"``（现登记在 `STAGE_PART_SPECS["qwen_image"]["dit"]` ✓）：
+        #: `38.05 GiB` 是按 **bf16 那份（2512）**量的 ✓ ⇒
         #: 文件是 int8 时表值**不匹配** ⇒ 走精算 19.09 ✓；文件是 bf16 时表值匹配 ⇒ 仍 38.05 ✓
         #: （这份**必须**留大 ✗：调小会让 2512 装到 20 GiB 才 OOM ✓）。换 **4bit** 档时
         #: mode="int4" ⇒ 也走精算 ✓（`quant.int4_stems_of` 认文件自述 ✓⇒ 不会被当成 int8 常驻 ✓✗）。
@@ -2692,7 +3052,10 @@ class EngineRuntime:
         part_need = dict(TorchBackend.QWEN_IMAGE_PART_NEED_GIB)
         part_need["dit"] = float(dit_need_gib)
 
-        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling)
+        backend = TorchBackend(device=device, policy=policy, vae_tiling=vae_tiling,
+                               gpu_layers=gpu_layers,
+                               profile_name=profile_name,
+                               profile_applied=profile_applied)
         #: ⭐ 按**本族**的账判一次 ✓✗（`part_need` ✓，已按文件精度校正过 `dit` ✓）：
         #: 拿 2.1 的 13.26 判 ⇒ "装得下" ✓✗、`residency` 留 `full` ✓、装到 20 GiB 才 OOM ✓。
         #: ⚠️ 账挂在 :class:`TorchBackend` 上（`QWEN_IMAGE_PART_NEED_GIB` ✓ 与 2.1 的
@@ -2959,9 +3322,13 @@ class EngineRuntime:
         }
 
     # ── 自述 ✓ ───────────────────────────────────────────────────────────
-    def status(self) -> dict[str, Any]:
+    def status(self, profile: Any = None) -> dict[str, Any]:
         """运行时的**全部事实** ✓（依赖 / 装了没 / 忙不忙 / 队列 / 最近任务 / **装配量计** ✓ /
-        **LoRA 账本** ✓）。"""
+        **LoRA 账本** ✓ / **机器档与预算** ✓）。
+
+        ``profile``：按**哪一档**算 ``budgets`` ✓（G1 ✓）。``None`` ⇒ 用最后那次装载的档 ✓
+        （从没装过 ⇒ ``auto`` ✓ —— 如实标 ``profileSource="default"`` ✓，不假装用户选过 ✓✗）。
+        """
         available, reason = torch_available()
         with self._lock:
             current = self._current
@@ -2969,6 +3336,20 @@ class EngineRuntime:
             tasks = [self._tasks[task_id].to_summary() for task_id in list(reversed(self._order))[:10]]
             report = dict(self._loadReport or {}) or None
             cache = self._cache_facts()
+        #: ⭐ 机器档（G1）✓：先定「按哪一档算」✓，再读数 ✓（读数只走 `_budget_facts` 一处 ✓）。
+        #: ``profileSource`` 三值必须分得开 ✓✗：``request``（这一问问的 ✓）/ ``loadReport``
+        #: （上次装载用的那一档 ✓）/ ``default``（从没选过 ✓ —— 此时 `budgets.profile` 必然是 ``auto`` ✓，
+        #: 别把它读成"用户选了 auto" ✓✗）。
+        if profile is not None:
+            profile_key = profile_mod.normalize_profile(profile)
+            profile_source = "request"
+        else:
+            recorded = ((report or {}).get("profile") or {}).get("profile")
+            if recorded:
+                profile_key, profile_source = str(recorded), "loadReport"
+            else:
+                profile_key, profile_source = "auto", "default"
+        budget = _budget_facts(profile_key)
         # ⚠️ 没装也要能答"**将会**在哪跑" ✗——``cpu`` 与 ``cuda`` 差着两个数量级 ✓✗
         #    （cpu 上一条视频要按小时算 ✓）⇒ 前端必须一眼看见 ✓，否则会把"慢"当成"卡住了" ✓。
         #    探设备的代价 = 一次依赖探测 ✓（毫秒级 ✓）。
@@ -2991,6 +3372,26 @@ class EngineRuntime:
             "deviceSource": ("loaded" if described else ("probe" if probe else None)),
             "loaded": self._loaded_flags(),
             "loadReport": report,
+            #: ⭐ **机器档**（G1 ✓）：档位清单 ＋ 这一档下**现在的**预算 ✓ —— 两件事分开报 ✓✗
+            #: （``profile.assumed`` 是假设 ✓、``budgets.gpuGiB`` 是实测 ✓，混读就会把"我以为有
+            #: 8 GiB"当成真读数 ✓✗）。``applied`` 只有 ``l1``/``l2``/``cpu`` 三档非空 ✓，
+            #: ``auto``/``gpu`` 是 ``{}`` ✓（它们压的正是默认值 ✓）。
+            "profile": {
+                "profile": profile_key,
+                "source": profile_source,
+                "known": profile_mod.describe(),
+                "note": ("`profile` 是**机器档**（这台机器多大 ✓，G1）✗ —— 与出图档 `profiles`"
+                         "（画面长什么样 ✓）不是一回事 ✓✗；`policy` 才是「这一件放哪」 ✓"),
+            },
+            #: ⭐ **预算**（§5.2 ✓）：一处回答"这一档下卡/内存各有多少能用" ✓
+            #: （``source`` 说清哪几栏是真读数 ✓；测不到 ⇒ ``null`` ✓，**不写 0** ✗）。
+            "budgets": budget,
+            #: ⭐ **物化缓存的账**（§4.4 ✓ 2026-11-07 加 ✓）：盘上压了多少 ✓ / 限多少 ✓ / 复用了几次 ✓
+            #: —— 三件事一格答完 ✓✗（只报"命中了"不报"占 8 GiB" ⇒ 用户会把它当免费加速 ✓✗；
+            #: 只报体积不报次数 ⇒ 看不出这层到底有没有在起作用 ✓）。
+            #: ``enabled=False`` ＝ 总开关关着 ✓（不是"没命中" ✗）；``limitGiB=null`` ＝ **不限** ✓
+            #: （不是"限了 0" ✗）。⚠️ 读的是**本进程**的账 ✓：重启清零 ✓（累计要看盘上体积 ✓）。
+            "diskCache": materialize_mod.cache_report(),
             #: ⭐ 复用了几次 / 真装了几次 / 丢掉了几次 ✓（E3.4 ✓）—— 以前只能从 `loadReport.reused`
             #: 看"这一次"，看不出"这一程"✓✗（`loadReport` 是**最后一份**的报告 ✓，装过几次就只留最后一次 ✓）。
             "cache": cache,

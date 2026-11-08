@@ -111,4 +111,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Windows 中文控制台是 GBK ⇒ 不重配就崩在第一条含 ⇒/✓ 的提示上（口径见 check_cli_encoding.py）
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # stderr 同样要重配：参数校验失败走的是中文 print(..., file=sys.stderr)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

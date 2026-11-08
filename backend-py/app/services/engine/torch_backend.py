@@ -58,6 +58,7 @@ from . import inventory as inv
 from . import keyframes as keyframes_mod
 from . import loader
 from . import media as media_mod
+from . import output_paths
 from . import quant as quant_mod
 from . import residency as residency_mod
 from . import scheduler as scheduler_mod
@@ -128,6 +129,29 @@ def _residency_kind(what: Any) -> str | None:
     return None
 
 
+#: ⭐ ``what``（**报告名**）⇒ ``part``（**分时部件名**）✓✗ —— 两套名字**从来不是一套** ✗✗。
+#:
+#: ## 为什么必须有一张表（2026-11-07 真机实测 ✓）
+#:
+#: 摆位置时用的名字是"给报告读者看的"（``"dit"`` / ``"h3"`` / ``"te"`` / ``"h3-te"`` ✓，见
+#: :func:`_residency_kind` 的说明 ✓），而 `release_part` 的入参是**分时部件**
+#: （``"dit"`` / ``"text"`` / ``"vae"`` / ``"vision"`` ✓）。原先 `release_part` 只做**同一性**判断
+#: ``holder.module is self._textEncoder`` ✓✗ —— 于是：
+#:
+#: * **文本塔**（`attach_krea2_te` ✓）摆的是 ``module.tower`` ✓、存的是外壳 ``module`` ✓ ⇒
+#:   两者**不是同一个对象** ⇒ 把手永不摘 ✓✗ ⇒ `residency.Handle` 的钩子环攥着每一层 ✓
+#:   ⇒ `gc.collect()` 收不掉 ⇒ 卡上那份**一字节不退** ✓✗（假 8 GiB 卡实测：退 text 前后
+#:   ``torch.cuda.memory_allocated`` 都是 6.41 GiB ✓）⇒ 下一拍 `decide_for` 读到"没余量" ✓
+#:   ⇒ 整件转 CPU ⇒ 宿主不够 ⇒ 报「要整份放进内存」✓✗（**看着像内存不够，其实是卡没退** ✓✗）。
+#: * 记账那本也一样 ✓：``reserve`` 用的是 ``what="te"`` ✓，而 ``release("text")`` 找不到这个键 ✓✗
+#:   ⇒ ``residencyTotal`` 只涨不退 ✓。
+#:
+#: ⇒ 摆放时**记下用的是哪个名字** ✓，退件时按**部件**认 ✓，两边都退 ✓。
+_WHAT_TO_PART: dict[str, str] = {
+    "dit": "dit", "h3": "dit",            #: 两族 DiT ✓
+    "te": "text", "h3-te": "text",        #: 各座文本塔 ✓（含 Krea2 / H3 / Music3 ✓）
+}
+
 #: 层预取上卡的槽数开关 ✓✗（2026-11-02 加 ✓）。**默认 0 ＝ 不存在这一级** ✓
 #: （与 `Strata` 上游的 ``STRATA_FS_SLOTS > 0`` 同一条纪律 ✓）：它花的是一整层显存 ✓，
 #: 而"该不该多占这一层"是**策略**不是正确性 ✓ ⇒ 显式开关 ✓，不设时引擎一字不变 ✓。
@@ -152,6 +176,12 @@ def _foresight_slots(raw: Any = None, *, default: int = FORESIGHT_SLOTS_DEFAULT)
 
 def _foresight_of(mode: str) -> Any:
     """按环境变量给出**层预取**的配置 ✓ ⇒ :class:`foresight.Foresight` 或 ``None`` ✓。
+
+    ⚠️ 它**不吃机器档** ✗✗（2026-11-07 明确 ✓）：引擎侧默认槽数是
+    :data:`FORESIGHT_SLOTS_DEFAULT`＝**0（关 ✓，不预取不花显存 ✓）** ⇒ 低配档**无需**再压 ✓；
+    而唯一能把它打开的是显式环境变量 ✓ —— 那条指令必须赢过档位 ✓✗，否则用户在 8 GB 机上设的
+    ``DARME_FORESIGHT_SLOTS=0`` 会被"档位说 1"静默顶掉 ✓✗（多占的那一层显存正是他要避开的 ✓）。
+    详见 :data:`profile.NOT_WIRED` ✓。
 
     ``None``（**没开** ✓）与"开了但这次没等到落地"（``hits=0`` ✓）在报告里必须分得开 ✗✗ ——
     前者整个 ``foresight`` 字段是 ``None`` ✓，后者字段在、``yieldLayers=0`` ✓。
@@ -194,7 +224,8 @@ class _Dependency:
     package: str
     purpose: str
     approximate_mb: int
-    #: ⭐ ``True`` ⇒ **可选**（缺了也**不阻断** ✓）。判据：本仓有等价的自研实现 ✓（如自研 BPE ✓）
+    #: ⭐ ``True`` ⇒ **可选**（缺了也**不阻断** ✓）。判据两条任一即可 ✓：
+    #: ① 本仓有等价的自研实现 ✓（如自研 BPE ✓）；② 该包只是**增强/互校**通道 ✓（缺了主干照跑 ✓）。
     optional: bool = False
 
 
@@ -209,6 +240,17 @@ DEPENDENCIES: tuple[_Dependency, ...] = (
     #    ⇒ 缺它**不该**把后端判成不可用 ✗（`torch_available()` 走的是 `ready` ✓ = **必需**项齐不齐 ✓）。
     _Dependency("transformers", "transformers",
                 "HF tokenizer 适配（本仓另有**自研 BPE** ✓ ⇒ 不装也能离线分词 ✓）", 120,
+                optional=True),
+    # ⚠️ 下面三项是 2026-11-07 补登记的 ✓ —— 此前**一条都不在册** ✗：换一台机器装引擎时，没人知道
+    #    还差它们 ✓✗（症状是「某个族的提示词/分词悄悄走另一条路」，不报错 ✓）。三条都是**可选** ✓。
+    _Dependency("jinja2", "jinja2",
+                "渲染权重自带的 chat 骨架（缺它 ⇒ 提示词按裸拼接走 ✓，不阻断 ✓）", 5,
+                optional=True),
+    _Dependency("sentencepiece", "sentencepiece",
+                "UMT5 分词的真值路（本仓另有纯 Python proto 解析 ✓ `parse_sp_model` ✓）", 5,
+                optional=True),
+    _Dependency("tokenizers", "tokenizers",
+                "词表**互校**的参考侧（缺它 ⇒ 只剩自研 BPE ✓，主干不受影响 ✓）", 10,
                 optional=True),
 )
 
@@ -574,6 +616,93 @@ def resident_bytes_of(info: Any, *, adapter: str | None,
                    "adapter": adapter}
 
 
+@dataclass(frozen=True)
+class PartSpec:
+    """一条装配线上**一件权重**的取数口径 ✓✗（2026-11-07 收口 ✓）。
+
+    三格各答一件事，混在一起就会算错而不报错 ✗：
+
+    * ``assume`` —— 表里那个数是按**哪一档文件**量的 ✓（:func:`part_need_gib` 的口径 ✓）；
+    * ``adapter`` —— 这族有没有**常驻壳** ✓（`"krea2"` / `"h3"` / `"int8"` ⇒ int8 层原样留 ✓）；
+    * ``measured`` —— 这件的数**按不按文件精算** ✓✗（``False`` ⇒ 只信表 ✓）。
+    """
+    assume: str | None = None
+    adapter: str | None = None
+    measured: bool = True
+
+
+#: ⭐⭐ 「某档某件要多少 GiB」的**唯一出处** ✓✗（2026-11-07 ✓）。
+#:
+#: 为什么必须收成一张表 ✗✗：这 9 处口径原先**内联在 8 条装配线里** ✓ ——
+#: 装配线要判"装不装得下" ✓、预检（`feasibility`）要**不装载就答同一个数** ✓✗。
+#: 两处各写一份 ⇒ 迟早一处改了另一处没改 ✓：预检说「装得下」、真装却 OOM ✓✗，
+#: 而报错落在**后装的那件**上，读起来像"VAE 坏了" ✗（这个坑本仓已经踩过两次 ✓：
+#: Krea2 表值按 int8 量、Qwen-Image 2511 按 38.05 判 ✓）。
+#:
+#: ⚠️ 表值本身**不在这里** ✗：各族的数仍挂在 :class:`TorchBackend` 的 ``*_PART_NEED_GIB`` ✓
+#: （与 2.1 的 :data:`PART_NEED_GIB` 并列、两族必须分开 ✓）。这里只登记**怎么取** ✓。
+#:
+#: ⚠️ 键是**stage**（不是族名 ✗）：``qwen_image``（2512/Edit）与 ``qwen_image21``（2.1）
+#: 是两条线、两本账 ✓✗；``image`` 是 SDXL 那条（单 checkpoint、无表 ⇒ 退回文件字节 ✓）。
+STAGE_PART_SPECS: dict[str, dict[str, PartSpec]] = {
+    "h3": {"dit": PartSpec("int8", "h3"),          # 19.62 是按 int8 档量的 ✓
+           "text": PartSpec("int8"),              # 25.44 是按 int8 档量的 ✓
+           #: H3 的真 VAE 是 `keep_parts` 常驻件、由后端自己找文件 ⇒ 没有路径可算 ✓，只信表 5.2 ✓
+           "vae": PartSpec(measured=False)},
+    "zimage": {"dit": PartSpec("plain"), "text": PartSpec("plain"), "vae": PartSpec("plain")},
+    "qwen_image21": {"dit": PartSpec("plain"),    # 13.26 是 bf16 那份量的 ✓
+                     "text": PartSpec("int8"),    # 14.79 是 int8 语言塔反量化后量的 ✓
+                     "vae": PartSpec("plain")},
+    "krea2": {"dit": PartSpec("int8", "krea2"),   # 12.57 是按 224 层 Int8Linear 常驻量的 ✓
+              "text": PartSpec("int8"),           # 7.5 是按 int8 量的 ✓
+              "vae": PartSpec("plain")},
+    "seedvr2": {"dit": PartSpec("plain"), "vae": PartSpec("plain")},
+    "music3": {"dit": PartSpec("plain"),          # fp16 原样驻留 ✓
+               "text": PartSpec("int8"),          # 表值是按 int8_convrot 常驻量的 ✓
+               "vae": PartSpec("plain")},
+    "wan22": {"dit": PartSpec("plain"), "text": PartSpec("plain"), "vae": PartSpec("plain")},
+    "qwen_image": {"dit": PartSpec("plain", "int8"),   # 38.05 是 bf16 那份量的 ✓（别调小 ✗）
+                   #: 这条线只有 dit 按文件精算 ✓；text/vae 仍按表 ✓（改了会让预检与装配线对不上 ✗）
+                   "text": PartSpec(measured=False),
+                   "vae": PartSpec(measured=False)},
+    "image": {"dit": PartSpec("plain")},          # SDXL：单 checkpoint，调用方退回文件字节 ✓
+}
+
+
+def stage_table_need(stage: str, part: str) -> float:
+    """**某档某件**的表值 ✓（GiB ✓）—— 不许查不到还编一个数 ✓✗。
+
+    ⚠️ 查不到就**抛** ✓（档名不在 :attr:`TorchBackend.STAGE_NEED_TABLES`、或表里没这一件）——
+    预检拿到异常应当**如实报"没有这本账"** ✓，而不是退回 0 让结论看着能跑 ✓✗。
+    """
+    stage_key = str(stage or "")
+    table = TorchBackend.STAGE_NEED_TABLES.get(stage_key)
+    if table is None:
+        raise ValueError(f"档 {stage_key!r} 没有逐件驻留表"
+                         f"（有表的档：{sorted(TorchBackend.STAGE_NEED_TABLES)}）"
+                         " ⇒ 这条线必须显式给 fallback")
+    if part not in table:
+        raise ValueError(f"档 {stage_key!r} 的表里没有 {part!r}（表里只有 {sorted(table)}）")
+    return float(table[part])
+
+
+def stage_part_need(stage: str, part: str, path: str | Path | None, *,
+                    fallback: float | None = None) -> tuple[float, dict[str, Any]]:
+    """**某档某件**要多少 GiB ✓ ⇒ ``(GiB, 凭据)`` ✓ —— 装配线与预检的**唯一出口** ✓✗。
+
+    ``fallback=None`` ⇒ 按 :attr:`TorchBackend.STAGE_NEED_TABLES` 现查 ✓（预检走这条：
+    它**没有**装配线里那份局部变量，也不该自己抄一份 ✓✗）；装配线仍显式传值 ✓（行为不变 ✓）。
+    """
+    spec = STAGE_PART_SPECS.get(str(stage or ""), {}).get(str(part or "")) or PartSpec()
+    if fallback is None:
+        fallback = stage_table_need(stage, part)
+    if not spec.measured:
+        return float(fallback), {"source": "table", "mode": "table-only",
+                                 "table": round(float(fallback), 2),
+                                 "why": "这条线不为该件按文件精算 ⇒ 按表 ✓（见 STAGE_PART_SPECS ✓）"}
+    return part_need_gib(path, fallback=fallback, adapter=spec.adapter, assume=spec.assume)
+
+
 def part_need_gib(path: str | Path | None, *, fallback: float,
                   adapter: str | None = None,
                   assume: str | None = None) -> tuple[float, dict[str, Any]]:
@@ -686,12 +815,23 @@ def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], 
 
     ⚠️ 只查 ``<``（漏装）不查 ``>``：将来若出现**不是** Linear 的 int8 张量（如量化后的
     embedding ✓），``int8Resident`` 会比层数**大** ✓ —— 那是合法的新品类，不该被这条判死 ✗。
+
+    ## 第 2 条的分母：**写进去的 ＋ 卸下去的** ✓✗（2026-11-07 ✓）
+
+    「内存这一级」会**故意**把几层 int8 卸到内存/盘上（`weights` 的 ``skip_prefixes`` ✓，`report.skipped`
+    ✓）—— 那些层**根本没被写进去** ✓ 是设计 ✓。原先分母只取 ``int8Resident`` ⇒ 卸得越多、越判成
+    「差的层会按 bf16 落盘」⇒ **真机实测**：假 8 GiB 卡上装 Krea2，224 层里 88 层写进去、136 层卸下去
+    ⇒ 被拒装 ✓✗（`residency="off"` 同机同文件 5.7 s 装得进去 ⇒ 是判据错、不是权重错 ✓）。
+    所以分母 ＝ ``int8Resident + int8Skipped`` ✓；但**卸下去就必须填得回来** ✗✗：``restorer is None``
+    而 ``int8Skipped > 0`` ⇒ 那几层是**填不回去的洞** ✗ ⇒ 照样拒装（并说明是洞、不是算术 ✓）。
     """
     import torch  # noqa: PLC0415
 
     layers = sum(1 for sub in module.modules() if type(sub).__name__ == "Int8Linear")
     int8_params = [param for param in module.parameters() if param.dtype == torch.int8]
     resident = int(getattr(report, "int8Resident", 0) or 0)
+    #: ⭐ 卸到内存/盘上、因而**故意没写**的 int8 层 ✓（2026-11-07 ✓）—— 它们也**交代清了** ✓✗。
+    skipped = int(getattr(report, "int8Skipped", 0) or 0)
     ledger = {
         "layers": layers,
         "int8Params": len(int8_params),
@@ -699,6 +839,9 @@ def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], 
         "int8OnCpu": sum(1 for param in int8_params if param.device.type == "cpu"),
         "int8OnGpu": sum(1 for param in int8_params if param.device.type != "cpu"),
         "int8Resident": resident,
+        #: ⭐ 其中**卸到内存/盘上**的层数 ✓（2026-11-07 ✓）：它们没被写进去是**策略** ✓，
+        #: 但 `restorer` 必须能把它们填回来 ✓✗（否则就是洞 ✗）。
+        "int8Skipped": skipped,
         #: ⭐ 其中**4bit 打包**的层数 ✓（2026-11-02 ✓）：与 ``int8Resident`` 是**子集关系** ✓
         #: —— 它们的参数同样 ``int8`` ✓，只是前向多一步解包 ✓。单列出来才看得出
         #: 「说好 4bit、实际按 int8 乘」✓✗（头部逐字同形 ⇒ 合计数看不出来 ✓）。
@@ -708,10 +851,16 @@ def _int8_residency_problems(module: Any, report: Any) -> tuple[dict[str, Any], 
         return ledger, (
             f"int8 常驻层 {layers} 个、int8 参数 {len(int8_params)} 个 ✗ ⇒ 结构自相矛盾"
             f"（一层应当恰好一个 int8 权重 ✓）")
-    if resident < layers:
+    if skipped > 0 and getattr(report, "restorer", None) is None:
         return ledger, (
-            f"文件里只有 {resident} 个 int8 权重被**原样**装进常驻层，而计划换掉的是 {layers} 层 ✗ ⇒ "
-            f"差的 {layers - resident} 层会按 bf16 落盘（显存 2 倍 ✓✗），"
+            f"{skipped} 层 int8 被卸到内存/盘上，但这次装载**没留下还原器** ✗ ⇒ 那几层填不回来"
+            f"（前向到那层就是一个空壳 ✓✗）—— 卸层省内存的前提是 **`report.restorer` 能重读** ✓✗")
+    accounted = resident + skipped
+    if accounted < layers:
+        return ledger, (
+            f"文件里只有 {resident} 个 int8 权重被**原样**装进常驻层"
+            f"（另有 {skipped} 层卸到内存/盘上 ✓），而计划换掉的是 {layers} 层 ✗ ⇒ "
+            f"差的 {layers - accounted} 层会按 bf16 落盘（显存 2 倍 ✓✗），"
             f"在 22.49 GiB 的卡上就是 OOM ✓✗ —— 而报告里 `parked` / `int8Resident` 两个数各自都\"正常\"✓✗")
     return ledger, None
 
@@ -1198,8 +1347,11 @@ class TorchBackend:
                  int8_offload: bool = False,
                  residency: str = "off",
                  residency_budget_mib: float | None = None,
+                 gpu_layers: Any = None,
                  policy: str | None = None,
-                 vae_tiling: Any = None) -> None:
+                 vae_tiling: Any = None,
+                 profile_name: str = "auto",
+                 profile_applied: dict[str, Any] | None = None) -> None:
         available, reason = torch_available()
         self._available = available
         self._reason = reason
@@ -1233,15 +1385,38 @@ class TorchBackend:
         #: 联合驻留必然多付跨界搬运 ✓ ⇒ 只有"真装不下/被 CPU 拖死"时才值得开 ✓。
         #: 取值单一真源在 `residency.MODES` ✓（``off`` / ``split`` / ``park`` ✓）。
         self._residency = _residency_mode(residency)
+        #: ⭐ **``gpuLayers`` 旋钮** ✓✗（2026-11-07 加 ✓）：``None`` ⇒ 没提，按预算自算 ✓；
+        #: ``0`` ⇒ 整份留内存 ✓；``n`` ⇒ 前 n 层上卡 ✓（口径单一真源 = `residency.normalize_gpu_layers` ✓）。
+        #:
+        #: ⚠️ **给了数就等于要求联合驻留** ✗✗（``off`` 时自动开成 ``split`` ✓）：``residency=off``
+        #: 那条路**根本不调 `residency.place`** ✓ ⇒ 旋钮会被静默吞掉 ✓✗ —— 而"给了参数不生效、
+        #: 回执里又看不出来"是本仓最恨的一类坑 ✓。**开成 split 而不是 park** 的理由可算 ✓：
+        #: 0 层时一样是"整份留内存" ✓（稳态相同 ✓），非 0 层时 park 每步都要整层来回搬 ✓（几十 GiB × 2 ✓）。
+        self._gpuLayers: int | None = residency_mod.normalize_gpu_layers(gpu_layers)
+        self._gpuLayersOpenedResidency = (self._gpuLayers is not None
+                                         and self._residency == "off")
+        if self._gpuLayersOpenedResidency:
+            self._residency = "split"
         #: 显式显存预算 ✓（MiB ✓；None ⇒ 按**当时**空闲显存 ×(1−reserve) 现算 ✓ —— 见 `residency.budget_from_cuda`）
         self._residencyBudgetMib = _residency_budget_mib(residency_budget_mib)
         #: 联合驻留的把手 ✓（``place()`` 的返回值 ✓ —— 报告与 `detach()` 都靠它 ✓；off ⇒ None ✓）
         self._residencyHandle: Any = None
+        #: ⭐ 这个把手是**用哪个 `what` 名摆的** ✓（2026-11-07 ✓）—— 见 `_WHAT_TO_PART` ✓：
+        #: `release_part("text")` 要认得出「以 `what="te"` 摆的那一把」✓✗，
+        #: 否则 `holder.module is self._textEncoder` 恒 False ⇒ **把手永远不摘** ✗✗。
+        self._residencyOwnerWhat: str | None = None
         #: ⭐ **内存这一级**（宿主配额表 ✓ —— 2026-11-02 加 ✓）：**每件一本** ✓✗
         #: （``dit`` 与 ``te`` 的组名都叫 ``blocks.0`` ✓ —— 合成一本账会把一件的层当成另一件的
         #: 同一层卸掉 ✓，前向到那里就会撞上 0 元素占位 ✓）。值 ``None`` ⇒ 这台机器的内存读数
         #: 取不到 ⇒ 这一级**不启用** ✓（如实走老路，不假装有上限 ✓）。
         self._hostCaches: dict[str, Any] = {}
+        #: ⭐ **机器档**（2026-11-07 加 ✓，见 :mod:`profile`）：档位展开出来的那几格**已经生效的值** ✓。
+        #: ⚠️ 空 dict ＝ ``auto`` 档（＝一切照默认 ✓，**零变化** ✓✗）—— 不给每一项都填一个"默认值"
+        #: （那会让报告和装载键都显得像配过 ✓✗，见 `profile.resolve` 的 ⚠️）。
+        #: ⚠️ **在构造期定死** ✓（不提供运行时 `apply_profile` ✗✗）：档位进装载键 ✓ ⇒ 换档必重装 ✓，
+        #: 一个实例不会中途被改档 ✓ —— 也就不存在「配额账本写着旧比例」那段坑 ✓。
+        self._profileName: str = str(profile_name or "auto")
+        self._profileApplied: dict[str, Any] = dict(profile_applied or {})
         #: ⭐ **任务账本** ✓（"这些字节现在是谁的" ✓）＋ **运行期压力状态机** ✓（带滞回 ✓）——
         #: 见 :mod:`scheduler` ✓。⚠️ 账本**不是判据** ✗：判据永远是**现测**读数（`device_policy.probe` ✓），
         #: 账本只回答归属 ✓（换装泄漏 / 忘记回收 / 两件重叠占卡，都从这看出来 ✓）。
@@ -1417,6 +1592,12 @@ class TorchBackend:
         return torch
 
     # ── 设备策略：GPU 优先 + 压力自适应（2026-10-31 ✓）────────────────────────────
+    #: ⭐ **H3**（MiniMax 双流）三件套的驻留账 ✓ —— 与下面 :attr:`PART_NEED_GIB`（2.1 的）
+    #: **必须分开** ✗✗（两张表差 11 GiB ✓✗）。逐格依据（哪份文件、多大、为什么 ×2 或被钉在
+    #: int8 上）写在 ``runtime.H3_PART_NEED_GIB`` 名旁 ≈20 行表里 ✓ —— 那份名字现在是本表的**别名**
+    #: （2026-11-07 收口 ✓：表值统一挂在类上，``STAGE_NEED_TABLES`` 才引用得到 ✓）。
+    H3_PART_NEED_GIB: dict[str, float] = {"dit": 19.62, "text": 25.44, "vae": 5.2}
+
     #: 每个**分时部件**在 bf16 下的驻留量 ✓（GiB ✓）—— 这是 Qwen-Image 2.1 那三件的**实测账** ✓
     #: （DiT 13.26 ＋ TE 14.79 ＋ VAE 0.63 ＝ 28.68 ✓，见 :attr:`PHASE_PARTS` ✓）。
     #: ⚠️ 别的族**没核过** ✗ ⇒ 不在表里的部件按"需求未知"处理 ✓（`device_policy.decide` ⑤ 那条
@@ -1528,6 +1709,29 @@ class TorchBackend:
     #: 分件表的每一格都必须与 :attr:`CHAIN_NEED_GIB` **对得上**（11.46+7.49+0.33=19.28 ✓）。
     CHAIN_NEED_PARTS_GIB: dict[str, dict[str, float]] = {
         "zimage": {"dit": 11.46, "text": 7.49, "vae": 0.33},
+    }
+
+    #: ⭐ 档 ⇒ 该档的**逐件表值** ✓（GiB ✓）—— **引用**上面几本账、不复制数字 ✓✗（2026-11-07 ✓）。
+    #:
+    #: 为什么需要这张索引 ✗✗：上面每一本账都叫 ``*_PART_NEED_GIB``，但**档名不一样**
+    #: （``qwen_image21`` 用 2.1 那本 ✓、``qwen_image`` 用 2512/Edit 那本 ✓、``image`` 干脆没表 ✓）。
+    #: 预检（``feasibility``）要「不装载就答同一个数」✓，就得知道**这个档该翻哪一本** ✓——
+    #: 让预检自己写一份 ``if stage == ...`` 就是第二本账 ✓✗（本仓踩过两次：Krea2 按 int8 量、
+    #: Qwen-Image 2511 按 38.05 判 ✓）。
+    #:
+    #: ⚠️ 值是**同一批 dict 对象** ✓（``is`` 相等 ✓，见 ``engine_feasibility_test`` ③）——
+    #: 也就是说改一本账，预检立刻跟着变 ✓；库里没有第二份数字 ✓✗。
+    #: ⚠️ ``image``（SDXL）**不在表里** ✓：单 checkpoint、驻留＝文件字节 ✓ ⇒ 调用方显式给
+    #: ``fallback=os.stat(...)`` ✓（不是"漏了" ✗）。
+    STAGE_NEED_TABLES: dict[str, dict[str, float]] = {
+        "h3": H3_PART_NEED_GIB,
+        "zimage": CHAIN_NEED_PARTS_GIB["zimage"],
+        "qwen_image21": PART_NEED_GIB,
+        "krea2": KREA2_PART_NEED_GIB,
+        "seedvr2": SEEDVR2_PART_NEED_GIB,
+        "music3": MUSIC3_PART_NEED_GIB,
+        "wan22": WAN22_PART_NEED_GIB,
+        "qwen_image": QWEN_IMAGE_PART_NEED_GIB,
     }
 
     def gpu_pressure(self) -> dict[str, Any] | None:
@@ -1762,11 +1966,14 @@ class TorchBackend:
         #: 真装不下时由 `_host_guard` 那道闸兜底 ✓）。
         handle = residency_mod.place(module, main_device=self._device, budget=budget,
                                      mode=self._residency, kind=_residency_kind(what),
+                                     gpu_layers=self._gpuLayers,
                                      guard=self._host_guard(what),
                                      host_cache=self._host_cache_of(what),
                                      reload=residency_mod.ReloadSlot(),
                                      foresight=_foresight_of(self._residency))
         self._residencyHandle = handle
+        #: ⭐ 记下这一把是**用哪个名字**摆的 ✓（`release_part` 靠它认件 ✓，见 `_WHAT_TO_PART` ✓）
+        self._residencyOwnerWhat = str(what)
         #: 记账 ✓（**切完才记** ✓ —— 记的是"实际留在内存的那份" ✓，不是估算 ✓）
         self._ledger.reserve(what, bytes_=int(handle.plan.gpu_bytes), device=str(self._device),
                              residency=self._residency,
@@ -1791,13 +1998,22 @@ class TorchBackend:
             "reserveKind": _residency_kind(what),
             # ⭐ 「切完还剩多少在卡上」是**判断有没有意义**的那个数 ✓（0 层 ⇒ 等于纯 CPU ✗）
             "fits": handle.plan.fits,
+            #: ⭐ 给了 ``gpuLayers`` 就得在回执里**看见它** ✓✗（2026-11-07 ✓）——
+            #: 尤其是"给了数、但这台机器没有第二台设备"那一路 ✓（见上面的 ``return`` ✓）。
+            "gpuLayers": handle.plan.gpuLayers,
+            #: 这一跑的联合驻留是**被 gpuLayers 顶开的** ✓（``residency=off`` ＋ 给了数 ✓）——
+            #: 不写这一句，用户会以为自己填的 ``residency`` 生效了 ✓✗。
+            "residencyOpenedBy": "gpuLayers" if self._gpuLayersOpenedResidency else None,
         })
         #: ⭐ **GPU 承担了多少**（按字节 ✓）—— 2026-11-01 加 ✓：用户问"为什么大部分计算在 CPU 上"时，
         #: 唯一能直接回答的数 ✓（层数占比会骗人 ✗：卡上 41% 的层也可能只占 41% 的字节、
         #: 却吃掉 95% 的时间 ✗）。分母为 0 ⇒ 不给（不编一个 1.0 ✗）。
         total = int(handle.plan.gpu_bytes) + int(handle.plan.cpu_bytes)
         report["gpuShare"] = (round(int(handle.plan.gpu_bytes) / total, 4) if total > 0 else None)
-        if not applied:
+        layers_note = self._gpu_layers_note(handle.plan)
+        if layers_note:
+            report["note"] = layers_note
+        elif not applied:
             report["note"] = (
                 f"预算 **{report['budgetMib']} MiB** ⇒ 没有可切的显存 ✓（`{handle.plan.reason}`）"
                 "⇒ 整份留在内存里 ✓✗（**等于纯 CPU** ✓ —— 装载成功、但这一档没联合 ✗；"
@@ -1821,6 +2037,32 @@ class TorchBackend:
                 "跨界只搬**激活** ✓（每步一次，代价小 ✓）；CPU 那几层在计算核上 ✓ 会比全卡慢 ✓")
         return report
 
+    def _gpu_layers_note(self, plan_: Any) -> str:
+        """``gpuLayers`` 那一路的**人话** ✓✗（2026-11-07 ✓）—— 没给过数就返回 ``""`` ✓。
+
+        ⚠️ 为什么优先级**高于**其余几条 ✗✗：给过数的那一跑，"卡上几层"是**用户的决定** ✓
+        （不是预算算出来的 ✓）—— 还去解释"预算怎么花的"会把人引向错误的旋钮 ✓。
+        """
+        if self._gpuLayers is None:
+            return ""
+        got = plan_.grantedLayers
+        opened = "（`residency` 由 `gpuLayers` 自动打开为 `split` ✓ —— 不然这个旋钮无处生效 ✗）" \
+            if self._gpuLayersOpenedResidency else ""
+        if self._gpuLayers == 0:
+            return (f"`gpuLayers=0` ⇒ **整份留内存** ✓（一层都不上卡 ✓，等同 `park` 的稳态 ✓；"
+                    f"**不是**装载失败 ✗ —— 想上卡就给个正整数 ✓）{opened}")
+        if got is None:
+            return f"`gpuLayers={self._gpuLayers}` 没生效（回执没给 granted ✓）—— 这条不该出现，请报 bug ✗"
+        if plan_.capped:
+            return (f"⚠️ `gpuLayers={self._gpuLayers}` **没给满** ✗：预算只装得下 {got} 层 ✓"
+                    f"（卡上 {plan_.gpu_bytes / 2**30:.2f} GiB ✓）⇒ 按 {got} 层切 ✓、"
+                    "剩余层在内存里 ✓（**不是**退回 auto ✗ —— 切法仍是「从前往后按你给的数取」✓；"
+                    "要真装满 ⇒ 加 `residencyBudgetMib` ✓ 或换更小的件 ✓）" + opened)
+        return (f"`gpuLayers={self._gpuLayers}` ⇒ 卡上 {got} 层 ✓（"
+                f"{plan_.gpu_bytes / 2**30:.2f} GiB ✓）"
+                + ("，其余在内存里 ✓（跨界只搬激活 ✓）" if plan_.layers_on_cpu else "，全上卡 ✓")
+                + opened)
+
     def _host_guard(self, what: str) -> Any:
         """给 ``residency.place(guard=)`` 的最后一道闸 ✓：**切完、搬之前**核内存放不放得下 ✓✗。
 
@@ -1835,6 +2077,17 @@ class TorchBackend:
             result = scheduler_mod.ensure_host_room(need, what=f"{what} 的 CPU 那一半")
             self._record_event("host-guard", {"what": what, **result})
         return _guard
+
+    def profile(self) -> dict[str, Any]:
+        """机器档的**实际生效面** ✓（``readout()`` / 回执用 ✓）。
+
+        ``applied`` 为空 ⇒ ``auto`` 档 ✓（``source="default"`` ✓ —— 别在报告里写成"已按 L1 压过配额" ✗）。
+        """
+        return {"profile": self._profileName, "applied": dict(self._profileApplied),
+                "source": "profile" if self._profileApplied else "default",
+                "hostRatio": self._profileApplied.get("hostRatio"),
+                "note": ("机器档只改**配额上限**与**解码分时** ✓；不换权重、不改像素 ✓"
+                         "（开 `tile` 才换字节 ✗，档位不碰它 ✓）")}
 
     def _host_cache_of(self, what: str) -> Any:
         """按件取**宿主层配额表** ✓ ⇒ :class:`host_cache.HostCache` 或 ``None``（这一级不启用 ✓）。
@@ -1861,13 +2114,20 @@ class TorchBackend:
         if host is not None:
             total = int(host[1])
             room = scheduler_mod.host_room_bytes(host)
-            quota = host_cache_mod.quota_of(total)
+            #: ⚠️ 比例**只有**机器档能改 ✓✗（``l1`` → 0.60、``l2`` → 0.50 ✓；``auto``/``gpu`` ⇒
+            #: 落回 :data:`host_cache.HOST_USE_RATIO` ✓，老路**零变化** ✓）。档位表里不抄这个数 ✓。
+            ratio = self._profileApplied.get("hostRatio")
+            quota = host_cache_mod.quota_of(total, **({} if ratio is None else {"ratio": ratio}))
             if room is not None:
                 quota = min(quota, max(0, int(room)))
             cache = host_cache_mod.HostCache(quota=quota, name=what)
             self._record_event("host-cache", {
                 "what": what, "quotaGiB": round(quota / device_policy.GIB, 2),
                 "totalGiB": round(total / device_policy.GIB, 2),
+                #: ⚠️ 比例也要报 ✓✗：配额是个 GiB 数 ✓，只看数字分不清"是这台机器内存小"还是
+                #: "档位把比例压下来了" ✓✗（两者对用户的动作完全不同 ✓）。
+                "ratio": ratio if ratio is not None else host_cache_mod.HOST_USE_RATIO,
+                "ratioSource": "profile" if ratio is not None else "default",
                 "roomGiB": (None if room is None
                             else round(int(room) / device_policy.GIB, 2)),
                 "note": ("内存这一级启用了 ✓：CPU 那几层超出配额就卸到盘上、"
@@ -6095,6 +6355,14 @@ class TorchBackend:
         """**当前**的 VAE 解码旋钮 ✓（回执/报告读它 ✓，别让调用方去摸私有字段 ✗）。"""
         return dict(self._vaeTiling)
 
+    def read_ahead(self) -> dict[str, Any]:
+        """这一趟装配**实际用的预取深度** ✓（§4.3 ✓，2026-11-07 ✓；回执 ``readAhead`` 一格读它 ✓）。
+
+        ⚠️ 深度是**逐文件**定的 ✗（同一趟里 DiT 与 TE 可能不在同一块盘上 ✓）⇒ 这里报的是
+        **最后一件**的 plan ✓，带 ``disk`` / ``mbps`` / ``source`` 凭据 ✓ —— 「为什么是 2」要能读出来 ✓✗。
+        """
+        return dict(weights_mod.last_read_ahead())
+
     def reset_vae_tiling(self) -> dict[str, Any]:
         """回到**装配默认** ✓：两个旋钮全关 ✓（逐位 ✓）＋ OOM 兜底仍开 ✓（见 :meth:`set_vae_tiling` ✓）。"""
         self._vaeTiling = normalize_vae_tiling(None)
@@ -6567,6 +6835,8 @@ class TorchBackend:
         （2026-11-01 端到端实证：`text` 卸完卡上仍占 14.8 GiB ✓，DiT 因此被迫整份落内存 ✓）。
         """
         holder, self._residencyHandle = self._residencyHandle, None
+        #: ⚠️ 名字也要跟着清 ✓✗：留着的话，下一个把手会被误判成「上一件摆的」✓（见 `release_part` ✓）
+        self._residencyOwnerWhat = None
         if holder is not None:
             try:
                 holder.detach()
@@ -6590,9 +6860,18 @@ class TorchBackend:
             raise ValueError(f"不认识的分时部件 {part!r} ✗（只认 dit / text / vae / vision ✓）")
         #: ⚠️ **只退「这一件」的把手** ✓：`_residencyHandle` 是单槽 ✓，它对应**最后装的那件** ✓；
         #: 若正好就是要退的这件 ✓（`module is target` ✓）⇒ 必须先 detach 才有资格谈释放 ✓✗。
+        #: ⭐ **两条判据，缺一不可** ✓✗（2026-11-07 ✓）：
+        #: ① 同一性（``holder.module is target`` ✓）—— DiT 那种"摆的就是它本身" ✓；
+        #: ② **名字**（`self._residencyOwnerWhat` 归一到 `part` ✓）—— 文本塔那种"摆的是**本体**、
+        #:    存的是**外壳**"✓✗（`attach_krea2_te` 摆 ``module.tower`` ✓、``_textEncoder`` 是 ``module`` ✓）。
+        #:    只有 ① 时 ② 恒不成立 ✓ ⇒ 把手不摘 ⇒ 钩子环吊着每一层 ⇒ **卡上一字节不退** ✓✗。
+        #: ⚠️ 用 `getattr` 兜底 ✓✗：一堆测试替身是 `__new__` 出来的（不跑 `__init__` ✓），
+        #: 写 `self._residencyOwnerWhat` 会让它们 `AttributeError` ⇒ 判据没跑就先炸 ✓（§9 教训）。
+        owner = getattr(self, "_residencyOwnerWhat", None)
+        same_part = owner is not None and _WHAT_TO_PART.get(owner, owner) == part
         holder = self._residencyHandle
         if holder is not None and target is not None \
-                and getattr(holder, "module", None) is target:
+                and (getattr(holder, "module", None) is target or same_part):
             self._drop_residency_handle()
         #: ⚠️⚠️ **两个局部引用必须当场放掉** ✓✗（2026-11-01 实测 ✓，这一句是本轮的关键 ✓）：
         #: ``target`` 就是那座要退的塔 ✓、``holder.module`` 又指回它 ✓ —— 只要这两个名字还在帧里 ✓，
@@ -6628,8 +6907,14 @@ class TorchBackend:
             self._visionShape = None
             self._visionReport = None
         #: 账本同步还回去 ✓（**无论有没有真退**都清 ✓：两处不一致比不记更糟 ✓✗）
-        self._ledger.release(part)
-        self._ledger.release(f"{part}#host")
+        #: ⚠️ 键名**不只一个** ✗✗：`reserve` 那侧写的是 ``what``（``"dit"`` / ``"h3"`` / ``"te"`` /
+        #: ``"h3-te"`` ✓），只退 ``part`` 会退了个空 ✓✗ —— 账本只涨不退，`residencyTotal` 里那件
+        #: 永远还在 ✓（假 8 GiB 卡实测：退 text 之后仍报「已占 6.41 GiB」✓✗）。按 `_WHAT_TO_PART`
+        #: 的**同名项**全退一遍 ✓（不存在的键 `release` 是空操作 ✓）。
+        for alias in {part, *(name for name, owner_part in _WHAT_TO_PART.items()
+                              if owner_part == part)}:
+            self._ledger.release(alias)
+            self._ledger.release(f"{alias}#host")
         if existed:
             import gc  # noqa: PLC0415
 
@@ -6662,12 +6947,22 @@ class TorchBackend:
         return None
 
     def _pinned_gib(self, part: str) -> int:
-        """这件**占了多少字节** ✓ ⇒ 读账本里现成的那一条 ✓（读不到就算 0 ✓）。"""
-        entry = self._ledger.items.get(part) or self._ledger.items.get(f"{part}#host")
-        return int(getattr(entry, "bytes", 0) or 0)
+        """这件**占了多少字节** ✓ ⇒ 读账本里现成的那一条 ✓（读不到就算 0 ✓）。
 
-    def _relocate_keep_parts(self, kept: tuple[str, ...],
-                             wanted: tuple[str, ...]) -> list[dict[str, Any]]:
+        ⚠️ 账本的键是**摆放时的 `what` 名** ✓✗（见 :attr:`_WHAT_TO_PART` ✓）：文本塔摆的时候叫
+        ``te`` ✓，而这里查的是部件名 ``text`` ✓ —— 只按一个名字查 ⇒ 读到 0 ✓ ⇒ 搬完记账记成
+        **0 字节** ✓✗（账本说"没占"、人却看着 7.5 GiB 躺在内存里 ✓）。所以按**别名**都试一遍 ✓。
+        """
+        names = [part, *(alias for alias, target in _WHAT_TO_PART.items() if target == part)]
+        for name in names:
+            entry = self._ledger.items.get(name) or self._ledger.items.get(f"{name}#host")
+            bytes_ = int(getattr(entry, "bytes", 0) or 0)
+            if bytes_:
+                return bytes_
+        return 0
+
+    def _relocate_keep_parts(self, kept: tuple[str, ...], wanted: tuple[str, ...],
+                             *, to_host_only: bool = False) -> list[dict[str, Any]]:
         """常驻件的**阶段定位** ✓✗ —— 这一阶段要它 ⇒ **上卡** ✓；不要 ⇒ **回 cpu** ✓。
 
         ## 为什么必须"能上去"（2026-11-01 端到端实测 ✓）
@@ -6696,6 +6991,11 @@ class TorchBackend:
             if current is None:
                 continue
             target = str(self._device) if part in wanted else "cpu"
+            #: ⭐ ``to_host_only`` ＝ **只做"让开"那一半** ✓✗（2026-11-07 ✓）：调用方要**先腾卡
+            #: 再决策** ✓ ⇒ 这一步只把"这一拍用不着的"往 cpu 挪 ✓，上卡留到装完之后那次调用 ✓
+            #: （反了就成"往满的卡里塞" ✓✗，见本方法末尾那条顺序说明 ✓）。
+            if to_host_only and device_policy.is_cuda_device(target):
+                continue
             if current == target:
                 continue
             if (device_policy.is_cuda_device(current)
@@ -6756,6 +7056,14 @@ class TorchBackend:
                    #: ⭐ Edit 2511 的**视觉塔** ✓（只有 Edit 链的 encode 段要它 ✓）
                    "vision": self._visionTower is not None}
         reused = [part for part in wanted if present[part]]
+        #: ⭐⭐ **常驻件里这一拍用不着的，先"停到内存"** ✓✗（2026-11-07 ✓）—— 必须排在
+        #: 「测卡况 → 决策 → 装下一件」**之前** ✗✗：它还压在卡上时测出来的余量是"假的宽" ✓
+        #: ⇒ 会把下一件判成"整份装得下" ✓ ⇒ 真装的时候撞上它 ✓✗（Krea2 实测口径：text 7.5 GiB
+        #: 还在卡上 ⇒ dit 12.57 GiB 被判 `off` ⇒ 装到 20 GiB 时 OOM ✓）。
+        #: 「上卡」那一半**留到装完之后** ✓（`_relocate_keep_parts` 末尾那次 ✓）—— 顺序反了就是
+        #: 往满的卡里塞 ✓✗。⚠️ 两个分支都要有 ✗✗：`reused` 走的是**早退**那条 ✓，
+        #: 而它同样会"边搬上去、边被占着的件堵着" ✓✗。
+        parked = self._relocate_keep_parts(kept, wanted, to_host_only=True)
         if len(reused) == len(wanted):
             #: 要的已在场 ✓ ⇒ 只把**不用的**退掉 ✓（能退多少退多少 ✓；常驻件不算"用不着" ✓）
             released = [self.release_part(part) for part in present
@@ -6764,7 +7072,7 @@ class TorchBackend:
             #: （`decode` 之后回 `sample` 那种回头路是少数 ✓，那时该由调用方决定要不要重装 ✓）。
             #: ⚠️ 但**要搬设备** ✓✗：H3 的 `decode` 正是"VAE 已在场（cpu ✓）而这一拍要它上卡"✓ ——
             #: 不搬就整个解码在 cpu 上跑 ✓（实测 94.6 秒 ✓，见 `_relocate_keep_parts` ✓）。
-            relocated = self._relocate_keep_parts(kept, wanted)
+            relocated = parked + self._relocate_keep_parts(kept, wanted)
             return {"phase": phase, "reused": reused, "released": released,
                     "relocated": relocated, "decision": None, "device": self._device,
                     "residency": self._residency}
@@ -6778,7 +7086,16 @@ class TorchBackend:
         # ⭐⭐ **退干净之后**才测卡况、才决策 ✓✗：退之前卡上还压着上一件 ✓，那时测出来的
         #     余量是"假的紧" ✓✗ ⇒ 会把自己越推越往 CPU（一旦降级就回不来 ✓✗）。
         #     顺序就是「退 → 测 → 定 → 装」✓，四步一步都不能挪 ✗。
-        decision = self.decide_for(tuple(wanted), phase=phase,
+        #: ⚠️⚠️ 决策只针对「**还没装的那几件**」✓✗（2026-11-07 ✓）—— 已在场的**不许再算一遍** ✗✗：
+        #: `decide_for` 的 `need` 是"这几件加起来多大"✓，而 `free` 是**此刻**卡上余量 ✓ ——
+        #: 已在场那件**本身就占着** `free` 里被扣掉的那几 GiB ✓ ⇒ 按整份 `wanted` 算就是把它
+        #: 数了两遍 ✓✗ ⇒ 需求虚高 ⇒ 判成 `cpu/off` ⇒ 接着 `ensure_host_room` 要"整份进内存" ⇒
+        #: **宿主不够 ⇒ 整条链拒装** ✓✗。实测（假 8 GiB 卡 ✓）：`init` 那拍 `text` 已在场（6.41 GiB ✓）、
+        #: 只差 0.24 GiB 的 `vae` ✓，却因为按「text+vae=7.74 GiB」判 ⇒ 卡上只剩 0.38 GiB
+        #: ⇒ 转 CPU ⇒ 要 7.74 GiB 内存（宿主只剩 3.59 GiB）⇒ 报「要整份放进内存」✓✗ ——
+        #: **看着像内存不够，其实只差一个 0.24 GiB 的 VAE** ✓✗。
+        missing = tuple(part for part in wanted if not present[part])
+        decision = self.decide_for(missing, phase=phase,
                                    need_gib=self._chain.get("partNeedGiB"))
         self._apply_decision(decision)
         chain = self._chain
@@ -6841,7 +7158,7 @@ class TorchBackend:
         #: `free` 0 → **17457 MiB** ✓。所以这一句必须落在**调用方**、装完之后 ✓。
         #: ⚠️ 常驻件的设备迁移排在**装完之后** ✓✗：先把卡让空（上一件退掉 ✓、这一件装好 ✓），
         #: 再搬那 5 GiB 上去 ✓ —— 顺序反了就是"往满的卡里塞" ✓✗（OOM 报在 `module.to` 上 ✓）。
-        relocated = self._relocate_keep_parts(kept, wanted)
+        relocated = parked + self._relocate_keep_parts(kept, wanted)
         self._trim_cuda()
         return {"phase": phase, "loaded": list(wanted), "released": released,
                 "relocated": relocated,
@@ -7494,6 +7811,89 @@ class TorchBackend:
             if self._vaeConfig is not None else "像素 → 潜变量 ✓（真 SEEDVR2 VAE ✓）",
         }
 
+    # ---------- 产物取证（2026-11-07 补 ✓：产物自己带"怎么来的" ✓）----------
+
+    @staticmethod
+    def _artifact_metadata(request: Any, plan: Any, kind: str) -> dict[str, Any]:
+        """落进 PNG iTXt / mp4 容器的**参数快照** ✓ —— 图脱离作业单后仍能自证 ✓。
+
+        ⚠️ 只放**短**字段 ✓（提示词截断 ✓）：容器元数据块是产物的一部分 ✓，
+        长提示词整段塞进去会让 PNG 体积不可控 ✓✗，而完整提示词本来就有 ``manifest.json`` 兜 ✓。
+        """
+        def _int(name: str) -> int:
+            try:
+                return int(getattr(plan, name, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        prompt = str(getattr(request, "prompt", "") or "")
+        negative = str(getattr(request, "negative", "") or "")
+        return {
+            "engine": "darme-voide/engine",
+            "kind": str(kind),
+            "stage": str(getattr(request, "stage", "") or ""),
+            "seed": int(getattr(request, "seed", 0) or 0),
+            "width": _int("width"), "height": _int("height"),
+            "frames": _int("frames"), "fps": _int("fps"), "steps": _int("steps"),
+            "sampler": str(getattr(request, "sampler", "") or ""),
+            "schedule": str(getattr(request, "schedule", "") or ""),
+            "prompt": prompt[:2000],
+            "negative": negative[:500],
+        }
+
+    def _load_summary(self, outputs: Mapping[str, Any]) -> dict[str, Any]:
+        """装配摘要 ✓（manifest 用 ✓）—— **顺手失败不算失败** ✓（清单不该拖垮一次成功的生成 ✓）。"""
+        try:
+            desc = self.describe()
+        except Exception:  # noqa: BLE001 - 自述本该总能调 ✓，但清单不是关键路径 ✓
+            desc = {}
+        residency = desc.get("residency") if isinstance(desc.get("residency"), dict) else {}
+        return {
+            "backend": desc.get("name"),
+            "device": desc.get("device"),
+            "available": desc.get("available"),
+            "residencyMode": residency.get("mode"),
+            "residency": residency.get("report"),
+            "vaeKind": outputs.get("vaeKind"),
+            "audioVaeKind": outputs.get("audioVaeKind"),
+        }
+
+    def _write_manifest(self, where: Path, request: Any, plan: Any,
+                        result: dict[str, Any], outputs: Mapping[str, Any]) -> str | None:
+        """产物目录的 ``manifest.json`` ✓（request / plan / 装配摘要 / ffprobe 事实 / sha256 ✓）。
+
+        ⚠️ 只在**真写出产物之后**调用 ✓（拒绝/失败路径一个文件都不该多 ✗）；
+        写不动 **不改判**这次生成 ✓，但会把原因记进 ``result["manifestError"]`` ✓（不静默 ✗）。
+        """
+        payload: dict[str, Any] = {
+            "schemaVersion": 1,
+            "writtenAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "request": request.to_dict() if hasattr(request, "to_dict") else None,
+            "plan": plan.to_dict() if hasattr(plan, "to_dict") else None,
+            "load": self._load_summary(outputs),
+            "artifacts": [],
+        }
+        facts_by_kind = {"image": result.get("image"), "video": result.get("video"),
+                         "audio": result.get("audio")}
+        for item in result.get("artifacts") or []:
+            entry = dict(item)
+            path = Path(str(entry.get("path") or ""))
+            if path.is_file():
+                entry["bytes"] = path.stat().st_size
+                entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                facts = facts_by_kind.get(str(entry.get("kind")))
+                if facts:
+                    entry["facts"] = facts
+            payload["artifacts"].append(entry)
+        target = where / "manifest.json"
+        try:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as err:
+            result["manifestError"] = f"{type(err).__name__}: {err}"
+            return None
+        result["manifestPath"] = str(target)
+        return str(target)
+
     def write(self, outputs: dict[str, Any], plan: Any, request: Any) -> dict[str, Any]:
         """有**真帧张量**就落**真 mp4** ✓（ffmpeg ✓）；否则落张量清单 JSON ✓ —— 两种情况都如实标 ✓。"""
         self._gate()
@@ -7503,8 +7903,20 @@ class TorchBackend:
         #    （见 `media.py` 的 ``scaled * 255`` 与 ``pcm`` 两处 ✓）⇒ **cpu 上解出来的帧照样能落盘** ✓。
         #    在这里加校验会把那条正当用法**拒掉** ✗✗（自检就常在 cpu 上解码 ✓），
         #    而它本来完全跑得通 ✓ ⇒ 「功能要全」= **逐个入口查清并写下结论** ✓，不是一律加 ✗。
-        where = Path(request.outputs_dir) if request.outputs_dir else Path(
-            tempfile.mkdtemp(prefix="engine_torch_"))
+        #: ⚠️ 兜底落点**不再** `tempfile.mkdtemp` ✗✗（2026-11-07 收口 ✓）：旧写法每次跑都新建
+        #: 一个 `%TEMP%\engine_torch_xxxx` ✓✗ ⇒ 图散在临时目录里、清理时连凭据一起丢 ✓、
+        #: 想留就得人工搬一遍 ✓✗。现在统一走 :mod:`output_paths` ✓ ⇒
+        #: `<storageRoot>/engine/<image|video|audio>/` ✓（`/static` 服务得到 ✓，路径稳定 ✓）。
+        #: kind 由**手里真有的东西**决定 ✓✗（先看帧维数、再看音频 ✓ ——
+        #: H3 双流同时有 5 维帧与波形 ✓ ⇒ 按 video 归 ✓，音轨本来就在那个 mp4 里 ✓）。
+        if request.outputs_dir:
+            where = Path(request.outputs_dir)
+        else:
+            frames_shape = getattr(outputs.get("frames"), "shape", None)
+            dims = len(tuple(frames_shape)) if frames_shape is not None else 0
+            where = output_paths.fallback_outputs_dir(
+                {4: "image", 5: "video"}.get(dims)
+                or ("audio" if outputs.get("audioWaveform") is not None else output_paths.DEFAULT_KIND))
         where.mkdir(parents=True, exist_ok=True)
         frames = outputs.get("frames")
         waveform = outputs.get("audioWaveform")
@@ -7513,9 +7925,12 @@ class TorchBackend:
             #    「真 TE ✓ → 真 DiT ✓ → 真 VAE ✓」之后，**最后一步落成了 JSON 清单** ✓✗
             #    （`synthetic: True` 还写着 ✓ —— 明明手里握着成品像素 ✓✗）。
             target = where / f"image_seed{int(request.seed)}.png"
-            report = media_mod.write_image(frames, target, value_range="-1..1")
+            #: ⭐ 2026-11-07 补 ✓：把参数快照写进 PNG 的 iTXt ✓（盘上那批图此前**零元数据** ✓✗ ——
+            #: 图一旦离开作业单就再也说不清是哪个模型/多少步/什么提示词出的 ✓）。
+            report = media_mod.write_image(frames, target, value_range="-1..1",
+                                          metadata=self._artifact_metadata(request, plan, "image"))
             synthetic = bool(outputs.get("synthetic", True))
-            return {
+            result: dict[str, Any] = {
                 "synthetic": synthetic, "realTensors": True, "realFile": True,
                 "imagePath": str(target), "primaryPath": str(target), "image": report,
                 "artifacts": [{"kind": "image", "path": str(target), "bytes": report["bytes"]}],
@@ -7524,10 +7939,46 @@ class TorchBackend:
                             else "VAE 未训练 ✗ ⇒ 画面是噪声 ✓")
                          + "）"),
             }
+            if report.get("degraded"):
+                # ⚠️ 纯色/全黑/全白**不抛异常** ✓✗（画布上看着就是"一张图" ✓）⇒ 必须由回执喊出来 ✓
+                result["degraded"] = True
+                result["degradedReason"] = (
+                    f"画面几乎是纯色（像素标准差 {report.get('std')} < 阈值 ✓）"
+                    f"—— 检查值域口径（-1..1 / 0..1 ✓）与 VAE 是否真解出了内容 ✓")
+                result["note"] = str(result["note"]) + "；⚠️ 但画面**几乎是纯色** ✗（见 `degradedReason` ✓）"
+            self._write_manifest(where, request, plan, result, outputs)
+            return result
         if hasattr(frames, "shape") and len(tuple(frames.shape)) == 5:
+            #: ⚠️ 2026-11-07 补 ✓：**落盘前先核帧数** ✓✗ —— 盘上三个 ``video_seed777.mp4``
+            #: 分别是 10/34/39 帧 ✓，就是同一个名字被"帧数不同"的两次生成**静默覆盖** ✓✗。
+            #: 帧数是 plan 说了算的（``plan.frames`` ✓），解出来的 T 与它不符 ⇒ 当场失败 ✓；
+            #: 不静默落一条"看着正常、其实少了几帧"的片子 ✓（那会一路流到成片里 ✗）。
+            expected_frames = int(getattr(plan, "frames", 0) or 0)
+            actual_frames = int(tuple(frames.shape)[2])
+            if expected_frames and actual_frames != expected_frames:
+                raise media_mod.MediaError(
+                    f"帧数不符 ✗：plan.frames = {expected_frames} ✓，手里有 {actual_frames} 帧 ✗ "
+                    f"—— 解码出的帧数与计划不一致（先查时间压缩比/潜帧口径 ✓），"
+                    f"**不落一条少帧的片子** ✓")
             target = where / f"video_seed{int(request.seed)}.mp4"
+            #: ⭐ 双流：**先把音轨落成 wav** ✓ 再混进 mp4 ✓ —— 顺序不能反 ✓
+            #: （混流要读那个文件 ✓）。wav 仍**原样保留** ✓：要干净音频（转写/配音对齐 ✓）读它 ✓。
+            audio_target: Path | None = None
+            audio_report: dict[str, Any] | None = None
+            if waveform is not None:
+                audio_target = where / f"audio_seed{int(request.seed)}.wav"
+                rate = int(outputs.get("sampleRate")
+                           or audio_vae_mod.AudioVAEConfig().sample_rate)
+                audio_report = media_mod.write_wav(waveform, audio_target, sample_rate=rate)
             report = media_mod.write_video(frames, target, fps=int(plan.fps or 24),
-                                           value_range="-1..1")
+                                           value_range="-1..1", audio=audio_target,
+                                           metadata=self._artifact_metadata(request, plan, "video"))
+            encoded_frames = report.get("nbFrames")
+            if expected_frames and encoded_frames is not None and int(encoded_frames) != expected_frames:
+                # ffprobe 读得到 nb_frames 时必须与 plan 一致 ✓（编码器丢/补帧同样是静默错 ✓✗）
+                raise media_mod.MediaError(
+                    f"落盘后的帧数与计划不符 ✗：mp4 里 {int(encoded_frames)} 帧 ✓，"
+                    f"plan.frames = {expected_frames} ✓（{target} ✗）")
             # ⚠️ 2026-11-01 修 ✗✗（接 SEEDVR2 修复线时踩到 ✓）：这里原先把 ``synthetic=True``
             #    与「画面来自**未训练**的参考 VAE ✗」**写死** ✓ —— 5 维帧此前只可能来自参考 VAE ✓，
             #    接上真视频 VAE（SEEDVR2 ``seedvr2-real`` ✓）之后这句话就成了假证 ✓✗：
@@ -7564,21 +8015,31 @@ class TorchBackend:
                 "artifacts": [{"kind": "video", "path": str(target), "bytes": report["bytes"]}],
                 "note": "**真 mp4** ✓（ffprobe 可复核 ✓）" + picture_note + sound_note,
             }
-            if waveform is not None:
-                # ⚠️ 双流：音频**单独落 wav** ✓（真 16-bit PCM ✓ 标准库 ✓）—— 不塞进 mp4 ✗：
-                #    塞进去要重编码 ✓，而"两条产物各是各的"更好独立核对 ✓（本仓一惯做法 ✓）。
-                audio_target = where / f"audio_seed{int(request.seed)}.wav"
-                rate = int(outputs.get("sampleRate")
-                           or audio_vae_mod.AudioVAEConfig().sample_rate)
-                audio_report = media_mod.write_wav(waveform, audio_target, sample_rate=rate)
+            if report.get("metadataDropped"):
+                # ⚠️ "写了元数据"与"元数据在文件里"是两件事 ✓✗（mp4 muxer 会静默丢掉不认识的键 ✓）
+                result["metadataDropped"] = list(report["metadataDropped"])
+                result["note"] = (str(result["note"]) + "；⚠️ 容器元数据有键**没写进去** ✗（"
+                                  + ", ".join(str(k) for k in report["metadataDropped"]) + "）")
+            if waveform is not None and audio_target is not None and audio_report is not None:
+                # ⚠️ 2026-11-07 改 ✓：音轨**同时**进 mp4 ✓（``-af apad`` ＋ ``-shortest`` 以画面收尾 ✓）
+                #    —— 此前只有"静音 mp4 ＋ 单独 wav" ✓✗：播放器里没声音、成片还得再合一次 ✓。
+                #    wav **照旧另存** ✓：转写/配音对齐/换轨都要干净音频 ✓，且两条产物各能独立核对 ✓
+                #    （``hasAudio`` 为真的 mp4 ＋ 原样 PCM 的 wav ✓，互相印证 ✓）。
                 result["artifacts"] = list(result["artifacts"]) + [
                     {"kind": "audio", "path": str(audio_target), "bytes": audio_report["bytes"]}]
                 result["audioPath"] = str(audio_target)
                 result["audio"] = audio_report
                 # ⚠️ 这是"本次真的产出了音频"的**铁证** ✓（不是"后端支持音频"那种能力声明 ✗）
                 result["dualStream"] = True
+                #: 回执里写明"mp4 自带音轨" ✓ —— 只剩一条 wav 时前端会**只看画面** ✓✗
+                result["videoHasAudio"] = bool(report.get("hasAudio"))
                 result["note"] = (str(result["note"])
-                                  + "＋ **真 wav** ✓（同一份音频的两条各自落盘 ✓）")
+                                  + "＋ **真 wav** ✓（16-bit PCM 原样另存 ✓；"
+                                  + ("并已混进 mp4 ✓ —— 音轨补静音到画面长度、以画面收尾 ✓"
+                                     if result["videoHasAudio"] else
+                                     "但**没混进 mp4** ✗（见 `videoHasAudio` ✓）")
+                                  + "）")
+            self._write_manifest(where, request, plan, result, outputs)
             return result
         if waveform is not None and hasattr(waveform, "shape"):
             #: ⭐ **纯音频**（Music3 ✓，2026-11-06 补 ✗✗）：上面两条都是"有画面"的分支 ✓ ——
@@ -7590,7 +8051,7 @@ class TorchBackend:
             rate = int(outputs.get("sampleRate") or 44100)
             report = media_mod.write_wav(waveform, target, sample_rate=rate)
             synthetic = bool(outputs.get("synthetic", True))
-            return {
+            result = {
                 "synthetic": synthetic, "realTensors": True, "realFile": True,
                 "audioPath": str(target), "primaryPath": str(target), "audio": report,
                 "artifacts": [{"kind": "audio", "path": str(target), "bytes": report["bytes"]}],
@@ -7599,6 +8060,8 @@ class TorchBackend:
                          + f"；{int(outputs.get('audioSamples') or 0)} 样本 @ {rate} Hz ✓"
                          + "；这一族**没有画面** ✓ —— 不要拿 ``primaryUrl`` 当视频用 ✗✗）"),
             }
+            self._write_manifest(where, request, plan, result, outputs)
+            return result
         target = where / f"torch_stub_seed{int(request.seed)}.json"
         target.write_text(json.dumps({
             "synthetic": True,

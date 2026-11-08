@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
+import tempfile
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -764,7 +766,11 @@ def main() -> int:
           h3.H3_TRUNK_DEFAULTS["hidden"] == 5376 and h3.H3_SIGMA_SHIFTS["sigma_shift_audio"] == 3.0
           and set(h3.H3_DEFAULTS) == set(h3.H3_TRUNK_DEFAULTS) | set(h3.H3_SIGMA_SHIFTS))
 
-    tiny_path = pathlib.Path(__file__).resolve().parents[1] / "tests" / "_h3_tiny.safetensors"
+    # ⚠️ 临时权重放**系统临时目录**，不写 `tests/`（2026-11-08 实测：CodeBuddy 的
+    #   `sitecustomize` 把 `Path.unlink` 换成「移到回收站」，只对系统临时目录旁路成原生删除 ⇒
+    #   删 `tests/` 下的文件要走 shell，长跑时偶发 `OSError: SHFileOperationW 失败: 0x2`，
+    #   断言全过却退出码非 0、总表显示成一整套红，真失败被埋掉）。
+    tiny_path = pathlib.Path(tempfile.mkdtemp(prefix="h3-tiny-")) / "_h3_tiny.safetensors"
     loaded_form: Any = None
     load_detail: Any = None
     try:
@@ -780,6 +786,7 @@ def main() -> int:
         load_detail = f"{type(err).__name__}: {err}"
     finally:
         tiny_path.unlink(missing_ok=True)
+        shutil.rmtree(tiny_path.parent, ignore_errors=True)
     check("㉛ ⭐ **集成**：把 H3 权重交给后端 ⇒ 它**认出形态并按 H3 建** ✓（而不是**静默按 DiT 建** ✗ —— "
           "那种情况下人只会看到「装载报告缺一堆键」✓✗，读成「权重没下全」✗）；装载报告 complete ✓"
           "—— ⭐ 这步之后 `h3_form` **不再是零调用** ✓",

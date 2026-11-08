@@ -18,7 +18,7 @@ tags / mode / duration / aspect。
   awesome-seedance-2-5-flaqai   MIT（宽松）                  结构：Markdown（层级不一致）
   seedance2（HF 已下载）         CC BY 4.0                   结构：JSONL
 
-⚠️ 原始正文**不得进仓库**（第三方版权红线）：本脚本产物落在 ``data/prompt-corpus/``（已 gitignore）。
+⚠️ 原始正文**不得进仓库**（第三方版权红线）：本脚本产物落在 ``corpus/prompt-corpus/``（已 gitignore）。
 
 用法::
 
@@ -26,8 +26,8 @@ tags / mode / duration / aspect。
     python backend-py/app/scripts/corpus/normalize.py --source=flaqai
 
 产物
-  ``data/prompt-corpus/_normalized/prompts.jsonl``   （每行一条，UTF-8）
-  ``data/prompt-corpus/_normalized/report.txt``      （字段填充率与分布，供人工核对）
+  ``corpus/prompt-corpus/_normalized/prompts.jsonl``   （每行一条，UTF-8）
+  ``corpus/prompt-corpus/_normalized/report.txt``      （字段填充率与分布，供人工核对）
 """
 
 from __future__ import annotations
@@ -40,7 +40,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]  # depth-adjusted-to-app
-CORPUS = ROOT / "data" / "prompt-corpus"
+#: 2026-11-07：从 ``data/prompt-corpus`` 迁到顶层 ``corpus/``（与 ``corpus/playbook`` 同类 ——
+#: 都是语料源，不属于运行时数据根 ``data/``）。与 ``app/agent/tools/corpus_tools.py`` 的
+#: ``CORPUS_JSONL`` 必须同一坐标，改一处要改两处（脚本层不 import ``app.*``）。
+CORPUS = ROOT / "corpus" / "prompt-corpus"
 OUT_DIR = CORPUS / "_normalized"
 ONLY = next((arg[9:] for arg in sys.argv if arg.startswith("--source=")), "")
 
@@ -290,7 +293,7 @@ def main() -> int:
     (OUT_DIR / "prompts.jsonl").write_text(
         "\n".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) for row in all_rows),
         encoding="utf-8")
-    say(f"\n# 合计 {len(all_rows)} 条 → data/prompt-corpus/_normalized/prompts.jsonl")
+    say(f"\n# 合计 {len(all_rows)} 条 → corpus/prompt-corpus/_normalized/prompts.jsonl")
     (OUT_DIR / "report.txt").write_text("\n".join(_report), encoding="utf-8")
     print("\n".join(_report))
     print(f"\nTOTAL={len(all_rows)}")

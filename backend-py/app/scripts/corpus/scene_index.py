@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""场次索引批处理（A 侧）—— 库里剧本 → ``data/ocr/library-scenes.sqlite``。
+"""场次索引批处理（A 侧）—— 库里剧本 → ``indexes/library-scenes.sqlite``。
 
 ⚠️ **不重复实现解析**：切场、角色提取、置信度全在 ``app/services/scene_parser.py``；
 落库与读回在 ``app/services/scene_index.py``。HTTP 端点 ``GET /knowledge/scenes`` 与
@@ -138,4 +138,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Windows 中文控制台是 GBK ⇒ 不重配就崩在第一条含 ⇒/✓ 的提示上（口径见 check_cli_encoding.py）
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

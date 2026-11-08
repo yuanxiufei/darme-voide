@@ -167,7 +167,13 @@ async def interpolate_video(
     source_fps = await probe_video_fps(source_path) or 24.0
     target_fps = target_fps_of(source_fps, factor)
 
-    out_dir = Path(get_storage_root()) / "static" / "interpolate"
+    #: ⚠️ **不能**再拼一层 `static` ✗✗（2026-11-07 修 ✓）：`get_storage_root()` 返回的
+    #: **就是** `<dataRoot>/static` ✓ ⇒ 旧写法 `get_storage_root()/"static"/"interpolate"`
+    #: 实落 `<dataRoot>/static/static/interpolate` ✓✗，而下面回执的 URL 是
+    #: `/static/interpolate/<uuid>.mp4` ✓ ⇒ `/static` 挂的是 `<dataRoot>/static` ✓ ⇒
+    #: **文件在 `static/static/` 下、链接指 `static/` 下** ⇒ 插帧成功的片子点开 404 ✓✗。
+    #: 与同层的 `composed` / `mixed` / `audio` / `images` 保持同级 ✓。
+    out_dir = Path(get_storage_root()) / "interpolate"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{uuid4()}.mp4"
 

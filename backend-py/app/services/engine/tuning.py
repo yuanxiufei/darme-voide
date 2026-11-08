@@ -48,7 +48,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from app.services import knowledge_ledger
+from . import hooks
 
 __all__ = [
     "MIN_SAMPLES",
@@ -174,7 +174,11 @@ def load() -> dict[str, Any]:
     if not file.exists():
         return _empty()
     try:
-        data = json.loads(file.read_text(encoding="utf-8"))
+        # ⚠️ ``utf-8-sig`` 不是保险丝而是必需 ✓✗：Windows 上记事本「UTF-8」与 PowerShell 5.1
+        #    的 ``Out-File``/``>`` **默认写 BOM** ✓，带 BOM 的文件用 ``utf-8`` 读出的首字符是
+        #    ``\ufeff`` ⇒ ``json.loads`` 直接抛 ✓ ⇒ 落到下面的 ``_empty()`` ✓
+        #    ⇒ 症状是「调优忽然全部失效、且一句话都不提示」✓✗（``diagnose()`` 也说不出原因 ✓）。
+        data = json.loads(file.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return _empty()
     if not isinstance(data, dict):
@@ -258,7 +262,8 @@ def problems() -> list[str]:
     file = path()
     if file.exists():
         try:
-            json.loads(file.read_text(encoding="utf-8"))
+            # 与 :func:`load` 同一编码口径 ✓（两处不一致 ⇒ load 读进来了、这里却报"读不出来" ✓✗）
+            json.loads(file.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as err:
             found.append(f"覆盖文件读不出来（已按无覆盖处理）：{err}")
     for key, entry in (load()["overrides"] or {}).items():
@@ -311,10 +316,8 @@ _EVIDENCE_MAX = 8
 
 
 def _index():
-    """延迟 import ``outcome_index``（``resolve`` 是热路径，不想为它拖一个 sqlite 依赖）。"""
-    from app.services import outcome_index
-
-    return outcome_index
+    """跑次索引的**注入源**（没登记 ⇒ ``None`` ✓；不 import 服务层 ✓）。"""
+    return hooks.get("run_index")
 
 
 def _scan(**filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
@@ -322,8 +325,14 @@ def _scan(**filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
 
     ``total`` 与 ``len(items)`` **必须分开**：扫到 500 条就说"共 500 条"会把
     「抽样了」读成「就这么多」，样本量闸门随即被绕过 ✓✗
+
+    ⚠️ 没登记跑次索引 ⇒ 返回 ``([], 0, available=False)`` ✓✗（**不是**"没有失败跑次 ⇒ 一切正常" ✓✗）：
+    ``available=False`` 会让上游 `suggest()` 如实报"没接入"，闸门按"样本量 0"处理 ✓。
     """
-    result = _index().query(limit=_SCAN_LIMIT, **filters)
+    index = _index()
+    if index is None:
+        return [], 0, False
+    result = index.query(limit=_SCAN_LIMIT, **filters)
     return (result.get("items") or [], int(result.get("total") or 0),
             bool(result.get("available")))
 
@@ -372,6 +381,8 @@ def _failure_candidates(*, min_samples: int,
     """
     outcome_index = _index()
     notes: list[str] = []
+    if outcome_index is None and stats is None:
+        return [], ["跑次索引没接入（引擎可独立运行 ⇒ 由服务层启动时登记）"]
     stats = stats if stats is not None else outcome_index.stats(group_by="stage")
     if not stats.get("available"):
         return [], [str(stats.get("hint") or "索引库不可用")]
@@ -419,7 +430,8 @@ def _steps_candidates(*, min_samples: int) -> tuple[list[dict[str, Any]], list[s
     ⚠️ 只在 ``runs.meta`` **真的带 ``steps``** 时才算：meta 里没这格就没有"步数"这个维度，
     拿 ``elapsed`` 反推步数等于猜 —— 猜出来的建议比没有建议更坏 ✓✗
     """
-    outcome_index = _index()
+    #: ⚠️ 这里**不**取 `_index()` ✓：本规则只经 `_scan()` 取数 ✓，而 `_scan` 已按"没登记"兜住 ✓
+    #: （旧写法白拿一个可能为 ``None`` 的变量、再不用它 ⇒ 读的人以为有来源 ✓✗）。
     current_overrides = load()["overrides"]
     found: list[dict[str, Any]] = []
     notes: list[str] = []
@@ -456,6 +468,14 @@ def _steps_candidates(*, min_samples: int) -> tuple[list[dict[str, Any]], list[s
         gain = avg_high - avg_second
         if gain >= 0.01:
             continue
+        #: 缺口 6：**降步数要过质检关** ✓ —— 「省时间不降质」的"质"不能只看引擎自报分数 ✗
+        #: （那份分数在真机上**根本不存在** ✗：``runtime._index_run`` 从来不写 ``score`` ⇒
+        #: 本规则在真机上一直靠"没有分数就没有候选"空转 ✓✗）。质检通过率是**有人/有判据
+        #: 看过**的离散结论 ✓ ⇒ 低档通过率明显更差就当场拦下这条候选 ✓（并留下理由 ✓）。
+        verdict = _qc_feedback().gate(stage, high, second)
+        if verdict.get("verdict") == "blocked":
+            notes.append(str(verdict.get("why") or f"{stage}: 降步数被质检闸门拦下"))
+            continue
         value, source = resolve(stage, name, spec.default)
         if source != "default" and float(value) == float(second):
             continue  # 已经是这个值了，不必再提
@@ -463,18 +483,165 @@ def _steps_candidates(*, min_samples: int) -> tuple[list[dict[str, Any]], list[s
             rule="steps-diminishing", stage=stage, field=name,
             current=value, proposed=second,
             why=(f"{stage}：{high} 步均分 {avg_high:.3f}，{second} 步均分 {avg_second:.3f}"
-                 f"（差 {gain:+.3f} < 0.01）⇒ 降回 {second} 步，省时间不降质"),
+                 f"（差 {gain:+.3f} < 0.01）⇒ 降回 {second} 步，省时间不降质；"
+                 f"质检闸门 {verdict.get('verdict')}"),
             samples=len(usable[high]) + len(usable[second]),
             evidence=(ids.get(high) or []) + (ids.get(second) or []),
             min_samples=min_samples,
             extra={"avgScoreHigh": round(avg_high, 4), "avgScoreSecond": round(avg_second, 4),
                    "gain": round(gain, 4), "scanned": len(items),
                    "sampled": total > len(items),
-                   "alreadyOverridden": source != "default"},
+                   "alreadyOverridden": source != "default",
+                   "qcGate": verdict},
         ))
+    notes.append(_qc_feedback().summary_line())
     if not found:
         notes.append("没有哪一族的「更高步数」比次高档多买到 ≥0.01 分（或样本/步数维度不足）")
     return found, notes
+
+
+def _qc_reviews():
+    """质检复核的**注入源**（没登记 ⇒ ``None`` ✓）。
+
+    ⚠️ 为什么要注入而**不是** import ✗：`qc_reviews` → `technical_qc` → **本模块** ⇒ 模块级
+    import 必成环 ✓✗（所以这里一直是 late import ✓）；而晚 import 仍然把方向定成
+    「引擎 → 服务层」✓✗。改成服务层启动时登记，环与方向一起解开 ✓。
+    """
+    return hooks.get("qc_reviews")
+
+
+def _qc_feedback():
+    """延迟 import 质检反哺（它要读派生索引库；模块级 import 会把"读盘"提前到加载期 ✗）。"""
+    from . import qc_feedback  # noqa: PLC0415
+
+    return qc_feedback
+
+
+def _next_threshold(current: float, spec: Tunable, *, up: bool) -> float | None:
+    """把阈值朝 ``up`` 方向推一格，返回新值；**推不动**（已顶到区间边界）返回 ``None`` ✓。
+
+    ⚠️ 「一格」是 **×1.25 / ×0.8 的起手值**，不是从数据里算出来的结论 ✓✗ —— 复核只告诉我们
+    方向（误报多 ⇒ 放宽 ✓），并没有告诉我们幅度（那要拿误报样本的实测值分布来定 ✓，本轮没做 ✗）。
+    所以：方向有据 ✓、幅度是**建议起手值** ✓，并在 ``why`` 里如实写明 ✓ —— 不把倍率说成证据 ✗。
+
+    ⚠️ 负值区间乘法方向是**反的** ✓✗：``truePeakDb=-1`` 要"调高"（放宽）得 ×0.8 得 -0.8，
+    而 ``-60 × 1.25 = -75`` 是**更严** ✗。别写成无脑 ``value * 1.25`` ✓。
+    """
+    if current == 0:
+        #: 0 乘不动 ⇒ 退一步按区间的 2% 走（有明确上下界的字段才可能到这里 ✓）
+        step = (spec.high - spec.low) * 0.02
+        value = step if up else -step
+    else:
+        grow = 1.25 if current > 0 else 0.8
+        shrink = 0.8 if current > 0 else 1.25
+        value = current * (grow if up else shrink)
+    value = max(spec.low, min(spec.high, value))
+    value = round(value) if spec.integer else round(value, 4)
+    return None if float(value) == float(current) else float(value)
+
+
+def _qc_hit_rate_candidates(*, reviewed_min: int | None = None) -> tuple[
+        list[dict[str, Any]], list[str], dict[str, Any] | None]:
+    """规则三：按**人工复核**算出的阈值命中率 ⇒ 误报多就放宽、漏报多就收紧（§4.3 第四条）。
+
+    这是 ``notEvaluated`` 里那条 ``qc-threshold-hit-rate`` 的正解 ✓：分母不再是"触发频次"
+    （那是分子 ✗），而是人看过成片之后给的结论（``hit`` / ``false_alarm`` / ``missed`` ✓）。
+
+    三条边界：
+    1. **样本门槛比规则一二更严的执行口径**：复核是人工成本，``MIN_REVIEWS``（默认 10 条）
+       以下的 code **一个候选都不出** ✓，只把"还差几条"写进 notes ✓。
+    2. **只动主字段**：``technical_qc.ISSUE_THRESHOLDS[code]`` 给的 ``field`` ✓；
+       配合字段（黑场的 pix_th、冻帧的噪声阈值）只提示不动 ✗ —— 两格同时动就说不清是哪一格起效 ✓。
+    3. **无对应阈值的 code 不出候选** ✓（``spec.unreadable`` / ``spec.probe_failed`` 的"误报"
+       是 ffprobe 环境问题，改阈值等于把探测失败藏起来 ✗✗）。
+    """
+    service = _qc_reviews()
+    if service is None:
+        why = "质检复核没接入（引擎可独立运行 ⇒ 由服务层启动时登记）⇒ 命中率没有分母"
+        return [], [why], {"rule": "qc-threshold-hit-rate", "why": why}
+    summary = service.hit_rate()
+    notes: list[str] = []
+    if not summary.get("available"):
+        reason = str(summary.get("reason") or "复核表读不出来")
+        return [], [f"质检复核不可用：{reason}"], {
+            "rule": "qc-threshold-hit-rate",
+            "why": f"质检复核表读不出来（{reason}）⇒ 命中率没有分母，本轮不出候选",
+        }
+
+    threshold = reviewed_min if reviewed_min is not None else int(summary.get("minReviews")
+                                                                  or service.MIN_REVIEWS)
+    found: list[dict[str, Any]] = []
+    thin: list[str] = []
+    for item in summary.get("codes") or []:
+        code = str(item.get("code") or "")
+        reviewed = int(item.get("reviewed") or 0)
+        target = item.get("threshold")
+        if not target:
+            continue
+        if reviewed < threshold:
+            thin.append(f"{code}: 复核 {reviewed} 条 < 门槛 {threshold}")
+            continue
+        spec = TUNABLES.get((QC_STAGE, str(target.get("field"))))
+        if spec is None:
+            #: 映射表指向了白名单里没有的字段 ⇒ 说出来（不静默跳过，那会让"没候选"看起来像"没问题"）
+            notes.append(f"{code}: 映射到未知阈值 `{target.get('field')}`（TUNABLES 里没有）⇒ 跳过")
+            continue
+        verdict = str(item.get("verdict") or "")
+        if verdict == "false_alarm_heavy":
+            relax, up = True, str(target.get("relax") or "raise") == "raise"
+        elif verdict == "miss_heavy":
+            #: 漏报多 ⇒ 收紧 = 放宽的反方向 ✓
+            relax, up = False, str(target.get("relax") or "raise") != "raise"
+        elif verdict == "insufficient":
+            thin.append(f"{code}: 复核 {reviewed} 条 < 门槛 {threshold}")
+            continue
+        else:
+            continue  # ``ok``：命中率与漏报率都在容忍范围内 ⇒ 不动它 ✓（"没结论"≠"没问题"✓）
+
+        current, source = resolve(QC_STAGE, str(target["field"]), spec.default)
+        proposed = _next_threshold(float(current), spec, up=up)
+        if proposed is None:
+            notes.append(f"{code}: `{target['field']}`={current} 已顶在 [{spec.low}, {spec.high}] "
+                         f"边界，{'放宽' if relax else '收紧'}方向推不动")
+            continue
+        hit_rate = item.get("hitRate")
+        miss_rate = item.get("missRate")
+        samples = [f"check:{sample.get('checkId')}"
+                   for sample in (item.get("sampleReviews") or [])
+                   if sample.get("checkId") is not None]
+        found.append(_candidate(
+            rule="qc-threshold-hit-rate", stage=QC_STAGE, field=str(target["field"]),
+            current=current, proposed=proposed,
+            why=(f"`{code}`（{item.get('label')}）复核 {reviewed} 条："
+                 f"判对 {item.get('hit')}／误报 {item.get('falseAlarm')}／漏报 {item.get('missed')}"
+                 + (f"，命中率 {float(hit_rate):.0%}" if hit_rate is not None else "")
+                 + (f"，漏报率 {float(miss_rate):.0%}" if miss_rate is not None else "")
+                 + f" ⇒ {'放宽' if relax else '收紧'} `{target['field']}`"
+                 f"（{current} → {proposed}，×1.25/×0.8 是**起手值**不是实测结论）"
+                 + (f"；若还不对再看配合字段 `{target.get('aux')}`（本轮不动它）"
+                    if target.get("aux") else "")),
+            samples=reviewed, evidence=samples, min_samples=threshold,
+            extra={"issueCode": code, "hitRate": hit_rate, "missRate": miss_rate,
+                   "verdict": verdict, "direction": "relax" if relax else "tighten",
+                   "alreadyOverridden": source != "default",
+                   "auxField": target.get("aux")},
+        ))
+
+    if found:
+        notes.append(f"命中率候选 {len(found)} 条（复核门槛 {threshold} 条；方向有据、幅度是起手值）")
+    elif thin:
+        notes.append("质检阈值暂无候选：" + "；".join(thin))
+    else:
+        notes.append("质检阈值的命中率与漏报率都在容忍范围内（或没有可映射的 code）")
+
+    note = {
+        "rule": "qc-threshold-hit-rate",
+        "why": (f"已接入人工复核：复核 {summary.get('records', {}).get('reviewed', 0)} 条"
+                f"／待复核 {summary.get('records', {}).get('unreviewed', 0)} 条 QC 记录；"
+                f"代码门槛 {threshold} 条复核。本轮候选 {len(found)} 条 —— "
+                f"候选只给方向与起手幅度，影子验证仍未做"),
+    }
+    return found, notes, note
 
 
 def suggest(*, min_samples: int = MIN_SAMPLES) -> dict[str, Any]:
@@ -489,10 +656,17 @@ def suggest(*, min_samples: int = MIN_SAMPLES) -> dict[str, Any]:
        它没做完就给「可应用」等于把闸门②换成一个布尔值。
     3. **说不出的维度如实列进 ``notEvaluated``** —— 「没检查」不是「检查过没问题」。
     """
-    probe = _index().stats(group_by="stage")
+    index = _index()
+    #: ⚠️ 没登记索引 ⇒ ``available=False`` ＋ 一句人话 ✓✗（**不是**"0 条候选 ⇒ 没问题" ✓✗）
+    probe = ({"available": False, "groups": [],
+              "hint": "跑次索引没接入（引擎可独立运行 ⇒ 由服务层启动时登记）"}
+             if index is None else index.stats(group_by="stage"))
     failed, failed_notes = _failure_candidates(min_samples=min_samples, stats=probe)
     steps, steps_notes = _steps_candidates(min_samples=min_samples)
-    candidates = sorted(failed + steps,
+    #: ⚠️ 第三条**不跟** ``min_samples`` 走 ✓：它的分母是人工复核条数（``MIN_REVIEWS``），
+    #:    两套门槛本来就不同源（30 条跑次 ≠ 30 次人工看片），强行共用一个数就是自欺 ✓✗。
+    qc_found, qc_notes, qc_note = _qc_hit_rate_candidates()
+    candidates = sorted(failed + steps + qc_found,
                         key=lambda c: (-(c.get("samples") or 0), c["id"]))
     #: ``available`` 的语义是「索引库读得出来」，不是「盘上有这个文件」——
     #: 空库（文件刚建、一条跑次都没写）也是 available=true，只是候选为空；
@@ -502,17 +676,17 @@ def suggest(*, min_samples: int = MIN_SAMPLES) -> dict[str, Any]:
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "minSamples": min_samples,
         "available": available,
-        "db": _index().db_path().as_posix(),
+        "db": index.db_path().as_posix() if index is not None else None,
         "candidates": candidates,
-        "notes": failed_notes + steps_notes,
+        "notes": failed_notes + steps_notes + qc_notes,
         #: 明确不做/做不了的四类：写出来是为了让下一个人知道"没结论"≠"没问题"
         "notEvaluated": [
-            {"rule": "qc-threshold-hit-rate",
-             "why": ("质检 issue 的 `code` 已经稳定（`technical_qc.ISSUE_CODES` 闭集 ⇒ "
-                     "`runs.error_code` 可按类别聚类），但「命中率」要判阈值该放宽还是收紧，"
-                     "分母是**人工复核结论**（这条 issue 是真问题还是误报）；"
-                     "`video_quality_checks` 没有复核字段 ⇒ 现在只有触发频次、没有误报率，"
-                     "先补复核结论再谈（别把频次当命中率）")},
+            #: 这一条**本轮已实现** ✓（分母＝人工复核，见 ``qc_reviews``）—— 仍留在
+            #: ``notEvaluated`` 里是因为它**每次都得如实报一句**：复核了几条、门槛差多少、
+            #: 本轮出没出候选 ✓✗。删掉它就等于"实现了 = 检查过了"，而颗粒度、样本、
+            #: 幅度三件事都还留着保留 ✓。
+            qc_note or {"rule": "qc-threshold-hit-rate",
+                        "why": "人工复核表不可用 ⇒ 命中率没有分母"},
             {"rule": "sampler-schedule-score",
              "why": ("换默认 sampler/schedule 等于换族语义，TUNABLES 里有意没有这两格；"
                      "且 runs.meta 未必带这两键 ⇒ 只报不猜")},
@@ -563,7 +737,14 @@ def set_field(stage: str, name: str, value: Any, *, basis: str,
     items = [str(item).strip() for item in items if str(item).strip()]
     if not items:
         return {"ok": False, "why": "缺 evidence：没有凭据的调优就是拍脑袋"}
-    checked = knowledge_ledger.check_evidence(items)
+    #: ⚠️ 台账没登记 ⇒ **拒写** ✓✗（不是"没人核 ⇒ 放过" ✓✗）：这是护栏三的落点 ✓，
+    #: 引擎单独跑起来时没有台账，就不该允许任何人拿字符串当凭据改行为 ✓。
+    ledger = hooks.get("ledger")
+    if ledger is None:
+        return {"ok": False, "unavailable": True,
+                "why": "知识台账没接入（引擎可独立运行 ⇒ 由服务层启动时登记）⇒ 凭据核不了，"
+                       "按「核不过」处理"}
+    checked = ledger.check_evidence(items)
     if not checked["ok"]:
         return {"ok": False, "why": f"证据核不过：{'、'.join(checked['bad'])}",
                 "bad": checked["bad"]}

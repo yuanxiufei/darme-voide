@@ -57,8 +57,18 @@ def _compile(source: str) -> Any:
     ⚠️ ``trim_blocks``/``lstrip_blocks`` 与 ``transformers`` 的 ``apply_chat_template`` **同口径** ✓✗：
     模板作者是按那套语义写的 ✓，换语义 ⇒ 空白/换行**悄悄变** ✓✗。
     """
-    from jinja2 import StrictUndefined  # noqa: PLC0415 —— 懒导入 ✓
-    from jinja2.sandbox import ImmutableSandboxedEnvironment  # noqa: PLC0415
+    # ⚠️ 缺 ``jinja2`` 也必须落到 :class:`ChatTemplateError` ✗（2026-11-07 校正 ✓）：原先这两行在 try 之外
+    #    ⇒ 报的是裸 ``ModuleNotFoundError: No module named 'jinja2'`` ✗，调用方按 ChatTemplateError 捕获时
+    #    **漏过去**，且看不出该怎么装 ✓✗。本层口径是「模板路径不可用就当场拒、并说清原因」✓。
+    try:  # noqa: PLC0415 —— 懒导入 ✓（本仓不把 jinja2 列为硬依赖 ✓）
+        from jinja2 import StrictUndefined
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+    except ImportError as err:  # pragma: no cover —— 本机装了 jinja2，反验走测试里屏蔽
+        raise ChatTemplateError(
+            "本机缺 ``jinja2`` ✗ ⇒ 权重自带的 chat 模板**渲染不了** ✓✗"
+            "（装法：``.venv/Scripts/python.exe -m pip install jinja2`` ✓；"
+            " 本层**不回落**裸拼接 ✗ —— 回落 = 格式悄悄不对 ✓✗）"
+        ) from err
 
     def _raise_exception(message: Any) -> Any:
         raise ChatTemplateError(f"模板**主动拒绝**（``raise_exception`` ✓）：{message}")
@@ -77,8 +87,16 @@ def _compile(source: str) -> Any:
         ) from err
 
 
-def _normalize_messages(messages: Any) -> list[dict[str, str]]:
-    """外部消息 ⇒ 模板能吃的形状 ✓（⚠️ 形状不对 ⇒ **拒** ✗ —— 不替调用方猜角色 ✓）。"""
+def _normalize_messages(messages: Any) -> list[dict[str, Any]]:
+    """外部消息 ⇒ 模板能吃的形状 ✓（⚠️ 形状不对 ⇒ **拒** ✗ —— 不替调用方猜角色 ✓）。
+
+    ⚠️ ``name`` 与 ``tool_calls`` **原样留着** ✗✗（2026-11-07 补 ✓）：多轮工具链必须回灌
+    「这条结果来自哪个工具」（``{"role":"tool","name":"save_script","content":…}``）与
+    「上一轮我调过什么」（``assistant.tool_calls``）。此前一律压成 ``{role, content}``
+    两字段 ✗ ⇒ 骨架里引用 ``message.name`` 时直接 ``UndefinedError``（本层用
+    ``StrictUndefined`` ✓）、或模板走「没有 tool_calls」那条分支把历史渲染成另一副形状 ✗，
+    **且不会有任何报错** —— 症状是「模型看不见自己调过工具、反复调同一个」✓✗。
+    """
     if messages is None:
         return []
     if isinstance(messages, (str, bytes, Mapping)):
@@ -95,7 +113,16 @@ def _normalize_messages(messages: Any) -> list[dict[str, str]]:
             raise ChatTemplateError(
                 f"消息缺 ``role`` ✗：{dict(item)!r} ⇒ 本层**不替调用方猜**角色 ✓✗"
             )
-        rows.append({"role": role, "content": str(item.get("content") or "")})
+        row: dict[str, Any] = {"role": role, "content": str(item.get("content") or "")}
+        # ``name``（各骨架的字段名不完全一致：OpenAI 用 ``name``、Ollama 用 ``tool_name`` ✓）
+        name = item.get("name") or item.get("tool_name")
+        if isinstance(name, str) and name.strip():
+            row["name"] = name
+        calls = item.get("tool_calls")
+        if isinstance(calls, (list, tuple)) and calls:
+            row["tool_calls"] = [dict(call) if isinstance(call, Mapping) else call
+                                 for call in calls]
+        rows.append(row)
     return rows
 
 

@@ -829,14 +829,16 @@ def case_chain_stages(tmp: Path) -> None:
     #: 不进「出图五档」那份名单 ✗（桥与业务白名单都不认它 ✓）。
     #: ⚠️ 2026-11-02：又多分派了一档 **`wan22`** ✓ —— **首帧 ⇒ 视频**（四格、请求必带首帧）✓，
     #: 同样**不是**出图档 ✗（`_chain_stages` / 业务 `allowed` 都不列它 ✓）。
-    #: 所以这里判的是「**出图五档**都在 ＋ 多出来的只许是这两条**另一类**装配线」✓✗ ——
+    #: ⚠️ 2026-11-06：再分派了一档 **`music3`** ✓ —— **音频**（出 wav ✗ 不出图 ✗），
+    #: 与前两条同属「另一类装配线」✓；此前这条判据没跟上，真跑时红在「多出来的只许两条」上 ✓✗。
+    #: 所以这里判的是「**出图五档**都在 ＋ 多出来的只许是这几条**另一类**装配线」✓✗ ——
     #: 写成 `set(dispatched) == set(expected)` 会把新加的非出图档误报成「出图档位漂移」✗。
     extra = set(dispatched) - set(expected)
     check("⭐ 运行时出图装配线 = 五档 ✓（``sdxl`` / ``zimage`` / ``qwen_image21`` / "
           "``qwen_image`` / ``krea2`` ✓ —— 下面几条都按这份对账 ✓；多出来的只许是 "
-          "``seedvr2``（修复）与 ``wan22``（首帧⇒视频）两条非出图档 ✓）",
+          "``seedvr2``（修复）/ ``wan22``（首帧⇒视频）/ ``music3``（音频）三条非出图档 ✓）",
           set(expected) <= set(dispatched)
-          and extra <= {pipeline.SEEDVR2_STAGE, pipeline.WAN22_STAGE},
+          and extra <= {pipeline.SEEDVR2_STAGE, pipeline.WAN22_STAGE, "music3"},
           (sorted(dispatched), sorted(expected)))
 
     check("⭐ 桥的三件套链 ∪ SDXL == 运行时那五档 ✓（桥漏一档 ⇒ 选它直接被拒 ✓✗）",

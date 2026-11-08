@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import shutil
 import sys
+import tempfile
 import wave
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -106,7 +108,13 @@ def main() -> int:
               small, latents_mean=(0.0,) * 8, latents_std=(1.0,) * 8))))
 
     # ⭐⭐ 真功能：**写出一个真的 wav**，再用标准库读回来核对 ✓
-    target = pathlib.Path(__file__).resolve().parents[1] / "tests" / "_audio_probe.wav"
+    # ⚠️ 落点必须是**系统临时目录**，不许写进 `tests/`（2026-11-08 实测真坑）：
+    #   本仓跑在 CodeBuddy 的 `sitecustomize` 沙箱里，它把 `Path.unlink` 换成「移到回收站」
+    #   （`SHFileOperationW` + `FOF_ALLOWUNDO`），且**只对系统临时目录旁路成原生删除** ✓✗ ⇒
+    #   删 `tests/` 下的探针文件要走 shell，长跑时**偶发** `OSError: SHFileOperationW 失败: 0x2` ✓✗
+    #   断言全过了、退出码却不是 0 ⇒ 总表显示成一整套红（真失败被埋掉 ✗✗）。
+    #   放系统临时目录 ⇒ 走原生删除、而且仓里本来也不该留媒体文件 ✓。
+    target = pathlib.Path(tempfile.mkdtemp(prefix="audio-vae-")) / "_audio_probe.wav"
     try:
         receipt = av.write_wav(target, wave_out[0].detach().numpy(), small.sample_rate)
         with wave.open(str(target), "rb") as handle:
@@ -114,6 +122,7 @@ def main() -> int:
                          handle.getsampwidth())
     finally:
         target.unlink(missing_ok=True)
+        shutil.rmtree(target.parent, ignore_errors=True)
     check("⑥ ⭐⭐ **真写 wav 并标准库读回** ✓：声道 **2** ✓、采样率 **100** ✓（H3 是 32000 ✓）、"
           "帧数 **20** ✓、位深 **2** 字节（16-bit ✓）—— **盘上真有个文件** ✓（不是「跑通」✗）",
           read_back == (2, 100, 20, 2) and receipt["frames"] == 20

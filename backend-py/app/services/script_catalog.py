@@ -99,7 +99,7 @@ class Entry:
 def normalize(raw: str, marker: str = MARKER) -> str:
     """任意写法的路径 → **相对库根的 posix 路径**（跨机器唯一可比的那种写法）。
 
-    * 索引里是 ``G:\\电影剧本\\全球热门与获奖影视剧本知识库\\01-…\\x.pdf``
+    * 索引里是建库机器上的旧盘符绝对路径（形如 ``…\\电影剧本\\全球热门与获奖影视剧本知识库\\01-…\\x.pdf``）
     * CSV 里是 ``01-传统神话志怪原典\\志怪原典\\1801 玄怪录.pdf``（相对）
     * 也见过绝对路径写在 CSV 的 ``本地完整路径`` 列
 
@@ -115,7 +115,7 @@ def normalize(raw: str, marker: str = MARKER) -> str:
     text = text.lstrip("\\")
     if not text:
         return ""
-    #: 绝对盘符（``D:\…``）但没有锚点 ⇒ 无法映射，明确失败而不是「截一段凑数」
+    #: 绝对盘符路径（盘符 + ``:\``）但没有锚点 ⇒ 无法映射，明确失败而不是「截一段凑数」
     if len(text) > 1 and text[1] == ":":
         return ""
     return text.replace("\\", "/")

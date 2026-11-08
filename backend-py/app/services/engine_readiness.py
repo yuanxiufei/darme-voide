@@ -35,7 +35,84 @@ from .engine import inventory as inv
 from .engine import loader as loader_mod
 from .engine import media as media_mod
 
-__all__ = ["collect", "precheck_weights", "quant_plan", "summary", "next_steps", "planned_gib"]
+__all__ = ["collect", "precheck_weights", "quant_plan", "summary", "next_steps", "planned_gib",
+           "run_samples", "task_feasibility"]
+
+
+def run_samples(stage: str, *, limit: int = 500) -> dict[str, Any]:
+    """从**跑次台账**取同族成功样本 ⇒ ``{available, total, samples, why, db}``（毫秒 ✓）。
+
+    ⚠️ 为什么放在**这一层** ✗✗（2026-11-07 定）：台账在业务库 ✓，而 :mod:`app.services.engine.feasibility`
+    是**纯函数、零 IO** ✓（内核不许读库 ✓）。所以「取样本」这件事只能在项目侧做 ✓，
+    取到的样本再经 ``facade.feasibility(samples=…)`` **传进去** ✓ —— 内核只负责算 ✓。
+
+    ⚠️ 三种「拿不到样本」必须**分开说** ✓✗（把前两种报成第三种会让读者白跑几轮）：
+
+    * 库读不了（异常 / 没建）⇒ ``available=false`` ＋ 原文理由 ✓；
+    * 库能读、但**这一族一次都没成功过** ⇒ ``available=true, total=0`` ✓（真去跑几次就有数了 ✓）；
+    * 库能读、有跑次、但**一条都没记耗时** ⇒ ``total>0, samples=[]`` ✓（索引字段缺 ✓）。
+    """
+    payload: dict[str, Any] = {"available": False, "total": 0, "samples": [], "why": "", "db": None}
+    try:
+        from app.services import outcome_index  # noqa: PLC0415 —— 循环引用防线 ✓
+
+        result = outcome_index.query(limit=limit, stage=stage, status="succeeded")
+    except Exception as err:  # noqa: BLE001 —— 台账坏了不许把「能不能跑」一并判死 ✓
+        payload["why"] = f"台账读不到（{type(err).__name__}: {err}）⇒ 只能报 unknown ✓"
+        return payload
+    payload["db"] = result.get("db")
+    payload["total"] = int(result.get("total") or 0)
+    if not result.get("available"):
+        payload["why"] = str(result.get("hint") or "索引库不可用 ⇒ 只能报 unknown ✓")
+        return payload
+    payload["available"] = True
+    samples: list[float] = []
+    for item in result.get("items") or []:
+        value = item.get("elapsed_ms")
+        if value is None:
+            continue
+        try:
+            samples.append(float(value))
+        except (TypeError, ValueError):  # pragma: no cover - 索引层已归一
+            continue
+    payload["samples"] = samples
+    if not samples:
+        payload["why"] = (
+            "台账里这一族的成功跑次是 0 条 ⇒ 先真跑几次 ✓（库是好的 ✓，不是读不到 ✗）"
+            if payload["total"] == 0
+            else f"台账命中 {payload['total']} 条，但都没记耗时 ⇒ 只能报 unknown ✓")
+    elif payload["total"] > len(samples):
+        payload["why"] = (f"台账命中 {payload['total']} 条、本次只取 {len(samples)} 条 ⇒ "
+                          f"这是**抽样** ✓ 不是「就这么多」✗")
+    return payload
+
+
+def task_feasibility(stage: str = "h3", *, root: str | Path | None = None,
+                     capacity_gib: float | None = None, policy: str = "auto",
+                     size: str | None = None, use_ledger: bool = False) -> dict[str, Any]:
+    """§5.1／§5.3 的**服务层**入口 ⇒ :func:`facade.feasibility` ＋（可选）跑次台账样本 ✓。
+
+    ``use_ledger=False``（默认）⇒ **不碰业务库** ✓、回执与内核版逐字相同 ✓；
+    ``use_ledger=True`` ⇒ 多一格 ``ledger`` ✓（``samples`` 进 ``estimate`` ✓ —— 样本不足闸门时
+    仍然 ``runSeconds=null`` ✓，**绝不**拿 1～2 条当结论 ✗）。
+
+    ⚠️ 台账里的 ``elapsed_ms`` 是**整任务**耗时 ✓（含装载/编码/采样/写盘 ✓），与 ``estimate.unit``
+    的口径一致 ✓ —— 别把它当纯采样速度读 ✗（那会把"装载慢"算成"采样慢"✗）。
+    """
+    from .engine import facade
+
+    samples: list[float] | None = None
+    matched = 0
+    ledger: dict[str, Any] = {}
+    if use_ledger:
+        ledger = run_samples(stage)
+        samples = list(ledger.get("samples") or []) or None
+        matched = int(ledger.get("total") or 0)
+    data = facade.feasibility(stage, root=root, capacity_gib=capacity_gib, policy=policy,
+                              size=size, samples=samples, matched=matched)
+    if use_ledger:
+        data["ledger"] = ledger
+    return data
 
 
 def device_facts() -> dict[str, Any]:

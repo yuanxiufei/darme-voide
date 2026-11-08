@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import time
 import zipfile
 from typing import Any
 
@@ -37,11 +38,20 @@ __all__ = [
     "build_edl",
     "build_export_zip",
     "collect_drama_export_files",
+    "export_tmp_dir",
     "ext_of",
     "sanitize_name",
     "seconds_to_timecode",
+    "sweep_stale_exports",
     "to_local_abs_path",
 ]
+
+#: 导出包（**一次性中转**）的专属子目录名 ✓ —— 落在系统临时区里，但**自己一层** ✓，
+#: 不和系统临时区里的杂物混住（`%TEMP%` 根上直接扔 zip ⇒ 出事时根本分不清哪个是本仓的 ✓✗）。
+EXPORT_TMP_PREFIX = "darme-export"
+#: 陈旧判据（小时）：正常路径由 `routers/export.py` 的 `BackgroundTask` 删掉 ✓，
+#: 超过这个时长还躺着的，一定是**没删掉**的那份 ✓✗。
+EXPORT_STALE_HOURS = 6.0
 
 #: 文件名非法字符（与 TS 的正则一一对应：``\\/:*?"<>|`` + 换行/制表）
 _INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
@@ -161,22 +171,65 @@ def collect_drama_export_files(conn: Connection, drama_id: int,
     return files
 
 
-def build_export_zip(files: list[dict[str, str]]) -> str:
+def export_tmp_dir() -> str:
+    """导出包落点：系统临时区下的**专属**子目录（自建）✓。
+
+    为什么不用 ``tempfile.TemporaryDirectory``：包要活到**响应分块吐完**之后
+    （``StreamingResponse`` 的 background task 才删 ✓），生命周期跨出函数 ⇒
+    只能先落盘、再由调用方删 ✓。专属一层是为了出事时能一眼认出是本仓的中转包 ✓。
+    """
+    path = os.path.join(tempfile.gettempdir(), EXPORT_TMP_PREFIX)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def sweep_stale_exports(max_age_hours: float = EXPORT_STALE_HOURS) -> list[str]:
+    """清掉**没被删掉**的旧导出包 ✓✗，返回被清掉的路径。
+
+    正常路径由 ``routers/export.py`` 的 ``BackgroundTask`` 删 ✓；但客户端半路断开、
+    或建完包之后抛异常时 background 跑不到 ✓✗ —— 一个完整导出包（合集能到几十 GB）
+    会永久压在系统临时区，且**没人再指得回它** ✓✗。故每次建包前顺手扫一遍 ✓。
+    只清本前缀目录里的 ``*.zip``，别的一律不碰 ✓。
+    """
+    root = export_tmp_dir()
+    cutoff = time.time() - max_age_hours * 3600.0
+    removed: list[str] = []
+    for name in os.listdir(root):
+        if not name.endswith(".zip"):
+            continue
+        target = os.path.join(root, name)
+        try:
+            if os.path.getmtime(target) < cutoff:
+                os.remove(target)
+                removed.append(target)
+        except OSError:
+            continue  # 别的进程正在吐/正在删 ⇒ 下一轮再说
+    return removed
+
+
+def build_export_zip(files: list[dict[str, str]], *, sweep: bool = True) -> str:
     """把清单打成 ZIP，返回**临时文件路径**（调用方负责分块吐完再删）。
 
     ⚠️ 与 TS 的 ``archiver`` 流式实现不同（见模块头）：这里用标准库写临时文件，
     既不把整包读进内存，也不新增依赖。``zipfile`` 默认 ``ZIP_STORED``；这里显式
     用 **deflate level=6**，与 TS 的 ``{ zlib: { level: 6 } }`` 对齐。
+
+    落点是 :func:`export_tmp_dir`（专属子目录，不是 ``%TEMP%`` 根上）✓；
+    ``sweep=True`` 时先清陈旧件（:func:`sweep_stale_exports`）✓。
     """
-    handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    handle.close()
-    with zipfile.ZipFile(handle.name, "w", compression=zipfile.ZIP_DEFLATED,
+    if sweep:
+        sweep_stale_exports()
+    # mkstemp 而不是 NamedTemporaryFile：只要一个**名字**，句柄立刻关掉，
+    # Windows 上也不会有"文件已被打开"的锁 ✓。
+    fd, name = tempfile.mkstemp(suffix=".zip", prefix="export-", dir=export_tmp_dir())
+    os.close(fd)
+    with zipfile.ZipFile(name, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=6) as archive:
         for entry in files:
             if not os.path.exists(entry["absPath"]):
                 continue  # 与 TS 的 ENOENT 告警等价：文件被移除就跳过
             archive.write(entry["absPath"], arcname=entry["zipPath"])
-    return handle.name
+    return name
 
 
 def seconds_to_timecode(seconds: float, fps: int = 25) -> str:

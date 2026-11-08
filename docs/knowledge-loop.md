@@ -5,6 +5,10 @@
 >
 > 本文只写设计（落点、表、判据、阶段），不写「已经实现」。文末「已具备 / 缺口」按 2026-11-06
 > 的代码实况列出，读的人能立刻分清哪些是现成的、哪些要新建。
+>
+> 台账**管理面**（条目的编辑/删除/恢复、版本与回滚、标签与分类、审计、权限声明）的
+> 接口契约不在本文，见 `docs/knowledge-base-contract.md`（端点表、输入输出、边界、
+> 错误码分工、验收标准与测试要点；该文档与 openapi 双向受测，改契约不同步会红）。
 
 ---
 
@@ -46,24 +50,74 @@
    无按 drama/episode/shot、无按 `level=ERROR`、无按 `agentType` 的聚合。
 3. **没有优化记录表** —— 优化史只落 `benchmarks/history/*.json`；`agent_configs`
    无 `version/score/parent_id`，回答不了「这次改动提升了多少」。
+   【2026-11-07 缺口闭合】新表 `agent_optimizations` ＋ `services/optimization_log.py`
+   ＋ 只读端点 `GET /api/v1/knowledge-loop/optimizations` ＋ 页面「优化史」分区 —— 见 §4.2 末。
 4. **优化只覆盖提示词** —— 参数、工具集、skill 绑定、QC 阈值、引擎参数都不在目标里。
+   【2026-11-07 第一格闭合】参数（`temperature`）已进目标：`agent/evaluation/param_optimizer.py`
+   ＋ `POST /api/v1/evaluation/tune/{case_id}` ＋ 优化史表新开 `target="params"` —— 见 §4.2「参数调优」。
+   仍缺：工具集、skill 绑定、引擎参数（QC 阈值走 §4.3 那条链，不进这张表）。
 5. **引擎无自我完善** —— 无人读 `comfyui_runs`/`video_quality_checks` 反推 `PROFILES` 或阈值；
    `pipeline.py:1262/1524` 的默认值是硬编码字面量。
    【2026-11-06 前半闭合】`tuning.suggest()` 已会读 `outcome_index` 的跑次出候选（失败聚集／步数平台期），
    **但只出候选、不自动应用**。同日补上**输入侧**：引擎任务封口（`runtime._worker_loop` →
    `_index_run`）与质检写回（`run_technical_qc` → `_index_qc_run`）都真往索引落
    `image`/`video`/`tts`/`qc` 跑次，技术 issue 也有了稳定 `code`（`technical_qc.ISSUE_CODES`）
-   ⇒ 失败聚集不再是「真机上永远没有聚集」的空转。仍未做的只剩「按阈值统计命中率」——
-   那要人工复核结论当分母（见 §4.3）。
+   ⇒ 失败聚集不再是「真机上永远没有聚集」的空转。
+   【2026-11-07 缺口闭合】「按阈值统计命中率」已接上**人工复核结论**当分母（新表 `qc_reviews` ＋
+   `services/qc_reviews.py` ＋ `GET/POST /api/v1/knowledge-loop/qc/*`），`suggest()` 的第三条规则
+   （质检命中率）随之落地 —— 见 §4.3。仍未做的只剩「换 sampler/schedule 默认」（那不是阈值、
+   是族语义，`TUNABLES` 里有意没这两格）。
 6. **QC ↔ engine 单向断开** —— `engine/bridge.py` 对 `qc|quality` 零引用；QC 失败只触发
    `qc_retry.py` 重跑这一镜，不影响后续同模型的参数选择。
+   【2026-11-07 缺口闭合】根因不是"少一条规则"而是**归因断了**：QC 行落在伪档 `video_spec`、
+   引擎行落在真档 `h3`/`wan22`/`krea2`，两边**没有共同键** ⇒ 「这一族最近质量掉了」从来
+   成不了一条**关于这一族**的结论。四条落地：① `outcome_index.records` 表（`link_record`/
+   `record_of`）—— `bridge.run_job` 在**刚拿到 `taskId` 的那一行**登记
+   `(记录类型, 记录 id) ⇒ (引擎档, 引擎跑次)`；② `technical_qc._index_qc_run` 写回时查它，
+   把 `producerStage`/`engineRunId` 放进 QC 行的 `meta`（**查不到就不带这两格**，不填 `null`）；
+   ③ `app/services/engine/qc_feedback.py`：按档聚合通过率、按 `meta.steps` 分桶、
+   给闸门 `gate(high, low)` 三档 `insufficient`/`pass`/`blocked`；
+   ④ `tuning._steps_candidates` 出「降步数」候选**之前**问闸门：`blocked` 当场不出并留 note
+   （不是静默丢弃），放行则把 `qcGate` 随候选带出去 —— **这才是"影响后续同模型的参数选择"**
+   那一格。顺带查实一个真缺陷：引擎跑次根本不记 `score`（`runtime._index_run` 无此字段）⇒
+   那条"步数平台期"规则在真机上一向空转，QC 通过率才是真能判的量。口实与坑见
+   §4.3 末「质检反哺引擎参数」与 §7 第 17 条。
 7. **训练链路无数据供给、无产物登记** —— 数据集靠人手填 `pathDir`；产物落
    `<dataRoot>/lora-train/tasks/<taskId>/`，**无 DB 登记、重启即丢**。
 8. **评测面太小** —— 只有 4 份基准（`benchmarks/{extractor,script-rewriter,storyboard-breaker,voice-assigner}.json`），
    不评"成片好坏"。
+   【2026-11-07 缺口闭合】两半都补上了：
+   ① **成片评测**：`app/agent/evaluation/film_check.py` ＋ `POST /api/v1/evaluation/film/{episode_id}`。
+   它**读数不重量**——判据全取自已发生的事实（`storyboards` / `video_generations` /
+   `video_quality_checks` / `qc_reviews`），**不重跑 ffmpeg、不调模型**（重跑会与质检页的口径打架，
+   且每条片子几十秒）。四维等权（覆盖 / 规格 / 缺陷 / 复核），**判不了的维度不进总分**
+   （`judged=false` 折成 0 是谎报"差"、折成满分是谎报"好"），`missing` 逐项点名、`verdict`
+   降成 `partial`；`review` 的分母只含 `hit+false_alarm`（漏报单列，没有 issue 行可挂）；
+   缺陷面的分母是**有 QC 的镜**而不是全部镜；跑次幂等 `run_id=film:<集>`、`kind="eval"`
+   （混进 `agent` 会污染 agent 成功率）。
+   ② **第 5 类基准 `grid_prompt`**（`benchmarks/grid-prompt.json`）：它卡在"产出层"与"成片层"
+   之间——宫格提示词写砸了，账最后记在成片维度上，而那时视频生成的钱已经花掉。
+   评分 `scorer.score_grid_prompts` 五维全硬判据（长度 / 格数吻合 / 中文占比 / 占位符残留 /
+   格间不重复），产出解析走 `services/grid_payload.py`（从 `routers/grid.py` 上收的**单一真源**），
+   执行时把基准镜头**真落成 `storyboards` 行**（宫格 Agent 的工具只按 id 查库）。
+   口实与坑见 §7 第 18 条。
 9. **修复域不闭环** —— `repair` 提案只有 `pending/applied/rolled_back`，没有「应用后问题是否消失」；
    `diagnose` 结论不落盘。
+   【2026-11-07 缺口闭合】`services/repair_closure.py`（快照 / 缺口键 / 四档判定 / 跑次记录）
+   ＋ `routers/repair.py` 五处接线：`GET /diagnose` 默认**顺带落快照**（`persist=false` 是
+   「只查不记」的口）、`GET /diagnose/history` 回答「缺口在变少还是变多」（同 `fingerprint`
+   即同一批问题）、`POST /propose` 收 `finding` 把「这条提案修的是哪条缺口」钉在提案上、
+   `POST /apply` 写盘成功后**当场复诊**、`POST /verify` 给「改动加了但模型文件要人去下」的
+   场合事后补判、`POST /rollback` 覆盖成终态。判定四档 `resolved / still / stale / unverified`
+   （＋终态 `rolled_back`），结论按 `kind="repair"` 写进 `outcome_index`。口实与坑见 §7 第 15 条。
 10. **Skills 静态全量注入** —— 按 `priority` 排序 + 60000 字符预算，无触发词/命中率/历史效果选择。
+    【2026-11-07 缺口闭合·半格】`services/skill_usage.py`（派生统计库
+    `data/knowledge/skill-usage.sqlite`，与 `entry_usage` 同构）＋ `agent/skills.py`
+    超预算裁剪 ＋ `agent/runtime.py` 跑次收口回填 ＋ `GET /api/v1/skills/usage`。
+    **触发词选择有意不做**（那要引入检索层，与「`SKILL.md` 自述」的机制冲突）；
+    「历史效果」只落到**可观测的那一半**：注入了哪些 / 各多少字符 / 哪些被裁 / 该跑次成败。
+    ⚠️ **没有命中率**——本仓没有「模型读没读它」的通路，`okRate` 只能读成「注入它的跑次成功率」。
+    预算够时行为逐字不变，只有装不下才用 `priority + 降级惩罚` 改裁剪次序。口实与坑见 §7 第 16 条。
 
 ---
 
@@ -74,7 +128,7 @@
 ```
               ┌──────────────────────── 事实层（只追加，可重建）────────────────────────┐
               │  traces/*.jsonl    video_quality_checks    comfyui_runs    api_usage   │
-              │  lora-train/tasks/*（要补登记）      repair/proposals/*.json             │
+              │  lora-train/tasks/*（要补登记）    repair/{proposals,diagnose}/*.json    │
               └───────────────────────────────┬────────────────────────────────────────┘
                                               │ ① 归一（scripts/knowledge/rebuild_runs.py）
                                               ▼
@@ -277,9 +331,195 @@ CREATE TABLE training_jobs (                               -- 补"重启即丢"�
 run 成功率 vs 未注入的基线 ⇒ `lift`。`lift < -0.05` 且样本 ≥10 ⇒ 自动 `deprecated`
 （这条知识是负资产，留着有害）。
 
-**Skills 的动态路由**（缺口 10）：不改 `SKILL.md` 的自述机制，只在 `load_agent_skills`
-选择"注入哪些"时加排序依据 `priority × 历史命中率`，命中率从 `entry_usage` 同构的
-`skill_usage` 读。默认仍全量注入 —— 排序只在超预算时生效（60000 字符预算一破就用它裁）。
+skill 侧有同构但**不同库**的一张表 `skill_usage`（`data/knowledge/skill-usage.sqlite`，
+`services/skill_usage.py`）：记注入与跑次成败，**不记"读没读"**（没有那条通路），
+也**没有 `lift`** —— 不存在"没注入任何 skill 的对照组"，算不出干净基线，所以只给 `okRate`
+并把它标成相关信号（缺口 10，见 §4.2 与 §7 第 16 条）。
+
+**优化史表（缺口 3，2026-11-07 落地）**：`agent_optimizations`（`core/models.py`）
+＋ `services/optimization_log.py` ＋ `GET /api/v1/knowledge-loop/optimizations`（只读）。
+五条口径写成硬约束，都是为了让「提升了多少」这个数**不能被读错**：
+
+* **一版一行、追加不覆盖**。`agent_configs` 是覆盖式落库（同一 agent 只有当前一行），
+  `benchmarks/history/*.json` 又按 case 整段覆盖 —— 两者都答不了「v3 比 v2 强多少」。
+  故每轮优化独立 insert，`version` / `parent_version` 显式成链。
+* **`accepted` 与 `persisted` 是两个布尔**。「分数严格更高」（判决）与「真写成默认值」（生效）
+  是两件事：前者只是评测结论，后者才改变后续出图行为。合成一个必然出现
+  「页面说已采纳、而默认提示词还是旧的」。`mark_persisted()` 是唯一置真点，且**必须**排在
+  `persist_agent_config()` 之后（AST 判据盯顺序）。
+* **`delta` 服务端算，算不了就 `None`**。`score_before` 取的是**当时 best 分数**（不是
+  Reference 分数），否则连续晋升会把同一段涨幅重复计入。首版没有对手 ⇒ `score_before`
+  为空 ⇒ `delta=None`，**不写 0**（写 0 页面就会显示「提升 0」，那是编数）。
+* **只存指纹不存全文**：`prompt_sha` 是提示词 sha1 前 16 位，全文仍在
+  `benchmarks/history/<agent>/<case>.json` —— 这张表是给人看版式的，不该变成第二份提示词仓库。
+* **写口不抛、读口不许返空表**。`record()` 失败只 `log_task_warn`（记账失败绝不能回滚一次
+  真晋升）；反过来读不出来就 `available=false` ＋ `reason`，页面原样透出那句病因，
+  而不是拿一张空表说「没有优化」。
+
+`target` 是闭集，现有两格：`system_prompt`（提示词优化器）与 `params`（参数调优，见下），
+其余仍未开（留列不留假数据）。
+
+**参数调优（缺口 4 第一格，2026-11-07 落地）**：`param_optimizer.optimize_agent_temperature`
+同一份提示词只换 `temperature`，判决落 `agent_optimizations(target="params")`，页面上与提示词
+那几版并排看。
+
+为什么单开一个模块而不是塞进 `optimizer.py`；六条硬约束：
+
+* **候选是「一批平级」不是演化链** —— `optimizer.py` 的 `version/parent_version` 是"v2 由 v1 改出
+  来的"，而 0.5 与 0.3 之间没有父子关系。硬塞进链里，"上一版是谁"当场变成假话。
+* **`repeat >= 2`**（`MAX_REPEAT=5`，默认 2）。单次评测的分数差里分不清「换温度了」与「这次恰好
+  抖高了」；`repeat=1` 一律 400，也**不许**悄悄抬到 2 —— 那等于替调用方撒谎。
+* **抖动带**：基线各轮的 `max-min` 就是这台机器/这个模型的噪声下限；候选的 Δ 必须**严格大于**它
+  才算赢，否则记 `below_noise`（"涨了，但没超过抖动带"）。这和 `no_gain` 在页面上意思完全不同：
+  前者"看不出差别"，后者"确实没变好"。
+* **只往低扫**：`TEMPERATURE_GRID=(0.0,0.1,0.2,0.3,0.5,0.7,1.0)`，从当前值往下取最近两档。
+  确定性判分下这一格方向单一（更低 ⇒ 格式漂移更少）；往上扫是拿"更有创意"赌判分，没有依据。
+  另外两格（`max_tokens`/`max_iterations`）**有意不做**：调小会静默截断工具链，症状看起来像
+  "模型变笨"，该由成本预算定，不该由分数定。
+* **换模型不算**：候选那轮 `model` 与基线不同 ⇒ 记 `runtime_mismatch`、不参与比较（换了模型还
+  比分数，等于把两件事的效果都算到温度头上）。
+* **没有配置行就不写**：`persist_agent_temperature` 只在 `agent_configs` 已有该 agent 行时 update
+  那一列；落 0 行则 `persisted=false` ＋ `persistSkip` 说明。插一行只带温度的空壳会把
+  `system_prompt` 留空 —— 等于把"用默认提示词"改成"用空提示词"。
+
+温度经 `runtime.merge_model_settings` 并进 `modelSettings`（键缺省即不覆盖；`0.0` 是正当值，
+不能 `or` 被默认 0.7 顶掉），`evaluator.evaluate_case(..., settings=...)` 再把它透给四个评测分支。
+
+⚠️ **落库必须复用调用方那条连接**：SQLite WAL 只允许一个写者，优化史那些 INSERT 已把写锁攥在
+调用方手里，`persist_agent_temperature` / `persist_agent_config` 另开连接会在 `busy_timeout` 里
+白等 30 秒再抛 `database is locked`（`tests/optimizer_test.py` 与 `tests/param_optimizer_test.py`
+都实测撞过）。两处写口因此都加了可选 `conn` 形参 —— 缺省行为不变，优化器传自己的连接，
+顺带让"判决"与"生效"落进同一个事务。
+
+**验证到什么程度（2026-11-07 如实记录）**：`tests/param_optimizer_test.py` 58 条，其中 ⑬ 是**真发
+HTTP** 的 —— 起一个本地 stub，跑 `default_generate` 两次（`temperature=0.0` 与 `0.7`），把请求体
+抓下来逐值核对。这条做过反向验证：把 ollama adapter 的 `js_nullish(...)` 换成 `... or 0.7`，判据
+立刻报 `[0.7, 0.7]`；换回即绿。已确定的是「那一格旋钮真的拧到了」，而不是"只加了个形参"。
+
+**模型从哪来：本仓自己下载 + 本仓自己推理**（同日补，别再拿「本机没模型」当借口）：下载走
+`app/scripts/model_manager.py` / `POST /api/v1/local-models/hf/download`（HF、hf-mirror、魔搭三源，
+断点续传 `.part`）⇒ 落到 `model-paths.json` 声明的 `models/llm/`；推理走 `services/engine/llm_backend.py`
+（`LlmBackend`：chat 模板取自权重元数据、`generate_llm` 前向、Qwen2/Qwen3/Llama dense 架构）。
+实测把 `unsloth/Qwen3-4B-Instruct-2507-GGUF` 的 `Q4_K_M`（2.33 GiB）拉到共享池 `models/llm/` ✓。
+
+⚠️ **缺的那一跳已经补上（本轮）**：`text_generation.generate_text` 早就支持 `provider="engine"`，但那
+只覆盖**一问一答**；agent 要的是「调工具 → 回灌结果 → 再想一步」。而 `default_generate` 里
+`provider="engine"` 会先撞 `get_text_adapter('engine')` 的 `UnknownProviderError` ⇒ **本仓下载的模型
+永远驱动不了 agent**（评测/优化全都打不上去，报错还长得像「没模型」）。现在 `default_generate` 在最
+前面分派到 `_run_engine_tool_loop`：工具调用按 `<tool_call>{json}</tool_call>` 协议从模型原文解出
+（块坏就抛、只截断不算调用），`assistant.tool_calls` 与 `role="tool"` 的 `name` 原样回灌
+（`chat_template._normalize_messages` 不再把这两个字段压掉），超窗与「权重没有 chat 模板」两种
+情况**当场拒**而不是静默降级。判据 `tests/engine_agent_loop_test.py` 26 条（含「分派必须在
+`default_generate` 里」与「registry 里确实没有 engine」的反证）。
+
+**真机已跑通（2026-11-07 补，取代此前「只差一次长跑」的记录）**：探针 `_bench/engine_llm_probe.py`
+（装载 → 单轮生成 → `provider="engine"` 真调一次 `save_note`）末行 `PROBE_OK`：
+`LOAD 62.4s`（带反量化产物缓存；首次 98.3s）／`DESC device=cuda:0 dtype=bfloat16`／
+`ONE-SHOT 1.5s`／`AGENT 1.9s`／`TOOL_CALLS [save_note{text:"第一集：剑噬天下"}]`／
+`SAVED` 与 `STEPS 2`（第一轮出调用、第二轮收尾）—— 即本仓下载的 GGUF **真能驱动 agent 工具循环**。
+
+同日探针扩到五项（新增 ④ 长提示词峰值 ⑤ 流式），复跑一次全中：`LOAD 56.4s`／
+`PREFILL tokens=4303 1.6s peak=9.68/22.49GiB OK`／`STREAM 0.4s deltas=9`（`1、2、3、4、5`）／
+`AGENT 1.1s` ⇒ `PROBE_OK`。**这两项是旧探针的盲区**：它只看「`save_note` 有没有被调」⇒
+上面那个 94.62 GiB 的预填充、以及流式半路不发字，都能照样报绿（`PROBE_OK` 现在要三票齐）。
+peak 从 94.62 GiB 落到 **9.68 GiB**（4303 词元档，比 `/tune` 的 3205 还长）是 `inference_mode`
+＋分块预填充的直接读数。
+
+途中两处「文件和代码各自没错、交界处对不上」，都已修并配判据：
+
+* **tie embeddings**（装不进去那句的真因）：`Qwen3-4B-Instruct-2507-GGUF` 的 Q4_K_M **既没有**
+  `qwen3.tie_embeddings` 元数据键、**也没有** `output.weight` 张量（llama.cpp 对 tie 模型允许省略）。
+  `infer_llm_config` 原先只看元数据、缺键按 `False` ⇒ 模型建出独立 `lm_head` ⇒ 键集对账要
+  `lm_head.weight` ⇒ 一个**完好的文件**被报「GGUF 里缺 1 个张量」。现在 `tie_embeddings_of()` 以
+  **张量表**为准（没有 `output.weight` ⇒ 只能 tie；声明写 `False` 而表里又没这张 ⇒ 具名拒绝），
+  且 `_check_accounting` 认得**真共享的键**——放行凭据是 `lm_head.weight is embed.weight` 这件
+  事实（`state_dict()` 会把同一张 Parameter 在 `embed.weight`／`lm_head.weight` 两个名字下各列
+  一次，这是对账必然误报的机制），不是配置位；配置说 tie、实物没 tie 时**照旧报缺**。
+* **漏标签的裸调用**：权重自带的 chat 模板明写 `<tool_call>...</tool_call>`，4B 那次却只吐
+  `{"name": "save_note", "arguments": {...}}` ⇒ 旧判据算「这轮没调工具」，工具不执行、`PROBE_NO_TOOL`。
+  现在 `parse_engine_tool_calls(text, tool_names=...)` 认一种**极窄**退路：**整段**就是一串调用
+  对象（可带 ```json 围栏）、键只限于 `name/tool/arguments/parameters`、且工具名**全都真注册过**、
+  个数 ≤ 32；缺任何一条就退回「没调工具」（夹在散文里的同形状对象不认、名字没注册当散文**不抛**、
+  多出键不认、不给 `tool_names` 一律不认）。
+  ⚠️ **必须是「一串」**：同日第二次真跑（`/tune`）才露头 —— extractor 那跑模型一口气吐了**四个**
+  裸对象（`read_script_for_extraction` + 三个 `read_existing_*`），只认单对象的写法把整串丢光 ⇒
+  读工具一个都没执行 ⇒ 模型永远走不到 `save_*` ⇒ `/tune` 四跑**恒 0 分**（看起来像"模型不行"，
+  其实是解析层吃掉了合法调用）。混着编造的名字时**整串不认**（只跑认得的几个＝替模型裁剪它没说过的调用）。
+* **预填充不关梯度**（`/tune` 真跑才露头的真 bug，`_bench/tune_probe.py` 里 OOM）：`generate_llm`
+  没有 `torch.inference_mode()`，参数默认 `requires_grad=True` ⇒ 每步前向都在建 autograd 图，
+  36 层中间量（注意力分数 `(heads, L, L)` 最大）被 backward 节点吊住。4B / 3205 词元的 extractor
+  提示词实测 **PyTorch 已分配 94.62 GiB**（卡 22.49 GiB —— WDDM 甩进共享内存硬撑 60 秒才 OOM）。
+  现在整函数跑在 `inference_mode` 里，且长提示词按 `prefill_chunk`（默认 1024 词元）分块预填充
+  （峰值 `O(L²)` → `O(chunk × L)`，带 KV cache 数学等价、逐 token 结果相同），解码步 `s == 1`
+  不再造全零因果掩码。判据 `engine_llm_test` 的 ⑦ 系列（钩子直接问「前向时梯度开着吗」「一次喂了多少词元」、
+  分块与一次吃完逐 token 对齐、`prefill_chunk=0` 当场拒）—— 这类"结果全对、只是吃 4 倍显存"的病，
+  ①②④ 那些数值判据**发现不了**。真机读数见上文探针 ④：4303 词元档 **1.6 秒、峰值 9.68 GiB**。
+
+**`/tune` 整轮已真跑（2026-11-07，取代此前「仍待一次」）**：`_bench/tune_probe.py` 把真库整份复制成
+沙箱（`DATA_ROOT` 指过去、`mklink /J` 复用 7.5 GB 反量化缓存）、往副本里插一条
+`provider="engine" / priority=999 / settings.ggufPath` 的文本配置，再调
+`param_optimizer.optimize_agent_temperature(conn, "extractor", ext-case-001, {repeat:2, maxCandidates:1})`
+—— **不碰用户库**。末行 `TUNE_OK`，耗时 423.9 秒：
+
+| 档 | 两次得分 | 均值 | 判据 |
+|---|---|---|---|
+| 基线 0.7 | 75.0 / 75.0 | 75.00 | 抖动带 0.00 |
+| 候选 0.5 | 75.0 / 75.0 | 75.00 | Δ +0.00 ⇒ `no_gain` ⇒ `KEEP`（温度保持 0.7） |
+
+即：分数是**真分数**（extractor 抽取评分 75/100，不是解析失败给的 0），而在这台 4B 上
+**温度 0.5 与 0.7 无差别**（两档各自两跑都稳在 75.00、抖动带 0）。单跑 85–165 秒（出现
+`missing-write-nudge` 的那跑翻倍）、四跑合计 424 秒。
+
+**424 秒这件事逼出的接口改造（2026-11-07 同日）**：原来 `POST /evaluation/tune/{case_id}` 是
+**同步长请求** —— 前端 fetch 不超时会一直等，**中间代理却会先截断**，结果是界面报失败、后台还在
+烧卡（最难受的一种：日志显示跑完了，用户看到的是超时）。现在改成**入队 + 查进度**
+（`app/agent/evaluation/tune_runtime.py`）：
+
+| 入口 | 行为 |
+|---|---|
+| `POST /api/v1/evaluation/tune/{case_id}` | **立刻**返回 `{taskId, status, queuePosition, pollUrl}`；`wait=true` 才等回执（`timeoutSeconds`，默认 900 秒，超时回快照标 `timedOut`，**任务不停**） |
+| `GET /api/v1/evaluation/tune/{taskId}` | `status` / `stage` / `doneRuns` / `totalRuns` / `progress`；跑完带 `receipt`，失败带 `error` |
+| `GET /api/v1/evaluation/tune` | 最近任务列表（新的在前） |
+| `POST /api/v1/evaluation/tune/{taskId}/cancel` | 取消：排队中立刻生效；**运行中只在两次评测之间生效**（一次真模型生成从外面掐不断，见下） |
+
+三条口径写进代码注释也写进测试（`tests/tune_runtime_test.py`，40 条）：① 一张卡 ⇒ **单工作线程 +
+队列**，第二个任务排队而不是并发抢显存；② 同一 (agent, case) 已在跑 ⇒ `deduped=true` 不重复入队；
+③ 取消**不假装能秒停** —— `TuneCancelled` 在每跑开头抛，排队中被取消的一次都不跑。任务自己
+`engine.connect()`（请求那条连接响应返回就归还了，拿它跑后台的症状是跑到一半 `connection is closed`），
+任务表是进程内存、重启即空（产物早已落 `agent_optimizations`/`agent_configs`）。
+
+**改造后又整轮真跑了一次，这次走的是线上默认那条路（2026-11-07 晚）**：
+`_bench/tune_probe.py --via-runtime` = 入队 → 工作线程跑 → 每 2 秒轮询。任务 `tune-4434da372aca`
+**560.3 秒**、终态 `succeeded`、末行 `TUNE_OK`；进度时间线 `2.0s 0/4 → 172.0s 1/4 → 392.1s 2/4
+→ 510.1s 3/4 → 560.1s 4/4`。回执这一轮与上面直连那轮不同（采样随机）：
+
+| 档 | 两次得分 | 均值 | 判据 |
+|---|---|---|---|
+| 基线 0.7 | 100.0 / 75.0 | 87.50 | 抖动带 25.00（同一档两次差 25 分） |
+| 候选 0.5 | 100.0 / 51.7 | 75.85 | Δ −11.65 ⇒ `no_gain` ⇒ `KEEP`，`accepted=null`、`persisted=null` |
+
+这条路径不可替代：单测里工作线程跑的是假 runner、直连探针跑在主线程 ⇒「**工作线程 + 自建连接 +
+真引擎 + 长耗时**」四者只有 `--via-runtime` 能同时覆盖。另附两个实测口径：
+① 探针 stdout 必须 `-u` 直连日志，别指望工具会话（3 分钟就超时）—— 超时截断后日志里只剩
+`faulthandler` 堆栈，看不到任何进度行；
+② 判断"真在跑还是卡死"看 `Get-Process` 的 **CPU 时间是否还在涨**，别拿日志 mtime 判断
+（每次 dump 都会刷新它）。
+
+**Skills 的动态路由**（缺口 10，2026-11-07 已落地半格）：不改 `SKILL.md` 的自述机制，
+只在 `load_agent_skills` 选择"注入哪些"时加排序依据。落地形状与设计稿的差异写在这里，
+免得后人以为是漏实现：
+
+| 设计稿 | 实际落法 | 为什么 |
+|---|---|---|
+| 触发词选择 | **不做** | 要引入检索层，与「`SKILL.md` 自述绑定」的机制冲突；且 skill 之间不是同义检索关系而是互补规则 |
+| `priority × 历史命中率` | `priority + 降级惩罚`（`PRIORITY_PENALTY=50`） | `priority` 是序数量纲，乘 0..1 的率会把 1 与 2 压成没差别；加法语义是「排到明显更好的候选之后」，不是"降权" |
+| 命中率（从 `skill_usage` 读） | **`okRate`＝注入该 skill 的跑次成功率** | 「模型读没读它」**没有观测通路**，硬算命中率就是编。`okRate` 是相关不是因果，看板不许改叫「命中率／贡献度」 |
+| 命中率低就少注入 | 只在**超预算**时改**裁剪次序** | 预算够时注入顺序与内容必须逐字不变（否则每次统计抖动都会改提示词，diff 无从判读） |
+
+`skill_usage` 记的是可观测事实：注入了哪些、各多少字符、哪些被裁、该跑次成败
+（`run_id` 用 `trace:Agent/<id>` 与知识投喂同一个句柄、同 run 覆盖幂等）。
+`MIN_SAMPLES=10` 以下一律 `judged=false` —— 没有基线不说话。读口只有
+`GET /api/v1/skills/usage`，且**永不影响主流程**（统计库坏了退化成纯 `priority` 排序）。
 
 ### 4.3 引擎自我完善
 
@@ -300,7 +540,7 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 |---|---|
 | 某 stage 的 `failed` 里 `error_code` 高度集中（如 OOM / 尺寸不整除） | 降 `mp`、改吸附步长 |
 | 某 stage `score` 与 `steps` 正相关但 30 步以上增益 <0.01 | 降 `steps`（省时间不降质） |
-| `TECH_QC_THRESHOLDS` 某条在 95% 的合格片上都被触发 | 该阈值与本机 ffmpeg 口径不匹配，建议改 |
+| `TECH_QC_THRESHOLDS` 某条触发多、人工复核里**误报占多数**（或反过来漏报多） | 该阈值与本机 ffmpeg 口径不匹配：误报多就放宽、漏报多就收紧 |
 | 某 sampler/schedule 组合的 `score` 显著更高（样本 ≥20） | 换默认组合 |
 
 **三道闸门**（缺一条就会变成"自我损坏"）：
@@ -311,13 +551,16 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 3. **可回滚**：`tuning.json` 每次写前备份，且 `applied` 记录带 `basis`/`evidence`；
    一条 `status=failed` 的后续跑次即可回滚（自动，且回执里明说回滚了哪条）。
 
-**已落（2026-11-06）**：`tuning.suggest()` ＋ `GET /api/v1/knowledge-loop/tuning/suggest`
-（`tests/tuning_suggest_test.py` 31 条）。四条现象规则里落了**前两条**，且都只报不应用：
+**已落（2026-11-06 前两条 / 2026-11-07 第三条）**：`tuning.suggest()` ＋
+`GET /api/v1/knowledge-loop/tuning/suggest`（`tests/tuning_suggest_test.py` 31 条 ＋
+`tests/qc_reviews_test.py` 53 条）。四条现象规则里落了**前三条**，且都只报不应用：
 
 - 失败聚集：某族 `failed` 过了样本闸门、且最大 `error_code` 占比 ≥50% ⇒ 出候选。
   50% 是刻意的下限 —— 三类各占 1/3 说明是三件事，并成一个结论就是编归因；
 - 步数平台期：按 `runs.meta.steps` 分桶比均分，最高档与次高档差 <0.01 ⇒ 建议降回次高档
-  （`meta` 里没 `steps` 就不算，**不拿 `elapsed` 反推步数**）。
+  （`meta` 里没 `steps` 就不算，**不拿 `elapsed` 反推步数**）；
+- 质检命中率（2026-11-07）：见下方「人工复核」小节 —— 分母不再是"触发次数"，而是人判过的
+  结论，方向（放宽/收紧）由误报与漏报谁多决定，幅度只是起手值。
 
 **同日补的输入侧**（不做这一步，上面两条在真机上是瞎的：此前只有 agent trace 被
 `ingest_trace` 灌进去，`image`/`video`/`qc` 跑次**没有任何生产代码写** ⇒ 夹具一撤就只会答
@@ -338,12 +581,87 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 - **两条硬纪律**：落账必须在 `with self._wake` **之外**（持锁写 sqlite 会把 `submit` 一起卡住，
   AST 判据盯行号）；整段 `try/except: pass`（P0 只加事实，出片与质检结论不受影响）。
 
-**后两条有意没落**，`suggest()` 的 `notEvaluated` 逐条写明原因（别把它读成"没问题"）：
-QC 命中率的 `code` 前提**已经补齐**（`ISSUE_CODES` 闭集 ⇒ `error_code` 可聚类），真正缺的是
-「该判没判／判了是误报」的**人工复核结论**当分母（`video_quality_checks` 没有该字段）——
-只有触发频次、没有误报率，算出来的"命中率"是假的；sampler/schedule 换默认等于换族语义，
-`TUNABLES` 里有意没这两格。因此 `candidates[].canApply` **恒为 false**：影子验证（闸门②）
-不在本模块，没做完就给"可应用"等于把闸门换成一个布尔值。
+**人工复核与阈值命中率（2026-11-07 落地，原 `notEvaluated` 里的 `qc-threshold-hit-rate`）**
+
+缺口不在统计代码，而在**分母**：`video_quality_checks` 只记"报了哪几条缺陷"，不记"人看过之后
+判它对还是错"，所以 `black` 报了 12 次到底是 12 次真黑场、还是 9 次片头淡入的误杀，机器答不出。
+补的是这张表 ＋ 一条统计 ＋ 一条规则：
+
+- **表** `qc_reviews`（`core/models.py`，**单开一张**而不是给 `video_quality_checks` 加列）：
+  理由三条 —— 漏报（该报没报）**没有 issue 行可挂**；一次质检里同一 `code` 可能报两段，
+  复核粒度是 `(check_id, code)` 而不是 issue 行；复核是**事实层**，不该被 QC 重跑覆盖掉。
+  故**不建 UNIQUE 索引**（旧库不必手工补索引，改判在服务层做覆盖式 upsert）。
+- **三值闭集** `services/qc_reviews.py::VERDICTS` = `hit` / `false_alarm` / `missed`；
+  `record_review()` 对 `(checkId, code)` **覆盖式改判**（先判误报、看放大帧后改判判对，那是
+  同一件事的结论变了，追加会把命中率按人的犹豫稀释）。`code` 必须落在
+  `technical_qc.ISSUE_CODES` 闭集里 —— 放任意字符串进来会长出"没人认得、也没有阈值可调"的行。
+- **口径**（直接影响数字，写死在 `qc_reviews` 模块头）：命中率 `hitRate = hit / (hit + false_alarm)`
+  （分母只含**触发过且判过对错**的），漏报率 `missRate = missed / reviewed`（分母＝该 code 全部
+  复核）—— 两者**不共分母**：混在一起会让"漏报多"看起来像"命中率下降"，而这俩要调的阈值方向
+  正相反。没判过 ⇒ `hitRate = None` **不是 0**（0 会被读成"从没误报过"，那是最危险的假绿）。
+- **门槛** `MIN_REVIEWS = 10`（复核是人工成本，30 条要好几天；同一条规则的错法又很集中）。
+  不足只摆数字、**不出候选**，并在 `notes` 里写"还差几条"。
+- **阈值映射** `technical_qc.ISSUE_THRESHOLDS`：每个 code 指到 `qc` 伪档里的主字段
+  （如 `black → blackminduration`、`fps.low → fpsmin`、`loud.peak → truepeakdb`），
+  `relax` 说明放宽是"调高"还是"调低"（负值区间的乘法方向是反的，`truePeakDb=-1` 放宽要 ×0.8）；
+  配合字段（黑场的 `blackpixthreshold`、冻帧的噪声阈值）只作 `aux` 提示、**不同时动**
+  （两格一起动就说不清哪一格起效）。`spec.unreadable` / `spec.probe_failed` **有意不登记** ——
+  它们的"误报"是 ffprobe 环境问题，改阈值等于把探测失败藏起来。
+- **候选怎么出**：`false_alarm_heavy`（命中率 <0.5）⇒ 放宽；`miss_heavy`（漏报率 ≥0.3）⇒ 收紧；
+  幅度是 `_next_threshold()` 的 **×1.25 / ×0.8 起手值**，`why` 里如实写明"方向有据、幅度是建议
+  起手值，不是从数据里算出来的"。
+- **入口**：`GET /qc/hit-rate`（按 code 的统计＋红线 `notes`）、`GET /qc/pending`（最近 QC 记录
+  与还没判的 code，直接摆到人面前 —— 表建好了没人填，命中率永远是 `None`）、
+  `GET/POST /qc/reviews`、`DELETE /qc/reviews/{id}`（撤销＝打错码）；前端在知识闭环页
+  「调参候选」与「写一条覆盖」之间，命中率表 ＋ 待复核列表 ＋ 判对/误报/漏报/撤销四个按钮。
+- 守卫：`tests/qc_reviews_test.py` 53 条（改判不新增、未知 verdict/code 拒、`hitRate=0.5`、
+  `missRate=0.3333`、`None ≠ 0`、映射不漂、误报→放宽、漏报→收紧、负值区间方向、门槛不足
+  不出候选、候选恒 `canApply=False`），其中 7 条走 **HTTP 层**（`TestClient`）：信封里少一层 `data`
+  或 `checkId` 漂成 `check_id` 服务层都看不出来，非法 `verdict`/闭集外 `code` 要 400、
+  `DELETE` 第二次要 404（撤销不静默成功）。
+
+**质检反哺引擎参数（2026-11-07 落地，缺口 6）**
+
+原来这条路上**两边各自都是通的**：QC 会写 `kind="qc"` 跑次、`suggest()` 也会读跑次，
+但它们**从来没有对上过** —— QC 落在伪档 `video_spec`（说的是"这是规格判据"，不是"哪族出的"），
+引擎落在真档 `h3`/`wan22`/`krea2`，没有共同键。「这一族最近出的片质量掉了」因此永远
+成不了一条**关于这一族**的结论，只能重跑这一镜。
+
+- **归因键** `outcome_index.records`（新表 `(record_type, record_id)` 主键 ＋ `stage`/`run_id`）：
+  由 `bridge.run_job` 在**刚拿到 `taskId` 的那一行**登记 —— 那是 `stage` 与
+  `video_generation_id` **唯一同时出现在手上**的时刻，过了这行就再也对不上。
+  ⚠️ 不要再打 `video_generations.task_id` 的主意：那一列是给**云 provider** 存轮询号的，
+  引擎这条路本来就不写它（`recover_video_tasks_on_startup` 里明文这么讲），拿它当引擎
+  taskId 用会让"续跑轮询"与"引擎任务号"两种语义混在一格。
+- **质检侧**：`_index_qc_run` 查归因表，把 `producerStage`/`engineRunId` 写进 QC 行的 `meta`。
+  **查不到就不带这两格**（不是填 `null`）—— 云 provider 的片没有"引擎档"，
+  填一格空值就等着被"最近一次引擎档"之类的猜测填上，然后拿别人的片去降这一族的步数。
+- **读向** `engine/qc_feedback.py`：`stage_stats()`（按档报条数/通过率/失败 `code` 分布，
+  `attributed` 与 `unattributed` **分开报**，只报"20 条 QC"会让人以为这 20 条都能判族）、
+  `pass_by_steps()`（同族按 `meta.steps` 分桶算 **QC 通过率**；拿不到步数的单独计
+  `missingSteps` —— 那是"这次比不了"，不是"没通过"）、`gate(high, low)` 三档。
+- **闸门三档必须分得开**：`insufficient`（每桶不足 `MIN_BUCKET=5` 条 ⇒ **判不了**）、
+  `pass`（低档通过率没明显下滑）、`blocked`（掉出 `TOLERANCE=0.1` ⇒ 别降）。
+  把 `insufficient` 当 `pass` 就是"拿空样本降质"，这是这条链上最危险的假绿。
+- **接线**：`tuning._steps_candidates` 出「降步数」候选**之前**问闸门；`blocked` 当场不出并
+  把理由写进 `notes`（**不许静默丢弃** —— 静默丢弃和"没有候选"在回执上长得一模一样），
+  放行则把 `qcGate`（两桶条数/通过率/落差）随候选带出去，人能看到凭据。
+- **顺带查实的真缺陷**：引擎跑次**根本不记 `score`**（`runtime._index_run` 没有这个字段）⇒
+  那条"步数平台期"规则在真机上一直靠"没有分数 ⇒ 没有候选"**空转**。所以本轮闸门用
+  **通过率**（离散、有人/有判据看过）而不是分数（连续、且根本没数）。
+- **降级**：索引库坏 / 归因表空 ⇒ 一律答"判不了"并退回原行为，主链路不因统计不可用而卡；
+  `bridge` 那边登记失败只记一条 `engine-record-link` warn（少一条归因只是少一条统计）。
+- 守卫：`tests/qc_feedback_test.py` 38 条（归因折得回/覆盖不并列/未知类型拒、
+  QC 行真带出 `producerStage`、云 provider 不带这两格、按档聚合与未归因分开报、
+  分桶与 `missingSteps`、闸门三档、**`blocked` 真的让候选消失且留下理由**、
+  四条 AST 接线判据、坏库降级），并新增两条设计稿差异：`stage` 语义**不动**
+  （QC 行仍落 `video_spec`，族信息只进 `meta` —— 改 `stage` 会让 `_failure_candidates`
+  把 QC 失败并进引擎族的失败率里）、`insufficient` 时**候选照出**（只是把"闸门没数据"带出去）。
+
+**最后一条仍有意没落**：换 sampler/schedule 默认等于换族语义，`TUNABLES` 里有意没这两格
+（`notEvaluated` 里照旧逐条写明原因，别读成"没问题"）。`candidates[].canApply` **恒为 false**：
+影子验证（闸门②）不在本模块，没做完就给"可应用"等于把闸门换成一个布尔值 —— 命中率补上了也不改
+这条。
 
 ### 4.4 模型自动投喂与改造
 
@@ -485,6 +803,78 @@ QC 命中率的 `code` 前提**已经补齐**（`ISSUE_CODES` 闭集 ⇒ `error_
     前端才敢用 status 分流（200 里塞 `ok:false` 会让所有调用方都得多写一层判断，总有人忘）。
     顺带一个写测试时的坑：本仓 `RequestValidationError` 被全局处理器统一成 **400 带 message**，
     所以「缺参数」的判据是 400 而不是 FastAPI 默认的 422 —— 照默认值断言会红，且红得莫名其妙。
+15. **修复闭环的四条判定口径**（缺口 9，`services/repair_closure.py`）：
+   * **快照只存缺口键，不存全盘清单**：键是 `kind:小写文件名`（`missing:xxx.safetensors`），
+     文件路径只留目录以下的小写文件名 —— 同一份工作流换个盘符不该变成"另一个问题"；
+     明细不存是因为它三个月后一定过期，而"当时有多少条、哪些键"是能被后来的诊断对上的。
+   * **按键集合判定，不按条数**：应用后新冒出一条无关缺口，不算这次修复失败（`resolved`）；
+     只看"当时那个键还在不在"。反过来，键的缺席要配 `truncated` 才能下结论 ——
+     `diagnose` 有条数上限，被截断时缺席**可能只是没列出来**，一律判 `unverified`。
+   * **`stale` ≠ 修复失败**：落单时该键本来就不在（人按旧快照提的案、或已被别的改动带走）。
+     所以提案上存的是 `findingBefore.present` 的三态：`true`/`false`/**`null`**。没有快照时
+     必须存 `null` 而不是 `false` —— 存 `false` 会让每次应用都判 `stale`，把"没基准"
+     说成"你抄错了"。
+   * **回滚不重新诊断**：改动都撤了，问题回来是必然的；重跑诊断只会把回滚记成又一次失败。
+     回滚直接判终态 `rolled_back`、按 `partial` **覆盖**应用期那条跑次 —— 留着应用时的
+     `ok` 会让修复成功率虚高。
+   **跑次**：`kind="repair"`、`run_id=repair-<proposalId>`（幂等覆盖），映射
+   `resolved→ok`／`still→failed`／`stale→partial`／`rolled_back→partial`；**`unverified` 不写** ——
+   分母里塞"没测过"会把成功率稀释成一个假的数字。守卫 `tests/repair_closure_test.py` 67 条
+   （含 6 条 AST 接线判据：`apply` 必须调 `_verify_proposal`、`diagnose` 必须调 `_persist_snapshot`）。
+16. **Skill 注入台账的五个坑**（缺口 10，`services/skill_usage.py`）：
+   * **`with sqlite3.connect(...)` 不关连接**：那个上下文只管**事务**（提交/回滚），
+     连接一直开着 ⇒ Windows 上删库 `PermissionError: WinError 32`、进程长期跑是句柄泄漏。
+     必须 `try/finally: conn.close()`（本模块 `_session()`）。测试里删库还要连
+     `-journal`/`-wal`/`-shm` 一起清，否则偶发红。
+   * **明细走"出参"不走落库**：`load_agent_skills` 在同一跑次被调用两次
+     （`build_agent_config` 建配置一次、`default_generate` 拼提示词一次），在函数内写库会把
+     **一次注入记成两笔样本**。所以它只回传 `sizes`/`dropped`，由跑次收口写。同 `run_id`
+     覆盖是第二道保险（跑次重试也不该翻倍）。
+   * **排序只许发生在超预算分支**：`total > budget else list(bindings)`。一旦在预算充足时也排，
+     提示词顺序就会随统计抖动而变 —— 每次微调 skill 都产生一大段无法判读的 diff。
+   * **裁剪理由的文案不许改**：改的是"谁被裁"，不是"为什么裁"，所以通知仍是
+     `（超预算）`。既有 `skills_test` 逐字断言那句文本 = 免费的回归守卫。
+   * **`priority` 缺省 0 要用序号兜住**：DB 配置里不写 priority 的条目全是 0，不兜就集体
+     抢到最前面（比任何 `priority: 3` 都靠前）；而测试造景里 `alpha` 必须**显著长于** `beta`、
+     预算取 `alpha_len + 5` —— 取 `beta_len + 5` 会让 alpha 一开始就装不下，
+     「按 priority 裁 beta」与「低成功率让位裁 alpha」两个用例都退化成同一个结果，
+     看着像实现错了。
+17. **质检反哺的四个坑**（缺口 6，`engine/qc_feedback.py`）：
+   * **"没有共同键"才是根因**：一开始容易当成"再加一条规则"，但 QC 行与引擎行之间
+     **压根没有一列能 join**（一个只有 `video_generation_id`，一个只有 `taskId`）——
+     规则写出来也只能拿 `video_spec` 这个伪档当钥匙，结论永远落不到某一族头上。
+     真正的动作是**先造归因键**（`outcome_index.records`），规则才有地方站。
+   * **归因只能在提交那一刻做**：`bridge.run_job` 里"刚拿到 `taskId`"那一行是唯一窗口，
+     那时 `stage` 与 `record_id` 同时在手上；所以登记调用点必须紧跟 `engine_runtime.submit`，
+     挪到 `await` 之后、挪到视频落盘之后都不行（那时 `record_id` 早就不在作用域里）。
+   * **查不到就不填**：`_producer_of` 返回空字典（不是 `{"producerStage": None}`）。填了空值，
+     下游一个 `or` 兜底就会把"未知"回升成"最近一次引擎档"，然后拿别人的片降这一族的步数 ——
+     这类错误的特征是**回执全绿、数字全错**。
+   * **判不了 ≠ 通过**：`insufficient` 这一档存在的全部意义是"样本不够，别说结论"。
+     实现上很容易写成 `if verdict == "blocked": skip` 然后其他一律放行 —— 那样库一坏、
+     归因表一空，闸门就自动变成"全部通过"。所以守卫里有一条专门盯着源码里
+     不许出现 `insufficient` 直通的写法。
+18. **评测面两次"看着很专业"的翻车**（缺口 8，`film_check.py` ＋ `scorer.score_grid_prompts`）：
+   * **判不了 ≠ 通过，也 ≠ 0 分**：成片四维里任一维没有样本（没有 QC 记录 / 没有人复核过）
+     就不进总分，而不是"当 0 分算"。折 0 会让一集没质检的好片被判 `blocked`，
+     折满分会让一集没质检的烂片直接 `ready` —— 两种都是**把"不知道"谎报成结论**。
+     实现上总分只能按**有值的维度**等权平均，`missing` 逐项点名，`verdict` 降成 `partial`。
+   * **分母选错，指标越算越好看**：缺陷面如果用"全部镜头"当分母，一集里大量没出片的镜
+     会白送干净；所以分母是**有 QC 的镜**。人工复核的命中率如果用"全部复核"当分母，
+     `missed`（漏报）就会稀释命中率 —— 漏报没有 issue 行可挂，只能单列进 notes，
+     分母只含 `hit + false_alarm`。
+   * **点五次评测 ≠ 五条样本**：评测跑次必须幂等（`run_id=film:<集>`），否则同一条片子
+     点几次就变成几条独立样本，喂给 `param_optimizer` 的 `repeat>=2` 直接变成自欺。
+     另开 `kind="eval"`：混进 `"agent"` 会把"评测跑了几次"算进 agent 成功率。
+   * **"含中文就扣分"会把合规产出判死**：宫格 Agent 的系统提示词**自己规定**要把位置写成
+     「格1」、参考图写成「图片1」、骨架里还有「首帧/尾帧」。按"有没有中文"判，完全合规的
+     产出会被判不合格；判据只能是**中文占比**（标签是个位数百分比，真写成中文散文在 40% 以上）。
+   * **空产出会白送分**：占位符维第一版是"文本里搜不到 `[` 就给满分"，
+     `payload=None` 时文本是空串 —— 当然搜不到，于是白送 15 分。分母必须是**全部待判文本（含空的）**，
+     分子只数"非空且干净"。凡是"找不出坏东西就给满分"的判据，都要先问一句"根本没有东西"算不算坏。
+   * **评测与生产必须是同一套解析**：宫格载荷的三段解析从 `routers/grid.py` 上收成
+     `services/grid_payload.py`，评测不自己认一套格式 —— 否则线上换一种写法时，
+     评测照旧打高分，那是最典型的假绿。
 
 ---
 
@@ -492,7 +882,8 @@ QC 命中率的 `code` 前提**已经补齐**（`ISSUE_CODES` 闭集 ⇒ `error_
 
 * **不做**"全自动改源码"：`profiles.py`/`pipeline.py` 的默认值只通过 `tuning.json` 覆盖，
   不改文件；
-* **不做**"训练无人值守"：L3 必须人点一次（成本与不可逆性都不允许全自动）；
+* **不做**"质检一失败就自动改参数"：闸门只**拦候选**，改参仍要人核（`set_field`）——
+  自动改会把一次误判连锁污染到后续全部出片，而"质量掉了"恰好是最难自己发现的那类错；
 * **不做**"知识全量注入"：只 top-N + 按需检索；
 * **不做**"向量库"：现有 bm25 + trigram + 维度筛选在本仓的数据量级（万级条目）足够，
   引入 embedding 会多一套部署与一致性负担（`script_library` 已有的 RRF 融合就是为此克制过）；
@@ -507,10 +898,78 @@ QC 命中率的 `code` 前提**已经补齐**（`ISSUE_CODES` 闭集 ⇒ `error_
 |---|---|---|
 | `services/task_logger.py` | 落盘后加一次 runs 双写（失败只 warn） | JSONL 格式与字段 |
 | `routers/traces.py` | 新增 `/runs` 聚合查询（转调 `outcome_index`） | 现有 `/traces*` 端点 |
-| `agent/runtime.py` | `_tool_factory` 加一行 `create_knowledge_tools()` | 主循环与重试 |
+| `agent/runtime.py` | `_tool_factory` 加一行 `create_knowledge_tools()`；**已接**：跑次收口写 `skill_usage`（`tests/skill_usage_test.py` 37 条） | 主循环与重试 |
+| `agent/skills.py` | **已接**：`load_agent_skills` 超预算裁剪（`priority + 降级惩罚`），`sizes`/`dropped` 只做出参 | 预算够时的注入顺序、`priority` 语义、`SKILL.md` 自述机制 |
 | `agent/qc_retry.py` | 重跑结束追加一次"复盘提案"调用（异步、超时即弃） | 只重写失败镜的既有纪律 |
 | `engine/profiles.py` | 不改；`pipeline` 取参处已改走 `tuning.resolve`／`apply_to_request` | `PROFILES` 表本身 |
 | `services/engine/tuning.py` | **已接读向**：`suggest()`（失败聚集／步数平台期，三道闸门如实标）＋ `GET /api/v1/knowledge-loop/tuning/suggest`（`tests/tuning_suggest_test.py` 31 条） | 候选**永不自动应用**：`canApply` 恒 false，人核过再 `set_field` |
 | `services/technical_qc.py` | **已接**：`qc_thresholds()` 逐键过 `tuning.resolve("qc", …)`，回执带 `thresholds-overridden` 警告（`tests/qc_thresholds_test.py` 28 条） | 阈值默认值（`TECH_QC_THRESHOLDS` 仍是唯一真源）与 ffmpeg 判据 |
+| `services/outcome_index.py` | **已接**：`records` 表（`link_record`/`record_of`）＋ 按主键取单行的 `get(run_id)` —— 缺口 6 的**唯一归因键** | `runs` 表结构、既有 `record_run` 的幂等覆盖语义、`query`/`samples` 的排序与白名单 |
+| `services/engine/bridge.py` | **已接**：`run_job` 在 `engine_runtime.submit` 之后立刻 `_remember_record` 登记"这条记录是谁出的"（失败只记 `engine-record-link` warn） | 请求构建 `request_from_*`、装配校验、回执字段 |
+| `services/engine/qc_feedback.py` | **已接**：质检结论 → 按档通过率／按步数分桶／降档闸门三档（`tests/qc_feedback_test.py` 38 条） | 不改任何族数学、不写参数（改参数仍只走 `tuning.set_field`，那是人的裁决） |
 | `routers/lora_train.py` | 加 `datasetRef` 参数与 `training_jobs` 登记 | 现有参数表与执行链 |
 | `routers/knowledge.py` | 挂 `/entries` 子路由（新 router 文件，避免与语料端点混） | `/search` `/documents` `/upload` 等 |
+| `routers/repair.py` | 接 `repair_closure`：`diagnose` 落快照、`propose` 收 `finding`、`apply`/`verify` 复诊、`rollback` 记终态（`tests/repair_closure_test.py` 67 条） | 提案落盘格式、`proposalId` 单参数口、可改前缀白名单、应用前全量备份 |
+| `agent/evaluation/film_check.py` | **已接**：成片四维评测（`tests/film_check_test.py` 37 条）；只读四张事实表、`kind="eval"` 幂等跑次 | 不改 QC 判据、不重跑 ffmpeg/不调模型（评测只读数） |
+| `routers/evaluation.py` | **已接**：`POST /film/{episode_id}`（`record` 默认 true）；坏 id 走 400、无成片走 200 且 `verdict=empty` | 既有 case 评测四个端点、`GET /cases` 无 try（坏 JSON 直接 500，与 TS 同） |
+| `services/grid_payload.py` | **已接**：宫格载荷解析上收为单一真源，`routers/grid.py` 保留同名别名（调用点零改动），评测同源 | 解析口径本身（camelCase 兼容、空 prompt 丢弃、递归下降、先 `json.loads` 再抠围栏） |
+
+## 10. 前端呈现（2026-11-07 落地）
+
+页面 `frontend/app/pages/knowledge-loop.vue`（桌面端 `desktop/frontend/src/pages/knowledge-loop.vue`，**逐字节同构**；两端 `composables/useApi.ts` 里的 `knowledgeLoopAPI` 也同一份），导航入口「闭环」，路由 `/knowledge-loop`。
+
+**为什么单开一页，不并进 `/knowledge`**：`/knowledge` 是**仓外剧本资料**的读写口（5403 份 PDF 的索引 + 覆盖层），本页是**本仓自己跑出来的经验**（跑次 → 蒸馏 → 人审 → 投喂/调参）。两者备份策略、重建代价、误删后果都不同；并页会让「删语料」与「删经验」这两个动作长得一样。
+
+### 10.1 页面结构（左导航分区 + 分区懒加载）
+
+| 分区 | 读的接口 | 写/触发的接口 | 图上能看见的诚实口径 |
+|---|---|---|---|
+| 概览 | `GET /report?includeCandidates`、`GET /scheduler` | `POST /runs/rebuild`、`POST /distill`、`POST /lift/refresh` | 事实层按阶段列 条数/失败率/均分/P50/P95；`available=false` 与「0 条」分开摆；定时复盘区**只读**（默认关就写「未启用」）；蒸馏候选没给文字归因就直说「只有统计信号」，凭据那排 run_id 原样列出 |
+| 经验台账 | `GET /entries`、`GET /entries/{id}` | `POST /entries/{id}/status`、`POST /entries` | 状态/类型/范围三筛 + 真分页；迁移按钮**由 4 条白名单边生成**（`proposed→accepted\|rejected`、`accepted→deprecated\|rejected`、`deprecated→accepted\|rejected`、`rejected→proposed`），前端不另造边；`lift: null` 显示「样本不足」而不是 `0`；新建条目明示是**叠加**（同标题 `support+1`），所以页面**不提供编辑按钮** |
+| 检索测试 | `GET /search` | — | 左 form／右 result 双栏；`ranking`（bm25 / like / recent）必须显示，三种排序不可比；空查询会被拒而不是回落成全表 |
+| 投喂与数据集 | `GET /feed/preview`、`GET /datasets`、`GET /datasets/resolve` | `POST /feed/export` | L1 编译预览原文进 `<pre>`，`truncated` 单独警示；L3 数据集表格带 `itemsExists` 徽章，逐条「核一遍」走的判据与训练 `datasetRef` 是同一个函数 |
+| 调参与训练 | `GET /tuning`、`GET /tuning/suggest`、`GET /training` | `POST /tuning`、`DELETE /tuning`、`POST /training/scan`、`POST /training/models/{id}/promote\|demote` | 覆盖层 `source !== 'default'` 才给「清除」；只读候选的 `canApply` 恒 false，按钮不画「应用」，只画「按这条写覆盖」（prefill 到表单，仍要人写 basis + evidence）；承诺默认档必须带凭据、撤销要写原因；训练产物**不会自动生效** |
+| 质检命中率与人工复核（同属"调参与训练"分区） | `GET /qc/hit-rate`、`GET /qc/pending`、`GET /qc/reviews` | `POST /qc/reviews`、`DELETE /qc/reviews/{id}` | 一表一行按 issue `code` 列 触发/复核/判对/误报/漏报/hitRate/missRate，**没判过显示 `—` 不是 0**（0 会被读成"从没误报过"）；`reviewed < 10` 行标「样本不足」且该 code 不出候选；待复核列表把最近 QC 的未判 `code` 直接摆出来逐条四个按钮（判对/误报/漏报/撤销），撤销是用来改错码的 —— 改判本身是"再点另一个按钮"，不是"删了重录" |
+| 成片评测（2026-11-07 补的第六个分区） | `GET /dramas`、`GET /dramas/{id}`（只为一件事：选出那一集） | `POST /evaluation/film/{episodeId}?record=true` | 四维等权（出片覆盖 / 技术规格 / 缺陷面 / 人工复核）：判不了的维度显示「判不了」并且**不参与总分**，总分一维都没有时显示「判不了」而不是 `0`；`verdict` 四档里 `partial` 用中性色（它的意思是"有几维没数据"，既不是通过也不是不通过）；复核行把**漏报单独列出来**并注明"没有 issue 行可挂、不进分母"；`recorded=false` 时明说这条没落库 |
+
+首屏只打 `/report` + `/scheduler` 两次请求，其余分区靠 `watch(view)` 懒加载（`loaded` 标记防重入）。
+
+「算不了的维度」一栏**逐条带出 `why`**（2026-11-07 补）：只摆 `rule` id 时，`qc-threshold-hit-rate`
+会被读成"这个维度有问题"，而它其实是"复核条数还没到 10 条门槛"——原因不显示，人就会以为缺功能。
+
+### 10.2 与参考项目复用了什么、改了什么
+
+| 参考项目 | 复用的结构 | 本仓的适配差异 |
+|---|---|---|
+| `reference/dify`（`web/features/new-rag/new-knowledge-list.tsx`、`knowledge-space-shell.tsx`） | 左侧分区导航 + 右侧列表的**信息架构**，以及「列表页一行就是一个可核查对象」的组织方式 | 不做 dify 的 `/datasets` 卡墙与创建向导：本仓的「数据集」是导出产物（L3），不是用户先建后灌的容器；分区导航是 5 个视图而不是多个路由 |
+| `reference/ragflow`（`dataset/dataset/use-dataset-table-columns.tsx`） | 数据集表格的列口径（名称 / 条数 / 角色 / 完整性 / 时间），以及状态用徽章而不是文字颜色表达 | 列名与判据换成 `manifest` 真有的字段（`count`/`roles`/`rights`/`itemsExists`）；不做多选批量操作（导出集是单份核验） |
+| `reference/ragflow`（`dataset/testing/testing-form.tsx`、`testing-result.tsx`） | 检索测试的**双栏 form/result** 与「先调参再跑一次」的交互 | 结果卡片多一行 `ranking` 标签（三种排序不可比是硬约束，不藏起来）；`available=false` 用独立警告条而不是空列表 |
+| 两者共有的抽屉详情 | 点击行 → 右侧抽屉，列表保持原位 | 抽屉内容按本仓字段重写：`links`（挂哪条跑次/镜头）、`usage`（被注入过几次、成功失败各几次）——这是 dify/ragflow 没有的「结果反查」 |
+
+### 10.3 实现约束（改这页之前先看）
+
+* 样式：两个 `kb-*` 页面是**两个组件**，scoped 样式不跨组件，所以 `knowledge-loop.vue` 里带一份同名 `kb-*` 副本 + 本页专有的 `kl-*`；断点沿用 `1023px` / `767px` 两档，由 `frontend/scripts/check-responsive.mjs` 硬判。
+* 类型：闭环检索回执叫 `KnowledgeLoopSearch`，**不能**叫 `KnowledgeSearch` —— `/knowledge` 那个回执已占用该名，TypeScript 同名 `interface` 会**合并**而不是覆盖，两侧字段都得齐，任一侧初始化对象都缺字段（2026-11-07 实测报错）。
+* 候选 `KnowledgeCandidate` 是**并集**：蒸馏候选给 `pattern/key/kind/score/stats`，调参候选给 `rule/stage/field/current/proposed/why/samples/canApply`。页面取 `stats` 兜底显示「作用面/样本量」，**不替后端编归因**。
+* 导航高亮：`/knowledge` 的 active 判据改成 `path === '/knowledge' || startsWith('/knowledge/')`，否则 `startsWith('/knowledge')` 会把 `/knowledge-loop` 也点亮。
+* 守卫：`node scripts/check-parity.mjs`（两端逐字一致）、`node scripts/check-responsive.mjs`、两端 `vue-tsc`。`composables/useApi.ts` 与 `pages/knowledge-loop.vue` 都是**两端同名同内容**，改一侧必须同步另一侧（`check:parity` 会红）。
+* ⚠️ 曾经别在 `useApi.ts` 的**注释**里写"带 API 前缀的完整调用形状"：`frontend_api_coverage_test.py` 是纯文本扫描，注释里的一条路径会被当真调用点去反查后端，而闭环**没有裸根端点**，当场红（2026-11-07 实测，写了两次才注意到）。**2026-11-08 已从「纪律」改成「机制」**：该自检现在先把注释遮蔽成等长空格再扫描（`mask_comments` 认引号，`.vue` 只遮 `<script>` 区内的 JS 注释），注释里记老路径不再红 —— 但**注释里写错的真调用照样会被抓**，别把这条当成放宽。
+
+### 10.4 质检命中率卡片（2026-11-07 补的第三块）
+
+放在「调参候选」下面、「写一条覆盖」上面 —— 顺序是刻意的：先看候选（机器认为哪条该动）→ 再看命中率（机器的依据够不够）→ 最后写覆盖（人的结论落盘）。三条实现约束：
+
+* **`—` 与 `0` 必须分开**：`hitRate === null` 渲染成 `—` + 「未复核」，`0` 才是「判过但一次没对」。把两者都画成 0，页面就会在"还没人看"的时候显示"阈值从没判对过"，人照着改就改错了方向。
+* **改判不是新增**：四个按钮里「判对/误报/漏报」都是对同一 `(checkId, code)` 的覆盖（同一个人看放大帧后改主意是常事），只有「撤销」才是删除；所以按钮上不写"删除"，写"撤销"，并在按钮组旁边说明「撤销只用于判错编码」。
+* **复核要能被找到**：待复核列表按 QC 记录倒序列出**还没判**的 `code`，已判的排在后面 —— 表建好了没人填，命中率永远是 `None`，所以"把人叫过来"这件事必须在同一屏里做完，不能让人自己去别处翻质检报告。
+
+### 10.5 成片评测分区（2026-11-07 补的第六块，缺口 8 的下半）
+
+前五个分区看的都是**跑次/经验/提示词**这一层，成片质量从来没人量过 —— 而花钱、决定交付质量的恰恰是成片。这一块把 `POST /evaluation/film/{集}` 摆到页面上，四条实现约束：
+
+* **两级选择，不做"只有一部剧就默认选中"**：本仓可以有多部剧，默认选中会让创作者在自己没看清评的是哪一集时就把结论记进闭环。所以先选剧组、再选集，两个 `select` 都是显式的。
+* **`判不了` 是一个独立状态，不是 0 也不是满分**：`dimensions[].judged=false` 的行显示「判不了」，总分一维都没有时显示「判不了（一维都判不了）」；`verdict=partial` 用中性色徽章，文案是「有维度判不了」—— `ready`/`blocked` 才是通过/不通过。
+* **漏报单独列、并且写明它不进分母**：`review.missed` 没有 issue 行可挂，如果混进分母，命中率会被"没被发现的错"稀释——那是把系统看不见的东西算成系统的功劳。
+* **`empty` 是"这集还没分镜"**：不是 0 分。页面在没出片时给出的是这句话 + 一条 `info` toast，而不是一条绿色的"评测完成"。
+
+⚠️ 页面这一块**只读**接口，不触发 ffmpeg/模型：重跑技术质检不但贵，还会与质检页的口径打架（两处显示不同的黑场数，人只会信错的那边）。真要重跑，那是质检页的按钮，不是这里。

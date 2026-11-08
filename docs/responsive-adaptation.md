@@ -117,7 +117,7 @@ Web 端（Nuxt，浏览器直开）覆盖 320–2560 全区间。
 2. **无越界元素**：除「横向滚动容器内的子元素」与「收缩状态的抽屉」，没有元素 `getBoundingClientRect().right > clientWidth`；
 3. **断点真源一致**：`npm run check:responsive` 比对两端 `studio.css` 的响应式基础层，逐字相同；
 4. **无硬宽度网格**：不出现 `repeat(auto-fill|auto-fit, minmax(<Npx>, 1fr))` 缺 `min()` 兜底（320px 会被撑破）；
-5. **每页都有窄屏规则**：`pages/**/*.vue` 至少一条 `@media (max-width: ...)`；
+5. **每页都有窄屏规则**：`pages/**/*.vue` 至少一条 `@media (max-width: ...)`（**注释里的不算** —— 4/5 两条一律在剔注释后判）；
 6. **触控热区**：`pointer: coarse` 下 `.btn` ≥34px、`.nav-link` ≥38px、`.btn-icon` 34×34、抽屉可开可关且 `aria-expanded` 正确；
 7. **不隐藏业务信息**：窄屏只允许「收窄 / 折行 / 单列 / 内部滚动」，不允许 `display: none` 掉业务按钮或字段。
    仅两类例外，且都是纯标签而非信息：顶栏装饰 `.film-strip`、`.brand-text`；设置页导航的分组小标题 `.nav-group-label`
@@ -178,6 +178,40 @@ cd desktop/frontend && npm run check:responsive
 脚本 `scripts/check-responsive.mjs`（两端各一份，逐字相同）的判定已做过反向验证：
 把某页 `minmax(320px, 1fr)` 写回去 → 报「缺 min() 兜底」；在桌面端 `studio.css` 末尾加一行 → 报「两端响应式基础层不一致」；
 复原后退出 0。
+
+> **2026-11-07 收口：B/C 加「注释遮蔽」**。两条判据原先都在**原文**上跑正则，于是一个方向假绿、
+> 另一个方向假红：
+> - **假绿（B）**：把某页唯一的 `@media (max-width: 767px)` 整块 `/* … */` 注释掉 —— 页面**一条窄屏规则都不剩**，
+>   但字符串还在，B 照旧放行，320px 下真会溢出；
+> - **假红（C）**：注释里的 `repeat(auto-fill, minmax(300px, 1fr))`（举例、或改版留下的旧写法）也被喊成问题。
+>
+> 现在两处都先过 `maskComments()`：把 `/* … */` 与 `<!-- … -->` **逐字符换成空格**再判。换成等长空格而不是
+> 直接删，是为了让 `m.index` 仍能当行号用（删字会让报告里的行号整体左移）。`//` 只切**整行** ——
+> 行内 `//` 后面常是 URL（`url(https://…)`），按它切会把真规则一起吃掉。
+> 反验（同一夹具一次跑两向）：注释掉 `weapons.vue` 的 `@media` 并补一条注释里的坏 `minmax` ⇒
+> 修前只报「缺 min() 兜底」（假红）、**不报**「没有任何 @media」（假绿）；修后只报
+> 「页面没有任何 @media (max-width: ...) 收敛规则（被注释掉的不算）」、不再喊那条注释。
+>
+> 同日第二处收口：遮蔽器原本是 **`replace` 三条正则**，而正则**看不见引号** ——
+> `content: "/*"` 这类字面会让它找不到收尾符、**一路遮蔽到文件尾**，该页剩下的规则对 B/C 完全隐身
+> （假绿，且没有任何提示）。现在 `maskComments()` 改成逐字符扫描，只有「不在引号里」的注释起始符才算注释；
+> 反验一对夹具：`content: "/*"` 之后写坏 `repeat(auto-fit, minmax(240px, 1fr))` ⇒ **仍报**（旧实现会全绿）；
+> 把同一句写成整行 `//` 注释 ⇒ **不报**。
+
+> **2026-11-08 收口：B 判据放宽「合法窄屏写法」，同时防住新的假绿**。B 原正则
+> `@media\s*\(max-width:\s*\d+px\)` 要求 `@media` 后**紧跟括号**，于是
+> `@media screen and (max-width: 767px)`（桌面壳文档里自己就是这么写的）与
+> `@media (max-width: 1023px) and (min-width: 768px)` 都被判成「页面没有任何 @media」——假红 ✗。
+> 现在统一走常量 `NARROW_QUERY`（`@media[^{]*?\(\s*(?:max-width\s*:\s*|width\s*<=\s*)(N)(px|em|rem)`），
+> 四种写法都认：`(max-width: Npx)`、`screen and (max-width: Npx)`、
+> `(max-width: Npx) and (min-width: Mpx)`、区间写法 `(width <= Npx)`。
+> 两处细节是**故意**的：`[^{]*?` 只放行到第一个 `{` 之前 ⇒ 不会跨过规则体跟后面的括号凑对，
+> 所以 `@media (min-width: 768px) { .x { max-width: 400px } }` 仍判不合格（防新假绿）；
+> 单位必须写全 ⇒ 无效 CSS `max-width: 767` 不被放行。
+> `--verbose` 的断点统计与 B 判据**共用同一条正则**（否则 B 认 `screen and` 而统计不认，
+> 输出会把有断点的页面漏印，读起来像「这页没有断点」）。
+> 反验（6 个夹具一次跑完）：`screen and` ✓放行 / 复合条件 ✓放行 / `width <= 600px` ✓放行；
+> 无 `@media` ✗报 / 只有 `min-width` ✗报 / 注释掉的 `@media` ✗报。
 
 改样式的固定流程：**先改 Web 端 → 把 `<style` 之后的整段同步到桌面端同名文件 → 跑守卫 → 跑实测矩阵**。
 两端风格化差异只有 `studio.css` 顶部的字体 `@import`（桌面端为 CSP 改成系统字体栈），响应式层必须逐字相同。

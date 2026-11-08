@@ -544,6 +544,44 @@ def _strip_krea2_specs(specs: Any, prefix: str | None) -> Any:
             for name, value in specs.items()}
 
 
+def _logical_shapes_of(raw: dict[str, tuple[int, ...]], info: SafetensorsInfo,
+                       path: Any) -> dict[str, tuple[int, ...]]:
+    """把 **4bit 打包**的权重形状还原成**逻辑**列数（×2）后再交给形状推断 ✓✗。
+
+    ## 为什么非做不可（2026-11-07 实测 ✓）
+
+    int4 文件把两个 4bit 塞进一个字节 ⇒ ``tmlp.0.weight`` 是 ``[6144, 128]`` ✓，
+    而逻辑上是 ``[6144, 256]`` ✓✗。:mod:`dit_generic` 的拓扑**全靠形状反推**
+    （``tdim=_shape_of(shapes, "tmlp.0.weight")[1]`` ✓ / ``txtdim=txtmlp.1.weight[1]`` ✓）
+    ⇒ 不还原就按**一半**的维建骨架 ⇒ 物化时逐键 ``shapeMismatch`` ⇒
+    报「权重推不出可装的结构」✓✗ —— **读起来像拿错了文件，其实是列数少算一半** ✓✗。
+
+    :mod:`dit_family` 那条新路径自己会还原（``_logical_dims`` ✓），它读的是 ``info``
+    不是这里的返回值 ⇒ 两边**不会**各还原一次 ✓（各还原一次＝×4 ✓✗）。
+
+    ``path`` 为 ``None``（自检/无盘）或读不到说明 ⇒ 原样返回 ✓（不猜 ✗）。
+    """
+    if path is None:
+        return raw
+    from . import loader, quant  # noqa: PLC0415
+
+    try:
+        specs = loader.quant_specs_of(path, info)
+    except Exception:  # noqa: BLE001 —— 补证据失败不该把装配搞崩 ✓
+        return raw
+    packed = quant.packed_weight_stems_of(specs)
+    if not packed:
+        return raw
+    out = dict(raw)
+    for stem in packed:
+        #: ⚠️ ``specs`` 的键是**层名**（``name[:-len(".comfy_quant")]`` ✓）——
+        #: 张量名要补 ``.weight`` ✓；直接拿层名查 ``raw`` 会一条都命中不了 ✓✗。
+        key = f"{stem}.weight"
+        if key in out:
+            out[key] = quant.logical_weight_shape(out[key], packed=True)
+    return out
+
+
 def _shell_int8(module: Any, info: SafetensorsInfo, prefix: str | None, path: Any,
                 int8_plan: Callable[..., dict[str, tuple[int, ...]]] | None,
                 int4_plan_fn: Callable[..., dict[str, tuple[int, ...]]] | None = None,
@@ -957,7 +995,10 @@ def build(key: str | None, info: SafetensorsInfo, explicit: Mapping[str, Any] | 
 
     explicit = dict(explicit or {})
     adapter = _ADAPTERS.get(spec.adapter)
-    raw = {name: tuple(entry.shape) for name, entry in info.tensors.items()}
+    #: ⭐ 4bit 打包权重的**逻辑**列数先还原 ✓✗（不还原 ⇒ 拓扑按一半的维建骨架 ⇒
+    #: 物化时逐键 `shapeMismatch`，报错指向"拿错文件"✓✗ 见 :func:`_logical_shapes_of` ✓）
+    raw = _logical_shapes_of(
+        {name: tuple(entry.shape) for name, entry in info.tensors.items()}, info, path)
     shapes, key_map, prefix = (raw, None, None)
     if adapter is not None:
         shapes, key_map, prefix = adapter.prepare(raw)

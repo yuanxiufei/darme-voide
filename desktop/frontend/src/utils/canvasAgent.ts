@@ -17,6 +17,7 @@
  *    必须一起报出来，否则用户看到「AI 说连上了」但画布没线 ✗
  */
 import { canvasAPI } from '../composables/useApi'
+import { canvasRevision } from '../composables/useCanvas'
 import { applyCanvasOps, canvasSnapshot, type ApplyResult, type CanvasOp } from './canvasOps'
 
 export interface CanvasAgentOutcome {
@@ -72,5 +73,124 @@ export async function runCanvasAgent(
     rejected,
     pendingRun,
     toolCalls: reply.toolCalls || [],
+  }
+}
+
+// ---------------------------------------------------------------- 草案 → 确认（两段式）
+
+/**
+ * 草案 ✓ —— 一句话换来「AI 打算做什么」，**画布一动不动**。
+ *
+ * 与 `runCanvasAgent` 的取舍：
+ *
+ * | | 一句话 ⇒ 直接落 | 一句话 ⇒ 草案 ⇒ 确认 |
+ * | --- | --- | --- |
+ * | 步数 | 1 | 2 |
+ * | 反悔机会 | 没有（落了才看见） | 有（先看 preflight 的数字） |
+ * | 坐标 | 模型自己算 | 编译器算 |
+ * | 适合 | 小动作（加一张图、连根线） | 一次建一批（开场三镜、整段分镜） |
+ *
+ * 所以两条都留着，别用一个替掉另一个 ✓。
+ */
+export interface CanvasPlanDraft {
+  planId: string
+  /** 用户原话（后端逐字保留，会回填进计划） */
+  goal: string
+  status: string
+  /** true ⇒ 还没确认，画布没动 */
+  requiresConfirmation: boolean
+  /** true ⇒ 这句子之前确认过，同一份计划不会再下发一遍 */
+  alreadyConfirmed?: boolean
+  /** 草案时的画布版本（参考值；真正的 CAS 用确认时返回的那个） */
+  expectedRevision: number | null
+  preflight: {
+    total: number
+    creates: number
+    links: number
+    runs: number
+    byOp: Record<string, number>
+    byNodeType: Record<string, number>
+  }
+  layout: Record<string, any>
+  warnings: string[]
+  note?: string
+}
+
+/** 起草 ✓ —— 不入画布。`baseRevision` 记下当下画布版本，供确认时比对。 */
+export async function draftCanvasPlan(
+  message: string,
+  handlers: { includeSnapshot?: boolean } = {},
+): Promise<CanvasPlanDraft> {
+  const text = (message || '').trim()
+  if (!text) throw new Error('请先说一句要做什么')
+
+  const snapshot = handlers.includeSnapshot === false ? undefined : canvasSnapshot()
+  return canvasAPI.planAuto({
+    message: text,
+    snapshot,
+    baseRevision: canvasRevision(),
+  })
+}
+
+export interface CanvasPlanOutcome {
+  /** 真正落到画布上的条数 */
+  applied: number
+  /** 后端在确认时重新发现的问题（画布变了导致计划对不上） */
+  errors: string[]
+  /** 前端落地被拒（连线被拒、节点不存在等） */
+  rejected: string[]
+  /** 没给 `onGenerate` 时挂起的生成节点（等用户手动点，这是正常的） */
+  pendingRun: string[]
+  /** 有值 ⇒ **一条都没落**：确认到落地之间画布被改过 */
+  conflict?: { baseRevision: number; currentRevision: number }
+  /** true ⇒ 这批 op 之前已经落过（重复确认 / 网络重试），本次什么也没做 */
+  replayed: boolean
+}
+
+/**
+ * 确认并落地 ✓ —— 唯一会写画布的那一步。
+ *
+ * 三个细节都是刻意的：
+ *
+ * 1. **确认时把当下快照再送一次**：后端会用它**重新编译**，所以「草案期间画布变了」
+ *    不是靠拒绝处理，而是靠重算消化掉 —— 计划里要连的节点被删了，这一步就会报错 ✓；
+ * 2. **`expectedRevision` 来自后端的确认响应**（= 重编译所依据的版本），不是草案时那个。
+ *    CAS 拦的是「确认到落地这几十毫秒里画布又被改」这个窗口 ✓；
+ * 3. **`applyId = planId`**：重复确认拿到的是后端缓存的同一批 op，前端靠幂等簿确保
+ *    不会建第二套节点、更不会重复起生成任务 ✓。
+ */
+export async function applyCanvasPlan(
+  planId: string,
+  handlers: { onGenerate?: (op: CanvasOp) => void; includeSnapshot?: boolean } = {},
+): Promise<CanvasPlanOutcome> {
+  const snapshot = handlers.includeSnapshot === false ? undefined : canvasSnapshot()
+  const confirmed = await canvasAPI.confirmPlan(planId, {
+    snapshot,
+    baseRevision: canvasRevision(),
+  })
+
+  const apply = applyCanvasOps(confirmed.ops as CanvasOp[], {
+    onGenerate: handlers.onGenerate,
+    applyId: planId,
+    baseRevision: confirmed.expectedRevision ?? undefined,
+  })
+
+  const pendingRun: string[] = []
+  const rejected: string[] = []
+  for (const item of apply.skipped) {
+    if (!handlers.onGenerate && item.op.type === 'run_generation' && item.op.nodeId) {
+      pendingRun.push(item.op.nodeId)
+      continue
+    }
+    rejected.push(`${item.op.type}：${item.reason}`)
+  }
+
+  return {
+    applied: apply.applied,
+    errors: confirmed.warnings || [],
+    rejected,
+    pendingRun,
+    conflict: apply.conflict,
+    replayed: apply.replayed === true,
   }
 }

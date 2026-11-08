@@ -18,7 +18,14 @@ from typing import Any
 import httpx
 
 from ..core.config import get_storage_root
+from ..core.media import get_absolute_path, parse_data_url  # noqa: F401  —— 再导出，见下
 from .task_logger import log_task_warn
+
+#: ⚠️ ``get_absolute_path`` / ``parse_data_url`` 的实现已搬 :mod:`app.core.media` ✓✗ ——
+#: 引擎读参考图必经这两步（``engine/bridge.py::materialize_reference``），而引擎不许 import
+#: 服务层 ✓。这里做的是**再导出同一个对象** ✓（``file_storage.get_absolute_path is
+#: app.core.media.get_absolute_path`` ✓），不是副本 ✗：业务侧十来个调用点一字不改 ✓，
+#: 全仓也仍然只有一份实现 ✓（``getAbsolutePath`` 的穿越防护是安全关键，抄两份必然漂 ✗）。
 
 #: mimeType ↔ 扩展名映射（与 TS 的两张表一字不差）
 _MIME_TO_EXT = {
@@ -35,27 +42,6 @@ _EXT_TO_MIME = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
-
-
-def get_absolute_path(relative_path: str) -> str:
-    """相对路径 → 绝对路径（**防路径穿越**）。
-
-    ⚠️ 一处容易看漏的原逻辑：若路径以 ``static/`` 开头，基准要**上跳到 storageRoot 的父目录**
-    —— 因为 ``static/xxx`` 这类返回值是「相对数据根」而非「相对 storageRoot」的。
-    路径穿越检查最终仍以**真实的 storageRoot** 为界，所以上跳本身不构成逃逸。
-    """
-    storage_root = Path(get_storage_root()).resolve()
-    if relative_path.startswith("static/") or relative_path.startswith("static\\"):
-        base = storage_root.parent
-    else:
-        base = storage_root
-
-    resolved = (base / relative_path).resolve()
-    if not (
-        str(resolved).startswith(str(storage_root) + os.sep) or str(resolved) == str(storage_root)
-    ):
-        raise ValueError(f"Path traversal blocked: {relative_path}")
-    return str(resolved)
 
 
 def save_uploaded_file(data: bytes, sub_dir: str, original_name: str) -> str:
@@ -88,12 +74,7 @@ def read_image_as_data_url(relative_path: str) -> str:
     return f"data:{mime_type};base64,{base64.b64encode(buffer).decode('ascii')}"
 
 
-def parse_data_url(data_url: str) -> dict[str, str] | None:
-    """``data:image/png;base64,xxxx`` → ``{mimeType, data}``；不匹配返回 None。"""
-    match = re.match(r"^data:([^;]+);base64,(.+)$", str(data_url or ""), re.S)
-    if not match:
-        return None
-    return {"mimeType": match.group(1), "data": match.group(2)}
+
 
 
 #: 下载体积上限 50MB（与原 TS 一致，防 OOM）

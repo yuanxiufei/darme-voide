@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""把供应商库里**没有正文**的扫描件 OCR 进本仓的 sidecar 索引（``data/ocr/library-ocr.sqlite``）。
+"""把供应商库里**没有正文**的扫描件 OCR 进本仓的 sidecar 索引（``indexes/library-ocr.sqlite``）。
 
 为什么需要它
 ============
 
 `curated-screenplay-methods.sqlite` 登记 5403 份文档，但只有 **2262 份**真抽出了文字；
-剩下 3139 份是**扫描件（无文本层）**，`get_text()` 返回空。用 PyMuPDF 抽查 5 份全是
+剩下 3139 份是**扫描件（无文本层）**，`get_text()` 返回空。抽查 5 份全是
 `chars_first5=0` ⇒ 不是抽取失败，是根本没有文字层。这些书里包含《序列编剧法》《电影剪辑》
 《中央戏剧学院剧本选 97 册》这类真用得上的东西，搜不到就等于库里没有。
 
@@ -13,7 +13,7 @@
 
 三种「没有文字层」的形态都要管（前两种盘上各有一批，第三种是留的口子）：
 
-* **PDF 扫描件**（3139 份）：`get_text()` 为空 ⇒ 用 pymupdf 按 dpi 渲染成图再 OCR；
+* **PDF 扫描件**（3139 份）：`get_text()` 为空 ⇒ 用 `pypdfium2` 按 dpi 渲染成图再 OCR；
 * **整页图片贴进 Word 的 docx**（2 份：《撕夜》全剧本 23.8 MB / 开端 8.7 MB）：docx 的
   `word/document.xml` 正文层 0 字，内容全在 `word/media/*` 的 44/49 张图里 ⇒ 按正文
   出现顺序取图再 OCR（docx 就是个 zip，不需要 python-docx 那个额外依赖）；
@@ -134,8 +134,8 @@
 **顺带一条纪律：批次在跑时别对它做整库备份/全表扫描**，要查就用「先取候选 id 集合、
 再在内存里做差集」，别写 ``NOT EXISTS (SELECT 1 FROM chunks ...)`` 那种逐份全表扫描。
 
-⚠️ 依赖：``pymupdf``（渲染页面）＋ OCR 引擎。两者都只在**离线批处理**里用，不进运行时镜像
-—— 服务端只需要读 sidecar 的 sqlite。引擎有两档，默认自动选新档（见 ``_new_engine``）：
+⚠️ 依赖：``pypdfium2``（渲染页面，与第三库的 PDF 文字层同一个包）＋ OCR 引擎。两者都只在
+**离线批处理**里用，不进运行时镜像 —— 服务端只需要读 sidecar 的 sqlite。引擎有两档，默认自动选新档（见 ``_new_engine``）：
 
 * ``rapidocr``（3.x，PP-OCRv6 small）——**优先**，实测 0.32 s/页；
 * ``rapidocr-onnxruntime``（1.4.x，PP-OCRv4）——装不上新档或要对照时的回退，1.75 s/页。
@@ -162,6 +162,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import gc
 import importlib.util
@@ -342,7 +343,7 @@ def _split_value_args() -> list[str]:
 
 
 def _rel(raw: str) -> str:
-    """主库里存的是 ``G:\\…\\全球热门与获奖影视剧本知识库\\08-…\\x.pdf``，取锚点右边。
+    """主库里存的是**建库机器上的旧盘符绝对路径**（形如 ``…\\全球热门与获奖影视剧本知识库\\08-…\\x.pdf``），取锚点右边。
 
     统一成正斜杠：``--plan`` 打印的 rel 要能直接贴进 ``--path-substr``（以及和
     ``/knowledge/documents`` 返回的 path 逐字对得上），混着反斜杠就得靠人脑转换。
@@ -393,7 +394,13 @@ def _extra_quarantined_docx() -> list[dict]:
     3.95 MB 里 ``word/document.xml`` 只有 7.9 KB、剩下的全是 6 张 jpeg。
 
     只接 ``status='quarantine'``：第三库正常收下的（``extra``）已经有正文块，再排进 OCR
-    队列是白烧算力；``.pdf``／散图本来就归 OCR 线自己扫主库，不从这里进。
+    队列是白烧算力。
+
+    ⚠️ 2026-11-07 起 ``.pdf`` 也归第三库抽文字层（``lib_index._pdf_text``），所以
+    **上传的扫描件 PDF 会先记 ``quarantine``、再由这里接进 OCR 队列** —— 靠的是
+    ``SUPPORTED_SUFFIXES`` 里本来就有 ``.pdf``。这一条是那条通道的**唯一补救路**：
+    若哪天把它从集合里拿掉，用户新传的扫描件就会变成"落盘了、永远搜不到、也没有
+    任何待办"，``tests/lib_index_test.py`` 里钉了一条 ast 判据守它。
     """
     from app.scripts.corpus import lib_index  # noqa: PLC0415 —— 只在算待办时需要
 
@@ -1005,38 +1012,62 @@ def _digest_pages(raw: list[tuple[int, str, str | None]]) -> tuple[list[tuple[in
     return pages_text, notes, blank
 
 
+def _pdf_open(local: Path):
+    """打开一份 PDF（``pypdfium2`` ／ PDFium）。**调用方负责 close**（见 :func:`_pdf_pages`）。
+
+    为什么要这个薄封装：``ocr_index`` 原先按需 ``import fitz``（PyMuPDF，AGPL-3.0），
+    而第三库的 PDF 文字层（``lib_index._pdf_text``）走的是 ``pypdfium2``（BSD-3／Apache-2.0）。
+    同一个仓里为「读 PDF」养两套绑定，唯一的理由才成立 —— 而这里不需要：取文字层、
+    渲染成图、数页数，PDFium 三件都做得了，于是把 AGPL 那个包整条摘掉。
+    """
+    import pypdfium2 as pdfium  # noqa: PLC0415 —— 只有真跑时才需要
+
+    return pdfium.PdfDocument(str(local))
+
+
+def _pdf_page_text(page) -> str:
+    """取一页**自己的**文字层；取不到（坏页／纯图页）返回 ""，不抛。"""
+    try:
+        return page.get_textpage().get_text_range().strip()
+    except Exception:  # noqa: BLE001 —— 个别坏页不拖垮整份
+        return ""
+
+
+def _pdf_page_image(page, dpi: int):
+    """把一页渲染成 ``(H, W, 3)`` uint8 **RGB** 数组（OCR 引擎吃的是这个）。
+
+    ⚠️ 两条都踩过才敢写死：
+    ① ``rev_byteorder=True`` 不能省 —— PDFium 的原生字节序是 **BGR**，不翻过来喂给
+       OCR 等于把红蓝对调（黑字白底看不出差别，彩色扫描件的检测框会偏）；
+    ② ``dpi`` 换算成 ``scale = dpi / 72``（PDF 的用户空间单位是 1/72 英寸）。
+    ``.copy()`` 也是必须的：``to_numpy()`` 是 bitmap 缓冲区的**视图**，bitmap 一回收，
+    这条跨线程返回的数组就是野指针。
+    """
+    bitmap = page.render(scale=dpi / 72, rev_byteorder=True)
+    return bitmap.to_numpy().copy()
+
+
 def _render_page(local: Path, index: int, dpi: int) -> tuple[str, object]:
     """在工作线程里把第 ``index`` 页准备成「可识别的输入」。
 
     返回 ``("native", 文本)`` 或 ``("image", ndarray)``。**「文字层够厚就直接用」也放在这里**：
     它虽是 1 ms 级的小活，但排在 OCR 前面时会把 GPU 的等待时间拉长（一页也不放过）。
 
-    ⚠️ 每个任务**自己 open/close** 一份 PDF，不缓存句柄：PyMuPDF 的 ``Document`` 不保证
+    ⚠️ 每个任务**自己 open/close** 一份 PDF，不缓存句柄：PDFium 的 ``PdfDocument`` 不保证
     跨线程并发安全（两个线程同时取页会崩），而线程本地缓存又会在长批次里累积几百个句柄、
-    且主线程无法安全回收别的线程的对象。open 是惰性 mmap＋解析 xref（实测 ≤ 数毫秒），
+    且主线程无法安全回收别的线程的对象。open 只解析 xref（实测 ≤ 数毫秒），
     相对一页渲染/识别是 1% 量级的开销，换「零泄漏」值得。
-
-    ⚠️ ``pix.samples`` 是 ``bytes``，``np.frombuffer`` 出来的数组把它的缓冲区**引用**住
-    （``ndarray.base``），因此 doc/pix 被回收后图像仍有效 —— 这条跨线程返回才不会读到野指针。
     """
-    import fitz  # noqa: PLC0415 —— 只有真跑时才需要
-    import numpy as np  # noqa: PLC0415
-
-    with fitz.open(str(local)) as doc:
+    with contextlib.closing(_pdf_open(local)) as doc:
         page = doc[index]
         #: ★先问 PDF 自己的文字层（约 1 ms/页）：供应商说「没抽出正文」不等于**每页**
         #: 都没文字层 —— 混合文档（正文页可复制、插图页是扫描）和供应商解析失败都
         #: 会落到待办里。但只有文字层**足够厚**（``NATIVE_TRUST_CHARS``）才敢用它，
         #: 否则「水印型扫描件」的整页正文会被几十字页眉顶掉（2026-11-04 实测 168 份）。
-        try:
-            text = page.get_text("text").strip()
-        except Exception:  # noqa: BLE001 —— 个别坏页不拖垮整份
-            text = ""
+        text = _pdf_page_text(page)
         if len(text) >= NATIVE_TRUST_CHARS:
             return "native", text
-        pix = page.get_pixmap(dpi=dpi)
-        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, pix.n)
+        image = _pdf_page_image(page, dpi)
     return "image", image
 
 
@@ -1052,7 +1083,7 @@ def _ocr_one(item: dict, ocr, *, dpi: int, max_pages: int | None,
     """OCR 一份 PDF，返回 ``{pages, chunks: [(page, chunk_no, text)], seconds}``。
 
     ★**渲染与识别流水**（2026-11-04）：原先一页一页「渲染 → 识别 → 渲染」，GPU 每页都要
-    空等一次 PyMuPDF 渲染（实测 GPU 利用率在 25–82% 之间抖、CPU 只占 20%）。现在由
+    空等一次页面渲染（实测 GPU 利用率在 25–82% 之间抖、CPU 只占 20%）。现在由
     ``render_threads()`` 条线程按窗口预取后续页，主线程连续喂 GPU，两条腿同时走；
     线程总额仍受 ``cpu_room()`` 约束（见 :func:`worker_threads`）。
 
@@ -1061,13 +1092,11 @@ def _ocr_one(item: dict, ocr, *, dpi: int, max_pages: int | None,
     走 ``_page_chunks``。跨页的版头页脚统计、碎行合并必须看全文档（单页看不出
     「·232·」是版头还是正文），所以清洗**只允许**在主进程做一次 —— 这是切分不伤质量的前提。
     """
-    import fitz  # noqa: PLC0415 —— 只有真跑时才需要
-
     local = _local(item["path"])
     if local is None or not local.exists():
         raise FileNotFoundError(item["rel"])
     started = time.time()
-    doc = fitz.open(str(local))
+    doc = _pdf_open(local)
     pool = None
     try:
         total = len(doc)
@@ -1669,7 +1698,7 @@ _OCR = None
 _WORKER_DPI = DEFAULT_DPI
 
 
-#: 每个进程最多开几条渲染线程：再多就只是在 PyMuPDF 里排队（一页渲染本身就是单线程的，
+#: 每个进程最多开几条渲染线程：再多就只是在 PDFium 里排队（一页渲染本身就是单线程的，
 #: 并行度来自「同时渲染几页」），同时也限制预取窗口占用的内存（每页 ≈ 4–6 MB）。
 MAX_RENDER_THREADS = 6
 #: GPU 档每进程的线程配额：2 条 ORT（CPU 侧只做解码/缩放/后处理）+ 其余给渲染预取。
@@ -1869,7 +1898,7 @@ def worker_threads(workers: int) -> tuple[int, int]:
 
     **不许超硬件线程数**：``os.cpu_count()`` 是逻辑线程数（本机 32 ＝ 16 核 × 2 超线程）。
     原式 ``cores // workers`` 给出 8 进程 × 4 线程 ＝ 32，恰好等于**全部**逻辑线程，
-    而每进程除 ORT 线程池还有 PyMuPDF 渲染线程、主进程与系统本身 —— 实测 32 个逻辑 CPU
+    而每进程除 ORT 线程池还有 PDFium 渲染线程、主进程与系统本身 —— 实测 32 个逻辑 CPU
     被顶满、机器失去响应，渲染被抢到 OCR 反而更慢。故预算先减 ``OCR_CPU_RESERVE``。
 
     ★2026-11-04 第二处修正：**不要再把渲染线程排除在配额之外**。原先 GPU 档写死「ORT 2 条、
@@ -1978,7 +2007,7 @@ def _pdf_pages(item: dict) -> int | None:
 
     ⚠️ 不用主库登记的 ``item["pages"]``：那个字段来自供应商解析器的报告，实测有缺有错。
     切段用的是「第几页到第几页」，报小了会**静默丢页**（段没覆盖到），宁可当场数一遍。
-    ``fitz.open`` 只解析 xref，毫秒级；且只在「待办份数 < 进程数」时才数（最多几份）。
+    ``PdfDocument`` 只解析 xref，毫秒级；且只在「待办份数 < 进程数」时才数（最多几份）。
     """
     suffix = (item.get("extension") or Path(item["rel"]).suffix).lower()
     if suffix != ".pdf":
@@ -1987,9 +2016,7 @@ def _pdf_pages(item: dict) -> int | None:
     if local is None or not local.exists():
         return None
     try:
-        import fitz  # noqa: PLC0415
-
-        with fitz.open(str(local)) as doc:
+        with contextlib.closing(_pdf_open(local)) as doc:
             return len(doc)
     except Exception:  # noqa: BLE001 —— 数不出页数就当不可切
         return None

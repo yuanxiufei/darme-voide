@@ -27,6 +27,10 @@ AGENT_BY_KIND: dict[str, str] = {
     "extractor": "extractor",
     "script_rewriter": "script_rewriter",
     "voice_assigner": "voice_assigner",
+    #: 2026-11-07 补（知识闭环缺口 8）：第 5 种可评对象 —— **图片提示词层**。
+    #: 它正好卡在"产出层"与"成片层"之间：提示词写砸了，成片评测那一维会替它挨罚，
+    #: 但那时已经花掉一次视频生成的钱。所以这一层必须自己有基准。
+    "grid_prompt": "grid_prompt_generator",
 }
 
 #: ``kind`` 的**字面量**联合（TS 里是 ``'storyboard' | 'extractor' | ...``）。
@@ -36,6 +40,7 @@ LITERAL_KINDS: tuple[str, ...] = (
     "extractor",
     "script_rewriter",
     "voice_assigner",
+    "grid_prompt",
 )
 
 #: 每个 case 的顶层键（``BenchmarkCase`` 的公共部分）。
@@ -47,6 +52,10 @@ STATEMENT_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
     "extractor": ("script",),
     "script_rewriter": ("content",),
     "voice_assigner": ("script", "characters"),
+    #: ``shots`` 是**要送进宫格的分镜**（``[{number,title,scene,action,dialogue}]``），
+    #: 由 ``seed_case`` 落成真实 ``storyboards`` 行再把 id 交给 Agent —— 宫格 Agent 的
+    #: 工具（``read_shots_for_grid``）只认 id，不认 JSON 片段。
+    "grid_prompt": ("shots", "rows", "cols", "mode"),
 }
 
 #: ``rubric``（**私密**金标准）的键 —— 按 kind 分。
@@ -57,6 +66,10 @@ RUBRIC_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
                   "minPromptLength"),
     "script_rewriter": ("minScenes", "forbiddenCameraWords"),
     "voice_assigner": ("legalVoiceIds", "requireReason"),
+    #: 宫格的金标准全是**可数/可测**的：格数对不对、有没有中文（英文提示词硬要求）、
+    #: 有没有模板残留（``[...]`` / ``TODO`` / ``<...>``）、格间是否互相复制、正文够不够长。
+    "grid_prompt": ("rows", "cols", "minGridPromptLength", "minCellPromptLength",
+                    "forbiddenTags"),
 }
 
 #: ``ScoreReport.dimensions[]`` 的键。

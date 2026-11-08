@@ -41,10 +41,11 @@ MAX_FILE_SIZE = 64 * 1024 * 1024
 #: 一次请求最多几份。前端队列一次拖 20 份是正常操作，再多就该分批了。
 MAX_FILES = 20
 
-#: 可接受的扩展名 —— 与 ``lib_index`` 登记的抽文本通道逐一对应，多一个都不收
+#: 可接受的扩展名 —— 与 ``lib_index`` 登记的抽文本通道**同一个真源**，多一个都不收
 #: （收了也得靠 ``lib_index`` 才抽得出，它不认的这里收进来只是死文件）。
-ALLOWED_SUFFIXES = tuple(lib_index.TEXT_EXTS + lib_index.DOC_EXTS
-                         + lib_index.DOCX_EXTS + lib_index.RTF_EXTS)
+#: 直接读 ``lib_index.SUPPORTED_EXTS``，别再在这里做加法：抄一份的后果是
+#: 上传能收、批量扫库却把同一批文件记成「未登记抽文本通道」（2026-11-07 实测）。
+ALLOWED_SUFFIXES = tuple(lib_index.SUPPORTED_EXTS)
 
 #: 给前端做提示用（"支持这些类型"），与 ``ALLOWED_SUFFIXES`` 同一真源。
 ALLOWED_LABEL = "、".join(sorted({suffix.lstrip(".").upper() for suffix in ALLOWED_SUFFIXES}))
@@ -98,7 +99,7 @@ def ingest(data: bytes, filename: str, *, note: str | None = None) -> dict[str, 
         return _reject(name, "空文件（0 字节），没有任何内容可入库。")
     if suffix not in ALLOWED_SUFFIXES:
         return _reject(name, f"不支持的类型「{suffix or '(无扩展名)'}」；"
-                             f"本库只收 {ALLOWED_LABEL}（PDF 走扫描件 OCR 那条线）。",
+                             f"本库只收 {ALLOWED_LABEL}。",
                        size=size)
     if size > MAX_FILE_SIZE:
         return _reject(name, f"文件太大（{size / 1024 / 1024:.1f} MB），"
@@ -142,8 +143,10 @@ def ingest(data: bytes, filename: str, *, note: str | None = None) -> dict[str, 
         #: 一律先说「已落盘」：``quarantined`` 与 ``rejected`` 对用户的差别就在
         #: **盘上有没有这份文件**（前者能拿去人工处理/走 OCR，后者根本没有）。
         if outcome["chars"] < lib_index.MIN_CHARS:
-            reason = ("已落盘，但正文只有几个字（多半是图片型/扫描件），"
-                      "要走 OCR 那条线才读得出内容。")
+            reason = "已落盘，但正文只有几个字"
+            #: PDF 抽不满要指向 OCR 线（那是它唯一的补救路），其余格式只说没内容。
+            reason += ("（多半是图片型/扫描件），要走 OCR 那条线才读得出内容。"
+                       if suffix == ".pdf" else "，没有可检索内容。")
         else:
             reason = (f"已落盘，但抽出的正文可打印率只有 {outcome['ratio']:.2f}"
                       f"（下限 {lib_index.MIN_PRINTABLE}），像是抽错了/编码不对。")

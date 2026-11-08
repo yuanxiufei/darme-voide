@@ -45,7 +45,14 @@ os.environ["KNOWLEDGE_LEDGER_DB"] = (TMP / "ledger.sqlite").as_posix()
 os.environ["DATA_ROOT"] = TMP.as_posix()
 
 from app.services import knowledge_ledger, outcome_index  # noqa: E402
+from app.services.engine import hooks as engine_hooks  # noqa: E402
 from app.services.engine import tuning  # noqa: E402
+
+#: ⚠️ 引擎不再 import 服务层 ✓✗（独立性契约 ② 判的就是这个 ✓）—— 三个源改成**由服务层登记** ✓，
+#: 线上的登记点在 ``app/main.py`` 启动钩子 ✓；本套件**直连引擎** ⇒ 得自己登记 ✓，
+#: 否则 ``set_field`` 会按"台账没接入 ⇒ 证据核不了 ⇒ 按核不过处理"拒写 ✓（症状是本节读
+#: ``tuning.json`` 时 FileNotFoundError ✓，报错指向路径、不指向真正的原因 ✓✗）。
+engine_hooks.provide(run_index=outcome_index, ledger=knowledge_ledger)
 
 SRC = (BP / "app" / "services" / "engine" / "tuning.py").read_text(encoding="utf-8")
 _RESULTS: list[tuple[str, bool, object]] = []

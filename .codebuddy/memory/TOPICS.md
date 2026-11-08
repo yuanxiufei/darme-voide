@@ -12,8 +12,8 @@
 
 ## 视频提示词语料
 - **合规红线**：他人提示词正文有版权，**不得搬运进仓库**；参考图用自有三视图；凭证绝不入库。PromptMart 免费区（500 中 23 免费）→ **只用免费区，不付费**。
-- **落盘约定**：第三方语料放 `data/prompt-corpus/<源>/`（gitignored）；脚本 `backend-py/app/scripts/corpus/`；结论 `docs/`。三者分离，勿混。
-- **Seedance2 语料**：8755 条 → `data/prompt-corpus/seedance2/metadata.jsonl`；脚本 `backend-py/app/scripts/corpus/analyze{,2,3}.py`（`SEEDANCE2_CORPUS` 可覆盖）。**提示词在 `i18n.zh.p`**（英文是平台扩写版）；`spec.duration` 有脏值 → 过滤 `0 < d <= 300`。报告 `docs/seedance2-corpus-analysis.md`，源清单 `docs/video-prompt-data-sources.md`。
+- **落盘约定**：第三方语料放 `corpus/prompt-corpus/<源>/`（gitignored）；脚本 `backend-py/app/scripts/corpus/`；结论 `docs/`。三者分离，勿混。
+- **Seedance2 语料**：8755 条 → `corpus/prompt-corpus/seedance2/metadata.jsonl`；脚本 `backend-py/app/scripts/corpus/analyze{,2,3}.py`（`SEEDANCE2_CORPUS` 可覆盖）。**提示词在 `i18n.zh.p`**（英文是平台扩写版）；`spec.duration` 有脏值 → 过滤 `0 < d <= 300`。报告 `docs/seedance2-corpus-analysis.md`，源清单 `docs/video-prompt-data-sources.md`。
 - **两类写法并存**：PromptMart（短剧/漫剧）**时间码分段** → 范式 6.1–6.9；Seedance2（平台通用短视频）**散文式多段**（时间码仅 14%）→ 6.10。
 - **三条实测修正**：① 「一镜到底」仅 4%，高频是 旋转/手持/环绕/推进/定格/跟随；② 一致性写法 = **部位清单式锚定**（面部比例/眼型/下颌线/发型轮廓/皮肤质感）；③ 有**反 AI 感词族**（不完美自然构图 / 自动对焦不完美 / 环境瑕疵 / 轻微手持不稳），比堆 `8k, ultra detailed` 更压塑料感。
 - **语料源筛选**：核仓库看 `size`(KB) 与真实文件树，**不要看 star**；**许可证是硬约束**（TIP-I2V 禁商用仅内部统计、Seedance2 CC BY 4.0 需署名、Semonxue 无 LICENSE 不得搬运）。

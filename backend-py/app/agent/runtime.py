@@ -33,7 +33,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
@@ -61,7 +61,7 @@ from app.services.task_logger import (
 )
 from app.services.vendor_errors import fetch_with_retry, format_vendor_http_error
 from app.services.visual_graph import build_visual_graph_guidance
-from app.services import knowledge_feed, rhythm_phase
+from app.services import knowledge_feed, rhythm_phase, skill_usage
 from app.mcp.client import discover_mcp_tools
 from app.agent import context_budget
 from app.agent.protocol import build_protocol_contract, parse_agent_protocol
@@ -94,6 +94,7 @@ __all__ = [
     "normalize_tool_nick",
     "normalize_tool_output",
     "record_knowledge_usage",
+    "record_skill_usage",
     "run_agent_with_instructions",
     "run_agent_with_retry",
 ]
@@ -108,6 +109,24 @@ DEFAULT_MAX_STEPS = 20
 #: 长回复被截断时**排在文本之后的 tool call 整段丢失**）
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.7
+
+
+def merge_model_settings(base: dict[str, Any], overrides: Any) -> dict[str, Any]:
+    """把「本次 run 的生成参数覆盖」合进基线 ``model_settings``。
+
+    存在的理由：评测域要问「**同一份提示词**、只换温度，分数会不会变」（见
+    ``agent/evaluation/param_optimizer.py``），而基线里那两格来自 DB 配置，光靠传参
+    改不动。故 ``options["modelSettings"]`` 允许按次覆盖。
+
+    ⚠️ 一律按 **nullish** 判：``temperature=0.0`` 是正当值（贪心解码），写 `or` 会被
+    默认温度悄悄顶掉 —— 于是「试 0.0」实际试的是 0.7，整轮结论作废且看不出异常。
+    """
+    merged = dict(base)
+    if isinstance(overrides, dict):
+        for key in ("temperature", "maxOutputTokens"):
+            if overrides.get(key) is not None:
+                merged[key] = overrides[key]
+    return merged
 
 #: 会被注入风格 Profile 的 Agent（其余直接透传）。
 #: 成员集合的单一来源在 ``agent_registry.AGENT_SPECS`` 的 ``style_profile`` 字段 ——
@@ -173,6 +192,30 @@ def record_knowledge_usage(entry_ids: list[str], trace: Any, outcome: str) -> No
     except Exception as err:  # noqa: BLE001
         log_task_warn("AgentFactory", "knowledge-usage-failed", {
             "error": str(err), "outcome": outcome, "entries": len(entry_ids),
+        })
+
+
+def record_skill_usage(sizes: dict[str, int], dropped: list[str], agent_type: str,
+                       trace: Any, outcome: str) -> None:
+    """把「这次真注入了哪些 skill、哪些被预算裁掉」记进 ``skill_usage``。
+
+    与知识投喂同构（``run_id`` 用 trace 句柄 id，可回查原始日志），但**语义不同**：
+    这里记的是注入事实与跑次结果，不宣称 skill 被采纳（见 ``services/skill_usage.py`` 模块头）。
+    统计失败只告警，不影响跑次。
+    """
+    if not sizes and not dropped:
+        return
+    items = [{"id": skill_id, "chars": chars, "dropped": False}
+             for skill_id, chars in sizes.items()]
+    items += [{"id": skill_id, "chars": 0, "dropped": True}
+              for skill_id in dropped if skill_id not in sizes]
+    try:
+        skill_usage.record(
+            items, agent_type=agent_type,
+            run_id=f"trace:Agent/{getattr(trace, 'trace_id', '')}", outcome=outcome)
+    except Exception as err:  # noqa: BLE001
+        log_task_warn("AgentFactory", "skill-usage-failed", {
+            "error": str(err), "outcome": outcome, "skills": len(items),
         })
 
 #: 只有**空串**要丢掉（``filter(Boolean)``）；``None`` 同样丢
@@ -842,7 +885,16 @@ async def default_generate(
     而本机默认文本配置正是 ``provider=ollama`` ⇒ ``/agent/{type}/chat`` 恒 400。
     其余原生适配器（Gemini）仍**显式报错**，不静默降级。
     """
-    adapter = get_text_adapter(str(config.get("provider") or ""))
+    provider_name = str(config.get("provider") or "")
+    if provider_name == "engine":
+        # ⚠️ **必须在这里分派** ✗✗：``engine`` 不是 HTTP 厂商 ⇒ ``get_text_adapter('engine')``
+        # 会先抛 ``UnknownProviderError``（registry 里没有这一项 ✓），根本走不到下面任何分支 ✓✗。
+        # 也就说「本仓自己下载的模型能不能跑 agent」= 这一行在不在 ✓。
+        return await _run_engine_tool_loop(
+            model=model, config=config, instructions=instructions, tools=tools,
+            message=message, max_steps=max_steps, model_settings=model_settings,
+        )
+    adapter = get_text_adapter(provider_name)
     provider = getattr(adapter, "provider", "")
     loop_kwargs: dict[str, Any] = {
         "adapter": adapter,
@@ -1083,6 +1135,233 @@ async def _run_ollama_tool_loop(
             "steps": steps}
 
 
+#: 工具调用块的**协议** ✓（Qwen3 / Hermes 系骨架要求模型这么写 ✓）。
+#: ⚠️ 定界只认**标签** ✓、不认花括号配对 ✗✗：配对写法（``\{.*?\}``）在「参数里有嵌套对象」
+#: 时会切坏 ✓，更糟的是「块在、但 JSON 本身残缺」时**正则根本匹配不上** ⇒ 变成「这轮没调工具」，
+#: 静默吞掉一次调用 ✓✗。先按标签抠出原文、再 ``json.loads`` ⇒ 坏就是坏、抛出来 ✓。
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+
+
+#: 裸对象退路最多认几个（再多的"一串调用"基本是模型在刷格式 ✓✗，按散文处理更安全 ✓）
+_MAX_BARE_CALLS = 32
+#: 裸调用的合法键（多一个键就是**别的什么东西** ✗ —— 结果回显、举例、schema 都会长成这样 ✓）
+_BARE_KEYS = {"name", "tool", "arguments", "parameters"}
+
+
+def _bare_tool_payloads(body: str) -> list[dict[str, Any]] | None:
+    """整段正文就是**一串**工具调用对象（一个标签都没写）⇒ 原样返回 ✓；否则 ``None`` ✗。
+
+    ⚠️ 2026-11-07 真机撞出来（本仓下载的 ``Qwen3-4B-Instruct-2507`` Q4_K_M ✓✗）：权重自带的
+    chat 模板明写「调用写成 ``<tool_call>...</tool_call>``」✓，模型却只吐了
+    ``{"name": "save_note", "arguments": {...}}`` ✗ —— 标签没写 ✓✗，内容一字不差 ✓。
+    按旧判据这就是「这轮没调工具」⇒ 工具没执行、`tool_results` 空 ⇒ 探针报 ``PROBE_NO_TOOL`` ✗✗。
+
+    ⚠️⚠️ **而且要认"一串"，不能只认"一个"** ✗✗（同日第二次真跑才露头 ✓）：extractor 那跑模型吐了
+    **四个**裸对象（``read_script_for_extraction`` + 三个 ``read_existing_*``）⇒ 只认单对象的写法
+    一个都不认 ⇒ 一个读工具都没执行 ⇒ 模型永远走不到 ``save_*`` ⇒ ``/tune`` 四跑全 0 分 ✗
+    （**分数恒 0** 看起来像"模型不行"，其实是解析层把它的合法调用整串丢了 ✓✗）。
+
+    因此放行一种**极窄**的退路 ✓（几条限制同时成立才算，任何一条不满足就退回「没调工具」✗）：
+
+    * **整段**只有这些 JSON 对象（对象之间只许空白 ✓）✗ 不是「文里夹着一段 JSON」✓
+      （夹在散文里的对象是举例、是结果回显，把它当调用就是**凭空造一次副作用** ✗✗）；
+    * 允许最外面包一层 ````` ```json ``` `` 代码围栏 ✓（小模型爱围，围了仍然指向这批对象 ✓）；
+    * 键只能是 ``name``/``tool``/``arguments``/``parameters`` ✓（多一个键就是别的什么东西 ✗）；
+    * 每个 ``name`` 都必须是**真实注册过的工具** ✓（由调用方核 ✓：模型编出来的工具名
+      当散文看，不当调用 ✗ —— 也不抛 ✗，那样一次幻觉能毁掉整轮 ✓✗；**混着就是不认** ✓，
+      只跑认得的几个等于替模型裁剪它没说的调用 ✗）；
+    * 个数上限 :data:`_MAX_BARE_CALLS` ✓（一串上百个基本是在刷格式 ✗）。
+    """
+    text = str(body or "").strip()
+    if text.startswith("```") and text.endswith("```") and len(text) > 6:
+        inner = text[3:-3]
+        if inner[:4].lower() == "json":
+            inner = inner[4:]
+        text = inner.strip()
+    if not text.startswith("{"):
+        return None
+    decoder = json.JSONDecoder()
+    payloads: list[dict[str, Any]] = []
+    cursor = 0
+    while True:
+        rest = text[cursor:].lstrip()      # 对象之间只许空白 ✓（空行随便 ✓ —— 真机就是空行隔开的 ✓）
+        if not rest:
+            break
+        if not rest.startswith("{"):
+            return None
+        try:
+            payload, end = decoder.raw_decode(rest)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if not set(payload) <= _BARE_KEYS:
+            return None
+        if not isinstance(payload.get("name") or payload.get("tool"), str):
+            return None
+        payloads.append(payload)
+        if len(payloads) > _MAX_BARE_CALLS:
+            return None
+        cursor = len(text) - len(rest) + end
+    return payloads or None
+
+
+def parse_engine_tool_calls(text: str, *, tool_names: Iterable[str] | None = None
+                            ) -> list[dict[str, Any]]:
+    """模型原文 ⇒ 工具调用列表 ✓（形状对齐 Ollama 那条：``[{"function": {"name", "arguments"}}]`` ✓）。
+
+    ⚠️ 为什么必须**从文本里抠** ✗✗：自研引擎是**纯文本生成**（没有 ``message.tool_calls``
+    这种结构化字段 ✓）；骨架对工具的约定是「把调用写成 ``<tool_call>{json}</tool_call>``」✓
+    ⇒ 本函数是**协议解析**、不是猜测 ✓。三条判据分得很开：
+
+    * 一个块都没有、正文也不是「整段一串调用对象」⇒ 返回空 ✓（= 这轮没调工具 ✓，交给 nudge/收工判定 ✓）；
+    * 块在但 JSON 坏 / 缺 ``name`` ⇒ **抛** ✗✗（**不许**静默丢弃 ✗ —— 丢了模型会以为调用成功，
+      下一轮还在等结果，而调用方看到的是一段「什么都没发生」的正常回复 ✓✗）；
+    * 没写标签但**整段**就是一串工具调用对象、且名字全都真注册过 ⇒ 认 ✓（见
+      :func:`_bare_tool_payloads` ✓：真机小模型漏标签时唯一不牺牲正确性的退路 ✓；
+      ⚠️ 是**一串**不是只认一个 ✗✗ —— extractor 那跑模型一口气吐了四个读工具 ✓）。
+
+    ⚠️ ``tool_names=None`` ⇒ **不认**裸对象 ✗：解析器自己没法核「这名字是不是真工具」，
+    没有清单就宁可当散文 ✓（调用方 ``_run_engine_tool_loop`` 一律把注册表的名字传进来 ✓）。
+    """
+    calls: list[dict[str, Any]] = []
+    body = str(text or "")
+    cursor = 0
+    while True:
+        start = body.find(_TOOL_CALL_OPEN, cursor)
+        if start < 0:
+            break
+        end = body.find(_TOOL_CALL_CLOSE, start + len(_TOOL_CALL_OPEN))
+        if end < 0:
+            # 开标签在、闭标签没了 ⇒ 生成被截断 ✓：**不算调用** ✓（也不猜参数 ✗）
+            break
+        raw = body[start + len(_TOOL_CALL_OPEN):end].strip()
+        cursor = end + len(_TOOL_CALL_CLOSE)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"工具调用块里的 JSON 解析不了 ✗：{raw[:160]}…（{err}）—— "
+                f"**不静默丢弃** ✗（丢掉＝这次调用凭空消失 ✓✗）") from err
+        if not isinstance(payload, dict):
+            raise ValueError(f"工具调用块必须是对象 ✗（收到 {type(payload).__name__}：{raw[:80]}）")
+        name = str(payload.get("name") or payload.get("tool") or "").strip()
+        if not name:
+            raise ValueError(f"工具调用缺 ``name`` ✗：{raw[:160]}")
+        raw_args = payload.get("arguments")
+        if raw_args is None:
+            raw_args = payload.get("parameters")
+        calls.append({"function": {"name": name, "arguments": _parse_tool_args(raw_args)}})
+    if calls or not tool_names:
+        return calls
+    payloads = _bare_tool_payloads(body)
+    if not payloads:
+        return calls
+    known = set(tool_names)
+    names = [str(item.get("name") or item.get("tool") or "").strip() for item in payloads]
+    if any(name not in known for name in names):
+        # 编出来的工具名（或混着编的）：**整串**当散文 ✓，既不当调用、也不抛 ✗
+        # ⚠️ 不许"认得几个就跑几个" ✗：那是替模型裁剪它没说过的调用 ✓✗
+        return calls
+    for payload, name in zip(payloads, names):
+        raw_args = payload.get("arguments")
+        if raw_args is None:
+            raw_args = payload.get("parameters")
+        calls.append({"function": {"name": name, "arguments": _parse_tool_args(raw_args)}})
+    return calls
+
+
+async def _run_engine_tool_loop(
+    *,
+    model: str,
+    config: dict[str, Any],
+    instructions: str,
+    tools: ToolRegistry,
+    message: str,
+    max_steps: int,
+    model_settings: dict[str, Any],
+) -> dict[str, Any]:
+    """**自研引擎**（``provider=engine`` ✓）的工具调用循环 —— 本仓自己下载的 GGUF、自己推理 ✓。
+
+    ⭐ 为什么要有这条（2026-11-07）：``generate_text`` 早就支持 ``provider="engine"`` ✓，
+    但那只是**一问一答**（:meth:`LlmBackend.generate` 只会把 ``(prompt, system)`` 拼成两条消息 ✗），
+    而 agent 要的是「调工具 → 回灌结果 → 再想一步」✓✗。缺的正是本函数 ✓ ——
+    没有它，本仓下载的模型**只能当聊天框**，跑不了任何 agent 评测/优化 ✓✗。
+
+    与另两条循环的区别只有**传输** ✓：不发 HTTP（进程内 ``to_thread`` 跑推理 ✓）、
+    工具调用从**模型原文**里按约定的 ``<tool_call>`` 块解出（:func:`parse_engine_tool_calls` ✓）。
+    其余（``max_steps`` 上限、只读工具 nudge、``_run_tool`` 记账）三条循环**同一份** ✓。
+
+    ⚠️ ``model`` 这个形参在这条路上**不参与取权重** ✗：权重由 ``config.settings.ggufPath``
+    决定 ✓（与 ``generate_text`` 同一个口径 ✓ —— 换模型就是换路径，不是换字符串 ✓）；
+    保留形参只为三条循环签名一致 ✓。
+    """
+    from app.services.text_generation import get_engine_backend   # 延迟 import ✓ 防启动期环 ✓
+
+    settings = config.get("settings") or {}
+    gguf_path = settings.get("ggufPath") or settings.get("gguf_path")
+    if not gguf_path:
+        raise ValueError(
+            "provider=engine 缺少 ``settings.ggufPath`` ✗ —— 自研引擎按**路径**取权重 ✓"
+            "（这不是「模型名」那套 ✓）；本仓下载的 GGUF 落在模型目录 ``llm/`` 下 ✓")
+    tokenizer_path = settings.get("tokenizerPath") or settings.get("tokenizer_path") or None
+    backend = get_engine_backend(
+        str(gguf_path), str(tokenizer_path) if tokenizer_path else None,
+        device=str(settings.get("device") or "auto"),
+        dtype=str(settings["dtype"]) if settings.get("dtype") else None,
+    )
+
+    temperature = model_settings.get("temperature")
+    max_new_tokens = int(model_settings.get("maxOutputTokens") or 1024)
+    openai_tools = tools.as_openai_tools() if tools.tools else None
+    # 裸对象退路要「这名字真注册过」作凭据 ✓ ⇒ 解析时把清单给下去 ✓（不给就只认标签 ✓）
+    tool_names = {tool.id for tool in tools.tools.values()} if tools.tools else None
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": message},
+    ]
+    tool_calls_out: list[dict[str, Any]] = []
+    tool_results_out: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    text = ""
+    nudged = False
+
+    for _ in range(max(1, int(max_steps))):
+        text = await asyncio.to_thread(
+            backend.generate_messages, messages,
+            tools=openai_tools,
+            temperature=float(temperature if temperature is not None else 1.0),
+            max_new_tokens=max_new_tokens,
+        )
+        steps.append({"backend": backend.name, "chars": len(str(text or ""))})
+        calls = parse_engine_tool_calls(text, tool_names=tool_names)
+        if not calls:
+            if _need_write_nudge(tool_calls_out, text, nudged, tools):
+                nudged = True
+                steps.append({"nudge": "missing-write"})
+                log_task_warn("Agent", "missing-write-nudge", {
+                    "calledTools": _called_tools(tool_calls_out), "textChars": len(text),
+                })
+                messages.append({"role": "user", "content": _NUDGE_TEXT})
+                continue
+            break
+
+        # assistant 这轮原文（含它自己写的 ``<tool_call>`` 块）**原样回灌** ✓：不重排、不重新序列化 ✗
+        # （序列化后再渲染，与模型自己产出的形状可能差一个空白 ⇒ 跟随度掉 ✓✗）。
+        messages.append({"role": "assistant", "content": text, "tool_calls": calls})
+        for call in calls:
+            function = call.get("function") or {}
+            name = function.get("name")
+            args = _parse_tool_args(function.get("arguments"))
+            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
+            messages.append({"role": "tool", "name": name, "content": rendered})
+
+    return {"text": text, "thinking": "", "tool_calls": tool_calls_out,
+            "tool_results": tool_results_out, "steps": steps}
+
+
 @dataclass
 class AgentRunResult:
     """``runAgentWithInstructions`` 的返回（字段名对齐 TS 的 ``AgentRunResult``）。"""
@@ -1136,9 +1415,16 @@ async def run_agent_with_instructions(
     # 统一组装：base + skill + 协议契约 + 风格注入 —— 与 build_agent_config **同一个函数**。
     # 这里刻意不复用 built.instructions：形参 instructions 可能是评测传入的候选提示词，
     # 而 style Profile 必须按「真实运行上下文」现算，否则评测结论对不上线上表现。
+    #: skill 注入明细（出参）：跑次收口时连同结果一起写 ``skill_usage``
+    skill_sizes: dict[str, int] = {}
+    skill_dropped: list[str] = []
     skill_instructions = load_agent_skills(
-        type, built.db_config.skills if built.db_config is not None else None
+        type, built.db_config.skills if built.db_config is not None else None,
+        sizes=skill_sizes, dropped=skill_dropped,
     )
+
+    def _record_skills(outcome: str) -> None:
+        record_skill_usage(skill_sizes, skill_dropped, type, trace, outcome)
     fed_ids: list[str] = []
     full_instructions = assemble_full_instructions(
         conn, type, episode_id, drama_id, instructions, skill_instructions,
@@ -1151,13 +1437,13 @@ async def run_agent_with_instructions(
         raise ValueError(f"No model configured for agent type {type}")
 
     max_steps = options.get("maxSteps") or DEFAULT_MAX_STEPS
-    model_settings = {
+    model_settings = merge_model_settings({
         "maxOutputTokens": ((built.db_config.max_tokens if built.db_config else None)
                             or DEFAULT_MAX_OUTPUT_TOKENS),
         # ⚠️ nullish：DB 里显式写了 0 也要保留 0
         "temperature": ((built.db_config.temperature if built.db_config is not None
                          and built.db_config.temperature is not None else DEFAULT_TEMPERATURE)),
-    }
+    }, options.get("modelSettings"))
 
     # MCP 外部工具接入：懒连接 single-flight 发现（**失败只降级，绝不阻断 Agent run**）
     discovered = mcp_tools if mcp_tools is not None else await discover_mcp_tools()
@@ -1187,6 +1473,7 @@ async def run_agent_with_instructions(
                 errors = list(parsed.get("errors") or [])
 
                 record_knowledge_usage(fed_ids, trace, "ok")
+                _record_skills("ok")
                 trace.success("completed", {
                     "model": model_name,
                     "toolCalls": len(result.get("tool_calls") or []),
@@ -1216,6 +1503,7 @@ async def run_agent_with_instructions(
                         "attempt": attempt + 1, "model": model_name, "error": str(err),
                     })
                     record_knowledge_usage(fed_ids, trace, "failed")
+                    _record_skills("failed")
                     raise
 
                 # 瞬态：先同模型指数退避，耗尽后换下一个模型
@@ -1238,6 +1526,7 @@ async def run_agent_with_instructions(
 
     log_task_error("Agent", "run-failed", {"agentType": type, "error": str(last_error)})
     record_knowledge_usage(fed_ids, trace, "failed")
+    _record_skills("failed")
     if last_error is not None:
         raise last_error
     raise ValueError("All models failed")

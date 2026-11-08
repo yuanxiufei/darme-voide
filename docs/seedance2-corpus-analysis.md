@@ -2,7 +2,7 @@
 
 > 语料：`GokuScraper/seedance-2-prompts-datasets` → `metadata.jsonl`
 > 许可：**CC BY 4.0（可商用，需署名）**
-> 落盘位置：`data/prompt-corpus/seedance2/metadata.jsonl`（37.58 MB，`data/prompt-corpus/` 已 gitignore）
+> 落盘位置：`corpus/prompt-corpus/seedance2/metadata.jsonl`（37.58 MB，`corpus/prompt-corpus/` 已 gitignore）
 > 分析时间：2026-09-12　分析脚本：`backend-py/app/scripts/corpus/analyze3.py`
 
 ---
@@ -233,13 +233,13 @@ Chapter N: <章标题>                          ← 章（仅超长作品用）
 ## 6. 复用方式
 
 ```bash
-# 语料位置（data/prompt-corpus/ 已 gitignore，不进仓库）
-data/prompt-corpus/seedance2/metadata.jsonl
+# 语料位置（corpus/prompt-corpus/ 已 gitignore，不进仓库）
+corpus/prompt-corpus/seedance2/metadata.jsonl
 
 # 提取中文提示词
 python -c "
 import json
-for l in open('data/prompt-corpus/seedance2/metadata.jsonl', encoding='utf-8'):
+for l in open('corpus/prompt-corpus/seedance2/metadata.jsonl', encoding='utf-8'):
     r = json.loads(l)
     z = r['i18n']['zh']
     print(z['t'], '|', z['p'][:80])
@@ -247,15 +247,15 @@ for l in open('data/prompt-corpus/seedance2/metadata.jsonl', encoding='utf-8'):
 
 # 重跑统计（词频 / 结构 / 标签）
 # 脚本自解析仓库根；也可用 SEEDANCE2_CORPUS=/abs/path/metadata.jsonl 覆盖
-python backend-py/app/scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.log
+python backend-py/app/scripts/corpus/analyze3.py > corpus/prompt-corpus/analyze3.log
 ```
 
 **合规**：
 
 - 语料 **CC BY 4.0**，可商用，**需署名**（署名到 `docs/video-prompt-data-sources.md` 或项目 README）。
 - 但按本项目既定红线：**只提炼范式，不搬运提示词正文进仓库**（skill §6.9）。
-  语料留在 gitignored 的 `data/prompt-corpus/` 内做参考，`docs/` 只放**归纳后的词表与模板**。
-- §4 为**归纳骨架 + 自写原创示例**，**不引用语料原文**；语料原文只存在于 gitignored 的 `data/prompt-corpus/` 内。
+  语料留在 gitignored 的 `corpus/prompt-corpus/` 内做参考，`docs/` 只放**归纳后的词表与模板**。
+- §4 为**归纳骨架 + 自写原创示例**，**不引用语料原文**；语料原文只存在于 gitignored 的 `corpus/prompt-corpus/` 内。
   需核对原始措辞时，按 §6 的命令从本体提取，不在仓库留档。
 
 ---
@@ -264,8 +264,8 @@ python backend-py/app/scripts/corpus/analyze3.py > data/prompt-corpus/analyze3.l
 
 | 路径 | 说明 |
 |---|---|
-| `data/prompt-corpus/seedance2/metadata.jsonl` | 37.58 MB，8755 条（**语料本体**，gitignored） |
-| `data/prompt-corpus/analyze*.log` | 各轮输出存档 |
+| `corpus/prompt-corpus/seedance2/metadata.jsonl` | 37.58 MB，8755 条（**语料本体**，gitignored） |
+| `corpus/prompt-corpus/analyze*.log` | 各轮输出存档 |
 | `backend-py/app/scripts/corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |
 | `backend-py/app/scripts/corpus/analyze2.py` | 深挖 i18n / raw_p / category / spec |
 | `backend-py/app/scripts/corpus/analyze3.py` | **主力脚本**：词表、结构特征、标签频次 |

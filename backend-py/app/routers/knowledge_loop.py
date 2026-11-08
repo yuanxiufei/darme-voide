@@ -35,14 +35,24 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.engine import Connection
 
-from ..core.db import get_conn
-from ..core.response import bad_request, not_found, success
+from ..core.db import get_conn, get_tx
+from ..core.response import (
+    bad_request,
+    conflict,
+    forbidden,
+    not_found,
+    server_error,
+    success,
+    unprocessable,
+)
 from ..services import (
     knowledge_distill,
     knowledge_feed,
     knowledge_ledger,
     knowledge_scheduler,
+    optimization_log,
     outcome_index,
+    qc_reviews,
     training_registry,
 )
 from ..services.engine import tuning
@@ -126,18 +136,30 @@ def get_entries(
     kind: str | None = Query(None, description="fact/work/recipe/lesson/failure/threshold/prompt_patch"),
     scope: str | None = Query(None, description="global / drama:<id> / stage:<name> / agent:<type>"),
     status: str | None = Query(None, description="proposed / accepted / deprecated / rejected"),
+    tags: str | None = Query(None, description="逗号分隔，**AND 语义**（多标签＝同时具备）"),
+    include_deleted: bool = Query(False, alias="includeDeleted",
+                                  description="回收站视角：连同已软删的一起列"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> Any:
     """条目清单（分页）。**默认不筛状态** ⇒ 提案与已采纳混在一起，前端必须显式带上。"""
     return success(knowledge_ledger.list_entries(
-        kind=kind, scope=scope, status=status, limit=limit, offset=offset))
+        kind=kind, scope=scope, status=status, tags=tags,
+        include_deleted=include_deleted, limit=limit, offset=offset))
 
 
 @router.get("/entries/{entry_id}")
-def get_entry(entry_id: str) -> Any:
-    """条目详情 ＋ 挂载关系 ＋ 被注入过的记录。"""
-    item = knowledge_ledger.detail(entry_id)
+def get_entry(
+    entry_id: str,
+    include_deleted: bool = Query(False, alias="includeDeleted",
+                                  description="回收站里看一条已删条目时必须显式带上"),
+) -> Any:
+    """条目详情 ＋ 挂载关系 ＋ 被注入过的记录。
+
+    已删条目默认当「不存在」（404）：否则这条端点就是绕过软删的后门 ——
+    回收站要看得显式 ``?includeDeleted=true``。
+    """
+    item = knowledge_ledger.detail(entry_id, include_deleted=include_deleted)
     if item is None:
         return not_found(f"没有这条知识：{entry_id}")
     return success(item)
@@ -161,9 +183,11 @@ def post_entry(payload: dict[str, Any]) -> Any:
         status=str(payload.get("status") or "proposed").strip(),
         source_kind="human",
         source_ref=str(payload.get("sourceRef") or ""),
+        operator=str(payload.get("operator") or payload.get("by") or ""),
+        role=str(payload.get("role") or ""),
     )
     if not outcome.get("ok"):
-        return bad_request(outcome.get("why") or "写入失败")
+        return _write_error(outcome)
     return success(outcome)
 
 
@@ -173,11 +197,264 @@ def post_entry_status(entry_id: str, payload: dict[str, Any]) -> Any:
     status = str(payload.get("status") or "").strip()
     if not status:
         return bad_request("缺少 status")
-    outcome = knowledge_ledger.set_status(entry_id, status,
-                                         reason=str(payload.get("reason") or ""))
+    role = str(payload.get("role") or "")
+    gate = _role_gate(role, "editor")
+    if gate is not None:
+        return gate
+    outcome = knowledge_ledger.set_status(
+        entry_id, status, reason=str(payload.get("reason") or ""),
+        operator=str(payload.get("operator") or payload.get("by") or ""), role=role)
     if not outcome.get("ok"):
-        return bad_request(outcome.get("why") or "状态未变")
+        return _write_error(outcome)
     return success(outcome)
+
+
+# ── 管理面：编辑 / 删除 / 恢复 / 版本 / 标签 / 分类 / 审计 ────────────────────
+#
+# 与上面 POST /entries 的分工必须写清（否则两条路会互相打架）：
+#   * ``POST /entries``      ＝「又有一份证据支持它」⇒ support+1，正文通常不变；
+#   * ``PATCH /entries/{id}`` ＝「这条写错了」⇒ 正文变、support 不动、version+1。
+# 把编辑做成叠加，会让「改了三次错别字」看起来像「有三份独立证据」，那是灌水。
+#
+# 错误码分派**按服务层的机器码**（``result["code"]``），不在中文文案里找关键字：
+# 文案改一个字就换 HTTP 码的判据，是最难查的那类回归。
+# 完整契约见 ``docs/knowledge-base-contract.md``。
+
+#: 角色等级。``ROLES`` 的顺序即权限序（viewer < editor < owner）。
+_ROLE_RANK = {"viewer": 0, "editor": 1, "owner": 2}
+
+#: 机器码 → HTTP 状态。未列出的按 400（参数/业务判据不成立）。
+_CODE_STATUS = {
+    "not_found": 404,
+    "conflict": 409,
+    "deleted": 409,      # 「与当前状态冲突」：先 restore 再改，不是参数写错
+    "not_deleted": 409,  # 硬删前置条件不满足
+    "evidence": 422,     # 格式都对、内容站不住（补证据，不是改请求形状）
+    "unavailable": 500,  # 库不可写：这是服务端的事，不该让前端去改参数
+}
+
+
+def _write_error(result: dict[str, Any]) -> Any:
+    """服务层 ``ok=False`` → 与机器码一致的 HTTP 响应。**必须带 why 原文**。"""
+    why = str(result.get("why") or "写入被拒")
+    status = _CODE_STATUS.get(str(result.get("code") or ""), 400)
+    if status == 404:
+        return not_found(why)
+    if status == 409:
+        return conflict(why)
+    if status == 422:
+        return unprocessable(why)
+    if status == 500:
+        return server_error(why)
+    return bad_request(why)
+
+
+def _role_gate(role: str, need: str) -> Any:
+    """声明式角色闸门，返回 ``None`` 表示放行。
+
+    ⚠️ 这**不是认证**：本仓没有 Authorization 中间件，``role`` 由调用方自己在请求里声明，
+    谁都能写 ``owner``。它解决的是「审计行里的角色与被执行的动作自相矛盾」这件事，
+    不解决「有人冒充」。要真鉴权得先有登录态（见契约文档 §4 的「未做」清单）。
+
+    ``role`` 为空＝**未声明** ⇒ 不判（向后兼容旧前端与 Agent 工具）；
+    声明了就必须合法且够格，否则 400 / 403 —— 宁可拒，也不"猜你想干什么"。
+    """
+    name = str(role or "").strip()
+    if not name:
+        return None
+    if name not in knowledge_ledger.ROLES:
+        return bad_request(f"未知角色 {name!r}（可选：{'/'.join(knowledge_ledger.ROLES)}）")
+    if _ROLE_RANK[name] < _ROLE_RANK[need]:
+        return forbidden(f"角色 {name} 不能做这件事（需要 {need} 及以上）")
+    return None
+
+
+def _opt_int(value: Any, name: str) -> tuple[int | None, Any]:
+    """可选的整数参数 → ``(值, 错误响应)``。空/缺省给 ``None``，非数字给 400。"""
+    if value is None or value == "":
+        return None, None
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return None, bad_request(f"{name} 必须是整数")
+
+
+@router.patch("/entries/{entry_id}")
+def patch_entry(entry_id: str, payload: dict[str, Any] | None = None) -> Any:
+    """编辑一条知识（**部分字段**，未出现的字段不动）。
+
+    只提供 PATCH、**有意不提供 PUT**：PUT 的语义是「整条替换」，一个忘了带 ``body``
+    的调用就会把正文清空 —— 这是知识库里最贵的一类事故（正文是几百字的经验）。
+    ``null`` 与「不传」同义（都不改），要清空标签请显式传 ``"tags": ""``。
+
+    三种失败要分开：404（不在了）／409（版本冲突或已删除）／422（证据核不过）。
+    """
+    body = payload or {}
+    role = str(body.get("role") or "")
+    gate = _role_gate(role, "editor")
+    if gate is not None:
+        return gate
+    confidence: float | None = None
+    if body.get("confidence") is not None:
+        try:
+            confidence = float(body["confidence"])
+        except (TypeError, ValueError):
+            return bad_request("confidence 必须是数字")
+    expected, error = _opt_int(body.get("expectedVersion"), "expectedVersion")
+    if error is not None:
+        return error
+    result = knowledge_ledger.update_entry(
+        entry_id,
+        title=body.get("title"),
+        body=body.get("body"),
+        tags=body.get("tags"),
+        evidence=body.get("evidence"),
+        confidence=confidence,
+        reason=str(body.get("reason") or ""),
+        expected_version=expected,
+        operator=str(body.get("operator") or body.get("by") or ""),
+        role=role,
+    )
+    if not result.get("ok"):
+        return _write_error(result)
+    return success(result)
+
+
+@router.delete("/entries/{entry_id}")
+def delete_entry(
+    entry_id: str,
+    hard: bool = Query(False, description="true＝物理删除（**必须先软删**，这是防手滑的第二道闸）"),
+    reason: str = Query("", description="删除原因（进审计 detail）"),
+    operator: str = Query("", description="操作者（进审计与被删行）"),
+    role: str = Query("", description="声明式角色；hard=true 需要 owner"),
+) -> Any:
+    """删除：默认软删（可恢复），``?hard=true`` 才是物理删除。
+
+    硬删的后置事实：``entries``/``entry_links``/``entry_usage``/``entry_versions``/
+    FTS 全清，**``entry_audit`` 保留** —— 「谁在什么时候删了什么」不能跟着内容一起蒸发。
+    """
+    gate = _role_gate(role, "owner" if hard else "editor")
+    if gate is not None:
+        return gate
+    if hard:
+        result = knowledge_ledger.purge(entry_id, operator=operator, role=role)
+    else:
+        result = knowledge_ledger.soft_delete(entry_id, reason=reason,
+                                              operator=operator, role=role)
+    if not result.get("ok"):
+        return _write_error(result)
+    return success(result)
+
+
+@router.post("/entries/{entry_id}/restore")
+def post_entry_restore(entry_id: str, payload: dict[str, Any] | None = None) -> Any:
+    """撤销软删（幂等：本来没删就回 ``changed=false``，不报错）。"""
+    body = payload or {}
+    role = str(body.get("role") or "")
+    gate = _role_gate(role, "editor")
+    if gate is not None:
+        return gate
+    result = knowledge_ledger.restore(
+        entry_id, reason=str(body.get("reason") or ""),
+        operator=str(body.get("operator") or body.get("by") or ""), role=role)
+    if not result.get("ok"):
+        return _write_error(result)
+    return success(result)
+
+
+@router.get("/entries/{entry_id}/versions")
+def get_entry_versions(entry_id: str) -> Any:
+    """版本列表（只有元信息，**不含正文**）。
+
+    ``current`` 是当前版本号，``items`` 是 1..current-1 的历史 —— 当前值永远在
+    ``GET /entries/{id}`` 里。要正文请按版本号取 ``/versions/{v}``（含当前版）。
+    """
+    result = knowledge_ledger.versions(entry_id)
+    if not result.get("available"):
+        return success(result)  # 读失败降级：如实回 available=false + hint
+    if not result.get("current"):
+        return not_found(f"没有这条知识：{entry_id}")
+    return success(result)
+
+
+@router.get("/entries/{entry_id}/versions/{version}")
+def get_entry_version(entry_id: str, version: int) -> Any:
+    """某个版本的全文（``isCurrent=true`` 表示它就是当前值）。"""
+    item = knowledge_ledger.version_detail(entry_id, version)
+    if item is None:
+        return not_found(f"{entry_id} 没有 v{version}")
+    return success(item)
+
+
+@router.post("/entries/{entry_id}/revert")
+def post_entry_revert(entry_id: str, payload: dict[str, Any] | None = None) -> Any:
+    """回滚到某个历史版本：**是一次普通编辑**（version+1 + 快照 + 审计），不删后续版本。"""
+    body = payload or {}
+    role = str(body.get("role") or "")
+    gate = _role_gate(role, "editor")
+    if gate is not None:
+        return gate
+    version, error = _opt_int(body.get("version"), "version")
+    if error is not None:
+        return error
+    if version is None:
+        return bad_request("缺 version（要回滚到哪一版）")
+    result = knowledge_ledger.revert(
+        entry_id, version, reason=str(body.get("reason") or ""),
+        operator=str(body.get("operator") or body.get("by") or ""), role=role)
+    if not result.get("ok"):
+        return _write_error(result)
+    return success(result)
+
+
+@router.get("/tags/facets")
+def get_tag_facets(
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> Any:
+    """标签 facet（每个标签命中多少条，按条数倒序）。
+
+    计数与列表用**同一套词边界匹配**（``',' || tags || ','``）：否则页面显示「节奏 5 条」，
+    点进去却因为 `节奏慢` 不算命中而只剩 3 条 —— 这类对不上的账会被当成筛选坏了。
+    """
+    return success(knowledge_ledger.tag_facets(
+        include_deleted=include_deleted, limit=limit))
+
+
+@router.get("/taxonomy")
+def get_taxonomy(
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    role: str = Query(""),
+) -> Any:
+    """分类导航：``kind``（闭集＋中文名＋计数）／``scope``／``status``／标签。
+
+    这是「分类管理」的**唯一入口** —— 前端不该自己写死中文名，否则服务端加一类，
+    前端就多出一串英文 id。
+    """
+    gate = _role_gate(role, "viewer")
+    if gate is not None:
+        return gate
+    return success(knowledge_ledger.taxonomy(include_deleted=include_deleted))
+
+
+@router.get("/audit")
+def get_audit(
+    entry: str | None = Query(None, alias="entryId", description="只看这一条的审计"),
+    action: str | None = Query(None, description="/".join(knowledge_ledger.ACTIONS)),
+    operator: str | None = Query(None),
+    role: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> Any:
+    """操作审计（倒序）。``total`` 是**全量条数**，不是本页条数。"""
+    gate = _role_gate(role, "viewer")
+    if gate is not None:
+        return gate
+    if action and action not in knowledge_ledger.ACTIONS:
+        return bad_request(
+            f"未知动作 {action!r}（可选：{'/'.join(knowledge_ledger.ACTIONS)}）")
+    return success(knowledge_ledger.audit_log(
+        entry=entry, action=action, operator=operator, limit=limit, offset=offset))
 
 
 @router.get("/search")
@@ -186,11 +463,19 @@ def get_search(
     kind: str | None = Query(None),
     scope: str | None = Query(None),
     status: str | None = Query(None),
+    tags: str | None = Query(None, description="逗号分隔，AND 语义"),
+    include_deleted: bool = Query(False, alias="includeDeleted"),
     limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
 ) -> Any:
-    """检索知识。``ranking`` 原样透出（三种排序不可比）。"""
+    """检索知识。``ranking`` 原样透出（三种排序不可比）。
+
+    ``total`` 是**全量命中数**（不是本页条数）——分页 UI 靠它算总页数；
+    候选集有 500 条上限，超了回 ``totalCapped=true`` 并说明「至少 500」。
+    """
     return success(knowledge_ledger.search(
-        q, kind=kind, scope=scope, status=status, limit=limit))
+        q, kind=kind, scope=scope, status=status, tags=tags,
+        include_deleted=include_deleted, limit=limit, offset=offset))
 
 
 @router.post("/distill")
@@ -344,6 +629,30 @@ def get_report(
     return success(payload)
 
 
+# ── 优化史（P1 续 / 缺口 3）：每一轮优化到底提升了多少 ──────────────────────
+#
+# 起因是一条回答不出来的问题：「这次改动提升了多少」。优化器的分数只落在
+# ``benchmarks/history/<时间戳>.json``（同名 case 重跑即覆盖 ✗），而生效提示词落在
+# ``agent_configs``（覆盖式，上一次生效的分数当场就没了 ✗）—— 两边都不成对。
+# 所以这张表**只读不写**：写入只发生在优化器内部（``optimize_agent_prompt``），
+# 不允许 HTTP 手写一行 —— 手写的"提升了多少"就是编的（也没法核）。
+
+@router.get("/optimizations")
+def get_optimizations(
+    agent_type: str | None = Query(None, alias="agentType"),
+    case_id: str | None = Query(None, alias="caseId"),
+    limit: int = Query(100, ge=1, le=optimization_log.MAX_LIMIT),
+) -> Any:
+    """优化史（倒序）＋ 汇总：跑过几轮、采纳几次、落库几次、最好的一次涨了多少。
+
+    三个数必须分开看 ✓：``rounds``（试了几次）／``accepted``（分数更高的几次）／
+    ``persisted``（真的变成默认值的几次）—— 合成一个「成功率」会把
+    「试了 5 轮只成 1 轮」与「成了 1 轮但没落库」糊成同一个数字 ✗。
+    """
+    result = optimization_log.list_records(agent_type=agent_type, case_id=case_id, limit=limit)
+    return success(result)
+
+
 # ── 引擎自我完善（P3）：参数覆盖层 ──────────────────────────────────────────
 
 @router.get("/tuning")
@@ -399,6 +708,107 @@ def delete_tuning(
     result = tuning.clear_field(stage, field)
     return success(result) if result.get("ok") else bad_request(
         str(result.get("why") or "没有这条覆盖"))
+
+
+# ── 引擎自我完善（P3 续）：质检阈值的**人工复核**与命中率 ────────────────────
+#
+# 这一节补的是 ``notEvaluated`` 里那条 ``qc-threshold-hit-rate``：光有「触发频次」算不出
+# 命中率（那是分子），分母必须是**人看过成片之后的结论**。所以这里有写入口 ✓ ——
+# 与整条闭环其它端点「只读候选」的口径不同：复核结论是**事实**（人看到的东西），
+# 由人录；而由事实推出的参数改动仍然只能走 ``POST /tuning``（要 basis + evidence）✓。
+
+@router.get("/qc/hit-rate")
+def get_qc_hit_rate() -> Any:
+    """按 issue ``code`` 的命中率 / 漏报率（分母＝人工复核条数）。
+
+    ``available=false`` 与「复核 0 条」严格分开 ✓：前者是表读不出来，后者是"还没人核"——
+    两者都会让 ``hitRate`` 为 ``null``，但一个要修库、一个要安排人看片 ✗。
+    """
+    return success(qc_reviews.hit_rate())
+
+
+@router.get("/qc/pending")
+def get_qc_pending(
+    limit: int = Query(20, ge=1, le=200),
+    conn: Connection = Depends(get_conn),
+) -> Any:
+    """**待复核**清单：最近几条 QC 记录 ＋ 每条里每个 code 的当前判定（未判为 ``null``）。
+
+    这条端点是"命中率能不能有分母"的入口 ✓：复核表建好了但没人知道该核哪一条的话，
+    命中率会永远停在 ``null`` ✗ —— 所以主动把最近报了缺陷的片子摆出来。
+    """
+    items = qc_reviews.pending(conn, limit=limit)
+    return success({
+        "items": items,
+        "unreviewed": len([item for item in items if not item.get("reviewed")]),
+        "verdicts": qc_reviews.VERDICTS,
+        "minReviews": qc_reviews.MIN_REVIEWS,
+    })
+
+
+@router.get("/qc/reviews")
+def get_qc_reviews(
+    limit: int = Query(50, ge=1, le=500),
+    check_id: int | None = Query(None, alias="checkId"),
+    code: str | None = Query(None),
+    verdict: str | None = Query(None, description="hit / false_alarm / missed"),
+    conn: Connection = Depends(get_conn),
+) -> Any:
+    """已录的复核结论（按更新时间倒序）。"""
+    return success({
+        "items": qc_reviews.list_reviews(conn, limit=limit, check_id=check_id,
+                                        code=code, verdict=verdict),
+        "verdicts": qc_reviews.VERDICTS,
+    })
+
+
+@router.post("/qc/reviews")
+def post_qc_review(
+    payload: dict[str, Any] | None = None,
+    conn: Connection = Depends(get_tx),
+) -> Any:
+    """录一条复核结论：``checkId`` + ``code`` + ``verdict``（``hit``/``false_alarm``/``missed``）。
+
+    ``(checkId, code)`` 已存在就**改判**（覆盖，不追加）✓ —— 同一个人看完放大帧改变主意是
+    改判，不是第二条样本 ✗（否则命中率会被自己的犹豫稀释 ✓✗）。
+    ``verdict`` 给错或 ``code`` 不在闭集里一律 400 并带 ``why`` ✓。
+    """
+    body = payload or {}
+    try:
+        check_id = int(body.get("checkId") or body.get("check_id") or 0)
+    except (TypeError, ValueError):
+        return bad_request("checkId 必须是整数")
+    if not check_id:
+        return bad_request("缺 checkId（要复核的是哪一条质检记录）")
+    try:
+        item = qc_reviews.record_review(
+            conn, check_id=check_id, code=str(body.get("code") or ""),
+            verdict=str(body.get("verdict") or ""), note=str(body.get("note") or ""),
+            reviewer=str(body.get("reviewer") or body.get("by") or ""),
+            storyboard_id=_int_or_none(body.get("storyboardId")),
+            video_generation_id=_int_or_none(body.get("videoGenerationId")),
+        )
+    except ValueError as err:
+        return bad_request(str(err))
+    return success({"review": item, "hitRate": qc_reviews.hit_rate(conn)})
+
+
+@router.delete("/qc/reviews/{review_id}")
+def delete_qc_review(review_id: int, conn: Connection = Depends(get_tx)) -> Any:
+    """撤销一条复核（打错码 / 选错片子）。"""
+    if not qc_reviews.delete_review(conn, review_id):
+        return not_found(f"没有 id={review_id} 的复核记录")
+    return success({"deleted": review_id})
+
+
+def _int_or_none(value: Any) -> int | None:
+    """``"3"``/``3`` → ``3``；空/非数字 → ``None``（不编 0 ✓）。"""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── 模型投喂（P4）：训练任务与产物登记 ──────────────────────────────────────

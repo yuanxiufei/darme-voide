@@ -41,9 +41,37 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.core.config import get_db_dir
+
 #: 覆盖层库的位置。**必须可换**（测试要隔离，绝不能让单测写进开发机的真库）。
-_DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "ocr" / "library-overlay.sqlite"
+#:
+#: ⚠️ 2026-11-07 三次修正 —— 一次纠错、两次归位：
+#: 1) 纠错：原先写 ``Path(__file__).resolve().parents[2]``（= ``backend-py/``），于是这只库
+#:    落在 ``backend-py/data/ocr/``，而三个兄弟库都在仓根 ``data/ocr/`` —— 同一个知识库被拆成
+#:    两个 ``data`` 目录，``backend-py/data/`` 又被 ``.gitignore`` 整棵挡住 ⇒ 备份只搬一半，
+#:    编辑与上传台账静默丢失（不报错）。
+#: 2) 分层：三只兄弟库都是**可重建的派生索引**，已去 ``indexes/``；而这一只是**用户台账**
+#:    （编辑 / 删除 / 上传记录），删了就算不回来 ⇒ 必须住在备份对象 ``data/`` 里。
+#: 3) 归位：与 ``drama.db`` **同级同目录** —— 数据根下的 SQLite 一律进 ``<dataRoot>/db/``
+#:    （``config.get_db_dir``，见 ``data/README.md``）。别再写 ``PROJECT_ROOT / "data"`` ✗：
+#:    那等于把「跟着数据根走」的那一半又钉死在仓根，用户把数据根设到别的盘时，
+#:    剧集跟着走了、台账留在原地 ⇒ 换台机器就「编辑记录全没了」。别把它挪进 ``indexes/``。
+_DEFAULT_DB = Path(get_db_dir()) / "library-overlay.sqlite"
 OVERLAY_DB = Path(os.environ.get("SCRIPT_LIBRARY_OVERLAY_DB") or _DEFAULT_DB)
+
+
+def resync_path() -> Path:
+    """按**当前**数据根重算库位置，返回新路径（``POST /storage/change`` 之后必须调 ✓）。
+
+    为什么需要：``OVERLAY_DB`` 是**模块级常量** ✓（模块只 import 一次），
+    切数据根后不重算就会继续读写**旧根**下的台账 —— 剧集跟着走了、编辑记录留在原地 ✗。
+    ``drama.db`` 那边靠 ``db.reopen_engine()`` 解决同一问题 ✓。
+    环境变量显式指定时**不覆盖** ✓（那是调用方的意志，测试靠它隔离 ✓）。
+    """
+    global OVERLAY_DB
+    if not os.environ.get("SCRIPT_LIBRARY_OVERLAY_DB"):
+        OVERLAY_DB = Path(get_db_dir()) / "library-overlay.sqlite"
+    return Path(OVERLAY_DB)
 
 #: 文档头那一格（改标题/备注）用 ``-1``。正文块从 0 起（``lib_index._chunks`` 的 ``chunk_no``），
 #: 两边不会撞。

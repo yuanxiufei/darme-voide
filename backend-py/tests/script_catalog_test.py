@@ -142,7 +142,7 @@ def main() -> int:  # noqa: C901
                 sl.EXTRA_DB, ov.OVERLAY_DB)
     sl.LIBRARY_ROOT, sl.METHODS_DB = kb, db
     sl.PLAYBOOK_ROOT = root / "playbook"
-    #: OCR sidecar 必须一起隔离：它是开发机 `data/ocr/` 下的真实产物，不指走就会
+    #: OCR sidecar 必须一起隔离：它是开发机 `indexes/` 下的真实产物，不指走就会
     #: 让夹具里「扫描件无正文」那些断言读到真 OCR 库（实测踩过：window 与 available 都对不上）。
     sl.OCR_DB = root / "ocr" / "不存在.sqlite"
     #: 第五库（本仓补录）与第四库（覆盖层）同理，且**必须一起指走**：`_scan_documents`

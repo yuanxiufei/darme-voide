@@ -53,7 +53,7 @@
 ========  ============================================  ==============================
 ``COMFYUI_URL``             ComfyUI 地址                    ``http://127.0.0.1:8188``
 ``H3_TIMEOUT``              单任务总超时（秒）              ``1800``（冷启动/长片要很久 ✓）
-``H3_OUTPUT_DIR``           产物落盘目录（`/files` 从这里发） ``<本文件目录>/outputs``
+``H3_OUTPUT_DIR``           产物落盘目录（`/files` 从这里发） ``<dataRoot>/static/h3`` ✓（不再是代码目录 ✓）
 ``H3_PUBLIC_BASE_URL``      回给后端的 URL 前缀             ``http://127.0.0.1:8765``
 ``H3_WORKFLOW_DIR``         工作流模板目录                  ``<本文件目录>/workflows``
 ``H3_T2V_WORKFLOW``         文生视频模板文件名              ``MiniMax_H3_Fast_T2V.json``
@@ -142,7 +142,26 @@ PORT = int(os.environ.get("H3_PORT") or "8765")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188")
 TIMEOUT = float(os.environ.get("H3_TIMEOUT") or "1800")
 WORKFLOW_DIR = Path(os.environ.get("H3_WORKFLOW_DIR") or (Path(__file__).resolve().parent / "workflows"))
-OUTPUT_DIR = Path(os.environ.get("H3_OUTPUT_DIR") or (Path(__file__).resolve().parent / "outputs"))
+
+
+def _default_output_dir() -> Path:
+    """产物落盘目录的默认值 ✓（`/files` 从这里发 ✓）。
+
+    ⚠️ 默认值**不再是代码目录** `<本文件目录>/outputs` ✗✗（2026-11-07 收口 ✓）：
+    旧写法跑一次就在源码树里长出一个 `outputs/` ✓✗ —— 重装 / 打包 / 切分支就没了 ✓、
+    它既不在 `<dataRoot>/static` 下也不在数据根里 ✓ ⇒ 主后端和前端都找不到那批片 ✓。
+    现在与主后端**同一口径** ✓：`<dataRoot>/static/h3` ✓（`app.core.config.get_storage_root`
+    是数据根的唯一真源 ✓，本文件已经在上面把 `backend-py` 补进 sys.path ✓）；
+    极端情况下 import 不到 app 包时退回 `<仓库根>/data/static/h3` ✓（仍是同一棵树 ✓）。
+    """
+    try:  # pragma: no cover - 取决于加载方式
+        from app.core.config import get_storage_root
+    except ImportError:  # pragma: no cover
+        return _REPO_ROOT.parent / "data" / "static" / "h3"
+    return Path(get_storage_root()) / "h3"
+
+
+OUTPUT_DIR = Path(os.environ.get("H3_OUTPUT_DIR") or _default_output_dir())
 PUBLIC_BASE_URL = (os.environ.get("H3_PUBLIC_BASE_URL") or f"http://127.0.0.1:{PORT}").rstrip("/")
 T2V_WORKFLOW = os.environ.get("H3_T2V_WORKFLOW") or "MiniMax_H3_Fast_T2V.json"
 I2V_WORKFLOW = os.environ.get("H3_I2V_WORKFLOW") or "MiniMax_H3_Fast_I2V.json"

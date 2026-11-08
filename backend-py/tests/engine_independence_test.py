@@ -6,7 +6,12 @@ r"""自研引擎 · **独立性契约**（WBS-1.4 / 1.5 / 2.1 / 2.6 的机器判
 覆盖：
 
 1. **静态**：`engine/*.py` 不许 import `fastapi` / `starlette` / `pydantic` / `app.routers` /
-   `app.services.*`（唯一允许的仓内依赖是 `app.core.*`）—— 用 AST 扫，不靠人记；
+   `app.services.*`（唯一允许的仓内依赖是 `app.core.*`）—— 用 AST 扫，不靠人记。
+   ★**相对写法同样算数**（`from .. import outcome_index` ⇒ 折算成 `app.services.outcome_index`）：
+   2026-11-08 之前只收 `level == 0` ⇒ 这一整类**全被放过** ✓✗（`qc_feedback` 藏了一轮、
+   `inventory` 更是写在模块头上 ⇒「引擎一被 import 就必须带着服务层」）。现在补三条：
+   ② 服务层依赖必须**逐条**在 `_SEAMS`（含"为什么"＋"怎么撤销"）／③ 表与代码**双向对账**
+   （修好的必须删表）／⑤ **模块加载期**不许碰服务层（`bridge.py` 是服务侧桥，豁免）；
 2. **门面契约**：`API_VERSION` 语义化；`EngineError` 每个错误码都有中文说明；
 3. **无 torch 也能回答**：`capabilities` / `plan` / `inspect` 只靠文件头（子进程里把 `torch`
    打成 `None` 再跑）；
@@ -56,16 +61,136 @@ _FORBIDDEN = ("fastapi", "starlette", "pydantic", "uvicorn", "sqlalchemy",
               "app.routers", "app.services.engine_readiness", "app.services.production",
               "app.db", "app.models")
 
+#: 本包的**绝对名**：相对 import 按它折算 ✓✗（不折算就等于判据只认一种写法 ✓）。
+_PKG = "app.services.engine"
 
-def _imports_of(path: Path) -> list[str]:
+#: 服务层里被引擎碰到的**全部**模块，逐条登记 ✓✗ ——
+#: `(文件, 绝对模块名) -> (为什么非碰不可, 怎么撤销, 用了它的哪几个名字)`。
+#:
+#: ⚠️ 这张表是**三向对账**的 ✓：表里有、代码里已经没有了 ⇒ 红（白名单过期 ✗）；
+#: 代码里有、表里没有 ⇒ 红（偷偷多一条依赖 ✗）；**`uses` 与真实 import 的名字对不上 ⇒ 红**
+#: （③b）。所以「先随手加一条豁免」这条路是通的 ✓，但**撤销条件必须写成人话且可判**
+#: （写"以后再说"会被 ④ 拦 ✓）。
+#:
+#: 为什么要 `uses`（2026-11-08 补 ✓）：`inventory.py` 对扫描层原本用了**两个**名字
+#: （`get_model_paths` + `get_default_roots`），按模块登记的话，悄悄销掉一个也不会红 ✓✗ ——
+#: 表停留在"两个都要"的旧口径上，「还欠什么」就没人知道了 ✓✗。降到名字粒度后，销一个
+#: **必须**改表（销完就得删条），账目才对得上 ✓。
+_SEAMS: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
+    ("bridge.py", "app.services.task_logger"): (
+        "任务日志（progress/warn/error 三档）是**服务层任务面板**的语料 ✓，"
+        "引擎侧没有等价物 ✓，桥负责把引擎的回执翻成面板能读的条目 ✓",
+        "引擎回执里已有结构化 notes ⇒ 让调用方（routers）自己落日志，桥不再写盘",
+        ("log_task_error", "log_task_progress", "log_task_warn"),
+    ),
+    ("bridge.py", "app.services.local_model_scan"): (
+        "装配默认路径（ComfyUI 根）只有服务层那份**探测**解析 ✓，"
+        "桥按它补 `ditPath`/`textWeights` 等缺省值 ✓（`models_dir` 那半已搬 `app.core` ✓）",
+        "让调用方显式给全四格路径（`ensure_loaded` 本就要求给全 ✓），桥不再猜缺省",
+        ("get_comfyui_roots",),
+    ),
+    ("inventory.py", "app.services.local_model_scan"): (
+        "`candidate_roots()` 要「盘上还有没有别处的副本」，那需要 ComfyUI 根探测 + 生态落点表 + "
+        "`model_folders` 的声明 ✓ —— 这一整套发现逻辑依赖服务层的表 ✓；"
+        "`models_dir()` 那半已搬进 `app.core.model_paths` ✓（不再是本条的负担 ✓）",
+        "把探测/生态落点也搬进 `app.core`（它们读的同样是配置与盘，不是业务数据 ✓），或让调用方传入根列表",
+        ("get_default_roots",),
+    ),
+}
+
+
+def _seam_of(name: str, dep: str) -> bool:
+    return (name, dep) in _SEAMS
+
+
+def _package_of(path: Path) -> str:
+    """该文件**所在包**的绝对名 ✓✗ —— 相对 import 是相对**包**解析的，不是相对模块 ✓。
+
+    （`from ...core.config import x` 里的三个点从 ``app.services.engine`` 往上退两级 ⇒
+    ``app.core.config`` ✓；把 stem 也拼进去会错算成 ``app.services.core.config`` ✗。）
+    """
+    return _PKG
+
+
+def _absolutize(node: ast.ImportFrom, package: str) -> list[str]:
+    """把 ``node`` 折成**绝对模块名** ✓（`level == 0` 原样 ✓）。
+
+    ⚠️ 此前只收 ``level == 0`` ✓✗ ⇒ ``from .. import outcome_index``、``from ..file_storage
+    import x`` 这一整类**相对写法全被放过** ✗ —— 判据写着"引擎不 import 服务层"，实际只要
+    换个写法就能绕过 ✓（2026-11-08 实测：``qc_feedback`` 藏了一轮、``inventory`` 更是
+    写在模块头上 ⇒ 「引擎一被 import 就必须带着服务层」✓✗）。折算规则与 Python 一致：
+    ``level=1`` 是本包、``level=N`` 上退 ``N-1`` 级 ✓。
+    """
+    if node.level == 0:
+        return [node.module] if node.module else []
+    parts = package.split(".")
+    base = ".".join(parts[: len(parts) - (node.level - 1)])
+    if node.module:
+        return [f"{base}.{node.module}"]
+    #: `from .. import X`：**X 可能是模块** ⇒ 只有这种写法需要把名字也展开 ✓
+    return [f"{base}.{alias.name}" for alias in node.names]
+
+
+def _imports_of(path: Path, *, module_level_only: bool = False) -> list[str]:
+    """该文件 import 了哪些**绝对模块名** ✓（相对写法先折算 ✓）。
+
+    ``module_level_only`` ⇒ 只收**模块加载期**会执行的那些 ✓（``if``/``try`` 里的算 ✓，
+    函数/类体里的不算 ✓）—— 判「一 import 这个模块会不会顺带把服务层拽起来」✓。
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    package = _package_of(path)
+
+    nodes: list[ast.AST]
+    if module_level_only:
+        nodes = []
+        stack: list[ast.AST] = list(tree.body)
+        while stack:
+            node = stack.pop()
+            nodes.append(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue  #: 函数体/类体里的 import 是**调用时**才执行 ✓，不算加载期 ✓
+            stack.extend(ast.iter_child_nodes(node))
+    else:
+        nodes = list(ast.walk(tree))
+
     found: list[str] = []
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             found.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            found.append(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            found.extend(_absolutize(node, package))
     return found
+
+
+def _import_names(path: Path) -> dict[str, set[str]]:
+    """``绝对模块名 -> 从它那儿 import 的**名字**集合`` ✓✗。
+
+    * ``from X import a, b`` ⇒ ``{X: {a, b}}``（判断"用了它的哪几个口"✓）；
+    * ``from .. import outcome_index`` ⇒ ``{app.services.outcome_index: {outcome_index}}``
+      （模块本身就是那个名字 ✓，调用处写的是 ``outcome_index.xxx`` ✓）；
+    * ``import a.b`` ⇒ 绑定名是 ``a``（``asname`` 优先 ✓）。
+
+    ⚠️ 别拿「文件全文里出现过 ``get_model_paths`` 这几个字」当对账 ✗：注释、docstring、
+    另一个同名变量全都会误命中 ✓✗ —— 只有 AST 里的 ``alias.name`` 是**真的在用** ✓。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    package = _package_of(path)
+    names: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.setdefault(alias.name, set()).add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            deps = _absolutize(node, package)
+            if node.module:
+                #: `from <mod> import a, b` ⇒ 两个名字都挂在同一个 dep 上 ✓
+                for dep in deps:
+                    names.setdefault(dep, set()).update(a.name for a in node.names)
+            else:
+                #: `from .. import X` ⇒ `_absolutize` 与 `node.names` **一一对应** ✓
+                for dep, alias in zip(deps, node.names):
+                    names.setdefault(dep, set()).add(alias.name)
+    return names
 
 
 def case_static() -> None:
@@ -80,14 +205,79 @@ def case_static() -> None:
                 app_deps.setdefault(path.name, set()).add(name)
     check(f"① 引擎 {len(files)} 个模块**不 import** Web 层/项目层（fastapi·pydantic·routers·services）",
           not violations, violations)
+
     #: 允许的仓内依赖只有两类：`app.core.*`（显存预算这类纯工具）＋ `app.services.engine`**自己**
     #: （包内互引写成绝对路径是正常的 ✓ —— 但它必须是**唯一**的外部前提 ✗）
     def _allowed(dep: str) -> bool:
         return dep == "app.services.engine" or dep.startswith(("app.core", "app.services.engine."))
 
-    bad_app = {name: sorted(deps) for name, deps in app_deps.items()
-               if any(not _allowed(dep) for dep in deps)}
-    check("② 引擎对仓内的依赖**只有** `app.core.*` ＋ 引擎自己（其余一律不许）", not bad_app, bad_app)
+    bad_app = sorted(f"{name}: {dep}" for name, deps in app_deps.items()
+                     for dep in deps if not _allowed(dep) and not _seam_of(name, dep))
+    check("② 引擎对仓内的依赖**只有** `app.core.*` ＋ 引擎自己；碰服务层必须**逐条**在 `_SEAMS` 里",
+          not bad_app, bad_app)
+
+    #: ②b **搬家 ≠ 抄一份** ✓✗：把口搬进 `app.core` 之后，服务层那份必须是**同一个对象**的再导出
+    #: （`is`）✓ —— 否则全仓就是两套实现：引擎走新的、业务走旧的，改一边不改另一边没人知道 ✓✗
+    #: （`get_absolute_path` 是**防路径穿越**的那道闸 ✓，抄两份必然漂 ✓）。2026-11-08 把
+    #: `file_storage` 的两个纯函数搬进 `app.core.media` 时补的这条 ✓。
+    from app.core import media as core_media
+    from app.services import file_storage as svc_storage
+
+    copied = [name for name in ("get_absolute_path", "parse_data_url")
+              if getattr(svc_storage, name, None) is not getattr(core_media, name, None)]
+    check("②b 搬进 `app.core` 的媒体口（`get_absolute_path`/`parse_data_url`）在服务层那份"
+          "是**同一个对象**（`is` 判；另写一份 = 第二真源 ✗）", not copied, copied)
+
+    #: ③ 双向对账：表里每一条都必须在代码里真存在（修好了就删表 ⇒ 表不许长霉 ✓✗）
+    stale: list[str] = []
+    for (name, dep) in _SEAMS:
+        path = _ENGINE / name
+        if not path.exists():
+            stale.append(f"{name}：文件不存在")
+        elif dep not in _imports_of(path):
+            stale.append(f"{name}：已不再 import {dep} ⇒ 请删掉这条（白名单过期 ✗）")
+    check("③ `_SEAMS` 每一条在代码里都还真的存在（已修好的必须删表，不许留下僵尸豁免 ✗）",
+          not stale, stale)
+
+    #: ③b **名字粒度**对账 ✓✗：一条依赖常常只用了对方几个函数（`from X import a, b`）。
+    #: 只按模块登记的话，悄悄销掉其中一个**不会红** ⇒ 表停留在「a 和 b 都要」的旧口径上，
+    #: 「还欠什么」就没人知道了 ✓✗（2026-11-08 把 `models_dir` 搬进 `app.core` 时实测踩到 ✓）。
+    wrong_uses: list[str] = []
+    for (name, dep), (_why, _exit, uses) in _SEAMS.items():
+        path = _ENGINE / name
+        if not path.exists():
+            continue
+        actual = _import_names(path).get(dep, set())
+        if actual != set(uses):
+            wrong_uses.append(f"{name}→{dep}: 表里 {sorted(uses)} ≠ 实际 {sorted(actual)}")
+    check("③b `_SEAMS.uses` 与代码里 `from … import …` 的**名字逐个**一致（销掉一个就得改表 ✓✗）",
+          not wrong_uses, wrong_uses)
+
+    #: ③c 空 `uses` 等于回到模块粒度 ⇒ 放它过去，③b 就白做了 ✓✗
+    check("③c 每条豁免都写明了用到的名字（空表 = 又退回模块粒度 ✗）",
+          all(uses for (_w, _e, uses) in _SEAMS.values()),
+          [f"{n}→{d}" for (n, d), (_w, _e, uses) in _SEAMS.items() if not uses])
+
+    #: ④ 每条豁免都得写清「为什么现在非碰不可」＋「怎么撤销」——两句话，别写"以后再说" ✓✗
+    weak = [f"{name}→{dep}" for (name, dep), (why, exit_, _uses) in _SEAMS.items()
+            if len(str(why).strip()) < 20 or len(str(exit_).strip()) < 20
+            or "以后" in str(exit_) or "待定" in str(exit_)]
+    check("④ 豁免不能是空话：`为什么` 与 `怎么撤销` 各 ≥20 字，撤销条件不许写「以后/待定」",
+          not weak, weak)
+
+    #: ⑤ **模块加载期**只许碰 `app.core` ＋ 自己（服务侧桥 `bridge.py` 例外：它本来就是服务层伸进来的）
+    #: —— 这条盯的是「`import app.services.engine.<任何核心模块>` 会不会顺带把服务层拽起来」✓✗，
+    #: 与 ② 不同：② 管"依赖存在"，⑤ 管"什么时候发生"✓。此前 `inventory` 的服务层 import 就在模块头 ✗。
+    load_time: dict[str, list[str]] = {}
+    for path in files:
+        if path.name == "bridge.py":  # 服务侧桥：routers 调它，模块头摸服务层是它的本职 ✓
+            continue
+        deps = sorted(dep for dep in set(_imports_of(path, module_level_only=True))
+                      if (dep == "app" or dep.startswith("app.")) and not _allowed(dep))
+        if deps:
+            load_time[path.name] = deps
+    check("⑤ 引擎核心**模块加载期**只碰 `app.core.*` 与自身（服务层依赖必须写在函数里 ✓；"
+          "`bridge.py` 是服务侧桥，豁免 ✓）", not load_time, load_time)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -249,6 +439,103 @@ def case_cli() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ⑥b 任务级可行性入口（§5.3）：退出码 0/1/2 机器可判 + 尺寸委托画布 + 估时不编
+# ══════════════════════════════════════════════════════════════════════════
+def case_feasibility_cli() -> None:
+    plain = _cli("feasibility", "--stage", "krea2", "--json")
+    try:
+        data = json.loads(plain.stdout)
+    except ValueError:
+        data = {}
+    check("⑲ `feasibility --json` 退出 0 且**三格齐**（verdict / estimate / size）",
+          plain.returncode == 0 and bool(data.get("verdict"))
+          and isinstance(data.get("estimate"), dict) and "size" in data,
+          {"exit": plain.returncode, "keys": sorted(data)[:12],
+           "err": (plain.stderr or "")[-200:]})
+    estimate = data.get("estimate") or {}
+    check("⑳ 没给样本 ⇒ `runSeconds=null` ＋ `basis=unknown`（**不是 0 秒**）",
+          estimate.get("runSeconds") is None and estimate.get("basis") == "unknown",
+          estimate)
+    check("㉑ `loadSeconds` 恒 null（本仓只记整任务耗时 ⇒ 不拆一个假装载秒数）",
+          "loadSeconds" in estimate and estimate["loadSeconds"] is None, estimate)
+
+    sized = _cli("feasibility", "--stage", "krea2", "--size", "1000x1000", "--json")
+    try:
+        sdata = json.loads(sized.stdout)
+    except ValueError:
+        sdata = {}
+    from app.services.engine import canvas as canvas_mod  # noqa: PLC0415
+
+    want = canvas_mod.plan_canvas("krea2", width=1000, height=1000)
+    size = sdata.get("size") or {}
+    check("㉒ `--size` 的吸附**与 `canvas.plan_canvas` 同值**（就近 992 不是 1024/1008）",
+          size.get("snapped") == f"{int(want.width)}x{int(want.height)}"
+          and size.get("step") == int(want.grid) and size.get("absorbed") is True,
+          size)
+    check("㉓ 给尺寸**不改 verdict**（这一栏只报几何；本仓没有逐族激活峰值表）",
+          sdata.get("verdict") == data.get("verdict"),
+          {"plain": data.get("verdict"), "sized": sdata.get("verdict")})
+
+    measured = _cli("feasibility", "--stage", "krea2", "--measure", "95,102,88", "--json")
+    try:
+        mdata = json.loads(measured.stdout)
+    except ValueError:
+        mdata = {}
+    mestimate = mdata.get("estimate") or {}
+    run = mestimate.get("runSeconds") or {}
+    check("㉔ `--measure 95,102,88` ⇒ basis=measured 且 p50/p95 是**出现过的实测值**（秒）",
+          mestimate.get("basis") == "measured" and mestimate.get("samples") == 3
+          and run.get("p50") in (88.0, 95.0, 102.0) and run.get("p95") == 102.0,
+          mestimate)
+
+    bad_stage = _cli("feasibility", "--stage", "nope")
+    check("㉖ 未知阶段 ⇒ 退出 2（用法错，不是「跑不了」的 1）", bad_stage.returncode == 2,
+          {"exit": bad_stage.returncode, "err": (bad_stage.stderr or "")[-200:]})
+
+    strict = _cli("feasibility", "--stage", "krea2", "--capacity", "4", "--strict")
+    loose = _cli("feasibility", "--stage", "krea2", "--capacity", "4")
+    check("㉗ `--strict` 只认 perfect/good ⇒ 紧档判 1，不加则能跑（marginal）判 0",
+          strict.returncode == 1 and loose.returncode == 0,
+          {"strict": strict.returncode, "loose": loose.returncode})
+
+    #: ⭐ 反转判据 ✓✗：``--from-ledger`` **故意不提供** ✗ —— 台账在业务库 ✓，
+    #: 引擎内核（`feasibility.py` 零 IO ✓）不许读它 ✓。这条一松，内核就开始依赖库了 ✗✗。
+    ledger_cli = _cli("feasibility", "--stage", "krea2", "--from-ledger")
+    check("㉘ 内核 CLI **没有** `--from-ledger`（台账归服务层，内核不许读业务库）",
+          ledger_cli.returncode == 2,
+          {"exit": ledger_cli.returncode, "err": (ledger_cli.stderr or "")[-160:]})
+
+    #: ⚠️ 但**服务层**必须给得出来 ✓（不然"从台账估时"这条能力就是空话 ✓✗）：
+    from app.services import engine_readiness  # noqa: PLC0415 —— 这是**项目侧**测试 ✓
+
+    block = engine_readiness.run_samples("krea2")
+    check("㉙ 服务层 `run_samples` 三态分明：`available/total/samples/why` 齐全且能自圆其说",
+          {"available", "total", "samples", "why"} <= set(block)
+          and (bool(block.get("samples")) or bool(block.get("why"))),
+          block)
+    #: 样本不足闸门（含 0 条）⇒ 估时**必须**是 null ✓（不许把 1～2 条当结论 ✗）
+    service = engine_readiness.task_feasibility("krea2", use_ledger=True)
+    lestimate = service.get("estimate") or {}
+    check("㉚ 服务层 `use_ledger=True` ⇒ 回执带 `ledger`，且样本不足时 `runSeconds=null`",
+          "ledger" in service
+          and (lestimate.get("samples") or 0) >= 0
+          and (lestimate.get("basis") == "measured" or lestimate.get("runSeconds") is None),
+          {"samples": lestimate.get("samples"), "basis": lestimate.get("basis")})
+    check("㉛ `use_ledger=False`（默认）⇒ 回执里**没有** `ledger`（不碰库就不留痕迹）",
+          "ledger" not in engine_readiness.task_feasibility("krea2"),
+          sorted(engine_readiness.task_feasibility("krea2")))
+
+    plan = _cli("plan", "--stage", "krea2", "--json")
+    try:
+        pdata = json.loads(plan.stdout)
+    except ValueError:
+        pdata = {}
+    check("㉜ 老的 `plan`（装载计划）**没被改成** verdict：仍出 `components` 且退出码跟件齐不齐",
+          isinstance(pdata.get("components"), (list, tuple)) and plan.returncode in (0, 1),
+          {"exit": plan.returncode, "keys": sorted(pdata)[:10]})
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ⑦ 清单诚实：许可不猜 / 头部哈希稳定
 # ══════════════════════════════════════════════════════════════════════════
 def case_manifest() -> None:
@@ -281,6 +568,7 @@ def main() -> int:
     case_bad_weights()
     case_no_drift()
     case_cli()
+    case_feasibility_cli()
     case_manifest()
 
     failed = 0

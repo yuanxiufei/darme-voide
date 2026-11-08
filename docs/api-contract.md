@@ -178,10 +178,21 @@
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/` | 列表（含分类/绑定 Agent/工作流阶段） |
+| GET | `/usage` | **Skill 注入台账**（按 skill 汇总注入/被裁/成败；必须注册在 `/*` 之前） |
 | GET | `/*` | 详情（通配符，routePath 动态提取 id） |
 | PUT | `/*` | 更新 |
 | POST | `/` | 创建 |
 | DELETE | `/*` | 删除 |
+
+**GET `/usage` 注入台账**（query：`agentType` 可选、`minSamples` 可选，缺省 10）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `skills[]` | `{skillId,agentType,injected,dropped,ok,failed,unknown,samples,settled,okRate,judged}[]` | 每条 skill 的注入事实与跑次结果；`dropped` = 因 60000 字符预算被裁掉的次数 |
+| `skills[].okRate` | `number \| null` | ⚠️ **注入该 skill 的跑次成功率**，不是命中率／贡献度（没有"模型读没读它"的观测通路） |
+| `skills[].judged` | boolean | `settled >= minSamples` 才为 `true`；`false` = 样本不足、**还没有结论**（不是"没用"） |
+| `stats` | `{available,db,rows,droppedRows,settledRows,skills,minSamples,lowOkRate,penalty,note}` | 统计库盘点；库不可用时 `available=false` + `hint` |
+| `note` | string | 后端随回执给出的语义说明，前端**不该另编一套措辞** |
 
 **GET `/meta` 侧栏元信息**（必须注册在 `GET /*` 之前）：Agent 与外部技能库清单均由后端推导，前端不硬编码。
 
@@ -273,7 +284,7 @@
 | `mergeAPI` | merge/status | 见 §2.10 |
 | `aiConfigAPI` | list/create/update/del/test/quickPreset/quickLocal/configsLocal/gpuStatus/gpuReleaseAll | 见 §2.12 |
 | `agentConfigAPI` | list/get/create/update/del | 见 §2.13 |
-| `skillsAPI` | list/get/create/update/del | 见 §2.14 |
+| `skillsAPI` | list/get/create/update/del/usage | 见 §2.14 |
 | `voicesAPI` | list/sync | `GET /ai-voices`, `POST /ai-voices/sync` |
 | `aiProvidersAPI` | list | `GET /ai-providers` |
 | `uploadAPI` | image | `POST /upload/image` |

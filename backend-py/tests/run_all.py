@@ -849,6 +849,8 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
       视频两跳链用例 17 ✓ + **本轮 8** ✓）、`adapters_test` → **108** ✓（本轮 +3 ✓）、`comfyui_runs_test`
       → **19** ✓（本轮 +2 ✓）⇒ 17 + 8 + 3 + 2 = **30** ✓ 与总差**一分不差** ✓；其余各套两跑**一致** ✓。
   ⑮ ⭐⭐ **补真实库两列 · 冒烟由红转绿（2026-10-27 本机 ✓ 全量实录）**。
+     📌 **路径注**：本条是当时的实录，那时库还在数据根（`data/drama.db`）；2026-11-07 起
+     所有 SQLite 统一收进 `data/db/`（见 `data/README.md`），下文路径按当时原样保留。
    ① **为什么红**：⑭ 在**代码侧**给 `video_generations` 加了 `reference_video_urls` / `reference_image_size`
       （模型 ＋ 路由 ＋ 适配器 ＋ H3 全链 ✓），但**真实库** `data/drama.db` 还是旧表 ✓✗ ⇒ 冒烟那条
       `schema: no extra column in models` 红 ✓（`tmp/run_all_v5.log` 末行逐字「结论：1 项未通过 -> 契约冒烟」✓）。
@@ -1864,7 +1866,38 @@ Windows 上 WinGet 装的 ``…\\Microsoft\\WinGet\\Links\\ffmpeg.exe`` 是**应
       ⓔ **别把补充功能做成新的崩溃点** ✗：`abort=` 只送给**签名里收**它的后端（`_accepts_abort` 判
       `inspect.signature` ✓，`**kwargs` 形算收 ✓）—— 老/替身后端硬塞一个 kwarg ⇒ `TypeError: unexpected
       keyword argument` ⇒ 正常流式当场崩 ✓✗（判据用的是"加 abort 之前"那份签名，正是要摁住这一种 ✓）。
-    """
+      * ㊹ **2026-11-08·`frontend_api_coverage_test` 自身三处盲区（5 → 10 条）** —— 这套是「删 `backend/`
+      之后唯一后端」的安全网，却在三处「看不见」：ⓐ **`patch` 从未被扫** ✗：`_CALL_RE` 只列
+      `get|post|put|del`，而 `useApi.updateEntry` 走的正是 `api.patch` ⇒ 那条调用点零覆盖，后端真删掉
+      `PATCH /knowledge-loop/entries/{id}` 本套仍全绿；ⓑ **只扫 Web 端** ✗：`FRONT` 只指 `frontend/app`，
+      `desktop/frontend/src` 的调用点无任何保护（两端是复制关系，桌面端同改照样点出 501）；ⓒ **查询串被
+      整体剥掉** ✗：`?a=b` 连参数名一起丢 ⇒ 前端写 `?assetType=` 而后端读 `asset_type` 时字段**静默失效**
+      （比 404 更难查）。修：`_METHODS` 补 `patch`、`FRONT_ROOTS` 两端合扫、新增 `query_keys()` +
+      `unknown_query_keys()` 逐键核对。★顺带抓出第四个坑：openapi **只报声明过的**参数，本仓十几处是手工
+      `request.query_params.get("k")`（`asset-versions`/`export`/`images`/`traces`/`usage` …）⇒ 只认
+      openapi 会把**真在用**的参数判成「未声明」（首跑 6 条假红 ✓）。故加 `manual_query_names()`：
+      **AST** 抽「哪个端点读了哪个键」（正则拿不到归属，只能全文件混成一个集合 ⇒ 判据白做），
+      `_router_prefix` + `_decorated_routes` + `_query_keys_of`（含 `q = …query_params` 别名与 `q["k"]` 下标形）。
+      反验双向四向：键拼错 `assetType` ⇒ 精确报出该键与该文件 ✓；`api.patch` 路径改坏 ⇒ 报 `('PATCH',
+      '/api/v1/knowledge-loop/entries/{}/__nope__')` ✓（证明 patch 真进了比对表，不只是被计数）；
+      只在桌面端加一条 `/__desk_nope__` ⇒ 报出 `desktop/frontend/src/…` ✓；两个「反套套逻辑」用例保证
+      匹配器与参数核对**都会拒绝** ✓。现状：175 文件 / 236 调用点 / 后端 385 条 (method,path) / 10/10 ✓。
+     * ㊺ **2026-11-08（同日接着）·「注释形态的调用」用纪律代替机制，今天换成机制（10 → 12 条）** ——
+      ㊹ 的 docstring 里留着一句「写注释**别用调用形状**」：那是 2026-09-22 踩过之后立的**纪律** ✓，
+       代价是任何人顺手在注释里记一句老路径就红、且红得莫名其妙（反查后端当然找不到）✗。同日另三支
+       前端守卫（`check-parity` 的 F/G、`check-isolation`、`check-responsive`）刚统一成「认引号的逐字符
+       注释遮蔽」，本套却还在裸文本上 `finditer` ⇒ 同一类缺陷两套口径。修：`mask_comments(code,
+       inline_slash)`（**认引号**、遮成等长空格保列号）+ `mask_source(text, suffix)` + `scan_source()`，
+       把 `.ts/.js` 整文件遮蔽、`.vue` **分块**（只 `<script>` 区跑 JS 状态机，模板/样式只遮 `<!-- -->`）。
+       ★两处「不这么写就更糟」：ⓐ 遮蔽器**必须认引号**，否则 `'https://…'`、`'src/**/*.ts'` 里的 `//`、
+       `/*` 会把后面的真代码一起遮掉 ⇒ 调用点**静默丢失**（假绿，比假红危险得多）；ⓑ `.vue` **不能整文件
+       跑 JS 状态机** —— 模板文本里一个 `Don't` 的撇号就让引号状态吃满剩余全文。反验双向：临时文件写
+       `// api.get('/__commented_probe__')` + 块注释 + `<!-- -->` ⇒ 12/12 全绿（旧版必红）✓；同一行
+       引号串后紧跟 `api.get('/__live_probe__')` / `api.patch(...)` ⇒ 精确报出两条 ✓（证明没有吃过头）。
+       判据 ⑤/⑤′ 自带「先过一遍不遮蔽的正则，确认夹具真的会被扫到」⇒ 夹具写坏时判据不会恒真。
+       现状：175 文件 / 236 调用点 / 385 条路由 / **12/12** ✓（调用点数量与改前一致 ⇒ 今天盘上没有依赖
+       假红的注释，收益是**关掉了这颗雷**）。
+      """
 
 from __future__ import annotations
 
@@ -1911,22 +1944,31 @@ TESTS = [
     ("MCP 接入层 + 路由", "mcp_test.py"),
     ("修复内核（提案/应用/回滚）", "repair_tools_test.py"),
     ("修复诊断（依赖反推/缺口）", "repair_diagnose_test.py"),
+    ("修复闭环（快照/应用后复诊/跑次）", "repair_closure_test.py"),
     ("修复技能提示词（L0–L4 权能边界）", "repair_skill_test.py"),
     ("画布工具层（工具→op 编译/跨语言同源）", "canvas_ops_test.py"),
     ("画布插件契约（清单校验/源对拍）", "canvas_plugins_test.py"),
     ("画布 Agent（一句话→op，工具无副作用）", "canvas_agent_test.py"),
     ("知识闭环（跑次归一/台账/蒸馏/投喂/接线）", "knowledge_loop_test.py"),
+    ("知识库管理面（编辑/删除/版本/标签/审计/HTTP 契约）", "knowledge_management_test.py"),
     ("知识复盘定时器（默认关/防重入/失败隔离/复位）", "knowledge_scheduler_test.py"),
     ("质检阈值覆盖层（qc 伪档/证据核验/接线到 ffmpeg）", "qc_thresholds_test.py"),
     ("调参候选（只读/样本闸门/归因边界/凭据可核/抽样如实）", "tuning_suggest_test.py"),
+    ("质检反哺引擎参数（归因可核/分桶/降档闸门/接线/坏库降级）", "qc_feedback_test.py"),
+    ("质检人工复核 + 阈值命中率（口径去重/改判/门槛/方向）", "qc_reviews_test.py"),
+    ("优化史（追加不覆盖/判决≠生效/delta 不编数/写口不抛/接线）", "optimization_log_test.py"),
+    ("参数调优（温度网格/repeat≥2/抖动带/换模型不算/落库走同一连接）", "param_optimizer_test.py"),
+    ("调优后台任务（入队即返/进度总数早定/串行/去重/取消只在两跑之间）", "tune_runtime_test.py"),
     ("跑次落账输入侧（引擎封口/质检写回/锁外/码可聚/重跑覆盖）", "outcome_wiring_test.py"),
     ("Agent 出厂提示词", "agent_prompts_test.py"),
     ("评测打分器 + 基准目录", "evaluation_scorer_test.py"),
     ("Skill 解析 + 加载", "skills_test.py"),
+    ("Skill 注入台账 + 超预算裁剪（缺口 10）", "skill_usage_test.py"),
     ("Skill 附件按需读取（边界/截断）", "skill_refs_test.py"),
     ("Skill 引用解析基准（断链守卫四类基准）", "skill_refs_check_test.py"),
     ("评测执行器 + 端点", "evaluation_route_test.py"),
     ("基准资产搬迁 + 评测 CLI", "eval_cli_test.py"),
+    ("成片评测（四维/缺维不折分/幂等跑次/降级不抛）", "film_check_test.py"),
     ("GPU 显存管理器 + 2 端点", "gpu_manager_test.py"),
     ("GPU 租约接线（text / tts + image/video 长租约）", "gpu_lease_wiring_test.py"),
     ("差分对拍比较器（Node↔Python 工具）", "parity_diff_test.py"),
@@ -1971,6 +2013,9 @@ TESTS = [
     ("QC 报告 + 联系表 2 端点", "qc_report_test.py"),
     ("时代背景提炼 + 风格提炼 2 端点", "era_style_distill_test.py"),
     ("数据根切换 + 存储 2 端点", "storage_change_test.py"),
+    ("库升级脚本·备份只留最近 N 份（按文件名时间戳排不按 mtime / 先建后裁 / 只认自己造的"
+     "形状、别人的备份与整套备份目录一律不碰 / 删不掉不拖垮补列；临时目录不碰真库）",
+     "db_upgrade_test.py"),
     ("生产镜像布局一致性", "dockerfile_contract_test.py"),
     ("前端调用点 ↔ 后端路由覆盖", "frontend_api_coverage_test.py"),
     ("共享契约镜像（contracts.ts ↔ 后端）", "contract_mirror_test.py"),
@@ -2231,6 +2276,31 @@ TESTS = [
     "接进 `TorchBackend`：压力爆表 ⇒ 构造期就不上卡且精度转 fp32、卡空了 ⇒ 下一阶段**自动回切** GPU、"
     "需求按部件相加、`describe()` 报策略实况；装载键把 `None`/`auto`/`gpu-first` 归一到同一个键）",
     "engine_device_policy_test.py"),
+   ("自研引擎·低配模拟（G4：`DARME_FAKE_GPU_TOTAL_GIB` / `DARME_FAKE_HOST_GIB` "
+    "让 22.49 GiB 机器装成 8 GB 卡 + 32 GB 内存 ⇒ 不用真机就能验降档决策；"
+    "口径是**只改总量、不改占用**（改 free 会让 `usedRatio` 恒 0 ⇒ 第 ⑤ 支判据永假）；"
+    "三处读数口必须同接（`probe` / `budget_of_cuda` / `host_memory`），只接一处会出现"
+    "「决策说 8 GiB、预算按 22.49 GiB 装」；模拟值如实标 `faked`；"
+    "写错的变量当场抛、不静默变成「没模拟」；含反向验证：不给变量时结论必须不同）",
+    "engine_fake_resources_test.py"),
+   ("自研引擎·可行性预检（G2：**不装载**就答「这台机器跑不跑得动这条链」⇒ `verdict` 四档；"
+    "逐件需求**只走** `stage_part_need`（装配线同一个出口）、表值**引用**那几本账（`is` 相等 ⇒ "
+    "没有第二本账）；「峰值」口径与装配事实对账（整链同驻求和 / 分时换装取最大 ⇒ "
+    "`qwen_image21` 不能按 28.68 判、`music3` 不能按 max 少算 8 GiB、`wan22` 双专家不叠加）；"
+    "激活如实 `basis=unknown` 不编数 ⇒ `perfect` 必降档成 `good` 并标 `downgraded`；"
+    "卡与内存**都**要够（split 也要内存放溢出的那部分 ⇒ 8 GiB 卡 + 32 GB 内存如实 `too_tight`）；"
+    "`capacityGiB` 假装小卡时标 `assumed` 不冒充真读数；路由 `GET /feasibility` 走门面唯一入口）",
+    "engine_feasibility_test.py"),
+   ("自研引擎·机器档（G1：一句话「8 GiB 卡按最低配跑」⇒ 一组旋钮的**唯一展开点**；"
+    "五档 `auto`/`gpu`/`l1`/`l2`/`cpu` ＋ 别名一张表、不认的当场抛（不静默回落）；"
+    "`applied` 只放**真会改**的项（`auto`/`gpu` 是 `{}`）、显式 `policy`/`vaeTiling` 与档位"
+    "冲突时以显式为准并标 `profileIgnored`；四项明确不接（`notWired`）；"
+    "档位表**只引用**默认值（`HOST_USE_RATIO` 的字面量不许出现）；假设值不冒充实测；"
+    "`budgets` 一处答「这档下卡/内存各多少能用」且 `source` 四值 ＋ 测不到写 `null` 不写 0"
+    "（`HostMemory` 带名字的分档口防 `(总量, 可用)` 顺序坑）；`profile` 进**装载键**、"
+    "七条装配线 ＋ H3 全部下传、`/load` 白名单与 `/engine/runtime?profile=` 都认、"
+    "拼错回 400；SDXL 那条线如实报 `hostRatio` 不生效）",
+    "engine_profile_test.py"),
    ("自研引擎·调度（**GPU 优先 ⇒ 不足则 GPU/CPU 协同 ⇒ 都不够就拒**：指令档先于估算"
     "（策略 `cpu`/显式 `cpu` 不被「卡还空着」劝回去、策略 `gpu` 再紧也上卡）、协同两本账"
     "（卡上 + 内存**正好等于**需求、卡上只给到「余量 − 1 GiB」）、**第二台设备也要核**"
@@ -2273,6 +2343,10 @@ TESTS = [
     "engine_vae_tiling_test.py"),
    ("自研引擎·独立性契约（AST 禁 Web 层依赖/门面无 torch 可算/坏权重必拦/CLI 退出码/两处判据不漂）",
      "engine_independence_test.py"),
+   ("自研引擎·服务层接线口（三源名固定/没登记**如实说没接入**而不是给空容器/登记的是模块对象不复刻/"
+    "写错名字**整体拒**不留半登记/`app/main.py` 的 `provide` 键与 `hooks.SOURCES` 逐字相同/"
+    "`tuning._scan()` 未登记回 `available=False`/`hooks.py` 顶层零服务层 import）",
+    "engine_hooks_test.py"),
     ("自研引擎·入口契约（HTTP 唯一入口走门面/错误码单一真源/六接口字段快照/"
      "**装配白名单盖住 `ensure_loaded` 签名·零豁免**（少抄一项＝开关静默失效）/开关严格解析"
      "（`\"false\"` 不许读成 True）/`loras` 走与 config **同一份**归一（相对路径按 `modelsDir` ✓、"
@@ -2374,6 +2448,12 @@ TESTS = [
      "engine_gguf_dequant_test.py"),
     ("自研引擎·GGUF → LlmModel 装载（ggml 命名映射 + 线性层转置；往返恒等；tie embeddings）",
      "engine_gguf_to_llm_test.py"),
+    ("自研引擎·反量化产物落盘缓存（G3：键＝源大小+头哈希+converter+dtype（**不含 mtime** ✓ 防 touch 增生）/ "
+     "四条失效（sidecar 缺 / 指纹不符 / 产物截断 / 自述 converter 不符）/ 原子写不留半成品 / "
+     "配额与余量不足 ⇒ `MaterializeSkip` 退化成「慢」不是「错」/ 命中与现算**逐位相等** / "
+     "`describe()['materialize']` 原样抬出结论 / 命中账（`refused` 与 `misses` 分开记 ✓ 合成命中率会把"
+     "「该清盘」读成「该重算」））",
+     "engine_materialize_test.py"),
     ("自研引擎·GGUF 自带词表（**全量读**（inspect 只存前 16 项 ✗）/ 判 GGUF 看正文不看后缀 / "
      "Qwen2 预分词（`\\p{N}` 单数字）不许串 GPT-2 / 控制符整体 / 不加 BOS·EOS / 四条具名拒绝）",
      "engine_tokenizer_gguf_test.py"),
@@ -2385,6 +2465,10 @@ TESTS = [
      "engine_llm_device_test.py"),
     ("自研引擎·对话骨架（**骨架从权重元数据取** ✓ 不内置 ✗ / 逐字渲染 / 「没有」与「坏了」两回事 / "
      "坏了当场拒；缩小版 CPU 可验）", "engine_chat_template_test.py"),
+    ("自研引擎·**当 agent 的模型**（`provider=\"engine\"`：`<tool_call>` 协议解析「块坏就抛、截断不算」/ "
+     "`tool.name` 与 `assistant.tool_calls` 不许被压掉 / 超窗当场拒 / 无骨架当面拒 / "
+     "工具真执行＋结果真回灌 / 分派必须在 `default_generate` 里；缩小版 CPU 可验）",
+     "engine_agent_loop_test.py"),
     ("自研引擎·LoRA 装配（语义从参考实现抄：bypass / merge / runtime 三条路**各自给理由** ✓；"
      "int8 融合 fc2 必须 merge（bypass 钩子不触发 ✗）/ adaln 只能运行时注入 / 孤儿与 rank 不一致"
      "不静默；零 torch 也能验算法）", "engine_lora_test.py"),
@@ -2425,6 +2509,9 @@ TESTS = [
      "`flow` 三形由**单一**解析处出（plan 与二采同源）)", "engine_video_schedule_test.py"),
     ("自研引擎·解码与落盘（VAE 编解码 + **真 mp4/wav 用 ffprobe/标准库复核** + 整链出片 + "
      "**设备口径逐入口**：错设备当场说清 / 判据不许比字符串 / 不许误伤真链路）", "engine_io_test.py"),
+    ("自研引擎·产物取证（**音轨真混进 mp4**：短/长两向都以画面收尾 + 帧数不符当场失败 + "
+     "PNG 元数据可复读 + 纯色图标 degraded + 产物目录 manifest（sha256/ffprobe 事实）+ "
+     "`<kind>-<taskId>/` 落点）", "engine_artifact_test.py"),
     ("自研引擎·文本编码（真 TE + 注入式 tokenizer + 截断回报 + 整链 TE→DiT→VAE→mp4）", "engine_text_test.py"),
     ("自研引擎·长视频分段（网格长度/重叠接缝/保留帧守恒 + 首帧落 PNG 传递）", "engine_segments_test.py"),
     ("自研引擎·多段成片（**超单段上限就分段**：拼接守恒 / 链式规范化**真拉小漂移** / 逐段产物各归其位 / "
@@ -2436,7 +2523,13 @@ TESTS = [
     ("自研引擎·业务桥（`provider=engine` 那条路：装配键集与运行时**逐键对账** / 缺 DiT 就报 / "
      "取整口径必填 / 产物口径 / **真跑出真 mp4+首帧真 PNG** / 把 httpx 打死照样跑完）",
      "engine_bridge_test.py"),
-    ("自研引擎·命名映射（预设改名/合并顺序/**干跑报告**缺哪些键 + 往返装载逐位一致）", "engine_mappings_test.py"),
+    ("自研引擎·产物落点（**兜底只有一处真源**：四个落盘入口不再各自 `mkdtemp` / `cwd()` ⇒ 不再"
+    "「每跑一次一个新目录、跑完还得搬」；干跑另起一棵不进 `static`；kind 不许穿越；"
+    "业务通路与兜底同一棵树）", "engine_output_paths_test.py"),
+   ("全仓产物落点（`<dataRoot>/static/` 下每个子目录都登记过；禁「二次 static」⇒ 修掉插帧 404 与"
+    "混音中间件 `static/static/`；禁代码目录输出 ⇒ H3 服务搬出源码树；实验产物落 "
+    "`<dataRoot>/experiments/<实验名>/`、`backend-py/output/` 存在即红）", "output_layout_test.py"),
+   ("自研引擎·命名映射（预设改名/合并顺序/**干跑报告**缺哪些键 + 往返装载逐位一致）", "engine_mappings_test.py"),
     ("短剧提示词生产契约（占位符**解析成具体内容** + Mx-Shell 五段质感层；零依赖）",
      "prompt_contract_test.py"),
     ("资产清单 + 验收门（依赖拓扑/成环点名/逐镜阻断/**付费生成前的门**；零依赖）",
@@ -2544,10 +2637,23 @@ def main() -> int:
         print(f"{status}  {label:<16} {summary}")
         if completed.returncode != 0:
             failures.append(label)
-            # 失败时把 FAIL 行打出来，方便直接定位
+            # 失败时把失败的**判据**原文打出来，方便直接定位。
+            # ⚠️ 为什么要把 `✗` 也算上（2026-11-08 实测真坑）：本仓各套件的判据打印用的是
+            #   `✓ / ✗` 这两号（`check()` 的通行写法），**不是** `FAIL` 前缀 ✓✗ ⇒
+            #   只认 `FAIL` 时，日志里就只剩「FAIL 套名 + 38 分之 37」这两句 ✓，
+            #   到底是哪一条红、拿了什么 detail **一个字都看不到** ✗ →
+            #   只能手动把那一套单独再跑一遍（而偶发/受环境影响的那种，单跑恰好是绿的 ✗✗）。
+            #   上限 20 行：崩得很大时也不至于把日志刷满（明细行本身还带 detail repr）。
+            shown = 0
             for line in output.splitlines():
-                if line.startswith("FAIL") or line.startswith("  DRIFT") or line.startswith("  SHADOW"):
-                    print(f"        {line.strip()}")
+                text = line.strip()
+                if not text.startswith(("FAIL", "✗", "  DRIFT", "  SHADOW")):
+                    continue
+                print(f"        {text}")
+                shown += 1
+                if shown >= 20:
+                    print("        （失败明细超过 20 行 ⇒ 只印前 20 行，看单跑输出更全）")
+                    break
             if not summary:
                 # ⚠️ **崩溃型**失败：子进程抛异常 / 被杀 ⇒ 输出里**一行都不带** `FAIL` 前缀 ✗
                 #    ⇒ 上面那圈一条也捞不到 ⇒ 日志只剩「FAIL 套名 + 空摘要」✓✗（2026-11-01 实测：

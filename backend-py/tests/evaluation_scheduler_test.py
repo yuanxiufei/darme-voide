@@ -92,22 +92,29 @@ def main() -> int:  # noqa: C901
     sch.optimize_agent_prompt = _stub_optimize  # type: ignore[assignment]
     _reset_state()
     results = asyncio.run(sch.run_evaluation_cycle())
-    check("跑一轮: 四个 case 全跑、**串行**（按目录顺序）",
-          [c["caseId"] for c in calls] == ["ext-case-001", "script-rewriter-001",
-                                           "sb-case-001", "voice-assigner-001"],
-          [c["caseId"] for c in calls])
+    # ⚠️ 期望值**从目录取**，不写死 ✗：原先硬编码 4 个 id，2026-11-07 目录加进第 5 类
+    # `grid-prompt-001` 之后这条恒红 —— 而"恒红"会被当成环境噪音忽略，真出问题（少跑一个 case、
+    # 并发跑、顺序乱）时也没人看得见了 ✗✗。
+    catalog_ids = [str(item.get("id")) for item in sch.list_benchmark_cases()]
+    check("跑一轮: 基准目录里**每个 case 都跑**（顺序＝目录顺序、串行；目录加档这里自动跟上 ✓）",
+          [c["caseId"] for c in calls] == catalog_ids and len(catalog_ids) >= 4,
+          ([c["caseId"] for c in calls], catalog_ids))
     check("跑一轮: iterations 取自配置、autoPersist 固定 True（自动落库）",
           all(c["options"] == {"iterations": 3, "autoPersist": True} for c in calls),
           calls[0]["options"])
-    check("跑一轮: **失败隔离** —— 挂掉的 case ok=false + error，其余照常 ok=true",
-          [r["ok"] for r in results] == [False, True, True, True]
-          and results[0]["error"] == "这个 case 炸了"
-          and results[0]["agentType"] == "extractor",
+    by_id = {str(r.get("caseId")): r for r in results}
+    crashed = by_id.get("ext-case-001") or {}
+    check("跑一轮: **失败隔离** —— 挂掉的 case ok=false + error，其余照常 ok=true"
+          "（按 caseId 取，不按下标 ✗：目录顺序一变下标就对不上）",
+          crashed.get("ok") is False and crashed.get("error") == "这个 case 炸了"
+          and crashed.get("agentType") == "extractor"
+          and all(r.get("ok") is True for r in results if r.get("caseId") != "ext-case-001"),
           results)
     check("跑一轮: 结果四键齐全（caseId/agentType/ok/persisted）",
           all(set(r) >= {"caseId", "agentType", "ok"} for r in results)
-          and results[2]["persisted"] == {"version": 1, "score": 60, "name": "n"},
-          results[2])
+          and (by_id.get("sb-case-001") or {}).get("persisted")
+          == {"version": 1, "score": 60, "name": "n"},
+          by_id.get("sb-case-001"))
     check("跑一轮: 结束后 running 复位、lastRunAt/lastResults 写回",
           sch._state["running"] is False and sch._state["lastRunAt"] is not None  # noqa: SLF001
           and sch._state["lastResults"] == results)  # noqa: SLF001

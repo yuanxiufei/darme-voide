@@ -22,8 +22,10 @@ from fastapi.responses import JSONResponse
 _OK = 200
 _CREATED = 201
 _BAD_REQUEST = 400
+_FORBIDDEN = 403
 _NOT_FOUND = 404
 _CONFLICT = 409
+_UNPROCESSABLE = 422
 _SERVER_ERROR = 500
 
 
@@ -54,16 +56,26 @@ def created(data: Any = None) -> JSONResponse:
     return JSONResponse(status_code=_CREATED, content={"code": _CREATED, "data": data, "message": "created"})
 
 
-def bad_request(message: str = "bad request", *, engine_code: str | None = None) -> JSONResponse:
-    """400 + 可选**引擎错误码**。
+def bad_request(
+    message: str = "bad request",
+    *,
+    engine_code: str | None = None,
+    errors: list[str] | None = None,
+) -> JSONResponse:
+    """400 + 可选**引擎错误码** / 可选**逐条问题清单**。
 
     ⚠️ ``engineCode`` 与信封里的 ``code`` **不是一回事** ✗：后者是 HTTP 状态码（前端按它判失败 ✓），
     前者是引擎的机器可判错误码（``facade.CODES`` 的键 ✓ —— 前端/脚本据此分流「该装包 / 该重下 /
     该换导出」✓）。不给就**不写这个字段** ✓ ⇒ 既有调用与旧前端完全不受影响 ✓。
+
+    ``errors`` 同理：只有调用方显式给了才出现（计划编译这类「一次报全部问题」的场景要它）。
+    ``message`` 仍然写人话 —— 只靠 errors 数组的报错，控制台里看不出发生了什么 ✗。
     """
     content: dict[str, Any] = {"code": _BAD_REQUEST, "message": message}
     if engine_code:
         content["engineCode"] = engine_code
+    if errors:
+        content["errors"] = list(errors)
     return JSONResponse(status_code=_BAD_REQUEST, content=content)
 
 
@@ -73,6 +85,22 @@ def not_found(message: str = "not found") -> JSONResponse:
 
 def conflict(message: str = "conflict") -> JSONResponse:
     return JSONResponse(status_code=_CONFLICT, content={"code": _CONFLICT, "message": message})
+
+
+def forbidden(message: str = "forbidden") -> JSONResponse:
+    """403 —— 角色不够（知识库的**声明式**权限，不是认证；见 ``docs/knowledge-base-contract.md`` §4）。"""
+    return JSONResponse(status_code=_FORBIDDEN, content={"code": _FORBIDDEN, "message": message})
+
+
+def unprocessable(message: str = "unprocessable") -> JSONResponse:
+    """422 —— 语义上能过格式校验但**内容站不住**（典型：证据核不过、标题全空白）。
+
+    ⚠️ 与 400 的分工要一致：400 是「参数本身不成立」（缺字段、类型错、非法枚举值），
+    422 是「参数都给了、格式也对，但业务判据过不去」。两者的处理动作不同 ——
+    400 要改请求形状，422 要改内容或补证据 —— 混成一个码，前端就只能统一弹「请求有误」。
+    """
+    return JSONResponse(status_code=_UNPROCESSABLE,
+                        content={"code": _UNPROCESSABLE, "message": message})
 
 
 def server_error(message: str = "internal error") -> JSONResponse:

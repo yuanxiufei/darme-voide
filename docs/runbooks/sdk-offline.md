@@ -74,5 +74,5 @@ foreach ($sub in @('doctor','plan','readiness','status')) {
 
 ## 5. 顺带得到的两个事实（记录下来，别下次再查）
 
-1. **引擎默认权重根是仓内 `data/models`**，不是桌面共享池（`D:\Comfy-Desktop\ComfyUI-Shared\models`）。所以同一份 stage 在 CLI 里可能报「缺文件」，而 ComfyUI 那边明明有 —— 这不是 bug，是根目录不同。要按共享池算，显式传 `--root`。
+1. **引擎默认权重根是仓内 `models`**，不是桌面共享池（`D:\Comfy-Desktop\ComfyUI-Shared\models`）。所以同一份 stage 在 CLI 里可能报「缺文件」，而 ComfyUI 那边明明有 —— 这不是 bug，是根目录不同。要按共享池算，显式传 `--root`。
 2. **显存估算会溢出**（49.44 GiB vs 24 GiB）是**权重总量**口径：`readiness` 报的是「必需权重合计」，不是「同时驻留」。真正的驻留视图在 `plan` 的 `residency.peakResidentGiB`（分块/分层装载后是否装得下，以它为准）。

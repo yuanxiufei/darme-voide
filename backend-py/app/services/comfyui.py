@@ -259,7 +259,7 @@ def _reference_file(url: str) -> tuple[bytes, str]:
     from .file_storage import get_absolute_path
 
     # ⚠️ 前导斜杠必须去掉：``Path(base) / "/uploads/x.png"`` 在 Windows 上会把 base **整个丢掉**
-    #    （绝对路径优先）⇒ 解析成 ``C:\uploads\x.png`` ⇒ 被判穿越 ✗
+    #    （绝对路径优先）⇒ 解析成盘符根下的 ``…\uploads\x.png`` ⇒ 被判穿越 ✗
     relative = str(url).strip().lstrip("/").replace("\\", "/")
     path = Path(get_absolute_path(relative))
     if not path.is_file():

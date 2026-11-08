@@ -13,10 +13,10 @@
 
 * ``剧本知识库/`` —— 第三方只读资料，``curated-screenplay-methods.sqlite`` 是供应商**预建**的，
   本仓连打开都用 ``?mode=ro``；
-* ``data/ocr/scanned-*.sqlite`` —— ``ocr_index.py`` 烧出来的，``--redo`` 就覆盖；
-* ``data/ocr/library-extra.sqlite`` —— ``lib_index.py`` 从盘上抽的，``--all`` 就覆盖。
+* ``indexes/library-ocr.sqlite``（含 ``scanned-*.sqlite`` 分卷）—— ``ocr_index.py`` 烧出来的，``--redo`` 就覆盖；
+* ``indexes/library-extra.sqlite`` —— ``lib_index.py`` 从盘上抽的，``--all`` 就覆盖。
 
-所以「编辑/删除」不落在它们身上，而是落在**第四库** ``data/ocr/library-overlay.sqlite``
+所以「编辑/删除」不落在它们身上，而是落在**第四库** ``data/db/library-overlay.sqlite``
 （``app/services/library_overlay.py``）：编辑写 ``edits``、删除写 ``tombstones``，读取时叠加/过滤。
 好处是「改完立刻能搜到、能看到」而**原库重建也不会把改动冲掉**；代价是原库若重建把某一份
 删了，那些编辑会**如实报 ``staleEdits``**（不假装还在）。

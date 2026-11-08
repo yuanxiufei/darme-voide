@@ -5,7 +5,8 @@
 + **``GET /gpu/status``、``POST /gpu/release-all``（GPU 显存管理器，配 ``services/gpu_manager.py``）**
 **已全部注册**（2026-09-15 校正）：``/ollama/*``(4)、``POST /models``、``POST /test`` **后来都已迁**
 （依赖外部进程/网络的那几条走既有 HTTP/子进程链路，不再 501 兜底）。
-⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册仅 1 条**：``storage/change``）。
+⚠️ 「哪些没迁」以 ``tests/route_parity_test.py`` 的机械扫描为准（当前**未注册 0 条** ——
+早先此处写「未注册仅 1 条：``storage/change``」，那条后来已迁，见 ``routers/storage.py``）。
 
 ⚠️ 四处易错点：
 

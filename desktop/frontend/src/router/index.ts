@@ -25,6 +25,11 @@ const routes: RouteRecordRaw[] = [
   { path: '/skills', name: 'skills', component: () => import('../pages/skills.vue') },
   { path: '/knowledge', name: 'knowledge', component: () => import('../pages/knowledge.vue') },
   {
+    path: '/knowledge-loop',
+    name: 'knowledge-loop',
+    component: () => import('../pages/knowledge-loop.vue'),
+  },
+  {
     path: '/style-profiles',
     name: 'style-profiles',
     component: () => import('../pages/style-profiles.vue'),

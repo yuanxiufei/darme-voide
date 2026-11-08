@@ -451,9 +451,9 @@
       "runtime": "git",
       "repo": "https://github.com/FunAudioLLM/CosyVoice.git",
       "size_gib": 4.0,
-      "required": true,
+      "required": false,
       "tags": ["tts", "voice"],
-      "note": "阿里中文 TTS 天花板，0-shot 音色克隆；clone 后需按其 README 下载权重并 pip 安装，部署为独立 HTTP 服务"
+      "note": "阿里中文 TTS 天花板，0-shot 音色克隆；clone 后需按其 README 下载权重并 pip 安装，部署为独立 HTTP 服务。⚠️ `required` 2026-11-07 由 true 改 false：本仓**已有替代实现** —— `app/local_services/tts/server.py`（端口 9880）把 TTS 协议钉死、引擎可换（edge-tts 在线 / Windows SAPI 离线），后端一行都不用改。这条无 `filename`/无落点（见 THIRD_PARTY_NOTICES「6 条无落点条目」）、本机也没装 ⇒ 保留为 true 只会让下载估算凭空多算 4 GB、且就绪检查永远报一个补不上的缺口"
     },
 
     {

@@ -231,7 +231,7 @@ def main() -> int:  # noqa: C901
     sl.reset_cache()
     missing = sl.search("三幕结构")
     #: playbook 的提示由「未安装」改为「缺失」：2026-11-04 起它随仓库分发
-    #: （``data/playbook/``），正常克隆里本来就该有 —— 再喊「未安装」会让人
+    #: （``corpus/playbook/``），正常克隆里本来就该有 —— 再喊「未安装」会让人
     #: 去装一个不需要装的东西，而真因通常是目录被误删或被 SCRIPT_PLAYBOOK_ROOT 指偏。
     check("降级: 两源都缺 -> available=false + 安装提示（不抛错）",
           missing["available"] is False and missing["results"] == []

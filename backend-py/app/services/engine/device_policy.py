@@ -135,6 +135,10 @@ class Pressure:
     utilPercent: float | None = None
     #: 这个数**从哪来** ✓：``"memory"``（显存推的 ✓）/ ``"nvml"``（真利用率 ✓）
     source: str = "memory"
+    #: ⭐ 这是**模拟值**（:data:`FAKE_GPU_TOTAL_ENV` 生效中 ✓）⇒ 报告必须如实标出来 ✓✗。
+    #: 为什么单列一字段而不是把 ``source`` 改成 ``"fake"`` ✗：``source`` 答的是「利用率从哪来」✓，
+    #: 两者正交 ✓（模拟值同样可能来自 nvml ✓）—— 混进一个枚举会让老读者判错口径 ✓✗。
+    faked: bool = False
 
     @property
     def usedBytes(self) -> int:
@@ -157,7 +161,72 @@ class Pressure:
             "usedRatio": round(self.usedRatio, 3),
             "utilPercent": self.utilPercent,
             "source": self.source,
+            "faked": self.faked,
         }
+
+
+# ── 低配模拟（G4，2026-11-07）─────────────────────────────────────────────────
+#
+# 为什么必须有它 ✗✗：本机是 A5000／**22.49 GiB**／96 GiB 内存 ✓，而验收档是
+# **8 GB 卡 + 32 GB 内存** ✓✗。没有它 ⇒「8 GiB 会不会崩」只能插真卡才知道 ✓✗，
+# 判据也就只能靠人眼 ✓（而人眼判"降级对不对"是判不了的 ✗）。
+#
+# 口径：**只改总量、不改占用** ✓✗ ——
+# 假装卡只有 N GiB ⇒ 已用字节原样保留 ✓、可用 = N − 已用 ✓（可为 0 ✓）。
+# 为什么不"把 free 直接写成 N" ✗✗：那样 `usedRatio` 恒为 0 ✓ ⇒ `decide()` 的第 ⑤ 支
+# （需求未知按占用率判）永远走不到 ✓✗、判据全是假绿 ✓。
+#
+# ⚠️ **只在这三处读**（它们分别是「决策」「切分预算」「内存余量」的唯一读数口 ✓）：
+# `probe()` / `residency.budget_of_cuda()` / `scheduler.host_memory()`。
+# 散着改会让报告与行为对不上 ✗：报告说"8 GiB"、切分却按 22.49 GiB 算，比不模拟更糟 ✓✗。
+FAKE_GPU_TOTAL_ENV = "DARME_FAKE_GPU_TOTAL_GIB"
+FAKE_HOST_TOTAL_ENV = "DARME_FAKE_HOST_GIB"
+
+
+def fake_total_bytes(env_name: str) -> int | None:
+    """读「假装只有 N GiB」✓；**没设 / 空串 ⇒ None** ✓；设了但不是正数 ⇒ **抛** ✗。
+
+    ⚠️ 拼错 / 写成 `8GB` 这类**不当空串忽略** ✗✗：忽略就等于"模拟静默不生效" ✓，
+    于是人以为在 8 GiB 上验过了 ✓✗ —— 与本仓「不认识就抛」同口径 ✓（见 `normalize_policy` ✓）。
+    """
+    import os  # noqa: PLC0415 —— 只在读数这一拍用 ✓（模块头不挂 os ✓）
+
+    raw = str(os.environ.get(env_name, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        gib = float(raw)
+    except ValueError:
+        gib = -1.0
+    if not gib > 0:
+        raise ValueError(
+            f"{env_name}={raw!r} 不合法 ✗（要 GiB 数，例如 `8` 或 `7.5` ✓；"
+            f"不想模拟就**删掉**这个变量 ✓）")
+    return int(gib * GIB)
+
+
+def fake_memory(fake_total: int, real_total: int, real_free: int) -> tuple[int, int]:
+    """把真读数换成「**同样占用**、更小的总量」⇒ ``(total, free)`` ✓（纯函数 ✓）。"""
+    used = max(0, int(real_total) - int(real_free))
+    total = int(fake_total)
+    return total, max(0, total - used)
+
+
+def cuda_memory(torch_mod: Any, index: int | None = None) -> tuple[int, int, bool] | None:
+    """**唯一一处**读卡上 ``(total, free, faked)`` ✓；取不到 ⇒ ``None`` ✓（不猜 ✗）。
+
+    ⚠️ 两份读数口径只能有一处 ✗✗（`probe` 与 `residency.budget_of_cuda` 都走这里 ✓）：
+    分开写迟早一处接上模拟、另一处没接 ✓ ⇒ 决策说 8 GiB、切分按 22.49 GiB 装 ✓✗。
+    """
+    try:
+        free, total = torch_mod.cuda.mem_get_info(index)
+    except Exception:  # pragma: no cover - 老驱动 / 不支持的设备
+        return None
+    fake = fake_total_bytes(FAKE_GPU_TOTAL_ENV)
+    if fake is None:
+        return int(total), int(free), False
+    total, free = fake_memory(fake, int(total), int(free))
+    return total, free, True
 
 
 def probe(torch_mod: Any = None, *, index: int | None = None,
@@ -171,10 +240,10 @@ def probe(torch_mod: Any = None, *, index: int | None = None,
     cuda = getattr(torch_mod, "cuda", None)
     if cuda is None or not getattr(cuda, "is_available", lambda: False)():
         return None
-    try:
-        free, total = cuda.mem_get_info(index)
-    except Exception:  # pragma: no cover - 老驱动 / 不支持的设备
+    mem = cuda_memory(torch_mod, index)
+    if mem is None:
         return None
+    total, free, faked = mem
     allocated = None
     reclaimable = 0
     try:
@@ -193,7 +262,8 @@ def probe(torch_mod: Any = None, *, index: int | None = None,
         reclaimable = 0
     return Pressure(totalBytes=int(total), freeBytes=int(free) + reclaimable,
                     allocatedBytes=allocated, utilPercent=util_percent,
-                    source="memory" if util_percent is None else "nvml")
+                    source="memory" if util_percent is None else "nvml",
+                    faked=faked)
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@
 | **语料管线** | `corpus/fetch_raw.py` → `normalize.py` → `search.py`（+ `analyze{,2,3}.py` 统计） | Python 3.8+，**仅标准库** |
 | **AI/GPU 工具链** | `model_manager.py` / `sd_h3_pipeline.py` / `sd_h3_compat_probe.py` / `h3_install.py` / `resource_watch.py` | Python 3.8+，**仅标准库**（与后端通过 subprocess 解耦） |
 | **引擎/度量工具** | `h3_readiness.py`（上机前自检**薄壳**：业务在 `app/services/engine_readiness.py`，本文件只解析参数与渲染）/ `dit_families.py`（盘上有几族 DiT、每族**差什么**才能跑；只核对不装载）/ `tokenizer_bench.py`（自研分词器 vs 参考实现：吞吐与规模） | Python 3.8+，`h3_readiness` / `tokenizer_bench` 需要后端 venv |
-| **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改）<br>`db_upgrade.py`（旧库**补列**；2026-09-25 加，真实库当时缺 **32 列**） | Python 3.8+，**仅标准库** |
+| **一次性迁移** | `migrate_models.py`（模型硬链接迁移到 ComfyUI Desktop 共享库；路径是**本机事实**，换机器要改）<br>`db_upgrade.py`（旧库**补列**；2026-09-25 加，真实库当时缺 **32 列**。`--apply` 会先留一份 `<db>.bak-<时间戳>` 再补列，且**只留最近 3 份** ⇒ 补列可以反复跑而备份不会一路累积；手改名的 `.bak-<别的>` 与整套备份 `data/_backup_<时间戳>/` 不归它管，一律不碰） | Python 3.8+，**仅标准库** |
 
 > 五类都**不参与产品运行时**。与之相对，**后端行为契约**的自检在 `backend-py/tests/`
 > （`run_all.py` 的 `TESTS` 清单才是权威；改后端代码请跑它）。
@@ -76,7 +76,7 @@ python backend-py/app/scripts/test_guards.py                 # 单跑：改了�
 
 | 文件 | 职责 |
 | --- | --- |
-| `corpus/fetch_raw.py` | **采集**：从 GitHub 拉原始语料到 `data/prompt-corpus/<源>/raw/`（已存在则跳过，`--only=<id>` 可单源重试） |
+| `corpus/fetch_raw.py` | **采集**：从 GitHub 拉原始语料到 `corpus/prompt-corpus/<源>/raw/`（已存在则跳过，`--only=<id>` 可单源重试） |
 | `corpus/normalize.py` | **归一化**：各源 → 统一 JSONL（`_normalized/prompts.jsonl`），只抽「能检索的最小字段集」 |
 | `corpus/search.py` | **检索**：在归一化语料上做「找相似镜头」（2-gram 打分，毫秒级，零依赖） |
 | `corpus/analyze.py` | 首轮结构探查（字段、长度、语言） |

@@ -181,6 +181,7 @@ def _remove_quietly(path: str) -> None:
 def export_jianying_draft(drama_id: str, request: Request,
                           conn: Connection = Depends(get_conn)):
     """导出剪映草稿（``.draft`` 文件夹打包 ZIP）；用户可在剪映里继续调字幕/配音/节奏。"""
+    zip_path: str | None = None  # 建完包再抛异常 ⇒ except 里必须自己删（background 跑不到 ✓✗）
     try:
         did = parse_param_id(drama_id)
         if did is None:
@@ -208,6 +209,8 @@ def export_jianying_draft(drama_id: str, request: Request,
         )
     except Exception as exc:  # noqa: BLE001
         log_task_error("ExportAPI", "jianying-draft", {"error": str(exc), "dramaId": drama_id})
+        if zip_path:  # 已经建出包却没交出去 ⇒ 自己删，别留给下一轮的陈旧清扫 ✓
+            _remove_quietly(zip_path)
         return bad_request(str(exc))
 
 
@@ -281,6 +284,7 @@ async def export_contact_sheet(drama_id: str, request: Request,
 @router.get("/dramas/{drama_id}")
 def export_drama_zip(drama_id: str, request: Request, conn: Connection = Depends(get_conn)):
     """打包导出整剧（``scope=video`` 只要成片 / ``assets`` 只要源素材 / ``all`` 默认全要）。"""
+    zip_path: str | None = None  # 建完包再抛异常 ⇒ except 里必须自己删（background 跑不到 ✓✗）
     try:
         did = parse_param_id(drama_id)
         if did is None:
@@ -309,4 +313,6 @@ def export_drama_zip(drama_id: str, request: Request, conn: Connection = Depends
         )
     except Exception as exc:  # noqa: BLE001
         log_task_error("ExportAPI", "download", {"error": str(exc), "dramaId": drama_id})
+        if zip_path:  # 已经建出包却没交出去 ⇒ 自己删，别留给下一轮的陈旧清扫 ✓
+            _remove_quietly(zip_path)
         return bad_request(str(exc))

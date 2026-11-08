@@ -358,6 +358,22 @@ def case_phased() -> None:
     required = ["encode", "sample", "decode"]
     unknown = [phase for phase in phases if phase not in {*required, "init"}]
     kept = [phase for phase in phases if phase in required]
+    #: ⚠️ 2026-11-07：`run_sync` 又有**一处**可选的 `encode` ✓✗ —— Wan2.2 的首帧条件前面
+    #: **显式**要一次那一拍 ✓（见 `pipeline.py` 里「首帧条件**要 VAE**」那段长注释 ✓：两件已在场
+    #: ⇒ 一件都不装、零代价 ✓；不在场 ⇒ 就地装上 ✓；不显式要 ⇒ 将来 init 真换了装就会静默缺 VAE ✓✗）。
+    #: ⇒ 同 2026-11-02 那条 `init` 的坑 ✓：写成 `kept == required` 会把「多了一拍**合法**换装」
+    #: 误报成「少了一拍换装」✓✗（提示读起来还像真缺陷 ✓）。判据改成三句话 ✓：
+    #: ① 三拍**按序**都在（去掉重复后逐字等于 required ✓）；② 重复**只许** `encode` ✓✗
+    #: （`sample`/`decode` 重复＝真换了两次装 ✓，那是缺陷 ✓）；③ 那次重复的 `encode` 必须落在
+    #: `sample` **之前** ✓（首帧条件在采样前 ✓ —— 跑到采样后补编码等于白换 ✓）。
+    deduped = [phase for index, phase in enumerate(kept) if phase not in kept[:index]]
+    repeats = sorted({phase for phase in kept if kept.count(phase) > 1})
+    ok_repeat = all(phase == "encode" for phase in repeats)
+    ok_place = True
+    if repeats:
+        encode_sites = [index for index, phase in enumerate(phases) if phase == "encode"]
+        ok_place = (len(encode_sites) == 2 and "sample" in phases
+                    and encode_sites[1] < phases.index("sample"))
     #: `init` 若在，只许**紧跟 encode**（它换的是 text＋vae 那一组 ✓，跑到 sample 之后再换就白换 ✓✗）
     #: ⚠️ 先判 `encode` 在不在再取下标 ✗ —— 少了 `encode` 时 `index` 会抛 `ValueError`，
     #: 判据就从「报红」变成「测试自己崩」✓✗（那种崩还不带可读理由 ✓）。
@@ -365,8 +381,172 @@ def case_phased() -> None:
     if "init" in phases and "encode" in phases:
         ok_init = phases.index("init") == phases.index("encode") + 1
     check("⑥″ `run_sync` 三处换装都在 ✓、顺序是 encode → sample → decode ✓✗"
-          "（按调用点的阶段实参 ＋ 行号判，不按源码排版 ✗；`init` 是可选拍、只许紧跟 encode ✓）",
-          kept == required and not unknown and ok_init, sites)
+          "（按调用点的阶段实参 ＋ 行号判，不按源码排版 ✗；`init` 是可选拍、只许紧跟 encode ✓；"
+          "`encode` 允许重复一次且必须在 sample 之前 ✓，`sample`/`decode` 不许重复 ✗）",
+          deduped == required and not unknown and ok_repeat and ok_place and ok_init, sites)
+
+
+# ------------------------------------------- ⑦ 装得下就**不分时**（2026-11-07 ✓）
+
+
+def case_all_resident() -> None:
+    """⑦ 三件装得下 ⇒ **不分时** ✓✗（否则每张图都要重读一次文本塔 ✓）。
+
+    这条守的是"**换装税**"这一级 ✓ —— 不验真装（真装是人为验收 ✓），验三件事：
+    ① 表本身：四段都点名三件 ✓（少点名一件 ⇒ 那一拍就把它退了 ✓✗）；
+    ② 门闩走**设备策略**（1 GiB 余量 ＋ 压力比 ✓）而不是手写阈值 ✗；
+    ③ 数值两档对拍：int4 判 `off`（全驻留 ✓）、int8 判**不是** `off`（老实分时 ✓）。
+    """
+    from app.services.engine import device_policy as policy_mod  # noqa: PLC0415
+    from app.services.engine import runtime as runtime_mod      # noqa: PLC0415
+
+    table = runtime_mod.KREA2_ALL_RESIDENT_PHASES
+    check("⑦ `KREA2_ALL_RESIDENT_PHASES` 四段（encode/init/sample/decode）**每段都点名三件** ✓✗"
+          "（少点名一件 ⇒ `enter_phase` 会在那一拍把它退掉 ✓✗，换装税就回来了 ✓）",
+          bool(table) and all(set(parts) == {"dit", "text", "vae"} for parts in table.values())
+          and {"encode", "init", "sample", "decode"} <= set(table), table)
+
+    #: ② 门闩不许自己写 GiB 阈值 ✗ —— 走 `decide_for`，只读它的 `residency` ✓。
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "engine"
+              / "runtime.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="runtime.py")
+    #: ⚠️ 只扫 **这三个函数** ✗✗：`runtime.py` 里另有 2.1 / 2512 两条装配线也在调
+    #: `declare_chain(phase_parts=…)` 与 `decide_for(("dit","text","vae"))` ✓（模组按族分时 ✓）——
+    #: 全树扫会把它们一起数进来 ⇒ 判据报"收到 4 个" ✗（假红 ✓✗）。
+    #: ⚠️ `decide_for` 现在住在 `_krea2_decision` 里 ✓（`_krea2_all_resident` 与 `_krea2_keep_parts`
+    #: 都走它 ✓）—— 只扫前两个 ⇒ 这条会报"0 个" ✓✗（改成单一出口后必须跟着改扫描面 ✓）。
+    scopes = [node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef)
+              and node.name in {"_ensure_krea2_loaded", "_krea2_decision"}]
+    declares: list[ast.Call] = []
+    gates: list[ast.Call] = []
+    for node in (ast.walk(scope) for scope in scopes):
+        for sub in node:
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name == "declare_chain":
+                declares.append(sub)
+            elif name == "decide_for":
+                gates.append(sub)
+    passed = [(kw.arg, kw.value) for call in declares for kw in call.keywords
+              if kw.arg == "phase_parts"]
+    kept = [(kw.arg, kw.value) for call in declares for kw in call.keywords
+            if kw.arg == "keep_parts"]
+    check("⑦′ `declare_chain` 真收到 `phase_parts=` ✓，且值**按门闩**给（`KREA2_ALL_RESIDENT_PHASES`"
+          " 或 `None` ✓ —— 直接写死表 ⇒ 装不下的档也会全驻留 ⇒ OOM 落在采样第 1 步 ✓✗）",
+          len(passed) == 1 and "KREA2_ALL_RESIDENT_PHASES" in ast.dump(passed[0][1])
+          and any(isinstance(node, ast.Constant) and node.value is None
+                  for node in ast.walk(passed[0][1])), passed)
+    #: `runtime.py` 这条装配线里 `decide_for` 有**两个**调用点 ✓：一个是 `_apply_decision`
+    #: 那条（管 DiT 自己装法 ✓），另一个是 `_krea2_decision` 这个**唯一问"装得下吗"的出口** ✓
+    #: （`_krea2_all_resident` / `_krea2_keep_parts` 都走它 ✓）。判据盯的正是后者 **只有一处** ✓✗。
+    single = [call for call in gates
+              if "tuple(parts)" in ast.unparse(call.args[0])[:40]
+              and any(kw.arg == "need_gib" for kw in call.keywords)]
+    check("⑦″ 门闩读的是设备策略（`decide_for(tuple(parts), …, need_gib=part_need)` ✓）而不是"
+          "自己算 GiB ✗，且\"装得下吗\"**只有一处出口** ✓✗（各写一份 ⇒ 口径就漂 ✓）",
+          len(single) == 1 and len(gates) == 2,
+          [ast.unparse(call)[:90] for call in gates])
+    check("⑦⁵ `declare_chain` 也真收到 `keep_parts=` ✓✗（漏给 ⇒ 分时档每张图都要把文本塔"
+          "**从盘上重读一遍** ✓：真卡实测 19.4 秒／张 ✓，且与提示词无关 ✓）",
+          len(kept) == 1 and "keep_parts" in ast.unparse(kept[0][1]), kept)
+
+    #: ⑦⁗ ⚠️ 这条是**真跑抓到的回归** ✓✗：`decide_for` 返的是 `Decision`（dataclass ✓），
+    #: 写成 `verdict.get(...)` 会抛 `AttributeError` ✓，再被 `except` 一兜 ⇒ **静默变分时** ✓✗
+    #: （表现＝"全驻留永不生效，回执一切正常"✓✗，最贵的那种 bug ✓）。两种形状都必须认 ✓。
+    class _Stub:  # noqa: D401 - 一次性桩件
+        def __init__(self, verdict: object) -> None:
+            self._verdict = verdict
+
+        def decide_for(self, parts, **_kwargs):  # noqa: ANN001, ANN201
+            return self._verdict
+
+    def verdict(text: str):  # noqa: ANN202
+        return policy_mod.Decision(device="cuda", residency=text, degraded=False,
+                                   reason="桩件", policy="auto")
+
+    class _Boom:  # noqa: D401 - 一次性桩件
+        def decide_for(self, parts, **_kwargs):  # noqa: ANN001, ANN201
+            raise RuntimeError("探不到卡 ✓")
+
+    helper = runtime_mod._krea2_all_resident  # noqa: SLF001
+    got = {
+        "Decision(off)": helper(_Stub(verdict("off")), {}),
+        "dict(off)": helper(_Stub({"residency": "off"}), {}),
+        "Decision(split)": helper(_Stub(verdict("split")), {}),
+        "抛异常": helper(_Boom(), {}),
+    }
+    check("⑦⁗ 门闩认 **`Decision` 与 `dict` 两种形状** ✓✗（只认 dict ⇒ `AttributeError` 被 `except`"
+          " 兜成\"永远分时\"✓✗，实测就是这么漏的 ✓）＋ 抛异常时退回分时 ✓",
+          got == {"Decision(off)": True, "dict(off)": True,
+                  "Decision(split)": False, "抛异常": False}, got)
+
+    #: ⑦⁶ ⚠️ 只有**整份装得下（`off`）**的件才许停内存 ✓✗：`split`（分层搬运 ✓）的件一旦混进
+    #: `keepParts`，`_relocate_keep_parts` 会把它**整份**搬去 cpu 再**整份**搬回卡上 ✓✗ ⇒
+    #: 分层计划当场作废 ✓、搬回时直接 OOM ✓（8 GiB 低配档正是这种 ✓）。
+    keeper = runtime_mod._krea2_keep_parts  # noqa: SLF001
+
+    class _Pick:  # noqa: D401 - 一次性桩件：只认 `("text",)` 判 off
+        def decide_for(self, parts, **_kwargs):  # noqa: ANN001, ANN201
+            return verdict("off" if tuple(parts) == ("text",) else "split")
+
+    keeper_got = {
+        "together": keeper(_Stub(verdict("off")), {}, together=True),
+        "两件都off": keeper(_Stub(verdict("off")), {}, together=False),
+        "只text": keeper(_Pick(), {}, together=False),
+        "全split": keeper(_Stub(verdict("split")), {}, together=False),
+        "判不出来": keeper(_Boom(), {}, together=False),
+    }
+    check("⑦⁶ 停内存的件**只许整份装得下的**（`off` ✓）：`split` 的件混进去 ⇒ 整份搬来搬去 ⇒"
+          " 分层计划作废 ＋ 搬回时 OOM ✓✗（8 GiB 档正是这种 ✓）；同驻档一件都不搬 ✓",
+          keeper_got == {"together": (),
+                         "两件都off": ("dit", "text", "vae"), "只text": ("text",),
+                         "全split": (), "判不出来": ()}, keeper_got)
+
+    #: ⑦⁷ ⭐ **"停到内存"不许改数** ✓✗（创作者红线："不能质量掉" ✓）—— 搬的是**同一份权重字节** ✓
+    #: （`nn.Module.to()` 同 dtype 只做设备拷贝 ✓、不转精度 ✗），所以 `cpu → cuda → cpu` 走一圈
+    #: 必须**逐位相同** ✓。没有 CUDA 就跳过 ✓（这是设备事实、不是判据放宽 ✓）。
+    try:
+        import torch  # noqa: PLC0415 - 只为这一条判据
+    except Exception:  # pragma: no cover - 引擎装不上就别在这儿报 ✓
+        torch = None                                            # type: ignore[assignment]
+    if torch is not None and torch.cuda.is_available():
+        tower = torch.nn.Module()
+        #: ⚠️ int8 参数必须 `requires_grad=False` ✓（`Int8Linear.weight` 就是这么建的 ✓）——
+        #: 默认 True 时 `Parameter.__new__` 当场抛「Only Tensors of floating point …」✗。
+        tower.w = torch.nn.Parameter(torch.randint(-128, 127, (97, 33), dtype=torch.int8),
+                                    requires_grad=False)
+        tower.register_buffer("scale", torch.rand(33, dtype=torch.float32))
+        tower.register_buffer("bf", torch.randn(5, 5, dtype=torch.bfloat16))
+        tower.register_buffer("idx", torch.arange(7, dtype=torch.int64))
+        snapshot = {name: tensor.detach().cpu().clone() for name, tensor
+                    in [*tower.named_parameters(), *tower.named_buffers()]}
+        tower.to("cuda").to("cpu")
+        moved = {name: tensor.detach().cpu() for name, tensor
+                 in [*tower.named_parameters(), *tower.named_buffers()]}
+        same = {name: (snapshot[name].dtype == moved[name].dtype
+                       and torch.equal(snapshot[name], moved[name])) for name in snapshot}
+        check("⑦⁷ 「停到内存」搬的是**同一份字节** ✓（`cpu→cuda→cpu` 逐位相同 ✓、dtype 不变 ✓）"
+              "⇒ 步数 / 精度 / 采样参数一律不动 ✓（红线：不能质量掉 ✓）",
+              bool(same) and all(same.values()), same)
+
+    #: ③ 数值对拍：同一张 22.49 GiB 卡、同样 20.93 GiB 可用 ✓。
+    free = int(20.93 * policy_mod.GIB)
+    pressure = policy_mod.Pressure(totalBytes=int(22.49 * policy_mod.GIB), freeBytes=free)
+
+    def residency_of(need: dict[str, float]) -> str:
+        decision = policy_mod.decide(policy="auto", need_bytes=int(sum(need.values())
+                                                                     * policy_mod.GIB),
+                                     pressure=pressure)
+        return str(getattr(decision, "residency", ""))
+
+    int4 = residency_of({"dit": 5.98, "text": 7.5, "vae": 0.24})     # 13.72 GiB ✓
+    int8 = residency_of({"dit": 12.57, "text": 7.5, "vae": 0.24})    # 20.31 GiB ✓
+    check("⑦‴ int4 档（5.98 ＋ 7.5 ＋ 0.24 ＝ 13.72 GiB）判 `off` ⇒ 全驻留 ✓；"
+          "int8 档（20.31 GiB）**不**判 `off` ⇒ 老实分时 ✓（挤得进但没余量给 1024² 的激活 ✓✗）",
+          int4 == "off" and int8 != "off", {"int4": int4, "int8": int8, "freeGiB": 20.93})
 
 
 def main() -> int:
@@ -376,6 +556,7 @@ def main() -> int:
     case_runtime_refuses()
     case_stage_registered()
     case_phased()
+    case_all_resident()
 
     failed = [row for row in _RESULTS if not row[1]]
     for name, ok, detail in _RESULTS:

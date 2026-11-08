@@ -473,7 +473,7 @@ export const characterLibraryAPI = {
   list: (params?: Record<string, any>) => {
     const q = new URLSearchParams()
     if (params) Object.entries(params).forEach(([k, v]) => v != null && v !== '' && q.set(k, String(v)))
-    return api.get(`/character-library${q.size ? `?${q}` : ''}`)
+    return api.get(`/character-libraryX${q.size ? `?${q}` : ''}`)
   },
   get: (id: number) => api.get(`/character-library/${id}`),
   create: (data: any) => api.post('/character-library', data),

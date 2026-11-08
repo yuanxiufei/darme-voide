@@ -168,12 +168,20 @@ def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
     if backend is not None:
         return backend
     info = gguf.inspect(gguf_path)
-    config = gguf_to_llm.infer_llm_config(info.metadata)
+    # ⚠️ 必须把**张量表**一起给下去 ✓：真文件的 tie_embeddings 两个来源都可能缺
+    # （元数据没有键、也没有 output.weight 张量 ✓✗）⇒ 只读元数据会把完好的文件判成装不了 ✗。
+    config = gguf_to_llm.infer_llm_config(info.metadata, tensor_names=info.tensors)
     backend = llm_backend.LlmBackend(config, gguf_path=gguf_path, tokenizer_path=tokenizer_path,
                                      device=device, dtype=dtype)
     backend.load()
     _engine_backends[key] = backend
     return backend
+
+
+#: 公开别名 ✓（2026-11-07）：**agent 运行时**（工具调用循环）也要用这一份后端 ✓。
+#: ⚠️ 必须共用同一个缓存 ✗✗ —— 各建一份 ⇒ 同一份权重在卡上装两遍 ✓✗（4B Q4_K_M 物化成
+#: bf16 约 8 GiB，两份就顶爆 22 GiB 卡的余量 ✓），而且两个后端各自持有一份 KV 缓存 ✓。
+get_engine_backend = _get_engine_backend
 
 
 async def _generate_with_engine(config: dict[str, Any], user_prompt: str,

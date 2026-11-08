@@ -46,9 +46,12 @@ from .tts_generation import generate_tts
 
 __all__ = ["compose_storyboard", "supports_subtitle_filter"]
 
-#: 混音中间产物目录名 ✓（放在数据根下的 ``static/mixed`` ✓ —— 与 ``composed`` 同级 ✓）：
+#: 混音中间产物目录名 ✓（``<dataRoot>/static/mixed`` ✓ —— 与 ``composed`` 同级 ✓）：
 #: ⚠️ 用**固定目录**而不是临时目录 ✗：出问题时能**拿到那几路音轨**复盘 ✓（排查"音轨不对"只能靠听 ✓）。
-_MIX_SUBDIR = "static/mixed"
+#: ⚠️ 值里**不带** ``static/`` ✗（2026-11-07 修 ✓）：调用处是 ``get_storage_root() / _MIX_SUBDIR`` ✓，
+#: 而它返回的**已经是** ``<dataRoot>/static`` ✓ ⇒ 旧值 `"static/mixed"` 实落
+#: ``<dataRoot>/static/static/mixed`` ✓✗，与同文件 ``composed``（``<dataRoot>/static/composed`` ✓）不同级。
+_MIX_SUBDIR = "mixed"
 
 #: 字幕滤镜支持探测的**记忆化**缓存（``None`` = 还没探测过）
 _subtitle_filter_support: bool | None = None

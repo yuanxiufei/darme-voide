@@ -37,15 +37,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from ..core import config
-from ..core.config import PROJECT_ROOT
+from ..core import config, model_paths
 from . import model_ecosystems, model_fingerprint, model_folders, ollama_store
 
 #: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
@@ -304,27 +302,24 @@ def build_suggestion(hit: dict[str, Any], name: str, ext: str) -> dict[str, Any]
 # 路径解析（环境变量 > configs/model-paths.json > 探测）
 # ============================================================
 
+#: ⚠️ 下面四个是**薄委托** ✓✗：配置面（文件位置 / JSON 读写 / ``models_dir`` 优先级）的唯一真源
+#: 在 :mod:`app.core.model_paths` ✓ —— 引擎要在不 import 服务层的前提下答「模型根在哪」✓，
+#: 那份解析搬去 ``app.core`` 后本层只留**发现**逻辑 ✓（ComfyUI 探测 / 生态落点 / 声明表 ✓）。
+#: 谁在这里再抄一遍优先级，就会「引擎说这里、扫描说那里」✓✗（判据：``tests/local_models_test.py``）。
 def _paths_config_file() -> str:
-    return str(PROJECT_ROOT / "configs" / "model-paths.json")
+    return str(model_paths.paths_config_file())
 
 
 def _read_paths_config() -> dict[str, Any]:
-    try:
-        path = _paths_config_file()
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as handle:
-                parsed = json.load(handle)
-            return parsed if isinstance(parsed, dict) else {}
-    except (OSError, ValueError):
-        pass
-    return {}
+    #: ⚠️ 读与写**两个**薄委托都必须经 ``_paths_config_file()`` ✓✗（它是本层唯一可 patch 的口）：
+    #: 只把读走它、写仍直连 ``model_paths`` 时，自检里换掉的文件只有读生效 ⇒ 一次 ``PUT /roots``
+    #: 就把真配置的 ``models_dir`` 冲掉、塞进一条 ``%TEMP%`` 的 ``extra_roots`` ✓✗（2026-11-08 实测；
+    #: 判据 ``tests/local_models_test.py``「真配置文件一字未动」）。
+    return model_paths.read_paths_config(path=Path(_paths_config_file()))
 
 
 def _write_paths_config(cfg: dict[str, Any]) -> None:
-    """⚠️ 缩进 2 空格 + 末尾换行（与原 TS 的 ``JSON.stringify(cfg, null, 2) + '\\n'`` 一致）。"""
-    os.makedirs(os.path.dirname(_paths_config_file()), exist_ok=True)
-    with open(_paths_config_file(), "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+    model_paths.write_paths_config(cfg, path=Path(_paths_config_file()))
 
 
 def _probe_bases() -> list[str]:
@@ -403,12 +398,12 @@ def detect_comfyui() -> str:
 
 
 def default_models_dir() -> str:
-    """本仓**自己的**模型存储目录 ✓：``<data_root>/models`` ✓。
+    """本仓**自己的**模型存储目录 ✓：``<data_root>/models`` ✓（实现见 ``app.core.model_paths`` ✓）。
 
     2026-09-25 自主化 ✓：模型不再依赖 ComfyUI 目录 ✗ —— 下载/扫描/就绪/加载统一落到这里 ✓
     （``MODELS_DIR`` 环境变量或 ``model-paths.json`` 的 ``models_dir`` 仍可覆盖 ✓）。
     """
-    return str(Path(config.get_data_root()) / "models")
+    return model_paths.default_models_dir()
 
 
 def get_extra_roots() -> list[str]:
@@ -462,8 +457,11 @@ def get_default_roots() -> list[str]:
     cfg = _read_paths_config()
     roots: list[str] = []
 
-    models_dir = (os.environ.get("MODELS_DIR") or cfg.get("models_dir")
-                  or default_models_dir())
+    #: ⚠️ 优先级**不在这里写** ✓✗ —— 走 ``app.core.model_paths.models_dir()`` 那唯一一份 ✓（同一份
+    #: 优先级既是「存放主目录」也是本函数的第一根 ⇒ 两处各写一遍必然漂 ✓）。
+    #: ⚠️ 必须把 ``_paths_config_file()`` 这个隔离口一起传下去 ✓✗（配置面有三个使用者：读 / 写 /
+    #: 本函数；少传一个，自检里换掉的文件就对它不生效 ⇒ 「换了文件还读到真配置」的假绿 ✓）。
+    models_dir = model_paths.models_dir(path=Path(_paths_config_file()))
     services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
                     or str(LOCAL_SERVICES_ROOT))
     # ⚠️ 显式配置（env / json）**优先且靠前** ✓；探测结果只是**补充** ✓（探测错了也不影响显式配置 ✓）
@@ -545,8 +543,10 @@ def get_model_paths() -> dict[str, Any]:
     return {
         "comfyui_root": os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root")
         or detect_comfyui() or "",
-        "models_dir": os.environ.get("MODELS_DIR") or cfg.get("models_dir")
-        or default_models_dir(),
+        #: ⚠️ ``models_dir`` 走 core 那唯一一份优先级 ✓（引擎 ``inventory.models_dir()`` 用的是
+        #: **同一个函数** ✓ ⇒ 「体检说这里、加载说那里」这类漂移从根上没了 ✓）。
+        #: ⚠️ 隔离口同 :func:`get_default_roots` —— 不传就是读真配置文件 ✓✗（端点自检因此假绿过 ✓）。
+        "models_dir": model_paths.models_dir(path=Path(_paths_config_file())),
         "nodes_dir": cfg.get("nodes_dir") or "",
         "local_services_dir": cfg.get("local_services_dir") or "",
         "extra_roots": get_extra_roots(),

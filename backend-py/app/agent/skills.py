@@ -202,7 +202,30 @@ def resolve_default_skills(agent_type: str) -> list[str]:
     return [skill_id for skill_id, _ in entries]
 
 
-def load_agent_skills(agent_type: str, db_skills_raw: str | None = None) -> str | None:
+def _trim_order(bindings: list[SkillBinding], agent_type: str) -> list[SkillBinding]:
+    """**超出字符预算时**的裁剪次序：``priority`` 为主，历史成功率明显低的往后排。
+
+    设计稿是 ``priority × 历史命中率``，这里落成「加法降级」（见 ``skill_usage`` 模块头）。
+    三条保守约束：
+
+    * **只在装不下时调用** —— 预算够就按原序全量注入，提示词顺序一个字节都不变；
+    * ``priority`` 缺省为 0（DB 配置里不写）时用**绑定序号**兜住，否则这些条目会集体抢到最前；
+    * 统计读不到（库坏 / 样本不足）⇒ 惩罚恒 0 ⇒ 退化成纯 ``priority`` 排序，**不报错也不猜**。
+    """
+    from app.services import skill_usage  # noqa: PLC0415 —— 统计库是可选件，别在 import 期就绑死
+
+    scored: list[tuple[int, int, SkillBinding]] = []
+    for index, binding in enumerate(bindings):
+        base = binding.priority or (index + 1)
+        cut, _why = skill_usage.penalty(agent_type, binding.id)
+        scored.append((base + cut, index, binding))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [binding for _score, _index, binding in scored]
+
+
+def load_agent_skills(agent_type: str, db_skills_raw: str | None = None,
+                      *, sizes: dict[str, int] | None = None,
+                      dropped: list[str] | None = None) -> str | None:
     """为指定 Agent 加载 Skill 指令文本；无可用 Skill → ``None``。
 
     优先级：
@@ -210,6 +233,10 @@ def load_agent_skills(agent_type: str, db_skills_raw: str | None = None) -> str 
     1. ``db_skills_raw`` 能解析出**配置项** → 只加载 ``enabled`` 的（**全部关闭则不注入，不回退默认**）；
     2. 空 / 空数组 / 解析失败 → 回退该 Agent 的默认绑定（SKILL.md frontmatter ``agents:``）；
     3. 都没有 → ``None``。
+
+    ``sizes`` / ``dropped`` 是**出参**（本函数不写库）：调用方拿着「真注入了哪些、各多少字符、
+    哪些被裁」去写 ``skill_usage``。分开的理由是同一跑次里本函数会被调用两次
+    （``build_agent_config`` 与 ``default_generate``），在函数内落库就会把一次注入记成两笔。
     """
     bindings: list[SkillBinding] = []
     # DB 里存在「配置项」= 用户已做过选择，其意图优先 —— 即使最终一个都不注入，也不回退默认
@@ -236,20 +263,35 @@ def load_agent_skills(agent_type: str, db_skills_raw: str | None = None) -> str 
         return None
 
     budget = skill_char_budget()
+    rendered_of: dict[str, str] = {}
+    for binding in bindings:
+        parsed = load_skill(binding.id)
+        if parsed is not None:
+            rendered_of[binding.id] = render_skill(parsed)
+
+    # 装不下才动排序（见 ``_trim_order``）：预算够时顺序与内容必须与老实现逐字一致
+    total = sum(len(rendered_of[binding.id]) for binding in bindings
+                if binding.id in rendered_of)
+    ordered = (_trim_order(bindings, agent_type)
+               if budget > 0 and total > budget else list(bindings))
+
     sections: list[str] = []
     skipped: list[str] = []
     used = 0
-    for binding in bindings:
-        parsed = load_skill(binding.id)
-        if parsed is None:
+    for binding in ordered:
+        rendered = rendered_of.get(binding.id)
+        if rendered is None:
             skipped.append(f"{binding.id}（缺失）")
             continue
-        rendered = render_skill(parsed)
         if budget > 0 and used + len(rendered) > budget:
             skipped.append(f"{binding.id}（超预算）")
+            if dropped is not None:
+                dropped.append(binding.id)
             continue
         used += len(rendered)
         sections.append(rendered)
+        if sizes is not None:
+            sizes[binding.id] = len(rendered)
 
     if not sections:
         return None

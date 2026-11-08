@@ -269,6 +269,10 @@ def case_backend(monkeypatch_free: bool = True) -> None:
     backend = TorchBackend.__new__(TorchBackend)
     backend._loadEvents = []           # noqa: SLF001 —— 只借 `_record_event` 的账 ✓
     backend._hostCaches = {}           # noqa: SLF001
+    #: ⚠️ `_host_cache_of` 要读机器档的 `hostRatio` ✓（`l1` 0.60／`l2` 0.50 ✓，`auto` ⇒ 空 ⇒ 落回
+    #: `HOST_USE_RATIO` ✓）。替身绕过了 `__init__` ✗ ⇒ 这一格得自己补 ✓，否则 AttributeError 会把
+    #: 「配额取 min」这条判据挡在外面（2026-11-07 实测踩过 ✓）。
+    backend._profileApplied = {}       # noqa: SLF001
 
     original = scheduler.host_memory
     try:

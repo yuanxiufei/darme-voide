@@ -1,6 +1,6 @@
 # 动作语汇库（通用术语）
 
-来源：`data/playbook/film-expert-bridge/general/动作专题库.md`
+来源：`corpus/playbook/film-expert-bridge/general/动作专题库.md`
 （素材原名「动作专题库」，含 13 节、约 340 条）。
 
 **只收通用武术 / 格斗术语**，用来把"打得很激烈"换成能拍的具体动作。素材里的文艺自造名

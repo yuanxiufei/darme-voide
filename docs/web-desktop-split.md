@@ -74,7 +74,7 @@ darme-voide/
             ├── pages/        (20)   # 副本，此后独立演进
             ├── components/   (34)
             ├── composables/  (8)
-            ├── utils/        (17)   # 含 nuxtCompat.ts（navigateTo/useState shim）
+            ├── utils/        (17)   # 含 nuxtCompat.ts（navigateTo/useState 实现，靠 auto-import 注入）
             ├── types/contracts.ts   # 副本
             └── assets/      (3)
 ```
@@ -136,8 +136,8 @@ cd desktop/frontend && npm install
 | 原 Nuxt API | 桌面端处理 | 调用点改动 |
 |---|---|---|
 | `<NuxtLink>` | → `<RouterLink>`（vue-router 全局组件） | 33 处标签，批量替换 |
-| `navigateTo()` | `utils/nuxtCompat.ts` 提供**同名**实现（内部 `router.push`） | **0 处** |
-| `useState()` | `utils/nuxtCompat.ts` 提供**同名**实现（模块级 Map 单例） | **0 处** |
+| `navigateTo()` | `utils/nuxtCompat.ts` 提供**同名**实现（内部 `router.push`） | **0 处**（现 6 文件 12 处调用） |
+| `useState()` | `utils/nuxtCompat.ts` 提供**同名**实现（模块级 Map 单例） | **0 处**（现 2 处调用） |
 | `definePageMeta({layout})` | 删除，改为 `router/index.ts` 的 `meta: { layout }` | 1 处 |
 | `#app` | → `vue-router` | 2 处 |
 | `import.meta.client` | → `typeof window === 'undefined'` | 1 处 |
@@ -145,30 +145,139 @@ cd desktop/frontend && npm install
 
 同名的价值：调用点零改动，未来从 Web 端再移植代码时不需要二次加工。
 
+⚠️ 这两个符号在桌面端**全仓零 `import`**——能解析全靠 `vite.config.ts` 的 `AutoImport`
+（`dirs` 含 `src/utils`）。于是「shim 文件在不在」和「配置还盖不盖得住」是两件独立的事：
+任一不成立，症状都是**点一下没反应**（`navigateTo is not a function`），而 `vite build`
+不报错（它只是注入不到）。
+
+`vue-tsc` 也兜不住：`src/auto-imports.d.ts` 是 unplugin 的生成物、被 `.gitignore` 忽略，
+本机留着它（**陈旧也照样声明**）⇒ typecheck 一路绿；只有干净克隆（没跑过 dev/build）
+才会报。实测把它移走后 typecheck 报 **481 处 `Cannot find name`**（`ref`/`computed`/
+`navigateTo` 全在内）——这同时说明这套注入是**架构依赖**，不是可选优化。
+
+所以守卫必须是脚本级的四条：B2（shim 实现齐全）、B3（`dirs` 覆盖 `src/utils`）、
+B4（`imports` 含 vue+vue-router 且 `dts` 在）、H（`vueTemplate: true`），全部做过反向验证。
+
 ### 第三层：机器守卫（`check-isolation.mjs`）
 
 ```bash
 cd desktop/frontend
-npm run check:isolation        # 八项判据（A/B/B2/C/E/F/G）
+npm run check:isolation        # 十一项判据（A/A2/B/B2/B3/B4/C/E/F/G/H）
 npm run check:isolation -- --dist   # 额外校验产物归属（D）
 ```
 
 | 判据 | 拦什么 |
 |---|---|
-| **A** 源码越界 | 任何相对/别名 import 解析后必须落在 `src/` 内；裸模块必须在白名单 |
+| **A** 源码越界 | 任何相对/别名 import 解析后必须落在 `src/` 内；裸模块必须在白名单。抽四种写法：`from '…'`、`import('…')`、`require('…')`、**无 `from` 的副作用导入 `import '…'`**（最后一种此前漏抽，越界的 CSS/JSON 能静默过关） |
+| **A2** 资源越界 | **非 JS 文件**（`.css` / `.html`）里的相对引用（`url(…)` / `@import` / `src=` / `href=`）解析后必须落在桌面工程内 —— A 只解析 JS 的 import 语法，换成 `@import '../../../frontend/app/assets/studio.css'` 就完全没有守卫 |
 | **B** Nuxt 残留 | `NuxtLink`/`definePageMeta`/`useHead`/`#app`/`import.meta.client` 等 |
-| **B2** shim 归属 | 允许 `useState(` 调用，但实现必须来自本工程 `nuxtCompat.ts` |
+| **B2** shim 归属 | 允许 `useState(`/`navigateTo(` 裸调用，但实现必须来自本工程 `nuxtCompat.ts`（导出名带词边界判，`navigateToRenamed` 之类骗不过） |
+| **B3** 注入配置 | 有裸调用 ⇒ `vite.config.ts` 的 `AutoImport.dirs` 必须覆盖 `src/utils`（否则运行期 undefined，构建不报错） |
+| **B4** 注入来源 | `AutoImport.imports` 必须含 `vue` + `vue-router`，`dts` 必须声明（全仓裸 `ref(`/`useRoute(` 靠它；实测移走生成物后 typecheck 报 481 处 `Cannot find name`） |
 | **C** 依赖隔离 | 不得依赖 `nuxt`；不得用 `file:`/`link:`/`workspace:`/`portal:` 指向别处 |
 | **D** 产物归属 | `dist-frontend/index.html` 必须是 Vite 产物（含 `./assets/`），出现 `/_nuxt/` 即失败 |
 | **E** 锁文件独立 | 本工程有自己的 `package-lock.json`，且不含 Web 端条目 |
-| **F** 媒体地址 | 不得手拼根相对路径（`'/' + p` / `` `/${p}` ``），也不得把后端字段**裸绑**进 `:src`（`:src="props.node.url"`），必须过 `utils/apiBase.ts::mediaUrl` |
-| **G** 外链资源 | CSS/HTML 里不得出现 `http(s)` 的样式表、字体、脚本、图片（CSP 会拦、断网必失效） |
+| **F** 媒体地址 | 四种形态都禁：`'/' + p`、`` `/${p}` ``、**`'/static/' + p`**、**`` `/static/${p}` ``**（后两种是 2026-11-08 补的，旧正则只认「斜杠紧跟引号」）；标签属性不得把后端字段**裸绑**（`:src` / `v-bind:src`、单双引号皆判），一律过 `utils/apiBase.ts::mediaUrl` |
+| **G** 外链资源 | CSS/HTML 里不得出现 `http(s)` 的样式表、字体、脚本、图片（CSP 会拦、断网必失效）。2026-11-08 起**扫到桌面壳 `index.html`** —— 此前只走 `src/`，而 `src/` 下一份 `.html` 都没有，HTML 那半边判据一直空转 |
+| **H** 模板注入 | `vueTemplate: true` 必须在（缺了症状是"点击没反应"+`_ctx.xxx is not a function`） |
 
 **反向验证已通过**：故意写入 `import ... from '../../../frontend/app/composables/useApi'`
 和 `useHead` 引用 → 守卫 A、B 同时报错，退出码 1；删除后恢复全绿、退出码 0。
+B2/B3/B4/H 四项另做过反向验证：shim 导出改名 → B2 红；`dirs` 去掉 `src/utils` → B3 红；
+`imports` 去掉 `vue-router` + 删 `dts` → B4 报两项；把 `vueTemplate: true` **注释掉** → H 红
+（这一条以前是假绿：旧写法扫全文，注释里留着原文也照样命中）。
 
-> 判据 B 会**先剥离注释**再匹配——迁移说明里会正当地提到 `NuxtLink` 这类名字，
-> 不剥离就会误报自己写的文档。
+A 另有补充（2026-11-07）：**副作用导入**（`import '…'`，无 `from`、无圆括号）此前三条正则
+都不命中 ⇒ 越界的 CSS/JSON 能静默过关。已补第四条正则并实测：夹具
+`src/_probe_isolation.ts` 写 `import '../../../frontend/app/composables/useApi'`
+→ `FAIL A. 源码越界 import 1 处 … 解析到工程外 (frontend\app\composables\useApi)`，退出码 1；
+删夹具后复原全绿。
+
+> **2026-11-08 收口（F 三漏 + 一处假红；G 空转；新增 A2）**：用「同一坏法拆成五种写法各占
+> 一个夹具」的办法实测，F 的两条正则只认「斜杠**紧跟**引号」⇒ 五种写法只抓两种：
+>
+> | 夹具 | 旧 F |
+> |---|---|
+> | `'/' + p` | 抓到 |
+> | `` `/${p}` `` | 抓到 |
+> | `'/static/' + p` | **漏** |
+> | `` `/static/${p}` `` | **漏** |
+> | `'/static/uploads/' + p` | **漏** |
+>
+> 后三种在实际代码里更常见（上传接口返回的就是 `static/uploads/…`），而症状与前两种一模一样：
+> dev 有 `/static` proxy 兜着看不出来，打包后整片裂图。现在改成**四种形态一张表**
+> `MEDIA_LITERAL`、逐行判。同时修两个反向毛病：
+> ① **假红** —— 旧写法拿 `raw` 逐行扫，只跳行首 `//`/`*`/`/*`，块注释包住的
+> `<img :src="item.imageUrl">` 会被当成活代码喊出来；改成在**注释遮蔽后**的文本上逐行判；
+> ② `:src` 只认双引号简写 ⇒ `:src='…'` 与 `v-bind:src="…"` 整个漏（已实测补上，静态
+> `<img src="./assets/…">` 不误报）。
+>
+> `stripComments()` 因此升级为 **`maskComments()`**：把注释**逐字符换成等长空格**而不是删掉。
+> 删字会让后面的行整体左移，而 F 是逐行判的、行号错一位就指错地方；换空格则长度、换行、
+> 行号全不变，注释里的 `import` / `NuxtLink` / `'/static/' + p` 一样匹配不到。
+> 只遮蔽**整行** `//`（行内 `//` 后面常是 `'https://…'`，切了会吃掉真代码）。
+>
+> G 此前只走 `src/`，而 `src/` 下**一份 `.html` 都没有** ⇒ 判据名里的「HTML」半边一直空转；
+> 打进包里的壳其实是 `desktop/frontend/index.html`。现在把它并进扫描：实测往 `<head>` 里加
+> 一行 `fonts.googleapis.com` 的 `<link>` → G 立刻红（以前全绿）。
+> 同时补 **A2**（CSS/HTML 里的相对引用不得跑出工程）：实测 `@import url('../../../frontend/app/assets/studio.css')`
+> → `A2` 红，而 `@import url('./studio.css')` 不误报。
+
+> 判据 B / B4 / H 都会**先剥离注释**再匹配——迁移说明里会正当地提到 `NuxtLink`、
+> 配置注释里也会写着 `vueTemplate: true` 这些字面，不剥离就会误报或假绿。
+
+> **2026-11-08 第二轮收口：遮蔽器必须认引号（三个脚本同一病根）**。「先剥注释再匹配」只做了一半 ——
+> 遮蔽器原本是三条正则（`<!-- -->` / `/* */` / 整行 `//`），而**正则看不见引号**：
+>
+> | 夹具（一行） | 旧遮蔽器 | 后果 |
+> |---|---|---|
+> | `export const OPEN = '/**'` 之后出现真注释 `/* … */` | 从**字符串里**的 `/*` 一路遮蔽到那句注释的 `*/` | 中间所有真代码变空格 ⇒ **判据对这一段彻底失明**（假绿，且无任何提示） |
+> | `content: "/*"`、`const GLOB = 'src/**` + `/*.ts'` | 找不到收尾符 ⇒ **遮蔽到文件尾** | 该文件剩下的行全部隐身 |
+>
+> 取证：往 `src/utils/` 放这样一个 7 行夹具，旧遮蔽器输出只剩第一行半截、`'/static/' + p` 整个消失（F 全绿）；
+> 换成认引号的逐字符扫描后，F 精确指到第 6 行。现在 `maskComments()` 逐字符走一遍，
+> 只有**不在引号里**的注释起始符才算注释（`'https://…'`、`'//static'`、`"/*"` 原样保留），
+> 且 `//` 的取舍由参数定：`inlineSlash=false` 只吃**整行** `//`（`check-isolation` 用，源码里有正则字面量），
+> `inlineSlash=true` 连行内 `//` 也吃（`check-parity` 的 F/G 要比「去注释后的正文」）。
+>
+> 同一轮顺着这个病根把 `check-parity` 的三处补齐（都做过**双向**反验）：
+> ① **F**（契约副本逐字比）与 **G**（行级差异）改用同一份 `maskComments(src, true)`；
+> ② **E**（`ONLY_DESKTOP` 必须真被引用）也先遮蔽 —— 否则把唯一的调用点注释掉，E 仍说「被引用」，
+> 而运行期就是 `undefined`（夹具实测：注释里写 `_pZzz('x')` ⇒ 报孤儿；改成真调用 ⇒ 静默 ✓）；
+> ③ `check-isolation` 的 **B2** 读了 `utils/nuxtCompat.ts` 却用**原文**匹配 `export function navigateTo(` ——
+> 把那行注释掉，判据照旧绿。现在同样走遮蔽后才匹配。
+>
+> **G 的登记值因此重定了一处**：`pages/drama/[id]/episode/[episodeNumber].vue` 4 → 6。
+> 这是**度量口径变了、内容没变**（该文件两端 `git diff` 为空）：旧实现删块注释时把换行一起删掉，
+> 多行注释前后的两行代码被**粘成一行**，差异被吞掉 2 行；换成等长遮蔽后行结构由原文决定，
+> 真实差异显形 = 仅 Web 3 行（`<NuxtLink` / `</NuxtLink>` / `definePageMeta`）对仅桌面 3 行
+> （`<RouterLink` 对 / `import EpisodePreflight`）。其余 14 条登记值一字未动。
+
+> **2026-11-08 第三轮收口：`router/` 整片游离于所有判据之外，加判据 I**。`DIRS` 原先只列八个目录，
+> 而 `desktop/frontend/src/router/index.ts`（400+ 行手写 vue-router 表，**应用唯一入口**）就在第九个
+> 目录里 ⇒ 它从不在 A/B/G 的遍历范围内：改坏一个 component 指向、漏跟一页路由，本脚本一声不响。
+> 现状：`DIRS` 补 `router`，`router/index.ts` 登记进 `ONLY_DESKTOP`（Web 端路由由 Nuxt 按 `pages/`
+> 文件系统生成，**没有对应文件可比**；两端页面集合是否一致另有 A 的 `pages/*.vue` 保证）。
+>
+> 只补一个目录治不了病根 —— 病根是「**白名单式遍历**：`DIRS` 之外的目录永远逃出全部判据」，
+> 新增一个目录（比如将来加 `stores/`）会重演同一次失明。故加判据 **I**：两端顶层目录**并集**必须
+> 恰好等于 `DIRS`（双向，两个方向都实测反验过）：
+>
+> | 动作 | I 的判定 |
+> |---|---|
+> | 新建 `frontend/app/stores/x.ts`（`DIRS` 没这项） | 红：`I 目录未纳入比对：stores/（…）` —— 强制登记后才能进判据 |
+> | 在 `DIRS` 里加一项 `_p_ghost`（两端都没这目录） | 红：`I 目录表过期：DIRS 列了 _p_ghost/，但两端都没有这个目录` —— 防止表本身腐化成「看着很全」 |
+>
+> `topDirs()` 只看**递归下真有 `EXTS` 文件**的目录：空目录/构建残留不应制造噪声红（反验时删夹具
+> 只删了文件、目录还在，I 当场误报过一次 ⇒ 加此过滤）。判据 I 落地后文件数从 87/87 变成 **87/88**。
+>
+> **同一轮把第二层漏洞也堵上（判据 J）**：目录进了表还不够，`walk()` 只收 `EXTS` 里的类型 ⇒
+> 登记目录里**别的扩展名**照样整类隐身。实测就有一份：`assets/brand-logo.svg` 两端各存一份、
+> 内容当时确实相同，可 `.svg` 不在 `EXTS` 里 ⇒ 换掉桌面端那份旧 logo，本脚本一句话都不说。
+> 处置：`.svg` 进 `EXTS`（B 从此逐字比它，反验＝只改桌面端那份 ⇒ 精确报 B 内容不一致），
+> 并加判据 **J**：`DIRS` 里出现未登记扩展名即红。反验＝在 `assets/` 放一个 `.json` ⇒
+> 报 `J 扩展名未纳入比对：.json（Web端，例 frontend/app/assets/_probe_extra.json）`。
+> 加完后文件数 **88/89**（两端各 +1，就是 `assets/brand-logo.svg`），逐字一致 71 → **72**。
 
 ### 第四层：构建期自包含断言（`vite.config.ts`）
 
@@ -215,9 +324,9 @@ npm run check:parity        # 两端各自的 scripts/check-parity.mjs（两份�
 > 脚本按**自身位置**向上认仓库根（认「同时含 `frontend/app` 与 `desktop/frontend/src`」的目录），
 > 所以放在哪一端、从哪个 `cwd` 调用，结论都一样。
 
-比对 `components/ composables/ utils/ layouts/ pages/ assets/ types/ plugins/` 八个目录
-（`.vue/.ts/.css`），外加**根级入口组件的显式对照**（Web `app.vue` ↔ 桌面 `App.vue`，见 `ROOT_ENTRIES`），
-七条硬判据（A–F 与 H），任一红即退出 1：
+比对 `components/ composables/ utils/ layouts/ pages/ assets/ types/ plugins/ router/` 九个目录
+（`EXTS`：`.vue/.ts/.css/.svg`），外加**根级入口组件的显式对照**（Web `app.vue` ↔ 桌面 `App.vue`，见 `ROOT_ENTRIES`），
+十条硬判据（A–J），任一红即退出 1：
 
 | 判据 | 拦什么 |
 |---|---|
@@ -227,12 +336,25 @@ npm run check:parity        # 两端各自的 scripts/check-parity.mjs（两份�
 | **D** 理由 | 每条白名单必须写 `why`（白名单是**带理由的例外**，不是垃圾桶） |
 | **E** 死件 | `ONLY_DESKTOP` 的文件必须真被桌面源码 import 到（只报不拦） |
 | **F** 契约 | `types/contracts.ts` 两端**去注释后必须逐字一致**（文件头各写各的身份说明） |
+| **G** 有界 | 进了 `ALLOW_DIFF` 只说明「可以不同」，剔注释后的**代码行多重集差异必须恰好等于** `ALLOW_DIFF_BUDGET` 登记值（变大＝漏跟一半/被旧版覆盖；变小＝只删了一侧的 shim 行） |
 | **H** 尺子 | 本脚本在两端的两份副本必须**逐字相同**（副本缺失或哈希不同即红——各存一份是为了互不依赖，漂移不能静默） |
+| **I** 目录表 | 两端**顶层目录并集 ≠ `DIRS`** 即红（双向：盘点出新目录却没登记 → 「整片逃出全部判据」；`DIRS` 里留着已不存在的目录 → 表腐化）。只看**递归下有 `EXTS` 文件**的目录，空目录/构建残留不参与 |
+| **J** 扩展名 | 与 I 同一个病根的第二层：目录登记了，里面**没登记的扩展名**照样整类隐身。`DIRS` 里出现 `EXTS` 之外的文件类型即红（报「哪一端、哪种扩展名、例哪份文件」）—— 是两端同源件就加进 `EXTS`，不是就别放在 `DIRS` 里 |
 
-当前状态：Web 86 / 桌面 86；同名 85，**逐字一致 70**，登记差异 15（`ALLOW_DIFF` 15 条 + `ONLY_WEB` 1 条）。
+当前状态：Web 88 / 桌面 89；同名 87，**逐字一致 72**，登记差异 15（`ALLOW_DIFF` 15 条）。
+<small>桌面端多出的那一个就是 `router/index.ts`（`ONLY_DESKTOP`，理由见脚本注释：Web 端路由由 Nuxt 文件系统生成，没有对应文件）。</small>
 15 条差异归 5 类合法 shim（每条在脚本里都写了 why）：`NuxtLink→RouterLink`／`#app→vue-router`／
 `definePageMeta→路由表 meta`、`typeof window` 守卫（桌面桥）、`studio.css` 字体、
 `contracts.ts` 的文件头，以及**根级入口组件**（`NuxtLayout/NuxtPage` vs `RouterView`）。
+
+> **2026-11-07 第四次收口（判据 G）**：`ALLOW_DIFF` 此前只登记「这两个文件**可以**不同」，
+> **没说能差多少** —— 于是「Web 端改了、桌面端只跟一半」和「桌面端那份被旧版本整块覆盖」
+> 都照样全绿，而这两件正是本脚本存在的理由（B 只看 sha256，不等即放行）。
+> 现在每条差异另有 `ALLOW_DIFF_BUDGET`：剔注释后的**代码行多重集差异必须恰好等于**登记值，
+> 两侧合计一分余量都不留。**变大**红（漏跟/被覆盖）；**变小**也红 —— 那通常意味着
+> 只删掉了一侧的 shim 行，另一端还是 `NuxtLink`，运行期就是 undefined 组件。
+> 只有「两端同改、差异行数不变」是常态，不需要碰那些数字。当前最紧的是
+> `layouts/default.vue` 44/44（22 处 `NuxtLink↔RouterLink`）。
 
 > **2026-11-06 第三次收口（覆盖范围）**：此前 `plugins/` 与根级 `app.vue` **完全不在比对范围内**——
 > 它们不是 `DIRS` 里的子目录，A/B/C 一条都碰不到。于是「Web 端加了插件、桌面端悄悄没有」和
@@ -251,10 +373,17 @@ npm run check:parity        # 两端各自的 scripts/check-parity.mjs（两份�
 > 顺带把 `composables/useApi.ts` 的知识库上传/覆盖层 API 定义同步到桌面端（纯 TS 增量，
 > 两端 import 路径本来就相同）。
 
-`ONLY_DESKTOP` 只有 `utils/nuxtCompat.ts`（零引用的移植安全网，判据 E 会一直提示）。
+`ONLY_DESKTOP` 只有 `utils/nuxtCompat.ts`（**14 处活调用的实现者**，6 个文件里的
+`navigateTo` 12 处 + `useState` 2 处全靠它 + `AutoImport.dirs`）。判据 E 认两种「被用到」：
+import 其**路径**，或调用其**导出函数**——后者是桌面端的常态（零 import），
+2026-11-07 之前只判前一种，于是这条被打成「零引用、真长期不用就删」。
+照着删会让整端路由与 Onboarding 状态全变 undefined，构建仍绿。现已按符号判并做过反向验证。
 
 **反向验证已通过**（每条都单独做过红）：只在一端新增文件 → A 红；只改一端一个字节 → B 红；
-把已一致的文件留在白名单 → C 红；给契约副本多加一个 type → F 红；全部复原后退出 0。
+把已一致的文件留在白名单 → C 红；给契约副本多加一个 type → F 红；
+G 两个方向都验过：桌面端 `props.vue` 多一条 CSS 规则 → `G 差异变大：… 3 行 > 登记 2 行`；
+删掉桌面端那条 `<RouterLink to="/library">` → `G 差异变小：… 1 行 < 登记 2 行`；
+全部复原后退出 0。
 
 > 与第三层的分工要分清：第三层查"桌面端有没有越界引用 Web"（耦合）；
 > 第五层查"两端有没有各改各的"（漂移）。前者防污染，后者防分叉。
@@ -470,6 +599,10 @@ Web 端（Nuxt）不受影响，它的自动导入默认覆盖模板。
 验证：重打壳后 CDP 程序化 `card.click()` → `location.hash` 由 `#/` 变 `#/drama/1`，
 详情页（返回/角色/场景/提示词/编辑剧集/添加集）正常渲染，`Runtime.exceptionThrown` 为 0。
 
+回归守卫：`check:isolation` 判据 **H**。它先剥注释再读 `AutoImport({...})`，
+所以把那行**注释掉**也会红——旧写法直接扫全文，注释里留着 `vueTemplate: true` 照样命中，
+属于假绿（本条踩过的坑，2026-11-07 补的剥注释）。
+
 > 同族风险：任何**只在模板里出现**的 auto-import（组件名外的函数，如 `fmtDate`/`useToast`）
 > 都会踩同一个坑。判据是"打开控制台看有没有 `_ctx.xxx is not a function`"，
 > 而不是去页面里逐个试点击。
@@ -505,7 +638,7 @@ Web 端（Nuxt）不受影响，它的自动导入默认覆盖模板。
 | 桌面端 `vite build` | 成功，20 个页面各自成 chunk（`episode` 218.5 KB） |
 | 桌面端 `vue-tsc` | exit 0，**零错误** |
 | 产物完整性 | 66 文件 / 1.00 MB，入口 `./assets/...` 相对路径 |
-| 隔离守卫 | 8 项全绿；反向验证 4 项均被拦住（A/B 跨工程 import、F 手拼根相对路径、F 内联 `url(${…})` 裸路径、G 外链字体） |
+| 隔离守卫 | 11 项全绿；反向验证多项均被拦住（A/B 跨工程 import、A2 跨工程 `@import`、F 四种手拼形态、F 裸绑字段、G 壳 HTML 外链字体） |
 | 依赖安装 | 独立 `package-lock.json` 60 KB，无 nuxt |
 | `sync-frontend.mjs` | 产物归属断言通过 |
 | `npm run build`（typecheck + build） | exit 0，1.22s |
@@ -565,5 +698,6 @@ Web 端不设该环境变量时行为完全不变，故**未删除**，真机验
 
 - 机器守卫：`npm run check:responsive`（两端各一份 `scripts/check-responsive.mjs`，逐字相同），
   比对基础层是否逐字一致、每个页面是否都有窄屏规则、是否出现缺 `min()` 兜底的硬宽度网格；
+  「窄屏规则 / 硬宽度网格」两条都在**剔除注释后**的文本上判（注释遮蔽见 `docs/responsive-adaptation.md` §8）；
 - 改样式的固定顺序：**改 Web 端 → 把 `<style` 之后整段同步到桌面端同名文件 → 跑守卫 → 跑多视口实测**；
 - 设备范围、关键页面清单、验收判据与实测记录见 `docs/responsive-adaptation.md`。

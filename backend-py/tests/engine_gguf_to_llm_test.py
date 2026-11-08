@@ -286,6 +286,72 @@ def case_tie() -> None:
     check("③′ tie 时 GGUF output.weight **跳过** ✓",
           g2l.map_name("output.weight", tie_embeddings=True) is None)
 
+    # ⭐ 2026-11-07 真机补（`Qwen3-4B-Instruct-2507-GGUF` 的 Q4_K_M ✓✗）：**两个来源都可能缺** ——
+    # 元数据没有 `qwen3.tie_embeddings` 键、文件里也没有 `output.weight` 张量 ⇒ 原实现按 False
+    # ⇒ 模型建出独立 lm_head ⇒ 对账要 `lm_head.weight` ⇒ 一个**完好的文件**被判「缺 1 个张量」✗✗。
+    _no_out = ["token_embd.weight", "output_norm.weight", "blk.0.attn_q.weight"]
+    _with_out = _no_out + ["output.weight"]
+    check("③″ ⭐ 张量表里**没有** output.weight ⇒ 判 tie ✓（元数据不给也照样判 ✓，且这不是猜 ✗："
+          "非 tie 模型的这份权重没有任何别的地方能来 ✓）",
+          g2l.tie_embeddings_of(None, _no_out) is True, g2l.tie_embeddings_of(None, _no_out))
+    check("③‴ 有 output.weight ⇒ 跟随声明 ✓（缺声明按 False ✓ —— 真 tie 时那份权重与词表逐位相同，"
+          "装成独立 lm_head 数值等价 ✓；声明 True ⇒ 跳过 ✓）",
+          g2l.tie_embeddings_of(None, _with_out) is False
+          and g2l.tie_embeddings_of(True, _with_out) is True)
+    check("③⁴ ⚠️ 声明 False 却**没有** output.weight ⇒ **具名拒绝** ✗（自相矛盾不猜 ✗，不许静默当 tie ✓）",
+          _rejects_with(lambda: g2l.tie_embeddings_of(False, _no_out), "GgufDequantError"))
+    check("③⁵ 只给元数据（不给张量表）⇒ **老行为一字不动** ✓（看不到张量表就不假设 tie ✗）",
+          g2l.tie_embeddings_of(None) is False and g2l.tie_embeddings_of(True) is True)
+
+
+def case_tied_load() -> None:
+    """⭐ tie 模型（文件里**没有** ``output.weight``）的装配与键集对账 ✓（2026-11-07 真机补 ✓）。
+
+    ⚠️ 为什么必须单独立一条 ✗：``nn.Module.state_dict()`` 会把同一张 Parameter 在 ``embed.weight``
+    与 ``lm_head.weight`` **两个名字下各列一次** ✗ ⇒ 旧对账在 tie 模型上必然报
+    「缺 1 个张量 lm_head.weight」✗✗ —— 那就是真机装不进时的原话 ✓✗，而文件其实是完好的 ✓。
+    放行凭据只能是**对象同一性** ✓：配置位写 tie 而实物没 tie ⇒ 照旧报缺 ✗（不许拿配置盖事实 ✗）。
+    """
+    if not _torch_available():
+        print("SKIP  ③ᵗ tie 对账：需要 torch（本机未装）⇒ 不判（≠ 通过 ✓）")
+        return
+    import types  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+
+    config = llm_mod.LlmConfig(vocab_size=32, hidden=16, depth=2, heads=2, kv_heads=1,
+                               head_dim=8, ffn=32, tie_embeddings=True)
+    model = llm_mod.build_llm(config)
+
+    def _arr(shape: tuple[int, ...]) -> "np.ndarray":
+        count = int(np.prod(shape))
+        return (np.arange(count, dtype=np.float32) + 1.0).reshape(shape)
+
+    payload = {_reverse(name): _arr(tuple(tensor.shape))
+               for name, tensor in model.state_dict().items()
+               if name != "lm_head.weight"}          # GGUF 对 tie 模型**就不写**这张 ✓
+    original_read = g2l._read_tensor
+    g2l._read_tensor = lambda path, info, tensor: tensor   # type: ignore[assignment]
+    try:
+        message = _message_of(lambda: g2l._load_into_model(
+            "<fake>", types.SimpleNamespace(tensors=dict(payload)), model, config))
+        check("③ᵗ ⭐ tie 模型 + 文件无 output.weight ⇒ **装得上** ✓（旧对账在这里报「缺 lm_head.weight」✗✗）",
+              message == "", message)
+        check("③ᵗ′ ⭐ 装完 `lm_head.weight is embed.weight` 仍成立 ✓（对账放行的是**同一张张量** ✓，"
+              "不是「少装一张也无所谓」✗）",
+              model.lm_head.weight is model.embed.weight)
+
+        # 反证：配置位说 tie、实物**没** tie（建出来各是各的）⇒ 仍然必须报「缺」✗
+        plain = llm_mod.build_llm(llm_mod.LlmConfig(
+            vocab_size=32, hidden=16, depth=2, heads=2, kv_heads=1, head_dim=8, ffn=32,
+            tie_embeddings=False))
+        message = _message_of(lambda: g2l._load_into_model(
+            "<fake>", types.SimpleNamespace(tensors=dict(payload)), plain, config))
+        check("③ᵗ″ ⚠️ 配置位说 tie 但模型**没** tie ⇒ 照旧报缺 ✗（拿配置盖事实会把「真缺」伪装成"
+              "「已共享」✗✗）", message.find("缺") >= 0, message)
+    finally:
+        g2l._read_tensor = original_read   # type: ignore[assignment]
+
 
 def case_stream_load() -> None:
     """⭐ 流式装配 + 键集对账（2026-10-29 ✓，真机 8B 撞出来的内存事故 ✓）。
@@ -458,6 +524,21 @@ def case_infer() -> None:
           g2l.infer_llm_config(meta_klen).head_dim == 128,
           g2l.infer_llm_config(meta_klen).head_dim)
 
+    # ⭐ 2026-11-07 真机补：tie 不能只问元数据（真文件「两个都不给」✓✗）⇒ `tensor_names` 一起给下去 ✓
+    check("④⁹ ⭐ `infer_llm_config` 吃 `tensor_names` ⇒ tie 按**张量表**定 ✓"
+          "（真机 Q4_K_M 那种「没有 tie 键、也没有 output.weight」的文件就靠这条装得进 ✓）",
+          g2l.infer_llm_config(
+              meta_tokens, tensor_names=["token_embd.weight", "output_norm.weight"]
+          ).tie_embeddings is True,
+          g2l.infer_llm_config(meta_tokens,
+                               tensor_names=["token_embd.weight"]).tie_embeddings)
+    check("④¹⁰ 有 output.weight ⇒ 不 tie ✓（装独立 lm_head ⇒ 数值等价 ✓，别把非 tie 也当成共享 ✗）",
+          g2l.infer_llm_config(
+              meta_tokens, tensor_names=["token_embd.weight", "output.weight"]
+          ).tie_embeddings is False)
+    check("④¹¹ 不传 `tensor_names` ⇒ **老行为一字不动** ✓（只看声明、缺声明按 False ✓）",
+          g2l.infer_llm_config(meta_tokens).tie_embeddings is False)
+
 
 def main() -> int:
     case_map()
@@ -467,6 +548,7 @@ def main() -> int:
     case_qk_norm()
     case_qkv_bias()
     case_tie()
+    case_tied_load()
     case_infer()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

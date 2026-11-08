@@ -623,7 +623,7 @@ def case_route_scenes() -> None:
 
 # ===== 三、B 侧项目事实 =====
 def with_temp_db(fn):
-    """临时 darme 库（只建 schema，不碰真实 ``data/drama.db``）。"""
+    """临时 darme 库（只建 schema，不碰真实 ``data/db/drama.db``）。"""
     with tempfile.TemporaryDirectory() as tmp:
         engine = create_engine("sqlite:///" + (Path(tmp) / "darme.sqlite").as_posix())
         metadata.create_all(engine)

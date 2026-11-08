@@ -52,8 +52,13 @@ os.environ["KNOWLEDGE_LEDGER_DB"] = (TMP / "ledger.sqlite").as_posix()
 os.environ["DATA_ROOT"] = TMP.as_posix()
 
 from app.core.config import get_storage_root  # noqa: E402
-from app.services import technical_qc  # noqa: E402
-from app.services.engine import tuning  # noqa: E402
+from app.services import knowledge_ledger, technical_qc  # noqa: E402
+from app.services.engine import hooks, tuning  # noqa: E402
+
+#: ⚠️ 2026-11-07：引擎读台账已改成**注入口**（`hooks.get("ledger")` ✓，生产由 `app/main.py`
+#: 启动时登记 ✓）—— 本套必须补同一步 ✗：否则写入入口全部回 `unavailable=True` 并
+#: 「按核不过处理」（护栏的可见症状 ✓），⑥ 之后整组红且看不出是环境还是缺陷 ✓✗。
+hooks.provide(ledger=knowledge_ledger)
 
 SRC = (BP / "app" / "services" / "technical_qc.py").read_text(encoding="utf-8")
 CONST = technical_qc.TECH_QC_THRESHOLDS
@@ -84,6 +89,20 @@ def main() -> int:
 
     check("默认: 返回的是副本，改它不动常量（镜像守卫才不会是假绿 ✗）",
           values is not CONST, id(values))
+
+    # ========================================= ①B 带 BOM（Windows 记事本/PowerShell 5.1 默认写 BOM）
+    bom = {"version": 1, "updatedAt": "", "history": [],
+           "overrides": {"qc.blackminduration": _entry(0.6)}}
+    tuning.path().write_text(json.dumps(bom, ensure_ascii=False, indent=2), encoding="utf-8-sig")
+    check("BOM: 文件确实是带 BOM 的写法（判据自身别是假绿 ✗）",
+          tuning.path().read_bytes()[:3] == b"\xef\xbb\xbf")
+    values, sources = technical_qc.qc_thresholds()
+    check("BOM: 带 BOM 的覆盖文件照样生效 ✓（读侧 `utf-8-sig` ✓ —— 否则整份覆盖**静默失效** ✗，"
+          "症状是「调优忽然不灵、一句提示都没有」✓✗）",
+          values["blackMinDuration"] == 0.6
+          and sources["blackMinDuration"] == "override:qc.blackminduration", sources)
+    check("BOM: ``problems()`` 不会报「覆盖文件读不出来」 ✓（与 ``load`` 同一编码口径 ✓）",
+          not [item for item in tuning.problems() if "读不出来" in item], tuning.problems())
 
     # ============================================ ② 合法覆盖 ⇒ 生效且只动那一格
     _write_overrides({"qc.blackminduration": _entry(0.5)})

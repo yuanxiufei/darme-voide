@@ -47,9 +47,11 @@ __all__ = [
     "AVAILABLE_SKILL_IDS",
     "CREATOR_INSTRUCTIONS",
     "GeneratedAgentConfig",
+    "TEMPERATURE_RANGE",
     "extract_json",
     "generate_agent_config",
     "persist_agent_config",
+    "persist_agent_temperature",
 ]
 
 #: creator 可推荐给 Agent 的 skill 集合 = **项目自有 skill**（``skills/`` 顶层含 SKILL.md 的目录）。
@@ -158,53 +160,118 @@ async def generate_agent_config(
     )
 
 
-def persist_agent_config(candidate: GeneratedAgentConfig) -> dict[str, Any]:
+def persist_agent_config(candidate: GeneratedAgentConfig,
+                         conn: Connection | None = None) -> dict[str, Any]:
     """把生成的配置 upsert 到 ``agent_configs``（**保留 model/temperature 等既有值**），返回落库行。
 
-    ⚠️ 自管短事务（对齐 Node 的逐语句自动提交）：调用方（optimizer / 路由）不该把这次写入
+    ⚠️ 缺省自管短事务（对齐 Node 的逐语句自动提交）：调用方（creator 路由）不该把这次写入
     卷进自己的事务 —— 否则失败会连累调用方的回滚语义。
+
+    ``conn``（2026-11-07 新增，形参可选 ⇒ 老调用方行为零变化）：**调用方已持写锁时必须传**。
+    优化器那条路上调用方的连接里已经攒了优化史那些 INSERT，SQLite 的 WAL 只允许一个写者 ⇒
+    另开连接这条 UPSERT 会在 busy_timeout（30 秒）里白等，然后抛 ``database is locked``
+    （``tests/optimizer_test.py`` 实测就是这么炸的）。复用同一连接还让「优化史」与「生效配置」
+    落进同一个事务，不会出现「历史说落库了、配置没变」。
     """
     ts = now()
     skills_str = json.dumps(candidate.skills, ensure_ascii=False, separators=(",", ":"))
+    if conn is None:
+        with engine.begin() as own:
+            return _write_config(own, candidate, skills_str, ts)
+    return _write_config(conn, candidate, skills_str, ts)
 
-    with engine.begin() as conn:
-        existing = conn.execute(
-            select(agent_configs).where(agent_configs.c.agent_type == candidate.agent_type)
-        ).first()
 
-        if existing is not None:
-            conn.execute(
-                agent_configs.update().where(agent_configs.c.id == existing.id).values(
-                    name=candidate.name,
-                    description=candidate.description,
-                    system_prompt=candidate.system_prompt,
-                    skills=skills_str,
-                    is_active=True,
-                    # ⚠️ 复活软删行（原 TS 显式写 deletedAt: null）
-                    deleted_at=None,
-                    updated_at=ts,
-                )
+def _write_config(conn: Connection, candidate: GeneratedAgentConfig,
+                  skills_str: str, ts: str) -> Any:
+    """``persist_agent_config`` 的实际 upsert（抽出只为让两条入口共用同一段 SQL）。"""
+    existing = conn.execute(
+        select(agent_configs).where(agent_configs.c.agent_type == candidate.agent_type)
+    ).first()
+
+    if existing is not None:
+        conn.execute(
+            agent_configs.update().where(agent_configs.c.id == existing.id).values(
+                name=candidate.name,
+                description=candidate.description,
+                system_prompt=candidate.system_prompt,
+                skills=skills_str,
+                is_active=True,
+                # ⚠️ 复活软删行（原 TS 显式写 deletedAt: null）
+                deleted_at=None,
+                updated_at=ts,
             )
-            row = conn.execute(
-                select(agent_configs).where(agent_configs.c.id == existing.id)
-            ).first()
-            return row
-
-        new_id = int(conn.execute(agent_configs.insert().values(
-            agent_type=candidate.agent_type,
-            name=candidate.name,
-            description=candidate.description,
-            model="",
-            system_prompt=candidate.system_prompt,
-            temperature=0.7,
-            max_tokens=4096,
-            max_iterations=10,
-            skills=skills_str,
-            is_active=True,
-            created_at=ts,
-            updated_at=ts,
-        )).lastrowid)
-        row = conn.execute(
-            select(agent_configs).where(agent_configs.c.id == new_id)
+        )
+        return conn.execute(
+            select(agent_configs).where(agent_configs.c.id == existing.id)
         ).first()
-        return row
+
+    new_id = int(conn.execute(agent_configs.insert().values(
+        agent_type=candidate.agent_type,
+        name=candidate.name,
+        description=candidate.description,
+        model="",
+        system_prompt=candidate.system_prompt,
+        temperature=0.7,
+        max_tokens=4096,
+        max_iterations=10,
+        skills=skills_str,
+        is_active=True,
+        created_at=ts,
+        updated_at=ts,
+    )).lastrowid)
+    return conn.execute(
+        select(agent_configs).where(agent_configs.c.id == new_id)
+    ).first()
+
+
+#: 温度合法区间（与各家 LLM API 的通用上限一致）。越界即拒 —— 不夹逼：
+#: 「你给 3.0 我悄悄按 2.0 跑」会让参数调优的记录与实际生效值对不上。
+TEMPERATURE_RANGE = (0.0, 2.0)
+
+
+def persist_agent_temperature(agent_type: str, temperature: float,
+                              conn: Connection | None = None) -> int:
+    """只改 ``temperature`` 一格，返回改了 0/1 行。
+
+    为什么单独一个写口而不是塞进 :func:`persist_agent_config`：那个函数的语义是
+    「upsert 一份完整配置（name/description/system_prompt/skills 全要）」，拿它写温度
+    就得先伪造一份提示词 —— 一次参数调优凭什么动提示词。这里只 update 那一列。
+
+    ⚠️ **没有配置行就不写**（返回 0）：``agent_configs`` 里没有这一行意味着该 agent 走的是
+    代码默认值，此时插一行只带温度的配置会把 ``system_prompt`` 留空，等于把它从「用默认
+    提示词」改成「用空提示词」。宁可让调用方照实记「采纳了但没落库」，也不许暗中改行为。
+
+    ``conn``（2026-11-07 新增，形参可选 ⇒ 老调用方行为零变化）：调用方**已经有连接**时必须
+    传进来。理由是 SQLite WAL **只允许一个写者** —— 参数调优那条路上，调用方的连接此刻正
+    攥着优化史那些 INSERT 的写锁，另开一条连接去 UPDATE 只会在 busy_timeout（30 秒）里白等，
+    然后抛 ``database is locked``。复用同一个连接还顺带让「判决」与「生效」落在同一个事务里：
+    要么都落，要么都不落（这正是 ``accepted`` / ``persisted`` 两格的意义）。
+    """
+    lo, hi = TEMPERATURE_RANGE
+    if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
+        raise ValueError(f"temperature 必须是数字，收到 {type(temperature).__name__}")
+    if not (lo <= float(temperature) <= hi):
+        raise ValueError(f"temperature 必须落在 [{lo}, {hi}]，收到 {temperature}")
+
+    ts = now()
+    if conn is None:
+        with engine.begin() as own:
+            return _write_temperature(own, agent_type, temperature, ts)
+    return _write_temperature(conn, agent_type, temperature, ts)
+
+
+def _write_temperature(conn: Connection, agent_type: str, temperature: float, ts: str) -> int:
+    """``persist_agent_temperature`` 的实际写入（抽出只为让「自管事务 / 复用调用方连接」两条
+    入口共用同一段 SQL —— 分成两个实现，迟早有一边忘了补条件）。"""
+    existing = conn.execute(
+        select(agent_configs.c.id).where(agent_configs.c.agent_type == agent_type)
+    ).first()
+    if existing is None:
+        return 0
+    conn.execute(
+        agent_configs.update().where(agent_configs.c.id == existing.id).values(
+            temperature=float(temperature),
+            updated_at=ts,
+        )
+    )
+    return 1

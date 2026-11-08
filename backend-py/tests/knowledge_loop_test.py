@@ -65,6 +65,14 @@ trace_store.get_traces_dir = lambda: TRACES.as_posix()
 #: ``check_evidence`` 会拿数据根拼一次路径，同样换成夹具目录（防真数据根上有同名文件）
 knowledge_ledger.get_data_root = lambda: TMP.as_posix()
 
+from app.services.engine import hooks  # noqa: E402
+
+#: ⚠️ 2026-11-07：引擎读业务数据已改成**注入口**（`hooks.get("ledger"/"run_index")` ✓，
+#: 生产由 `app/main.py` 启动时登记 ✓）—— 本套必须补同一步 ✗：否则 `tuning.set_field()`
+#: 会因「知识台账没接入」**全部拒写**（护栏三的可见症状 ✓），覆盖层那段随后断在
+#: 「tuning.json 不存在」而整套崩（不是 FAIL，更容易被当成环境问题 ✓✗）。
+hooks.provide(ledger=knowledge_ledger, run_index=outcome_index)
+
 _RESULTS: list[tuple[str, bool, object]] = []
 
 
@@ -429,8 +437,12 @@ def main() -> int:
 
     bad_post = client.post("/api/v1/knowledge-loop/entries", json={
         "kind": "lesson", "title": "接口层假证据", "body": "x", "evidence": ["trace:agent/none"]})
-    check("接线: POST /entries 证据核不过 → 400 + message 带原因",
-          bad_post.status_code == 400 and "证据核不过" in bad_post.json()["message"],
+    #: 2026-11-07 契约调整：证据核不过是「格式都对、内容站不住」⇒ **422**（旧断言是 400）。
+    #: 400 留给「请求形状不成立」（缺字段/未知枚举/类型错），两者前端动作不同：
+    #: 400 改请求、422 补证据。分派真源 = 服务层 ``result["code"]``，见
+    #: ``docs/knowledge-base-contract.md`` §1.1。
+    check("接线: POST /entries 证据核不过 → 422 + message 带原因",
+          bad_post.status_code == 422 and "证据核不过" in bad_post.json()["message"],
           bad_post.json())
 
     stats_resp = client.get("/api/v1/knowledge-loop/runs/stats", params={"groupBy": "body"})

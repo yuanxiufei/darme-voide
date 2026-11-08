@@ -466,6 +466,134 @@ def case_budget_decompose() -> None:
           "budget_of_cuda" in src and "mem_get_info" not in src, src[:120])
 
 
+def case_gpu_layers() -> None:
+    """⑧ ``gpuLayers`` 这条**对外旋钮** ✓✗（2026-11-07 加 ✓，§4.1 ✓）。
+
+    它跟 ``plan`` 里唯一的数 ``budget`` 是**两种意图** ✓✗：
+
+      * 按预算自算 —— 「能塞多少塞多少」✓（``gpu_layers=None`` ⇒ **老路一字不变** ✓）；
+      * 给层数 —— 「我只要 N 层」✓（预算富余也**不多切** ✓）。
+
+    判据盯六件：
+
+      ① 归一只有一份口径 ✓（``"3"`` / ``3.0`` / ``" 3 "`` 都是 3 ✓；``"auto"`` / 空串是 None ✓）；
+      ② 坏值**当场抛** ✓✗（``-1`` / ``true`` / ``3.5`` / ``"abc"``）—— 尤其 ``-1``：本仓**不抄**
+         llama.cpp「负数＝全上卡」✓（同一条命令两种含义，运维一定填错 ✓）；
+      ③ 给数就**真按数切** ✓✗（不是"给了数还走 auto"✓ —— 判据＝同一批组、同一张卡，
+         ``gpu_layers=1`` 的卡上字节必须**严格少于** auto ✓）；
+      ④ 预算截断 ⇒ ``granted < asked`` ＋ ``capped=True`` ＋ **``fits`` 仍是 True** ✓✗；
+      ⑤ ``0`` ⇒ 整份留内存 ✓、``refused`` **仍为 False** ✓✗（它不是"切分救不了"✗）；
+      ⑥ 老调用方零变化 ✓（``plan`` / ``place`` 的新参数默认 None ✓）。
+    """
+    import inspect  # noqa: PLC0415 —— 只在判签名时用 ✓
+
+    # ① 归一
+    check("⑧ gpuLayers 归一：'3' / 3.0 / ' 3 ' 都是 3",
+          all(r.normalize_gpu_layers(v) == 3 for v in ("3", 3.0, " 3 ", 3)), None)
+    check("⑧ gpuLayers 归一：None / '' / 'auto' 都是「没提」（按预算自算）",
+          all(r.normalize_gpu_layers(v) is None for v in (None, "", "  ", "auto", "AUTO")), None)
+    check("⑧ gpuLayers 归一：0 就是 0（不是「没提」✗）", r.normalize_gpu_layers(0) == 0, None)
+
+    # ② 坏值当场抛
+    raised = []
+    for bad in (-1, True, False, 3.5, "abc", []):
+        try:
+            r.normalize_gpu_layers(bad)
+        except ValueError:
+            raised.append(bad)
+    check("⑧ gpuLayers 坏值全部抛 ValueError（-1 / true / 3.5 / 'abc' / []）",
+          len(raised) == 6, raised)
+    try:
+        r.normalize_gpu_layers(-1)
+        message = ""
+    except ValueError as err:
+        message = str(err)
+    check("⑧ 负数的理由里点名「不抄 -1＝全上卡」（错误消息要能照做 ✗）",
+          "全上卡" in message and "llama.cpp" in message, message)
+
+    # ③ 给数就真按数切（同一批组／同一张卡）
+    need = 100 * 2**20
+    groups = [r.Group(name=f"blocks.{i}", nbytes=need, layers=1) for i in range(10)]
+    groups.append(r.Group(name="embed", nbytes=need // 10))          # 非层参数 ✓
+    budget = 8 * need                                                 # 预算装得下 7 层 ✓
+    auto = r.plan(groups, budget)
+    asked = r.plan(groups, budget, gpu_layers=1)
+    check("⑧ 给 gpuLayers=1 ⇒ 卡上**只有 1 层**（不是给了数还走 auto ✗）",
+          asked.grantedLayers == 1, (asked.grantedLayers, auto.grantedLayers))
+    check("⑧ 同一预算下：gpuLayers=1 的卡上字节**严格少于** auto",
+          asked.gpu_bytes < auto.gpu_bytes, (_bytes(asked.gpu_bytes), _bytes(auto.gpu_bytes)))
+    check("⑧ 非层参数**照样先上卡**（层数只管层，不管 embedding）",
+          "embed" in asked.on_gpu and "blocks.0" in asked.on_gpu
+          and "blocks.1" not in asked.on_gpu, asked.on_gpu)
+    check("⑧ gpuLayers=1 的 CPU 那头有 9 层（少切 == 多留，两边数量要对得上）",
+          sum(1 for n in asked.on_cpu if r.is_layer(n)) == 9, asked.on_cpu)
+    check("⑧ 回执三格齐（requested / granted / capped）",
+          asked.gpuLayers == {"requested": 1, "granted": 1, "capped": False}, asked.gpuLayers)
+
+    # ④ 预算截断：不许退回 auto、更不许整份打回 CPU
+    tight = r.plan(groups, 3 * need + need // 10, gpu_layers=9)        # 只装得下 2 层 ✓
+    check("⑧ 预算截断 ⇒ granted < asked 且 capped=True",
+          tight.grantedLayers is not None and tight.grantedLayers < 9 and tight.capped,
+          tight.gpuLayers)
+    check("⑧ 预算截断时 **fits 仍是 True**（部分层在卡上是成立的状态，不是失败 ✗）",
+          tight.fits is True, (tight.fits, tight.reason[:80]))
+    check("⑧ 预算截断的理由里点名「不是退回 auto」",
+          "auto" in tight.reason, tight.reason[:120])
+
+    # ⑤ 0 层：整份留内存，但不是失败
+    zero = r.plan(groups, budget, gpu_layers=0)
+    check("⑧ gpuLayers=0 ⇒ 一层都不上卡、整份 CPU",
+          zero.on_gpu == () and zero.cpu_bytes == sum(g.nbytes for g in groups), zero.on_gpu)
+    check("⑧ gpuLayers=0 **不是 refused**（那是「切分救不了」的意思 ✗，会把人引去查卡）",
+          zero.refused is False, (zero.refused, zero.reason[:80]))
+    check("⑧ gpuLayers=0 的话里点明「等价 park 的稳态 / 不是装载失败」",
+          "park" in zero.reason and "装载失败" in zero.reason, zero.reason[:120])
+
+    # ③' 要得比实有层数多 ⇒ 全上卡，且**不算被截断**
+    over = r.plan(groups, 100 * need, gpu_layers=999)
+    check("⑧ gpuLayers=999 > 实有 10 层 ⇒ 全上卡、capped=False（没被截断，是本来就没那么多）",
+          over.grantedLayers == 10 and over.capped is False, over.gpuLayers)
+    check("⑧ gpuLayers=999 时 on_cpu 为空（全上卡 ⇒ 一根 hook 都不挂）",
+          over.on_cpu == (), over.on_cpu)
+
+    # 没有显存时：如实报 granted=0，不许假装
+    noc = r.plan(groups, 0, gpu_layers=5)
+    check("⑧ 预算 0 ＋ gpuLayers=5 ⇒ 如实报 granted=0 / capped=True（不假装切过 ✗）",
+          noc.grantedLayers == 0 and noc.capped is True, noc.gpuLayers)
+
+    # ⑥ 老调用方零变化 + place 透传
+    check("⑧ plan 的 gpu_layers 默认 None（老调用方零变化）",
+          inspect.signature(r.plan).parameters["gpu_layers"].default is None, None)
+    check("⑧ place 的 gpu_layers 默认 None（老调用方零变化）",
+          inspect.signature(r.place).parameters["gpu_layers"].default is None, None)
+
+    probe = _Tiny(dim=8, depth=4)
+    device = torch.device("cuda:0" if HAS_CUDA else "cpu")
+    handle = r.place(probe, main_device=device, budget=small_budget(probe), mode="split",
+                     gpu_layers=1)
+    check("⑧ place 的报告里有 gpuLayers 三格，且 granted == 1",
+          (handle.report().get("gpuLayers") or {}).get("granted") == 1, handle.report().get("gpuLayers"))
+    check("⑧ 没给数时报告里 requested 是 None（**不许**读成「要 0 层」✗）",
+          r.place(probe, main_device=device, budget=small_budget(probe),
+                  mode="split").report().get("gpuLayers") == {
+                      "requested": None, "granted": None, "capped": False}, None)
+    try:
+        r.place(probe, main_device=device, budget=small_budget(probe), gpu_layers="abc")
+        raised_bad = False
+    except ValueError:
+        raised_bad = True
+    check("⑧ place 收到坏 gpuLayers 时**在读卡况之前**就抛（日志里不该先出现一片显存读数 ✗）",
+          raised_bad, None)
+
+
+def small_budget(module: torch.nn.Module) -> int:
+    """给这批组一个「刚好装得下 1 层」的预算 ✓（与 `survey` 的口径同源，不自己算形状 ✓）。"""
+    groups = r.survey(module)
+    layer = next(g.nbytes for g in groups if g.is_layer)
+    fixed = sum(g.nbytes for g in groups if not g.is_layer)
+    return fixed + layer + layer // 2
+
+
 def main() -> int:
     case_plan()
     case_layer_names()
@@ -476,6 +604,7 @@ def main() -> int:
     case_budget_from_cuda()
     case_reserve_by_kind()
     case_budget_decompose()
+    case_gpu_layers()
     width = max(len(name) for name, _, _ in _RESULTS)
     fails = 0
     for name, ok, detail in _RESULTS:

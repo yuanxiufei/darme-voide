@@ -72,7 +72,7 @@ agents: []
 ## 四、查素材
 
 具体招式形态与设计方法**不在本 skill 正文里**，在原料库：
-`data/playbook/film-expert-bridge/ultimate/`
+`corpus/playbook/film-expert-bridge/ultimate/`
 （11 份：国漫级大招设计语言库 1 ＋ 九系属性招式库 9（光神圣/冰/剑仙飞剑/土岩/暗魔/水/火/雷/风）
 ＋ 火系大招输入模版 1）。
 那份目录**随仓库分发、开箱可检索**（来源与许可见 `THIRD_PARTY_NOTICES.md` §六）。
@@ -82,7 +82,7 @@ agents: []
 
 **查法**：用工具 `search_script_library`。
 
-- `source="playbook"` 就是在原料库里检索（`data/playbook/` 下的两个来源目录都在索引里，
+- `source="playbook"` 就是在原料库里检索（`corpus/playbook/` 下的两个来源目录都在索引里，
   `ultimate/` 就在 `film-expert-bridge/` 下面 —— 那 11 份**本来就可检索**，不需要副本）；
   再加 `path_contains="ultimate/"` 把范围收进大招素材（带斜杠，才不会连
   `modules/ultimate.md` 那份规约摘要一起捞进来）。

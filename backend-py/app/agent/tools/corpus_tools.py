@@ -1,6 +1,6 @@
 """语料检索工具（移植自 ``agents/tools/corpus-tools.ts``，148 行）—— 让 Agent 能「找相似镜头」。
 
-数据源：``data/prompt-corpus/_normalized/prompts.jsonl``（由 ``backend-py/app/scripts/corpus/`` 产出）。
+数据源：``corpus/prompt-corpus/_normalized/prompts.jsonl``（由 ``backend-py/app/scripts/corpus/`` 产出）。
 
 ⚠️ 该目录**已 gitignore**（第三方语料不进仓库）⇒ 新克隆的仓库里文件不存在，所以本工具
 **必须在语料缺失时优雅降级**：返回 ``available=false`` + 提示，而不是抛错 ——
@@ -30,7 +30,9 @@ from app.agent.tool import Tool, json_number, json_string, object_schema
 __all__ = ["CORPUS_JSONL", "load_corpus", "corpus_stats", "tokenize", "create_corpus_tools"]
 
 #: 语料文件（与 Node 同法：**基于仓库根**解析，兼容任意 cwd / Docker）
-CORPUS_JSONL = PROJECT_ROOT / "data" / "prompt-corpus" / "_normalized" / "prompts.jsonl"
+#: 2026-11-07：从 ``data/prompt-corpus/`` 迁到顶层 ``corpus/``（与 ``corpus/playbook/`` 同类：
+#: 都是随仓分发/采集的**语料源**，不属于运行时数据根 ``data/``）。
+CORPUS_JSONL = PROJECT_ROOT / "corpus" / "prompt-corpus" / "_normalized" / "prompts.jsonl"
 
 #: 拉丁词（≥2 字符，含 . _ -）
 _LATIN_WORD = re.compile(r"[a-z0-9][a-z0-9._-]+")
@@ -118,7 +120,7 @@ def tokenize(text: str) -> list[str]:
 
 
 _NOT_AVAILABLE_HINT = (
-    "本地语料未安装（data/prompt-corpus/ 已 gitignore，不在仓库内）。"
+    "本地语料未安装（corpus/prompt-corpus/ 已 gitignore，不在仓库内）。"
     "请先执行 python backend-py/app/scripts/corpus/fetch_raw.py 采集、python backend-py/app/scripts/corpus/normalize.py 归一化。"
     "在语料就绪前，请改用 SKILL 里已有的词表与锚点，不要假设能检索到参考。"
 )

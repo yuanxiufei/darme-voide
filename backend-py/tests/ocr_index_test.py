@@ -17,8 +17,12 @@
 """
 from __future__ import annotations
 
+import ast
+import contextlib
+import gc
 import io
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -59,6 +63,67 @@ def png(width: int, height: int) -> bytes:
     return buffer.getvalue()
 
 
+@contextlib.contextmanager
+def worksite(prefix: str = "ocr-test-"):
+    """临时工作目录：**清理失败不许把「断言全过」翻成红**。
+
+    为什么不用 ``tempfile.TemporaryDirectory()``（2026-11-08 实测真事）：Windows 上 PDFium
+    的句柄回收比断言慢半拍 —— 本套件里 ``红页.pdf`` 既被 :func:`_render_page` 打开、又会被
+    后续 ``index()`` 的渲染线程再打开一次，``TemporaryDirectory.__exit__`` 删除时偶尔撞上
+    ``PermissionError: [WinError 32] 另一个程序正在使用此文件``（同刻 PDFium 才在 GC 里
+    打印 "The following objects are still open and will now be closed"）。
+    **全量 261 套连跑才偶发、单跑 20 次都绿** ⇒ 症状是「一整套红、可里面找不到一条 ✗」，
+    真失败会被埋掉 ✗✗。这里先 ``gc.collect()`` 再删，删不掉就**放着**（在 %TEMP% 里，
+    不影响任何判据；下一次照样新建目录）。
+    """
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield path
+    finally:
+        gc.collect()
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def build_pdf(path: Path, pages: list[bytes]) -> Path:
+    """造一份 **xref 完整**的最小 PDF（Helvetica / ASCII），``pages`` 是每页的内容流。
+
+    不借第三方 PDF 生成器：这里要验的是「``ocr_index`` 能不能把这份文件取字/渲染成 OCR 的
+    输入」，生成器一旦与被测实现同库（原先两边都是 PyMuPDF），测的就是那个库自己，
+    换库后的错（字节序、dpi 换算、页数）一条都测不出来。
+    """
+    font_no = 3 + 2 * len(pages)
+    kids = b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(len(pages)))
+    objs = [b"<</Type/Catalog/Pages 2 0 R>>",
+            b"<</Type/Pages/Kids[" + kids + b"]/Count %d>>" % len(pages)]
+    for index, content in enumerate(pages):
+        page_no = 3 + 2 * index
+        objs.append(b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]"
+                    b"/Resources<</Font<</F1 %d 0 R>>>>/Contents %d 0 R>>"
+                    % (font_no, page_no + 1))
+        objs.append(b"<</Length %d>>stream\n" % len(content) + content + b"\nendstream")
+    objs.append(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for no, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % no + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += (b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref_at))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(out))
+    return path
+
+
+def text_stream(lines: list[str], size: int = 9) -> bytes:
+    """一页「有文字层」的内容流：逐行 ``Tj``，每行都留在页面内（抽取才不被裁掉）。"""
+    body = "\n".join(f"({line}) Tj T*" for line in lines)
+    return (f"BT /F1 {size} Tf 20 800 Td 12 TL\n{body}\nET").encode("latin-1")
+
+
 def build_docx(path: Path, blips: list[str], rels: dict[str, str],
                media: dict[str, bytes]) -> Path:
     """造一份最小 docx：``blips`` 是正文里出现的 rId 顺序，``rels`` 是 rId→包内路径。"""
@@ -91,7 +156,7 @@ class FakeOCR:
 
 def case_images() -> None:
     print("\n① 取图顺序与兜底")
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         page1, page2, icon = png(600, 800), png(640, 900), png(60, 60)
         docx = build_docx(
@@ -123,7 +188,7 @@ def case_images() -> None:
 
 def case_docx_ocr() -> None:
     print("\n② docx 的页数/空白/试跑口径")
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         big1, big2, big3 = png(600, 800), png(600, 800), png(600, 800)
         docx = build_docx(
@@ -167,25 +232,19 @@ def case_docx_ocr() -> None:
 def case_native() -> None:
     """PDF 自己的文字层要先用：OCR 是最贵的路，只有真没字时才走。"""
     print("\n③ 有文字层的页不 OCR（混合文档）")
-    import fitz  # noqa: PLC0415
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         pdf = root / "知识库" / "58-短剧待精筛" / "混排.pdf"
-        pdf.parent.mkdir(parents=True, exist_ok=True)
-        doc = fitz.open()
-        try:
-            #: ⚠️ 字数必须过 NATIVE_TRUST_CHARS（100）：这条判据是 2026-11-04 为「水印型
-            #: 扫描件」加的，样本只写 92 字时会被当水印送去 OCR —— 那时本用例测的就不再是
-            #: 「有文字层就不 OCR」，而是「字太少要 OCR」，红得莫名其妙。
-            native_text = "NATIVE TEXT LAYER ON PAGE ONE, NO OCR NEEDED. " * 6
-            first = doc.new_page(width=595, height=842)
-            first.insert_text((60, 90), native_text, fontsize=9)
-            second = doc.new_page(width=595, height=842)
-            second.insert_image(fitz.Rect(0, 0, 595, 842), stream=png(600, 800))
-            doc.save(str(pdf))
-        finally:
-            doc.close()
+        #: ⚠️ 字数必须过 NATIVE_TRUST_CHARS（100）：这条判据是 2026-11-04 为「水印型
+        #: 扫描件」加的，样本只写 92 字时会被当水印送去 OCR —— 那时本用例测的就不再是
+        #: 「有文字层就不 OCR」，而是「字太少要 OCR」，红得莫名其妙。
+        native_lines = ["NATIVE TEXT LAYER ON PAGE ONE, NO OCR NEEDED."] * 7
+        build_pdf(pdf, [
+            text_stream(native_lines),
+            #: 整页黑块＝扫描件：PDFium 抽不出一个字，只能走 OCR
+            b"0 0 0 rg 0 0 595 842 re f",
+        ])
 
         item = {"path": f"G:\\电影剧本\\{sl.LOCAL_MARKER}\\58-短剧待精筛\\混排.pdf",
                 "rel": "58-短剧待精筛/混排.pdf", "name": "混排.pdf", "extension": ".pdf"}
@@ -201,19 +260,33 @@ def case_native() -> None:
             merged = "".join(text for _page, _no, text in outcome["chunks"])
             check("两种来源的正文都进了块（原生页与 OCR 页都不丢）",
                   "NATIVE TEXT" in merged and "SCANNED PAGE" in merged, merged[:80])
+            #: 切段靠页数：报小了会**静默丢页**（段没覆盖到），所以数页数这条也得真测。
+            check("PDF 页数按真文件数（切段用，不信供应商报的 pages）",
+                  oi._pdf_pages(item) == 2, oi._pdf_pages(item))
+
+            #: 渲染这条只有真出一张图才能钉住两件事：dpi 换算（scale=dpi/72）与通道序
+            #: （PDFium 原生是 BGR，``rev_byteorder`` 丢了就会红蓝对调 —— 黑字白底看不出来，
+            #: 彩色扫描件的检测框会偏，且不报错）。故用**纯红页**当样本。
+            red = root / "知识库" / "58-短剧待精筛" / "红页.pdf"
+            build_pdf(red, [b"1 0 0 rg 0 0 595 842 re f"])
+            kind, frame = oi._render_page(red, 0, 96)
+            means = frame.reshape(-1, frame.shape[-1]).mean(axis=0)
+            check("渲染: 没文字层的页出图（(H, W, 3) uint8，OCR 引擎吃三通道）",
+                  kind == "image" and frame.dtype == np.uint8 and frame.shape[2] == 3
+                  and frame.shape[0] > frame.shape[1], (kind, getattr(frame, "shape", None)))
+            check("渲染: 红页出来仍是红的（字节序翻对了，不是 BGR）",
+                  means[0] > 200 and means[1] < 40 and means[2] < 40, means)
+            check("渲染: 96 dpi 下 595×842 pt 出 794×1123 px（dpi 换算 = dpi/72）",
+                  (frame.shape[1], frame.shape[0]) == (794, 1123), frame.shape)
 
             #: 水印型：文字层只有三十来字（页眉水印＋日期）⇒ **不算**原生，必须送 OCR。
             #: 这条钉的是 ``NATIVE_TRUST_CHARS`` —— 没有它，168 份 / 27888 页水印型扫描件
             #: 会被当成「有文字层」白拿 35 字水印入库，正文一个字都进不去。
             watermarked = root / "知识库" / "58-短剧待精筛" / "水印.pdf"
-            doc = fitz.open()
-            try:
-                page = doc.new_page(width=595, height=842)
-                page.insert_text((60, 90), "CENTRAL ACADEMY OF DRAMA  07/26/2014", fontsize=9)
-                page.insert_image(fitz.Rect(0, 0, 595, 842), stream=png(600, 800))
-                doc.save(str(watermarked))
-            finally:
-                doc.close()
+            build_pdf(watermarked, [
+                b"0 0 0 rg 0 0 595 842 re f\n"
+                + text_stream(["CENTRAL ACADEMY OF DRAMA  07/26/2014"]),
+            ])
             watermark_item = {"path": f"G:\\电影剧本\\{sl.LOCAL_MARKER}\\58-短剧待精筛\\水印.pdf",
                               "rel": "58-短剧待精筛/水印.pdf", "name": "水印.pdf",
                               "extension": ".pdf"}
@@ -223,6 +296,19 @@ def case_native() -> None:
                   outcome["native"] == 0 and watermark_ocr.calls == 1, outcome)
         finally:
             sl.LIBRARY_ROOT = original
+
+    #: 依赖守卫：PyMuPDF（AGPL-3.0）2026-11-07 已整条摘掉，渲染改走 pypdfium2。
+    #: 用 ast 判「模块真的 import 了什么」而不是搜字符串 —— 抬头里写着「原先按需 import fitz」
+    #: 这类**说明性**提及是应该留的，搜文本会把说明本身判红。
+    tree = ast.parse(Path(oi.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    check("源码不 import fitz／pymupdf（AGPL 已摘，PDF 只走 pypdfium2）",
+          not ({"fitz", "pymupdf"} & imported), sorted(imported & {"fitz", "pymupdf"}))
 
 
 def case_engine() -> None:
@@ -304,7 +390,7 @@ def case_image_doc() -> None:
     print("\n⑤ 图片文档：单页 / 多帧 TIFF / 试跑截断")
     from PIL import Image  # noqa: PLC0415 —— 与 ocr_index 同一条依赖
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         kb = root / "知识库"
         folder = kb / "08-编剧方法书籍"
@@ -379,7 +465,7 @@ def case_dispatch() -> None:
     finally:
         oi._ocr_one, oi._ocr_docx, oi._ocr_image, oi._ocr_text = originals
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         db = root / "curated.sqlite"
         conn = sqlite3.connect(db)
@@ -539,7 +625,7 @@ def case_budget() -> None:
         check("渲染线程也算进配额、且至少 1 条（否则 GPU 只能干等 CPU 渲染）",
               all(oi.worker_threads(w)[1] >= 1 for w in range(1, 9)),
               [oi.worker_threads(w)[1] for w in range(1, 9)])
-        check("渲染线程有上限（再多只是在 PyMuPDF 里排队，还白占内存）",
+        check("渲染线程有上限（再多只是在 PDFium 里排队，还白占内存）",
               all(oi.worker_threads(w)[1] <= oi.MAX_RENDER_THREADS for w in range(1, 9)),
               oi.MAX_RENDER_THREADS)
         os.environ["OCR_RENDER_THREADS"] = "2"
@@ -880,7 +966,7 @@ def case_text() -> None:
           broken_plain["rejected"] == 1 and not broken_plain["chunks"],
           broken_plain["rejected"])
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         #: 每页都以同一行打头：非 plain 清洗会把它当"跨页页眉"全剔掉（＝删内容）。
         #: 每页刻意凑到**正好** TEXT_PAGE_CHARS（标记行 8 字 + 一行 1490 正文 ⇒ 9+1491=1500），
@@ -1011,11 +1097,30 @@ def case_resources() -> None:
         check("快照写了预算 ⇒ cpu_budget() 读它（子进程靠这条环境变量拿到全局一致的配额）",
               oi.cpu_budget() == 12, oi.cpu_budget())
 
+        #: GPU 档的线程切分只在**这套 onnxruntime 真能上 CUDA** 时才成立。上不了时钉死
+        #: ``cuda`` 必须当场抛错（不许静默回落 CPU 让人以为在用卡）—— 两条路都要有判据，
+        #: 否则测试要么在 CPU 轮子上直接崩、要么在 GPU 机器上白跑。
         os.environ["OCR_DEVICE"] = oi.ENGINE_DEVICE_CUDA
-        for workers in (1, 2, 4):
-            ort, render = oi.worker_threads(workers)
-            check(f"预算 12 时 {workers} 进程 ×（{ort}+{render}）不超预算",
-                  workers * (ort + render) <= 12, (workers, ort, render))
+        if oi.cuda_ready():
+            for workers in (1, 2, 4):
+                ort, render = oi.worker_threads(workers)
+                check(f"预算 12 时 {workers} 进程 ×（{ort}+{render}）不超预算",
+                      workers * (ort + render) <= 12, (workers, ort, render))
+        else:
+            rigged: Exception | None = None
+            try:
+                oi.worker_threads(1)
+            except oi.DeviceUnavailable as exc:
+                rigged = exc
+            check("钉死 cuda 但这套 onnxruntime 上不了 CUDA ⇒ 当场报错（不静默回落 CPU）",
+                  rigged is not None, rigged)
+            check("报错里点名现有 provider 与退回办法（OCR_DEVICE=cpu）",
+                  rigged is not None and "CUDAExecutionProvider" in str(rigged)
+                  and "OCR_DEVICE=cpu" in str(rigged), rigged)
+            os.environ["OCR_DEVICE"] = oi.ENGINE_DEVICE_CPU
+            check("同样条件下 OCR_DEVICE=cpu 立刻可用（不是整条 OCR 线坏死）",
+                  oi.worker_threads(1)[0] >= 1, oi.worker_threads(1))
+            os.environ["OCR_DEVICE"] = oi.ENGINE_DEVICE_CUDA
 
         check("显存够 4 会话且预算够 ⇒ 4 进程",
               oi.default_workers({"cpuBudget": 30, "device": oi.ENGINE_DEVICE_CUDA,
@@ -1073,7 +1178,7 @@ def case_reaudit() -> None:
     （``suspect`` 照常写块），但会一直挂在 ``--audit`` 里把真问题淹掉。页文本没单独存，
     重判只能重跑 —— 于是需要一个「只跑这批」的入口，而不是 ``--only=done`` 全库 3138 份。
     """
-    with tempfile.TemporaryDirectory() as tmp:
+    with worksite() as tmp:
         root = Path(tmp)
         saved = (sl.LIBRARY_ROOT, sl.METHODS_DB, sl.OCR_DB)
         sl.OCR_DB = root / "ocr" / "sidecar.sqlite"

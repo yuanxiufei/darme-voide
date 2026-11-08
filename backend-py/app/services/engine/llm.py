@@ -375,10 +375,16 @@ def _build() -> dict[str, Any]:
             # ⭐ 因果掩码 ✓：当前位置（past_len+i）只许看 ≤ 它自己的位置 ✓✗
             # ⚠️ mask 的 dtype 必须跟 scores 一致 ✗：fp32 的 mask 加到 bf16 的 scores 上会**广播成 fp32**
             # ⇒ 后面 ``attn @ v`` 撞 `expected scalar type BFloat16 but found Float` ✗✗（低精度专炸 ✓）。
-            mask = torch.triu(torch.full((s, past_len + s), float("-inf"),
-                                         device=x.device, dtype=scores.dtype),
-                              diagonal=past_len + 1)
-            masked = scores + mask
+            # ⚠️ 单 token（解码步 ``s == 1``）**不造 mask** ✓：唯一的查询就是最后一位 ⇒ 它能看见
+            # ``past_len + 1`` 个位置里的全部 ✓，掩码全零 ⇒ 造出来只是白占一份 ``(1, past+1)`` 的显存 ✗
+            # （每生成一个 token 白造一次、每层一次 ✓✗）。数值上与原路径**逐位相同** ✓（加零 ≠ 变数 ✓）。
+            if s == 1:
+                masked = scores
+            else:
+                mask = torch.triu(torch.full((s, past_len + s), float("-inf"),
+                                             device=x.device, dtype=scores.dtype),
+                                  diagonal=past_len + 1)
+                masked = scores + mask
             # fp16 的 softmax 升 fp32 再降回 ✓（溢出 + 精度两个理由 ✓）；fp32/bf16 原样 ✓。
             if masked.dtype == torch.float16:
                 attn = torch.softmax(masked.float(), dim=-1).to(masked.dtype)
@@ -449,7 +455,8 @@ def _build() -> dict[str, Any]:
     def generate_llm(model: Any, ids: Any, *, max_new_tokens: int = 64,
                      temperature: float = 1.0, top_p: float = 1.0, top_k: int = 0,
                      eos_id: int | None = None, seed: int | None = None,
-                     stop_ids: Any = None, on_token: Any = None) -> Any:
+                     stop_ids: Any = None, on_token: Any = None,
+                     prefill_chunk: int = 1024) -> Any:
         """逐 token 生成 ✓（greedy / temperature / top-p / top-k ✓ + 早停 ✓）。
 
         ⚠️ ``temperature=0`` ⇒ greedy ✓（直接 argmax ✓ —— 保证可复现 ✓，也是**跨设备一致**的判据 ✓）。
@@ -466,54 +473,74 @@ def _build() -> dict[str, Any]:
           「客户端断开」两种中止的实现方式 ✓；已生成的张量**不返回**（抛出去了 ✓）。
         * ``stop_ids``：命中的 token **计入输出后**收尾 ✓（字符级停用词由上层按解码文本裁 ✓，
           本层只处理"整 token 级"的哨兵 ✓）。
+
+        ⚠️⚠️ **整段跑在 ``torch.inference_mode()`` 里**（2026-11-07 修 ✓✗ —— 这条是**真 bug** ✗✗）：
+        本函数原来没有关梯度 ✓，而参数默认 ``requires_grad=True`` ⇒ 每一步前向都在建 **autograd 图** ✗，
+        36 层的所有中间量（注意力分数 ``(heads, L, L)`` 最大 ✓）被 ``SoftmaxBackward``/``MulBackward``
+        当 saved tensor **吊住不放** ✓✗。代价是 L² 乘层数：实测 4B（heads=32/depth=36）上
+        **3205 词元**的提示词 ⇒ PyTorch 已分配 **94.62 GiB**（卡只有 22.49 GiB ✗ —— Windows 的 WDDM
+        把它甩进共享内存硬撑了 60 秒才 OOM ✓）。关梯度后同一跑峰值 ≈ 权重 8.1 + 三张分数 1.8 GiB ✓。
+        **看着能跑、只是慢/吃显存** ⇒ 没有任何报错指向这里 ✗✗（``/tune`` 真跑才露头 ✓）。
+
+        长提示词还要**分块预填充** ✗：``prefill_chunk`` 把提示词按块数切成若干次前向 ✓（带 KV cache ✓
+        数学上等价 ✓ —— 每块只对**自己那批查询**算注意力 ✓），峰值从 ``O(L²)`` 降到
+        ``O(prefill_chunk × L)`` ✓。默认 1024 词元 ✓（3205 词元的 extractor 提示词 ⇒ 4 块 ✓）；
+        写成 ``>= ids.shape[1]`` 即退回「一次吃完」的老路径 ✓（数值上逐位相同 ✓）。
         """
         if max_new_tokens < 1:
             raise LlmError(f"max_new_tokens 必须 ≥1（收到 {max_new_tokens} ✗）")
         if temperature < 0:
             raise LlmError(f"temperature 不能为负（收到 {temperature} ✗）")
+        if prefill_chunk < 1:
+            raise LlmError(f"prefill_chunk 必须 ≥1（收到 {prefill_chunk} ✗）")
         if seed is not None:
             torch.manual_seed(int(seed))       # ⚠️ 种全部设备 ✓（cuda 的 generator 也在内 ✓）
         ids = ids.to(model_device(model))      # ⚠️ 拼 id 的调用方常忘了搬 ✓（HF 同口径 ✓ 移动而不报错 ✓）
-        past_kv = None
-        current = ids
-        generated: list[Any] = []
-        for _ in range(max_new_tokens):
-            logits, past_kv = model(current, past_kv)
-            next_logits = logits[:, -1, :]
-            if temperature == 0:
-                token = torch.argmax(next_logits, dim=-1, keepdim=True)
-            else:
-                # ⚠️ 采样一律在 **fp32** 里做 ✓：top-p 的阈值比较与多项式抽样都对**概率精度**敏感 ✓，
-                # bf16 只有 8 位尾数 ⇒ 尾部概率会被压平/抹掉 ✓（argmax 不受影响 ✓ —— 它只比大小 ✓）。
-                # 副作用是好的 ✓：概率在两端算得更接近 ⇒ 随机采样也不至于一上来就分叉 ✓。
-                probs = torch.softmax(next_logits.float() / temperature, dim=-1)
-                if top_k > 0:
-                    topk = torch.topk(probs, min(top_k, probs.shape[-1]))
-                    mask = torch.full_like(probs, float("-inf"))
-                    mask.scatter_(1, topk.indices, topk.values)
-                    probs = torch.softmax(mask, dim=-1)
-                if top_p < 1.0:
-                    sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-                    cum = torch.cumsum(sorted_probs, dim=-1)
-                    remove = cum > top_p
-                    remove[..., 1:] = remove[..., :-1].clone()
-                    remove[..., 0] = False
-                    sorted_probs[remove] = 0.0
-                    probs = torch.zeros_like(probs).scatter_(1, sorted_idx, sorted_probs)
-                    probs = probs / probs.sum(dim=-1, keepdim=True)
-                token = torch.multinomial(probs, 1)
-            current = token
-            generated.append(token)
-            token_id = int(token.reshape(-1)[0].item())
-            if on_token is not None:
-                # ⚠️ 顺序固定：**先回调再判停** ✓ —— 让流式端也看见收尾那个 token（不看见就得靠上层猜 ✗）；
-                # 回调抛异常=主动中止（文字级停用词/客户端断开 ✓），原样上抛 ✓。
-                on_token(token_id)
-            if eos_id is not None and bool((token == eos_id).all()):
-                break
-            if stop_ids is not None and token_id in stop_ids:
-                break
-        return torch.cat([ids] + generated, dim=1)
+        total = int(ids.shape[1])
+        if total < 1:
+            raise LlmError("ids 不能是空序列 ✗（至少要有一个词元 ✓ 空提示词没有可续写的上下文 ✗）")
+        with torch.inference_mode():           # ⚠️ 见 docstring：不关梯度 = 每层中间量全部被吊住 ✗✗
+            past_kv = None
+            logits = None
+            for start in range(0, total, prefill_chunk):
+                logits, past_kv = model(ids[:, start:start + prefill_chunk], past_kv)
+            generated: list[Any] = []
+            for _ in range(max_new_tokens):
+                next_logits = logits[:, -1, :]
+                if temperature == 0:
+                    token = torch.argmax(next_logits, dim=-1, keepdim=True)
+                else:
+                    # ⚠️ 采样一律在 **fp32** 里做 ✓：top-p 的阈值比较与多项式抽样都对**概率精度**敏感 ✓，
+                    # bf16 只有 8 位尾数 ⇒ 尾部概率会被压平/抹掉 ✓（argmax 不受影响 ✓ —— 它只比大小 ✓）。
+                    # 副作用是好的 ✓：概率在两端算得更接近 ⇒ 随机采样也不至于一上来就分叉 ✓。
+                    probs = torch.softmax(next_logits.float() / temperature, dim=-1)
+                    if top_k > 0:
+                        topk = torch.topk(probs, min(top_k, probs.shape[-1]))
+                        cut = torch.full_like(probs, float("-inf"))
+                        cut.scatter_(1, topk.indices, topk.values)
+                        probs = torch.softmax(cut, dim=-1)
+                    if top_p < 1.0:
+                        sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+                        cum = torch.cumsum(sorted_probs, dim=-1)
+                        remove = cum > top_p
+                        remove[..., 1:] = remove[..., :-1].clone()
+                        remove[..., 0] = False
+                        sorted_probs[remove] = 0.0
+                        probs = torch.zeros_like(probs).scatter_(1, sorted_idx, sorted_probs)
+                        probs = probs / probs.sum(dim=-1, keepdim=True)
+                    token = torch.multinomial(probs, 1)
+                generated.append(token)
+                token_id = int(token.reshape(-1)[0].item())
+                if on_token is not None:
+                    # ⚠️ 顺序固定：**先回调再判停** ✓ —— 让流式端也看见收尾那个 token（不看见就得靠上层猜 ✗）；
+                    # 回调抛异常=主动中止（文字级停用词/客户端断开 ✓），原样上抛 ✓。
+                    on_token(token_id)
+                if eos_id is not None and bool((token == eos_id).all()):
+                    break
+                if stop_ids is not None and token_id in stop_ids:
+                    break
+                logits, past_kv = model(token, past_kv)
+            return torch.cat([ids] + generated, dim=1)
 
     return {
         "torch": torch, "nn": nn, "F": F, "RMSNorm": RMSNorm, "GQAAttention": GQAAttention,

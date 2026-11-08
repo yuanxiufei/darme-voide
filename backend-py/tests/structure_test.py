@@ -35,8 +35,9 @@
    （``run_all`` 只认这个字面量；写成 ``SUMMARY 12/12 通过 ✓`` / 「全部通过」⇒
    全量表里这套的**项数恒为 0**、退出码却仍 0 ✗ —— 2026-11-01 实测 9 套中招 ✓）
 ㊉ :func:`hygiene_problems` —— **生成物不许入库**：``.gitignore`` 必须**整目录**挡住
-   ``backend-py/output/``（真跑产物）、``backend-py/_bench/``（草稿区）、
-   ``models/tokenizers/``（16 MB 词表）✓；``backend-py/`` **包根只许**有
+   ``backend-py/_bench/``（草稿区）、``models/tokenizers/``（16 MB 词表）、
+   ``data/experiments/``（实验产物）✓；``backend-py/output/`` 已退役（2026-11-07 产物统一进
+   ``<dataRoot>/``），但那条规则**保留作兜底**、仍须挡住 ✓；``backend-py/`` **包根只许**有
    ``README.md`` / ``requirements*.txt`` / ``_run_qwen_image.py`` ✓
    （2026-11-04 实测：根上躺着 5 个「跑完就删」的探针 ✗、三处生成区 36+95+9 件全在忽略之外
    ⇒ 一次 ``git add -A`` 就整片入库 ✗ —— 这类坑不报错、只是**悄悄变胖** ✓）
@@ -74,11 +75,23 @@ MIN_DOC_WORDS = 8
 
 #: ㊉ 仓库里**允许长大的生成区**（不是代码、不是配置 ⇒ 必须被 ``.gitignore`` 整目录挡住 ✓）。
 #: 2026-11-04 实测三处都在忽略之外：``output/`` 36 件真跑产物 ✓、``_bench/`` 95 件草稿 ✓、
-#: ``models/tokenizers/`` 16 MB 词表（代码零引用 ✓）⇒ 一次 ``git add -A`` 就整片入库 ✗。
+#: ``models/tokenizers/`` 16 MB 词表 ⇒ 一次 ``git add -A`` 就整片入库 ✗。
+#: 2026-11-07 整理 ``data/`` 时又补四处 —— ``data/`` 的其余条目早就在，只有这几个新落点没规则：
+#: ``data/engine-dryrun/``（干跑凭据，3 份 JSON 当时是「未跟踪又未忽略」）、``data/materialized/``
+#: （反量化缓存 2 份 / 7.7 GB，同一形状、量级最大）、``indexes/``（知识库三只派生 sqlite，
+#: 合计 ≈2 GB）、``models/PaddleOCR-VL*/``（OCR 权重，每份 1.8 GiB）。
+#: 同日再整理一层：SQLite 全部收进 ``data/db/``、模型按用途收进 ``models/ocr`` 与
+#: ``models/tokenizers`` ⇒ 规则跟着改（**整目录**规则而非逐文件名：列举式漏一个就是整片入库 ✗）。
 GENERATED_DIRS = {
-    "backend-py/output/": "引擎真跑产物（PNG / MP4 / 一次性 JSON 快照）",
+    "backend-py/output/": "已退役的产物区（2026-11-07 产物统一进 <dataRoot>/；规则留作兜底）",
     "backend-py/_bench/": "调试草稿区（一次性 probe 脚本与其账）",
-    "models/tokenizers/": "下载的分词器词表（约 16 MB，代码零引用）",
+    "data/experiments/": "实验/探针产物（不上线、不发 URL；`_bench/*.py` 真跑出来的图/片/歌）",
+    "models/tokenizers/": "三档出图工作流的 Qwen 词表（约 18 MB，tokenizer_hub 的仓内落点）",
+    "models/ocr/": "OCR 权重（约 1.8 GiB，ocr_vlm_fetch.py --fetch 可重下）",
+    "indexes/": "知识库派生索引（三只 sqlite 合计约 2 GB，--redo / --all 可重建）",
+    "data/db/": "数据根的 SQLite 目录（drama.db 与其 .bak / -wal / 知识库覆盖层台账，全不入库）",
+    "data/engine-dryrun/": "引擎干跑凭据（JSON，可删；刻意不进 static，见 engine/bridge.py）",
+    "data/materialized/": "LLM 反量化权重缓存（实测 2 份 / 7.7 GB，materialize.py 下次跑图会重算）",
 }
 
 #: ㊉ ``backend-py/`` **包根只许**这几个松散文件 ✓。
@@ -634,18 +647,24 @@ def case_test_list() -> None:
 def case_hygiene() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8", errors="replace")
     problems = hygiene_problems(gitignore, BACKEND_PY)
-    check(f"㊉ 三处生成区（`output/` `_bench/` `models/tokenizers/`）都被 `.gitignore` 整目录挡住、"
-          f"`backend-py/` 包根没有散落脚本 ✓", not problems, problems)
+    check(f"㊉ 生成区（`_bench/` `models/tokenizers/` `data/experiments/` ＋已退役的 `output/`）"
+          f"都被 `.gitignore` 整目录挡住、`backend-py/` 包根没有散落脚本 ✓", not problems, problems)
 
     stripped = "\n".join(ln for ln in gitignore.splitlines()
                          if ln.strip() != "backend-py/output/")
     leaked = hygiene_problems(stripped, BACKEND_PY)
     check("㊉ 反验：把 `backend-py/output/` 这条规则删掉 ⇒ 必须报"
-          "（36 件真跑产物下一次 `git add -A` 就入库 ✗）",
+          "（产物区一旦在代码目录重建，下一次 `git add -A` 就整片入库 ✗）",
           len(leaked) == 1 and "backend-py/output/" in leaked[0], leaked)
-    commented = gitignore.replace("backend-py/output/", "# backend-py/output/", 1)
+    # ⚠️ 按**整行**注释，不许用 `gitignore.replace("backend-py/output/", ..., 1)` ✗
+    # （2026-11-07 实测踩过：`.gitignore` 的说明注释里也会出现这个路径 ⇒ `replace(...,1)`
+    #  命中的是**注释**那处、真规则原封不动 ⇒ 反验静默失效、判据自己骗自己 ✓✗）
+    rule_lines = [ln for ln in gitignore.splitlines() if ln.strip() == "backend-py/output/"]
+    commented = "\n".join("# " + ln if ln.strip() == "backend-py/output/" else ln
+                          for ln in gitignore.splitlines())
     check("㊉ 反验：规则被**注释掉**（注释里还留着路径）⇒ 仍必须报（最像修好的坏法 ✗）",
-          bool(hygiene_problems(commented, BACKEND_PY)), None)
+          len(rule_lines) == 1 and bool(hygiene_problems(commented, BACKEND_PY)),
+          {"ruleLines": len(rule_lines)})
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

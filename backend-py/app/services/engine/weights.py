@@ -50,7 +50,8 @@ from . import quant_nvfp4 as nvfp4_mod
 from . import safetensors as st_mod
 
 __all__ = ["WeightLoadReport", "RestoreError", "diff_state_dict", "load_module_weights",
-           "make_reloader", "nvfp4_layers_of", "save_module_weights"]
+           "last_prefetch", "last_read_ahead", "make_reloader", "nvfp4_layers_of",
+           "save_module_weights"]
 
 #: safetensors 头部的 dtype 字符串 → torch 的属性名 ✓（**装载**要知道怎么把字节变成张量 ✓）
 #: ⚠️ 这张表必须覆盖 :data:`safetensors.DTYPE_ITEMSIZE` 的全部取值 ✗ ——
@@ -104,6 +105,12 @@ class WeightLoadReport:
     #: ⚠️ 它**不是** missing ✗✗：missing 是"模型要、文件里没有"（真缺陷 ✓）；
     #: 这里是"文件里有、我们决定先放盘上"（策略 ✓）—— 混成一栏会让真缺键被埋掉 ✓✗。
     skipped: int = 0
+    #: ⭐ `skipped` 里**本来是 int8 常驻**的那几层 ✓（2026-11-07 ✓）。
+    #: ⚠️ 它必须单列 ✗✗：:func:`torch_backend._int8_residency_problems` 拿 ``int8Resident`` 跟层数对账，
+    #: 而「卸到内存/盘上」的 int8 层**根本没被写进去**（按设计 ✓）⇒ 只看得见 ``int8Resident`` 时
+    #: 会得出「差 136 层会按 bf16 落盘」的**假警报** ✓✗，整份模型被拒装 ✓✗（实测：假 8 GiB 卡上
+    #: 装 Krea2 224 层只认到 88 层 ✓）。分母是「写进去的 ＋ 卸下去的」✓，不是「写进去的」✗。
+    int8Skipped: int = 0
     #: ⭐ 逐张量**还原器** ✓（2026-11-02 ✓）：**不进** :meth:`to_dict` ✗ ——
     #: 它握着文件 reader 与模块参数的引用 ✓，序列化既没意义也装不下 ✓。
     #: 内存这一级（`residency` 的 ``host_cache``）靠 ``report.restorer.group_values`` 重读 ✓；
@@ -126,15 +133,25 @@ class WeightLoadReport:
             "renamed": self.renamed, "dtypeCasts": self.dtypeCasts,
             "consumedQuantMeta": self.consumedQuantMeta, "int8Resident": self.int8Resident,
             "int4Resident": self.int4Resident,
+            #: ⭐ 「内存这一级」卸掉多少键 / 其中多少是 int8 常驻层 ✓（2026-11-07 ✓）——
+            #: 少了这两格，回执里只看得到 `loadedKeys` 变小 ✓✗，读不出「是策略卸的还是真缺」✓✗。
+            "skipped": self.skipped, "int8Skipped": self.int8Skipped,
             "consumedNvfp4": self.consumedNvfp4, "consumedScales": self.consumedScales,
             "dequant": dict(self.dequant), "error": self.error,
         }
 
 
 #: 读前置的**件数** ✓（2＝当前这件在反量化/写卡时，下一件已经在盘上读 ✓）。
+#:
+#: ⚠️ 2026-11-07 起它**不再**是装载时的深度 ✗（§4.3 ✓）：真正的深度由
+#: :func:`prefetch.resolve_depth` **按盘速分档**给出 ✓（NVMe 2／SATA 2／机械 1 ✓，计划区间 NVMe 2–4、
+#: SATA 1–2 ✓），``load_module_weights(read_ahead=None)`` ＝ 自适应 ✓。这里这个 2 只保留两件事：
+#: ① **测不出盘速**时的回落值 ✓（盘档表 ``DISK_CLASSES["unknown"]`` ✓，与它同值 ✓）；
+#: ② 老调用方／老测试按名字读它时的锚点 ✓（口径**不是**它 ✓✗，读 :func:`last_read_ahead` 才是 ✓）。
 _READ_AHEAD = 2
 #: 读前置的**单件字节上限** ✓✗：20 GiB 的模型里也有 780 MiB 的 embedding ✓，
 #: 提前读它等于峰值多吃 780 MiB（而它只换来几毫秒 ✗）⇒ 超过这条线的一律就地读 ✓。
+#: ⇒ 也正因为有这条线，深度从 2 抬到 3–4 只是多几条**小件**在飞 ✓（内存代价有上界 ✓）。
 _READ_AHEAD_MAX_BYTES = 256 * 1024 * 1024
 #: 上一次装载的读前置统计 ✓（``engine_readahead_test`` 靠它证明**真的用上了** ✗✗ 而不是「接了个空壳」）。
 _LAST_PREFETCH: dict[str, Any] = {}
@@ -316,7 +333,7 @@ def _apply_key_map(state: dict[str, Any], key_map: dict[str, str]) -> tuple[dict
 def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
                         device: str | None = None,
                         key_map: dict[str, str] | None = None,
-                        read_ahead: int = _READ_AHEAD) -> WeightLoadReport:
+                        read_ahead: int | None = None) -> WeightLoadReport:
     """把 ``path`` 的权重**逐张量**装进 ``module`` ✓，并**如实**报告差异 ✓（不静默 ✗）。
 
     ## 为什么是流式（2026-10-29 起 ✓）
@@ -340,6 +357,14 @@ def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
     两种都等价 ✓ —— 最终放置一律由 ``.to`` 决定 ✓，没有一处依赖 ``device=`` 把权重送卡上 ✓。
     旧实现反而在那 1 处**白占了一份显存** ✗：整份权重先读上卡 ✓、再从卡 copy 回 CPU 的 param ✓✗、
     最后 ``.to`` 又搬一次 ✓（流式实现只在最后一次 ``.to`` 上卡 ✓）。
+
+    ## 预取深度（§4.3 ✓，2026-11-07 ✓）
+
+    ``read_ahead=None``（默认）＝ **按盘速自适应** ✓：深度由 :func:`prefetch.resolve_depth` 给出
+    （显式参数 > ``DARME_READ_AHEAD`` > 盘档默认 ✓，机械盘上还会把过大的值截到 1 ✓ 并报 ``capped`` ✓）。
+    实测口径：盘速量不出来（文件 < 8 MiB ✓）⇒ ``unknown`` ⇒ 2 ✓，与本文件原来的写死值同 ✓
+    ⇒ **老行为零变化** ✓。给了显式值就照给（只做 0..8 的合法性检查 ✓，坏值当场抛 ✓）。
+    上一趟用了多深、凭什么，读 :func:`last_read_ahead` ✓。
     """
     target = Path(path)
     own = module.state_dict()          # ⚠️ 是 param 的**视图**（共享 storage ✓）⇒ 不复制数据 ✓
@@ -363,9 +388,15 @@ def load_module_weights(module: Any, path: str | Path, *, dtype: Any = None,
         f"{name}." for name in getattr(module, "_residency_spilled", ()) or ()
         if name and name != "‹root›")
 
-    with reader, _prefetch_scope(read_ahead) as prefetcher:
+    #: ⭐ §4.3（2026-11-07 ✓）：深度**不再写死** ✗ —— 交给 `prefetch.resolve_depth` **按盘速分档** ✓
+    #: （显式给就到显式值 ✓；没给就量这块盘 ✓；量不出来 ⇒ unknown ⇒ 2 ✓，行为零变化 ✓）。
+    #: 放在「文件存在 / 头部打开成功」**之后** ✓：缺文件不该先去量 32 MiB 的盘 ✗。
+    depth_plan = pf_mod.resolve_depth(target, explicit=read_ahead)
+    depth = int(depth_plan["value"])
+
+    with reader, _prefetch_scope(depth, plan=depth_plan) as prefetcher:
         return _load_streaming(reader, own, report, dtype=dtype, key_map=key_map,
-                               read_ahead=read_ahead, prefetcher=prefetcher,
+                               read_ahead=depth, prefetcher=prefetcher,
                                skip_prefixes=skip_prefixes, module=module)
 
 
@@ -390,31 +421,50 @@ def _submit_ahead(prefetcher: Any, reader: Any, plan: list[tuple[str, str]],
 
 
 @contextmanager
-def _prefetch_scope(read_ahead: int) -> Iterator[Any]:
+def _prefetch_scope(read_ahead: int, *, plan: dict[str, Any] | None = None) -> Iterator[Any]:
     """开一个**只活一次装载**的预取器 ✓（``read_ahead<=0`` ⇒ 给 ``None`` ✓ 全走就地读 ✓）。
 
     ⚠️ 退出时 `close(wait=True)` **必须等干净** ✓✗：不等的话，本函数已经返回、装配线接着去
     `release_part` ⇒ 后台线程还捏着旧 reader 的字节在写 ✓，而调用方以为「退干净了」✓✗
     —— 这正是「跨阶段预取」被否掉的那个账 ✓，在这里用作用域把它焊死 ✓。
+
+    ``plan`` 是 :func:`prefetch.resolve_depth` 的回执 ✓（§4.3 ✓）：**关掉**（``<=0``）也要写观测面 ✓✗
+    ——「关掉了」与「这一趟根本没跑过」是两件事 ✓，留旧的统计会让人以为它还在跑 ✓✗。
     """
     if int(read_ahead) <= 0:
+        _remember_prefetch({"readAhead": 0, "disabled": True, "readAheadPlan": dict(plan or {})})
         yield None
         return
     prefetcher = pf_mod.Prefetcher(name="load", max_inflight=max(1, int(read_ahead)))
     try:
         yield prefetcher
     finally:
-        global _LAST_PREFETCH
         try:
-            _LAST_PREFETCH = {**prefetcher.snapshot(), "readAhead": int(read_ahead)}
+            snapshot = prefetcher.snapshot()
         except Exception:  # noqa: BLE001 - 观测面不许反过来搞坏装载 ✓✗
-            _LAST_PREFETCH = {"readAhead": int(read_ahead)}
+            snapshot = {"error": "snapshot 取不到"}
+        _remember_prefetch({**snapshot, "readAhead": int(read_ahead),
+                            "readAheadPlan": dict(plan or {})})
         prefetcher.close(wait=True)
+
+
+def _remember_prefetch(payload: dict[str, Any]) -> None:
+    """写观测面 ✓（失败也**不许**反过来搞坏装载 ✓✗）。"""
+    global _LAST_PREFETCH
+    try:
+        _LAST_PREFETCH = dict(payload)
+    except Exception:  # noqa: BLE001
+        _LAST_PREFETCH = {"readAhead": payload.get("readAhead")}
 
 
 def last_prefetch() -> dict[str, Any]:
     """上一次装载的读前置统计 ✓（``hits`` 为 0 ⇒ 一次都没用上 ✓：那这个优化等于没接 ✗✗）。"""
     return dict(_LAST_PREFETCH)
+
+
+def last_read_ahead() -> dict[str, Any]:
+    """上一趟装载**用了多深、凭什么** ✓（§4.3 ✓；回执 ``/load`` 的 ``readAhead`` 一格读它 ✓）。"""
+    return dict(_LAST_PREFETCH.get("readAheadPlan") or {})
 
 
 class RestoreError(RuntimeError):
@@ -675,6 +725,15 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     #: 别拿被破坏的东西当基准 ✓（与 :func:`residency._refill_group` 用快照核形状是同一条纪律 ✓）。
     skipped_keys = {logical for logical in orig_of if skip_prefixes
                     and logical.startswith(skip_prefixes)}
+    #: ⚠️ **int8 常驻**（2026-10-29 ✓）：模板里**参数本身就是 int8** 的那些键 ✓ ⇒ **不反量化** ✗。
+    #:    这是「19.53 GiB 权重装进 22.49 GiB 显存」的唯一路径 ✓✗：整份反量化成 bf16 = 35.9 GiB ✗
+    #:    ⇒ 连装都装不进去 ✓（`h3_form.Int8Linear` 负责前向时逐层反量化 ✓）。
+    #:    ⚠️ 判据只看**参数 dtype** ✓（不再多一个调用方开关 ✓ —— 少一个开关就少一种配错 ✓）。
+    #:    ⭐ 提前到**预检之前**算 ✓✗（2026-11-07 ✓）：`:data:`skipped_keys` 的账要判「卸下去的这几层
+    #:    本来是不是 int8 常驻」✓，而那段代码在旧的 `resident = …` 之前 ✓。
+    #:    ⚠️ 这里取 ``_torch()`` 而不是下面那个局部名 ✓：下面 ``torch = _torch()`` 在**本行之后**
+    #:    ⇒ 直接用局部名会 ``UnboundLocalError`` ✓✗（实测 2026-11-07 ✓）。
+    resident = {logical for logical in own if own[logical].dtype == _torch().int8}
 
     # ② 差集：**只看头部** ✓ —— 形状不符时一个字节都不读 ✓（旧实现已经把 20 GiB 拉进内存了 ✗）
     meta: dict[str, tuple[Any, tuple[int, ...]]] = {}
@@ -731,6 +790,11 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
         kept = [(orig, logical) for orig, logical in plan
                 if not logical.startswith(skip_prefixes)]
         report.skipped = len(plan) - len(kept)
+        #: ⭐ 其中**本来是 int8 常驻**的几层 ✓（2026-11-07 ✓）：它们**没被写进去**是设计 ✓，
+        #: 但 `_int8_residency_problems` 要拿「写进去的 ＋ 卸下去的」当分母 ✓✗ —— 少了这一格
+        #: 就是「卸层越省、越被判成装不上」✓✗（假 8 GiB 卡装 Krea2 实测 88/224 ✓）。
+        report.int8Skipped = sum(1 for _orig, logical in plan
+                                 if logical.startswith(skip_prefixes) and logical in resident)
         plan = kept
     report.missing = [key for key in own if key not in orig_of]
     report.loadedKeys = len(plan)
@@ -764,11 +828,6 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
         except (st_mod.SafetensorsError, OSError):
             continue     # 读不到 ⇒ 预检会报「没有读到值」✓（不在这里猜 ✓）
     torch = _torch()
-    #: ⚠️ **int8 常驻**（2026-10-29 ✓）：模板里**参数本身就是 int8** 的那些键 ✓ ⇒ **不反量化** ✗。
-    #:    这是「19.53 GiB 权重装进 22.49 GiB 显存」的唯一路径 ✓✗：整份反量化成 bf16 = 35.9 GiB ✗
-    #:    ⇒ 连装都装不进去 ✓（`h3_form.Int8Linear` 负责前向时逐层反量化 ✓）。
-    #:    ⚠️ 判据只看**参数 dtype** ✓（不再多一个调用方开关 ✓ —— 少一个开关就少一种配错 ✓）。
-    resident = {logical for logical in own if own[logical].dtype == torch.int8}
     #: ⚠️ 预检只验**这次真要写的**那些键 ✓✗（``meta`` 是**整份文件**的键 ✓ —— 里面有本模块根本
     #:    不装的层 ✓）。两个理由：
     #:    ① nvfp4 的打包权重**不能进** `precheck_dequant` ✗✗：那套判据是「形状自己就能证明布局」✓，

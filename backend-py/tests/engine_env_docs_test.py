@@ -165,8 +165,12 @@ def case_hardware_report() -> None:
           saved_profiles == live_profiles,
           {"文件": saved_profiles, "现场": live_profiles})
 
+    #: ⭐ 2026-11-07 补 `scaleSuffixes` / `supportedFormats` ✓✗：这两栏原先**没人对账** ✓ ⇒
+    #:    落盘那份少写了 `.scale_weight` ✓、把 `convrot_w4a4` / 两种 fp8 漏在外面 ✓ ——
+    #:    而它们正是「这个文件装不装得进」的对外承诺 ✓（读的人会按旧表判某份权重不支持 ✓✗）。
     for section, keys in (("backend", ("available", "missingRequired", "optionalMissing")),
-                          ("quant", ("supportedLayouts", "unsupportedFamilies", "unsupportedFormats")),
+                          ("quant", ("supportedLayouts", "unsupportedFamilies", "unsupportedFormats",
+                                     "scaleSuffixes", "supportedFormats")),
                           ("catalog", ("models", "modelsDir"))):
         got = {key: (saved.get(section) or {}).get(key) for key in keys}
         want = {key: (live.get(section) or {}).get(key) for key in keys}

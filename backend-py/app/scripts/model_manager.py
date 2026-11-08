@@ -167,6 +167,28 @@ def _default_data_root():
     return os.path.join(PROJECT_ROOT, "data")
 
 
+def default_models_dir():
+    """``<data_root>/models`` —— 与 ``app/core/model_paths.default_models_dir()`` 同口径的副本。"""
+    return os.path.join(_default_data_root(), "models")
+
+
+def resolve_models_dir(cli_models=None, cfg=None):
+    """``models_dir`` 的优先级：CLI > ``MODELS_DIR`` > ``model-paths.json`` > ``<data_root>/models``。
+
+    ⚠️ 本函数是 ``app/core/model_paths.py::models_dir()`` 的**副本** ✓✗ —— 本目录脚本
+    「只吃标准库、不 import ``app.*``」（见 ``scripts/README.md`` 的「依赖关系」），
+    与运行链通过 subprocess 解耦，所以这一档优先级只能在这儿再写一遍。**少的就是 CLI 那一档**
+    （脚本有 ``--models-dir``，运行链没有 ✓）。
+
+    ⚠️ 副本不等于可以各走各的 ✗：``tests/local_models_test.py`` 拿**三档情形**（设
+    ``MODELS_DIR`` / 只配文件 / 都不给）逐档与 ``core.model_paths.models_dir()`` 对拍 ⇒
+    改一边不改另一边**当场红** ✓，不靠注释互相提醒 ✗。
+    """
+    if cfg is None:
+        cfg = load_paths_config()
+    return cli_models or os.environ.get("MODELS_DIR") or cfg.get("models_dir") or default_models_dir()
+
+
 def resolve_paths(cli_comfyui=None, cli_models=None, cli_nodes=None, cli_services=None):
     """统一解析本地模型路径，返回 Paths。优先级：CLI > 环境变量 > 配置文件 > 默认。"""
     cfg = load_paths_config()
@@ -179,12 +201,11 @@ def resolve_paths(cli_comfyui=None, cli_models=None, cli_nodes=None, cli_service
     )
     # ⭐ 自主化（2026-09-25 ✓）：模型默认落本仓自己的 <data_root>/models ✓ —— 不再回落 ComfyUI/models ✗
     #    （ComfyUI 目录只在显式配 COMFYUI_PATH / comfyui_root 时仍可作下载目标 ✓）。
-    default_models = os.path.join(_default_data_root(), "models")
     default_nodes = os.path.join(comfyui_root, "custom_nodes") if comfyui_root else ""
     default_services = os.path.join(APP_ROOT, "local_services")
     return Paths(
         comfyui_root,
-        cli_models or os.environ.get("MODELS_DIR") or cfg.get("models_dir") or default_models,
+        resolve_models_dir(cli_models, cfg),
         cli_nodes or os.environ.get("NODES_DIR") or cfg.get("nodes_dir") or default_nodes,
         cli_services or os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir") or default_services,
     )
@@ -284,7 +305,10 @@ def in_repo_models(path, paths):
 def model_status(m, paths):
     """返回 (状态, 详情路径)。状态：installed/missing/manual/unknown。
 
-    comfyui 类**先看本仓 `data/models`**（存储自主化：那是我们自己的目录，下载与删除都只认它），
+    comfyui 类**先看本仓 `<dataRoot>/models`**（存储自主化：那是我们自己的目录，下载与删除都只认它；
+    ⚠️ 与仓库根的 ``models/`` **不是一处** —— 那一层放的是「仓内携带的小素材」：三档出图工作流的
+    Qwen 词表（``models/tokenizers/``）与 OCR 权重（``models/PaddleOCR-VL-1.6/``），锚定仓库根、
+    不随数据根走。这一层的几十 GB 出图权重属于运行时数据，跟着 ``<dataRoot>`` 迁移。），
     未命中再找引擎同样加载得到的同一份权重（共享池 / 别的 ComfyUI 安装）。两者都算 installed
     —— 否则这台机器上「引擎能出图、CLI 说没有」，中间还夹着一次 87 GB 的无谓下载。
     想知道到底是哪一种，看返回的详情路径是否落在本仓（:func:`in_repo_models`）。
@@ -437,7 +461,7 @@ def download_url(url, dest, force=False, timeout=120, size_gib=None):
 def install_comfyui_model(m, paths, force=False, source="hf"):
     path = os.path.join(paths.models_dir, m.get("kind", ""), m.get("filename", ""))
     # 引擎已经加载得到就不下第二份：本仓目录之外的可见副本（共享池 / 别的安装）同样算数。
-    # 想在本仓 data/models 留一份自己的副本才加 --force —— 否则这里会白下几十 GB（2026-10-28 实测 7 个 ≈ 87 GB）。
+    # 想在本仓 <dataRoot>/models 留一份自己的副本才加 --force —— 否则这里会白下几十 GB（2026-10-28 实测 7 个 ≈ 87 GB）。
     if not force:
         found = find_elsewhere(m, paths)
         if found:

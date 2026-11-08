@@ -185,7 +185,7 @@ class VlmConfig:
             return f"VLM：进程内 PaddleOCR-VL @ {path.as_posix()}（每份最多 {self.max_pages} 页）"
         if not self.endpoint:
             #: 「没装权重」与「装了但没启用」是两种状态，混成一句「未配置」的后果是
-            #: 实测踩过的：``data/models/PaddleOCR-VL-1.6`` 齐备，``--stats`` 照样写
+            #: 实测踩过的：``models/PaddleOCR-VL-1.6`` 齐备，``--stats`` 照样写
             #: 「未配置」，于是没人知道加 ``--vlm`` 就能用，整条通道白装。
             #: ⚠️ 这里只**报告**就绪，绝不自动启用 —— VLM 每页一次推理，默认必须关。
             try:

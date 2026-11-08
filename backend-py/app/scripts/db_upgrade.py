@@ -27,6 +27,11 @@
 3. **备份用 ``sqlite3`` 的 backup API** ✓，**不复制文件** ✗：库跑在 WAL 模式 ✓，
    只 copy ``drama.db`` 会丢掉 ``-wal`` 里尚未 checkpoint 的写 ✓✗
    （副本人为「少一个剧集」那种坑 ✓）。
+4. **备份只留最近 ``KEEP_BACKUPS`` 份** ✓：每次 ``--apply`` 都留一份 ``<db>.bak-<时间戳>`` ✓，
+   而补列是「一次性迁移」里会反复做的事 ⇒ 不清就会一直累积（2026-11-07 实测盘上已躺两份，
+   一份是 0925 那次缺 32 列的老库 ✓，与当前库差好几个版本，留着只会让人分不清「升级前」是哪份 ✗）。
+   裁剪**排在新建之后** ✓ ⇒ 刚做的那份永远在保留名单里 ✓；认不出的非 ``.bak-`` 文件一律不碰 ✓
+   （整套备份 ``data/_backup_<时间戳>/`` 是另一码事，归人手管 ✗）。
 
 ⚠️ ``--plan`` 会**建缺失的表**（`create_all` ✓）—— 这是**任何一次后端启动都会发生**的既定行为 ✓，
 但**不动任何已存在的表** ✓（补列只在 ``--apply`` 且备份之后 ✓）。
@@ -36,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -51,6 +57,15 @@ from pathlib import Path
 BACKEND_PY = Path(__file__).resolve().parents[2]
 
 _DB_LINE_PREFIX = "[db-upgrade] db = "
+
+#: 备份保留份数（**含**刚做的那份）✓。见顶部口径 4。
+KEEP_BACKUPS = 3
+
+#: 备份名里的时间戳格式 ✓（定宽 ⇒ 文件名倒序＝时间倒序 ✓，不必解析成 ``datetime`` 也能排 ✓）
+_BACKUP_STAMP = "%Y%m%d-%H%M%S"
+
+#: 「这一份是我造的」的判据 ✓：``strftime(_BACKUP_STAMP)`` 的**输出形状** ✓（不认 mtime、不认前缀相似 ✗）
+_STAMP_RE = re.compile(r"\d{8}-\d{6}")
 
 
 def _run_backend(flag: str) -> subprocess.CompletedProcess[str]:
@@ -95,16 +110,59 @@ def _parse_db_path(output: str) -> Path | None:
 
 
 def _backup(db: Path) -> Path:
-    """一致性快照备份（含 WAL 里的写 ✓）⇒ ``<db>.bak-YYYYmmdd-HHMMSS`` ✓。"""
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    """一致性快照备份（含 WAL 里的写 ✓）⇒ ``<db>.bak-YYYYmmdd-HHMMSS`` ✓。
+
+    ⚠️ 两个连接都**显式 close** ✗：``with sqlite3.connect(...)`` 只管**事务** ✓、
+    **不关连接** ✗ —— Windows 上句柄不释放 ⇒ 备份文件被本进程占着 ✓✗，
+    紧接着的 ``_prune_backups`` 想删旧备份、或人手想移走它，都会报 ``WinError 32`` ✓。
+    """
+    stamp = datetime.now().strftime(_BACKUP_STAMP)
     dest = db.with_name(f"{db.name}.bak-{stamp}")
     source = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
     try:
-        with sqlite3.connect(dest) as target:
-            source.backup(target)  # 标准库 API ✓：读到的是「一个一致的点」，不是文件当前字节 ✓
+        target = sqlite3.connect(dest)
+        try:
+            with target:
+                source.backup(target)  # 标准库 API ✓：读到的是「一个一致的点」，不是文件当前字节 ✓
+        finally:
+            target.close()
     finally:
         source.close()
     return dest
+
+
+def _backups_of(db: Path) -> list[Path]:
+    """该库的 ``.bak-*`` 备份，**由新到旧** ✓（按**文件名里的时间戳**排 ✓，不按 mtime ✗ —— 复制/解压会把 mtime 抹平）。
+
+    ⚠️ 只认 ``<db.name>.bak-<YYYYmmdd-HHMMSS>`` 这一种形状 ✓：同一目录里还躺着整套备份
+    ``_backup_<时间戳>/`` 与 ``-wal``/``-shm`` 旁文件 ✓，以及人手改名留下的 ``.bak-<别的>`` ✓ ——
+    它们都不是「我这个脚本造的」⇒ **既不计数也不删** ✗（认不出形状就退回人手管 ✓）。
+    """
+    prefix = f"{db.name}.bak-"
+    found = [
+        p for p in db.parent.glob(f"{db.name}.bak-*")
+        if p.is_file() and _STAMP_RE.fullmatch(p.name[len(prefix):])
+    ]
+    return sorted(found, key=lambda p: p.name[len(prefix):], reverse=True)
+
+
+def _prune_backups(db: Path, keep: int = KEEP_BACKUPS) -> list[Path]:
+    """只留最近 ``keep`` 份 ✓，返回**被删掉的**（由新到旧，调用方打成一行回执 ✓）。
+
+    ⚠️ 单独删不掉（被占用 / 无权限）**不许拖垮补列** ✗：补列才是本脚本的主任务 ✓，
+    清理只是附带 ✓ ⇒ 记一行警告后继续 ✓（下一轮 ``--apply`` 会再试 ✓）。
+    """
+    doomed = _backups_of(db)[keep:]
+    removed: list[Path] = []
+    for path in doomed:
+        try:
+            path.unlink()
+        except OSError as exc:
+            print(f"[db-upgrade] ⚠️ 删不掉旧备份 {path.name}（{exc}）⇒ 跳过，不影响补列",
+                  file=sys.stderr)
+        else:
+            removed.append(path)
+    return removed
 
 
 def main() -> int:
@@ -133,6 +191,10 @@ def main() -> int:
         return plan.returncode
 
     print(f"\n[db-upgrade] 备份 → {_backup(db)}")
+    pruned = _prune_backups(db)
+    if pruned:
+        print(f"[db-upgrade] 备份只留最近 {KEEP_BACKUPS} 份 ⇒ 删掉更旧的 {len(pruned)} 份："
+              + "、".join(p.name for p in pruned))
     applied = _run_backend("--apply")
     if applied.stdout:
         print(applied.stdout, end="")
@@ -145,4 +207,8 @@ def main() -> int:
 if __name__ == "__main__":
     # ⚠️ Windows 中文控制台是 **GBK**（py3.14 及以前不会自动 UTF-8 ✗）⇒ 不加这行，裸跑第一条 `print` 就 `UnicodeEncodeError` 崩 ✗（守口径见 `check_cli_encoding.py` ✓）
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # ⚠️ **stderr 同样要重配** ✗：本脚本的失败分支（子进程崩 / 认不出库路径 / 删不掉旧备份）
+    #    全是中文 `print(..., file=sys.stderr)` ⇒ 只重配 stdout 的话，**越到出错越崩** ✓✗
+    #    （报错本身变成 `UnicodeEncodeError`，真原因被吞掉 ✓）。
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())
