@@ -21,20 +21,21 @@ import { ChevronRight, Eraser, Send, Sparkles, Square, Target, Undo2 } from 'luc
 import { NODE_TYPE_LABEL, useCanvas } from '../../composables/useCanvas'
 import { runCanvasAgent } from '../../utils/canvasAgent'
 import { useEngineRun } from '../../composables/useEngineRun'
-import type { RunOverride } from '../../utils/canvasOps'
+import { isRunPending, normalizeRunVerdict, type RunAnswer, type RunOverride } from '../../utils/canvasOps'
 
 const props = defineProps<{
   open: boolean
   /** 画布可视区尺寸（`focusNode` 要用；不给就只能选中不能飞过去） */
   stage?: { width: number; height: number }
   /**
-   * 代点生成：模型给 `run_generation` 时调它，`true` 才算真提交。
-   * 不给（或返回 false）⇒ 该卡落进 `pendingRun`，由用户自己点卡上的「生成」。
+   * 代点生成：模型给 `run_generation` 时调它，答复说 `ok` 才算真提交。
+   * 不给（或没提交成）⇒ 该卡落进 `pendingRun`，由用户自己点卡上的「生成」。
    *
    * 可以返回 promise：同一批 op 刚建的卡还没挂载、或档位清单还在路上，
    * 它只能等一次才知道真答案 ✓ —— 面板同样 `await` 后再写回执，不抢跑 ✗。
+   * 也可以返回 `{ ok: false, reason }`：理由写进回执明细（别丢成一句「看卡片」✗）。
    */
-  generate?: (nodeId: string, override?: RunOverride) => boolean | Promise<boolean>
+  generate?: (nodeId: string, override?: RunOverride) => RunAnswer | Promise<RunAnswer>
 }>()
 const emit = defineEmits<{
   (e: 'update:open', value: boolean): void
@@ -263,7 +264,7 @@ async function send(raw?: string) {
         ? (op) => {
           // `CanvasOp` 是联合类型，只有 `run_generation` 带 `nodeId`/`mode`/`prompt`
           const run = op as { nodeId?: string; mode?: string; prompt?: string }
-          if (!run.nodeId) return false
+          if (!run.nodeId) return { ok: false, reason: '这条生成动作没带 nodeId，没法定位卡片' }
           // 落成局部常量：下面 `await` 进的闭包里，TS 不会保住对 `run.nodeId` 的收窄 ✓
           const nodeId = run.nodeId
           /*
@@ -273,23 +274,23 @@ async function send(raw?: string) {
            */
           const override: RunOverride = { mode: run.mode, prompt: run.prompt }
           /*
-           * 卡片闸没过（缺档位/缺件/缺首帧/类别不符）⇒ 返回 false，执行器记 skipped、
+           * 卡片闸没过（缺档位/缺件/缺首帧/类别不符）⇒ 答复 `ok:false`，执行器记 skipped、
            * 面板也不把这条算进「已提交生成」✓
            *
            * ⚠️ 卡片**可能先给一个 promise**（刚建的卡还没挂载 / 档位清单还在路上）——
            * 那就等它真答复再记账 ✓✗：同步当 `true` 处理过一版，实测结果是
            * 「模型让 zimage 卡跑 video，卡片如实拒绝，回执却写已提交生成 1」。
+           *
+           * 答复里的 `reason` **不要在这里消费**：它跟着返回值上到执行器，
+           * 由 skipped 的明细渲染（写两处必然漂移，而用户只看得到其中一处 ✗）。
            */
-          const verdict = props.generate?.(nodeId, override)
-          if (verdict && typeof (verdict as Promise<boolean>).then === 'function') {
-            return Promise.resolve(verdict).then((ok) => {
-              if (ok === true) startedRun.push(nodeId)
-              return ok === true
-            })
+          const settle = (value: unknown) => {
+            const verdict = normalizeRunVerdict(value)
+            if (verdict.ok) startedRun.push(nodeId)
+            return verdict
           }
-          const started = verdict === true
-          if (started) startedRun.push(nodeId)
-          return started
+          const answer = props.generate?.(nodeId, override)
+          return isRunPending(answer) ? answer.then(settle) : settle(answer)
         }
         : undefined,
     })

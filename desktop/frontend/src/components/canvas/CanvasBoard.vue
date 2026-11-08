@@ -14,7 +14,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { findGroupDropTarget } from '../../utils/canvasGeometry'
 import { collectReferenceInputs, resolvePromptText, type ReferenceInputs } from '../../utils/canvasReferences'
 import { useCanvas } from '../../composables/useCanvas'
-import type { GeneratedPayload, RunOverride } from '../../utils/canvasOps'
+import type { GeneratedPayload, RunAnswer, RunOverride } from '../../utils/canvasOps'
 import CanvasNodeCard from './CanvasNodeCard.vue'
 
 const canvas = useCanvas()
@@ -235,10 +235,10 @@ function onDoubleClick(e: MouseEvent) {
  * 卡片自己握着档位/参数/引擎任务状态，页面拿不到；用回调 ref 收一份
  * 比把整套提交逻辑提升到页面（等于重写 runEngine）安全得多。
  */
-const cardRefs = new Map<string, { run?: (override?: RunOverride) => unknown }>()
+const cardRefs = new Map<string, { run?: (override?: RunOverride) => RunAnswer | Promise<RunAnswer> }>()
 
 function setCardRef(id: string, el: unknown) {
-  if (el) cardRefs.set(id, el as { run?: (override?: RunOverride) => unknown })
+  if (el) cardRefs.set(id, el as { run?: (override?: RunOverride) => RunAnswer | Promise<RunAnswer> })
   else cardRefs.delete(id)
 }
 
@@ -262,33 +262,31 @@ function resolveOverride(override?: RunOverride): RunOverride | undefined {
  * ⭐ 但「等」**不能拿 `true` 顶账** ✗✗：那样闸没过（档位类别不符、缺首帧…）时，
  * 面板已经写下「已提交生成 1」，而实际一条请求都没发 —— 用户看到的回执是假的。
  * 所以没挂载这条路**返回 promise**，跑完再给真答案（`applyCanvasOps` 会 await 它 ✓）。
+ *
+ * 这一层**只转交、不解释** ✓：卡片给的 `{ ok, reason }` 原样往上递，
+ * 理由才能一路走到回执里（在这层折成布尔就把理由丢了 ✗）。
  */
-function runNode(id: string, override?: RunOverride): boolean | Promise<boolean> {
+function runNode(id: string, override?: RunOverride): RunAnswer | Promise<RunAnswer> {
   const resolved = resolveOverride(override)
   const card = cardRefs.get(id)
-  if (typeof card?.run === 'function') return verdictOf(card.run(resolved))
-  if (!nodes.value.some((n) => n.id === id)) return false
+  if (typeof card?.run === 'function') return card.run(resolved)
+  if (!nodes.value.some((n) => n.id === id)) {
+    return { ok: false, reason: `画布上没有这个节点：${id}` }
+  }
   // 还没挂载：等它挂上再跑（override 要一起带过去，否则模型这轮写的提示词会丢 ✗）
   return scheduleRun(id, resolved)
 }
 
-/** 卡片自己也可能给 promise（档位清单还没到，它同样要等一次）⇒ 统一折成「真值或 promise」✓ */
-function verdictOf(value: unknown): boolean | Promise<boolean> {
-  const thenable = value as Promise<unknown> | null
-  if (thenable && typeof thenable.then === 'function') return Promise.resolve(thenable).then((ok) => ok === true)
-  return value === true
-}
-
-/** 一直没挂上（超过 8 次重试 ≈ 240ms）⇒ 如实返回 false，别谎报已提交 ✗ */
-function scheduleRun(id: string, override?: RunOverride, tries = 8): Promise<boolean> {
+/** 一直没挂上（超过 8 次重试 ≈ 240ms）⇒ 如实说「卡没渲染出来」，别谎报已提交 ✗ */
+function scheduleRun(id: string, override?: RunOverride, tries = 8): Promise<RunAnswer> {
   return nextTick().then(() => {
     const card = cardRefs.get(id)
-    if (typeof card?.run === 'function') return Promise.resolve(verdictOf(card.run(override)))
+    if (typeof card?.run === 'function') return Promise.resolve(card.run(override))
     if (tries > 0) {
       return new Promise((resolve) => setTimeout(resolve, 30))
         .then(() => scheduleRun(id, override, tries - 1))
     }
-    return false
+    return { ok: false, reason: '这张卡一直没渲染出来（重试 8 次），这次没有提交' }
   })
 }
 

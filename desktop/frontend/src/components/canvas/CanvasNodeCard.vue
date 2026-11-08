@@ -24,7 +24,8 @@ import { compressImageForUpload, formatBytes } from '../../utils/mediaFile'
 import { cropImage, type CropRect } from '../../utils/canvasImageOps'
 import { useComfyRun, type ComfyWorkflow } from '../../composables/useComfyRun'
 import { useEngineRun, type EngineStage } from '../../composables/useEngineRun'
-import type { GeneratedPayload, RunOverride } from '../../utils/canvasOps'
+import type { GeneratedPayload, RunAnswer, RunOverride, RunVerdict } from '../../utils/canvasOps'
+import { normalizeRunVerdict } from '../../utils/canvasOps'
 import type { ReferenceInputs } from '../../utils/canvasReferences'
 import CanvasCropDialog from './CanvasCropDialog.vue'
 
@@ -164,6 +165,11 @@ const engineRunning = computed(
 )
 const running = computed(() => (runMode.value === 'engine' ? engineRunning.value : comfyRunning.value))
 
+/** 当前通道的状态字 ✓ —— 用来判断「这次失败的原文是不是已经由进度条显示了」✗ 别写两遍 */
+const currentStatus = computed(
+  () => (runMode.value === 'engine' ? engineState.value.status : runState.value.status),
+)
+
 const progressText = computed(() => {
   if (runMode.value === 'engine') {
     const state = engineState.value
@@ -265,24 +271,51 @@ function buildPayload(promptOverride?: string) {
   }
 }
 
-/** 口径与 `runEngine` 一致：**true ＝真提交了**（对话面板据此回执，不谎报 ✗） */
-function runWorkflow(override?: RunOverride): boolean {
-  if (!props.node.workflowId) return false
+/**
+ * 「这一次没跑起来」的**唯一**出口 ✓✗：既弹给点按钮的人，也把理由交给调用方。
+ *
+ * 两处都不能省：`emit` 是手动点「生成」时的即时反馈（那时没人在等返回值）；
+ * `reason` 是对话代跑用的 —— 上一轮只 `emit` 后 `return false`，回执就只能写
+ * 「生成没提交成：看卡片上的缺项提示」，理由明明算出来了却被丢掉 ✗。
+ */
+function fail(reason: string): RunVerdict {
+  emit('error', reason)
+  /*
+   * 同时写进节点 ✓ —— toast 几秒就没，而闸口拒绝时**一条请求都没发**、
+   * 没有 taskId 也没有 `engine.state` 可回读 ⇒ 不落盘就等于无痕 ✓✗。
+   * 落盘后卡上看得见、刷新还在、还会随快照进模型视野（源 `errorDetails` 同义）✓。
+   */
+  emit('update', { lastError: reason })
+  return { ok: false, reason }
+}
+
+/**
+ * 提交成功 ⇒ 清掉「上次没跑起来」的留档 ✓。
+ *
+ * 不清的后果很实在：用户照提示连了首帧、再点生成跑成功了，卡上却仍挂着
+ * 「需要首帧：先连一张图片卡过来」⇒ 他以为这次也没跑起来 ✗（而产物其实在生成中）。
+ */
+function clearLastError() {
+  if (props.node.lastError) emit('update', { lastError: undefined })
+}
+
+/** 口径与 `runEngine` 一致：**答复说 ok ＝真提交了**（对话面板据此回执，不谎报 ✗） */
+function runWorkflow(override?: RunOverride): RunAnswer {
+  if (!props.node.workflowId) return { ok: false, reason: '这张卡还没绑定工作流：先在卡上选一个' }
   const prompt = (override?.prompt || promptText.value || '').trim()
   if (!prompt) {
     // 工作流侧同样不该拿空提示词去跑（`prompt` 是 bindings 的特例字段，空串会顶掉模板默认值 ✗）
-    emit('error', '还没有提示词：先在卡片上写一句要生成什么')
-    return false
+    return fail('还没有提示词：先在卡片上写一句要生成什么')
   }
   try {
     void run.start(props.node.id, buildPayload(prompt)).catch((err: any) => {
       emit('error', `提交失败：${err?.message || err}`)
     })
   } catch (err: any) {
-    emit('error', `提交失败：${err?.message || err}`)
-    return false
+    return fail(`提交失败：${err?.message || err}`)
   }
-  return true
+  clearLastError()
+  return { ok: true }
 }
 
 async function cancelRun() {
@@ -497,7 +530,7 @@ let waitedStages = false
  * 「已提交生成」✓ —— 闸没过就返回 false，面板会把这张卡退回「待运行」，
  * 不谎报 ✗。提交本身是 fire-and-forget（产物好了由 `generated` 事件带回卡）。
  */
-function runEngine(override?: RunOverride): boolean | Promise<boolean> {
+function runEngine(override?: RunOverride): RunAnswer | Promise<RunAnswer> {
   const stage = currentStage.value
   if (!stage) {
     /*
@@ -514,21 +547,22 @@ function runEngine(override?: RunOverride): boolean | Promise<boolean> {
       waitedStages = true
       return engine.loadStages()
         .then(() => runEngine(override))
-        .then((ok) => ok === true, () => false)
+        // 等的过程本身可能抛（后端 500 / 超时）⇒ 那也是一句该写进回执的理由 ✓
+        .then(
+          (answer) => normalizeRunVerdict(answer),
+          (err: any) => ({ ok: false, reason: `档位清单拉取失败：${err?.message || err}` }),
+        )
     }
-    emit(
-      'error',
+    return fail(
       engineStagesError.value
         ? `档位清单拉取失败：${engineStagesError.value}`
         : '还没有档位清单：后端 `/engine/stages` 没返回任何档位',
     )
-    return false
   }
   if (!stage.ready) {
     // 缺件就别提交 ✓：跑起来也会在装载阶段失败 ✓，那几十秒白等 ✗
     const detail = stage.missing.slice(0, 2).join('；')
-    emit('error', `${stage.label} 缺 ${stage.missing.length} 件：${detail || '看 /engine/stages'}`)
-    return false
+    return fail(`${stage.label} 缺 ${stage.missing.length} 件：${detail || '看 /engine/stages'}`)
   }
   /*
    * 模型点名的类别必须与这张卡的档位对得上 ✓。
@@ -537,33 +571,28 @@ function runEngine(override?: RunOverride): boolean | Promise<boolean> {
    */
   const wanted = (override?.mode || '').trim()
   if (wanted && wanted !== stageKind.value) {
-    emit(
-      'error',
+    return fail(
       `${stage.label} 是「${STAGE_KIND_LABEL[stageKind.value]}」档，跑不了「${STAGE_KIND_LABEL[wanted] || wanted}」：`
       + '换一张对应档位的卡，或在卡上把档位改过去',
     )
-    return false
   }
   // 有效提示词 ✓：模型这一轮给的优先，其次卡上正文（引用串已由画布解析成正文 ✓）
   const prompt = (override?.prompt || promptText.value || '').trim()
   // 空提示词直接提交＝白占一次显卡（后端只会拿空串去跑）⇒ 在这里拦 ✓
   // 音频档豁免：它的正文是曲风描述，`lyrics`/`seconds` 在 values 里另算 ✓
   if (!isAudioStage.value && !prompt) {
-    emit('error', `${stage.label} 还没有提示词：先在卡片上写一句要生成什么`)
-    return false
+    return fail(`${stage.label} 还没有提示词：先在卡片上写一句要生成什么`)
   }
   // 只有 I2V 档才逼首帧 ✓（h3 是文生视频 ✗ —— 在这里拦它等于让用户以为必须连图 ✓✗）
   if (needsFirstFrame.value && !referenceCount.value) {
-    emit('error', `${stage.label} 需要首帧：先连一张图片卡过来`)
-    return false
+    return fail(`${stage.label} 需要首帧：先连一张图片卡过来`)
   }
   // 起点图那一格成对使用 ✓：`denoise<1` 却没图 ⇒ 后端会拒（只砍 σ 不换起点＝与参考图无关的灰图 ✗）
   // 音频档没有"起点图"这回事（音频潜帧不吃 initImage ✓）⇒ 这一格不适用 ✗
   const startDenoise = numeric(props.node.values || {}, 'denoise')
   if (!isVideoStage.value && !isAudioStage.value && typeof startDenoise === 'number'
       && startDenoise < 1 && startDenoise > 0 && !referenceCount.value) {
-    emit('error', `起点图 denoise=${startDenoise} 需要一张起点图：先连一张图片卡过来（或把 denoise 清空）`)
-    return false
+    return fail(`起点图 denoise=${startDenoise} 需要一张起点图：先连一张图片卡过来（或把 denoise 清空）`)
   }
   try {
     void engine.start(props.node.id, buildEnginePayload(override?.prompt)).catch((err: any) => {
@@ -571,10 +600,10 @@ function runEngine(override?: RunOverride): boolean | Promise<boolean> {
     })
   } catch (err: any) {
     // `start` 同步抛（参数没拼好之类）⇒ 也算没提交 ✓
-    emit('error', `提交失败：${err?.message || err}`)
-    return false
+    return fail(`提交失败：${err?.message || err}`)
   }
-  return true
+  clearLastError()
+  return { ok: true }
 }
 
 async function cancelEngine() {
@@ -659,13 +688,17 @@ watch(runMode, (mode) => {
  *
  * 返回值可能是 promise（档位清单还在路上，见 `runEngine`）⇒ 调用方请 `await`
  * 再记账，别把「等」读成「已提交」✗。
+ * 没跑起来时给的是 `{ ok: false, reason }`，那句 `reason` 就是要写进回执的人话 ✓。
  */
-function runAny(override?: RunOverride): boolean | Promise<boolean> {
+function runAny(override?: RunOverride): RunAnswer | Promise<RunAnswer> {
   return runMode.value === 'engine' ? runEngine(override) : runWorkflow(override)
 }
 
 defineExpose({
-  /** true ⇒ 真提交了；false ⇒ 没档位 / 闸没过；promise ⇒ 还得等一下才知道（面板据此别谎报「已提交」） */
+  /**
+   * `{ ok: true }` ⇒ 真提交了；`{ ok: false, reason }` ⇒ 没提交且给出理由；
+   * promise ⇒ 还得等一下才知道（面板据此别谎报「已提交」，也别把理由吞掉）
+   */
   run: runAny,
   cancel: cancelEngine,
 })
@@ -1167,6 +1200,19 @@ function onMediaLoad(ev: Event) {
           ⚠️ {{ engineState.warnings[0] }}<template v-if="engineState.warnings.length > 1">
             <br />⚠️ {{ engineState.warnings[1] }}<template v-if="engineState.warnings.length > 2">（+{{ engineState.warnings.length - 2 }} 条，悬停看全部）</template>
           </template>
+        </p>
+
+        <!-- 「上次没跑起来」留档 ✓（对应源 `metadata.errorDetails`）——
+             闸口拒绝时**一条请求都没发**，没有 taskId/state 可回读 ⇒ 不落盘就只剩一声 toast，
+             关掉即无痕（刷新更没 ✗），用户过一阵只看到「点了没反应」✓✗。
+             正在跑/这次已经失败时**不显示**（前者旧理由无意义、后者进度条上就是原文）✗，
+             成功提交时由 `clearLastError()` 清掉 ✓。 -->
+        <p
+          v-if="props.node.lastError && !running && currentStatus !== 'failed'"
+          class="cn-hint err"
+          :title="props.node.lastError"
+        >
+          上次没跑起来：{{ props.node.lastError }}
         </p>
       </template>
 

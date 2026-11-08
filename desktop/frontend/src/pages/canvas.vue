@@ -41,7 +41,7 @@ import { cropImage, rotateImage, splitImage, upscaleImage } from '../utils/canva
 import type { Paddings } from '../utils/canvasOutpaint'
 import { captureVideoFrame } from '../utils/videoFrame'
 import { describeReferences } from '../utils/canvasReferences'
-import type { RunOverride } from '../utils/canvasOps'
+import type { RunAnswer, RunOverride } from '../utils/canvasOps'
 import type { GeneratedPayload } from '../utils/canvasOps'
 import { DEFAULT_NODE_SIZE } from '../utils/canvasNodeSize'
 import { uploadAPI } from '../composables/useApi'
@@ -134,9 +134,12 @@ function setChatOpen(value: boolean) {
  * ⚠️ 原样转交那句 promise ✗：同一批 op 刚建的卡还没挂载，画布板只能等挂上再跑，
  * 它会回一个 promise —— 这里若写 `=== true` 就把 promise 判成 false（该跑的没跑），
  * 反过来乐观返回 true 则会把「被拒」写成「已提交」✗✗。两种都不许。
+ *
+ * 同理**不许在这里把 `{ ok, reason }` 折成布尔** ✓：那句话（「zimage 是图片档，
+ * 跑不了视频」）就是回执要写的内容，折掉它，面板又只能报「看卡片上的缺项提示」✗。
  */
-function runNodeFromChat(nodeId: string, override?: RunOverride): boolean | Promise<boolean> {
-  return boardRef.value?.runNode(nodeId, override) ?? false
+function runNodeFromChat(nodeId: string, override?: RunOverride): RunAnswer | Promise<RunAnswer> {
+  return boardRef.value?.runNode(nodeId, override) ?? { ok: false, reason: '画布还没就绪，这次没有提交' }
 }
 
 /** 工具条浮层：添加 / 更多 / 快捷键 —— 同时只开一个 ✓ */

@@ -18,7 +18,7 @@
  */
 import { canvasAPI } from '../composables/useApi'
 import { canvasRevision } from '../composables/useCanvas'
-import { applyCanvasOps, canvasSnapshot, type ApplyResult, type CanvasOp } from './canvasOps'
+import { applyCanvasOps, canvasSnapshot, type ApplyResult, type CanvasOp, type RunAnswer } from './canvasOps'
 
 export interface CanvasAgentOutcome {
   /** 模型的回话（说明它做了什么） */
@@ -48,8 +48,11 @@ export interface CanvasAgentOutcome {
 export async function runCanvasAgent(
   message: string,
   handlers: {
-    /** 可以返回 promise：卡片还没挂载时，它要等挂上跑一次才知道真答案 ✓ */
-    onGenerate?: (op: CanvasOp) => boolean | void | Promise<boolean>
+    /**
+     * 可以返回 promise：卡片还没挂载时，它要等挂上跑一次才知道真答案 ✓。
+     * 可以返回 `{ ok, reason }`：没提交成的人话理由会进「未生效」明细 ✓。
+     */
+    onGenerate?: (op: CanvasOp) => RunAnswer | Promise<RunAnswer>
     includeSnapshot?: boolean
     /** 用户点「停止」时中止 ✓（抛 `AbortError`，画布一条都不动） */
     signal?: AbortSignal

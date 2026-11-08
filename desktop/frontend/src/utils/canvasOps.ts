@@ -155,17 +155,58 @@ export interface RunOverride {
   prompt?: string
 }
 
+/**
+ * 「这一下到底提交了没有」的答复 ✓✗ —— 代跑回执的**唯一**真源。
+ *
+ * 为什么不是一个裸 boolean：闸没过时用户最需要的是**为什么**（档位类别不符？
+ * 缺首帧？缺件？），而这些理由卡片早就算出来了、也已经弹给了手动点按钮的人。
+ * 只回 `false` 等于把理由丢掉 ⇒ 回执只能写「生成没提交成：看卡片上的缺项提示」，
+ * 用户还得自己去找是哪一张卡的哪一行 ✗（实测就是这么坑的：模型让 zimage 卡跑
+ * video，卡片算出「zimage 是图片档，跑不了视频」，回执只报「没提交成」）。
+ *
+ * 参考实现的写法也不行：源侧 `void generateNodeRef.current?.(…)` 是 fire-and-forget，
+ * 理由只挂在节点 `metadata.errorDetails` 上，对话侧一个字都拿不到 —— 我们比它严，
+ * 就不该只学一半 ✓。
+ */
+export interface RunVerdict {
+  ok: boolean
+  /** 没提交成的人话原因（直接进回执明细，别让用户再去猜是哪张卡） */
+  reason?: string
+}
+
+/** 卡片 / 画布板可能给出的答复形态（老调用方只回 boolean 也照旧兼容 ✓） */
+export type RunAnswer = boolean | RunVerdict | void
+
+/**
+ * 归一答复 ✓：`true` / `void` ⇒ 提交了（老契约「没说不行就是行」）；
+ * `false` ⇒ 没提交且没给理由；对象 ⇒ 取 `ok` 与 `reason` 原样。
+ */
+export function normalizeRunVerdict(answer: unknown): RunVerdict {
+  if (answer && typeof answer === 'object') {
+    const verdict = answer as RunVerdict
+    return { ok: verdict.ok === true, reason: verdict.reason || undefined }
+  }
+  return { ok: answer !== false }
+}
+
+/** 是不是「还得等一下」的答复（卡没挂载 / 档位清单在路上）✓ */
+export function isRunPending(answer: unknown): answer is Promise<RunAnswer> {
+  const pending = answer as Promise<unknown> | null
+  return !!pending && typeof pending.then === 'function'
+}
+
 export async function applyCanvasOps(
   ops: CanvasOp[],
   handlers: {
     /**
      * 返回 `false` ⇒ 明确"没提交成"（缺档位/缺件/缺首帧），执行器会记 skipped ✓。
+     * 返回 `RunVerdict` ⇒ 连**理由**一起交上来，回执直接写那句人话 ✓。
      *
      * ⭐ 也可以返回一个 **promise**：同一批 op 刚建出来的卡此刻还没挂载，
      * 它没法同步回答「提交了没有」，只能等挂上后跑一次再如实回答 ✓ ——
      * 这正是本函数改成 `async` 的唯一理由（见下面 `run_generation` 分支）。
      */
-    onGenerate?: (op: CanvasOp) => boolean | void | Promise<boolean>
+    onGenerate?: (op: CanvasOp) => RunAnswer | Promise<RunAnswer>
     /** 幂等键 ✓（计划 id 天然合适） */
     applyId?: string
     /** 这批 op 是基于哪一版画布算的 ✓（不给 = 不校验，兼容老调用方） */
@@ -327,9 +368,14 @@ export async function applyCanvasOps(
          * （实测踩过：model 让 zimage 卡跑 video，卡片如实拒绝，回执却报已提交）。
          */
         const verdict = await handlers.onGenerate(op)
-        if (verdict === false) {
-          // 回调说"没提交成"（缺档位/缺件/缺首帧）⇒ 不能记成已落地 ✗
-          result.skipped.push({ op, reason: '生成没提交成：看卡片上的缺项提示' })
+        const answer = normalizeRunVerdict(verdict)
+        if (!answer.ok) {
+          /*
+           * 回调说"没提交成"（缺档位/缺件/缺首帧）⇒ 不能记成已落地 ✗。
+           * 理由优先用卡片算好的那句（「zimage 是图片档，跑不了视频」），
+           * 只有老调用方连理由都不给时才退回那句笼统话 ✓。
+           */
+          result.skipped.push({ op, reason: answer.reason || '生成没提交成：看卡片上的缺项提示' })
           continue
         }
         result.applied += 1
