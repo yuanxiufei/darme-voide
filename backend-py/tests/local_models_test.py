@@ -432,6 +432,29 @@ def main() -> int:  # noqa: C901
           "（漏一处 ⇒ 自检换掉的文件对它不生效，端点判据就会读到真配置 ✓✗）",
           not unported, unported)
 
+    # ⚠️ 同类守卫其二（2026-11-08 ✓）：ComfyUI 安装根探测已搬 ``app.core.comfyui_roots`` ✓，
+    #    服务层那条薄委托有**两个**可 patch 的名字要传下去 ✓✗：「``_paths_config_file()``（配置」
+    #    与「``detect_comfyui_roots``（探测」✓。跨模块 monkeypatch **不生效** ✗✗ —— 本套正是靠
+    #    patch ``ls.detect_comfyui_roots`` 注入假根 ✓，漏传就是它去走 core 自己的全局 ⇒ patch 静默
+    #    失效、用例在不该绿的地方绿（实测症状：漏传后「每个 ComfyUI 根都要收进来」当场红 ✓，
+    #    而反过来「没多收根」那类断言会假绿 ✓✗）。⇒ 一次判两个关键字，缺哪个点名哪个 ✓。
+    unported_core: list[str] = []
+    for node in ast.walk(ast.parse(scan_src)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "comfyui_roots":
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Name) and owner.id == "core_comfyui_roots"):
+            continue
+        given = {kw.arg for kw in node.keywords}
+        missing = [name for name in ("path", "detect") if name not in given]
+        if missing:
+            unported_core.append(f"comfyui_roots 缺 {missing}@L{node.lineno}")
+    check("守卫: 委托 core 探测时 ``path=`` 与 ``detect=`` **两个隔离口都传** ✓✗"
+          "（只传路径 ⇒ core 走自己的全局，本套 patch 的 ``ls.detect_comfyui_roots`` 静默失效 ✓✗）",
+          not unported_core, unported_core)
+
     # ⭐ 副本对拍（2026-11-08 ✓）：上表登记进来的副本**必须与本尊逐档一致** ✓✗ ——
     #    只判「它读过这个环境变量」是不够的 ✗：把 ``MODELS_DIR`` 挪到配置文件**后面**、
     #    或漏掉 ``<data_root>/models`` 这一档回落，照样能通过上面那条 ✗✗（那才是真正会漂的形状）。

@@ -43,6 +43,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..core import comfyui_roots as core_comfyui_roots
 from ..core import config, model_paths
 from . import model_ecosystems, model_fingerprint, model_folders, ollama_store
 
@@ -86,43 +87,23 @@ MODEL_EXTS = frozenset([
     ".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx", ".sft", ".engine",
 ])
 
-#: 递归时跳过的目录名 —— **仅跳过「非模型」目录**。
-#: ⚠️ clip / vae / controlnet / upscale_models / embeddings / photomaker / style_models /
-#: ipadapter 等目录下**都是模型权重**，不能跳过，需被扫描识别。
-SKIP_DIRS = frozenset([
-    "node_modules", ".git", "venv", ".venv", "__pycache__", ".cache", ".huggingface",
-    "output", "temp", "input", "assets", "metadata", "samples", "custom_nodes",
-    ".codebuddy", "python", "lib", "site-packages",
-])
-
-#: 系统级目录（磁盘/全盘扫描时跳过）。这里用**目录名小写**匹配，模型几乎不可能放在这些目录下。
-SYSTEM_DIRS = frozenset([
-    "windows", "program files", "program files (x86)", "programdata",
-    "$recycle.bin", "system volume information", "recovery", "perflogs",
-    "msocache", "documents and settings", "windows.old", "appdata",
-    "onedrive", "onedrivetemp", "intel", "amd", "nvidia", "drivers",
-])
-
-#: ⭐ 2026-09-26 用户口径 ✓：**不许写死路径** ✗ —— 模型既可以装在**用户指定的任意目录** ✓，
-#: 也要能扫**电脑上任意目录**里已有的模型 ✓。所以这里**没有**任何**机器盘符字面量** ✗，
-#: 只有「**按名字动态探测 + 全盘枚举**」的口径 ✓：
-#:
-#: * **权威来源**（优先于探测）：环境变量 ``COMFYUI_PATH`` / ``model-paths.json`` 的 ``comfyui_root`` ✓、
-#:   用户的「额外扫描目录」``extra_roots`` ✓（**任意目录**都行 ✓，见 ``get_default_roots`` ✓）；
-#:   下载/存放的**主目录** = ``MODELS_DIR`` / ``model-paths.json`` 的 ``models_dir`` ✓（默认 ``<data_root>/models`` ✓）；
-#: * **探测回退** = 家目录 + **各现存盘符**（``list_drives`` ✓）往下找「名字含关键词」的目录 ✓，
-#:   判定「像 ComfyUI 根」只看**目录下有没有 ``models/``** ✓（与旧口径一致 ✓ ⇒ 桌面端的**共享模型目录**
-#:   ``…/ComfyUI-Shared`` ✓ 也算一个根 ✓，本机那份 SDXL 正在它下面 ✓）；
-#: * ⚠️ 关键词是**产品名**不是机器路径 ✓：用户把 ComfyUI 装在**任意盘、名字里带关键词**的目录里照样命中 ✓
-#:   （名字毫不相干的目录 = 不瞎猜 ✗，靠用户显式配 ``extra_roots`` / ``comfyui_root`` ✓）。
-COMFYUI_DIR_HINTS = ("comfyui", "comfy-desktop", "comfyui-desktop", "comfy")
-#: 探测深度（层）：**关键词目录**最深看到这里 ✓。
-#: ⚠️ 桌面端把安装藏在 ``<盘>/Comfy-Desktop/ComfyUI-Installs/<名字>/ComfyUI`` ✓ ⇒ **5 层**才够 ✓。
-COMFYUI_PROBE_DEPTH = 5
-#: 「顺便看一眼」的深度（层）：名字**不沾边**的目录只在最上面这几层进一下 ✓ ——
-#: 因为开发/自建目录常挂在 ``<盘>/code/ComfyUI`` 这类**父目录名不含关键词**的地方 ✗
-#: （只认关键词会漏掉它 ✗）；再深就**不乱翻** ✗（省时的同时避开无关目录树 ✓）。
-COMFYUI_BLANKET_DEPTH = 2
+#: ⚠️ 跳过表与「ComfyUI 安装根探测」的**实现**都在 :mod:`app.core.comfyui_roots` ✓✗
+#: （2026-11-08 搬 ✓）：那一套读的**只有配置与盘** ✓，不碰业务数据 ⇒ 与 ``app.core.model_paths``
+#: 同一类 ✓；而引擎读权重时**也要**答「安装根在哪」（``bridge.resolve_tokenizer_path`` 找
+#: ``comfy/sd1_tokenizer`` ✓ —— SDXL 的 CLIP-BPE 词表不是权重，扫 ``.safetensors`` 永远找不着 ✓✗），
+#: 留在服务层就等于逼引擎 ``import app.services.local_model_scan`` ✓✗。
+#: 这里做的是**再导出同一批对象** ✓（``SKIP_DIRS is app.core.comfyui_roots.SKIP_DIRS`` ✓），不是副本 ✗。
+#: ⚠️ 分层只搬到「安装根探测」为止 ✗✗：``get_default_roots`` 的另外几类根（``extra_roots`` /
+#: ``model_ecosystems`` 的世界生态落点 / ``model_folders`` 的声明表）要读生态约定与用户声明，
+#: 属「模型库功能」⇒ 仍留在这里 ✓（``_SEAMS`` 里 ``inventory.py`` 那条登记的就是剩下的这半 ✓）。
+SKIP_DIRS = core_comfyui_roots.SKIP_DIRS
+SYSTEM_DIRS = core_comfyui_roots.SYSTEM_DIRS
+COMFYUI_DIR_HINTS = core_comfyui_roots.COMFYUI_DIR_HINTS
+COMFYUI_PROBE_DEPTH = core_comfyui_roots.COMFYUI_PROBE_DEPTH
+COMFYUI_BLANKET_DEPTH = core_comfyui_roots.COMFYUI_BLANKET_DEPTH
+list_drives = core_comfyui_roots.list_drives
+detect_comfyui_roots = core_comfyui_roots.detect_comfyui_roots
+detect_comfyui = core_comfyui_roots.detect_comfyui
 
 #: 运行时 → 默认 baseUrl。
 #: ⚠️ ``comfyui`` **有意为空**：它只作「只读的可选扫描来源」，不生成可调用注册建议。
@@ -322,81 +303,6 @@ def _write_paths_config(cfg: dict[str, Any]) -> None:
     model_paths.write_paths_config(cfg, path=Path(_paths_config_file()))
 
 
-def _probe_bases() -> list[str]:
-    """探测起点：家目录 + 各现存盘根（``list_drives`` ✓ —— POSIX 上取不到盘符 ⇒ 只剩家目录 ✓）。"""
-    bases: list[str] = []
-    home = os.path.expanduser("~")
-    if home and os.path.isdir(home):
-        bases.append(home)
-    for drive in list_drives():
-        root = str(drive.get("root") or "")
-        if root and os.path.isdir(root):
-            bases.append(root)
-    return bases
-
-
-def detect_comfyui_roots(bases: list[str] | None = None) -> list[str]:
-    """**动态**探测本机全部「ComfyUI 类」目录（保序：起点顺序 + 浅→深 ✓）。
-
-    ⚠️ 与旧 ``detect_comfyui()`` 的关键差别：这里返回**全部**命中 ✓ —— 旧实现只取**第一个** ⇒
-    机器上装了两个以上 ComfyUI 时，**后面的全被遮住** ✗✗（本机就是这么漏掉那份 SDXL 的 ✓：
-    候选表把 ``ComfyUI-Installs/…`` 排在前 ⇒ ``ComfyUI-Shared/models`` 永远扫不到 ✗）。
-
-    做法：从起点往下走，**名字含关键词**（``COMFYUI_DIR_HINTS``）的目录一路下潜
-    （最多 ``COMFYUI_PROBE_DEPTH`` 层 ✓），名字不沾边的只在最上面 ``COMFYUI_BLANKET_DEPTH`` 层
-    「顺便看一眼」✓ —— 因为自建/开发目录常挂在 ``<盘>/code/ComfyUI`` 这种**父目录名不含关键词**的地方 ✗；
-    命中判定 = **名字含关键词 + 目录下有 ``models/``** ✓（与旧口径一致 ✓）。``SKIP_DIRS`` / ``SYSTEM_DIRS``
-    照旧跳过 ✓（⇒ 再怎么「顺便看」也不会进 ``Windows`` / ``AppData`` ✓）。
-
-    ``bases=None`` ⇒ 家目录 + 各现存盘根 ✓；测试**注入临时目录** ✓（不碰真实磁盘 ✓）。
-    """
-    found: list[str] = []
-    seen: set[str] = set()
-    queue: list[tuple[str, int]] = [
-        (base, 0) for base in (bases if bases is not None else _probe_bases())
-    ]
-    while queue:
-        current, depth = queue.pop(0)
-        try:
-            with os.scandir(current) as scanned:
-                children: list[tuple[str, str, bool]] = []
-                for entry in sorted(scanned, key=lambda item: item.name.lower()):
-                    try:
-                        children.append((entry.name.lower(), os.path.abspath(entry.path),
-                                         entry.is_dir(follow_symlinks=False)))
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-        for name, path, is_dir in children:
-            if not is_dir or name.startswith(".") or name in SKIP_DIRS or name in SYSTEM_DIRS:
-                continue
-            hinted = any(hint in name for hint in COMFYUI_DIR_HINTS)
-            # ⚠️ 名字不沾边的**只在最上面几层**「顺便看一眼」✓（``<盘>/code/ComfyUI`` 这种 ✗）；
-            #    再往下只跟着关键词走 ✗ —— 既不乱翻无关目录树 ✓、对普通名字也**不瞎猜**是根 ✓
-            #    （用户的任意目录另有显式入口：``extra_roots`` / ``comfyui_root`` ✓）
-            if not hinted and depth + 1 >= COMFYUI_BLANKET_DEPTH:
-                continue
-            key = os.path.normcase(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            if hinted and os.path.isdir(os.path.join(path, "models")):
-                found.append(path)
-            if depth + 1 < COMFYUI_PROBE_DEPTH:
-                queue.append((path, depth + 1))
-    return found
-
-
-def detect_comfyui() -> str:
-    """探测**第一个** ComfyUI 安装位置（保留给「单值要用」的调用方 ✓）。
-
-    ⚠️ **扫描一律走** :func:`detect_comfyui_roots` ✓（只取第一个 = 漏 ✗，2026-09-26 修的正是这条 ✓）。
-    """
-    roots = detect_comfyui_roots()
-    return roots[0] if roots else ""
-
-
 def default_models_dir() -> str:
     """本仓**自己的**模型存储目录 ✓：``<data_root>/models`` ✓（实现见 ``app.core.model_paths`` ✓）。
 
@@ -425,20 +331,17 @@ def get_comfyui_roots() -> list[tuple[str, str]]:
     这个要的是「**安装根**」（``<根>/comfy/…`` 这类**安装内部**的落点 ✓）—— 两者**共用**这一份
     根表 ✓（哪一块都不许各写一份 ✗：一处改了另一处不跟着改，就会出现「扫描能看见、加载看不见」✓✗）。
 
-    ⚠️ 这里**一个路径字面量都没有** ✗：根全部来自用户配置或动态探测 ✓（口径见
-    ``tests/local_models_test.py`` 的静态守卫 ✓）。
+    ⚠️ 实现已搬 :mod:`app.core.comfyui_roots` ✓（引擎 ``inventory`` / ``bridge`` 也要这一份 ✓，
+    而引擎不许 import 服务层 ✓）。这里只剩**一层薄委托**，目的是把本模块**两个可 patch 的名字**
+    显式传下去 ✓✗（``tests/local_models_test.py`` 就是 patch 它们来注入临时配置与假根 ✓）：
+    ``_paths_config_file()`` ✓ 与 ``detect_comfyui_roots`` ✓。
+    ⚠️ 两个都**必须**传 ✗✗：只传配置路径而不传探测函数 ⇒ core 会走它自己的全局 ⇒ 本模块这次
+    patch 静默失效 ✓✗（2026-11-08 实测：``get_default_roots`` 那条「每个 ComfyUI 根都要收进来」
+    当场红 ✓ —— 跨模块 monkeypatch 不生效，只能靠显式注入 ✓）。
     """
-    cfg = _read_paths_config()
-    explicit = os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root") or ""
-    found: list[tuple[str, str]] = []
-    for candidate, source in (
-        (explicit, "COMFYUI_PATH" if os.environ.get("COMFYUI_PATH") else "清单 configs/model-paths.json 的 comfyui_root"),
-        *((item, "动态探测 detect_comfyui_roots()") for item in detect_comfyui_roots()),
-    ):
-        text = os.path.abspath(str(candidate)) if str(candidate or "").strip() else ""
-        if text and os.path.normcase(text) not in {os.path.normcase(path) for path, _ in found}:
-            found.append((text, source))
-    return found
+    return core_comfyui_roots.comfyui_roots(
+        path=Path(_paths_config_file()), detect=detect_comfyui_roots
+    )
 
 
 def get_default_roots() -> list[str]:

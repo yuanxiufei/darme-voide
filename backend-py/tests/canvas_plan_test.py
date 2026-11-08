@@ -323,7 +323,7 @@ def main() -> int:
     failed = [(name, detail) for name, ok, detail in _RESULTS if not ok]
     for name, ok, detail in _RESULTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"  ⇒ {detail}"))
-    print(f"\n{len(_RESULTS) - len(failed)}/{len(_RESULTS)} 通过")
+    print(f"\nSUMMARY: {len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed")
     return 1 if failed else 0
 
 

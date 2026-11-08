@@ -60,6 +60,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ...core.comfyui_roots import comfyui_roots
 from ...core.config import get_data_root, get_storage_root
 from ...core.media import get_absolute_path, parse_data_url
 from ..task_logger import log_task_error, log_task_progress, log_task_warn
@@ -303,7 +304,13 @@ def resolve_tokenizer_path(settings: Mapping[str, Any] | None) -> tuple[str, str
     """定 **CLIP 词表目录** ✓ ⇒ ``(目录, 来源说明)`` ✓ —— 定不下来就**报** ✗。
 
     两级来源（顺序固定 ✓）：1. ``settings.tokenizerPath`` ✓；
-    2. ComfyUI 类安装根（``local_model_scan.get_comfyui_roots`` ✓）下的 ``comfy/sd1_tokenizer/`` ✓。
+    2. ComfyUI 类安装根（:func:`app.core.comfyui_roots.comfyui_roots` ✓）下的 ``comfy/sd1_tokenizer/`` ✓。
+
+    ⚠️ 那一份根表**原先在服务层**（``local_model_scan.get_comfyui_roots``）✓✗：引擎为此得
+    ``import app.services.local_model_scan`` ✗ —— 但这一整套读的**只有配置与盘** ✓（``COMFYUI_PATH`` /
+    ``configs/model-paths.json`` 的 ``comfyui_root`` / 盘符枚举 / 目录名），一个业务数据都不碰 ✓
+    ⇒ 2026-11-08 搬进 :mod:`app.core.comfyui_roots` ✓，服务层那份改为再导出 ＋ 一层薄委托 ✓
+    （服务层要保住它可 patch 的 ``_paths_config_file()`` 隔离口 ✓）。
 
     ⚠️ 词表**不是**权重 ✗：它是**一张 BPE 表** ✓ ⇒ 靠"有没有 ``.safetensors``"是找不着它的 ✓✗；
     但也**不瞎找** ✗ —— 只在**上游约定**的那个落点上找 ✓（``comfy/sd1_tokenizer`` 是 ComfyUI
@@ -314,10 +321,8 @@ def resolve_tokenizer_path(settings: Mapping[str, Any] | None) -> tuple[str, str
     if given:
         return given, "settings.tokenizerPath"
 
-    from ..local_model_scan import get_comfyui_roots  # 局部 import ✓
-
     seen: list[str] = []
-    for root, source in get_comfyui_roots():
+    for root, source in comfyui_roots():
         directory = Path(root).joinpath(*_COMFYUI_TOKENIZER_SUBDIR)
         if str(directory) in seen:
             continue

@@ -421,8 +421,9 @@ def main() -> int:
     check("提取: 后端路由表规模正常（≥200 组合）", len(patterns) >= 200, len(patterns))
     check("提取: 后端参数表规模正常（≥200 组合）", len(params) >= 200, len(params))
     # ②′ 防「patch 那条路又掉了」。
-    #     ⚠️ 这条**不能**靠「真实文件里扫到 ≥1 个 PATCH」：前端更新入口已全部改走 PUT，
-    #     盘上一个 `api.patch(...)` 都没有 ⇒ 那样写必然假红（2026-11-08 实测 0 个）。
+    #     ⚠️ 这条**故意不靠**「真实文件里扫到 ≥1 个 PATCH」：前端用不用 PATCH 是**会变的事实**——
+    #     2026-11-08 上午更新入口全改走 PUT、盘上一个 `api.patch(...)` 都没有；同日下午接
+    #     knowledge-loop 又冒出真的 PATCH 调用点。判据跟着真实文件写，就会随前端换 method 假红。
     #     改成对**合成样本**断言：喂一段 `api.patch(...)`，提取器必须认得 PATCH 这个 method
     #     —— 分支还在就绿，谁把 patch 从 `_CALL_RE`/`_METHODS` 里删掉这里立刻红 ✓。
     _patch_probe = scan_source("api.patch(`/probe/${id}`, data)\n", ".ts")

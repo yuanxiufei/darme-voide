@@ -664,9 +664,13 @@ def case_component_spots(tmp: Path) -> None:
 
 
 def case_tokenizer(tmp: Path) -> None:
-    """**CLIP 词表**怎么被定下来 ✓：``settings`` 优先 ✓ → 上游约定的**安装内**落点 ✓ → 都没有 ⇒ 报 ✗。"""
-    from app.services import local_model_scan as scan_mod  # noqa: PLC0415
+    """**CLIP 词表**怎么被定下来 ✓：``settings`` 优先 ✓ → 上游约定的**安装内**落点 ✓ → 都没有 ⇒ 报 ✗。
 
+    ⚠️ 替身打在 ``bridge.comfyui_roots`` 上 ✓✗（2026-11-08 改）：安装根探测已从服务层搬进
+    :mod:`app.core.comfyui_roots` ✓（引擎不许 import 服务层 ✓），桥现在是**直接**从 core 取这个名字 ✓
+    ⇒ 再 patch ``local_model_scan.get_comfyui_roots`` 就够不着它了 ✓✗（会静默走真探测 ⇒ 本组三条判据
+    红 ✓，而"假根没生效"这件事本身并不会有人来报 ✗）。规矩照旧：**替身打在使用点** ✓。
+    """
     given, given_source = bridge.resolve_tokenizer_path({"tokenizer_path": "D:/词表目录"})
     check("词表: ``settings.tokenizerPath`` **永远优先**（人不该被探测结果盖掉 ✓）",
           given == "D:/词表目录" and given_source == "settings.tokenizerPath", (given, given_source))
@@ -677,9 +681,9 @@ def case_tokenizer(tmp: Path) -> None:
     (vocab / "vocab.json").write_text("{}", encoding="utf-8")
     (vocab / "merges.txt").write_text("", encoding="utf-8")
 
-    saved_roots = scan_mod.get_comfyui_roots
+    saved_roots = bridge.comfyui_roots
     try:
-        scan_mod.get_comfyui_roots = lambda: [(str(install), "COMFYUI_PATH")]
+        bridge.comfyui_roots = lambda **_kw: [(str(install), "COMFYUI_PATH")]  # type: ignore[assignment]
         probed, probed_source = bridge.resolve_tokenizer_path({})
         check("⭐ 词表: 不给 ``settings`` ⇒ 按**上游约定**在 ``<ComfyUI 根>/comfy/sd1_tokenizer/`` 找到 ✓",
               Path(probed) == vocab and "COMFYUI_PATH" in probed_source, (probed, probed_source))
@@ -701,7 +705,7 @@ def case_tokenizer(tmp: Path) -> None:
         check("词表: 单文件 ``tokenizer.json`` 那种形态也认（与 ``tokenizer_bpe`` 的嗅探同口径 ✓）",
               Path(single) == vocab, single)
 
-        scan_mod.get_comfyui_roots = lambda: []
+        bridge.comfyui_roots = lambda **_kw: []  # type: ignore[assignment]
         nowhere: object = None
         try:
             bridge.resolve_tokenizer_path({})
@@ -712,13 +716,14 @@ def case_tokenizer(tmp: Path) -> None:
               isinstance(nowhere, ValueError) and "tokenizerPath" in str(nowhere)
               and "COMFYUI_PATH" in str(nowhere), nowhere)
     finally:
-        scan_mod.get_comfyui_roots = saved_roots
+        bridge.comfyui_roots = saved_roots  # type: ignore[assignment]
 
 
 def case_image_assembly(tmp: Path) -> None:
-    """``stage="sdxl"`` 的装配：**权重 + 词表两样都得能定** ✓（缺一样 ⇒ 当场报 ✗，不等到装载 ✓✗）。"""
-    from app.services import local_model_scan as scan_mod  # noqa: PLC0415
+    """``stage="sdxl"`` 的装配：**权重 + 词表两样都得能定** ✓（缺一样 ⇒ 当场报 ✗，不等到装载 ✓✗）。
 
+    ⚠️ 替身同样打在 ``bridge.comfyui_roots`` ✓（理由见 :func:`case_tokenizer` ✓）。
+    """
     install = tmp / "假ComfyUI装配"
     vocab = install / "comfy" / "sd1_tokenizer"
     vocab.mkdir(parents=True)
@@ -727,9 +732,9 @@ def case_image_assembly(tmp: Path) -> None:
     weights = tmp / "假SDXL主权重.safetensors"
     weights.write_bytes(b"x")
 
-    saved_roots = scan_mod.get_comfyui_roots
+    saved_roots = bridge.comfyui_roots
     try:
-        scan_mod.get_comfyui_roots = lambda: [(str(install), "临时安装")]
+        bridge.comfyui_roots = lambda **_kw: [(str(install), "临时安装")]  # type: ignore[assignment]
         assembly = bridge.assembly_from_config({"settings": {"sdxlPath": str(weights)}},
                                                stage=bridge.IMAGE_STAGE)
         check("⭐ 出图装配: 权重 ✓ 与 CLIP 词表 ✓ **两样都在装配里**（运行时不必自己再找一遍 ✓）",
@@ -742,7 +747,7 @@ def case_image_assembly(tmp: Path) -> None:
         check("视频装配: 缺词表**照样能装**（挂桩 ✓ —— 这条要求只加在出图上 ✗ 别越界 ✓）",
               video.get("stage") == bridge.VIDEO_STAGE and not video.get("tokenizer_path"), video)
 
-        scan_mod.get_comfyui_roots = lambda: []
+        bridge.comfyui_roots = lambda **_kw: []  # type: ignore[assignment]
         missing: object = None
         try:
             bridge.assembly_from_config({"settings": {"sdxlPath": str(weights)}},
@@ -752,7 +757,7 @@ def case_image_assembly(tmp: Path) -> None:
         check("⭐ 出图装配: 缺词表 ⇒ **报**（不许「装作能跑」✗ —— 那条路一装载就炸 ✓✗）",
               isinstance(missing, ValueError) and "词表" in str(missing), missing)
     finally:
-        scan_mod.get_comfyui_roots = saved_roots
+        bridge.comfyui_roots = saved_roots  # type: ignore[assignment]
 
 
 def case_job_stage(tmp: Path) -> None:

@@ -83,17 +83,12 @@ _SEAMS: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
         "引擎回执里已有结构化 notes ⇒ 让调用方（routers）自己落日志，桥不再写盘",
         ("log_task_error", "log_task_progress", "log_task_warn"),
     ),
-    ("bridge.py", "app.services.local_model_scan"): (
-        "装配默认路径（ComfyUI 根）只有服务层那份**探测**解析 ✓，"
-        "桥按它补 `ditPath`/`textWeights` 等缺省值 ✓（`models_dir` 那半已搬 `app.core` ✓）",
-        "让调用方显式给全四格路径（`ensure_loaded` 本就要求给全 ✓），桥不再猜缺省",
-        ("get_comfyui_roots",),
-    ),
     ("inventory.py", "app.services.local_model_scan"): (
-        "`candidate_roots()` 要「盘上还有没有别处的副本」，那需要 ComfyUI 根探测 + 生态落点表 + "
-        "`model_folders` 的声明 ✓ —— 这一整套发现逻辑依赖服务层的表 ✓；"
-        "`models_dir()` 那半已搬进 `app.core.model_paths` ✓（不再是本条的负担 ✓）",
-        "把探测/生态落点也搬进 `app.core`（它们读的同样是配置与盘，不是业务数据 ✓），或让调用方传入根列表",
+        "`candidate_roots()` 要「盘上还有没有别处的副本」⇒ 需要 `extra_roots` ＋ `model_ecosystems` 的"
+        "生态落点表 ＋ `model_folders` 的声明 ✓（这几样是「模型库功能」，读生态约定与用户声明 ✓）；"
+        "另外两半都已搬走 ✓ —— `models_dir` 在 `app.core.model_paths` ✓、ComfyUI 安装根探测在"
+        "`app.core.comfyui_roots` ✓（2026-11-08 搬，`bridge.py` 那条已随之销掉 ✓）",
+        "把生态落点/声明表也搬进 `app.core`（它们读的同样是配置与盘，不是业务数据 ✓），或让调用方传入根列表",
         ("get_default_roots",),
     ),
 }

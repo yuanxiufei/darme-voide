@@ -104,6 +104,11 @@ export const api = {
   get: <T = any>(p: string) => req<T>('GET', p),
   post: <T = any>(p: string, b?: any) => req<T>('POST', p, b),
   put: <T = any>(p: string, b?: any) => req<T>('PUT', p, b),
+  /**
+   * 部分字段更新。与 PUT 的差别是**语义**，不是风格：后端 `PATCH /knowledge-loop/entries/{id}`
+   * 有意不提供 PUT —— 忘记带 `body` 的 PUT 会把几百字正文清空（见 `docs/knowledge-loop.md`）。
+   */
+  patch: <T = any>(p: string, b?: any) => req<T>('PATCH', p, b),
   del: <T = any>(p: string) => req<T>('DELETE', p),
 }
 
@@ -1211,6 +1216,421 @@ export const knowledgeAPI = {
   /** 上传语料（补录库），回执按 `ingested/quarantined/rejected` 三档分别给结果 */
   upload: (files: File[], onProgress?: (pct: number) => void) =>
     uploadFiles<KnowledgeUploadBatch>('/knowledge/upload', files, onProgress),
+}
+
+// ── 知识闭环（`/api/v1/knowledge-loop/*` ＋成片评测）─────────────────────────
+//
+// 与上面的 `knowledgeAPI`（`/knowledge/*`：语料库的只读钻取）是**两套对象**，别混：
+// 这一族是可写台账，写口一律带 `operator`/`role`（审计行自洽）与 `basis`/`evidence`
+// （可归因），缺凭据后端直接拒（400/403/409/422），前端**不替它补默认值**。
+// 契约真源：`backend-py/app/routers/knowledge_loop.py`；说明：`docs/knowledge-loop.md`。
+
+/** 台账一条。派生字段（`tagList`/`version`/`deleted*`）由服务端算，前端不自己拆标签 */
+export interface KnowledgeEntry {
+  id: string
+  kind: string
+  scope: string
+  title: string
+  body: string
+  tags: string
+  tagList: string[]
+  evidence: string[]
+  confidence: number
+  status: string
+  support: number
+  contra: number
+  lift: number | null
+  created_ns: number
+  updated_ns: number
+  version: number
+  deleted: boolean
+  deletedNs: number
+  deletedBy: string
+  source_kind?: string | null
+  source_ref?: string | null
+}
+
+/** 详情＝条目＋挂载关系＋用过几次（`okRate` 是注入后结果占比，**不是 lift**） */
+export interface KnowledgeEntryDetail extends KnowledgeEntry {
+  links: Array<{ refKind: string; refId: string }>
+  usage: Array<{ runId: string; usedNs: number; outcome: string }>
+  usageSummary: {
+    ok: number
+    failed: number
+    unknown: number
+    settled: number
+    okRate: number | null
+  }
+}
+
+export interface KnowledgeEntryList {
+  total: number
+  items: KnowledgeEntry[]
+  limit: number
+  offset: number
+  available: boolean
+  hint?: string
+}
+
+/** 版本列表只给元信息（不带正文：一页十条正文会把响应撑到几十 KB） */
+export interface KnowledgeEntryVersion {
+  version: number
+  title: string
+  kind: string
+  scope: string
+  tags: string[]
+  confidence: number
+  status: string
+  editor: string
+  reason: string
+  bodyLen: number
+  createdNs: number
+}
+
+export interface KnowledgeEntryVersions {
+  id: string
+  current: number
+  deleted: boolean
+  items: KnowledgeEntryVersion[]
+  available: boolean
+  hint?: string
+}
+
+export interface KnowledgeEntryVersionDetail {
+  id: string
+  version: number
+  kind: string
+  scope: string
+  title: string
+  body: string
+  bodyLen: number
+  tags: string[]
+  evidence: string[]
+  confidence: number
+  status: string
+  editor: string
+  reason: string
+  createdNs: number
+  isCurrent: boolean
+}
+
+export interface KnowledgeAuditItem {
+  id: number
+  entryId: string
+  action: string
+  operator: string
+  role: string
+  atNs: number
+  detail: string
+}
+
+export interface KnowledgeAuditList {
+  total: number
+  items: KnowledgeAuditItem[]
+  limit: number
+  offset: number
+  available: boolean
+  hint?: string
+}
+
+export interface KnowledgeLedgerStats {
+  total: number
+  deleted?: number
+  accepted?: number
+  proposed?: number
+  byKindStatus?: Array<{ kind: string; status: string; count: number }>
+  byScope?: Array<{ scope: string; count: number }>
+  available: boolean
+  hint?: string
+}
+
+/** 词表闭集（kind/scope/status 的中文名与计数都由后端下发，前端不硬编码第二份） */
+export interface KnowledgeTaxonomy {
+  kinds: Array<{ kind: string; label: string; count: number }>
+  scopes: Array<{ scope: string; count: number }>
+  statuses: Array<{ status: string; count: number }>
+  tags: Array<{ tag: string; count: number }>
+  tagTotal: number
+  available: boolean
+  hint?: string
+}
+
+export interface KnowledgeLoopSearch {
+  query: string
+  ranking: string
+  total: number
+  items: KnowledgeEntry[]
+  limit: number
+  offset?: number
+  available: boolean
+  totalCapped?: boolean
+  hint?: string
+}
+
+/** 调参台账的一行：`value` 为 null 表示「没设过，走 default」 */
+export interface KnowledgeTunable {
+  stage: string
+  field: string
+  default: any
+  value: any
+  source: string
+  basis?: string
+  evidence?: string[]
+  updatedAt?: string
+  note?: string
+}
+
+/** 蒸馏/调参候选：`canApply=false` 的会带 `why`（拒的理由），照实显示，别只显示前半句 */
+export interface KnowledgeCandidate {
+  id?: string
+  key?: string
+  pattern?: string
+  rule?: string
+  kind?: string
+  stage?: string
+  field?: string
+  current?: any
+  proposed?: any
+  why?: string
+  evidence?: string[]
+  samples?: number
+  stats?: Record<string, any>
+  gate?: { samples?: string; needed?: string; [key: string]: any }
+  canApply?: boolean
+  qcGate?: { verdict: string; [key: string]: any }
+}
+
+/** 写口回执：`ok=false` 时 `why` 是后端原话（HTTP 层通常已抛，这里是兜底的软失败） */
+export interface KnowledgeWriteResult {
+  ok?: boolean
+  /** 机器码（`conflict`/`evidence`/`invalid`…）；HTTP 层已分派成 400/403/409/422 */
+  code?: string
+  why?: string
+  id?: string
+  version?: number
+  entry?: KnowledgeEntry
+  /**
+   * 「真的有变化吗」——**两种形态**，别当同一种读：
+   * `PATCH` 给的是改动字段名数组（`[]` ＝ 合法但没变），删/恢复/回滚给的是 bool。
+   */
+  changed?: boolean | string[]
+  /** `POST /entries` 回执：`created=false` 表示命中去重合并到既有条目，不是新建 */
+  created?: boolean
+  /** 同一条目并发写撞车（`code=conflict` 时另带 `version`＝库里现版本） */
+  conflict?: boolean
+  support?: number
+  hint?: string
+}
+
+export interface FilmEvalDimension {
+  name: string
+  label: string
+  score: number | null
+  samples: number
+  judged: boolean
+  notes: string[]
+}
+
+/** 成片四维评测（`POST /evaluation/film/{id}`）。`score=null` 表示一维都判不了，**不是 0 分** */
+export interface FilmEvalReport {
+  episodeId: number
+  total: number
+  ready: number
+  missingShots: number[]
+  dimensions: FilmEvalDimension[]
+  score: number | null
+  verdict: string
+  passScore: number
+  missing: string[]
+  defectCodes: Array<{ code: string; count: number; shots?: number[] }>
+  review: {
+    hit: number
+    falseAlarm: number
+    missed: number
+    reviewed: number
+    hitRate: number | null
+  }
+  notes: string[]
+  recorded: boolean
+}
+
+export const knowledgeLoopAPI = {
+  /** 闭环总览。`includeCandidates` 才把蒸馏候选一起算（贵：要扫跑次统计） */
+  report: (includeCandidates = false) =>
+    api.get<any>(`/knowledge-loop/report?includeCandidates=${includeCandidates ? 'true' : 'false'}`),
+  /** 定期蒸馏/提升的排期事实（下一次什么时候跑、上次跑成什么） */
+  scheduler: () => api.get<any>('/knowledge-loop/scheduler'),
+  rebuildRuns: (p: { dryRun?: boolean; limit?: number } = {}) =>
+    api.post<any>('/knowledge-loop/runs/rebuild', p),
+  /** 蒸馏候选 → `proposed` 条目。`dryRun` 只看不写 */
+  distill: (p: { dryRun?: boolean; limit?: number } = {}) =>
+    api.post<any>('/knowledge-loop/distill', p),
+  refreshLift: (p: { limit?: number } = {}) =>
+    api.post<any>('/knowledge-loop/lift/refresh', p),
+  optimizations: (p: { agentType?: string; caseId?: string; limit?: number } = {}) =>
+    api.get<any>(
+      `/knowledge-loop/optimizations?limit=${p.limit ?? 50}`
+      + (p.agentType ? `&agentType=${encodeURIComponent(p.agentType)}` : '')
+      + (p.caseId ? `&caseId=${encodeURIComponent(p.caseId)}` : ''),
+    ),
+  taxonomy: (p: { includeDeleted?: boolean } = {}) =>
+    api.get<KnowledgeTaxonomy>(
+      `/knowledge-loop/taxonomy?includeDeleted=${p.includeDeleted ? 'true' : 'false'}`,
+    ),
+  entries: (p: {
+    kind?: string
+    scope?: string
+    status?: string
+    tags?: string
+    includeDeleted?: boolean
+    limit?: number
+    offset?: number
+  } = {}) =>
+    api.get<KnowledgeEntryList>(
+      `/knowledge-loop/entries?limit=${p.limit ?? 50}&offset=${p.offset ?? 0}`
+      + (p.includeDeleted ? '&includeDeleted=true' : '')
+      + (p.kind ? `&kind=${encodeURIComponent(p.kind)}` : '')
+      + (p.status ? `&status=${encodeURIComponent(p.status)}` : '')
+      + (p.scope ? `&scope=${encodeURIComponent(p.scope)}` : '')
+      + (p.tags ? `&tags=${encodeURIComponent(p.tags)}` : ''),
+    ),
+  entry: (id: string, includeDeleted = false) =>
+    api.get<KnowledgeEntryDetail>(
+      `/knowledge-loop/entries/${encodeURIComponent(id)}`
+      + `?includeDeleted=${includeDeleted ? 'true' : 'false'}`,
+    ),
+  /** **部分字段**改一条：没出现的字段不动（`null` 与「不传」同义）。清标签要显式传 `tags: ''` */
+  updateEntry: (
+    id: string,
+    p: {
+      title?: string
+      body?: string
+      tags?: string
+      evidence?: string[]
+      confidence?: number
+      reason?: string
+      operator?: string
+      role?: string
+      /** 乐观锁：与库里的 `version` 不符一律 409，防「两个人各改一半」互相覆盖 */
+      expectedVersion?: number
+    },
+  ) => api.patch<KnowledgeWriteResult>(`/knowledge-loop/entries/${encodeURIComponent(id)}`, p),
+  /** 默认软删（可还原）；`hard` 是物理删除，必须先软删过，且需要 owner */
+  deleteEntry: (
+    id: string,
+    p: { hard?: boolean; reason?: string; operator?: string; role?: string } = {},
+  ) =>
+    api.del<KnowledgeWriteResult>(
+      `/knowledge-loop/entries/${encodeURIComponent(id)}?hard=${p.hard ? 'true' : 'false'}`
+      + (p.reason ? `&reason=${encodeURIComponent(p.reason)}` : '')
+      + (p.operator ? `&operator=${encodeURIComponent(p.operator)}` : '')
+      + (p.role ? `&role=${encodeURIComponent(p.role)}` : ''),
+    ),
+  restoreEntry: (id: string, p: { operator?: string; role?: string; reason?: string } = {}) =>
+    api.post<KnowledgeWriteResult>(`/knowledge-loop/entries/${encodeURIComponent(id)}/restore`, p),
+  entryVersions: (id: string) =>
+    api.get<KnowledgeEntryVersions>(`/knowledge-loop/entries/${encodeURIComponent(id)}/versions`),
+  entryVersion: (id: string, version: number) =>
+    api.get<KnowledgeEntryVersionDetail>(
+      `/knowledge-loop/entries/${encodeURIComponent(id)}/versions/${version}`,
+    ),
+  /** 回滚到某个历史版本（**追加**一个新版本，不抹掉中间的历史） */
+  revertEntry: (
+    id: string,
+    p: { version: number; reason?: string; operator?: string; role?: string },
+  ) => api.post<KnowledgeWriteResult>(`/knowledge-loop/entries/${encodeURIComponent(id)}/revert`, p),
+  audit: (p: { entryId?: string; action?: string; operator?: string; limit?: number; offset?: number } = {}) =>
+    api.get<KnowledgeAuditList>(
+      `/knowledge-loop/audit?limit=${p.limit ?? 50}&offset=${p.offset ?? 0}`
+      + (p.entryId ? `&entryId=${encodeURIComponent(p.entryId)}` : '')
+      + (p.action ? `&action=${encodeURIComponent(p.action)}` : '')
+      + (p.operator ? `&operator=${encodeURIComponent(p.operator)}` : ''),
+    ),
+  /** 状态迁移：后端只有四条边（proposed→accepted/rejected、accepted↔deprecated），越界 400 */
+  setEntryStatus: (
+    id: string,
+    status: string,
+    p: { reason?: string; operator?: string; role?: string } = {},
+  ) => api.post<KnowledgeWriteResult>(`/knowledge-loop/entries/${encodeURIComponent(id)}/status`, { status, ...p }),
+  createEntry: (p: {
+    kind: string
+    scope?: string
+    title: string
+    body: string
+    tags?: string
+    evidence?: string[]
+    confidence?: number
+    operator?: string
+    role?: string
+  }) => api.post<KnowledgeWriteResult>('/knowledge-loop/entries', p),
+  search: (p: { q: string; kind?: string; status?: string; scope?: string; limit?: number }) =>
+    api.get<KnowledgeLoopSearch>(
+      `/knowledge-loop/search?q=${encodeURIComponent(p.q)}&limit=${p.limit ?? 10}`
+      + (p.kind ? `&kind=${encodeURIComponent(p.kind)}` : '')
+      + (p.status ? `&status=${encodeURIComponent(p.status)}` : '')
+      + (p.scope ? `&scope=${encodeURIComponent(p.scope)}` : ''),
+    ),
+  /** 一次喂给某角色的知识包（编译期预算内，超了按分值截断并计数） */
+  feedPreview: (p: { agentType?: string; budgetChars?: number; limit?: number } = {}) =>
+    api.get<any>(
+      `/knowledge-loop/feed/preview?budgetChars=${p.budgetChars ?? 600}&limit=${p.limit ?? 8}`
+      + (p.agentType ? `&agentType=${encodeURIComponent(p.agentType)}` : ''),
+    ),
+  datasets: () => api.get<any>('/knowledge-loop/datasets'),
+  /** L3 导出：`target=runs` 导高分跑次，`target=knowledge` 导「指令 → 做法」对 */
+  feedExport: (p: { target: 'runs' | 'knowledge'; limit?: number } = { target: 'knowledge' }) =>
+    api.post<any>('/knowledge-loop/feed/export', p),
+  /** 把 `datasetRef` 解析成盘上真路径（提交训练前先核一遍，比训练跑完才知道缺文件强） */
+  datasetResolve: (ref: string) =>
+    api.get<any>(`/knowledge-loop/datasets/resolve?ref=${encodeURIComponent(ref)}`),
+  tuning: () => api.get<any>('/knowledge-loop/tuning'),
+  tuningSuggest: (minSamples = 30) =>
+    api.get<any>(`/knowledge-loop/tuning/suggest?minSamples=${minSamples}`),
+  /** 落一条调参（`basis`/`evidence` 必填：没有凭据的「我觉得这个好」会让下次风格变化无从归因） */
+  setTuning: (p: {
+    stage: string
+    field: string
+    value: any
+    basis: string
+    evidence?: string[]
+    by?: string
+  }) => api.post<any>('/knowledge-loop/tuning', p),
+  clearTuning: (p: { stage: string; field: string }) =>
+    api.del<any>(
+      `/knowledge-loop/tuning?stage=${encodeURIComponent(p.stage)}`
+      + `&field=${encodeURIComponent(p.field)}`,
+    ),
+  qcHitRate: () => api.get<any>('/knowledge-loop/qc/hit-rate'),
+  qcPending: (limit = 20) => api.get<any>(`/knowledge-loop/qc/pending?limit=${limit}`),
+  /** 录一条复核：`(checkId, code)` 已存在就是**改判**（覆盖，不追加），别当第二条样本 */
+  qcReview: (p: {
+    checkId: number
+    code: string
+    verdict: 'hit' | 'false_alarm' | 'missed'
+    note?: string
+    reviewer?: string
+    storyboardId?: number
+    videoGenerationId?: number
+  }) => api.post<any>('/knowledge-loop/qc/reviews', p),
+  deleteQcReview: (id: number) => api.del<any>(`/knowledge-loop/qc/reviews/${id}`),
+  training: (p: { limit?: number; status?: string } = {}) =>
+    api.get<any>(
+      `/knowledge-loop/training?limit=${p.limit ?? 50}`
+      + (p.status ? `&status=${encodeURIComponent(p.status)}` : ''),
+    ),
+  trainingScan: (taskId: string | number) =>
+    api.post<any>('/knowledge-loop/training/scan', { taskId: String(taskId) }),
+  /** 定为该类默认档——**唯一能改变出图行为的入口**，必带 `basis` 与 `evidence` */
+  promoteModel: (id: string, p: { basis: string; evidence?: string[]; by?: string }) =>
+    api.post<any>(`/knowledge-loop/training/models/${encodeURIComponent(id)}/promote`, p),
+  /** 撤掉默认档（文件与记录都不删：「不用它」不等于「它没存在过」） */
+  demoteModel: (id: string, p: { why?: string } = {}) =>
+    api.post<any>(`/knowledge-loop/training/models/${encodeURIComponent(id)}/demote`, p),
+  /** 成片四维评测。`record=true` 会落一条 `kind=eval` 跑次（同一集重评是**覆盖**） */
+  filmEval: (episodeId: number, record = true) =>
+    api.post<FilmEvalReport>(
+      `/evaluation/film/${episodeId}?record=${record ? 'true' : 'false'}`,
+    ),
 }
 
 export const styleProfileAPI = {

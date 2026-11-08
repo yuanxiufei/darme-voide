@@ -1949,6 +1949,7 @@ TESTS = [
     ("画布工具层（工具→op 编译/跨语言同源）", "canvas_ops_test.py"),
     ("画布插件契约（清单校验/源对拍）", "canvas_plugins_test.py"),
     ("画布 Agent（一句话→op，工具无副作用）", "canvas_agent_test.py"),
+    ("画布计划（草案/确认重编译/幂等重放）", "canvas_plan_test.py"),
     ("知识闭环（跑次归一/台账/蒸馏/投喂/接线）", "knowledge_loop_test.py"),
     ("知识库管理面（编辑/删除/版本/标签/审计/HTTP 契约）", "knowledge_management_test.py"),
     ("知识复盘定时器（默认关/防重入/失败隔离/复位）", "knowledge_scheduler_test.py"),
