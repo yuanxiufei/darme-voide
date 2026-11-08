@@ -1,4 +1,4 @@
-"""数据存储 —— 移植 ``backend/src/services/data-storage.ts``（**整域关闭**）。
+"""数据存储 —— 移植 ``backend/src/services/data-storage.ts``（**已接线**）。
 
 两个端点：
 * ``GET  /storage/info``   —— 只读信息
@@ -16,9 +16,14 @@
 2. ``migrate`` 语义是 ``!== false``（只认字面量 ``False``；``null``/``0`` 都算「要迁移」）；
 3. 拒绝把数据目录设成项目根，或放进 ``backend`` / ``frontend`` / ``node_modules`` / ``configs`` / ``.git``；
 4. 建目录 + 写探针文件验可写，失败报「目录不可写」；
-5. 迁移是**复制**（旧目录保留作备份）：库文件 + ``-wal`` / ``-shm`` 伴生文件、``static/``、``traces/``；
+5. 迁移是**复制**（旧目录保留作备份）：库文件 + ``-wal`` / ``-shm`` 伴生文件、``static/``、
+   ``library-overlay.sqlite``，以及 ``MIGRATED_TREE_SUBDIRS`` 那几个**不可重建**的整目录；
    复制抛错时**回滚**（重开旧库）并把错误包成「迁移失败：…」；
-6. 最后写标记文件（重启仍生效）+ 重开连接（对应 Node 的 ``reopenDatabase()`` + ``rebuildDb()``）。
+6. 最后写标记文件（重启仍生效）+ 重开连接（对应 Node 的 ``reopenDatabase()`` + ``rebuildDb()``）；
+7. 复制前先算账：旧数据体积 + 余量 > 目标盘可用空间 ⇒ **当场拒**（2026-11-08 补）。
+   这条是本仓自定的 —— 参考侧 anything-llm / ragflow 这类自托管项目都是「配置项 + 重启生效」、
+   不做运行时迁移，没有可搬的实现；而本仓是在线切换，半途失败虽会回滚连接、标记也不写，
+   但新根下会留下**半份目录**，下次切进该根时 ``_copy_tree`` 的合并语义会把半成品当"已有数据"叠上去 ✓✗。
 """
 
 from __future__ import annotations
@@ -64,6 +69,16 @@ def _dir_size(directory: str) -> int:
 
     walk(directory)
     return total
+
+
+def _human_bytes(size: int) -> str:
+    """人话体积（只用于错误文案：用户要能一眼判断「差多少」）。"""
+    value = float(max(int(size), 0))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024.0:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} TB"
 
 
 def get_storage_info() -> dict[str, Any]:
@@ -124,6 +139,11 @@ def _copy_tree(source: str, target: str) -> None:
 #: 判据：``tests/storage_change_test.py`` ⑨ 双向核对 —— 表内每个名字真的搬了（④ 那条），
 #: 且表**不许**混进上面那批「能重下/重算」的目录。
 MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train", "canvas")
+
+#: 迁移前的空间余量：复制完还要写标记、建库表、写 WAL —— 卡在「刚刚好」上会以更难看的方式失败。
+#: 64 MiB 是**故意偏小**的：它是防「目标盘明显装不下」的，不是精确容量规划；
+#: 真按 GB 级余量卡会在边界上误拒合法目录（旧数据本身还能被清走再切）。
+MIGRATION_HEADROOM_BYTES = 64 * 1024 * 1024
 
 
 def _write_probe(directory: str) -> None:
@@ -187,6 +207,27 @@ def change_data_root(new_root_raw: Any, migrate: bool = True) -> dict[str, Any]:
 
     # 迁移旧数据（复制）。⚠️ 只认字面量 False 才跳过（TS 是 `opts.migrate !== false`）
     if migrate is not False:
+        # ⚠️ 复制前先算账：目标盘装不下就**当场拒**（理由写在文件头第 7 条）。
+        # 这里刻意在 ``close_engine()`` **之前**——此时连接池还开着、状态一点没动，
+        # 抛出去就是干净的拒绝；若放到关连接之后，报错路径还得再回滚一次。
+        need = (
+            _file_size(old_db_path)
+            + _file_size(f"{old_db_path}-wal")
+            + _file_size(f"{old_db_path}-shm")
+            + _file_size(old_overlay_path)
+            + _dir_size(old_storage_path)
+            + sum(_dir_size(str(old_root / name)) for name in MIGRATED_TREE_SUBDIRS)
+        )
+        try:
+            free = shutil.disk_usage(str(new_root)).free
+        except OSError:
+            # 取不到可用空间（网络盘/特殊文件系统）就**不拦**：宁可不预检，也不误拒合法目录。
+            free = -1
+        if free >= 0 and need + MIGRATION_HEADROOM_BYTES > free:
+            raise ValueError(
+                f"目标目录可用空间不足：需要约 {_human_bytes(need)}，"
+                f"可用 {_human_bytes(free)}（旧目录会保留，可先清理再试）"
+            )
         # 先关连接池：Windows 上库文件被占用时复制会失败
         close_engine()
         try:

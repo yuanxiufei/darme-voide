@@ -1573,7 +1573,17 @@ patchify 顺序这些"错一个数就对不上"的点）—— 它不是一次�
 **仍然不许当死代码删**，但理由换了：不是「留着将来重启」，而是「**删了当场断链**」——
 `data_storage` 一断，前端设置页切数据根立刻 501（它正是「删 `backend/`」的最后一块阻塞，见
 `routers/storage.py` 模块头）；`subagent` 一断，orchestrator 退化成不能委托领域专家。
-判据：`route_parity_test`（224 条端点、0 条未迁移）＋ `storage_change_test` 40 条 ＋ `agent` 各套。
+判据：`route_parity_test`（224 条端点、0 条未迁移）＋ `storage_change_test` 43 条 ＋ `agent` 各套。
+
+**切根到底搬什么**（`data_storage.change_data_root`）：库三件（`drama.db` ＋ `-wal` ＋ `-shm`）、
+`static/`、`library-overlay.sqlite`，加上 `MIGRATED_TREE_SUBDIRS` 里整目录搬的三个
+（`traces`／`lora-train`／`canvas`）。收录判据只有一条——**「丢了算不算得回来」**：能重下/重算/重跑的
+一律不进（那些进 `app/core/config.py` 的数据根登记表并标 `✗`），画布草案与训练产物没有源可再生，故必须搬
+（`canvas/` 2026-11-08 补进来：`canvas_plan_store.plans_dir()` 读的是 `get_data_root()`，切根后它直接指向
+新根的空目录 ⇒ 症状是「换个目录，画布全空了」）。迁移是**复制**、旧根保留作备份，所以起手先做磁盘预检
+（`MIGRATION_HEADROOM_BYTES` 固定余量，`shutil.disk_usage` 取不到可用空间时**不拦**——宁可不预检也不误拒
+合法目录），预检放在 `close_engine()` **之前**，保证拒绝路径「状态一点没动」。参考侧
+（`reference/anything-llm`／`reference/ragflow`）的数据根都只是配置项 + 重启生效、没有运行时迁移，无可搬实现。
 
 ### 10.4 接口有、界面没有（4 个域，2026-11-08 实测两端）
 

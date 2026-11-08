@@ -284,6 +284,41 @@ def main() -> int:
           response.status_code == 200 and response.json()["data"]["dataRoot"] == str(_TARGET_D),
           response.text[:160])
 
+    # ── ⑩ 空间预检：装不下就当场拒，而且**一点状态都不许动** ──
+    # 打桩真正的 `shutil.disk_usage`（`ds.shutil` 就是那个模块对象本身）⇒ **必须还原**，
+    # 否则后面的用例全按 1 KiB 可用空间算。
+    import shutil as _shutil  # noqa: PLC0415
+
+    _real_usage = _shutil.disk_usage
+    _before_root = config.get_data_root()
+    _shutil.disk_usage = lambda _path: type("_Tiny", (), {"free": 1024})()
+    try:
+        try:
+            ds.change_data_root(str(_SANDBOX / "target_full"), True)
+            _space_err = None
+        except ValueError as exc:
+            _space_err = str(exc)
+    finally:
+        _shutil.disk_usage = _real_usage
+    check("⑩ 目标盘装不下 -> 报「可用空间不足」并给出需求/可用两个体积",
+          isinstance(_space_err, str) and "可用空间不足" in _space_err
+          and "需要约" in _space_err and "可用" in _space_err, _space_err)
+    check("⑩ 拒之前状态一点没动（根未切、库未建）",
+          config.get_data_root() == _before_root
+          and not (_SANDBOX / "target_full" / "db" / "drama.db").exists(),
+          (config.get_data_root(), _before_root))
+
+    # 反方向同样要守住：**取不到可用空间**（网络盘/特殊文件系统）时不许拦 ——
+    # 误拒一个合法目录比「没预检」更糟（用户完全无法切换，且报错指向不到真因）。
+    _shutil.disk_usage = lambda _path: (_ for _ in ()).throw(OSError("no such device"))
+    try:
+        _net_info = ds.change_data_root(str(_SANDBOX / "target_netdisk"), True)
+    finally:
+        _shutil.disk_usage = _real_usage
+    check("⑩ 取不到可用空间 -> 不拦，照常切换",
+          Path(_net_info["dataRoot"]).resolve() == (_SANDBOX / "target_netdisk").resolve(),
+          _net_info)
+
     # ── ⑦ 安全收口：真项目根标记文件从未被写 ──
     check("安全: 真仓库 .data-root **内容未变**（全程只写沙箱）",
           (_REAL_MARKER.read_text(encoding="utf-8") if _REAL_MARKER.exists() else None)

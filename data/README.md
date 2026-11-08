@@ -21,6 +21,7 @@ data/
 ├── hf-cache/         ← HuggingFace 下载缓存（`HF_HOME` 指这儿，可重下）
 ├── lora-train/       ← 训练参数 toml / 预览 prompt / 导出数据集 / 训练日志
 ├── repair/           ← 修复提案与改动前备份（proposals/）
+├── canvas/           ← 画布草案（plans/<16位id>.json，用户手作、不可重建）
 ├── engine-dryrun/    ← 引擎干跑凭据（可重建）
 ├── materialized/     ← LLM 反量化权重缓存（可重建）
 └── experiments/      ← 实验/探针产物（不上线、不发 URL、切根不搬）
@@ -57,6 +58,7 @@ data/
 | `hf-cache/` | HuggingFace 下载缓存（模型 / 词表）：`engine.tokenizers_tuning.default_cache_dir()` 把它设成 `HF_HOME` | `transformers`（经 `tokenizers_tuning.apply_tuning`） | 下次用到时自动重下 | **不必**（可重下；切根也不复制它） |
 | `lora-train/` | 训练参数 `settings/<模型>_settings.toml`、预览 `previews/<模型>/prompt.txt`、导出集 `datasets/<名>/`、任务 `tasks/<taskId>/`（日志与 `*.safetensors`） | `services/lora_train/*`、`knowledge_feed` | 手调的参数与训出来的权重没了，要重训才知道原来那套好不好 | **建议**（配置与产物都算「丢了要重来」；切根时**会**随数据根一起复制 ✓ 见下） |
 | `repair/` | 修复提案与改动前备份（`proposals/`） | `routers/repair.py::_repair_data_dir` | 提案没了，得重新诊断一遍 | 可选 |
+| `canvas/` | 画布草案：`plans/<16位id>.json`，节点/连线/参数快照 | `services/canvas_plan_store.py` | 用户手作的画布没了，**没有任何源能再生** | **必须**（切根时**会**复制 ✓） |
 | `experiments/` | 实验/探针产物（`backend-py/_bench/*.py` 真跑出来的图/片/歌），每个实验一个子目录 `<实验名>/` | 一次性探针脚本 | 只是这次实验的产物没了，重跑即可 | **不必**（切根也不搬） |
 
 `static/` 与 `experiments/` 的分界是**硬边界**，别混：`static/` 是**成品**（`/static/{rel:path}`
@@ -72,7 +74,7 @@ data/
 注意它与**仓库根**的 `models/`（仓内 OCR / 分词器素材，见 `models/README.md`）是两回事：
 名字撞了，一个是运行时下载的模型池、一个是随仓库走的素材。
 
-上面写了 11 个目录，而 `tests/output_layout_test.py` 的 `DATA_DIRS` 白名单是 9 个 —— **不是矛盾**：
+上面写了 12 个目录，而 `tests/output_layout_test.py` 的 `DATA_DIRS` 白名单是 10 个 —— **不是矛盾**：
 白名单登记的是「**代码里拼出来的**落点」，`static/` 是 storage root 本身（`get_storage_root()`
 的返回值）、`traces/` 主要由 Node 侧写（Python 只在 `data_storage.change_data_root()` 切根复制时
 拼它一次，那是搬旧数据不是落点），两个都不在 Python 的落点拼路径里。
@@ -122,9 +124,9 @@ data/
 切根时由 `data_storage.change_data_root()` 一并复制。
 
 **切根到底搬哪几样**（别靠猜，`change_data_root(migrate=True)` 的完整清单）：
-`db/`（`drama.db` + `library-overlay.sqlite`）、`static/`、`traces/`、`lora-train/` —— 四样。
+`db/`（`drama.db` + `library-overlay.sqlite`）、`static/`、`traces/`、`lora-train/`、`canvas/` —— 五样。
 其中「整目录搬」的那部分以 `data_storage.MIGRATED_TREE_SUBDIRS` 为**单一真源**（现为
-`("traces", "lora-train")`）；`db` / `static` / 覆盖层各有覆盖口（`DB_PATH`、`STORAGE_PATH`、
+`("traces", "lora-train", "canvas")`）；`db` / `static` / 覆盖层各有覆盖口（`DB_PATH`、`STORAGE_PATH`、
 模块常量），只能各自算，**不在**这张表里。
 `models/` 与 `hf-cache/`（能重下，几百 GB）、`knowledge/` 与 `materialized/`（能重算）、
 `engine-dryrun/` 与 `repair/`（能重跑 / 重诊断）、`experiments/`（实验产物，重跑即可）
@@ -132,3 +134,12 @@ data/
 `lora-train/` 是 2026-11-07 补进来的：训练参数与 `*.safetensors` 不可重建（重训几小时卡时），
 而 `lora_train.config.data_dir()` 在新的数据根下会 `mkdir` 出一个**空目录** ⇒ 不搬的话
 用户看到的就是「切个目录，训练集和权重全没了」（旧数据还在旧根，只是没人指向它）。
+`canvas/` 是 2026-11-08 按同一条判据补进来的：`canvas_plan_store.plans_dir()` 读的是
+`get_data_root()`，切根后它立刻指向新根下的**空目录** ⇒ 症状与上面一模一样（「换个目录，画布全空了」），
+而画布草稿是用户手作的，没有源能再生。
+
+因为迁移是**复制**（旧根原样保留作备份），动手前先做一次磁盘预检：需求 ≈ 库三件 + `static/` +
+三个整搬目录的字节数，加上固定余量 `data_storage.MIGRATION_HEADROOM_BYTES`；目标盘不够就
+**直接拒**并报出「需要多少 / 可用多少」。`shutil.disk_usage` 取不到可用空间（网络盘、特殊文件系统）时
+**不拦**——宁可不预检，也不误拒一个合法目录。预检发生在 `close_engine()` **之前**，所以被拒时
+数据根、库、标记文件全都一点没动。

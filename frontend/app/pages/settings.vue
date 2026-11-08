@@ -173,7 +173,7 @@
             </label>
             <label class="storage-check">
               <input type="checkbox" v-model="migrateData" />
-              自动迁移旧数据（复制数据库与生成文件，旧目录保留）
+              自动迁移旧数据（复制数据库、生成文件，以及画布草案/训练产物等不可重建的数据；旧目录保留）
             </label>
             <div class="storage-actions">
               <button class="btn btn-primary" :disabled="storageChanging || !newDataRoot.trim()" @click="changeDataRoot">
