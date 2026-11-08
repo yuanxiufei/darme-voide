@@ -420,9 +420,14 @@ def main() -> int:
     check("提取: 两端都扫到了（文件数 ≥ 100，Web + 桌面）", file_count >= 100, file_count)
     check("提取: 后端路由表规模正常（≥200 组合）", len(patterns) >= 200, len(patterns))
     check("提取: 后端参数表规模正常（≥200 组合）", len(params) >= 200, len(params))
-    # ②′ 防「patch 那条路又掉了」：`updateEntry` 是唯一的 PATCH 调用点
-    check("提取: PATCH 调用点被扫到（≥1）", any(m == "PATCH" for m, _ in calls),
-          [p for m, p in calls if m == "PATCH"])
+    # ②′ 防「patch 那条路又掉了」。
+    #     ⚠️ 这条**不能**靠「真实文件里扫到 ≥1 个 PATCH」：前端更新入口已全部改走 PUT，
+    #     盘上一个 `api.patch(...)` 都没有 ⇒ 那样写必然假红（2026-11-08 实测 0 个）。
+    #     改成对**合成样本**断言：喂一段 `api.patch(...)`，提取器必须认得 PATCH 这个 method
+    #     —— 分支还在就绿，谁把 patch 从 `_CALL_RE`/`_METHODS` 里删掉这里立刻红 ✓。
+    _patch_probe = scan_source("api.patch(`/probe/${id}`, data)\n", ".ts")
+    check("提取: 提取器认得 PATCH（合成样本）",
+          any(m == "PATCH" for m, _, _ in _patch_probe), _patch_probe)
     # ③ ⭐ 核心不变量：前端每一个调用点，后端都实现了
     check("⭐ 覆盖: 前端**全部**调用点都能在后端路由表里找到（0 未匹配）",
           not unmatched, unmatched[:6])

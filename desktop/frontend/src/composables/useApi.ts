@@ -409,12 +409,66 @@ export const canvasAPI = {
   /** 压缩快照（正文截断，只留判断所需字段） */
   compact: (d: { snapshot: any }) => api.post('/canvas/ops/snapshot', d),
   /** 一句话 ⇒ 一串待执行 op（`ops` 此刻**还没落地**） */
-  agent: (d: { message: string; snapshot?: any }) =>
+  agent: (d: { message: string; snapshot?: any; scene?: string }) =>
     api.post('/canvas/agent', d) as Promise<{
       text: string
       ops: any[]
       errors: string[]
       toolCalls: Array<{ toolName: string; args: Record<string, any> }>
+    }>,
+
+  // —— 计划通路（意图 → 计划 → op，中间有一道**人工确认**）——
+  //
+  // 与 `agent` 的区别值得留意：`agent` 一句话回来的是能直接落地的 op（快，但没有反悔机会）；
+  // `plan` 回来的是一份**草案**（有 preflight 计数、**没有 ops**），用户确认后才走 confirm 拿 op ✓。
+  // 要「AI 改画布但我先看一眼」就用这条；要「快，别问」就还用 `agent` ✓。
+
+  /** 一句话 ⇒ **草案**（模型只出计划，编译器出 op，此刻**不下发 op**） */
+  planAuto: (d: { message: string; snapshot?: any; baseRevision?: number }) =>
+    api.post('/canvas/plan/auto', d) as Promise<{
+      planId: string
+      goal: string
+      status: string
+      preflight: { total: number; creates: number; links: number; runs: number; byOp: Record<string, number>; byNodeType: Record<string, number> }
+      layout: Record<string, any>
+      warnings: string[]
+      expectedRevision: number | null
+      requiresConfirmation: boolean
+      alreadyConfirmed?: boolean
+      modelText?: string
+      note?: string
+    }>,
+  /** 交一份**已写好的**计划（工具链/测试用；用户侧走 `planAuto`） */
+  plan: (d: { plan: any; snapshot?: any; baseRevision?: number }) =>
+    api.post('/canvas/plan', d) as Promise<{
+      planId: string
+      goal: string
+      status: string
+      preflight: { total: number; creates: number; links: number; runs: number; byOp: Record<string, number>; byNodeType: Record<string, number> }
+      layout: Record<string, any>
+      warnings: string[]
+      expectedRevision: number | null
+      requiresConfirmation: boolean
+      alreadyConfirmed?: boolean
+      note?: string
+    }>,
+  /** 草案列表（新的在前） */
+  plans: (limit = 20) => api.get(`/canvas/plans?limit=${limit}`),
+  /** 单份草案详情（draft 阶段同样不含 ops） */
+  planDetail: (planId: string) => api.get(`/canvas/plans/${planId}`),
+  /** 确认：用**当下**快照重编译后下发 ops；重复确认返回上次缓存（`replayed=true`） */
+  confirmPlan: (planId: string, d: { snapshot?: any; baseRevision?: number } = {}) =>
+    api.post(`/canvas/plans/${planId}/confirm`, d) as Promise<{
+      planId: string
+      goal: string
+      status: string
+      ops: any[]
+      refs: Record<string, string>
+      preflight: { total: number; creates: number; links: number; runs: number; byOp: Record<string, number>; byNodeType: Record<string, number> }
+      warnings: string[]
+      expectedRevision: number | null
+      replayed: boolean
+      note?: string
     }>,
 }
 

@@ -718,6 +718,16 @@ _JSON_DUMPS_ALLOW_PATHS = {
     # 更不当 HTTP 响应体（回执里给的是 `manifestPath` 这个**路径字符串** ✓）⇒ 与 `dryrun.py`
     # 同一类：**没有 Node 对应物** ✗ ⇒ 不承担「镜像紧凑性」义务 ✓。
     "services/engine/torch_backend.py",
+    # 模型路径配置 `configs/model-paths.json`（2026-11-08 登记）：`indent=2` + 末尾换行**正是**
+    # 与前端 `JSON.stringify(cfg, null, 2) + '\n'` 逐字一致的依据 —— 这条守卫要的是「镜像紧凑」，
+    # 而它的镜像本身就是缩进格式；按紧凑性改反而让两端不再逐字一致 ✗。
+    "core/model_paths.py",
+    # 计划内容指纹 `canvas_plan.plan_digest`（sha1 取前 16 位，`planId` 就是它）：只在后端进程内
+    # 算一次、结果以**字符串**进出，前端从不重算、也从不比 JSON 文本 ⇒ 没有 Node 对应物 ✓。
+    "services/canvas_plan.py",
+    # 画布计划档 `<dataRoot>/canvas/plans/<id>.json`：给人打开看草案的**证据**文件（`indent=1` 有意 ✓），
+    # 与 `repair_closure.py` 的诊断快照同一类 —— 不进共用 DB 列、不当 HTTP 响应体、不发给厂商 ✓。
+    "services/canvas_plan_store.py",
 }
 
 

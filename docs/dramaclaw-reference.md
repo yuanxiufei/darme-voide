@@ -3,6 +3,9 @@
 > 采集 2026-11-08 ｜ 上游 `https://github.com/dramaclaw/dramaclaw`（产品名 **DramaClaw / SuperTale**，CE 版）
 > HEAD `c7d9f0e`（2026-11-03，`fix: preserve FastAPI validation diagnostics in agent tools (#919)`），浅克隆 `--depth 50`
 > 每条结论标注「实测」或「读码」，实测口径见 §8。
+>
+> **本仓已落地五条**（不是建议，是已改的代码）：计划编译器、草案/确认门、CAS+幂等、场景工具面、一次报全。
+> 落点与验证见 **§9**。
 
 ---
 
@@ -418,4 +421,56 @@ $env:DRAMACLAW_FRONTEND_DIST="$PWD\frontend\dist"
 | 19 | `_agent_tools()` 四组合直量（scope × plugin） | ✓ `home+dramaclaw=4` / `project+dramaclaw=45` / `home+freezone=0` / `project+freezone=54`——根因坐实，见 §7.6 |
 
 > 环境：Windows 11 + PowerShell ｜ Python 3.12（uv 管理）｜ Node 22 + pnpm 11.14 ｜ 未配置模型网关，故未做真实出图出片。
+
+## 9. 本仓落地记录（2026-11-08）—— 借了哪几条、落在哪个文件
+
+前八章是「源做了什么」。这一章是「我们拿它做了什么」，避免文档停在建议层。
+
+### 9.1 落地前必须先搞清的一件事：两边的画布**不是一回事**
+
+| | DramaClaw | 本仓 |
+|---|---|---|
+| 画布状态在哪 | 后端（`canvas_store` + SQLite），前端只是视图 | **只在浏览器 localStorage**，后端全程纯函数 |
+| 谁能改画布 | 后端事务 | 只有前端 `applyCanvasOps` |
+| 并发的真实风险 | 多客户端互相覆盖 | **AI 算计划期间，用户自己动了画布** |
+
+> 结论：**不能照搬「后端画布实体 + 服务端 CAS」**。照搬的代价是给本仓再造一份画布真值，
+> 前端 localStorage 与它双写，必然分叉 ✗。所以 CAS 落前端、审批门落后端、编译器做成纯函数。
+
+### 9.2 已落地五件
+
+| # | 借鉴自 | 落地位置 | 本仓化改造 |
+|---|---|---|---|
+| 1 | A1 意图→计划→命令三段式 | **新增** `backend-py/app/services/canvas_plan.py` | 编译器纯函数、不调模型；`goal` 逐字保留；坐标由 `layout` 算；**确定性 id**（同计划重放不建两套） |
+| 2 | A2 草稿态 + 确认后一次性 apply | **新增** `backend-py/app/services/canvas_plan_store.py` + `routers/canvas.py` 四个端点 | 草案落盘但**不下发 op**；确认时用**当下快照重编译**（画布在前端，重编译比拒绝体验好）；`planId` = 计划指纹 ⇒ 天然幂等 |
+| 3 | A4 ambiguous → 先纠正再重试 | 同上（`PlanRejected.errors` 一次报全） | 拒绝时返回**全部**问题而非第一条：模型 8 步根本不够「改一条报一条」 |
+| 4 | A3 CAS + 幂等 | `frontend/app/composables/useCanvas.ts`（`revision` / `canvasRevision()`）＋ `utils/canvasOps.ts`（`baseRevision` / `applyId` / `conflict` / `replayed`） | 版本**只随 nodes/edges 变**（视口不算），`flush:'sync'` 保证不等防抖；幂等簿上限 50 条 |
+| 5 | B6 工具面按场景收敛 | `backend-py/app/services/canvas_ops.py`（`SCENES` / `SCENE_TOOL_SETS` / `tools_for_scene` / `scene_problems`）＋ `canvas_agent.build_canvas_tools(scene=)` | `chat` = 读＋整批落地 4 件，`canvas` = 全量 22；**两道守卫**见 §9.3 |
+
+### 9.3 三条“防静默归零”守卫（本次最想留下的东西）
+
+§7.6 那个坑的本质不是「代码写错」，而是**空结果被当成合法结果**。本仓照此立了三条：
+
+1. `scene_problems()` 查**白名单点名了工具表里没有的名字** ⇒ 配置漂移，当场报错（否则能力凭空消失、日志全绿）；
+2. `scene_problems()` 查**白名单与工具表交集为空** ⇒ 模型拿到 0 个工具仍会平静地回「我做不到」；
+3. 前端 `applyCanvasOps` 的 `conflict` 是**整批拒绝**并带回 `currentRevision`，不做「落一半」。
+
+### 9.4 端点（新增 4 个，均在 `/api/v1/canvas`）
+
+| 端点 | 作用 | 关键约束 |
+|---|---|---|
+| `POST /plan` | 收**已写好的**计划 → 编译成草案（工具链/测试用） | 缺参/成环/指向不存在 ⇒ 400 + `errors[]` |
+| `POST /plan/auto` | **一句话** → 模型只出计划 → 草案 | 模型无工具、单步；非 JSON 回复明确报错 |
+| `POST /plans/{id}/confirm` | 确认 → 用当下快照**重编译** → 才下发 `ops` | 重复确认返回缓存 + `replayed:true` |
+| `GET /plans`、`GET /plans/{id}` | 草案列表 / 详情 | draft 阶段**不含 ops** |
+
+另：`GET /tools?scene=chat|canvas` 支持按场景过滤；`POST /agent` 新增可选 `scene`。
+
+### 9.5 验证
+
+- `backend-py/tests/canvas_plan_test.py`：**58/58 通过**（场景守卫、一次报全、布局三形态、环检测、既有节点并线、草案不下发 op、重放幂等、路径穿越防护、前端同源）
+- `backend-py/tests/canvas_ops_test.py`：**74/74 通过**（既有守卫未被破坏）
+- `frontend` `check:parity`：**通过**（Web 与桌面端 4 个改动文件已同步为逐字一致；否则守卫直接红）
+- `frontend` `typecheck`：本次改动 0 报错（`knowledge-loop.vue` 的报错为既有问题，与画布无关）
+
 

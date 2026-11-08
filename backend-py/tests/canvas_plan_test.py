@@ -30,6 +30,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 BP = REPO / "backend-py"
 
+# GBK 控制台兜底（同族套件都有这两行，本套件 2026-11-08 补）：
+# 失败详情里带 `⇒`，Windows 默认 GBK 码页打不出来 ⇒ **有失败反而崩在打印上**，
+# `UnicodeEncodeError` 把真正的失败原因整个吞掉 ✗（实测就撞过一次）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
+
 _RESULTS: list[tuple[str, bool, object]] = []
 
 
@@ -271,7 +280,10 @@ def main() -> int:
             loaded.update({"status": store.STATUS_CONFIRMED, "confirmCount": 1})
             store.save_plan(loaded)
             confirmed = store.public_view(store.load_plan(record["id"]), with_ops=True)
-            check("确认: 带 ops", len(confirmed["ops"]) == 3, len(confirmed["ops"]))
+            # 5 条 op = 3 建节点 + 1 连线 + 1 开跑（op 条数 ≠ 节点数，别混 ✓）
+            check("确认: 带 ops（3 建 + 1 连 + 1 跑）",
+                  len(confirmed["ops"]) == 5 and confirmed["preflight"]["creates"] == 3,
+                  (len(confirmed["ops"]), confirmed["preflight"]))
             check("确认: requiresConfirmation = False", confirmed["requiresConfirmation"] is False)
 
             try:
