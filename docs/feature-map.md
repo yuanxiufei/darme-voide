@@ -393,7 +393,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 
 | 功能点 | 落点 | 说明 |
 |---|---|---|
-| 数据存储 | `app/services/data_storage.py` | **整域关闭** |
+| 数据存储 | `app/services/data_storage.py` | 数据根信息与切换（`/api/v1/storage/{info,change}`；**已接线**，见 §10.3） |
 | 文件存储 | `app/services/file_storage.py` | 移植 `utils/storage.ts` |
 | 资源库共享实现 | `app/services/resource_library.py` | 角色/场景/兵器/服装模板 |
 | 资产清单 + 验收门 | `app/services/asset_manifest.py` | 缺件即阻断 |
@@ -570,6 +570,7 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | **KV cache INT8 分组量化（2026-11-08）**（`llm.quantize_kv` / `dequantize_kv` / `update_kv_cache`：**沿 `head_dim` 每 64 元素共用一个 fp32 scale、零点恒 0**（口径同 Strata `kernels/kv_q8.hpp`）——沿序列分组是错的（语义无关的 token 共用一把尺子）；全零组 `scale=1`（否则 0/0 ⇒ NaN ⇒ softmax 全崩）；旧段 int8 **原样 cat 不重复量化**（32K 上下文反复量化会累积误差）；`head_dim` 除不尽组宽 ⇒ 尾部 pad 到整组、反量化按 `head_dim` 裁回；注意力读的是**量化后再反量化**的值（prefill 用原 k、decode 读 dequant(k) 会是两套历史）。`Q8Kv` 壳把「值＋scale＋组宽＋原始 headDim」绑在一起、`shape` 与量化前逐字相同。对外旋钮 `settings.kvMode`（`off`/`fp`＝原样浮点老路径逐字节相同／`q8`/`int8`/`auto`＝量化，拼错**装载前**具名拒）：`kv_bytes_per_token` 给的就是**每 token 字节**（4B 档 144 KiB ⇒ 76.5 KiB，32K 上下文 4608 MiB ⇒ 2448 MiB），`describe()["kv"]` 带 `mode/group/kBytes/vBytes/totalBytes/fpTotalBytes/ratio/contextBytes`，装载前按**请求值**报数并标 `assumedDtype`（配了 q8 却报 fp 的字节会让人以为配置没吃） | `app/services/engine/llm.py` / `llm_backend.py`（`kvModeRequested` ＋ `kv` 回执） / `app/services/text_generation.py`（`engine_kv_mode` 单一真源；缓存键归一 `None`＝`off`、`auto`＝`q8`，否则同义写法会各装一份 8 GiB） |
 | **跨调用 KV 前缀复用（2026-11-08）**（`llm.KvPrefixCache` 单槽 ＋ 字节预算 ＋ 命中回执：**按 token id 比公共前缀**（文本相等不保证 id 相等；模板空白/特殊符/编解码往返都会换一串 id）且**必须 ≤ 序列长 − 1**（复用整段就没有查询可算 ⇒ 拿不到 logits）；`truncate_kv` 裁段时 **`q` 与 `scale` 一起裁**（只裁 q ＝ 长度对数值错位）并 `contiguous()`（切片视图会吊住整段长张量）；`store` 存**整段**（提示词＋续写 ⇒ agent 循环下一轮连上轮输出也不必重算）；**一点共同前缀都没有 ⇒ 当场释放**（留着「万一」＝一段永不命中的 cache 一路占显存，卡满时报在别的件上）；**超预算不存**并写明原因（`conversation_memory.hpp` 的预算准入写法）；口径必须同一套（`fp` 的 cache 喂 `q8` 跑＝长度对数值两套）。⚠️ 「无损」只到 bf16 舍入级：复用的 KV 段与重算**逐位相同**（q8 分组沿 `head_dim` ⇒ 每 token 的 scale 与前后无关），但末位查询块从 `M×N` 变 `1×N` ⇒ 4B 真权重末位 logits 差 0.145（0.56%），**同串整段复用在近似并列处会翻 token**（实测差一个空格）⇒ 要逐字复现就关复用；增量轮（agent 循环真实形状）实测**逐字相同**。对外旋钮 `settings.kvReuse`（`off`/`false`/`0` ＝关）＋ `settings.kvCacheBytes`（`512MiB`/`1GiB`/字节数，不写＝512 MiB，`0`＝关；拼错**装载前**具名拒）；`describe()["kvCache"]` 带 `enabled/mode/group/budgetBytes/storedTokens/bytes/hits/misses/skipped/reusedTokens/stored/note`（**命中数必须真报**：不报 ⇒ 「配了复用」与「一次没命中」分不清） | `app/services/engine/llm.py` / `llm_backend.py`（`kvCache` 回执 ＋ `clear_kv_cache()`） / `app/services/text_generation.py`（`engine_kv_cache_bytes` 单一真源，三个调用口共用；缓存键新增第 7 格 `cache_slot`，`None` ≡ 默认 ≠ `0`＝关，否则改了预算仍拿到老后端） |
 | **投机解码：后缀查表草稿（2026-11-08）**（`llm.LookupDrafter` ＋ `generate_llm(spec_lookup=True)`：三词元后缀 → 历史里出现过的后继（零权重、不训草稿头，与 Strata `spec::SuffixDrafter` 同构）。**只在 `temperature=0` 启用**——随机采样要「概率接受 ＋ Philox 计数空间隔离」才能落在同一条随机序列上，本仓没有那套 ⇒ `spec_report` 如实报 `enabled=False, reason="temperature>0"`，同种子输出与不开**逐位相同**（不假装开了）。主循环口径四条：① `window[0]` 是 **target 自己刚产出但还没喂过前向**的那个 token（参考实现的 `window[0]` 口径），所以「一拍吃 1+T 行」比老路径**少一拍**；② 接受判据是「第 `i` 行 argmax == `window[i+1]`」（第 `i` 行预测的是窗口**之后**那个 token），抄成 `window[i]` 全拒且不报错；③ 回滚 `keep = min(past_len + 1 + a, total + len(generated))`——上限压到「已产出总数」是因为 stop 打断时 cache 不能比 ids 长（否则 `KvPrefixCache.store` 存错配）；④ `a == len(draft)` 时第 `a` 行就是 bonus token，被拒时它就是修正后的 token ⇒ 两条路同一个 `_sample_token(win_logits[:, a, :])`。草稿器口径：**允许与当前后缀重叠**（周期文本唯一能拿到草稿的路径）、等长匹配**保留更近**（`>` 写成 `>=` 结果不同但不报错）、`min_match` 不够就返回**空列表**（不是错）。收益实测 1.02~1.03×（逐字复述时最长匹配贴着当前末尾 ⇒ 匹配越准越不接受，这是 lookup 的结构性盲区，照参考实现保留、不擅自加错位修正）。旋钮 `spec_lookup`/`spec_window`(8)/`spec_min_match`(3)/`spec_report`，`< 1` 具名拒。⚠️ 默认关闭 ⇒ 老调用方逐字节相同 | `app/services/engine/llm.py`（`LookupDrafter` ＋ `spec_*` 参数） / `tests/engine_llm_test.py`（⑩ 系列 12 条：真模型等价、q8 等价、`accepted == drafted > 0`、回滚差值区间（**部分拒绝时严格小于窗口行数**——全接受时不裁也「差 == 行数」⇒ 只看区间会假绿）、输出依赖 `past_len` 的模型下仍等价、温度退回、三条草稿器口径、额度边界、参数校验） |
+| **融合核快路径（`fastPath`，2026-11-08，默认关）**（两个**减 launch** 的开关 ＋ 一处**无开关**的等价改写：`norm`＝`RMSNorm` 走 `F.rms_norm`（老五连在真机上是**一次 16 个 kernel**，不是纸面的 5 个 ⇒ 4B 档一步 145 次调用、2320→290）、`attn`＝`F.scaled_dot_product_attention(enable_gqa=True)`（免掉 `repeat_kv` 物化 1.15 GiB/步、每层 6→1）、RoPE 折叠（`fold_rope`/`apply_rope_wide`：`cat((cos,cos),-1)` ／ `cat((-sin,sin),-1)`，**前后半配对**不是相邻交错，与 `apply_rope` **逐位相同**所以不设开关）。`resolve_fast_path` 收 `off/norm/attn/all/组合/布尔/列表`，返回 **`frozenset`**（`"all"` 里没有 `"norm"` 子串 ⇒ 字符串包含判断会把 all 读成只开 attn），拼错**当场具名拒**。关着时 `fast_kw = {}` ⇒ **不传关键字**、调用签名逐字不变（本仓桩模型测试靠这条）。真机实测（A5000／4B-Q4_K_M／2048 上下文）：`all` 每步 32.7→24.6 ms、launch 4449→2203、整条生成循环 **32.5→45.0 token/s**；收益全在 launch 不在算（CUDA 侧 50.8→44.1 ms），所以**默认关**（融合核差 1 个 bf16 ulp ⇒ 长程贪心可能岔口）。回执 `describe()["fastPath"]` 报 `requested/norm/attn/items/enabled/fusedNormAvailable/note`，缺 `F.rms_norm` 时如实写「退回老写法、一步也没省」；`settings.fastPath` 经 `text_generation.engine_fast_kwargs` 三处生成口共用，缓存键含 `fastSlot` | `app/services/engine/llm.py`（`FAST_PATH_ITEMS`／`resolve_fast_path`／`fold_rope`／`apply_rope_wide`／`sdpa_attention`／`fused_norm_available`） / `llm_backend.py`（`_fast_report`／`_fast_call`） / `app/services/text_generation.py`（`engine_fast_path`／`engine_fast_kwargs`） / `tests/engine_llm_test.py`（⑫ 系列 19 条：逐位对拍＋反证、SDPA 三种 past_len＋掩码偏 1 的反证、**spy 数融合核调用次数**、默认关不传关键字＋反证） / `tests/engine_llm_backend_test.py`（⑫ 系列 12 条：回执三态、`load()` 开头拒、缓存键、**AST 判三个调用口＋后端 3 处 `generate_llm`**、真跑 spy） / `data/experiments/llm_attn_cost/fast_path.py` / `docs/reference-audit-llm.md` §7.5） |
 | 进程内文本后端 | `app/services/engine/llm_backend.py`（`generate_messages` 走权重自带的 chat 模板；超窗在**进采样前**按 `*.context_length` 拒 ⇒ 不半路越界） |
 | GGUF 反量化 | `app/services/engine/gguf_dequant.py` |
 | GGUF → LlmModel 装载 | `app/services/engine/gguf_to_llm.py`（**tie embeddings 以张量表为准**：文件里没有 `output.weight` ⇒ 只能 tie ⇒ `tie_embeddings_of`，2026-11-07 真机 `Qwen3-4B-Instruct-2507` 两个来源都缺、旧实现按 `False` 判 ⇒ 完好文件被报「缺 `lm_head.weight`」；对账放行的凭据是 `lm_head.weight is embed.weight` 这件**事实**，不是配置位） |
@@ -1556,11 +1557,23 @@ bf16 的 q/k 升成 fp32 ⇒ SDPA 报 `query float32 / value bf16`；小配置 f
 patchify 顺序这些"错一个数就对不上"的点）—— 它不是一次性残留，是那条「相对差 0」结论的**唯一
 复现路径**，别顺手删。
 
-### 10.3 整域关闭（实现保留，调用链已断）
+### 10.3 曾记为「整域关闭」的四件，2026-11-08 核实**全部已接线**
 
-`app/services/color_grade.py`、`app/services/data_storage.py`、`app/services/rhythm_phase.py`，
-以及 `app/agent/subagent.py`。Node 侧已停用、Python 侧实现完整并被测试覆盖。
-**不许当死代码删** —— 删掉等于把「暂时停用」变成「能力消失」，将来重启时无从对照。
+本节早先写的是「实现保留、调用链已断」——那描述的是 Node→Python 绞杀期的中间态，**现已全部作废**。
+四个文件今天都在真调用链上（`agent/runtime.py` 文件头自己就写着「曾经的『依赖未迁』项现已全部
+落地接线」，与旧文本直接矛盾；这条矛盾是 2026-11-08 全面检查时抓到的）：
+
+| 文件 | 当前调用方（按名字核，不写行号） |
+|---|---|
+| `app/services/color_grade.py` | `services/image_generation.py` 出图后调 `apply_color_grade_to_file`；`routers/presets.py` 与 `routers/characters.py` 调 `normalize_color_grade` |
+| `app/services/data_storage.py` | `routers/storage.py` 的 `GET /api/v1/storage/info` 与 `POST /api/v1/storage/change`（`main.py` 挂 `storage_router`） |
+| `app/services/rhythm_phase.py` | `agent/tools/storyboard_tools.py` 的 `assign_rhythm_phases`；`agent/runtime.py` 的 `rhythm_guidance_for_episode`；`routers/dramas.py` 的 `get_drama_rhythm` |
+| `app/agent/subagent.py` | `agent/runtime.py` 的 `_tool_factory("subagent")` 装 `run_subagent` / `list_available_agents` |
+
+**仍然不许当死代码删**，但理由换了：不是「留着将来重启」，而是「**删了当场断链**」——
+`data_storage` 一断，前端设置页切数据根立刻 501（它正是「删 `backend/`」的最后一块阻塞，见
+`routers/storage.py` 模块头）；`subagent` 一断，orchestrator 退化成不能委托领域专家。
+判据：`route_parity_test`（224 条端点、0 条未迁移）＋ `storage_change_test` 40 条 ＋ `agent` 各套。
 
 ### 10.4 接口有、界面没有（4 个域，2026-11-08 实测两端）
 

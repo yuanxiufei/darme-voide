@@ -29,9 +29,10 @@
 ``materialized/`` ``engine.materialize.default_directory``             ✓        ✓ 反量化缓存
 ``indexes/``     ``script_library.OCR_DB`` / ``EXTRA_DB`` /             ✗        ✓ 三只派生
                  ``scene_index.SCENES_DB``（顶层目录，**不进** ``data/``）
-``canvas/``      ``canvas_plan_store.plans_dir``（画布草案）            ✗        ✗ 用户手作
-                 （``canvas/plans/<16位id>.json``；**不在** ``change_data_root``
-                 的搬运清单里 ⇒ 换根前须自己拷走 ✓✗）
+``canvas/``      ``canvas_plan_store.plans_dir``（画布草案）            ✓        ✗ 用户手作
+                 （``canvas/plans/<16位id>.json``；**已进** ``change_data_root``
+                 的 ``MIGRATED_TREE_SUBDIRS`` ⇒ 切根时复制到新根 ✓。
+                 草案无源可再生，别当缓存摘出去）
 ``models/``      ``scripts.corpus.ocr_vlm_local.default_model_dir``     ✗        ✗ 需重下
                  ＋ ``models/tokenizers/``（tokenizer_hub 的第二落点）
 ``corpus/``      ``script_library.PLAYBOOK_ROOT`` /                    ✗        ✗ 但已入库

@@ -106,10 +106,16 @@ def _copy_tree(source: str, target: str) -> None:
 #:   * ``lora-train/`` —— 手调参数 + 训出来的 ``*.safetensors``。重训是几小时卡时，
 #:                        且 ``lora_train.config.data_dir()`` 会在新根 ``mkdir`` 出空目录
 #:                        ⇒ 不搬的症状是「切个目录，训练集和权重全没了」而旧数据还在旧根 ✓✗
+#:   * ``canvas/``     —— 画布草案（``canvas_plan_store.plans_dir()`` ⇒ ``canvas/plans/<16位id>.json``）。
+#:                        草案是**用户手作**（节点位置/连线/填好的 values），没有任何源可再生；
+#:                        而 ``plans_dir()`` 动态读 ``get_data_root()`` ⇒ 切根后它**立刻指向新根的空目录**，
+#:                        症状正是「切个目录，画布全空了」而旧草案还躺在旧根没人读 ✓✗（2026-11-08 补）。
 #:
 #: **故意不搬**（写下来是为了防后人「顺手补齐」✓✗）：``models/`` 与 ``hf-cache/`` 能重下、
 #: ``knowledge/`` 与 ``materialized/`` 能重算、``engine-dryrun/`` 与 ``repair/`` 能重跑/重诊断。
 #: 这些一次切根白搬几十 GB（慢、占盘），而不搬**不会丢东西**。
+#: 判据的反面同样要守住：**不可重建的一律得搬** —— ``canvas/`` 就是照这条补进来的，
+#: 别因为「它只有几百 KB、看起来像缓存」再把它摘出去（草案里存的是人一场一场摆出来的布局）。
 #:
 #: 为什么 ``db`` / ``static`` / ``library-overlay`` 不在表里：三者各有覆盖口
 #: （``DB_PATH`` / ``STORAGE_PATH`` / 覆盖层的模块常量），只能各自走
@@ -117,7 +123,7 @@ def _copy_tree(source: str, target: str) -> None:
 #:
 #: 判据：``tests/storage_change_test.py`` ⑨ 双向核对 —— 表内每个名字真的搬了（④ 那条），
 #: 且表**不许**混进上面那批「能重下/重算」的目录。
-MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train")
+MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train", "canvas")
 
 
 def _write_probe(directory: str) -> None:
