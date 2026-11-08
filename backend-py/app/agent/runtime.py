@@ -153,8 +153,14 @@ def knowledge_feed_enabled() -> bool:
 
 
 def append_knowledge_feed(agent_type: str, instructions: str,
-                          injected: list[str] | None = None) -> str:
+                          injected: list[str] | None = None,
+                          *, scopes: list[str] | None = None) -> str:
     """把台账里 ``accepted`` 的成法追加到 system prompt 末尾（P2）。
+
+    ``scopes`` 是本次跑次的作用域（``knowledge_feed.scopes_for(episode_id=…, drama_id=…)``），
+    不传就只剩 ``global`` 与 ``agent:<type>`` 两档 —— 后者**全仓没人写**，
+    所以不传的调用方实际只能吃到全局成法（2026-11-08 起由
+    :func:`assemble_full_instructions` 统一传入，两处入口不再各自为政）。
 
     三条克制：
     * **默认关**（见 ``KNOWLEDGE_FEED_ENV``）—— 这是唯一会改变模型输入的环节；
@@ -168,7 +174,7 @@ def append_knowledge_feed(agent_type: str, instructions: str,
     if not knowledge_feed_enabled():
         return instructions
     try:
-        compiled = knowledge_feed.compile_for_prompt(agent_type)
+        compiled = knowledge_feed.compile_for_prompt(agent_type, scopes=scopes)
     except Exception as err:  # noqa: BLE001 —— 投喂失败不该阻断创作
         log_task_warn("AgentFactory", "knowledge-feed-failed", {
             "agentType": agent_type, "error": str(err),
@@ -631,7 +637,11 @@ def assemble_full_instructions(
     )
     #: 知识投喂放在**最后**：风格 Profile 是硬约束，经验只是参考。
     #: 开关默认关 ⇒ 关着时返回值与历史逐字相同。
-    return append_knowledge_feed(type, text, injected)
+    #: 作用域从**本函数已经拿到的真值**算（不必再让调用方多传一个参数）。
+    return append_knowledge_feed(
+        type, text, injected,
+        scopes=knowledge_feed.scopes_for(episode_id=episode_id, drama_id=drama_id),
+    )
 
 
 def build_agent_config(
@@ -1297,7 +1307,9 @@ async def _run_engine_tool_loop(
     决定 ✓（与 ``generate_text`` 同一个口径 ✓ —— 换模型就是换路径，不是换字符串 ✓）；
     保留形参只为三条循环签名一致 ✓。
     """
-    from app.services.text_generation import get_engine_backend   # 延迟 import ✓ 防启动期环 ✓
+    from app.services.text_generation import (  # 延迟 import ✓ 防启动期环 ✓
+        get_engine_backend, engine_gpu_layers, engine_kv_cache_bytes, engine_kv_mode,
+        engine_spec_kwargs)
 
     settings = config.get("settings") or {}
     gguf_path = settings.get("ggufPath") or settings.get("gguf_path")
@@ -1310,6 +1322,10 @@ async def _run_engine_tool_loop(
         str(gguf_path), str(tokenizer_path) if tokenizer_path else None,
         device=str(settings.get("device") or "auto"),
         dtype=str(settings["dtype"]) if settings.get("dtype") else None,
+        gpu_layers=engine_gpu_layers(settings),
+        kv_mode=engine_kv_mode(settings),
+        kv_cache_bytes=engine_kv_cache_bytes(settings),
+        **engine_spec_kwargs(settings),
     )
 
     temperature = model_settings.get("temperature")

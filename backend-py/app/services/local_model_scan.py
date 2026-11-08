@@ -25,7 +25,7 @@
 7. **排序**：``video > image > text > audio > unknown``，同类按**体积降序**（体积更能代表重要性）；
 8. ⭐ **要覆盖「世界各大模型」**（2026-09-25 用户口径 ✓）：默认根目录含 HuggingFace / ModelScope /
    LM Studio / GPT4All / Jan / llama.cpp / text-generation-webui / SD WebUI / Stability Matrix /
-   InvokeAI / torch hub 的本地落点 ✓（表在 ``services/model_ecosystems.py`` ✓），**全程只读、零外部依赖** ✓
+   InvokeAI / torch hub 的本地落点 ✓（表在 ``app/core/model_ecosystems.py`` ✓，本层再导出 ✓），**全程只读、零外部依赖** ✓
    —— **不许**要求 ``ollama serve`` / LM Studio 等**服务在跑**才能扫到 ✗✗（那正是「盘上有模型却
    看不见」的老 bug ✓）；Ollama 的权重是无扩展名 blob ⇒ 文件遍历看不见 ✗，改由 **manifests 清单**读出 ✓
    （见 ``_merge_ollama`` ✓）。
@@ -44,16 +44,20 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..core import comfyui_roots as core_comfyui_roots
-from ..core import config, model_paths
-from . import model_ecosystems, model_fingerprint, model_folders, ollama_store
+from ..core import model_paths
+from ..core import model_roots as core_model_roots
+from . import model_ecosystems, model_fingerprint, ollama_store
 
-#: 后端包根（``backend-py/``）。**「本地服务根」的默认值落在这里**：
+#: 后端包根（``backend-py/``）。**「本地服务根」的默认值**：
 #: 2026-09-15 从仓库根 ``local_services/`` 迁入 —— 它是「``model_manager.py`` 会 ``git clone``
 #: 的独立服务 + 项目自带的 ``h3`` 薄封装」的落脚点，属后端资产，与后端代码同包更归拢。
 #: ⚠️ **唯一权威在 ``app/core/config.py``**（2026-09-15 收口：本文件原先自己算一遍 ``parents[2]`` ✗）；
 #: ``scripts/model_manager.py`` 那份是同名独立实现（scripts 不 import ``app.*``），靠注释同步。
 #: ⚠️ 与 ``config.BACKEND_PY_ROOT`` 区分：**资产根是 `app/`**（三类资产住在这里）⇒ 用 `APP_ROOT`。
-LOCAL_SERVICES_ROOT = config.APP_ROOT / "local_services"
+#: ⚠️ 2026-11-08 起**再导出** :data:`app.core.model_roots.LOCAL_SERVICES_ROOT` ✓（同一个 ``Path`` ✓）：
+#: 「默认扫描根」的拼装整体搬进 ``app.core.model_roots`` 了（引擎 ``inventory`` 也要那份根表 ✓），
+#: 这个常量是根表的一行 ⇒ 跟着走 ✓，本层不再自己算一遍 ✗。
+LOCAL_SERVICES_ROOT = core_model_roots.LOCAL_SERVICES_ROOT
 
 __all__ = [
     "COMFYUI_BLANKET_DEPTH",
@@ -356,67 +360,19 @@ def get_default_roots() -> list[str]:
     * ``extra_roots``（用户显式加的**任意目录** ✓）**排在约定落点之前** ✓（显式意图优先 ✓）；
     * ComfyUI 类目录 = **显式配的** ``comfyui_root`` ✓ + :func:`detect_comfyui_roots` 的**全部**命中 ✓
       —— ⚠️ 修的就是「只取第一个 ⇒ 后面几个被遮住」✗✗（本机因此扫不到 ``ComfyUI-Shared/models`` ✓）。
+
+    ⚠️ **实现已搬 :mod:`app.core.model_roots`** ✓（2026-11-08 ✓）：引擎 ``inventory.candidate_roots``
+    要的是**同一份**根表 ✓，而引擎不许 import 服务层 ✓ ⇒ 拼装整体下沉，本函数只剩**一层薄委托** ✓。
+    这里显式下传两个隔离口 ✓✗（``tests/local_models_test.py`` 就是 patch 它们注入临时配置与假根）：
+    ``path=``（:func:`_paths_config_file` ✓）与 ``comfyui=``（:func:`get_comfyui_roots` ✓ ——
+    它自身已把 ``detect_comfyui_roots`` 传下去了 ✓）。**两个都少不得** ✗✗：
+    只传一个 ⇒ core 对另一半走自己的全局 ⇒ 本模块这次 patch 静默失效 ✓✗（2026-11-08 实测）。
     """
-    cfg = _read_paths_config()
-    roots: list[str] = []
-
-    #: ⚠️ 优先级**不在这里写** ✓✗ —— 走 ``app.core.model_paths.models_dir()`` 那唯一一份 ✓（同一份
-    #: 优先级既是「存放主目录」也是本函数的第一根 ⇒ 两处各写一遍必然漂 ✓）。
-    #: ⚠️ 必须把 ``_paths_config_file()`` 这个隔离口一起传下去 ✓✗（配置面有三个使用者：读 / 写 /
-    #: 本函数；少传一个，自检里换掉的文件就对它不生效 ⇒ 「换了文件还读到真配置」的假绿 ✓）。
-    models_dir = model_paths.models_dir(path=Path(_paths_config_file()))
-    services_dir = (os.environ.get("LOCAL_SERVICES_DIR") or cfg.get("local_services_dir")
-                    or str(LOCAL_SERVICES_ROOT))
-    # ⚠️ 显式配置（env / json）**优先且靠前** ✓；探测结果只是**补充** ✓（探测错了也不影响显式配置 ✓）
-    #    ⚠️ 根表**只此一份** ✗：安装根表由 :func:`get_comfyui_roots` 给 ✓（引擎侧要 ``<根>/comfy/…``
-    #    这类**安装内部**落点 ✓，两处各写一份就会「扫描能看见、加载看不见」✓✗）。
-    comfyui_root = os.environ.get("COMFYUI_PATH") or cfg.get("comfyui_root") or ""
-    comfyui_roots: list[str] = [path for path, _source in get_comfyui_roots()]
-
-    def add(candidate: str) -> None:
-        if candidate and os.path.exists(candidate):
-            resolved = os.path.abspath(candidate)
-            if os.path.normcase(resolved) not in {os.path.normcase(r) for r in roots}:
-                roots.append(resolved)
-
-    add(models_dir)
-    add(services_dir)
-    # ⚠️ 用户**显式**加的目录排在约定落点之前 ✓：显式意图优先于约定 ✓
-    for candidate in get_extra_roots():
-        add(candidate)
-    # ⭐ 2026-09-26：**用户声明过的任意目录** ✓（ComfyUI 的 ``extra_model_paths.yaml`` ✓、
-    #    ``model-paths.json`` 的 ``extra_paths`` ✓、环境变量 ``EXTRA_MODEL_PATHS`` ✓）——
-    #    「模型放任意目录，**声明一下就能用**」✓，口径见 ``model_folders`` ✓。
-    #    ⚠️ 与 ``extra_roots`` 同属**显式意图** ⇒ 也排在生态落点之前 ✓（显式优先于约定 ✓）。
-    #    ⚠️ **环境变量**指向的声明文件读不开 ⇒ 如实抛 ✓（用户自己指的文件 ✗ 不许静默跳过 ✗）；
-    #       而 ComfyUI 那边别人的 ``extra_model_paths.yaml`` 坏掉 ⇒ 只跳过 ✓（不连坐 ✗）。
-    for candidate in model_folders.declared_extra_dirs(
-            cfg, os.path.dirname(_paths_config_file()), comfyui_roots):
-        add(candidate)
-    # ⭐ 2026-09-25：**世界各大模型生态**的落点 ✓（HuggingFace / ModelScope / LM Studio / GPT4All /
-    # Jan / llama.cpp / text-generation-webui / SD WebUI / Stability Matrix / InvokeAI / torch hub ✓，
-    # 表在 ``model_ecosystems`` ✓；只读 ✓、不要求任何生态的服务在跑 ✓）。
-    # ⚠️ 排在 ComfyUI **之前** ✗：ComfyUI 的 ``models/`` 动辄上万文件 ⇒ 后置会被 ``maxFiles``
-    # 上限吃光 ✗，生态落点就「**扫不到也不报错**」了 ✗✗ —— 那正是本轮要修的那类 bug ✓。
-    for _, path in model_ecosystems.roots():
-        add(path)
-    # ⭐ 2026-09-26 修「只取第一个」✗：**每个** ComfyUI 类目录的 ``models/`` 都加 ✓
-    #    （本机三个：桌面端安装层里两个 ✓ + 自建检出一份 ✓ —— ⚠️ **盘符不复述** ✗；
-    #     旧实现只加第一个 ⇒ 共享目录里那份 SDXL 扫不到 ✗✗）
-    for root in comfyui_roots:
-        add(os.path.join(root, "models"))
-    # ⚠️ **只有显式配的那个根**整体也加上 ✓（``COMFYUI_PATH`` / ``comfyui_root`` ✓）：
-    #    探测到多个安装时，各自的整包（web / tests … 动辄上万文件）会把 ``maxFiles`` 吃光 ✗
-    #    ⇒ 生态落点又变成「扫不到也不报错」✗✗；而根下除 ``models/`` 外基本是代码/输出 ✓（不是模型 ✓）。
-    if comfyui_root:
-        add(comfyui_root)
-
-    # 若完全没有可扫描目录，回退到本仓默认模型目录
-    if not roots:
-        default = os.path.abspath(default_models_dir())
-        if os.path.exists(default):
-            roots.append(default)
-    return roots
+    return core_model_roots.default_roots(
+        path=Path(_paths_config_file()),
+        comfyui=get_comfyui_roots,
+        extra_roots=get_extra_roots(),
+    )
 
 
 def save_extra_roots(roots: list[str]) -> list[str]:

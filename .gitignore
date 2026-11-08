@@ -190,3 +190,9 @@ backend-py/_bench/
 backend-py/tmp/
 # 下载的分词器文件（merges.txt/vocab.json 合计约 16 MB，机器数据；引擎按显式路径读取，代码里零硬编码）
 models/tokenizers/
+
+# 2026-11-08 本机起 dev 服务时的 stdout 重定向（python -m app.main > _dev_api.out 这类）
+# 实测事故：git add -A 会把正在写的日志整份带进提交（当场抓到 3 份），所以按名忽略。
+/_dev_*.out
+/_dev_*.err
+/tmp_run_all.*

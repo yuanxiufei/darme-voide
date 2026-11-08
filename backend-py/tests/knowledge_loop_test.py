@@ -298,6 +298,129 @@ def main() -> int:
           no_evidence["written"] == 0 and no_evidence["rejected"] == 1
           and "没有一条证据" in no_evidence["items"][0]["why"], no_evidence)
 
+    # ============================================================ ③b 关联读侧（2026-11-08）
+    # 这批判据盯的是「entry_links 只写不读」：蒸馏一直在挂 stage/shot，但没有任何
+    # 反向查询 —— 于是"这条经验挂在哪个阶段上"这个**事实**等于没存。
+    refs = knowledge_ledger.context_refs(ref_kind="stage")
+    probe_ref = next((r for r in refs["items"] if r["refId"] == "distill-probe"), None)
+    check("关联: ⭐ 蒸馏写的 stage ref 可反查（原先这张表只写不读）",
+          refs["available"] is True and probe_ref is not None and probe_ref["entries"] >= 1,
+          refs)
+
+    scoped = knowledge_ledger.for_context(stage="distill-probe")
+    check("关联: 按阶段反查拿到该阶段的经验（顺序按 confidence 降序）",
+          scoped["total"] >= 1
+          and any(item["entry"]["id"] == entry_id for item in scoped["items"])
+          and all(item["refKind"] == "stage" for item in scoped["items"]), scoped)
+    check("关联: 反查回执自带 refs，调用方能确认查的是哪个阶段",
+          scoped["refs"] == [{"refKind": "stage", "refId": "distill-probe"}], scoped["refs"])
+
+    blank = knowledge_ledger.for_context()
+    check("关联: ⭐ stage/shot 都不给 ⇒ 空结果 + 人话（不把全库当上下文命中）",
+          blank["available"] is True and blank["total"] == 0
+          and blank["items"] == [] and "必须点名" in blank["hint"], blank)
+
+    ghost = knowledge_ledger.for_context(stage="ghost-stage-xyzzy")
+    check("关联: 没挂过条目的阶段 ⇒ total=0 且 hint 说明是没有而不是坏了",
+          ghost["available"] is True and ghost["total"] == 0 and bool(ghost["hint"]), ghost)
+
+    sibling = knowledge_ledger.upsert(
+        kind="lesson", scope="EP1", title="同阶段另一条经验",
+        body="同一个阶段下的另一条结论，用来验证反向关联。",
+        evidence=["probe-fail-0"], links=[("stage", "distill-probe")])
+    check("关联: 同 ref 的第二条条目写库成功（反向边的前提）", sibling["ok"] is True, sibling)
+
+    neighbours = knowledge_ledger.related(entry_id)
+    shared_ids = [item["entry"]["id"] for item in neighbours["items"] if item["via"] == "shared"]
+    check("关联: ⭐ 共用同一 stage 的兄弟条目被反向查出（这才是 entry_links 的用处）",
+          sibling["id"] in shared_ids
+          and neighbours["counts"]["shared"] >= 1, neighbours)
+    check("关联: 共享档不带分数（有事实依据，不该伪造成相似度）",
+          all(item["score"] is None for item in neighbours["items"] if item["via"] == "shared"),
+          neighbours["items"])
+    check("关联: 本条自己的 ref 原样带回（前端要显示挂在哪个阶段上）",
+          {"refKind": "stage", "refId": "distill-probe"} in neighbours["links"],
+          neighbours["links"])
+
+    near = knowledge_ledger.upsert(
+        kind="fact", scope="global", title="Krea2 夜景低步数会过曝",
+        body="低步数在夜景里容易过曝，先降步数再看。")
+    near_dup = knowledge_ledger.upsert(
+        kind="fact", scope="global", title="Krea2 夜景低步数会过曝，先降步数",
+        body="低步数在夜景里容易过曝，先降步数再看。")
+    unrelated = knowledge_ledger.upsert(
+        kind="fact", scope="global", title="口型与音轨对不上",
+        body="成片的唇形与音轨差半拍。")
+    cross_kind = knowledge_ledger.upsert(
+        kind="lesson", scope="EP3", title="Krea2 夜景低步数会过曝",
+        body="低步数在夜景里容易过曝，先降步数再看。", evidence=["probe-fail-1"])
+    fact_neighbours = knowledge_ledger.related(near["id"])
+    similar_ids = [item["entry"]["id"] for item in fact_neighbours["items"]
+                   if item["via"] == "similar"]
+    check("关联: 正文近乎同源的条目进相似档且带分数（≥ SIMILAR_RATIO）",
+          near_dup["id"] in similar_ids
+          and all(float(item["score"] or 0) >= knowledge_ledger.SIMILAR_RATIO
+                  for item in fact_neighbours["items"] if item["via"] == "similar"),
+          fact_neighbours["items"])
+    check("关联: ⭐ 不相关条目**不**进相似档（否则邻居列表就是噪声）",
+          unrelated["id"] not in similar_ids, similar_ids)
+    check("关联: ⭐ 跨 kind 不做相似（fact 与 lesson 字面再像也不是一件事）",
+          cross_kind["id"] not in similar_ids, similar_ids)
+    check("关联: 空文本相似度是 0 而不是 1（否则空条目会跟谁都像）",
+          knowledge_ledger._similarity("", "夜景过曝") == 0.0)
+
+    knowledge_ledger.soft_delete(near_dup["id"])
+    deleted_neighbours = knowledge_ledger.related(near["id"])
+    check("关联: 已软删的邻居默认不出现（回收站里的条目不该混进正常邻居）",
+          near_dup["id"] not in [i["entry"]["id"] for i in deleted_neighbours["items"]])
+    revived = knowledge_ledger.related(near["id"], include_deleted=True)
+    check("关联: includeDeleted=True 时才把已删邻居带回来",
+          near_dup["id"] in [i["entry"]["id"] for i in revived["items"]])
+
+    knowledge_ledger.soft_delete(near["id"])
+    dead = knowledge_ledger.related(near["id"])
+    check("关联: 条目已软删 ⇒ found=True/deleted=True（不是不存在）",
+          dead["found"] is True and dead["deleted"] is True and dead["items"] == [], dead)
+    missing = knowledge_ledger.related("no-such-entry-xyzzy")
+    check("关联: 条目不存在 ⇒ found=False 且 available=True（不抛异常、也不假装成功）",
+          missing["found"] is False and missing["available"] is True, missing)
+
+    # 路由层：服务层绿 ≠ 端点通 —— camelCase 别名只接一半就 422，而前端传的正是驼峰
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routers import knowledge_loop as knowledge_loop_router
+
+    probe_app = FastAPI()
+    probe_app.include_router(knowledge_loop_router.router)
+    with TestClient(probe_app) as client:
+        base = "/api/v1/knowledge-loop"
+        resp = client.get(f"{base}/entries/{near['id']}/related",
+                          params={"limit": 5, "includeDeleted": "true"})
+        payload = resp.json()
+        check("关联: GET /entries/{id}/related 通，includeDeleted 别名可收（驼峰不是 422）",
+              resp.status_code == 200 and payload.get("data", {}).get("found") is True
+              and payload.get("data", {}).get("deleted") is True, payload)
+
+        resp = client.get(f"{base}/context", params={"stage": "distill-probe", "limit": 5})
+        payload = resp.json()
+        check("关联: GET /context 按阶段反查通，且回 data 包装",
+              resp.status_code == 200 and payload.get("data", {}).get("total", 0) >= 1
+              and payload["data"]["refs"][0]["refId"] == "distill-probe", payload)
+
+        resp = client.get(f"{base}/context")
+        payload = resp.json()
+        check("关联: GET /context 不给参数 ⇒ 200 + total=0 + hint（不是 422，也不返回全量）",
+              resp.status_code == 200 and payload["data"]["total"] == 0
+              and bool(payload["data"]["hint"]), payload)
+
+        resp = client.get(f"{base}/context/refs", params={"refKind": "stage"})
+        payload = resp.json()
+        check("关联: GET /context/refs 只回 stage 档，且条目数是正数",
+              resp.status_code == 200
+              and all(i["refKind"] == "stage" for i in payload["data"]["items"])
+              and any(i["refId"] == "distill-probe" and i["entries"] >= 1
+                      for i in payload["data"]["items"]), payload)
+
     lift = knowledge_distill.refresh_lift()
     check("蒸馏: 样本不足的 accepted 条目写 lift=None 并计入 skipped",
           lift["skipped"] >= 1 and all(i["lift"] is None for i in lift["items"]
@@ -324,6 +447,69 @@ def main() -> int:
     check("投喂: ⭐ 无可用知识时 text 为空但 available=True（「没好料」不是「库坏了」）",
           empty_feed["text"] == "" and empty_feed["available"] is True
           and "accepted" in empty_feed["hint"], empty_feed)
+
+    #: 写入口给的作用域是 EP<id>/DRAMA<id>（knowledge_tools）与 stage:/shot:（knowledge_distill），
+    #: 而读入口原先只认 global 与「全仓没人写」的 agent:<type> ⇒ 同一集里刚采纳的经验
+    #: 在下一次同集跑次里注入不进去，回执还只说「还没有知识」。这一组钉住键域对齐。
+    broad = knowledge_feed.compile_for_prompt("script")
+    ep_feed = knowledge_feed.compile_for_prompt("script", scopes=["EP1"])
+    check("投喂: ⭐ 传 scopes=EP1 才带出 EP1 作用域条目（写读键域对齐，不是靠 agent:<type>）",
+          "不属于 global 的经验" in ep_feed["text"] and "EP1" in ep_feed["scopes"], ep_feed)
+    check("投喂: 不传 scopes 时同一条仍被排除，且 blocked 如实多算（默认不猜作用域）",
+          "不属于 global 的经验" not in broad["text"]
+          and broad["blocked"] >= 1 and broad["blocked"] > ep_feed["blocked"],
+          {"broadBlocked": broad["blocked"], "epBlocked": ep_feed["blocked"]})
+
+    check("投喂: scopes_for 与写入口字面形一致（EP12／DRAMA3），非数字不编",
+          knowledge_feed.scopes_for(episode_id=12, drama_id=3) == ["EP12", "DRAMA3"]
+          and knowledge_feed.scopes_for() == []
+          and knowledge_feed.scopes_for(episode_id="x") == [],
+          knowledge_feed.scopes_for(episode_id=12, drama_id=3))
+
+    knowledge_ledger.upsert(kind="threshold", scope="EP9", title="阈值只在第九集成立",
+                            body="第九集的过曝阈值比其他集低一档。",
+                            evidence=["trace:agent/t1"], status="accepted")
+    blocked_feed = knowledge_feed.compile_for_prompt("script", kinds=("threshold",))
+    check("投喂: ⭐ 有知识但作用域不匹配 ⇒ text 空 + blocked>0 + hint 点名作用域"
+          "（不是「还没积累」）",
+          blocked_feed["text"] == "" and blocked_feed["blocked"] >= 1
+          and "作用域" in blocked_feed["hint"], blocked_feed)
+
+    #: 准入打通了还不够：若排序仍只看 weight，一条全局高置信成法就会把
+    #: 本集的具体经验挤出 limit 之外，定向通道等于开了一半。这组钉住「定向优先占预算」。
+    #: 造数用 `work` —— 它不在 DEFAULT_KINDS 里，不会污染其它判据的默认投喂；
+    #: 证据照挂真实 run（假 run_id 会被 check_evidence 拒收，且拒收是静默的，故逐条核 ok）。
+    for index in range(9):
+        written = knowledge_ledger.upsert(
+            kind="work", scope="global", title=f"通用成法{index}",
+            body=f"通用第{index}条正文。", evidence=["trace:agent/t1"],
+            confidence=0.9, status="accepted")
+        check(f"投喂: 造数 {index} 写入成功（静默拒收是造数最常踩的坑）",
+              written.get("ok") is True, written)
+    knowledge_ledger.upsert(kind="work", scope="EP1", title="只在第一集成立的写法",
+                            body="第一集的外景只用这一种布光。",
+                            evidence=["trace:agent/t1"], confidence=0.1,
+                            status="accepted")
+    knowledge_ledger.upsert(kind="work", scope="EP1", title="第一集特有的机位",
+                            body="第一集的过肩镜一律从右后方起。",
+                            evidence=["trace:agent/t1"], confidence=0.05,
+                            status="accepted")
+    ranked = knowledge_feed.compile_for_prompt("script", scopes=["EP1"], limit=8,
+                                               kinds=("work",))
+    check("投喂: ⭐ 定向条目挤进预算（9 条全局 0.9 vs 2 条本集 0.1/0.05，limit=8），"
+          "且档内按 weight 排而不是按插入顺序",
+          "只在第一集成立的写法" in ranked["text"]
+          and "第一集特有的机位" in ranked["text"]
+          and ranked["targeted"] == 2
+          and ranked["text"].index("只在第一集成立的写法")
+          < ranked["text"].index("第一集特有的机位"), ranked)
+
+    plain_feed = knowledge_feed.compile_for_prompt("script", limit=8, kinds=("work",))
+    check("投喂: 不给 scopes 时两条仍在预算外，targeted=0、blocked=2"
+          "（定向没开就不假装开）",
+          "只在第一集成立的写法" not in plain_feed["text"]
+          and "第一集特有的机位" not in plain_feed["text"]
+          and plain_feed["targeted"] == 0 and plain_feed["blocked"] == 2, plain_feed)
 
     _run("vid-good", kind="video", status="ok", stage="video-probe", score=0.9,
          meta={"prompt": "雨夜巷口，逆光", "steps": 8, "cfg": 1.0, "seed": 777})
@@ -365,9 +551,13 @@ def main() -> int:
     paths = app.openapi()["paths"]
     wanted = ["/runs", "/runs/stats", "/runs/rebuild", "/entries", "/search", "/distill",
               "/lift/refresh", "/feed/preview", "/feed/export", "/report",
-              "/datasets", "/datasets/resolve"]
+              "/datasets", "/datasets/resolve", "/context", "/context/refs"]
     missing = [p for p in wanted if f"/api/v1/knowledge-loop{p}" not in paths]
     check("接线: 知识闭环路由已挂到 /api/v1/knowledge-loop", not missing, missing)
+    check("接线: 关联读侧两个口也挂上了（/context 与 /context/refs）",
+          all(f"/api/v1/knowledge-loop{p}" in paths for p in ["/context", "/context/refs"]))
+    check("接线: 条目邻居口是路径参数形态（/entries/{entry_id}/related）",
+          any(k.endswith("/entries/{entry_id}/related") for k in paths), list(paths)[:3])
     check("接线: 条目详情与状态口在（路径参数形态）",
           all(any(k.startswith(f"/api/v1/knowledge-loop{p}") for k in paths)
               for p in ["/entries/{entry_id}", "/entries/{entry_id}/status"]))
@@ -407,6 +597,30 @@ def main() -> int:
     searched = asyncio.run(tools["search_knowledge"].run({"query": "过曝"}))
     check("接线: 检索工具透出 ranking（不粉饰）",
           searched.get("available") is True and searched.get("ranking") == "like", searched)
+
+    contextual = asyncio.run(tools["context_knowledge"].run({"stage": "distill-probe"}))
+    check("接线: ⭐ 上下文工具按 stage 反查到该阶段经验（关键词检索答不了这一问）",
+          contextual.get("available") is True and contextual.get("total", 0) >= 1
+          and any(i["refId"] == "distill-probe" for i in contextual.get("items", [])),
+          contextual)
+
+    at_shot = asyncio.run(tools["context_knowledge"].run({"shot": "ghost-shot-xyzzy"}))
+    check("接线: 上下文工具查不存在的镜头 ⇒ 空 + hint（不编经验）",
+          at_shot.get("total") == 0 and bool(at_shot.get("hint")), at_shot)
+
+    discover = asyncio.run(tools["context_knowledge"].run({}))
+    check("接线: ⭐ 三个参数都不给 ⇒ 回 ref 清单（让模型别猜阶段名）",
+          discover.get("available") is True and discover.get("items")
+          and "distill-probe" in discover.get("hint", ""), discover)
+
+    neighbour_tool = asyncio.run(tools["context_knowledge"].run({"entryId": sibling["id"]}))
+    check("接线: 上下文工具取邻居带回本条挂载的 ref（links 原样给模型看）",
+          neighbour_tool.get("found") is True
+          and {"refKind": "stage", "refId": "distill-probe"} in neighbour_tool.get("links", []),
+          neighbour_tool)
+    dead_tool = asyncio.run(tools["context_knowledge"].run({"entryId": near["id"]}))
+    check("接线: 已软删条目在工具侧也不给邻居（与详情一致，不留后门）",
+          dead_tool.get("deleted") is True and dead_tool.get("items") == [], dead_tool)
 
     bad_kind = asyncio.run(tools["search_knowledge"].run({"query": "过曝", "kind": "nope"}))
     check("接线: 工具给错类型不静默回空（available=False + hint 列可选项）",
@@ -473,6 +687,11 @@ def main() -> int:
           len(fed) >= 1
           and all(isinstance(i, str) and len(i.rsplit("-", 1)[-1]) == 16 for i in fed), fed)
 
+    fed_ep: list[str] = []
+    ep_text = agent_runtime.append_knowledge_feed("script", "BASE", fed_ep, scopes=["EP1"])
+    check("注入: ⭐ scopes 真透传进编译（同一集的经验这次进得了 system prompt）",
+          "不属于 global 的经验" in ep_text, ep_text)
+
     original_compile = knowledge_feed.compile_for_prompt
     knowledge_feed.compile_for_prompt = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
     try:
@@ -482,6 +701,17 @@ def main() -> int:
         knowledge_feed.compile_for_prompt = original_compile
 
     os.environ.pop(agent_runtime.KNOWLEDGE_FEED_ENV, None)
+
+    preview = client.get("/api/v1/knowledge-loop/feed/preview",
+                         params={"agentType": "script", "episodeId": 1}).json()
+    check("投喂: ⭐ GET /feed/preview 带 episodeId 时与生产同口径（预览得到本集条目）",
+          "不属于 global 的经验" in (preview["data"]["text"] or "")
+          and "EP1" in preview["data"]["scopes"], preview.get("data"))
+
+    preview_bare = client.get("/api/v1/knowledge-loop/feed/preview",
+                              params={"agentType": "script"}).json()
+    check("投喂: 预览不带 episodeId ⇒ blocked>0（把漏掉的那些如实数出来）",
+          preview_bare["data"]["blocked"] >= 1, preview_bare.get("data"))
 
     source = (BP / "app" / "agent" / "runtime.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -494,6 +724,19 @@ def main() -> int:
     ) if nodes else False
     check("注入: ⭐ 注入挂在**唯一组装点**里（否则两个入口会分叉，历史缺陷重演）",
           calls_feed, [n.name for n in nodes])
+
+    feed_calls = [n for n in ast.walk(nodes[0])
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "append_knowledge_feed"] if nodes else []
+    scoped_in_assembler = any(
+        any(kw.arg == "scopes"
+            and isinstance(kw.value, ast.Call)
+            and isinstance(kw.value.func, ast.Attribute)
+            and kw.value.func.attr == "scopes_for"
+            for kw in call.keywords)
+        for call in feed_calls)
+    check("注入: ⭐ 组装点自己从 episode_id/drama_id 算作用域（不指望各调用方记得传）",
+          scoped_in_assembler, [kw.arg for c in feed_calls for kw in c.keywords])
 
     check("注入: record_knowledge_usage 记 failed 也照记（失败样本比成功的更有用）",
           agent_runtime.record_knowledge_usage(fed, type("T", (), {"trace_id": "abc12345"})(),

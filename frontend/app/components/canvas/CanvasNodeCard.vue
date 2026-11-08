@@ -24,13 +24,21 @@ import { compressImageForUpload, formatBytes } from '../../utils/mediaFile'
 import { cropImage, type CropRect } from '../../utils/canvasImageOps'
 import { useComfyRun, type ComfyWorkflow } from '../../composables/useComfyRun'
 import { useEngineRun, type EngineStage } from '../../composables/useEngineRun'
+import type { GeneratedPayload, RunAnswer, RunOverride, RunVerdict } from '../../utils/canvasOps'
+import { normalizeRunVerdict } from '../../utils/canvasOps'
+import type { ReferenceInputs } from '../../utils/canvasReferences'
 import CanvasCropDialog from './CanvasCropDialog.vue'
 
 const props = defineProps<{
   node: CanvasNode
   selected: boolean
-  /** 上游素材（连线 / 同组 ✓，由画布统一算好传进来 ✓）—— 生成时当参考图 ✓ */
-  references?: { images: string[]; text?: string }
+  /**
+   * 上游素材（连线 / 同组 ✓，由画布统一算好传进来 ✓）—— 生成时当参考图 ✓。
+   *
+   * `prompt` 是**这张卡真正的提示词**（配置卡正文是 `@[node:…]` 时已解析成正文 ✓），
+   * 生成只认它；`text` 仍只给插件节点用（HTML/便利贴的「来自上游」）✓。
+   */
+  references?: ReferenceInputs
 }>()
 
 const emit = defineEmits<{
@@ -41,7 +49,7 @@ const emit = defineEmits<{
   /** 非错误提示 ✓（如"已压缩后再上传"）—— 混进 error 通道会让人以为传失败了 ✗ */
   (e: 'notice', message: string): void
   /** 生成完成 ⇒ 由画布**新开一张卡**带进来 ✓（原地覆盖会把用户手上的参考图冲掉 ✗） */
-  (e: 'generated', payload: { kind: 'image' | 'video' | 'audio'; url: string; runId: number | null }): void
+  (e: 'generated', payload: GeneratedPayload): void
 }>()
 
 // ─────────────────── 插件节点（`<pluginId>:<name>`）───────────────────
@@ -221,7 +229,13 @@ function numeric(raw: Record<string, string>, key: string): number | undefined {
 }
 
 /** 表单 → ``POST /comfyui/runs`` 的注册表形态 ✓（后端负责注入，前端**不拼图** ✗） */
-function buildPayload() {
+/**
+ * 这张卡**真正的提示词** ✓（口径见 `canvasReferences.collectReferenceInputs`）：
+ * 配置卡正文若是 `@[node:text-…]` 引用串，必须换成文本卡正文再提交 ✗ 否则引擎收到的是引用标记。
+ */
+const promptText = computed(() => props.references?.prompt ?? (props.node.text || ''))
+
+function buildPayload(promptOverride?: string) {
   const raw = props.node.values || {}
   const width = numeric(raw, 'width')
   const height = numeric(raw, 'height')
@@ -241,7 +255,7 @@ function buildPayload() {
     workflowId: props.node.workflowId,
     variant: props.node.variant || undefined,
     // ⚠️ 提示词走**顶层 prompt** ✓：bindings 里 prompt 是特例（没有 from 路径）
-    prompt: props.node.text || '',
+    prompt: promptOverride ?? promptText.value,
     size: width && height ? { width, height } : undefined,
     quality: steps !== undefined || cfg !== undefined ? { steps, cfg } : undefined,
     count: numeric(raw, 'count') ?? 1,
@@ -252,13 +266,34 @@ function buildPayload() {
   }
 }
 
-async function runWorkflow() {
-  if (!props.node.workflowId) return
-  try {
-    await run.start(props.node.id, buildPayload())
-  } catch (err: any) {
-    emit('error', `提交失败：${err?.message || err}`)
+/**
+ * 「这一次没跑起来」的**唯一**出口 ✓✗：既弹给点按钮的人，也把理由交给调用方。
+ *
+ * 两处都不能省：`emit` 是手动点「生成」时的即时反馈（那时没人在等返回值）；
+ * `reason` 是对话代跑用的 —— 上一轮只 `emit` 后 `return false`，回执就只能写
+ * 「生成没提交成：看卡片上的缺项提示」，理由明明算出来了却被丢掉 ✗。
+ */
+function fail(reason: string): RunVerdict {
+  emit('error', reason)
+  return { ok: false, reason }
+}
+
+/** 口径与 `runEngine` 一致：**答复说 ok ＝真提交了**（对话面板据此回执，不谎报 ✗） */
+function runWorkflow(override?: RunOverride): RunAnswer {
+  if (!props.node.workflowId) return { ok: false, reason: '这张卡还没绑定工作流：先在卡上选一个' }
+  const prompt = (override?.prompt || promptText.value || '').trim()
+  if (!prompt) {
+    // 工作流侧同样不该拿空提示词去跑（`prompt` 是 bindings 的特例字段，空串会顶掉模板默认值 ✗）
+    return fail('还没有提示词：先在卡片上写一句要生成什么')
   }
+  try {
+    void run.start(props.node.id, buildPayload(prompt)).catch((err: any) => {
+      emit('error', `提交失败：${err?.message || err}`)
+    })
+  } catch (err: any) {
+    return fail(`提交失败：${err?.message || err}`)
+  }
+  return { ok: true }
 }
 
 async function cancelRun() {
@@ -330,6 +365,22 @@ const traits = computed<StageTraits | null>(
 const isVideoStage = computed(() => Boolean(traits.value?.video))
 const needsFirstFrame = computed(() => Boolean(traits.value?.firstFrame))
 const isAudioStage = computed(() => Boolean(traits.value?.audio))
+
+/**
+ * 这张卡能出什么成品 ✓ —— 与 `canvas_ops` 的 `mode` 同一套词（`text|image|video|audio`）。
+ *
+ * 本仓**没有文本生成档**（`/engine/stages` 里全是图/视频/音频），所以 `text` 不在这张表里：
+ * 会话里若真给了 `mode=text`，下面的比对会如实拒掉，而不是按图片档偷偷出图 ✗。
+ */
+const STAGE_KIND_LABEL: Record<string, string> = {
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+  text: '文本',
+}
+const stageKind = computed<'image' | 'video' | 'audio'>(
+  () => (isAudioStage.value ? 'audio' : isVideoStage.value ? 'video' : 'image'),
+)
 /** 要时长那一格 ✓（视频与音频都要，但**只有它们要** ✓ —— 图档给 seconds 是噪音 ✗） */
 const needsSeconds = computed(() => isVideoStage.value || isAudioStage.value)
 
@@ -379,11 +430,11 @@ const referenceHint = computed<{ text: string; warn: boolean }>(() => {
  * ⚠️ 也不传 `width/height` ✗：引擎的尺寸口径是 `ratio` + `megapixels`（**按档吸附** ✓），
  * 硬给像素会被计划层再吸一次 ✓，两边不一致时用户看到的数对不上 ✗。
  */
-function buildEnginePayload() {
+function buildEnginePayload(promptOverride?: string) {
   const raw = props.node.values || {}
   const payload: Record<string, unknown> = {
     stage: currentStage.value?.stage,
-    prompt: props.node.text || '',
+    prompt: promptOverride ?? promptText.value,
     negative: raw.negative || undefined,
     ratio: raw.ratio || undefined,
     megapixels: numeric(raw, 'megapixels'),
@@ -447,36 +498,89 @@ function buildEnginePayload() {
   return payload
 }
 
-async function runEngine() {
+/** 「为了档位清单只等一下」的一次性闸（每张卡各自一份，避免无限重试） */
+let waitedStages = false
+
+/**
+ * 点「生成」＝先过四道闸，全过才提交。
+ *
+ * 返回 **true ＝真提交了**：对话面板（`defineExpose` 那条路）据此才敢写
+ * 「已提交生成」✓ —— 闸没过就返回 false，面板会把这张卡退回「待运行」，
+ * 不谎报 ✗。提交本身是 fire-and-forget（产物好了由 `generated` 事件带回卡）。
+ */
+function runEngine(override?: RunOverride): RunAnswer | Promise<RunAnswer> {
   const stage = currentStage.value
   if (!stage) {
-    emit('error', '还没有档位清单：后端 `/engine/stages` 没返回任何档位')
-    return
+    /*
+     * 清单还没到 ≠ 没有档位：刚开页、或对话里「建卡 + 立刻生成」时，
+     * `/engine/stages` 往往还在路上。此刻直接报「没有档位」是误判 ✗，
+     * 所以先等它一次再跑（只等一次，真拿不到才如实报错 ✓）。
+     *
+     * ⭐ 等的时候**必须把 promise 交出去** ✗✗：旧写法返回 `true`，等于对调用方说
+     * 「已经提交了」，可清单拉回来若仍没有档位（或拉取失败），它其实一条都没提交 ⇒
+     * 面板会写下「已提交生成」而画布上什么都没发生 ✓✗。
+     */
+    // 正在加载中也要等（`loadStages` 会复用同一个 loadPromise，不会多发请求 ✓）
+    if (!waitedStages && !engineStagesError.value) {
+      waitedStages = true
+      return engine.loadStages()
+        .then(() => runEngine(override))
+        // 等的过程本身可能抛（后端 500 / 超时）⇒ 那也是一句该写进回执的理由 ✓
+        .then(
+          (answer) => normalizeRunVerdict(answer),
+          (err: any) => ({ ok: false, reason: `档位清单拉取失败：${err?.message || err}` }),
+        )
+    }
+    return fail(
+      engineStagesError.value
+        ? `档位清单拉取失败：${engineStagesError.value}`
+        : '还没有档位清单：后端 `/engine/stages` 没返回任何档位',
+    )
   }
   if (!stage.ready) {
     // 缺件就别提交 ✓：跑起来也会在装载阶段失败 ✓，那几十秒白等 ✗
     const detail = stage.missing.slice(0, 2).join('；')
-    emit('error', `${stage.label} 缺 ${stage.missing.length} 件：${detail || '看 /engine/stages'}`)
-    return
+    return fail(`${stage.label} 缺 ${stage.missing.length} 件：${detail || '看 /engine/stages'}`)
+  }
+  /*
+   * 模型点名的类别必须与这张卡的档位对得上 ✓。
+   * 对不上就**如实拒绝**：静默按卡上档位跑，用户会得到一张「要视频却出图」的产物，
+   * 而对话已经回了「已提交」，事后完全查不出是哪一环错 ✗。
+   */
+  const wanted = (override?.mode || '').trim()
+  if (wanted && wanted !== stageKind.value) {
+    return fail(
+      `${stage.label} 是「${STAGE_KIND_LABEL[stageKind.value]}」档，跑不了「${STAGE_KIND_LABEL[wanted] || wanted}」：`
+      + '换一张对应档位的卡，或在卡上把档位改过去',
+    )
+  }
+  // 有效提示词 ✓：模型这一轮给的优先，其次卡上正文（引用串已由画布解析成正文 ✓）
+  const prompt = (override?.prompt || promptText.value || '').trim()
+  // 空提示词直接提交＝白占一次显卡（后端只会拿空串去跑）⇒ 在这里拦 ✓
+  // 音频档豁免：它的正文是曲风描述，`lyrics`/`seconds` 在 values 里另算 ✓
+  if (!isAudioStage.value && !prompt) {
+    return fail(`${stage.label} 还没有提示词：先在卡片上写一句要生成什么`)
   }
   // 只有 I2V 档才逼首帧 ✓（h3 是文生视频 ✗ —— 在这里拦它等于让用户以为必须连图 ✓✗）
   if (needsFirstFrame.value && !referenceCount.value) {
-    emit('error', `${stage.label} 需要首帧：先连一张图片卡过来`)
-    return
+    return fail(`${stage.label} 需要首帧：先连一张图片卡过来`)
   }
   // 起点图那一格成对使用 ✓：`denoise<1` 却没图 ⇒ 后端会拒（只砍 σ 不换起点＝与参考图无关的灰图 ✗）
   // 音频档没有"起点图"这回事（音频潜帧不吃 initImage ✓）⇒ 这一格不适用 ✗
   const startDenoise = numeric(props.node.values || {}, 'denoise')
   if (!isVideoStage.value && !isAudioStage.value && typeof startDenoise === 'number'
       && startDenoise < 1 && startDenoise > 0 && !referenceCount.value) {
-    emit('error', `起点图 denoise=${startDenoise} 需要一张起点图：先连一张图片卡过来（或把 denoise 清空）`)
-    return
+    return fail(`起点图 denoise=${startDenoise} 需要一张起点图：先连一张图片卡过来（或把 denoise 清空）`)
   }
   try {
-    await engine.start(props.node.id, buildEnginePayload())
+    void engine.start(props.node.id, buildEnginePayload(override?.prompt)).catch((err: any) => {
+      emit('error', `提交失败：${err?.message || err}`)
+    })
   } catch (err: any) {
-    emit('error', `提交失败：${err?.message || err}`)
+    // `start` 同步抛（参数没拼好之类）⇒ 也算没提交 ✓
+    return fail(`提交失败：${err?.message || err}`)
   }
+  return { ok: true }
 }
 
 async function cancelEngine() {
@@ -511,7 +615,7 @@ watch(
     const kind = /\.(mp3|wav|flac|m4a|ogg)$/i.test(state.primaryUrl) || isAudioStage.value
       ? 'audio'
       : /\.(mp4|webm|mov)$/i.test(state.primaryUrl) || isVideoStage.value ? 'video' : 'image'
-    emit('generated', { kind, url: state.primaryUrl, runId: null })
+    emit('generated', { kind, url: state.primaryUrl, runId: null, sourceId: props.node.id })
   },
 )
 
@@ -529,6 +633,7 @@ watch(
       kind: currentWorkflow.value?.type === 'video' ? 'video' : 'image',
       url,
       runId: state.runId,
+      sourceId: props.node.id,
     })
   },
 )
@@ -546,6 +651,33 @@ onMounted(() => {
 watch(runMode, (mode) => {
   if (mode === 'engine') void engine.loadStages()
   else void run.loadWorkflows()
+})
+
+/*
+ * 对话面板要能「代你点一下生成」 ⇒ 把同一条 `runEngine` 通路暴露出去 ✓。
+ *
+ * 刻意**不**在面板里另写一份提交逻辑：档位就绪判断、首帧/起点图校验、缺件拦截
+ * 都在 `runEngine` 里（上面那四个 `emit('error', …)`），另写一份必然漏掉其中几条 ✗。
+ */
+/**
+ * 「生成」按钮与对话面板共用的**唯一入口** ✓ —— 按 `runMode` 分派到本机引擎或
+ * 绑定的 comfy 工作流。分派写两处会错位：引擎卡被工作流口径提交、反之亦然 ✗。
+ *
+ * 返回值可能是 promise（档位清单还在路上，见 `runEngine`）⇒ 调用方请 `await`
+ * 再记账，别把「等」读成「已提交」✗。
+ * 没跑起来时给的是 `{ ok: false, reason }`，那句 `reason` 就是要写进回执的人话 ✓。
+ */
+function runAny(override?: RunOverride): RunAnswer | Promise<RunAnswer> {
+  return runMode.value === 'engine' ? runEngine(override) : runWorkflow(override)
+}
+
+defineExpose({
+  /**
+   * `{ ok: true }` ⇒ 真提交了；`{ ok: false, reason }` ⇒ 没提交且给出理由；
+   * promise ⇒ 还得等一下才知道（面板据此别谎报「已提交」，也别把理由吞掉）
+   */
+  run: runAny,
+  cancel: cancelEngine,
 })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -615,7 +747,7 @@ async function applyCrop(rect: CropRect) {
     const result = await cropImage(mediaUrl(source), rect)
     const file = new File([result.blob], 'crop.png', { type: result.blob.type || 'image/png' })
     const { url } = await uploadAPI.image(file)
-    emit('generated', { kind: 'image', url, runId: null })
+    emit('generated', { kind: 'image', url, runId: null, sourceId: props.node.id })
     emit('notice', `已裁剪 ${result.width}×${result.height}，已带入画布`)
   } catch (err: any) {
     emit('error', `裁剪失败：${err?.message || err}`)

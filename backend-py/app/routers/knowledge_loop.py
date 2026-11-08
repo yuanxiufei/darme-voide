@@ -134,7 +134,7 @@ def post_runs_rebuild(payload: dict[str, Any] | None = None) -> Any:
 @router.get("/entries")
 def get_entries(
     kind: str | None = Query(None, description="fact/work/recipe/lesson/failure/threshold/prompt_patch"),
-    scope: str | None = Query(None, description="global / drama:<id> / stage:<name> / agent:<type>"),
+    scope: str | None = Query(None, description="真实字面形：global / EP12 / DRAMA3 / stage:krea2 / shot:SHOT-012"),
     status: str | None = Query(None, description="proposed / accepted / deprecated / rejected"),
     tags: str | None = Query(None, description="逗号分隔，**AND 语义**（多标签＝同时具备）"),
     include_deleted: bool = Query(False, alias="includeDeleted",
@@ -163,6 +163,57 @@ def get_entry(
     if item is None:
         return not_found(f"没有这条知识：{entry_id}")
     return success(item)
+
+
+@router.get("/entries/{entry_id}/related")
+def get_entry_related(
+    entry_id: str,
+    limit: int = Query(10, ge=1, le=50),
+    include_deleted: bool = Query(False, alias="includeDeleted",
+                                  description="回收站里看邻居时必须显式带上"),
+) -> Any:
+    """一条知识的邻居：**共用同一 stage/shot 的兄弟条目** ＋ **正文相似的条目**。
+
+    条目不存在不报 404 —— 回 ``found=false`` 而不是异常，因为这是「详情面板的附加信息」，
+    为它把整页打成错误不值；但**也不假装成功**（``found`` 字段如实说）。
+    已软删的条目默认按「不存在」对待（与详情一致：否则就是绕过软删的后门）。
+    """
+    return success(knowledge_ledger.related(entry_id, limit=limit,
+                                            include_deleted=include_deleted))
+
+
+@router.get("/context")
+def get_context(
+    stage: str | None = Query(None, description="阶段名，如 image / video / h3（蒸馏写的是这几个字面值）"),
+    shot: str | None = Query(None, description="镜头 id，如 SHOT-001"),
+    status: str | None = Query(None, description="只取该状态，如 accepted"),
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    limit: int = Query(10, ge=1, le=50),
+) -> Any:
+    """按「阶段 / 镜头」反查经验（读 ``entry_links`` 反向索引）。
+
+    ``stage``/``shot`` 都不给 ⇒ **空结果 + 人话**，不返回全量：把"没点名上下文"
+    当成"全部都是上下文命中"，调用方会以为拿到了针对性经验。
+    """
+    return success(knowledge_ledger.for_context(
+        stage=stage, shot=shot, status=status,
+        include_deleted=include_deleted, limit=limit))
+
+
+@router.get("/context/refs")
+def get_context_refs(
+    ref_kind: str | None = Query(None, alias="refKind",
+                                 description="stage / shot（不传＝两种都给）"),
+    entry: str | None = Query(None, description="只看这一条挂的 ref"),
+    limit: int = Query(200, ge=1, le=500),
+) -> Any:
+    """台账里**真被挂过**的 ref 清单（附条目数）。
+
+    没有它前端只能猜阶段名（``video``? ``h3``?），猜错的表现是"查了没结果"，
+    与"确实没有经验"永远分不开。
+    """
+    return success(knowledge_ledger.context_refs(
+        ref_kind=ref_kind, entry=entry, limit=limit))
 
 
 @router.post("/entries")
@@ -549,6 +600,9 @@ def get_scheduler() -> Any:
 @router.get("/feed/preview")
 def get_feed_preview(
     agent_type: str | None = Query(None, alias="agentType"),
+    episode_id: int | None = Query(None, alias="episodeId"),
+    drama_id: int | None = Query(None, alias="dramaId"),
+    scopes: str | None = Query(None, description="额外作用域，逗号分隔，如 stage:krea2,shot:SHOT-012"),
     budget_chars: int = Query(knowledge_feed.DEFAULT_BUDGET, alias="budgetChars",
                               ge=0, le=8000),
     limit: int = Query(8, ge=1, le=30),
@@ -557,9 +611,16 @@ def get_feed_preview(
 
     ``entries`` 是真正被写进去的 id；生产侧拿它去 ``record_injection`` 记 usage，
     没有这一步 ``lift`` 永远算不出来。
+
+    ⚠️ 预览必须能**按集预览**（``episodeId``），否则这里看不到真实注入：
+    生产侧由 ``assemble_full_instructions`` 传 ``EP<id>``/``DRAMA<id>``，
+    不带这两个参数预览出来的是「只剩全局成法」的另一种结果，两者差别恰好就是
+    此前那个静默漏掉的那批条目。``blocked`` 才是「有知识但进不来」的那个数。
     """
+    extra = [x.strip() for x in str(scopes or "").split(",") if x.strip()]
+    extra += knowledge_feed.scopes_for(episode_id=episode_id, drama_id=drama_id)
     return success(knowledge_feed.compile_for_prompt(
-        agent_type, budget_chars=budget_chars, limit=limit))
+        agent_type, scopes=extra, budget_chars=budget_chars, limit=limit))
 
 
 @router.post("/feed/export")

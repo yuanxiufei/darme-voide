@@ -152,18 +152,88 @@ async def generate_text(
     raise ValueError("文本生成失败")
 
 
-#: 自研文本后端缓存 ✓（key = ``(gguf_path, tokenizer_path, device, dtype)`` ✓ —— 大权重只 load 一次 ✗）
+#: 自研文本后端缓存 ✓（key = ``(gguf_path, tokenizer_path, device, dtype, gpu_layers, kv_mode)`` ✓
+#: —— 大权重只 load 一次 ✗）
 #: ⚠️ 设备/精度**必须进 key** ✗✗：只按路径缓存 ⇒ 改 ``device``/``dtype`` 后仍拿到**旧设备**的后端 ✗
 #: （表现：配置里写了 cuda，跑起来还是 CPU 的速度 ✓ 而且看不出来 ✗）。
-_engine_backends: dict[tuple[str, str | None, str, str], Any] = {}
+#: ⚠️ ``gpu_layers`` 同理更狠 ✗✗：不进 key ⇒ 把「分层放置」的配置改掉仍拿到**整份在卡上／整份在 CPU**
+#: 的旧后端 ✓ —— 两种口径的权重占用天差地别 ✓✗，回执还会照着旧后端报 ✓。
+#: ⚠️ ``kv_mode`` 同一类坑 ✗✗（2026-11-08）：它不改权重落点、但改**每 token 的 KV 字节** ✓ ⇒ 不进 key
+#: 时把 ``kvMode`` 从 ``off`` 改成 ``q8`` 仍拿到老后端 ✓，显存数字与速度**一动不动**、回执还报 ``fp`` ✓✗
+#: （这属于「配了没生效看不出来」✗）。
+_engine_backends: dict[tuple[str, str | None, str, str, str, str], Any] = {}
+
+
+def _engine_backend_key(gguf_path: str, tokenizer_path: str | None, *,
+                        device: str = "auto", dtype: str | None = None,
+                        gpu_layers: Any = None, kv_mode: Any = None,
+                        kv_cache_bytes: Any = None, spec_lookup: Any = None,
+                        spec_window: Any = None, spec_min_match: Any = None,
+                        ) -> tuple[str, str | None, str, str, str, str, str, str, str, str]:
+    """缓存键口径 ✓（**单一真源** ✗：键在哪拼、就等于哪些参数参与复用 ✓）。
+
+    ⚠️ 单列成函数是为了「能被判据直接读」✗✗：键拼在 ``_get_engine_backend`` 体内时，
+    「``kv_mode`` 到底进没进键」只能靠人肉读源码 ✓（写漏一格 ⇒ 改配置仍拿到旧后端 ✓ 而测试全绿 ✗）。
+
+    ⚠️ **同义写法必须归一成同一个键** ✗✗：``None`` 与 ``"off"`` 都是「不分层/不量化」✓，若各占一格
+    ⇒ 配置从没写变成写 ``off`` 时会**再装一份权重** ✓（4B 物化 bf16 约 8 GiB，卡上两份 ✓✗）。
+    归一后拼错仍保留原样 ✓（键唯一 ✓ ⇒ 由 ``load()`` 具名拒 ✗，不会与合法值共用缓存 ✓）。
+    """
+    from .engine import llm as llm_mod  # 延迟 import ✓（顶层不许拖引擎 ✓）
+
+    gpu_raw = "" if gpu_layers is None else str(gpu_layers).strip().lower()
+    gpu_slot = "" if gpu_raw in ("", "none", "off", "false", "no") else gpu_raw
+    try:
+        kv_slot = llm_mod.resolve_kv_mode(kv_mode)
+    except Exception:  # noqa: BLE001 —— 拼错时原样留一格 ✓（拒绝交给 load() ✗ 不在这里抛 ✗）
+        kv_slot = "" if kv_mode is None else str(kv_mode).strip().lower()
+    try:
+        cache_slot = str(llm_mod.resolve_kv_cache_bytes(kv_cache_bytes))
+    except Exception:  # noqa: BLE001 —— 同上：拼错原样留一格 ✓
+        cache_slot = "" if kv_cache_bytes is None else str(kv_cache_bytes).strip().lower()
+    if cache_slot == "0":      # ⚠️ 关复用＝不占显存 ⇒ 与「没写」（默认 512 MiB）**必须分格** ✗✗
+        cache_slot = "off"
+    # ⚠️ 投机三件套也进 key ✗✗（2026-11-08 补）：它们不改权重落点、但改**每拍吃几行** ✓ ⇒ 不进 key 时
+    # 改 ``specLookup`` 仍拿到按老口径造的后端 ✓ 回执照旧报「关」✓ 而配置明明写着 on ✓✗
+    # （与 ``kvMode`` 同一个坑 ✓）。关着＝**空串**（与「没写」同格 ✓ 不额外装一份权重 ✓）。
+    try:
+        spec_slot = "on" if llm_mod.resolve_spec_lookup(spec_lookup) else ""
+    except Exception:  # noqa: BLE001 —— 拼错原样留一格 ✓ 拒绝交给 load() ✗
+        spec_slot = "" if spec_lookup is None else str(spec_lookup).strip().lower()
+    try:
+        window_slot = str(llm_mod.resolve_spec_window(spec_window)) if spec_slot else ""
+    except Exception:  # noqa: BLE001
+        window_slot = "" if spec_window is None else str(spec_window).strip().lower()
+    try:
+        match_slot = str(llm_mod.resolve_spec_min_match(spec_min_match)) if spec_slot else ""
+    except Exception:  # noqa: BLE001
+        match_slot = "" if spec_min_match is None else str(spec_min_match).strip().lower()
+    return (gguf_path, tokenizer_path, device or "auto", dtype or "", gpu_slot, kv_slot, cache_slot,
+            spec_slot, window_slot, match_slot)
 
 
 def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
-                        device: str = "auto", dtype: str | None = None) -> Any:
-    """自研文本后端（缓存 + 幂等 load ✓）。"""
+                        device: str = "auto", dtype: str | None = None,
+                        gpu_layers: Any = None, kv_mode: Any = None,
+                        kv_cache_bytes: Any = None, spec_lookup: Any = None,
+                        spec_window: Any = None, spec_min_match: Any = None) -> Any:
+    """自研文本后端（缓存 + 幂等 load ✓）。
+
+    ``gpu_layers`` ✓（2026-11-08）：``None``/``"off"`` = 不分层（老路径 ✓）；``0`` = 全 CPU；
+    ``N`` = 前 N 层上卡；``"auto"`` = 按此刻可用显存铺满 ✓。口径见 ``llm_backend.LlmBackend._layer_placement`` ✓。
+
+    ``kv_mode`` ✓（2026-11-08）：``None``/``"off"`` = 原样浮点（老路径 ✓）；``"q8"`` = INT8 分组量化缓存 ✓。
+    归一与合法性由 ``llm.LlmBackend.load()`` 里的 ``resolve_kv_mode`` 判 ✓（拼错在装载前就具名拒 ✗）。
+
+    ``kv_cache_bytes`` ✓（2026-11-08）：跨调用 KV 前缀复用的**预算** ✓（``None`` = 512 MiB ✓、``0`` = 关 ✓）。
+    归一由 ``llm.resolve_kv_cache_bytes`` 判 ✓（同一条纪律：拼错在装载前拒 ✓ 不当 0 处理 ✗）。
+    """
     from .engine import gguf, gguf_to_llm, llm_backend
 
-    key = (gguf_path, tokenizer_path, device or "auto", dtype or "")
+    key = _engine_backend_key(gguf_path, tokenizer_path, device=device, dtype=dtype,
+                              gpu_layers=gpu_layers, kv_mode=kv_mode,
+                              kv_cache_bytes=kv_cache_bytes, spec_lookup=spec_lookup,
+                              spec_window=spec_window, spec_min_match=spec_min_match)
     backend = _engine_backends.get(key)
     if backend is not None:
         return backend
@@ -172,7 +242,10 @@ def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
     # （元数据没有键、也没有 output.weight 张量 ✓✗）⇒ 只读元数据会把完好的文件判成装不了 ✗。
     config = gguf_to_llm.infer_llm_config(info.metadata, tensor_names=info.tensors)
     backend = llm_backend.LlmBackend(config, gguf_path=gguf_path, tokenizer_path=tokenizer_path,
-                                     device=device, dtype=dtype)
+                                     device=device, dtype=dtype, gpu_layers=gpu_layers,
+                                     kv_mode=kv_mode, kv_cache_bytes=kv_cache_bytes,
+                                     spec_lookup=spec_lookup, spec_window=spec_window,
+                                     spec_min_match=spec_min_match)
     backend.load()
     _engine_backends[key] = backend
     return backend
@@ -182,6 +255,108 @@ def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
 #: ⚠️ 必须共用同一个缓存 ✗✗ —— 各建一份 ⇒ 同一份权重在卡上装两遍 ✓✗（4B Q4_K_M 物化成
 #: bf16 约 8 GiB，两份就顶爆 22 GiB 卡的余量 ✓），而且两个后端各自持有一份 KV 缓存 ✓。
 get_engine_backend = _get_engine_backend
+
+
+def engine_gpu_layers(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**分层放置**请求 ✓（``gpuLayers`` ／ ``gpu_layers`` ✓）。
+
+    ⚠️ 单一真源 ✗✗：三个调用口（普通生成／流式／agent 工具循环）各手抄一遍键名 ⇒ 改配置只在一处
+    生效、另外两处还按**整份上卡**装 ✓（同一份权重的落点不一致 ✓ 回执也各说各话 ✗）。
+
+    返回值**原样**给 ``LlmBackend(gpu_layers=...)`` ✓ —— 合法性（``off``/``0``/``N``/``auto``）由它判 ✓，
+    这里**不做**类型转换 ✗（``"8"`` 和 ``8`` 都收 ✓，别在这一层猜调用方想写哪种）。
+    """
+    if not settings:
+        return None
+    value = settings.get("gpuLayers")
+    if value is None:
+        value = settings.get("gpu_layers")
+    return value
+
+
+def engine_kv_mode(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**KV cache 口径**请求 ✓（``kvMode`` ／ ``kv_mode`` ✓）。
+
+    ⚠️ 与 :func:`engine_gpu_layers` 同一条纪律 ✗✗：三个调用口各手抄一遍键名 ⇒ 只在其中一个口
+    生效，另外两处还按原样浮点缓存 ✓（同一个后端被两条路用着，一边省显存一边不省 ✓ 回执还各说各话 ✗）。
+
+    返回值**原样**给 ``LlmBackend(kv_mode=...)`` ✓ —— ``off``/``fp``/``q8`` 的归一与拼错拒绝由
+    ``llm.resolve_kv_mode`` 判 ✓，这里**不做**类型转换 ✗（``None`` 与空串都表示「没请求」✓ ⇒ 老路径 ✓）。
+    """
+    if not settings:
+        return None
+    value = settings.get("kvMode")
+    if value is None:
+        value = settings.get("kv_mode")
+    return value
+
+
+def engine_spec_lookup(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**投机解码**开关 ✓（``specLookup`` ／ ``spec_lookup`` ✓）。
+
+    ⚠️ 与 :func:`engine_kv_mode` 同一条纪律 ✗✗：三个调用口各手抄一遍键名 ⇒ 只在其中一个口生效 ✓。
+    归一（``on``/``off``/... 与拼错拒绝）由 ``llm.resolve_spec_lookup`` 判 ✓，这里原样返回 ✓。
+    """
+    if not settings:
+        return None
+    value = settings.get("specLookup")
+    if value is None:
+        value = settings.get("spec_lookup")
+    return value
+
+
+def engine_spec_window(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读草稿窗口 ✓（``specWindow`` ／ ``spec_window`` ✓）。"""
+    if not settings:
+        return None
+    value = settings.get("specWindow")
+    if value is None:
+        value = settings.get("spec_window")
+    return value
+
+
+def engine_spec_min_match(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读后缀匹配最短长度 ✓（``specMinMatch`` ／ ``spec_min_match`` ✓）。"""
+    if not settings:
+        return None
+    value = settings.get("specMinMatch")
+    if value is None:
+        value = settings.get("spec_min_match")
+    return value
+
+
+def engine_spec_kwargs(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """投机三个口子**一把**给 ✓（调用方 ``**engine_spec_kwargs(settings)`` 即可 ✓ 免得漏抄一个 ✗）。"""
+    return {"spec_lookup": engine_spec_lookup(settings),
+            "spec_window": engine_spec_window(settings),
+            "spec_min_match": engine_spec_min_match(settings)}
+
+
+def engine_kv_cache_bytes(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**跨调用 KV 前缀复用**的预算 ✓（2026-11-08 补）。
+
+    两个键，语义分开写才不乱：
+
+    - ``kvReuse``／``kv_reuse``：**开关** ✓。``off``/``false``/``no``/``0`` ⇒ 关（返回 ``0`` ✓）；
+      写别的（``on`` 等）或不写 ⇒ 开着 ✓。
+    - ``kvCacheBytes``／``kv_cache_bytes``：**预算** ✓。数字或带单位（``512MiB`` ✓）。
+      不写 ⇒ 返回 ``None`` ⇒ 由 ``llm.resolve_kv_cache_bytes`` 取默认 512 MiB ✓
+      （默认账集中在一处 ✗ 不许三个调用口各抄一个数字 ✗）。
+
+    ⚠️ 同一条纪律 ✓：三个调用口（普通生成／流式／agent 工具循环）**共用本函数** ✗✗ ——
+    只给一条路开复用 ⇒ 同一后端被两条路用着、一条省一条不省 ✓ 而回执只有一份 ✓（看不出是哪条 ✗）。
+    """
+    if not settings:
+        return None
+    reuse = settings.get("kvReuse")
+    if reuse is None:
+        reuse = settings.get("kv_reuse")
+    if reuse is not None and str(reuse).strip().lower() in ("off", "false", "no", "0", "none", "disabled"):
+        return 0
+    value = settings.get("kvCacheBytes")
+    if value is None:
+        value = settings.get("kv_cache_bytes")
+    return value
 
 
 async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
@@ -199,7 +374,11 @@ async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
     if not gguf_path:
         raise ValueError("自研文本后端缺少 ggufPath（在文本服务 settings 里配 ✓）")
     backend = _get_engine_backend(str(gguf_path), str(tokenizer_path) if tokenizer_path else None,
-                                  device=device, dtype=str(dtype) if dtype else None)
+                                  device=device, dtype=str(dtype) if dtype else None,
+                                  gpu_layers=engine_gpu_layers(settings),
+                                  kv_mode=engine_kv_mode(settings),
+                                  kv_cache_bytes=engine_kv_cache_bytes(settings),
+                                  **engine_spec_kwargs(settings))
     return await asyncio.to_thread(
         backend.generate, user_prompt,
         system=options.get("system"),

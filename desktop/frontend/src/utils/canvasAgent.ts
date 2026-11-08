@@ -29,8 +29,12 @@ export interface CanvasAgentOutcome {
   errors: string[]
   /** 前端落地被拒（连线被拒、节点不存在等） */
   rejected: string[]
+  /** 不影响落地、但用户该知道的事（例如整批自检没跑成） */
+  warnings: string[]
   /** 等着用户点一下「运行」的配置节点（没注入 `onGenerate` 时才会有） */
   pendingRun: string[]
+  /** 这次真正被改到的节点 id ✓（对话面板据此「选中刚动的卡」并飞过去） */
+  touched: string[]
   /** 模型调用过的工具（排查用） */
   toolCalls: Array<{ toolName: string; args: Record<string, unknown> }>
 }
@@ -43,16 +47,60 @@ export interface CanvasAgentOutcome {
  */
 export async function runCanvasAgent(
   message: string,
-  handlers: { onGenerate?: (op: CanvasOp) => void; includeSnapshot?: boolean } = {},
+  handlers: {
+    /** 可以返回 promise：卡片还没挂载时，它要等挂上跑一次才知道真答案 ✓ */
+    onGenerate?: (op: CanvasOp) => boolean | void | Promise<boolean>
+    includeSnapshot?: boolean
+    /** 用户点「停止」时中止 ✓（抛 `AbortError`，画布一条都不动） */
+    signal?: AbortSignal
+  } = {},
 ): Promise<CanvasAgentOutcome> {
   const text = (message || '').trim()
   if (!text) throw new Error('请先说一句要做什么')
 
   const snapshot = handlers.includeSnapshot === false ? undefined : canvasSnapshot()
-  const reply = await canvasAPI.agent({ message: text, snapshot })
+  const reply = await canvasAPI.agent({ message: text, snapshot }, handlers.signal)
 
   const ops = (reply.ops || []) as CanvasOp[]
-  const apply: ApplyResult = applyCanvasOps(ops, { onGenerate: handlers.onGenerate })
+
+  /*
+   * 落地前**整批自检** ✓（`POST /canvas/ops/validate`，这个接口一直有、此前没人调）。
+   *
+   * 为什么必须补这一步：`applyCanvasOps` 是逐条 try 的，遇到「指向不存在的节点」
+   * 只跳过那一条 ⇒ 一批 6 条落 5 条，用户看到半套节点 + 一句看不懂的告警 ✗；
+   * 后端是**整批判**，有问题就一条都不落、错误逐条列出来 ✓。
+   * 它顺带把字段名归一（`node_type`→`nodeType`、坐标转数字），落地用它的产出更稳。
+   */
+  const warnings: string[] = []
+  let verified = ops
+  if (ops.length) {
+    try {
+      const check = await canvasAPI.validate({ ops, snapshot })
+      if (check.ok && Array.isArray(check.ops)) {
+        verified = check.ops as CanvasOp[]
+      } else {
+        // 整批拒：画布一条不动，把问题原样交给用户（比落一半好收拾 ✓）
+        return {
+          text: reply.text || '',
+          applied: 0,
+          errors: [...(reply.errors || []), ...(check.errors || [])],
+          rejected: [],
+          warnings,
+          pendingRun: [],
+          touched: [],
+          toolCalls: reply.toolCalls || [],
+        }
+      }
+    } catch (err: any) {
+      /*
+       * 自检自己挂了（后端 500 / 断网）不该把用户这一句话吞掉：
+       * 退回「照原样落地」，前端逐条兜底仍在，但要如实说一声 ✓
+       */
+      warnings.push(`整批自检没跑成（${err?.message || err}）：这批按原样落地，可能有半批被拒`)
+    }
+  }
+
+  const apply: ApplyResult = await applyCanvasOps(verified, { onGenerate: handlers.onGenerate })
 
   // `run_generation` 被跳过有两种原因：没给回调（⇒ 等用户手动点，这是**正常**的），
   // 或者缺 nodeId（⇒ 是真错误）。混在一起报会给用户一条看不懂的告警 ✗
@@ -71,7 +119,9 @@ export async function runCanvasAgent(
     applied: apply.applied,
     errors: reply.errors || [],
     rejected,
+    warnings,
     pendingRun,
+    touched: apply.touched,
     toolCalls: reply.toolCalls || [],
   }
 }
@@ -161,7 +211,10 @@ export interface CanvasPlanOutcome {
  */
 export async function applyCanvasPlan(
   planId: string,
-  handlers: { onGenerate?: (op: CanvasOp) => void; includeSnapshot?: boolean } = {},
+  handlers: {
+    onGenerate?: (op: CanvasOp) => boolean | void | Promise<boolean>
+    includeSnapshot?: boolean
+  } = {},
 ): Promise<CanvasPlanOutcome> {
   const snapshot = handlers.includeSnapshot === false ? undefined : canvasSnapshot()
   const confirmed = await canvasAPI.confirmPlan(planId, {
@@ -169,7 +222,7 @@ export async function applyCanvasPlan(
     baseRevision: canvasRevision(),
   })
 
-  const apply = applyCanvasOps(confirmed.ops as CanvasOp[], {
+  const apply = await applyCanvasOps(confirmed.ops as CanvasOp[], {
     onGenerate: handlers.onGenerate,
     applyId: planId,
     baseRevision: confirmed.expectedRevision ?? undefined,

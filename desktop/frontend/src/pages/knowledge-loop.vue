@@ -403,16 +403,30 @@
             <div class="kl-card-head">
               <span>L1 注入预览（system prompt 的 Knowledge 段）</span>
               <span v-if="feed" class="kb-pill">{{ feed.entries?.length ?? 0 }} 条 / {{ feed.used ?? 0 }} 字</span>
+              <span v-if="feed && feed.targeted" class="kb-pill">其中 {{ feed.targeted }} 条定向</span>
             </div>
             <div class="kl-inline-form">
               <input v-model="feedForm.agentType" class="kb-name-input" placeholder="agentType（可空）">
+              <label class="kl-inline-num">剧 <input v-model.number="feedForm.dramaId" type="number" min="1" step="1"></label>
+              <label class="kl-inline-num">集 <input v-model.number="feedForm.episodeId" type="number" min="1" step="1"></label>
               <label class="kl-inline-num">预算 <input v-model.number="feedForm.budgetChars" type="number" min="0" max="8000" step="100"></label>
               <label class="kl-inline-num">条数 <input v-model.number="feedForm.limit" type="number" min="1" max="30"></label>
               <button class="btn btn-ghost kl-tool-btn" :disabled="busy.feed" @click="loadFeed">编译预览</button>
             </div>
+            <p class="kl-note">
+              填上「剧」「集」才看得到本集/本剧那几条 —— 不填就只剩全局成法，
+              生产侧（`assemble_full_instructions`）则是带着集号跑的。
+            </p>
             <div v-if="feed && feed.available === false" class="kb-warn-inline">{{ feed.hint || '台账不可用' }}</div>
             <template v-else-if="feed">
-              <pre class="kl-out">{{ feed.text || '（空段：台账是好的，只是没有够格的已采纳知识）' }}</pre>
+              <pre v-if="feed.text" class="kl-out">{{ feed.text }}</pre>
+              <div v-else class="kb-warn-inline">{{ feed.hint || '（空段：这条链上没有够格的知识）' }}</div>
+              <p class="kl-note">
+                作用域：{{ (feed.scopes ?? []).join(' · ') || '（未限定）' }}
+                <span v-if="feed.blocked" class="kl-bad">
+                  另有 {{ feed.blocked }} 条知识存在、但作用域不符没进这一段。
+                </span>
+              </p>
               <p class="kl-note">
                 真正被写进去的 id 会记 usage —— 没有这一步 lift 永远算不出来。
                 <span v-if="feed.truncated" class="kl-bad">本次因预算被截断。</span>
@@ -836,6 +850,23 @@
           <span class="kl-evidence-label">标签</span>
           <button v-for="t in opened.tagList" :key="t" class="kb-pill kl-facet" @click="toggleTag(t)">{{ t }}</button>
         </div>
+        <div v-if="opened.links?.length" class="kl-evidence">
+          <span class="kl-evidence-label">挂载</span>
+          <code v-for="l in opened.links" :key="`${l.refKind}:${l.refId}`" class="kl-code">{{ l.refKind }}:{{ l.refId }}</code>
+        </div>
+        <div v-if="related?.items?.length" class="kl-evidence">
+          <span class="kl-evidence-label">相关知识</span>
+          <button v-for="item in related.items" :key="`${item.via}:${item.entry.id}`"
+                  class="kb-pill kl-facet" :title="item.entry.snippet"
+                  @click="openEntry(item.entry.id, item.entry.deleted)">
+            {{ item.via === 'shared' ? `共用 ${item.refKind}:${item.refId}` : `相似 ${(item.score ?? 0).toFixed(2)}` }}
+            · {{ item.entry.title }}
+          </button>
+        </div>
+        <div v-else-if="related?.hint" class="kl-evidence">
+          <span class="kl-evidence-label">相关知识</span>
+          <span class="kl-code">{{ related.hint }}</span>
+        </div>
         <div class="kl-kv">
           <span class="kl-kv-key">版本</span>
           <span>v{{ opened.version }}<template v-if="opened.deleted"> · 已软删（{{ opened.deletedBy || '未知' }}）</template></span>
@@ -1010,6 +1041,7 @@ import {
   type KnowledgeEntryVersionDetail,
   type KnowledgeLedgerStats,
   type KnowledgeLoopSearch,
+  type KnowledgeRelated,
   type KnowledgeTaxonomy,
   type KnowledgeTunable,
 } from '~/composables/useApi'
@@ -1260,11 +1292,31 @@ async function loadEntries(offset = entryOffset.value) {
   }
   loadTaxonomy()
 }
+/**
+ * 邻居（`/entries/{id}/related`）。两档 `via` 的**证据强度不同**，界面上一眼分得出来：
+ * `shared` 是事实（共用同一 stage/shot），`similar` 只是正文像 —— 把字面像当"同一件事"
+ * 去合并，会把这本台账最值钱的分歧抹掉，所以两档不许混成一条分数显示。
+ */
+const related = ref<KnowledgeRelated | null>(null)
+
 async function openEntry(id: string, includeDeleted = false) {
+  opened.value = null
+  related.value = null
   try {
     opened.value = await knowledgeLoopAPI.entry(id, includeDeleted)
   } catch (err: any) {
     toast.error(err?.message || '条目详情读取失败')
+    return
+  }
+  // 邻居是**附加信息**：读失败不该把已经拿到的详情一起丢掉
+  try {
+    related.value = await knowledgeLoopAPI.relatedEntries(id, { includeDeleted })
+  } catch (err: any) {
+    related.value = {
+      id, found: true, deleted: false, available: false, links: [],
+      items: [], counts: { shared: 0, similar: 0 },
+      hint: err?.message || '邻居读取失败',
+    }
   }
 }
 
@@ -1537,7 +1589,10 @@ async function runSearch() {
 }
 
 // ── 投喂与数据集 ─────────────────────────────────────────────────────────
-const feedForm = reactive({ agentType: '', budgetChars: 600, limit: 8 })
+const feedForm = reactive({
+  agentType: '', episodeId: '' as number | '', dramaId: '' as number | '',
+  budgetChars: 600, limit: 8,
+})
 const feed = ref<any>(null)
 const exportForm = reactive({ target: 'knowledge' as 'knowledge' | 'runs', limit: 500 })
 const datasets = ref<any[]>([])
@@ -1548,6 +1603,8 @@ async function loadFeed() {
   try {
     feed.value = await knowledgeLoopAPI.feedPreview({
       agentType: feedForm.agentType.trim() || undefined,
+      episodeId: Number(feedForm.episodeId) || undefined,
+      dramaId: Number(feedForm.dramaId) || undefined,
       budgetChars: feedForm.budgetChars,
       limit: feedForm.limit,
     })

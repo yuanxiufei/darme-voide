@@ -356,14 +356,186 @@ def case_backend_device(tmp: Path) -> None:
         g2l.load_llm_from_gguf = original_loader    # type: ignore[assignment]
 
 
+# ── ⑦ 分层放置的**算术**部分 ✓（不碰 torch ⇒ 哪台机器都要判 ✓ 2026-11-08 补 ✓）
+def case_layer_plan() -> None:
+    params = llm_mod._block_param_count(CONFIG)
+    model = llm_mod.build_llm(CONFIG, device="cpu", dtype="float32")
+    real = sum(int(p.numel()) for p in model.blocks[0].parameters())
+    check("⑦ ⭐ 每层参数量是**算出来**的、与真模型逐项一致 ✓（抄配额表会随结构漂移 ✗）",
+          params == real, (params, real))
+
+    layer_bytes = params * 2
+    devices, report = llm_mod.plan_layer_devices(CONFIG, gpu_bytes=layer_bytes + 8, dtype_bytes=2)
+    check("⑦′ 预算够 1 层 ⇒ 卡上放**连续前缀** 1 层、其余在 CPU ✓（不是随机挑层 ✗）",
+          devices == ["cuda", "cpu"] and report["gpuLayers"] == 1, (devices, report))
+
+    devices, report = llm_mod.plan_layer_devices(CONFIG, gpu_bytes=layer_bytes // 2, dtype_bytes=2)
+    check("⑦″ 一层都放不上 ⇒ 全 CPU 且 **why 写清原因** ✓（静默回落 cpu ✗✗）",
+          devices == ["cpu", "cpu"] and bool(report["why"]), (devices, report["why"]))
+
+    devices, report = llm_mod.plan_layer_devices(CONFIG, gpu_bytes=9 * layer_bytes, dtype_bytes=2,
+                                                 want_gpu_layers=3)
+    check("⑦‴ 想放 3 层但模型只有 2 层 ⇒ shortfall 如实报 ✓（悄悄减配 ✗）",
+          report["gpuLayers"] == 2 and report["shortfall"] == 1, report)
+
+    devices, report = llm_mod.plan_layer_devices(CONFIG, gpu_bytes=10 * layer_bytes, dtype_bytes=2,
+                                                 reserve_bytes=9 * layer_bytes)
+    check("⑦⁴ 预留真的从毛预算里扣掉 ✓（按毛预算算 ⇒ 纸面能装、真装 OOM ✗）",
+          report["gpuLayers"] == 1 and report["usableBytes"] == layer_bytes, report)
+
+    message = _message_of(lambda: llm_mod.plan_layer_devices(CONFIG, gpu_bytes=0, dtype_bytes=0))
+    check("⑦⁵ dtype_bytes=0 ⇒ 具名拒绝 ✓（会算出除零或谎报能装 ✗）",
+          "LlmError" in message and "dtype_bytes" in message, message)
+
+
+# ── ⑧ 混合放置**真跑**：GPU 前缀 + CPU 尾巴 ✓
+def _tokens(out: Any) -> list[Any]:
+    return out.tolist() if hasattr(out, "tolist") else list(out)
+
+
+def case_layer_split_forward() -> None:
+    # 长度不符 / 与 device 互斥：**不需要卡**也能判 ✓（放前面 ✓）
+    message = _message_of(lambda: llm_mod.build_llm(CONFIG, device="cpu",
+                                                   layer_devices=["cpu", "cpu"]))
+    check("⑧ ``device`` 与 ``layer_devices`` 同时点名 ⇒ 具名拒绝 ✓（不静默二选一 ✗）",
+          "LlmError" in message and "layer_devices" in message, message)
+    message = _message_of(lambda: llm_mod.build_llm(CONFIG, layer_devices=["cpu"]))
+    check("⑧′ 层表长度 ≠ 层数 ⇒ 具名拒绝 ✓（不补默认值 ✗）",
+          "LlmError" in message and "层数" in message, message)
+
+    if _gpu_count() == 0:
+        skip("⑧″ 混合放置前向 / KV 归属 / greedy 一致", "本机没有 CUDA 卡")
+        return
+    device = f"cuda:{torch.cuda.current_device()}"
+    torch.manual_seed(7)
+    cpu_model = llm_mod.build_llm(CONFIG, device="cpu", dtype="float32")
+    split_model = llm_mod.build_llm(CONFIG, dtype="float32", layer_devices=[device, "cpu"])
+    split_model.load_state_dict(cpu_model.state_dict())     # ⚠️ 同一份权重 ✓
+
+    landed = split_model._layer_devices
+    check("⑧″ ⭐ 第 0 层真在卡、第 1 层真在 CPU ✓（都落一处 = 没分层 ✗）",
+          str(landed[0]).startswith("cuda") and str(landed[1]) == "cpu", landed)
+    check("⑧‴ ``norm`` / ``lm_head`` 跟**末层**同设备 ✓（tie 时拆成两份 = 白涨一份词表 ✗）",
+          split_model.norm.weight.device == landed[-1]
+          and split_model.lm_head.weight.device == landed[-1],
+          (str(split_model.norm.weight.device), str(split_model.lm_head.weight.device)))
+
+    ids = torch.randint(0, CONFIG.vocab_size, (1, 5))
+    with torch.inference_mode():
+        want, _ = cpu_model(ids)
+        got, kv = split_model(ids)
+    diff = float((want - got).abs().max())
+    check("⑧⁴ 混合放置的 logits 与全 CPU 一致 ✓（fp32 只差归约顺序 ✓）", diff < 1e-4, diff)
+    check("⑧⁵ KV cache 留在**各自层**的设备上 ✓（全塞回一处 = 分层白做 ✗）",
+          str(kv[0][0].device).startswith("cuda") and str(kv[1][0].device) == "cpu",
+          (str(kv[0][0].device), str(kv[1][0].device)))
+
+    with torch.inference_mode():
+        a = _tokens(llm_mod.generate_llm(cpu_model, ids, max_new_tokens=4, temperature=0.0))
+        b = _tokens(llm_mod.generate_llm(split_model, ids, max_new_tokens=4, temperature=0.0))
+    check("⑧⁶ greedy 生成逐个 token 相同 ✓（跨设备判据用 temperature=0 ✓）", a == b, (a, b))
+
+    tied = llm_mod.LlmConfig(vocab_size=64, hidden=32, depth=2, heads=4, kv_heads=2,
+                             head_dim=8, ffn=64, tie_embeddings=True)
+    tied_model = llm_mod.build_llm(tied, dtype="float32", layer_devices=[device, "cpu"])
+    check("⑧⁷ tie_embeddings 下 embed 与 lm_head **仍是同一个 Parameter** ✓（.to 成两份 ✗）",
+          tied_model.lm_head.weight is tied_model.embed.weight,
+          str(tied_model.embed.weight.device))
+
+
+# ── ⑨ 后端层的**分层放置**接线 ✓（配置 ⇒ 真装载路径 ✓ 2026-11-08 补 ✓）
+def case_backend_gpu_layers(tmp: Path) -> None:
+    original_loader = g2l.load_llm_from_gguf
+    base = llm_mod.build_llm(CONFIG, device="cpu", dtype="float32")
+    calls: list[dict[str, Any]] = []
+
+    def fake_loader(path: Any, config: Any, *, device: Any = "cpu", dtype: Any = None,
+                    layer_devices: Any = None) -> Any:
+        calls.append({"device": device, "dtype": dtype,
+                      "layer_devices": None if layer_devices is None else list(layer_devices)})
+        # ⚠️ 与**真**装载器同一分支 ✓：给了层表就**不再**传 device ✓（两个都传会被 build_llm 拒 ✗）
+        if layer_devices is not None:
+            model = llm_mod.build_llm(config, dtype=dtype, layer_devices=layer_devices)
+        else:
+            model = llm_mod.build_llm(config, device=device, dtype=dtype)
+        model.load_state_dict(base.state_dict())     # 同一份权重 ✓
+        return model
+
+    g2l.load_llm_from_gguf = fake_loader            # type: ignore[assignment]
+    try:
+        off = _backend(tmp, device="cpu", dtype="float32", gpu_layers="off").load()
+        check("⑨ ``gpuLayers=off`` ⇒ **不分层** ✓（装载器收到的是 device、没收到层表 ✓ 老路径零变化 ✓）",
+              off.describe()["layers"] is None and calls[-1]["layer_devices"] is None
+              and calls[-1]["device"] == "cpu", (off.describe()["layers"], calls[-1]))
+
+        zero = _backend(tmp, device="cpu", dtype="float32", gpu_layers=0).load()
+        report = zero.describe()["layers"] or {}
+        check("⑨′ ``gpuLayers=0`` ⇒ 全 CPU **且回执说是显式要求** ✓（悄悄全 CPU = 看不出配生效 ✗）",
+              calls[-1]["layer_devices"] == ["cpu", "cpu"]
+              and report.get("gpuLayers") == 0 and report.get("cpuLayers") == 2
+              and "显式" in str(report.get("why")), (calls[-1], report))
+        check("⑨″ 分层后 ``device`` 报**首层**在哪 ✓（报 embed 所在 = 分层时永远说 cpu ✗✗）",
+              zero.describe()["device"] == "cpu" and "分层" in zero.describe()["deviceNote"],
+              zero.describe()["deviceNote"])
+
+        bad = _message_of(_backend(tmp, device="cpu", dtype="float32", gpu_layers="atou").load)
+        check("⑨‴ ``gpuLayers`` 拼错 ⇒ 具名拒绝 ✓（当成分层与否都算「配了没生效」✗）",
+              "LlmError" in bad and "gpuLayers" in bad, bad)
+
+        over = _message_of(_backend(tmp, device="cpu", dtype="float32", gpu_layers=9).load)
+        check("⑨⁴ ``gpuLayers`` 超过层数 ⇒ 具名拒绝 ✓（不悄悄截到 2 层 ✗）",
+              "LlmError" in over and "层数" in over, over)
+
+        nocard = _message_of(_backend(tmp, device="cpu", dtype="float32", gpu_layers=1).load)
+        check("⑨⁵ 点名 N 层上卡但设备是 cpu ⇒ **具名拒绝** ✓（静默退回全 CPU ✗✗）",
+              "LlmError" in nocard and "gpuLayers" in nocard and "CUDA" in nocard, nocard)
+
+        if _gpu_count() == 0:
+            skip("⑨⁶ 后端分层真跑（前 1 层在卡 + greedy 与全 CPU 逐字相同）", "本机没有 CUDA 卡")
+            return
+        device = f"cuda:{torch.cuda.current_device()}"
+        split = _backend(tmp, device=device, dtype="float32", gpu_layers=1).load()
+        layers = split.describe()["layers"] or {}
+        check("⑨⁶ ⭐ 配置 ``gpuLayers=1`` ⇒ 装载器真收到层表 ✓、首层真在卡 ✓",
+              calls[-1]["layer_devices"] == [device, "cpu"]
+              and layers.get("gpuLayers") == 1 and layers.get("cpuLayers") == 1
+              and split.describe()["device"] == device,
+              (calls[-1], layers, split.describe()["device"]))
+        first = next(split._model.blocks[0].parameters())
+        check("⑨⁷ 卡上那一层的参数真在 CUDA ✓（表说在卡、实际在 CPU = 分层没落地 ✗✗）",
+              first.device.type == "cuda", str(first.device))
+
+        plain = _backend(tmp, device="cpu", dtype="float32").load()
+        check("⑨⁸ ⭐⭐ 后端端到端：分层放置与全 CPU 的 greedy 输出**逐字相同** ✓",
+              split.generate("你好", temperature=0, max_new_tokens=6)
+              == plain.generate("你好", temperature=0, max_new_tokens=6))
+
+        auto = _backend(tmp, device=device, dtype="float32", gpu_layers="auto").load()
+        auto_report = auto.describe()["layers"] or {}
+        check("⑨⁹ ``gpuLayers=auto`` ⇒ 按此刻余量算出层数、**why 非空** ✓（0 层也要给理由 ✗）",
+              0 <= int(auto_report.get("gpuLayers", -1)) <= 2 and bool(auto_report.get("why")),
+              auto_report)
+
+        from app.services.text_generation import engine_gpu_layers   # noqa: PLC0415
+        check("⑨¹⁰ settings 两种键名都认 ✓（``gpuLayers`` ／ ``gpu_layers`` ✓）",
+              engine_gpu_layers({"gpuLayers": 4}) == 4
+              and engine_gpu_layers({"gpu_layers": "auto"}) == "auto"
+              and engine_gpu_layers({}) is None, engine_gpu_layers({"gpu_layers": "auto"}))
+    finally:
+        g2l.load_llm_from_gguf = original_loader    # type: ignore[assignment]
+
+
 def main() -> int:
     case_devices()
     case_dtype()
     case_forward_fp32()
     case_forward_bf16()
     case_loader_device()
+    case_layer_plan()
+    case_layer_split_forward()
     with tempfile.TemporaryDirectory(prefix="llmdev_") as handle:
         case_backend_device(Path(handle))
+        case_backend_gpu_layers(Path(handle))
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

@@ -182,6 +182,7 @@ def detect_features(config: llm_mod.LlmConfig, tensor_names: Iterable[str]) -> l
 
 def load_llm_from_gguf(path: str | Path, config: llm_mod.LlmConfig, *,
                        device: Any = "cpu", dtype: Any = None,
+                       layer_devices: Any = None,
                        materialize: bool | str | Path | None = None) -> Any:
     """GGUF 文件 → 装载好权重的 :class:`llm.LlmModel` ✓。
 
@@ -203,10 +204,19 @@ def load_llm_from_gguf(path: str | Path, config: llm_mod.LlmConfig, *,
     ``materialize``（G3 ✓ 2026-11-07）：``None`` = 跟随总开关（``DARME_MATERIALIZE`` ✓ 默认开 ✓）；
     ``False`` = 关；``True`` = 开（默认目录 ✓）；给路径 = 用这个目录 ✓。结论挂在 ``model.materialized``
     上 ✓（``{hit, gib, path, reason}`` ✓ —— 命中时说清**凭什么** ✓，不做时说清**为什么** ✓✗）。
+
+    ``layer_devices``（2026-11-08 补 ✓）：给了就**每层落到各自设备** ✓（GPU 前缀 ＋ CPU 尾巴 ✓，
+    见 :func:`~.llm.apply_layer_plan`）。⚠️ 此时**不许**再点名 ``device`` ✗ —— 这里**不替调用方
+    二选一** ✗：只把 ``layer_devices`` 原样转给 :func:`~.llm.build_llm` ✓，它自己会说谁跟谁冲突 ✓。
+    流式装配**天然支持**这条 ✓：反量化结果留 CPU ✓、``copy_`` 时逐张量跨设备拷一次 ✓
+    （不是「先整份装到一处再搬」✗ —— 那等于两份权重 ✗✗）。
     """
     info = gguf_mod.inspect(path)
     config = detect_features(config, info.tensors)
-    model = llm_mod.build_llm(config, device=device, dtype=dtype)
+    if layer_devices is not None:
+        model = llm_mod.build_llm(config, dtype=dtype, layer_devices=list(layer_devices))
+    else:
+        model = llm_mod.build_llm(config, device=device, dtype=dtype)
     handle, note = _open_materializer(path, info, model, config, materialize)
     report = _load_into_model(path, info, model, config, materializer=handle)
     model.materialized = (report.to_dict() if report is not None

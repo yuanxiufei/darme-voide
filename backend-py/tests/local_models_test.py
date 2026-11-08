@@ -455,6 +455,59 @@ def main() -> int:  # noqa: C901
           "（只传路径 ⇒ core 走自己的全局，本套 patch 的 ``ls.detect_comfyui_roots`` 静默失效 ✓✗）",
           not unported_core, unported_core)
 
+    # ⚠️ 同类守卫其三（2026-11-08 ✓）：**默认扫描根**的拼装也搬 ``app.core.model_roots`` 了 ✓
+    #    ⇒ 服务层那条薄委托同样是**两个**隔离口：「``_paths_config_file()``（配置」与
+    #    「``get_comfyui_roots``（安装根表」✓。跨模块 monkeypatch 不生效 ✗✗ —— 本套 patch
+    #    ``ls._paths_config_file`` 与 ``ls.detect_comfyui_roots`` 注入，漏传哪个都静默失效 ✓✗
+    #    （实测症状：只传 ``path=`` ⇒「每个 ComfyUI 根都要收进来」当场红 ✓）。
+    unported_roots: list[str] = []
+    for node in ast.walk(ast.parse(scan_src)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "default_roots":
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Name) and owner.id == "core_model_roots"):
+            continue
+        given = {kw.arg for kw in node.keywords}
+        missing = [name for name in ("path", "comfyui") if name not in given]
+        if missing:
+            unported_roots.append(f"default_roots 缺 {missing}@L{node.lineno}")
+    check("守卫: 委托 core 根表时 ``path=`` 与 ``comfyui=`` **两个隔离口都传** ✓✗"
+          "（少传一个 ⇒ core 走自己的全局，本套注入的临时配置／假安装根静默失效 ✓✗）",
+          not unported_roots, unported_roots)
+
+    # ⚠️ 守卫其四（2026-11-08 ✓）：**搬家 ≠ 抄一份** ✓✗ —— 服务层这些再导出的名字必须是
+    #    core 那个**同一个对象**（判 ``is`` ✓）。⚠️ 不能判 ``==`` ✗：两份内容相同的 ``dict`` /
+    #    常量**照样相等** ⇒ 那次「复制粘贴一份实现」会静默通过 ✓✗，然后两侧各自演化：
+    #    扫描层用新表、引擎用旧表 ⇒「清单说装了、加载说没有」（本仓踩过的那类 bug ✓）。
+    from app.core import comfyui_roots as core_comfyui
+    from app.core import model_ecosystems as core_eco
+    from app.core import model_folders as core_mf
+    from app.core import model_roots as core_roots
+    from app.core import ollama_roots as core_ollama
+    from app.services import model_ecosystems as svc_eco
+    from app.services import ollama_store as ollama_mod
+
+    twins = {
+        "model_folders.FOLDER_SPECS": (mf.FOLDER_SPECS, core_mf.FOLDER_SPECS),
+        "model_folders.declared_extra_dirs": (mf.declared_extra_dirs,
+                                              core_mf.declared_extra_dirs),
+        "model_ecosystems.ECOSYSTEMS": (svc_eco.ECOSYSTEMS, core_eco.ECOSYSTEMS),
+        "model_ecosystems.roots": (svc_eco.roots, core_eco.roots),
+        "ollama_store.models_root_candidates": (ollama_mod.models_root_candidates,
+                                                core_ollama.models_root_candidates),
+        "ollama_store.declared_models_root": (ollama_mod.declared_models_root,
+                                             core_ollama.declared_models_root),
+        "local_model_scan.LOCAL_SERVICES_ROOT": (ls.LOCAL_SERVICES_ROOT,
+                                                 core_roots.LOCAL_SERVICES_ROOT),
+        "local_model_scan.detect_comfyui_roots": (ls.detect_comfyui_roots,
+                                                  core_comfyui.detect_comfyui_roots),
+    }
+    drifted = [f"{name} 不是同一个对象" for name, (a, b) in twins.items() if a is not b]
+    check("守卫: 服务层这八处再导出的都是 core 的**同一个对象**（``is`` 判 ⇒ 防「搬家变抄一份」✓✗）",
+          not drifted, drifted)
+
     # ⭐ 副本对拍（2026-11-08 ✓）：上表登记进来的副本**必须与本尊逐档一致** ✓✗ ——
     #    只判「它读过这个环境变量」是不够的 ✗：把 ``MODELS_DIR`` 挪到配置文件**后面**、
     #    或漏掉 ``<data_root>/models`` 这一档回落，照样能通过上面那条 ✗✗（那才是真正会漂的形状）。

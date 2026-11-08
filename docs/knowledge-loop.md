@@ -42,7 +42,7 @@
 | Agent 工具注册单一来源 | `agent/runtime.py:326`（`_TOOL_FACTORIES`）+ `services/agent_registry.py` 的 `tool_set` | 加一个工具组＝一个装饰器 + 一个字面量 |
 | 引擎参数外部化成纯数据表 | `engine/profiles.py:102-159`、`device_policy.POLICIES`、`samplers/schedules`、`technical_qc.TECH_QC_THRESHOLDS:69-79` | 已是"数据"，加一层 override 即可，不必改代码；**两处都已接线**（P3 覆盖层 + QC 伪档，见 §6.1） |
 
-### 缺口（十个，按阻塞程度排）
+### 缺口（十二个，按阻塞程度排）
 
 1. **没有知识写入口** —— `agent/tools/` 8 组工具全只读（`library_tools.py` 只有一个
    `search_script_library`），全仓 grep `knowledge|write_note` = 0 命中。「知识积累」目前是空环。
@@ -110,7 +110,12 @@
    `POST /apply` 写盘成功后**当场复诊**、`POST /verify` 给「改动加了但模型文件要人去下」的
    场合事后补判、`POST /rollback` 覆盖成终态。判定四档 `resolved / still / stale / unverified`
    （＋终态 `rolled_back`），结论按 `kind="repair"` 写进 `outcome_index`。口实与坑见 §7 第 15 条。
-10. **Skills 静态全量注入** —— 按 `priority` 排序 + 60000 字符预算，无触发词/命中率/历史效果选择。
+10. **知识只按"条目"存在，节点之间没有边** —— 蒸馏每天写下 `stage:video` / `shot:SHOT-012`
+   的关联行，但**全仓没有一处读 `entry_links`**：一条知识挂在哪个阶段上、哪些条子是同族的、
+   "这一镜踩过什么坑"三个问题都问不出来。
+   【2026-11-08 缺口闭合】`knowledge_ledger.related()` / `for_context()` / `context_refs()`
+   ＋ 两个只读端点 ＋ Agent 工具 `context_knowledge` ＋ 详情面板「挂载／相关知识」。口实与坑见 §11。
+11. **Skills 静态全量注入** —— 按 `priority` 排序 + 60000 字符预算，无触发词/命中率/历史效果选择。
     【2026-11-07 缺口闭合·半格】`services/skill_usage.py`（派生统计库
     `data/knowledge/skill-usage.sqlite`，与 `entry_usage` 同构）＋ `agent/skills.py`
     超预算裁剪 ＋ `agent/runtime.py` 跑次收口回填 ＋ `GET /api/v1/skills/usage`。
@@ -118,6 +123,17 @@
     「历史效果」只落到**可观测的那一半**：注入了哪些 / 各多少字符 / 哪些被裁 / 该跑次成败。
     ⚠️ **没有命中率**——本仓没有「模型读没读它」的通路，`okRate` 只能读成「注入它的跑次成功率」。
     预算够时行为逐字不变，只有装不下才用 `priority + 降级惩罚` 改裁剪次序。口实与坑见 §7 第 16 条。
+12. **投喂的作用域键域与台账对不上** —— 写入口给的是 `EP<id>` / `DRAMA<id>`（Agent 工具）
+   与 `stage:<name>` / `shot:<id>`（蒸馏），而 `compile_for_prompt` 只认 `global` 与
+   `agent:<type>` —— 后者**全仓没有一处写**。于是「同一集里刚被采纳的经验」在下一次同集跑次里
+   依然注入不进去，且回执只说「还没有 accepted 的知识」，看起来像库空。
+   【2026-11-08 缺口闭合·集/剧集两档】`compile_for_prompt(scopes=…)` ＋
+   `scopes_for(episode_id, drama_id)` ＋ `assemble_full_instructions` 用手上真值算 ⇒
+   生产侧自动带上 `EP<id>` / `DRAMA<id>`；回执新增 `scopes` / `blocked`，把
+   「有知识但作用域不匹配」与「确实还没积累」分成两种空。
+   `stage:` / `shot:` 有意**不自动加**：agent 跑次手上没有「我属于哪个引擎档 / 哪一镜」的真值，
+   编一个只会让投喂看起来在定向、其实在乱猜 —— 那两档走 Agent 工具 `context_knowledge`（§11）。
+   口实与坑见 §12。
 
 ---
 
@@ -739,7 +755,7 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 
 ### 6.1 落地实况（2026-11-06，P0–P4 全部到位）
 
-| 阶段 | 状态 | 落点 | 判据（主干 `tests/knowledge_loop_test.py` 131 条；各阶段另挂专测，见「落点」列） |
+| 阶段 | 状态 | 落点 | 判据（主干 `tests/knowledge_loop_test.py` 本节落地时 131 条、现 **178**（见 §12.5）；各阶段另挂专测，见「落点」列） |
 |---|---|---|---|
 | P0 事实层 | ✅ | `app/services/outcome_index.py` + `app/routers/knowledge_loop.py` + **输入侧两处写点**（`engine/runtime.py::_index_run`、`technical_qc.py::_index_qc_run`，`tests/outcome_wiring_test.py` 28 条） | 同批 trace 重建两次总条数不变；没写 `status` 的记录**拒收**（不塞 `partial` 稀释失败率）；索引写失败只返回 `False`，不炸主链路。输入侧：引擎封口在 `with self._wake` **之外**落账（AST 判行号）、`kind` 按产物后缀、`error_code` 只取类别（整句/带数字的文案一律 `None`）；质检用确定性 `run_id` 覆盖同一条（重跑不堆行）、分数归一到 0–1、规则维度失败标 `cause=rule` 不编伪码；`record_run` 抛异常时两处写点均静默 |
 | P1 知识层 | ✅ | `app/services/knowledge_ledger.py` + `app/agent/tools/knowledge_tools.py` | 假 run_id **整条拒**；`propose_knowledge` 只能写 `proposed`；2 字中文搜得到且如实回 `ranking=like`；`search_knowledge` 只转发不造分数 |
@@ -916,7 +932,7 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 
 ## 10. 前端呈现（2026-11-07 落地）
 
-页面 `frontend/app/pages/knowledge-loop.vue`（桌面端 `desktop/frontend/src/pages/knowledge-loop.vue`，**逐字节同构**；两端 `composables/useApi.ts` 里的 `knowledgeLoopAPI` 也同一份），导航入口「闭环」，路由 `/knowledge-loop`。
+页面 `frontend/app/pages/knowledge-loop.vue`（桌面端 `desktop/frontend/src/pages/knowledge-loop.vue`，**逐字节同构**；两端 `composables/useApi.ts` 里的 `knowledgeLoopAPI` 也同一份，接口层实况与守卫见 §10.6），导航入口「闭环」，路由 `/knowledge-loop`。
 
 **为什么单开一页，不并进 `/knowledge`**：`/knowledge` 是**仓外剧本资料**的读写口（5403 份 PDF 的索引 + 覆盖层），本页是**本仓自己跑出来的经验**（跑次 → 蒸馏 → 人审 → 投喂/调参）。两者备份策略、重建代价、误删后果都不同；并页会让「删语料」与「删经验」这两个动作长得一样。
 
@@ -973,3 +989,177 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 * **`empty` 是"这集还没分镜"**：不是 0 分。页面在没出片时给出的是这句话 + 一条 `info` toast，而不是一条绿色的"评测完成"。
 
 ⚠️ 页面这一块**只读**接口，不触发 ffmpeg/模型：重跑技术质检不但贵，还会与质检页的口径打架（两处显示不同的黑场数，人只会信错的那边）。真要重跑，那是质检页的按钮，不是这里。
+
+### 10.6 接口层（2026-11-08 补齐：此前这一页一进来就崩）
+
+**发现的真问题不是"某个方法参数写错"，而是整个 `knowledgeLoopAPI` 不存在**：页面顶部 `import { dramaAPI, knowledgeLoopAPI, type FilmEvalReport, … } from '~/composables/useApi'` 里的 `knowledgeLoopAPI` 与 12 个类型，`useApi.ts` **一个都没有导出**（`git log -S knowledgeLoopAPI -- useApi.ts` 为空 ⇒ 从来没写过，不是被谁删了）。后果是 `import` 拿到 `undefined`，页面初始化第一句 `knowledgeLoopAPI.report(...)` 直接 `TypeError` —— 不是"部分功能不可用"，是**整页白屏**；而 `npm run typecheck` 早在报 `TS2724: has no exported member named 'knowledgeLoopAPI'`，只是没人跑。
+
+补齐的 36 个口（页面实际用到的，**不为将来预留**）：
+
+* **读**：`report`／`scheduler`／`taxonomy`／`entries`／`entry`／`entryVersions`／`entryVersion`／`audit`／`search`／`optimizations`／`feedPreview`／`datasets`／`datasetResolve`／`tuning`／`tuningSuggest`／`qcHitRate`／`qcPending`／`training`。
+* **写**：`createEntry`／`updateEntry`／`deleteEntry`／`restoreEntry`／`revertEntry`／`setEntryStatus`／`rebuildRuns`／`distill`／`refreshLift`／`feedExport`／`setTuning`／`clearTuning`／`qcReview`／`deleteQcReview`／`trainingScan`／`promoteModel`／`demoteModel`。
+* **评测**：`filmEval` → `POST /evaluation/film/{集}?record=`（与 §10.5 同一口）。
+
+四条口径：
+
+1. **`api.patch` 是新加的动词**。此前 `api` 只有 `get/post/put/del`，所以"前端全仓零 `PATCH`"不是没人用，是**根本没这个口**。后端 `PATCH /entries/{id}` 有意不提供 `PUT`（忘记带 `body` 的 `PUT` 会把几百字正文清空），前端因此也不得不用 `PATCH`。
+2. **`changed` 有两种形态，别当一种读**：`PATCH` 回执给的是**改动字段名数组**（`[]` ＝ 请求合法但内容没变），而 `delete`/`restore`/`revert` 给的是 **bool**。`KnowledgeWriteResult.changed` 如实声明成 `boolean | string[]`；页面里 `res.changed === false` 只出现在 `restore`，是对的，但**照抄到 `PATCH` 上就会把"没改动"显示成"已更新"**。
+3. **可选参数一律"不传"而不是"传空"**：`Query(50, ge=1)` 这类整型参数收到 `limit=` 会 422；字符串参数虽然后端用真值判断（`if kind:`）能吃空串，但两类都不该靠后端兜。所以整型一律带默认值送出，字符串类走 `+ (p.kind ? … : '')`。
+4. **`role` 缺省＝放行**（`_role_gate` 空值直接过）、但 `evidence`/`basis` 缺省＝拒：写口的"凭据核不过"返回的是 **400 + 人话**（"知识台账没接入 ⇒ 凭据核不了，按『核不过』处理"），**不是** 422 形状错。看错误码别只看数字。
+
+**怎么守住**（两层，都跑过）：
+
+* 静态：`tests/frontend_api_coverage_test.py`（14 条判据）把前端每个 `api.get/post/put/patch/del` 的字面路径按 `@方法+路径` 反匹配 FastAPI 路由模板，并把路径里写死的 query 键与后端声明对账。本轮现状：**261 个调用点**（补之前 215）／36 个带 query 键的调用点，全对；`PATCH` 由"靠合成样本自证"变成**真有调用点**。
+* 实打：36 个方法用 `TestClient` 各调一次（`with TestClient(app)` 起 lifespan，否则调参口会因为"台账没接入"报 400 —— 那是**缺启动事件**，不是接口坏）。验收看的是"路径与字段名被读懂"：写链路 `create → PATCH → versions → version/1 → status → revert → audit → search → delete → restore` 全程 200，`entry` 详情的 `tagList`/`version`/`deleted`/`usageSummary`、`entryVersions` 的 `current`/`deleted`、`audit.items[]` 的 `atNs`、`filmEval` 的 `dimensions[].judged` 与 `review.{hit,falseAlarm,missed,reviewed,hitRate}` 与 TS 声明逐字段一致。
+
+⚠️ 页面/文档都按"已完成"写、而接口层从来没落地，是这套代码最贵的一类错：**静态守卫（同构、隔离、响应式）全绿、页面看着像做完了**，只有 `typecheck` 与真跑会说话。新增页面时先跑一次 `npm run typecheck` 再谈样式。
+
+---
+
+## 11. 知识关联与上下文注入（2026-11-08：`entry_links` 从只写变可读）
+
+**发现的真问题**：`entry_links` 自蒸馏上线起一直在写（按 `stage`/`shot` 挂），但**全仓没有一处读它** —— `detail()` 只回显本条挂的 ref，既没有反向也没有邻居。于是"这条经验挂在哪个阶段上"这个**事实**存了等于没存：蒸馏每天产出 `scope=stage:video` 的条目，人问「这一镜/这一阶段踩过什么坑」时没有任何入口，只能退回去关键词检索 —— 而「SHOT-012」这种 id 在正文里根本不出现，检索永远命中不了。
+
+这一层正是参考实现（graphiti 的双向边、cognee 的图补全、mem0 的相近记忆召回、auto-ontology 的图谱）把"一堆条目"变成"一张网"的地方。**但它的前提不是向量**：边已经在库里，先把边读出来。因此 `docs/knowledge-stack-audit.md` 对向量库／RAG 框架的结论（不采用）**不变** —— 这一层是确定性的，零新依赖，也不引分词器（中文用 3 字滑窗）。
+
+### 11.1 两档 `via` 的证据强度不同，回执里分开、不混成一条分数
+
+| `via` | 依据 | 强度 | 界面显示 |
+| --- | --- | --- | --- |
+| `shared` | 共用同一 `(refKind, refId)`（同阶段/同镜头） | **事实**（蒸馏真的挂过），`score=null` | `共用 stage:video` |
+| `similar` | 标题或正文的 trigram Jaccard ≥ `SIMILAR_RATIO=0.6` | **启发式**，`score` 0–1 | `相似 0.72` |
+
+混成一档的后果是真实的：`similar` 只说明「字面像」，而同题材、**结论相反**的两条在这本台账里字面恰恰很像（"夜景低步数会过曝" vs "夜景低步数反而稳"）。把相似度当合并依据，最先抹掉的就是这些分歧 —— 那才是台账最值钱的部分。所以：`similar` 只作提示，**自动合并明确不做**（§10 未做清单同款理由）。
+
+### 11.2 三个函数、两条端点、一个工具
+
+* `knowledge_ledger.related(entry, limit, include_deleted)` → `GET /entries/{entry_id}/related?limit=&includeDeleted=`
+  回 `{found, deleted, available, links, items, counts:{shared,similar}, hint}`。三档如实分开：**不存在** ⇒ `found=false`（不抛 404，也不假装成功）；**已软删** ⇒ `found=true, deleted=true` 且 `items=[]`（否则就是绕软删看邻居的后门）。
+* `knowledge_ledger.for_context(stage=, shot=, status=, ...)` → `GET /context?stage=&shot=`
+  按 ref 反查，顺序 `confidence DESC, updated_ns DESC`。**两者都不给 ⇒ `total=0` + 人话**，不返回全量：「没点名上下文」被当成「全库都是上下文命中」，调用方会以为自己拿到了针对性经验。
+* `knowledge_ledger.context_refs(ref_kind=, entry=, limit=)` → `GET /context/refs?refKind=&entry=`
+  台账里**真被挂过**的 ref 清单＋条目数。没有它只能猜阶段名（`video`? `h3`? `krea2`? 三个都是本仓真实存在的字面值），猜错的表现是「查了没结果」，与「确实没经验」永远分不开。
+* Agent 工具 `context_knowledge`（`app/agent/tools/knowledge_tools.py`，第三个知识工具）：`stage`/`shot` → 上下文反查；`entryId` → 邻居；**三个都不给 → 回 ref 清单并提示"给 stage 或 shot 才能取到针对性经验"**，即让模型别猜。
+
+### 11.3 接线与守卫
+
+* 端点 3 个，已登记 `docs/knowledge-base-contract.md` §3.2（总表 40→42）与 §9；`tests/knowledge_management_test.py` ⑧ 组会**双向核**（openapi 里的端点必须在契约文档出现，反之亦然）—— 本轮补完文档后 75/75。
+* 前端只加 `relatedEntries`（详情面板「相关知识」；顺带把 `opened.links` 显示的「挂载」补上 —— 那也是只传不显示）。`/context`、`/context/refs` **刻意不给前端方法**：页面上「这一阶段有哪些经验」还没有稳定的信息层级，不为将来预留。
+* `tests/knowledge_loop_test.py` 本节落地时 **159 条**（现 **178**，见 §12.5），本轮新增 20 条盯真行为：`shared` 档不带分数、跨 `kind` 不比相似（`fact` 与 `lesson` 字面再像也不是一件事）、已软删邻居默认不出现／`includeDeleted=true` 才回来、空文本相似度是 0 而**不是** 1、不给参数 `total=0` 且 `hint` 非空、驼峰 `includeDeleted` 不 422、工具侧"已删条目不回邻居"。
+* `tests/frontend_api_coverage_test.py`：262 个调用点／37 个带 query 键的调用点全对；两端 `useApi.ts`、`knowledge-loop.vue` 逐字同构（`npm run check:parity` 绿），两端 `npm run typecheck` 零错。
+
+⚠️ 踩到的坑（下次别再踩）：新端点**只加后端不写契约文档**，`knowledge_management_test` ⑧ 组会当场红；而它红的时候若控制台是 cp936，`✗` 打印会抛 `UnicodeEncodeError`，看起来像"脚本崩了"而不是"有一条判据没过"（`PYTHONIOENCODING=utf-8` 才看得到真话）。
+
+---
+
+## 12. 投喂的作用域：写读键域闭合（2026-11-08）
+
+### 12.1 缺口长什么样
+
+`compile_for_prompt` 原来是这么选条目的：
+
+```python
+scopes = {"global"}
+if agent_type:
+    scopes.add(f"agent:{agent_type}")
+```
+
+而全仓写 `scope` 的地方只有三类，**没有一处写 `agent:<type>`**：
+
+| 写入口 | 写下的字面形 |
+|---|---|
+| `agent/tools/knowledge_tools.py::propose_knowledge` | `EP<id>` / `DRAMA<id>` / `global` |
+| `services/knowledge_distill.py` | `stage:<key>` / `shot:<key>`（并同时写 `links`） |
+| `POST /entries`（管理接口） | 调用方给，实际就是上面两种 |
+
+所以自动投喂**实际只对 `scope="global"` 生效**：人工把一条 `EP12` 的经验采纳（`accepted`）之后，
+EP12 的下一次跑次依然注入不进去，而回执说的是「台账里还没有 accepted 的知识」——
+库里明明有、且已经审过，读起来却像还没积累。这是「写入口与读入口的键域不一致」，
+和 §11 那个 `entry_links` 只写不读是同一种形状：**两边都不报错，只是白写**。
+
+### 12.2 落法
+
+* `knowledge_feed.compile_for_prompt(agent_type=None, *, scopes=None, …)`：`scopes` 是
+  **本次跑次真实拥有**的作用域，并进允许集合；**默认 `None` ⇒ 老的 `{global, agent:<type>}` 逐字不变**，
+  不传的调用方行为零变化。
+* `knowledge_feed.scopes_for(*, episode_id=None, drama_id=None)`：字面形对齐**写入口**
+  （`EP12` / `DRAMA3`），非数字的不编、直接不产出。
+* `runtime.append_knowledge_feed(..., scopes=[…])` 透传；
+  `assemble_full_instructions` 从自己**已经拿到**的 `episode_id` / `drama_id` 算 ⇒
+  两个入口不再各自为政，也不需要各调用方记得多传一个参数。
+* `GET /feed/preview` 增 `episodeId` / `dramaId` / `scopes`（逗号分隔）——
+  否则预览出来的是「只剩全局成法」的另一种结果，恰好看不见被漏掉的那批。
+
+### 12.3 三种「空」必须分开报
+
+回执新增 `scopes`（本次允许集合）与 `blocked`（kind 够格但作用域不匹配的条数）：
+
+| 情形 | 回执 | 该去做什么 |
+|---|---|---|
+| 台账坏了 | `available=False` | 修库 |
+| 有知识但进不来 | `text=""`, `blocked>0`, hint 点名作用域并列出允许集合 | 传 `scopes` / 查 `episodeId` 是否正确 |
+| 确实还没积累 | `text=""`, `blocked=0` | 去审条目 |
+
+混成一句的代价是：人一直去审已经审过的条目，而真正的毛病在作用域。
+
+### 12.4 为什么不自动带上 `stage:` / `shot:`
+
+`stage:` / `shot:` 才是真正「定向」的那一档（一条关于 `SHOT-012` 夜景过曝的经验，
+只该出现在做 SHOT-012 的跑次里）。但 agent 跑次手上**没有**「我属于哪个引擎档 / 哪一镜」的真值，
+硬拼一个只会让投喂**看起来在定向、其实在乱猜** —— 正是 §11 里刚吃过的亏（猜错阶段名的表现是
+「查了没结果」，与「确实没经验」分不开）。所以这两档留给 Agent 主动调 `context_knowledge`（§11），
+等到跑次能如实报出 stage/shot 的那天再接进来。
+
+### 12.5 定向条目要先占预算（同日补，同一次检查里发现的）
+
+12.2 只解决了**准入**（作用域匹配才进池子），但池子的排序当时仍是 `pool.sort(key=_weight)`，
+而 `_weight = confidence × (1+lift)`。于是出现一个半开的口子：一条 `global` 的高置信通用成法，
+完全可以把**本集**的具体经验挤出 `limit=8` 之外 —— 准入打开了，位子却被别人占着，
+定向的价值只兑现了一半。
+
+落法是**两段式排序**（`_scope_rank`，只用于排次序、绝不用于准入）：
+
+| 档 | 作用域 | 说明 |
+|---|---|---|
+| 0 | `global` | 放之四海 |
+| 1 | 未知写法 / `agent:<type>` | 不认识的不当定向，也不压到底 |
+| 2 | `DRAMA<id>` | 本剧 |
+| 3 | `EP<id>` | 本集 |
+| 4 | `stage:<name>` | 本阶段/本引擎档 |
+| 5 | `shot:<id>` | 本镜 |
+
+先按档降序、档内再按 `_weight` 降序。回执新增 `targeted`（这批里有几条属于本剧/本集/本阶段）——
+**定向到底有没有生效，看这个数，不要靠读文本猜**。
+
+代价与取向：一条 `EP12` 低置信条目会排在 `global` 高置信条目前面。这是有意的
+（相关性先于强度，mem0/cognee 的 recall 同一取向）；若真发现某条定向条目在拉低质量，
+处理办法是**人工降它的 confidence 或 deprecate**，而不是让排序去猜"这条到底算不算好"。
+
+预览页跟着把两个读数写出来（两端同源）：卡头是 `其中 N 条定向`，正文第一行是
+`作用域：…`，`blocked>0` 时同一行还会写「另有 N 条知识存在、但作用域不符没进这一段」——
+否则用户看见空段只会以为"没积累"，实际是**有知识、只是作用域不对**（三种空里最难自查的一种）。
+
+### 12.6 守卫
+
+`tests/knowledge_loop_test.py` 159 → **178**，新增 19 条：
+
+* 键域（8 条）：传 `scopes=["EP1"]` 才带出 EP1 条目・不传时同一条仍被排除且 `blocked` 如实多算・
+  `scopes_for` 字面形与写入口一致・「有知识但作用域不匹配」时 `text` 空而 `blocked>0` 且 hint 点名作用域・
+  `append_knowledge_feed` 的 `scopes` 真透传进编译・组装点 AST 断言其 `scopes=` 来自
+  `knowledge_feed.scopes_for(episode_id=…, drama_id=…)`・`/feed/preview` 带 `episodeId` 与生产同口径・
+  不带 `episodeId` 时 `blocked>0`。
+* 定向优先（11 条）：9 条造数逐条核 `ok is True`（**upsert 拒收是静默的**，不核就会被"数据没写进去"
+  骗到）・9 条 `global` 0.9 对 2 条 `EP1` 0.1/0.05、`limit=8` 时定向两条必须进预算且 `targeted==2`・
+  档内仍按 weight 排（0.1 在 0.05 前，不是按插入顺序）・不给 `scopes` 时两条都在预算外且
+  `targeted==0`、`blocked==2`。
+
+造数用 `kind="work"`（不在 `DEFAULT_KINDS` 里）以免污染其它判据的默认投喂 —— 第一版用了 `lesson`，
+当场把「注入: 打开后追加分节」那条判据挤红，是真实的连锁污染。
+
+反向验证过三条：① 把 `allowed.add(text)` 改成 `pass` ⇒ 4 条红（含预览）；② 把组装点的 `scopes=`
+传参删掉 ⇒ AST 判据当场红并打印残留关键字；③ 把两段式排序退回 `key=_weight`
+⇒ 定向判据当场红，回执里 8 条全是 `[作品] 通用成法*`、`targeted=0`。复原后 178/178。
+
+⚠️ 顺手取到的一条纪律：`upsert(require_evidence=False)` 只免除**空证据**的拒绝，
+**带了证据仍无条件过 `check_evidence`**（`if items:` 那一段不看这个开关）。
+所以测试造数别用假 `run_id` 再关核验 —— 会静默拒收；要挂真实存在的 run。

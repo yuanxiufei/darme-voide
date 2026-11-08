@@ -4,9 +4,17 @@ import type { DramaDetailDTO, DramaListResponse, DramaUpdateBody, EraBackground 
 // 后端基址：Web 同源、桌面端由壳注入绝对 origin（唯一真源与理由见 `utils/apiBase.ts` 文件头）
 import { apiBase } from '../utils/apiBase'
 
-async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
+/**
+ * 唯一出口（JSON）。
+ *
+ * `signal` 只有「能被用户中途叫停」的慢接口才传（画布 AI 一次要 5–20 秒）✓。
+ * 中止时 `fetch` 抛 `AbortError`，本函数原样透传 —— 调用方靠 `name === 'AbortError'`
+ * 区分「用户叫停」与「真失败」，所以这里**不能**把它包装成别的错误 ✗。
+ */
+async function req<T = any>(method: string, path: string, body?: any, signal?: AbortSignal): Promise<T> {
   const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
   if (body) opts.body = JSON.stringify(body)
+  if (signal) opts.signal = signal
 
   const start = performance.now()
   console.log(`%c[API] %c${method} %c${path}`, 'color:#888', 'color:#2dd4bf;font-weight:bold', 'color:#ccc', body || '')
@@ -413,9 +421,15 @@ export const canvasAPI = {
     api.post('/canvas/ops/validate', d) as Promise<{ ops: any[]; errors: string[]; ok: boolean }>,
   /** 压缩快照（正文截断，只留判断所需字段） */
   compact: (d: { snapshot: any }) => api.post('/canvas/ops/snapshot', d),
-  /** 一句话 ⇒ 一串待执行 op（`ops` 此刻**还没落地**） */
-  agent: (d: { message: string; snapshot?: any; scene?: string }) =>
-    api.post('/canvas/agent', d) as Promise<{
+  /**
+   * 一句话 ⇒ 一串待执行 op（`ops` 此刻**还没落地**）。
+   *
+   * `signal` 是给对话面板「停止」用的：模型这一趟要 5–20 秒，用户等不下去时必须能真的
+   * 停下 —— 中止后请求被丢弃、`runCanvasAgent` 抛 `AbortError`、**一条 op 都不会落** ✓。
+   * 只做「界面不转圈、但结果照落」是假停止 ✗。
+   */
+  agent: (d: { message: string; snapshot?: any; scene?: string }, signal?: AbortSignal) =>
+    req('POST', '/canvas/agent', d, signal) as Promise<{
       text: string
       ops: any[]
       errors: string[]
@@ -1272,6 +1286,49 @@ export interface KnowledgeEntryList {
   hint?: string
 }
 
+/** 邻居条目的摘要：不给全文（列表里塞全文会把抽屉撑到几百 KB），但**必须给头 120 字** */
+export interface KnowledgeRelatedBrief {
+  id: string
+  kind: string
+  scope: string
+  title: string
+  status: string
+  confidence: number
+  support: number
+  contra: number
+  lift: number | null
+  tags: string[]
+  version: number
+  deleted: boolean
+  updatedNs: number
+  snippet: string
+}
+
+/**
+ * 邻居一项。`via` 两档**证据强度不同，不能混读**：
+ * - `shared`：共用同一 `stage`/`shot`（有事实依据，`score` 恒为 `null`）；
+ * - `similar`：正文 trigram 相似（启发式，只作提示，**不是合并依据**）。
+ */
+export interface KnowledgeRelatedItem {
+  via: 'shared' | 'similar'
+  refKind: string
+  refId: string
+  score: number | null
+  entry: KnowledgeRelatedBrief
+}
+
+/** `GET /entries/{id}/related`：`found=false` 是「没这条」，不是「库坏了」 */
+export interface KnowledgeRelated {
+  id: string
+  found: boolean
+  deleted: boolean
+  available: boolean
+  links: Array<{ refKind: string; refId: string }>
+  items: KnowledgeRelatedItem[]
+  counts: { shared: number; similar: number }
+  hint?: string
+}
+
 /** 版本列表只给元信息（不带正文：一页十条正文会把响应撑到几十 KB） */
 export interface KnowledgeEntryVersion {
   version: number
@@ -1336,6 +1393,7 @@ export interface KnowledgeAuditList {
 export interface KnowledgeLedgerStats {
   total: number
   deleted?: number
+  recent7d?: number
   accepted?: number
   proposed?: number
   byKindStatus?: Array<{ kind: string; status: string; count: number }>
@@ -1499,6 +1557,12 @@ export const knowledgeLoopAPI = {
       `/knowledge-loop/entries/${encodeURIComponent(id)}`
       + `?includeDeleted=${includeDeleted ? 'true' : 'false'}`,
     ),
+  /** 一条知识的邻居：共用同一 stage/shot（有事实依据）＋ 正文相似（启发式，仅提示） */
+  relatedEntries: (id: string, p: { limit?: number; includeDeleted?: boolean } = {}) =>
+    api.get<KnowledgeRelated>(
+      `/knowledge-loop/entries/${encodeURIComponent(id)}/related?limit=${p.limit ?? 10}`
+      + (p.includeDeleted ? '&includeDeleted=true' : ''),
+    ),
   /** **部分字段**改一条：没出现的字段不动（`null` 与「不传」同义）。清标签要显式传 `tags: ''` */
   updateEntry: (
     id: string,
@@ -1570,11 +1634,21 @@ export const knowledgeLoopAPI = {
       + (p.status ? `&status=${encodeURIComponent(p.status)}` : '')
       + (p.scope ? `&scope=${encodeURIComponent(p.scope)}` : ''),
     ),
-  /** 一次喂给某角色的知识包（编译期预算内，超了按分值截断并计数） */
-  feedPreview: (p: { agentType?: string; budgetChars?: number; limit?: number } = {}) =>
+  /**
+   * 一次喂给某角色的知识包（编译期预算内，超了按分值截断并计数）。
+   * `episodeId`/`dramaId` 决定「本集/本剧」作用域能否进来 —— 不传就只剩全局成法，
+   * 预览会说"没有知识"，而生产侧其实注入了本集那几条（同一功能两个口径，最易误判）。
+   */
+  feedPreview: (p: {
+    agentType?: string; episodeId?: number; dramaId?: number
+    scopes?: string; budgetChars?: number; limit?: number
+  } = {}) =>
     api.get<any>(
       `/knowledge-loop/feed/preview?budgetChars=${p.budgetChars ?? 600}&limit=${p.limit ?? 8}`
-      + (p.agentType ? `&agentType=${encodeURIComponent(p.agentType)}` : ''),
+      + (p.agentType ? `&agentType=${encodeURIComponent(p.agentType)}` : '')
+      + (p.episodeId ? `&episodeId=${p.episodeId}` : '')
+      + (p.dramaId ? `&dramaId=${p.dramaId}` : '')
+      + (p.scopes ? `&scopes=${encodeURIComponent(p.scopes)}` : ''),
     ),
   datasets: () => api.get<any>('/knowledge-loop/datasets'),
   /** L3 导出：`target=runs` 导高分跑次，`target=knowledge` 导「指令 → 做法」对 */

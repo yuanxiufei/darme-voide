@@ -72,24 +72,22 @@ _PKG = "app.services.engine"
 #: （③b）。所以「先随手加一条豁免」这条路是通的 ✓，但**撤销条件必须写成人话且可判**
 #: （写"以后再说"会被 ④ 拦 ✓）。
 #:
-#: 为什么要 `uses`（2026-11-08 补 ✓）：`inventory.py` 对扫描层原本用了**两个**名字
-#: （`get_model_paths` + `get_default_roots`），按模块登记的话，悄悄销掉一个也不会红 ✓✗ ——
-#: 表停留在"两个都要"的旧口径上，「还欠什么」就没人知道了 ✓✗。降到名字粒度后，销一个
-#: **必须**改表（销完就得删条），账目才对得上 ✓。
+#: 为什么要 `uses`（2026-11-08 补 ✓）：`inventory.py` 对扫描层曾经用了**两个**名字
+#: （`get_model_paths` + `get_default_roots`）—— 按模块登记的话，悄悄销掉其中一个不会红 ✓✗，
+#: 表就停在"两个都要"的旧口径上，「还欠什么」没人知道 ✓✗。降到名字粒度后，销一个**必须**改表
+#: （销完就得删条），账目才对得上 ✓。⚠️ 这条规则当天就应验了两次 ✓：`get_model_paths` 先搬去
+#: `app.core.model_paths`、随后 `get_default_roots` 连同根表整体搬去 `app.core.model_roots`
+#: （连同 `model_folders` / `model_ecosystems` / `ollama_roots`）⇒ `inventory.py` 整条已删 ✓。
+#:
+#: ⚠️ 现阶段只剩**一条** ✓ —— `bridge.py → task_logger`（任务日志面板的语料，引擎侧没有等价物 ✓、
+#: 也**不该**有：那是"给谁看"的业务口径，不是"能不能跑"的引擎口径 ✓）。这不是"迁就现状"的余额 ✓，
+#: 而是逐条撤销后剩下的**真缺口**：要销它得先让路由器自己落日志（见该条"怎么撤销"）。
 _SEAMS: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
     ("bridge.py", "app.services.task_logger"): (
         "任务日志（progress/warn/error 三档）是**服务层任务面板**的语料 ✓，"
         "引擎侧没有等价物 ✓，桥负责把引擎的回执翻成面板能读的条目 ✓",
         "引擎回执里已有结构化 notes ⇒ 让调用方（routers）自己落日志，桥不再写盘",
         ("log_task_error", "log_task_progress", "log_task_warn"),
-    ),
-    ("inventory.py", "app.services.local_model_scan"): (
-        "`candidate_roots()` 要「盘上还有没有别处的副本」⇒ 需要 `extra_roots` ＋ `model_ecosystems` 的"
-        "生态落点表 ＋ `model_folders` 的声明 ✓（这几样是「模型库功能」，读生态约定与用户声明 ✓）；"
-        "另外两半都已搬走 ✓ —— `models_dir` 在 `app.core.model_paths` ✓、ComfyUI 安装根探测在"
-        "`app.core.comfyui_roots` ✓（2026-11-08 搬，`bridge.py` 那条已随之销掉 ✓）",
-        "把生态落点/声明表也搬进 `app.core`（它们读的同样是配置与盘，不是业务数据 ✓），或让调用方传入根列表",
-        ("get_default_roots",),
     ),
 }
 
@@ -222,6 +220,27 @@ def case_static() -> None:
               if getattr(svc_storage, name, None) is not getattr(core_media, name, None)]
     check("②b 搬进 `app.core` 的媒体口（`get_absolute_path`/`parse_data_url`）在服务层那份"
           "是**同一个对象**（`is` 判；另写一份 = 第二真源 ✗）", not copied, copied)
+
+    #: ②b′ 同一把尺子量**模型落点**那批（2026-11-08 搬 ✓）：引擎现在直接从 `app.core` 取
+    #: `comfyui_roots` / `model_roots` / `model_ecosystems` ⇒ 服务层那几份**必须**是同一个对象 ✓✗。
+    #: 抄一份的后果特别隐蔽：扫描层与引擎各读一张表 ⇒「清单说装了、加载说没有」✓✗
+    #: （本仓 2026-09-26 真机踩过同类：扫描看得见、视频看不见 ✓）。
+    from app.core import comfyui_roots as core_comfyui
+    from app.core import model_ecosystems as core_eco
+    from app.core import model_roots as core_roots
+    from app.services import local_model_scan as svc_scan
+    from app.services import model_ecosystems as svc_eco
+
+    twins = {
+        "local_model_scan.detect_comfyui_roots": (svc_scan.detect_comfyui_roots,
+                                                  core_comfyui.detect_comfyui_roots),
+        "local_model_scan.comfyui_roots→LOCAL_SERVICES_ROOT": (svc_scan.LOCAL_SERVICES_ROOT,
+                                                               core_roots.LOCAL_SERVICES_ROOT),
+        "model_ecosystems.ECOSYSTEMS": (svc_eco.ECOSYSTEMS, core_eco.ECOSYSTEMS),
+    }
+    copied_roots = [f"{name} 不是同一个对象" for name, (a, b) in twins.items() if a is not b]
+    check("②b′ 搬进 `app.core` 的模型落点口（安装根探测 / 本地服务根 / 生态落点表）在服务层那份"
+          "是**同一个对象**（`is` 判；另写一份 = 第二真源 ✗）", not copied_roots, copied_roots)
 
     #: ③ 双向对账：表里每一条都必须在代码里真存在（修好了就删表 ⇒ 表不许长霉 ✓✗）
     stale: list[str] = []

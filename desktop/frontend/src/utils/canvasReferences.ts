@@ -118,6 +118,43 @@ export interface ReferenceInputs {
    * 所以它和 `images` 分开放，别混进请求里 ✗。
    */
   text?: string
+  /**
+   * 这张卡的**真正提示词** ✓ —— 生成请求该送的那句话。
+   *
+   * 配置卡正文不是人话而是 `@[node:text-xxxx]` 引用串（`canvas_ops._generation_flow` 就是这么
+   * 回给前端的：提示词只存一份，改文本卡配置卡跟着变 ✓）。**引用不解析就直接提交**，
+   * 引擎拿到的会是一串 `@[node:text-9f8e7d6c5a]` ✗ —— 出的图与用户看到的字毫无关系。
+   * 所以这里统一解析成正文（见 :func:`resolvePromptText`），卡片只管取用 ✓。
+   */
+  prompt?: string
+}
+
+/** 配置卡正文里的节点引用标记 ✓（与后端 `canvas_ops.REFERENCE_PATTERN` 同形） */
+export const REFERENCE_TOKEN = /@\[node:([^\]]+)\]/g
+
+/**
+ * 引用串 → 人话 ✓（`@[node:text-x]` 换成那张文本卡的正文）。
+ *
+ * `missing` 如实返回找不到的 id —— 静默删掉会让用户以为提示词就这几句 ✗。
+ */
+export function resolvePromptText(text: string, nodes: CanvasNode[]): { text: string; missing: string[] } {
+  if (!text.includes('@[node:')) return { text: text.trim(), missing: [] }
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const missing: string[] = []
+  const resolved = text.replace(REFERENCE_TOKEN, (_all, id: string) => {
+    const target = byId.get(id)
+    const body = (target?.text || '').trim()
+    if (!target) missing.push(id)
+    return body
+  })
+  // 引用都是空卡时会剩下成片空行 ⇒ 归一，别把一串 `\n\n\n` 当提示词送出去 ✗
+  const cleaned = resolved
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+  return { text: cleaned, missing }
 }
 
 /**
@@ -134,11 +171,28 @@ export function collectReferenceInputs(
 ): ReferenceInputs {
   const images: string[] = []
   const texts: string[] = []
-  for (const node of upstreamNodes(nodeId, nodes, edges)) {
+  const upstream = upstreamNodes(nodeId, nodes, edges)
+  for (const node of upstream) {
     if (node.type === 'image' && node.url && !images.includes(node.url)) images.push(node.url)
     if (node.type === 'text' && node.text?.trim()) texts.push(node.text.trim())
   }
-  return texts.length ? { images, text: texts.join('\n\n') } : { images }
+  const inputs: ReferenceInputs = texts.length ? { images, text: texts.join('\n\n') } : { images }
+
+  /*
+   * 提示词口径（与源项目的一处语义修正）：
+   * 源把 prompt 存进 config 节点的 `metadata.prompt`，正文另存一份 ⇒ 两处会漂 ✗。
+   * 本仓正文就是**唯一真源**：是人话直接送；是 `@[node:…]` 引用就先解析 ✓。
+   * 都不成立（配置卡还没写）时才回落到「上游文本拼接」——
+   * 那是用户「连了一张文本卡过来」的意图 ✓，但优先级必须低于正文 ✗。
+   */
+  const self = nodes.find((node) => node.id === nodeId)
+  const own = (self?.text || '').trim()
+  if (own) {
+    const resolved = resolvePromptText(own, nodes)
+    if (resolved.text) inputs.prompt = resolved.text
+  }
+  if (!inputs.prompt && inputs.text) inputs.prompt = inputs.text
+  return inputs
 }
 
 /** 给人看的一行摘要 ✓（画布右键「查看引用」直接显示） */

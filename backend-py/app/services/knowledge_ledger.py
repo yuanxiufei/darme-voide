@@ -51,6 +51,10 @@ __all__ = [
     "db_path",
     "upsert",
     "search",
+    "related",
+    "for_context",
+    "context_refs",
+    "SIMILAR_RATIO",
     "list_entries",
     "detail",
     "set_status",
@@ -696,6 +700,254 @@ def search(query: str, *, kind: str | None = None, scope: str | None = None,
             "hint": ("bm25 序（越小越相关，只覆盖 ≥3 字查询）" if ranking == "bm25"
                      else "LIKE 包含匹配（不支持词序/相关性；1–2 字中文只能走这条）"),
         }
+
+
+# ---------------------------------------------------------------------------
+# 关联：把 entry_links 从「只写」变成可正反向读（2026-11-08）
+# ---------------------------------------------------------------------------
+#
+# 缘起：``entry_links`` 自蒸馏上线起就一直在写（按 ``stage``/``shot`` 挂），但**全仓
+# 没有一处读它**（``detail`` 只回显本条挂的 ref，没有反向、没有邻居）——写进去的关联
+# 等于不存在。参考实现（graphiti 的双向边、cognee 的图补全、mem0 的相近记忆召回）
+# 都说明这个能力是「记忆」与「一堆条目」的分水岭，而它们的共同前提不需要向量：
+# **边已经在库里了，先把它读出来**。
+#
+# 两档 ``via`` 的**证据强度不同，回执分开给、不混排成一条分数**：
+#   * ``shared``：同一 ``(refKind, refId)`` 上还挂着谁 —— 有事实依据（同阶段／同镜头）；
+#   * ``similar``：正文 trigram Jaccard ≥ ``SIMILAR_RATIO`` —— 纯启发式，只作提示，
+#     **不当成合并依据**（同题材不同结论的条目字面也很像，合并会抹掉分歧）。
+
+#: 文本相似的默认闸门。0.6 对应「同一件事换个说法」（词序/语气词微调）；
+#: 调低会把同题材、结论相反的条目混进来 —— 那是这本台账最值钱的分歧，不能被"去重"。
+SIMILAR_RATIO = 0.6
+
+#: 相似比较的候选上限（同 kind 内按最近更新取）。台账规模是百级，
+#: 全量两两比较也没问题，但**别让它随库增长变成隐形的慢查询**。
+_SIMILAR_POOL = 300
+
+#: ``related`` / ``for_context`` 回执里条目摘要保留的正文长度
+_BRIEF_CHARS = 120
+
+
+def _trigrams(text: Any) -> set[str]:
+    """3 字滑窗（大小写与空白先归一）。
+
+    为什么是 trigram 而不是分词：中文没有空格，本仓也不想为此引一个分词器依赖；
+    3 字窗对「换词序」「加语气词」稳健，对「换主语」敏感 —— 正好是我们要的粒度。
+    """
+    plain = _WHITESPACE.sub(" ", str(text or "")).strip().lower()
+    if not plain:
+        return set()
+    if len(plain) <= 3:
+        return {plain}
+    return {plain[i:i + 3] for i in range(len(plain) - 2)}
+
+
+def _similarity(left: Any, right: Any) -> float:
+    """Jaccard 相似度（0–1）。任一侧为空返回 0.0 —— **不是** 1.0。"""
+    a, b = _trigrams(left), _trigrams(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _brief(row: sqlite3.Row) -> dict[str, Any]:
+    """条目摘要（不含全文）。
+
+    ``body`` 可能上千字，邻居列表里塞全文会让一个抽屉拉几百 KB；
+    但**不能只给标题** —— 判断「这条是不是我要找的那条」几乎全靠头两句。
+    """
+    item = _row_to_entry(row)
+    return {
+        "id": item["id"],
+        "kind": item["kind"],
+        "scope": item["scope"],
+        "title": item["title"],
+        "status": item["status"],
+        "confidence": float(item.get("confidence") or 0.0),
+        "support": int(item.get("support") or 0),
+        "contra": int(item.get("contra") or 0),
+        "lift": item.get("lift"),
+        "tags": item["tagList"],
+        "version": item["version"],
+        "deleted": item["deleted"],
+        "updatedNs": int(item.get("updated_ns") or 0),
+        "snippet": _WHITESPACE.sub(" ", str(item.get("body") or ""))[:_BRIEF_CHARS],
+    }
+
+
+def _links_of(conn: sqlite3.Connection, entry: str) -> list[dict[str, str]]:
+    return [
+        {"refKind": str(r["ref_kind"]), "refId": str(r["ref_id"])}
+        for r in conn.execute(
+            "SELECT ref_kind, ref_id FROM entry_links WHERE entry_id = ?"
+            " ORDER BY ref_kind, ref_id", [entry])
+    ]
+
+
+def related(entry: str, *, limit: int = 10,
+            include_deleted: bool = False) -> dict[str, Any]:
+    """一条知识的邻居：**共享同一 ref 的兄弟条目** ＋ **正文高度相似的条目**。
+
+    ``links`` 原样带回本条自己挂的 ref（前端要显示「挂在 stage:video 上」）；
+    ``items`` 只装**别的条目**，每项带 ``via``/``score``/``refKind``/``refId``。
+
+    条目不存在与条目已删**分开报**：前者是 ``found=False``，后者是 ``found=True``
+    但 `deleted=True`（回收站里的条目点开邻居不该显示成"这条不存在"）。
+    """
+    limit = max(1, min(int(limit or 10), 50))
+    empty_counts = {"shared": 0, "similar": 0}
+    try:
+        with _connect() as conn:
+            row = conn.execute("SELECT * FROM entries WHERE id = ?", [entry]).fetchone()
+            if row is None:
+                return {"id": entry, "found": False, "available": True, "links": [],
+                        "items": [], "counts": empty_counts,
+                        "hint": f"没有这条知识：{entry}"}
+            deleted = bool(int(_col(row, "deleted_ns", 0) or 0))
+            if deleted and not include_deleted:
+                return {"id": entry, "found": True, "deleted": True, "available": True,
+                        "links": [], "items": [], "counts": empty_counts,
+                        "hint": "这条已软删（回收站视角要 includeDeleted=true）"}
+            item = _row_to_entry(row)
+            links = _links_of(conn, entry)
+            seen = {str(entry)}
+
+            shared: list[dict[str, Any]] = []
+            for link in links:
+                rows = conn.execute(
+                    "SELECT e.* FROM entry_links l JOIN entries e ON e.id = l.entry_id"
+                    " WHERE l.ref_kind = ? AND l.ref_id = ? AND l.entry_id <> ?"
+                    " ORDER BY e.updated_ns DESC LIMIT ?",
+                    [link["refKind"], link["refId"], entry, limit]).fetchall()
+                for sibling in rows:
+                    key = str(sibling["id"])
+                    if key in seen:
+                        continue
+                    if not include_deleted and int(_col(sibling, "deleted_ns", 0) or 0):
+                        continue
+                    seen.add(key)
+                    shared.append({
+                        "via": "shared", "refKind": link["refKind"], "refId": link["refId"],
+                        "score": None, "entry": _brief(sibling),
+                    })
+
+            #: 相似只在**同 kind** 内比较：`fact` 与 `failure` 字面再像也不是一件事
+            #: （一个是外部事实、一个是我们自己的坑），跨类相似只会在列表里制造噪声。
+            clause = "SELECT * FROM entries WHERE id <> ? AND kind = ?"
+            params: list[Any] = [entry, item.get("kind")]
+            if not include_deleted:
+                clause += " AND COALESCE(deleted_ns, 0) = 0"
+            pool = conn.execute(clause + " ORDER BY updated_ns DESC LIMIT ?",
+                                [*params, _SIMILAR_POOL]).fetchall()
+            base_title = item.get("title") or ""
+            base_body = item.get("body") or ""
+            similar: list[dict[str, Any]] = []
+            for other in pool:
+                key = str(other["id"])
+                if key in seen:
+                    continue
+                score = max(_similarity(base_title, other["title"]),
+                            _similarity(base_body, other["body"]))
+                if score < SIMILAR_RATIO:
+                    continue
+                similar.append({"via": "similar", "refKind": "", "refId": "",
+                                "score": round(score, 4), "entry": _brief(other)})
+            similar.sort(key=lambda x: -float(x["score"] or 0.0))
+            similar = similar[:limit]
+    except sqlite3.Error as exc:
+        return {"id": entry, "found": False, "available": False, "links": [], "items": [],
+                "counts": empty_counts, "hint": f"台账不可用：{exc}"}
+
+    items = shared[:limit] + similar
+    hint = ""
+    if not links:
+        hint = "这条没挂任何阶段/镜头（人工写的条目通常如此）：邻居只剩正文相似这一档"
+    elif not shared:
+        hint = "挂在 ref 上但没有别的条目共用（蒸馏出的同族条目还没出现）"
+    return {"id": entry, "found": True, "deleted": deleted, "available": True,
+            "links": links, "items": items,
+            "counts": {"shared": len(shared), "similar": len(similar)},
+            "hint": hint}
+
+
+def for_context(*, stage: str | None = None, shot: str | None = None,
+                status: str | None = None, include_deleted: bool = False,
+                limit: int = 10) -> dict[str, Any]:
+    """按「阶段 / 镜头」反查经验 —— 读 ``entry_links`` 的反向索引。
+
+    回答的是「**这一阶段／这一镜**踩过什么坑」，与 ``search``（提到某个词的有哪些）
+    不可互替：前者是结构化事实，后者是文本匹配。
+
+    ``stage``/``shot`` 都不给时**不猜**（不返回"全部"当成上下文命中）：那会让调用方
+    以为自己拿到了针对性经验。要"台账里挂了哪些 ref"走 :func:`context_refs`。
+    """
+    limit = max(1, min(int(limit or 10), 50))
+    refs = [(kind, _text(value)) for kind, value in (("stage", stage), ("shot", shot))]
+    refs = [(kind, value) for kind, value in refs if value]
+    if not refs:
+        return {"available": True, "items": [], "total": 0, "refs": [],
+                "hint": "没给 stage/shot：按上下文取知识必须点名其中一个阶段或镜头"}
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with _connect() as conn:
+            for ref_kind, ref_id in refs:
+                clause = ("SELECT e.* FROM entry_links l JOIN entries e ON e.id = l.entry_id"
+                          " WHERE l.ref_kind = ? AND l.ref_id = ?")
+                params: list[Any] = [ref_kind, ref_id]
+                if status:
+                    clause += " AND e.status = ?"
+                    params.append(status)
+                if not include_deleted:
+                    clause += " AND COALESCE(e.deleted_ns, 0) = 0"
+                rows = conn.execute(
+                    clause + " ORDER BY e.confidence DESC, e.updated_ns DESC LIMIT ?",
+                    [*params, limit]).fetchall()
+                for row in rows:
+                    key = str(row["id"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    items.append({"refKind": ref_kind, "refId": ref_id, "entry": _brief(row)})
+    except sqlite3.Error as exc:
+        return {"available": False, "items": [], "total": 0,
+                "refs": [{"refKind": k, "refId": v} for k, v in refs],
+                "hint": f"台账不可用：{exc}"}
+    return {"available": True, "items": items, "total": len(items),
+            "refs": [{"refKind": k, "refId": v} for k, v in refs],
+            "hint": "" if items else "这些 ref 上还没有条目（蒸馏还没写过，或都已被删）"}
+
+
+def context_refs(*, ref_kind: str | None = None, entry: str | None = None,
+                 limit: int = 200) -> dict[str, Any]:
+    """台账里**真被挂过**的 ref 清单（附条目数）——「有哪些阶段/镜头有经验」。
+
+    没有这条端点时，前端只能猜阶段名（`video`? `h3`? `krea2`?）；猜错的表现是
+    "查了没结果"，与"确实没有经验"永远分不开。
+    """
+    limit = max(1, min(int(limit or 200), 500))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if ref_kind:
+        clauses.append("ref_kind = ?")
+        params.append(_text(ref_kind))
+    if entry:
+        clauses.append("entry_id = ?")
+        params.append(_text(entry))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT ref_kind, ref_id, COUNT(*) AS n FROM entry_links"
+                f"{where} GROUP BY ref_kind, ref_id ORDER BY n DESC, ref_id LIMIT ?",
+                [*params, limit]).fetchall()
+    except sqlite3.Error as exc:
+        return {"available": False, "items": [], "total": 0, "hint": f"台账不可用：{exc}"}
+    items = [{"refKind": str(r["ref_kind"]), "refId": str(r["ref_id"]),
+              "entries": int(r["n"])} for r in rows]
+    return {"available": True, "items": items, "total": len(items),
+            "hint": "" if items else "库里还没有任何 ref（蒸馏尚未写过 stage/shot 关联）"}
 
 
 def list_entries(*, kind: str | None = None, scope: str | None = None,

@@ -6,6 +6,10 @@
 > 本仓引擎 = `backend-py/app/services/engine/`（PyTorch，跑 DiT 扩散 ＋ 少量小 LLM，
 > Windows 11 ＋ RTX A5000 24G / sm86 / **无 fp8 硬件加速**）。
 >
+> ⚠️ **LLM 侧另见 `docs/reference-audit-llm.md`**（2026-11-08）：落点从 DiT 扩散换成自研 LLM 推理后，
+> 同七仓按七项能力（含此前未覆盖的**投机解码**与 **KV 量化**）重新判定；本文件 §零~§五 的 DiT 结论不受影响。
+> 该轮审计时七仓在盘位置是 `D:\code\voide\_audit-lowvram\`（非本仓 `reference/`，后者已于 2026-11-04 清理）。
+>
 > ⚠️ **盘上现状（2026-11-04 清理）**：`reference/` 整棵是 `.gitignore` 的"学习用拷贝"，**已全部删除**
 > （46 个仓、8.5 GiB，其中 `comfy-org/` 独占 7.1 GiB），并且**本仓不再依赖其中任何一个** ✓：
 > `app/services/lora_train/paths.py` 的工具根只认环境变量（`MUSUBI_TUNER_ROOT` / `SD_SCRIPTS_ROOT`）

@@ -303,6 +303,138 @@ def main() -> int:
     check("端点: 5 个画布 op 接口都已挂上", expected <= set(paths),
           sorted(item for item in paths if item.startswith("/api/v1/canvas")))
 
+    # ---------------------------------------------------------------- ⑦ 对话代跑生成的接线（2026-11-08）
+    #: 这一节全部是**跨层接线**判据：后端编出来、前端接不接得住。
+    #: 单看任何一层都绿 ✓✗ —— 只有对着源码断言才抓得到「模型点了名、前端没理」。
+    run_op, errors = ops.validate_ops(
+        [{"type": "run_generation", "nodeId": "c", "mode": "video", "prompt": "@[node:t1]"}], snapshot)
+    check("对话: 校验后 run_generation 仍带 mode/prompt（丢掉=模型这轮写的提示词白写 ✗）",
+          run_op and run_op[0].get("mode") == "video" and run_op[0].get("prompt") == "@[node:t1]",
+          run_op)
+
+    refs_src = (REPO / "frontend" / "app" / "utils" / "canvasReferences.ts").read_text(encoding="utf-8")
+    check("对话: 提示词有引用解析器（`@[node:…]` 原样送引擎=出图与用户写的字无关 ✗）",
+          "export function resolvePromptText" in refs_src
+          and "REFERENCE_TOKEN" in refs_src,
+          [line.strip() for line in refs_src.splitlines() if "resolvePromptText" in line])
+    check("对话: 引用解析结果进了 ReferenceInputs.prompt",
+          re.search(r"prompt\?:\s*string", refs_src) is not None
+          and "inputs.prompt" in refs_src,
+          [line.strip() for line in refs_src.splitlines() if "inputs.prompt" in line])
+    #: ⚠️ 必须**定位到函数体**再断言：这两个 build 里都写了 `promptOverride ?? promptText.value`，
+    #: 只查「文件里存在这串」的话，把 engine 那处改回 `props.node.text` 仍然判绿 ✗
+    #: （反向验证时真踩到了：整文件存在性断言对这种双处写法完全失效 ✗）
+    engine_fn = re.search(r"function buildEnginePayload\([^)]*\)\s*\{(.*?)\n\}", card_src, re.S)
+    comfy_fn = re.search(r"function buildPayload\([^)]*\)\s*\{(.*?)\n\}", card_src, re.S)
+    check("对话: 引擎 payload 用解析后的正文（改回 props.node.text = 引用串直达引擎 ✗）",
+          engine_fn is not None and "promptOverride ?? promptText.value" in engine_fn.group(1),
+          [line.strip() for line in (engine_fn.group(1) if engine_fn else "").splitlines()
+           if "prompt:" in line][:2])
+    check("对话: 工作流 payload 同样用解析后的正文",
+          comfy_fn is not None and "promptOverride ?? promptText.value" in comfy_fn.group(1),
+          [line.strip() for line in (comfy_fn.group(1) if comfy_fn else "").splitlines()
+           if "prompt:" in line][:2])
+    check("对话: 卡片从 references.prompt 取解析结果",
+          "references?.prompt" in card_src,
+          [line.strip() for line in card_src.splitlines() if "references?.prompt" in line])
+    check("对话: 卡片按 op.mode 对档位类别（类别不符要拒，不许静默按卡上档位跑 ✗）",
+          "stageKind.value" in card_src and "STAGE_KIND_LABEL" in card_src,
+          [line.strip() for line in card_src.splitlines() if "stageKind" in line])
+
+    panel_src = (REPO / "frontend" / "app" / "components" / "canvas"
+                 / "CanvasChatPanel.vue").read_text(encoding="utf-8")
+    check("对话: 面板把 mode/prompt 一起交给画布（只传 nodeId = 丢掉新提示词 ✗）",
+          "props.generate?.(nodeId, override)" in panel_src
+          and "mode: run.mode, prompt: run.prompt" in panel_src,
+          [line.strip() for line in panel_src.splitlines() if "override" in line])
+    check("对话: 回执读引擎真状态（只写「已提交」= 用户永远不知道跑成没跑成 ✗）",
+          "engine.stateOf(id).value" in panel_src and "function runBadge" in panel_src,
+          [line.strip() for line in panel_src.splitlines() if "runBadge" in line][:3])
+
+    page_src = (REPO / "frontend" / "app" / "pages" / "canvas.vue").read_text(encoding="utf-8")
+    check("对话: 成品贴源卡右侧落位（固定落视口中心 ⇒ 多张叠在一起看不出哪张是哪次 ✗）",
+          "function artifactSpot" in page_src and "payload.sourceId" in page_src,
+          [line.strip() for line in page_src.splitlines() if "artifactSpot" in line][:3])
+    check("对话: 成品与源卡连线（不连=下一轮 agent 眼里它是来路不明的图 ✗）",
+          "connect(payload.sourceId, id)" in page_src)
+
+    agent_src = (REPO / "frontend" / "app" / "utils" / "canvasAgent.ts").read_text(encoding="utf-8")
+    check("对话: 落地前调整批自检（逐条 try 只会落半批 ✗）",
+          "canvasAPI.validate(" in agent_src and "verified" in agent_src,
+          [line.strip() for line in agent_src.splitlines() if "canvasAPI.validate" in line])
+    check("对话: 自检自身失败如实提醒（不许静默吞掉 ✗）",
+          "warnings.push" in agent_src)
+
+    #: ── 谎报「已提交」的四处病灶（本轮浏览器实测抓到）─────────────────────────
+    #: 场景：模型让一张 zimage 卡跑 `mode:"video"`，卡片如实拒绝（一条请求都没发），
+    #: 面板却写下「已提交生成 1」。根因是两处「乐观返回 true」：同一批 op 刚建的卡
+    #: 还没挂载、或 `/engine/stages` 还在路上，它们回答了「等」，而调用方读成「成」✗。
+    #: 修法是让「等」显式变成 promise 一路传上去、由执行器 `await` 出真答案 ✓。
+    ops_src = (REPO / "frontend" / "app" / "utils" / "canvasOps.ts").read_text(encoding="utf-8")
+    check("对话: 执行器等代跑的真答复（不 await ⇒ 闸没过也记 applied ✗）",
+          re.search(r"export async function applyCanvasOps\(", ops_src) is not None
+          and "await handlers.onGenerate(op)" in ops_src,
+          [line.strip() for line in ops_src.splitlines() if "onGenerate(op)" in line])
+    board_src = (REPO / "frontend" / "app" / "components" / "canvas"
+                 / "CanvasBoard.vue").read_text(encoding="utf-8")
+    #: 重试到头必须如实给「没提交」，而且要说清是「卡没渲染出来」；改回 `return true`
+    #: 顶账就是面板谎报，改回裸 `return false` 就把理由丢了（回执只能写「看卡片」✗）
+    sched = re.search(r"function scheduleRun\([^)]*\)\s*:\s*Promise<RunAnswer>\s*\{(.*?)\n\}\n",
+                      board_src, re.S)
+    check("对话: 未挂载的代跑也如实答复（乐观 true 顶账 ⇒ 面板谎报已提交 ✗）",
+          sched is not None and "ok: false" in sched.group(1)
+          and "return true" not in sched.group(1)
+          and "return false" not in sched.group(1),
+          [line.strip() for line in (sched.group(1) if sched else "").splitlines()
+           if line.strip().startswith("return")])
+    #: `card.run(...) === true` 会把卡片交出来的 promise 判成 false ⇒ 该跑的静默没跑 ✗；
+    #: 在一层把它折成布尔/丢掉 `reason` ⇒ 回执永远只有一句笼统话 ✗
+    check("对话: 画布板原样转交答复（折成布尔 ⇒ 该跑的吞掉、理由也丢 ✗）",
+          "card.run(resolved) ===" not in board_src
+          and "card.run(resolved)" in board_src
+          and "RunAnswer | Promise<RunAnswer>" in board_src)
+    check("对话: 档位清单未到时把 promise 交出去（返回 true ⇒ 没档位也报已提交 ✗）",
+          re.search(r"return engine\.loadStages\(\)\s*\n\s*\.then\(", card_src) is not None,
+          [line.strip() for line in card_src.splitlines() if "loadStages()" in line])
+    check("对话: 页面原样转交结果（`=== true` 会把 promise 判成 false ✗）",
+          "RunAnswer | Promise<RunAnswer>" in page_src
+          and "runNode(nodeId, override) === true" not in page_src,
+          [line.strip() for line in page_src.splitlines() if "runNodeFromChat" in line])
+    check("对话: 面板等真答复再记「已提交」（乐观 push ⇒ 回执说谎 ✗）",
+          "const answer = props.generate?.(nodeId, override)" in panel_src
+          and "isRunPending(answer)" in panel_src
+          and "if (verdict.ok) startedRun.push(nodeId)" in panel_src,
+          [line.strip() for line in panel_src.splitlines() if "verdict" in line][:3])
+
+    #: ── 回执要把「为什么」说出来（本轮第二轮：理由明明算出来了却被丢掉）──────────
+    #: 上一轮修完「不谎报」，回执只剩一句「生成没提交成：看卡片上的缺项提示」——
+    #: 卡片其实算出了「zimage 是「图片」档，跑不了「视频」」，`emit` 给了 toast，
+    #: 但 `return false` 让那句话到不了对话侧 ⇒ 用户看见的是一句指路牌 ✗。
+    #: 参考实现也不给答案（`void generateNodeRef.current?.(…)` 是 fire-and-forget，
+    #: 理由只挂节点 `metadata.errorDetails`），照抄只能学一半 ⇒ 本仓自己把理由回传 ✓。
+    check("对话: 答复带理由（RunVerdict.reason 是回执的真源）",
+          "export interface RunVerdict" in ops_src
+          and re.search(r"export interface RunVerdict\s*\{[^}]*reason\?:", ops_src, re.S) is not None
+          and "export function normalizeRunVerdict" in ops_src
+          and "export function isRunPending" in ops_src,
+          [line.strip() for line in ops_src.splitlines() if "RunVerdict" in line][:4])
+    check("对话: 执行器把卡片理由写进「未生效」（写死一句笼统话 ⇒ 用户仍要去猜 ✗）",
+          "normalizeRunVerdict(verdict)" in ops_src
+          and "answer.reason ||" in ops_src,
+          [line.strip() for line in ops_src.splitlines() if "answer.reason" in line])
+    #: 闸口必须**每一处**都过 `fail()`：漏一处就是「这次没跑起来，但理由没了」✗。
+    #: 判据盯函数体而不是整文件 —— 整个文件里别处还有 `emit('error')`，会蒙过去 ✓✗
+    run_engine = re.search(r"function runEngine\([^)]*\)[^{]*\{(.*?)\n\}\n", card_src, re.S)
+    body = run_engine.group(1) if run_engine else ""
+    check("对话: 卡片闸口把理由一起交出去（`emit` 完就 return false ⇒ 理由到不了对话 ✗）",
+          body.count("return fail(") >= 6 and "return false" not in body,
+          {"fail": body.count("return fail("),
+           "return_false": [line.strip() for line in body.splitlines()
+                            if "return false" in line]})
+    check("对话: 卡片承诺的「ok」与 emit 同源（两处各算一遍必然漂移 ✗）",
+          "function fail(reason: string): RunVerdict" in card_src
+          and "emit('error', reason)" in card_src)
+
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed_ok, detail in _RESULTS:
         print(("PASS  " if passed_ok else "FAIL  ") + name + ("" if passed_ok else f"   <<< {detail!r}"))

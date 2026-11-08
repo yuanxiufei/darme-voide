@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ...core import model_paths as core_model_paths
+from ...core import model_roots as core_model_roots
 from . import gguf as gguf_mod
 from . import h3_form
 from . import h3_keys
@@ -215,24 +216,27 @@ def catalog_entry(key: str) -> dict[str, Any] | None:
 def candidate_roots() -> list[tuple[Path, str]]:
     """清单落点的**候选根** ✓ ⇒ ``[(根, 来源说明)]`` ✓（去重保序 ✓）。
 
-    根表**只此一份** ✗ —— 直接摊平 :func:`app.services.local_model_scan.get_default_roots` ✓
+    根表**只此一份** ✗ —— 直接摊平 :func:`app.core.model_roots.default_roots` ✓
     （``models_dir`` 排第一 ✓ / 用户显式加的目录 ✓ / 各生态落点 ✓ / **每个** ComfyUI 类目录的
     ``models/`` ✓ —— 见那份函数自己的说明 ✓）。
+
+    ⚠️ 2026-11-08 起**不再 import 服务层** ✓✗：那份拼装已整体搬进 ``app.core.model_roots`` ✓
+    （扫描层 ``local_model_scan.get_default_roots`` 与这里**同调一个函数** ✓）。此前是本模块
+    唯二的跨层依赖之一（另一条是 ``bridge → task_logger``）⇒ 「引擎答一句『盘上还有没有副本』
+    都得把模型库服务层拽起来」✓✗。
 
     ⚠️ 这里**一个路径字面量都没有** ✗：根全部来自用户配置或动态探测 ✓（口径同
     ``tests/local_models_test.py`` 的静态守卫 ✓）。⚠️ 探测根**只用来对文件名** ✗，
     绝不"挑一个看着像的权重" ✓ —— 见 :func:`component_candidates` ✓。
     """
-    from ..local_model_scan import get_default_roots  # 局部 import ✓：清单层不把扫描层拖到 import 期 ✓
-
     declared = models_dir()
     declared_key = os.path.normcase(str(declared)) if declared is not None else ""
     roots: list[tuple[Path, str]] = []
-    for raw in get_default_roots():
+    for raw in core_model_roots.default_roots():
         path = Path(raw)
         source = ("清单 configs/model-paths.json 的 models_dir"
                   if declared_key and os.path.normcase(str(path)) == declared_key
-                  else "扫描根 local_model_scan.get_default_roots()")
+                  else "扫描根 app.core.model_roots.default_roots()")
         roots.append((path, source))
     return roots
 

@@ -40,9 +40,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.core import ollama_roots as roots_mod  # noqa: E402
 from app.main import app  # noqa: E402
 from app.routers import ai_configs as ac  # noqa: E402
 from app.services import ollama_store as store  # noqa: E402
+
+#: ⚠️ 2026-11-08：**根候选那段实现已搬 ``app/core/ollama_roots.py``** ⇒ 「桌面端声明库根」的
+#: 缓存也跟着搬了（缓存必须与发它出去的那个函数同住 ✓，否则清缓存清的是空壳 ✓✗）。
+#: 本套要清缓存就得清**实现那边**那个 ``dict``（`roots_mod._DECLARED_CACHE` ✓）；
+#: 服务层 ``ollama_store`` 只是再导出公开函数 ✓，**不再**转发私有缓存 ✗ ——
+#: 那等于给"搬家后还能从旧位置摸到旧状态"开口子，正是要消灭的第二真源 ✓✗。
+_CACHE = roots_mod._DECLARED_CACHE
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -164,7 +172,7 @@ def main() -> int:  # noqa: C901
                 probe.close()
         except sqlite3.Error as exc:   # pragma: no cover - 真机库被独占时才可能
             print(f"SKIP  真机配置库读不了（{exc}）⇒ 这条不判 ✓")
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
         got = store.declared_models_root()
         check("桌面端: 真机配置库存在 ⇒ 解析值 == 独立读出的值（本机实测 D:\\app\\LLM\\models\\ollama\\models ✓）",
               got == (os.path.abspath(expected) if expected else None), (real_db, expected, got))
@@ -217,7 +225,7 @@ def main() -> int:  # noqa: C901
         os.environ["LOCALAPPDATA"] = desktop_app_data
         os.environ["APPDATA"] = desktop_app_data      # 两个候选都指到假目录 ⇒ 不碰真机 ✓
         _write_declared_db(declared_store)
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
 
         check("桌面端: 从 settings 表读出**自定义**库根（真机 D:\\app\\LLM\\... 那条 ✓）",
               store.declared_models_root() == os.path.abspath(declared_store),
@@ -249,19 +257,19 @@ def main() -> int:  # noqa: C901
         # ③ 边界：读不到就必须**静默且不抛错** ✓（桌面端没装 / 库被独占 / 格式变了 ✓）
         os.environ["LOCALAPPDATA"] = scratch_data
         os.environ["APPDATA"] = scratch_data
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
         check("桌面端: 配置库不存在 ⇒ None 且不抛错（没装桌面端也照样能用 ✓）",
               store.declared_models_root() is None)
 
         os.environ["LOCALAPPDATA"] = desktop_app_data
         os.environ["APPDATA"] = desktop_app_data
         _write_declared_db(None, payload=b"not a database")
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
         check("桌面端: 配置库是垃圾文件（不是 sqlite）⇒ None 不抛错",
               store.declared_models_root() is None)
 
         _write_declared_db(declared_store, column="working_dir")
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
         check("桌面端: 没有 `models` 那一列 ⇒ None（将来换存储格式别硬读 ✓）",
               store.declared_models_root() is None)
 
@@ -271,7 +279,7 @@ def main() -> int:  # noqa: C901
         holder = sqlite3.connect(os.path.join(desktop_app_data, "Ollama", "db.sqlite"), timeout=1.0)
         try:
             holder.execute("begin exclusive")
-            store._DECLARED_CACHE.clear()
+            _CACHE.clear()
             started = time.monotonic()
             locked_value = store.declared_models_root()
             waited = time.monotonic() - started
@@ -285,7 +293,7 @@ def main() -> int:  # noqa: C901
                                ("models/ollama", "相对路径"),
                                ("", "空值")):
             _write_declared_db(bad_value)
-            store._DECLARED_CACHE.clear()
+            _CACHE.clear()
             check(f"桌面端: 声明值不合格（{why}）⇒ 丢弃且**不进候选**（垃圾不能污染候选 ✗）",
                   store.declared_models_root() is None
                   and os.path.abspath(declared_store)
@@ -294,7 +302,7 @@ def main() -> int:  # noqa: C901
 
         # ④ 缓存：桌面端改了路径就得立刻跟上（不能粘住旧值 ✗）
         _write_declared_db(declared_store)
-        store._DECLARED_CACHE.clear()
+        _CACHE.clear()
         first_read = store.declared_models_root()
         _write_declared_db(declared_store + "2")
         check("桌面端: 配置一变（mtime/大小）⇒ 缓存失效并重读（不粘旧值 ✓）",
@@ -311,7 +319,7 @@ def main() -> int:  # noqa: C901
             os.environ.pop("APPDATA", None)
         else:
             os.environ["APPDATA"] = saved_app_data
-        store._DECLARED_CACHE.clear()      # ⚠️ 别把假目录的缓存留给后面的路由检查 ✗
+        _CACHE.clear()      # ⚠️ 别把假目录的缓存留给后面的路由检查 ✗
         for folder in (desktop_app_data, declared_store, shell_root, scratch_data):
             shutil.rmtree(folder, ignore_errors=True)
 

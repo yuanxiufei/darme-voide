@@ -12,6 +12,9 @@
  *    不检查返回值 = 用户看到「AI 说连上了」但画布没线 ✗ ⇒ 每条都要记 skipped。
  * 3. **`run_generation` 不在这里跑**：那是生成域（要带工作流、档位、参考图），
  *    由调用方注入 `onGenerate` 回调 ✓ —— 执行器保持纯粹，不偷偷起任务。
+ *    但**必须等它的答复**（`await`，答复可以是个 promise）✓：卡片可能还没挂载，
+ *    同步回答不了「提交了没有」；不等就只能乐观记账 ⇒ 面板谎报「已提交」✗。
+ *    这也是 `applyCanvasOps` 是 `async` 的唯一理由。
  */
 import type { CanvasAnyNodeType, CanvasDoc, CanvasEdge, CanvasNode, CanvasViewport } from '../composables/useCanvas'
 import { isBuiltinNodeType, useCanvas } from '../composables/useCanvas'
@@ -69,6 +72,14 @@ export interface ApplyConflict {
 export interface ApplyResult {
   applied: number
   skipped: SkippedOp[]
+  /**
+   * 这批 op 真正碰到的节点 id（新建/修改/删除/连线两端/选中）✓。
+   *
+   * 为什么要交出来：AI 一次落 5 条 op 之后，用户**找不到**是哪几张卡动了 ——
+   * 画布可能早已滚到别处、卡片又长得都一样。有了这个列表，界面才能
+   * 「选中刚改的那几张」或「飞过去看一眼」，否则只能让用户自己扫一遍 ✗。
+   */
+  touched: string[]
   /** 有值 ⇒ **一条都没落**，调用方应提示用户重看计划 ✗ */
   conflict?: ApplyConflict
   /** 有值 ⇒ 这批 op 之前已经落过，本次是**重放**，`applied` 记的是上次的条数 ✓ */
@@ -116,18 +127,58 @@ function finite(value: unknown, fallback = 0): number {
  *   典型场景：AI 出一份计划要 30 秒，用户等不及自己拖了两个节点 ——
  *   那批 op 是按旧画布算的坐标与连线，硬落就是错位加断线 ✗。
  */
-export function applyCanvasOps(
+/**
+ * 对话里「代你点生成」时 op 带下来的两格覆盖 ✓（源同口径：`generateNodeRef(nodeId, mode, prompt)`）。
+ *
+ * ⚠️ 为什么不是"只按 nodeId 点一下"：模型经常先 `canvas_create_text_node` 写新提示词、
+ * 再 `canvas_run_generation` 指向那张配置卡 —— 只认 nodeId 就等于把它刚写的那句话丢掉 ✗。
+ */
+/**
+ * 「跑完了，这是成品」这一跳的载荷 ✓（卡片 emit → 画布板 → 画布页）。
+ *
+ * `sourceId` 是后加的，不是可有可无的装饰：画布页要据此**贴边落位并连线**，
+ * 否则一份成品只知道自己是「图片」，不知道自己是哪张卡跑出来的 ✗ ——
+ * 连了线的成品，下一轮对话 agent 读快照时才追得回来 ✓。
+ */
+export interface GeneratedPayload {
+  kind: 'image' | 'video' | 'audio'
+  url: string
+  runId: number | null
+  /** 出品卡 id ✓（缺省时退回视口中心：工具栏直接跑工作流那条路） */
+  sourceId?: string
+}
+
+export interface RunOverride {
+  /** 生成类别（`text|image|video|audio`）✓ —— 与卡上档位类别不符就如实拒绝，不静默换档 ✗ */
+  mode?: string
+  /** 本次提示词 ✓ —— 优先于卡上正文；仍是引用串时由画布解析成正文再送 */
+  prompt?: string
+}
+
+export async function applyCanvasOps(
   ops: CanvasOp[],
   handlers: {
-    onGenerate?: (op: CanvasOp) => void
+    /**
+     * 返回 `false` ⇒ 明确"没提交成"（缺档位/缺件/缺首帧），执行器会记 skipped ✓。
+     *
+     * ⭐ 也可以返回一个 **promise**：同一批 op 刚建出来的卡此刻还没挂载，
+     * 它没法同步回答「提交了没有」，只能等挂上后跑一次再如实回答 ✓ ——
+     * 这正是本函数改成 `async` 的唯一理由（见下面 `run_generation` 分支）。
+     */
+    onGenerate?: (op: CanvasOp) => boolean | void | Promise<boolean>
     /** 幂等键 ✓（计划 id 天然合适） */
     applyId?: string
     /** 这批 op 是基于哪一版画布算的 ✓（不给 = 不校验，兼容老调用方） */
     baseRevision?: number
   } = {},
-): ApplyResult {
+): Promise<ApplyResult> {
   const canvas = useCanvas()
-  const result: ApplyResult = { applied: 0, skipped: [] }
+  const result: ApplyResult = { applied: 0, skipped: [], touched: [] }
+  /** 同一次落地里可能反复碰到同一张卡（先建再连再选中）⇒ 去重但保序 ✓ */
+  const touched = new Set<string>()
+  const touch = (id?: string | null) => {
+    if (id) touched.add(id)
+  }
 
   if (handlers.applyId) {
     const previous = appliedBatches.get(handlers.applyId)
@@ -141,6 +192,7 @@ export function applyCanvasOps(
       return {
         applied: 0,
         skipped: ops.map((op) => ({ op, reason: '画布已被修改，这批动作已过期' })),
+        touched: [],
         conflict: { baseRevision: handlers.baseRevision, currentRevision: current },
       }
     }
@@ -183,6 +235,7 @@ export function applyCanvasOps(
         canvas.nodes.value = exists
           ? canvas.nodes.value.map((item) => (item.id === node.id ? node : item))
           : [...canvas.nodes.value, node]
+        touch(node.id)
         result.applied += 1
       } else if (op.type === 'update_node') {
         if (!op.id) {
@@ -196,6 +249,7 @@ export function applyCanvasOps(
           continue
         }
         canvas.updateNode(op.id, op.patch || {})
+        touch(op.id)
         result.applied += 1
       } else if (op.type === 'delete_nodes') {
         const ids = (op.ids || []).filter((id) => canvas.nodes.value.some((item) => item.id === id))
@@ -203,6 +257,8 @@ export function applyCanvasOps(
           result.skipped.push({ op, reason: 'ids 为空或都不存在' })
           continue
         }
+        // 删掉的 id 也记：撤销后要「跳回去看它原本在哪」，界面得知道是哪一个 ✗ 记了才发现不在了
+        ids.forEach(touch)
         canvas.removeNodes(ids)
         result.applied += 1
       } else if (op.type === 'delete_edges') {
@@ -226,9 +282,18 @@ export function applyCanvasOps(
           if (!canvas.connect(pair.from, pair.to)) rejected.push(`${pair.from} → ${pair.to}`)
         }
         if (rejected.length) result.skipped.push({ op, reason: `连线被拒：${rejected.join('、')}` })
-        if (rejected.length < pairs.length) result.applied += 1
+        if (rejected.length < pairs.length) {
+          // 只记真连上的那两端（被拒的连不上，别让界面去选中它们）
+          for (const pair of pairs) {
+            if (rejected.some((item) => item === `${pair.from} → ${pair.to}`)) continue
+            touch(pair.from)
+            touch(pair.to)
+          }
+          result.applied += 1
+        }
       } else if (op.type === 'select_nodes') {
         canvas.setSelection(op.ids || [])
+        ;(op.ids || []).forEach(touch)
         result.applied += 1
       } else if (op.type === 'set_viewport') {
         const viewport = op.viewport
@@ -252,7 +317,21 @@ export function applyCanvasOps(
           result.skipped.push({ op, reason: '未提供生成回调（本次只落画布，未开跑）' })
           continue
         }
-        handlers.onGenerate(op)
+        // 先定位再提交：闸没过也要把卡选中，用户才知道是哪张卡没跑起来 ✓
+        touch(op.nodeId)
+        /*
+         * ⭐ 必须 `await` ✓✗ —— 这里的 promise 不是风格问题，是**谎报的根源**：
+         * 同一批 op 刚建的卡此刻还没挂载（Vue 渲染是异步的），画布板只能先给一个
+         * promise「等挂上后跑一次再答复」。不 await 就等于把「排队」当「已提交」，
+         * 闸没过时对话面板会写「已提交生成 1」而实际一条请求都没发 ✗
+         * （实测踩过：model 让 zimage 卡跑 video，卡片如实拒绝，回执却报已提交）。
+         */
+        const verdict = await handlers.onGenerate(op)
+        if (verdict === false) {
+          // 回调说"没提交成"（缺档位/缺件/缺首帧）⇒ 不能记成已落地 ✗
+          result.skipped.push({ op, reason: '生成没提交成：看卡片上的缺项提示' })
+          continue
+        }
         result.applied += 1
       } else {
         result.skipped.push({ op, reason: `未知 op 类型：${String((op as { type: string }).type)}` })
@@ -262,10 +341,12 @@ export function applyCanvasOps(
     }
   }
 
+  result.touched = [...touched]
+
   if (handlers.applyId) {
     // 记的是**这一次**的结果（含 skipped）—— 重放时如实返回「上次落了 N 条、跳了 M 条」，
     // 而不是假装又成功了一次 ✓
-    appliedBatches.set(handlers.applyId, { applied: result.applied, skipped: result.skipped })
+    appliedBatches.set(handlers.applyId, { applied: result.applied, touched: result.touched, skipped: result.skipped })
     while (appliedBatches.size > APPLIED_LIMIT) {
       const oldest = appliedBatches.keys().next()
       if (oldest.done) break

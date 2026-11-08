@@ -118,7 +118,7 @@ interface KnowledgeAuditRow {
 
 ---
 
-## 3. 端点总表（本模块全部 40 个，⑧ 组会双向核）
+## 3. 端点总表（本模块全部 42 个，⑧ 组会双向核）
 
 ### 3.1 条目与检索
 
@@ -137,7 +137,15 @@ interface KnowledgeAuditRow {
 - `GET /api/v1/knowledge-loop/tags/facets` —— 标签 facet
 - `GET /api/v1/knowledge-loop/audit` —— 操作审计（`entryId`/`action`/`operator`/`limit`/`offset`）
 
-### 3.2 闭环与运维（本次未改，仅登记以保契约完整）
+### 3.2 关联（2026-11-08 新增，读 `entry_links` 的反向索引）
+
+- `GET /api/v1/knowledge-loop/entries/{entry_id}/related` —— 一条知识的邻居（`limit`/`includeDeleted`）：
+  `shared`（共用同一 `stage`/`shot`，**事实依据**，`score=null`）＋ `similar`（正文 trigram 相似，`score` 0–1，**启发式**）
+- `GET /api/v1/knowledge-loop/context` —— 按阶段/镜头反查经验（`stage`/`shot`/`status`/`includeDeleted`/`limit`）；
+  两者都不给 ⇒ `total=0` + `hint`（**不把"没点名"当"全库都是上下文命中"**）
+- `GET /api/v1/knowledge-loop/context/refs` —— 台账里**真被挂过**的 ref 清单＋条目数（`refKind`/`entry`/`limit`）
+
+### 3.3 闭环与运维（本次未改，仅登记以保契约完整）
 
 - `GET /api/v1/knowledge-loop/report` —— 闭环总览
 - `GET /api/v1/knowledge-loop/runs` —— 摄取记录
@@ -151,7 +159,7 @@ interface KnowledgeAuditRow {
 - `GET /api/v1/knowledge-loop/qc/reviews` —— 审阅记录
 - `POST /api/v1/knowledge-loop/qc/reviews` —— 提交审阅
 - `DELETE /api/v1/knowledge-loop/qc/reviews/{review_id}` —— 撤销审阅
-- `GET /api/v1/knowledge-loop/feed/preview` —— 投喂预览
+- `GET /api/v1/knowledge-loop/feed/preview` —— 投喂预览（入参 `agentType` / `episodeId` / `dramaId` / `scopes` 逗号分隔 / `budgetChars` / `limit`；回执 `text` / `entries` / `used` / `budget` / `truncated` / `available` / `scopes`（本次允许集合）/ `blocked`（够格但作用域不匹配的条数）/ `targeted`（这批里属于本剧·本集·本阶段的有几条）/ `hint`）
 - `POST /api/v1/knowledge-loop/feed/export` —— 导出投喂包
 - `GET /api/v1/knowledge-loop/scheduler` —— 调度状态
 - `GET /api/v1/knowledge-loop/training` —— 训练清单
@@ -359,6 +367,10 @@ interface KnowledgeAuditRow {
 | `getTagFacets(params)` | `GET /tags/facets` |
 | `getTaxonomy(params)` | `GET /taxonomy` |
 | `getAuditLog(params)` | `GET /audit` |
+| `relatedEntries(id,{limit,includeDeleted})` | `GET /entries/{id}/related` |
+
+`/context` 与 `/context/refs` **没有前端方法**（刻意）：页面上「这一阶段有哪些经验」还没有稳定的
+信息层级，先只给 Agent 工具 `context_knowledge` 与 curl 用。**不为将来预留**——等真有交互再补方法。
 
 ## 10. 未做 / 已知边界
 

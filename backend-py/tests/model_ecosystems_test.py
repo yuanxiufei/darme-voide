@@ -39,9 +39,16 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.core import model_ecosystems as core_eco  # noqa: E402
 from app.services import local_model_scan as ls  # noqa: E402
-from app.services import model_ecosystems as eco  # noqa: E402
+from app.services import model_ecosystems as svc_eco  # noqa: E402
 from app.services import ollama_store  # noqa: E402
+
+# ⚠️ 2026-11-08：**实现已搬 ``app/core/model_ecosystems.py``** ⇒ 本套对着**实现**跑（`eco`），
+#    服务层那份是再导出、另有判据验「是同一个对象」（`eco is svc_eco.X` ✓）。此前 import 的是
+#    服务层那个模块：搬家后它对私有名（`_candidates` / `_expand` / `_env_path`）就没有了 ——
+#    这正是「搬家 ≠ 抄一份」的用处：判据要么对实现、要么对再导出，指着搬家后的空壳会当场 AttributeError。
+eco = core_eco
 
 _RESULTS: list[tuple[str, bool, object]] = []
 
@@ -82,6 +89,13 @@ def main() -> int:
     _make_hf_cache(hub)
 
     # ================= ① 生态表自检 =================
+    # ⚠️ 搬家守卫（2026-11-08 ✓）：服务层那份必须是 core 的**同一个对象** ✓✗ ——
+    #    判 ``is`` 而非 ``==``：复制一份内容相同的元组也「相等」，然后两侧各自演化 ⇒
+    #    扫描层用新表、引擎用旧表 ⇒「清单说装了、加载说没有」✓✗。
+    check("守卫: 服务层再导出的生态表/根表都是 core 的**同一个对象**（``is`` 判）",
+          svc_eco.ECOSYSTEMS is core_eco.ECOSYSTEMS and svc_eco.roots is core_eco.roots,
+          (svc_eco.ECOSYSTEMS is core_eco.ECOSYSTEMS, svc_eco.roots is core_eco.roots))
+
     ids = [spec.id for spec in eco.ECOSYSTEMS]
     check("表: id **唯一**且非空", len(ids) == len(set(ids)) and all(ids), ids)
     check("表: 用户点名的生态一个不少（HuggingFace / ModelScope / LM Studio / GPT4All / Jan / llama.cpp）",

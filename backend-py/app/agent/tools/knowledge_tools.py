@@ -1,11 +1,14 @@
-"""知识台账的 Agent 工具（读一条、写一条，2026-11-06）。
+"""知识台账的 Agent 工具（读三条、写一条，2026-11-06；2026-11-08 补关联读侧）。
 
-**只做两件事**，全部口径在 ``services/knowledge_ledger.py``（单一真源），本文件不重复实现：
+**只做这几件事**，全部口径在 ``services/knowledge_ledger.py``（单一真源），本文件不重复实现：
 
-* ``search_knowledge`` —— 读。给 Agent 一个「本仓自己跑出来的经验」的出口：
+* ``search_knowledge`` —— 读（关键词）。给 Agent 一个「本仓自己跑出来的经验」的出口：
   这个题材哪个参数配得好、这类失败上次是怎么修的、哪个镜头写法被证伪过。
-  与 ``search_script_library``（外部 5403 份资料，只读）**不是一回事**：
+  与 ``search_script_library``（外部资料，只读）**不是一回事**：
   那边是别人的书，这边是本仓自己的账。
+* ``context_knowledge`` —— 读（**结构化上下文**）。按 ``stage``/``shot`` 反查「这一处踩过
+  什么坑」、按 ``entryId`` 取邻居（共用同一 ref 的兄弟条目 ＋ 正文相似条目）。
+  关键词检索答不了这类问题：「口型」能搜到，但「SHOT-012 这一镜」搜不到。
 * ``propose_knowledge`` —— 写，且**只能写 ``proposed``**。
   Agent 可以提议，不能自己拍板 —— 状态机 ``proposed → accepted → …`` 由人审推进
   （``POST /api/v1/knowledge-loop/entries/{id}/status``）。
@@ -128,6 +131,35 @@ def create_knowledge_tools(episode_id: int | None = None,
             )
         return result
 
+    async def context_knowledge(arguments: dict[str, Any]) -> dict[str, Any]:
+        """按**结构化上下文**取经验：这三问 ``search_knowledge`` 都答不了。
+
+        * 「这个镜头／这一阶段踩过什么坑」→ ``stage`` / ``shot``（读 ``entry_links`` 反向索引）；
+        * 「这条经验还和哪些条目是一伙的」→ ``entryId``（共用同一 ref ＋ 正文相似）；
+        * 「台账里到底挂了哪些阶段/镜头」→ 三个都不给 ⇒ 回 ref 清单，**让模型别猜阶段名**。
+
+        猜阶段名的表现是「查了没结果」，与「确实没经验」永远分不开 —— 所以这里
+        宁可多回一趟清单，也不默认猜成 ``video``。
+        """
+        entry_id = str(arguments.get("entryId") or "").strip()
+        stage = str(arguments.get("stage") or "").strip()
+        shot = str(arguments.get("shot") or "").strip()
+        try:
+            limit = int(arguments.get("limit")) if arguments.get("limit") is not None else 8
+        except (TypeError, ValueError):
+            limit = 8
+        if entry_id:
+            return knowledge_ledger.related(entry_id, limit=limit)
+        if stage or shot:
+            return knowledge_ledger.for_context(stage=stage or None, shot=shot or None,
+                                                limit=limit)
+        refs = knowledge_ledger.context_refs(limit=200)
+        if refs.get("items"):
+            known = "、".join(f"{r['refKind']}:{r['refId']}" for r in refs["items"][:12])
+            refs["hint"] = ("给 stage 或 shot 才能取到针对性经验；当前台账挂过的有："
+                            f"{known}{'（还有更多）' if len(refs['items']) > 12 else ''}")
+        return refs
+
     return {
         "search_knowledge": Tool(
             id="search_knowledge",
@@ -199,5 +231,30 @@ def create_knowledge_tools(episode_id: int | None = None,
                 required=["kind", "title", "body"],
             ),
             execute=propose_knowledge,
+        ),
+        "context_knowledge": Tool(
+            id="context_knowledge",
+            description=(
+                "按**结构化上下文**取本仓经验（与 search_knowledge 的关键词检索互补，不能互替）。"
+                "三问：① 这个镜头/这一阶段踩过什么坑 ⇒ 给 stage 或 shot（读蒸馏写下的关联）；"
+                "② 这条经验还和哪些条目是一伙的 ⇒ 给 entryId（共用同一 stage/shot 的兄弟条目 ＋ 正文相似条目，"
+                "两档证据强度不同：共用有事实依据，相似只是字面像）；"
+                "③ 不知道阶段/镜头叫什么 ⇒ 三个都不给，回台账里真挂过的 ref 清单，别猜。"
+                "**给一个具体镜头/阶段时优先用它**，它答的是「这一处」的事，关键词检索答不了。"
+            ),
+            input_schema=object_schema(
+                {
+                    "stage": json_string(
+                        "阶段名（台账里真挂过的字面值，如 image/video/h3；不确定就留空先取清单）"
+                    ),
+                    "shot": json_string("镜头 id，如 SHOT-001"),
+                    "entryId": json_string(
+                        "条目 id：取这条的邻居（共用同 ref 的兄弟条目 ＋ 正文相似条目）"
+                    ),
+                    "limit": json_number("返回条数，默认 8，最多 50"),
+                },
+                required=[],
+            ),
+            execute=context_knowledge,
         ),
     }

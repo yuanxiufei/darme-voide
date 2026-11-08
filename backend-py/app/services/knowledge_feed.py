@@ -34,11 +34,31 @@ from app.services import knowledge_ledger, outcome_index
 __all__ = [
     "compile_for_prompt",
     "record_injection",
+    "scopes_for",
     "export_knowledge_dataset",
     "export_runs_dataset",
     "list_datasets",
     "resolve_dataset",
 ]
+
+
+def scopes_for(*, episode_id: Any = None, drama_id: Any = None) -> list[str]:
+    """一次跑次**真实拥有**的作用域（``EP12`` / ``DRAMA3``），给 ``compile_for_prompt`` 用。
+
+    字面形对齐**写入口**（``agent/tools/knowledge_tools.py`` 的 ``default_scope``）——
+    必须是同一个字符串，否则「写进去的」与「读出来的」永远对不上，而两处都不会报错。
+    ``stage:<name>`` / ``shot:<id>`` 有意不在这里造：那要当前任务真知道自己属于哪个
+    引擎档/哪一镜，agent 跑次手上没有这个真值，编一个会让投喂看起来在定向、其实在乱猜。
+    """
+    out: list[str] = []
+    for prefix, value in (("EP", episode_id), ("DRAMA", drama_id)):
+        if value is None or value == "":
+            continue
+        try:
+            out.append(f"{prefix}{int(value)}")
+        except (TypeError, ValueError):
+            continue
+    return out
 
 #: L1 默认注入哪几类（``fact``/``work`` 是外部资料，体积大、相关性依赖查询 ⇒ 走 L2 检索）
 DEFAULT_KINDS = ("recipe", "lesson", "prompt_patch", "failure")
@@ -81,6 +101,34 @@ def _weight(entry: dict[str, Any]) -> float:
     return confidence * (1.0 + max(-0.5, min(0.5, lift_value)))
 
 
+def _scope_rank(scope: Any) -> int:
+    """作用域**具体度**（越大越贴本次跑次），只用于排次序、不用于准入。
+
+    准入由 ``allowed`` 决定（不匹配的条目根本不进池子）；这里回答的是另一个问题：
+    池子里只剩几个位置时，「就这一集/这一镜的」和「放之四海的」该谁先上。
+
+    ⚠️ 为什么必须分档（2026-11-08 补）：``scopes`` 打通后，``EP12`` 的条目能进池子，
+    但排序仍只看 ``_weight``（confidence × lift）—— 一条 ``global`` 的高置信通用成法
+    会把本集的具体经验挤出 ``limit`` 之外，定向通道等于开了一半。mem0/cognee 那类
+    recall 也是**相关性先于强度**：不相关的高分项不该占掉相关项的位子。
+
+    档位：``global`` < 未知/``agent:*`` < ``DRAMA<id>`` < ``EP<id>`` < ``stage:*`` < ``shot:*``。
+    不认识的写法按 1 算 —— 不当定向（怕乱猜），也不压到最低（怕新生作用域被饿死）。
+    """
+    text = str(scope or "global").strip()
+    if not text or text == "global":
+        return 0
+    if text.startswith("DRAMA"):
+        return 2
+    if text.startswith("EP"):
+        return 3
+    if text.startswith("stage:"):
+        return 4
+    if text.startswith("shot:"):
+        return 5
+    return 1
+
+
 def _first_sentence(text: str, limit: int = _BODY_SNIP) -> str:
     """取正文第一句（中文句号/分号/换行都算断句），再按长度硬截。"""
     body = (text or "").strip().replace("\r", "")
@@ -94,35 +142,62 @@ def _first_sentence(text: str, limit: int = _BODY_SNIP) -> str:
 
 
 def compile_for_prompt(agent_type: str | None = None, *,
+                       scopes: Iterable[str] | None = None,
                        budget_chars: int = DEFAULT_BUDGET,
                        kinds: Iterable[str] = DEFAULT_KINDS,
                        limit: int = 8,
                        allowed_status: str = "accepted") -> dict[str, Any]:
     """编译「## Knowledge」段（只含 accepted）。
 
+    ``scopes`` 是**本次跑次真实拥有**的作用域（``EP12`` / ``DRAMA3`` / ``stage:krea2`` …），
+    由调用方按手上真值传入，本模块**一个都不猜**（见下）。
+
     回执里 ``entries`` 是**真正被写进这段文本的 id**，调用方拿它去
     ``record_injection`` 记 usage —— 没有这一步，``lift`` 永远算不出来。
 
-    两种「空」要分开报：``available=False`` 是台账坏了；``text=""`` 是台账好的、
-    只是没有够格的知识。前端/日志不能都显示成"没知识"。
+    三种「空」要分开报，不能都显示成"没知识"：
+    ``available=False`` 是台账坏了；``blocked>0`` 是**有知识但作用域不匹配**（最容易被
+    误读成"库里没有"的一种）；``text=""`` 且 ``blocked=0`` 才是真的还没积累。
+
+    排序是**两段式**：先按作用域具体度分档（见 :func:`_scope_rank`，定向的先进预算），
+    档内再按效果权重。回执的 ``targeted`` 是这批里有几条属于「本集/本剧/本阶段」——
+    定向到底有没有生效，看这个数，不要靠猜。
+
+    ⚠️ 为什么必须有 ``scopes``（2026-11-08 修）：写入口给的作用域是
+    ``EP<id>`` / ``DRAMA<id>``（``knowledge_tools.propose_knowledge``）、
+    ``stage:<name>`` / ``shot:<id>``（``knowledge_distill``），而这里原先只认
+    ``global`` 与 ``agent:<type>`` —— 后者**全仓没有任何一处写**。于是「同一集里刚被
+    采纳的经验」在下一次同集跑次里依然注入不进去，且回执只说"还没有知识"，
+    看起来像库空。默认值仍是老的两项 ⇒ 不传 ``scopes`` 的调用方行为逐字不变。
     """
     budget = max(0, int(budget_chars or 0))
     listing = knowledge_ledger.list_entries(status=allowed_status, limit=200)
     if not listing.get("available", True):
         return {"text": "", "entries": [], "used": 0, "budget": budget,
-                "truncated": False, "available": False,
-                "hint": listing.get("hint") or "台账不可用"}
+                "truncated": False, "available": False, "scopes": [], "blocked": 0,
+                "targeted": 0, "hint": listing.get("hint") or "台账不可用"}
 
     wanted = set(kinds)
-    scopes = {"global"}
+    allowed = {"global"}
     if agent_type:
-        scopes.add(f"agent:{agent_type}")
+        allowed.add(f"agent:{agent_type}")
+    for item in scopes or ():
+        text = str(item or "").strip()
+        if text:
+            allowed.add(text)
 
-    pool = [
-        entry for entry in listing.get("items", [])
-        if entry.get("kind") in wanted and str(entry.get("scope") or "global") in scopes
-    ]
-    pool.sort(key=_weight, reverse=True)
+    pool: list[dict[str, Any]] = []
+    blocked = 0
+    for entry in listing.get("items", []):
+        if entry.get("kind") not in wanted:
+            continue
+        if str(entry.get("scope") or "global") in allowed:
+            pool.append(entry)
+        else:
+            blocked += 1
+    #: 先按**具体度**分档、档内再按效果 weight 排 —— 定向的先进预算，通用的补位。
+    pool.sort(key=lambda entry: (_scope_rank(entry.get("scope")), _weight(entry)),
+              reverse=True)
     pool = pool[:max(1, int(limit or 1))]
 
     lines: list[str] = []
@@ -148,7 +223,19 @@ def compile_for_prompt(agent_type: str | None = None, *,
         picked.append(str(entry["id"]))
         used += cost
 
+    #: 这批里有多少条是**冲本次跑次来的**（DRAMA/EP/stage/shot）—— 定向有没有真生效看它
+    targeted = sum(1 for entry in pool[:len(picked)]
+                   if _scope_rank(entry.get("scope")) >= 2)
     text = "\n".join(lines)
+    if lines:
+        hint = ""
+    elif blocked:
+        #: 「有知识但一条都进不来」与「库里确实没有」必须分开说：前者是作用域没给全，
+        #: 后者才该去审条目。混成一句会让人一直去审已经审过的条目。
+        hint = (f"台账里有 {blocked} 条够格的知识，但作用域不在本次允许集合内"
+                f"（{'／'.join(sorted(allowed))}）—— 传 scopes（如 EP12／DRAMA3）才能带出")
+    else:
+        hint = "台账里还没有 accepted 的知识（先审几条，或把蒸馏出的 proposed 采纳）"
     return {
         "text": text,
         "entries": picked,
@@ -156,7 +243,10 @@ def compile_for_prompt(agent_type: str | None = None, *,
         "budget": budget,
         "truncated": truncated,
         "available": True,
-        "hint": "" if lines else "台账里还没有 accepted 的知识（先审几条，或把蒸馏出的 proposed 采纳）",
+        "scopes": sorted(allowed),
+        "blocked": blocked,
+        "targeted": targeted,
+        "hint": hint,
     }
 
 

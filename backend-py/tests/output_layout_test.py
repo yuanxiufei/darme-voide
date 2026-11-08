@@ -81,6 +81,7 @@ DATA_DIRS = {
     "models",         # local_model_scan
     "hf-cache",       # engine.tokenizers_tuning.default_cache_dir（它被设成 HF_HOME）
     "experiments",    # 实验/探针产物（不上线、不发 URL）—— `_bench/*.py` 探针的 OUT_DIR
+    "canvas",         # canvas_plan_store.plans_dir（<dataRoot>/canvas/plans 画布草案）
 }
 
 #: 写文件时**不许**出现在 `__file__` 拼路径里的目录名 ✓（代码目录里的产物 ✓✗）
