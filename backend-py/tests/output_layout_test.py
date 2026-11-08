@@ -74,6 +74,10 @@ STATIC_DIRS = {
 DATA_DIRS = {
     "db",             # config.get_db_dir
     "knowledge",      # knowledge_ledger / outcome_index / skill_usage / training_registry
+                      # ↑ knowledge_ledger 与 training_registry 是**真源**（台账条目／版本／审计、
+                      #   LoRA 的 promote 依据），只有 outcome_index / skill_usage 能重放/重算
+                      #   ⇒ 整目录进 data_storage.MIGRATED_TREE_SUBDIRS；别因为目录名叫
+                      #   "knowledge" 就整目录当派生索引划走（2026-11-08 改判）
     "repair",         # routers/repair.py
     "lora-train",     # lora_train.config.data_dir
     "engine-dryrun",  # engine.output_paths.dryrun_root

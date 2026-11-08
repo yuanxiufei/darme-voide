@@ -16,7 +16,7 @@ data/
 ├── db/               ← 所有 SQLite（2026-11-07 起）
 ├── static/           ← 图片 / 视频 / 音频等生成物
 ├── traces/           ← Agent 执行轨迹与 token 统计
-├── knowledge/        ← 知识库派生索引（可重建）
+├── knowledge/        ← 知识台账 / 训练登记（真源）＋ 两个派生索引（见下）
 ├── models/           ← 本地模型池（默认落点；本机已被指向别处，见下）
 ├── hf-cache/         ← HuggingFace 下载缓存（`HF_HOME` 指这儿，可重下）
 ├── lora-train/       ← 训练参数 toml / 预览 prompt / 导出数据集 / 训练日志
@@ -51,7 +51,7 @@ data/
 | `db/library-overlay.sqlite` | 知识库**编辑 / 删除 / 上传台账** | `services/library_overlay.py` | 上传记录与人工改动没了，重建不了 | **必须** |
 | `static/` | 生成物：图片、视频、音频、导出文件 | 生成链路、上传接口 | 作品素材没了 | **必须** |
 | `traces/` | Agent 执行轨迹、token 统计 | `trace_store`（写入侧仍在 Node） | 只是观测数据没了 | 可选 |
-| `knowledge/` | 知识库派生索引（`*_index.sqlite` 等） | `outcome_index` / `knowledge_ledger` | 下次检索时自动重建 | 不必 |
+| `knowledge/` | 四个库、**两种性质混住**：**真源**＝`knowledge-ledger.sqlite`（Agent 蒸馏 + 人审累积的条目／`entry_versions`／`audit`）、`training-registry.sqlite`（哪个 LoRA 被 `promote`、依据与凭据）；**派生**＝`outcome-index.sqlite`（可从 `traces/` 的 `rebuild()` 重放）、`skill-usage.sqlite`（从跑次重算） | `services/knowledge_ledger.py` / `training_registry.py` / `outcome_index.py` / `skill_usage.py` | 两个**真源**删了就真没了（历史评审与 promote 依据没有任何源能再生）；两个派生库下次自动重建 | **必须**（切根时整目录**会**复制 ✓；派生库跟着一起搬是故意的 —— 省一次手跑 `rebuild`，代价只有 100 KB 量级） |
 | `engine-dryrun/` | 引擎干跑凭据（JSON） | `engine.bridge.outputs_dir_for(dry_run=True)` | 下次干跑重新生成 | 不必 |
 | `materialized/` | LLM 反量化权重缓存（实测数 GB） | `engine.materialize` | 下次跑图自动重算 | 不必 |
 | `models/` | **本地模型池**：下载 / 扫描 / 就绪 / 加载的权重（`local_model_scan.get_models_dir()`；`MODELS_DIR` 或 `configs/model-paths.json` 的 `models_dir` 可指到别处 —— 本机就指到 `D:/Comfy-Desktop/ComfyUI-Shared/models`，所以 `data/` 里看不到它） | `app/services/local_model_scan.py` | 重下即可（数百 GB 量级） | **不必**（且**必须排除**，见下） |
@@ -84,7 +84,11 @@ data/
 漏登记 + 没忽略，躲了一个多月（2026-11-07 才补上）。所以 ② 报绿只说明**它看得见的那部分**干净。
 
 `db/` 里为什么连台账也算「必须备份」：它和 `drama.db` 是同一类东西——**丢了就真没了**。
-而 `knowledge/` 里的索引虽然也慢（重建可能要跑很久），但**算得回来**，所以不列进备份对象。
+而 `knowledge/` **不能**这么读：那个目录里 `outcome-index` / `skill-usage` 确实算得回来，但
+`knowledge-ledger`（知识台账）与 `training-registry`（训练登记）是**真源** —— 它们是 Agent 蒸馏
+与人审一圈圈攒出来的，没有任何源可重放 ⇒ 归「必须备份」。
+（2026-11-08 改判：这一行原先写的是「`knowledge/` 里的索引……算得回来，所以不列进备份对象」，
+错在**按目录名判而不是按目录里的东西判** —— 名字像索引缓存，里面混着两个真源。）
 **能不能重建决定它进不进 `data/`；跟谁同一个子系统决定它进不进 `db/`。**
 
 ---
@@ -124,11 +128,12 @@ data/
 切根时由 `data_storage.change_data_root()` 一并复制。
 
 **切根到底搬哪几样**（别靠猜，`change_data_root(migrate=True)` 的完整清单）：
-`db/`（`drama.db` + `library-overlay.sqlite`）、`static/`、`traces/`、`lora-train/`、`canvas/` —— 五样。
+`db/`（`drama.db` + `library-overlay.sqlite`）、`static/`、`traces/`、`lora-train/`、`canvas/`、
+`knowledge/` —— 六样。
 其中「整目录搬」的那部分以 `data_storage.MIGRATED_TREE_SUBDIRS` 为**单一真源**（现为
-`("traces", "lora-train", "canvas")`）；`db` / `static` / 覆盖层各有覆盖口（`DB_PATH`、`STORAGE_PATH`、
+`("traces", "lora-train", "canvas", "knowledge")`）；`db` / `static` / 覆盖层各有覆盖口（`DB_PATH`、`STORAGE_PATH`、
 模块常量），只能各自算，**不在**这张表里。
-`models/` 与 `hf-cache/`（能重下，几百 GB）、`knowledge/` 与 `materialized/`（能重算）、
+`models/` 与 `hf-cache/`（能重下，几百 GB）、`materialized/`（能重算）、
 `engine-dryrun/` 与 `repair/`（能重跑 / 重诊断）、`experiments/`（实验产物，重跑即可）
 **故意不搬**。
 `lora-train/` 是 2026-11-07 补进来的：训练参数与 `*.safetensors` 不可重建（重训几小时卡时），
@@ -137,9 +142,16 @@ data/
 `canvas/` 是 2026-11-08 按同一条判据补进来的：`canvas_plan_store.plans_dir()` 读的是
 `get_data_root()`，切根后它立刻指向新根下的**空目录** ⇒ 症状与上面一模一样（「换个目录，画布全空了」），
 而画布草稿是用户手作的，没有源能再生。
+`knowledge/` 是 2026-11-08 同日**改判**补进来的（原先被列在上面「能重算 ⇒ 故意不搬」那一行里）：
+`knowledge_ledger.db_path()` 与 `training_registry` 的落点都是这个目录，而那两个库是真源
+（条目／版本／审计、以及 LoRA 的 promote 依据与凭据），且都现算 `get_data_root()`
+⇒ 不搬的症状与 canvas 逐字相同（「换个目录，积累的经验全空了」）。
+教训：**别按目录名判、要按目录里的东西判** —— 那个目录里还躺着两个可重建的派生库，
+整目录划进「能重算」时，两个真源就被一起划掉了。`tests/storage_change_test.py` 的 ⑨′ 因此改成
+**现算 `db_path()` 的父目录名**：将来任何真源挪去白名单外的目录，那条判据自己会亮。
 
 因为迁移是**复制**（旧根原样保留作备份），动手前先做一次磁盘预检：需求 ≈ 库三件 + `static/` +
-三个整搬目录的字节数，加上固定余量 `data_storage.MIGRATION_HEADROOM_BYTES`；目标盘不够就
+四个整搬目录的字节数，加上固定余量 `data_storage.MIGRATION_HEADROOM_BYTES`；目标盘不够就
 **直接拒**并报出「需要多少 / 可用多少」。`shutil.disk_usage` 取不到可用空间（网络盘、特殊文件系统）时
 **不拦**——宁可不预检，也不误拒一个合法目录。预检发生在 `close_engine()` **之前**，所以被拒时
 数据根、库、标记文件全都一点没动。

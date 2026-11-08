@@ -143,6 +143,10 @@ def main() -> int:
     # 画布草案：用**真形状**的 id（`canvas_plan_store.PLAN_ID_PATTERN` = 16 位十六进制），
     # 这样夹具与线上 `canvas/plans/<id>.json` 同构，不会测到一个线上不存在的路径。
     _seed(_ROOT0, "canvas/plans/0123456789abcdef.json", '{"nodes":[]}')
+    # 知识库：夹具用**真文件名**（`knowledge_ledger.db_path()` 与 `training_registry` 的落点
+    # 就是这两个），与 lora-train / canvas 同款同构写法。
+    _seed(_ROOT0, "knowledge/knowledge-ledger.sqlite", "LEDGER")
+    _seed(_ROOT0, "knowledge/training-registry.sqlite", "REGISTRY")
     # ⚠️ 库在 ``<数据根>/db/`` 下（2026-11-07 分层：顶层只放目录、不放散文件）——
     #    这行曾是 ``_ROOT0 / "drama.db"``，切根后当场 FileNotFoundError。
     old_db_size = (_ROOT0 / "db" / "drama.db").stat().st_size
@@ -170,22 +174,32 @@ def main() -> int:
     def _content(path: Path) -> str:
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
-    check("迁移: db / static / traces / lora-train / canvas 五样都复制到新根",
+    check("迁移: db / static / traces / lora-train / canvas / knowledge 六样都复制到新根",
           (_TARGET_A / "db" / "drama.db").is_file()
           and _content(_TARGET_A / "static" / "a.png") == "IMG"
           and _content(_TARGET_A / "traces" / "run.jsonl") == '{"t":1}'
           and _content(_TARGET_A / "lora-train" / "settings.toml") == "LR"
           and _content(_TARGET_A / "canvas" / "plans" / "0123456789abcdef.json")
-          == '{"nodes":[]}',
+          == '{"nodes":[]}'
+          and _content(_TARGET_A / "knowledge" / "knowledge-ledger.sqlite") == "LEDGER"
+          and _content(_TARGET_A / "knowledge" / "training-registry.sqlite") == "REGISTRY",
           sorted(p.name for p in _TARGET_A.iterdir()))
-    # ⚠️ 「五样」里 `lora-train` 是 2026-11-07 补的：手调的参数 + 训出来的权重**不可重建**
+    # ⚠️ 「六样」里 `lora-train` 是 2026-11-07 补的：手调的参数 + 训出来的权重**不可重建**
     #    （重训是几小时卡时），而 `lora_train.config.data_dir()` 就是 `<dataRoot>/lora-train`
     #    且会 `mkdir` ⇒ 不同步的话新根下是个**空目录**，用户看到「训练集和权重全没了」，
     #    旧数据还在旧根却没人指向 ✓✗。对照：`models/` / `hf-cache/` 能重下、
-    #    `knowledge/` / `materialized/` 能重算 ⇒ 那几个故意不搬。
+    #    `materialized/` 能重算 ⇒ 那几个故意不搬。
     # ⚠️ `canvas` 同理（2026-11-08 补）：草案是用户一场一场摆出来的节点与连线，**无源可再生**；
     #    `canvas_plan_store.plans_dir()` 动态读 `get_data_root()` ⇒ 不搬的话切根瞬间
     #    「画布全空了」，且旧草案还躺在旧根（用户以为坏了，其实是被丢下）。
+    # ⚠️ `knowledge`（2026-11-08 同日补，是**改判**不是新增认知）：原先这里写着
+    #    「`knowledge/` 能重算 ⇒ 故意不搬」—— **错了**。那个目录里四个库只有两个可重建
+    #    （`outcome-index` 能从 traces `rebuild()`、`skill-usage` 从跑次重算），另两个是**真源**：
+    #    `knowledge-ledger.sqlite`（Agent 蒸馏 + 人审累积的条目／版本／审计）与
+    #    `training-registry.sqlite`（哪个 LoRA 被 promote、依据与凭据）。两个模块的 `db_path()`
+    #    都现算 `get_data_root()` ⇒ 不搬的症状与 canvas 逐字相同：「切个目录，积累的经验全空了」。
+    #    教训是**别按目录名判、要按目录里的东西判** —— 名字像缓存、里面有真源，这一格只能靠读落点。
+
     # ⚠️ **别比主库文件体积**：WAL 模式 + `close_engine()` 会触发检查点 ⇒ 同一个库在
     #    「复制前 / 复制后」体积都会变（本次实测 4096 → 159744）。要比就比**逻辑等价**。
     check("迁移: 是**复制**不是移动（旧库、旧 static、旧 lora-train 都还在）",
@@ -197,13 +211,25 @@ def main() -> int:
     # 白名单从 3 个 if 提成 `data_storage.MIGRATED_TREE_SUBDIRS` 之后，这里同时钉住
     # 「表里是哪些」与「表里不许有哪些」—— 后者防的是有人为"补齐"把 models/hf-cache
     # 也加进去：一次切根白搬几十 GB，而这些目录不搬**不会丢东西** ✓。
-    check("⑨ 整目录搬的白名单＝('traces','lora-train','canvas')（db/static/覆盖层各有覆盖口，单独算）",
-          ds.MIGRATED_TREE_SUBDIRS == ("traces", "lora-train", "canvas"), ds.MIGRATED_TREE_SUBDIRS)
+    check("⑨ 整目录搬的白名单＝('traces','lora-train','canvas','knowledge')（db/static/覆盖层各有覆盖口，单独算）",
+          ds.MIGRATED_TREE_SUBDIRS == ("traces", "lora-train", "canvas", "knowledge"),
+          ds.MIGRATED_TREE_SUBDIRS)
     check("⑨ 能重下/重算/重跑的目录**不许**进白名单（也不许重复收录 static/db）",
           not set(ds.MIGRATED_TREE_SUBDIRS)
-          & {"models", "hf-cache", "knowledge", "materialized", "engine-dryrun", "repair",
+          & {"models", "hf-cache", "materialized", "engine-dryrun", "repair",
              "static", "db"},
           ds.MIGRATED_TREE_SUBDIRS)
+    # ── ⑨′ 反向守卫：不问「表里写了哪些」，问「已知的真源切根后还在不在」──
+    # 上面两条判的是**表的内容**，所以漏一个真源只能靠人记得改那张表（`knowledge/` 就是这么漏的）。
+    # 这条改成现算各模块 ``db_path()`` 的**父目录名**：凡是落在白名单外的真源，当场报红。
+    # 将来任何模块把真源挪去新目录、或新开一个真源目录，这里都会自己亮，不必依赖记性 ✓✗
+    from app.services import knowledge_ledger, training_registry as _training_registry
+    truth_paths = {"knowledge_ledger": knowledge_ledger.db_path(),
+                   "training_registry": _training_registry.db_path()}
+    missed = {name: path.as_posix() for name, path in truth_paths.items()
+              if path.parent.name not in ds.MIGRATED_TREE_SUBDIRS}
+    check("⑨′ 知识台账 / 训练登记这两个真源库，其父目录必须在整目录搬的白名单里",
+          not missed, missed or {k: v.as_posix() for k, v in truth_paths.items()})
     old_engine = create_engine(f"sqlite+pysqlite:///{(_ROOT0 / 'db' / 'drama.db').as_posix()}")
     try:
         check("迁移: 新旧两库**逻辑等价**（都能打开且表结构在）",

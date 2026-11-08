@@ -125,12 +125,26 @@ def _copy_tree(source: str, target: str) -> None:
 #:                        草案是**用户手作**（节点位置/连线/填好的 values），没有任何源可再生；
 #:                        而 ``plans_dir()`` 动态读 ``get_data_root()`` ⇒ 切根后它**立刻指向新根的空目录**，
 #:                        症状正是「切个目录，画布全空了」而旧草案还躺在旧根没人读 ✓✗（2026-11-08 补）。
+#:   * ``knowledge/``  —— 知识台账 ``knowledge-ledger.sqlite``（Agent 蒸馏 + 人审累积的条目、
+#:                        ``entry_versions``、审计）与训练登记 ``training-registry.sqlite``
+#:                        （哪个 LoRA 被 ``promote``、依据与凭据）**都不可重建**；而两个模块的
+#:                        ``db_path()`` 每次现算 ``get_data_root()`` ⇒ 不搬的症状是
+#:                        「切个目录，积累的经验与训练登记全空了」，旧库还躺在旧根没人读 ✓✗
+#:                        （2026-11-08 补）。
+#:                        ⚠️ 同目录里另有两个**派生**库（``outcome-index`` 可从 ``traces`` 的
+#:                        ``rebuild()`` 重放、``skill-usage`` 从跑次重算）。它们跟着一起搬是**故意的**：
+#:                        白名单是**目录粒度**，多搬这 100 KB 换来的好处是切根后「优化史／质检命中率
+#:                        ／跑次统计」的历史立刻可用 —— 否则要手跑 ``rebuild`` 才补得回来。别为了
+#:                        「只搬真源」把它拆成文件级清单（那要多维护一套，收益只是少搬 100 KB）。
 #:
 #: **故意不搬**（写下来是为了防后人「顺手补齐」✓✗）：``models/`` 与 ``hf-cache/`` 能重下、
-#: ``knowledge/`` 与 ``materialized/`` 能重算、``engine-dryrun/`` 与 ``repair/`` 能重跑/重诊断。
+#: ``materialized/`` 能重算、``engine-dryrun/`` 与 ``repair/`` 能重跑/重诊断。
 #: 这些一次切根白搬几十 GB（慢、占盘），而不搬**不会丢东西**。
-#: 判据的反面同样要守住：**不可重建的一律得搬** —— ``canvas/`` 就是照这条补进来的，
-#: 别因为「它只有几百 KB、看起来像缓存」再把它摘出去（草案里存的是人一场一场摆出来的布局）。
+#: 判据的反面同样要守住：**不可重建的一律得搬** —— ``canvas/`` 与 ``knowledge/`` 就是照这条补进来的。
+#: ⚠️ **别按目录名判、要按目录里的东西判**：``knowledge/`` 曾因为「名字里带 knowledge、看起来像
+#: 索引缓存」被整目录划进「能重算」（连 ``data/README.md`` 的落点表都写着「下次检索时自动重建」），
+#: 而真相是四个库里两个不可重建。``canvas/`` 是同一个形状：只有几百 KB、名字像临时缓存，
+#: 里面却是人一场一场摆出来的布局。
 #:
 #: 为什么 ``db`` / ``static`` / ``library-overlay`` 不在表里：三者各有覆盖口
 #: （``DB_PATH`` / ``STORAGE_PATH`` / 覆盖层的模块常量），只能各自走
@@ -138,7 +152,7 @@ def _copy_tree(source: str, target: str) -> None:
 #:
 #: 判据：``tests/storage_change_test.py`` ⑨ 双向核对 —— 表内每个名字真的搬了（④ 那条），
 #: 且表**不许**混进上面那批「能重下/重算」的目录。
-MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train", "canvas")
+MIGRATED_TREE_SUBDIRS: tuple[str, ...] = ("traces", "lora-train", "canvas", "knowledge")
 
 #: 迁移前的空间余量：复制完还要写标记、建库表、写 WAL —— 卡在「刚刚好」上会以更难看的方式失败。
 #: 64 MiB 是**故意偏小**的：它是防「目标盘明显装不下」的，不是精确容量规划；
