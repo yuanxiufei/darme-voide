@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from . import safetensors as st
+from . import sdpa
 
 __all__ = ["DiTConfig", "DiTConfigError", "H3_SHAPE_FACTS", "H3_PACK_FACTS", "H3_STRUCTURAL_GAPS",
            "H3_GAPS_CLOSED", "build_dit", "flow_match_x0", "infer_config_from_info"]
@@ -399,7 +400,7 @@ def _build() -> tuple[type, type, type]:
             qkv = self.qkv_proj(tokens)
             query, key, value = qkv.chunk(3, dim=-1)
             shape = (batch, length, self.heads, self.head_dim)
-            attended = torch.nn.functional.scaled_dot_product_attention(
+            attended = sdpa.attention(
                 query.view(shape).transpose(1, 2),
                 key.view(shape).transpose(1, 2),
                 value.view(shape).transpose(1, 2))

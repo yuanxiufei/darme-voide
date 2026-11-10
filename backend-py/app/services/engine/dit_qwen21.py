@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from . import sdpa
 from .dit_generic import (ShapeError, apply_rope, rope_freqs, timestep_embedding)
 
 __all__ = ["AXES_DIM", "ROPE_THETA", "T_FREQ", "Qwen21Shape", "Qwen21DiT",
@@ -262,7 +263,7 @@ class _Attention(nn.Module):
         # ⚠️ 先 norm 再 rope（参考实现同序：norm 作用在 per-head 原始分量上）
         q = apply_rope(_rms_norm(q, self.norm_q.weight, self.eps), freqs)
         k = apply_rope(_rms_norm(k, self.norm_k.weight, self.eps), freqs)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = sdpa.attention(q, k, v, attn_mask=mask)
         return self.to_out[0](out.transpose(1, 2).reshape(b, n, h * d))
 
 

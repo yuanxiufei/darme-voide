@@ -89,6 +89,11 @@ class WeightLoadReport:
     #: 单列出来的理由：4bit 与 per-row int8 **头部逐字同形** ✓✗ ⇒ 只报一个合计数时，
     #: 「说好 224 层 4bit、实际全按 int8 乘了」在报告里看不出来 ✓✗（2026-10-30 的假绿 ✓）。
     int4Resident: int = 0
+    #: ⭐ 其中**nvfp4 打包**的层数 ✓（2026-11-09 ✓）：参数是 ``uint8`` ``[out, in/2]`` ✓、
+    #: 反量化挪到前向（``NvFp4Linear`` ✓）⇒ 14.61 GiB 的 32B 文本塔装得下 ✓✗。
+    #: ⚠️ 单列的理由同 ``int4Resident`` ✗：nvfp4 与 int8 的**文件头部**不同（U8 打包 ✓ vs I8 ✓），
+    #: 但**目标参数**在报告里只体现为"常驻了 N 层" ✓ ⇒ 不单列就答不出「那 14.61 GiB 的件到底按哪条路装的」✓✗。
+    nvfp4Resident: int = 0
     #: 被**当配套张量吃掉**的 nvfp4 伙伴个数 ✓（`weight_scale` / `weight_scale_2` / `pre_quant_scale` ✓）——
     #: 它们和 `comfy_quant` 一样**不是权重** ✗，但一个 32B 文本编码器有 700+ 个 ✓ ⇒ 落进
     #: `unexpected` 会把「真·多出来的键」淹掉 ✓✗
@@ -132,7 +137,7 @@ class WeightLoadReport:
             "shapeMismatch": self.shapeMismatch[:6], "shapeMismatchCount": len(self.shapeMismatch),
             "renamed": self.renamed, "dtypeCasts": self.dtypeCasts,
             "consumedQuantMeta": self.consumedQuantMeta, "int8Resident": self.int8Resident,
-            "int4Resident": self.int4Resident,
+            "int4Resident": self.int4Resident, "nvfp4Resident": self.nvfp4Resident,
             #: ⭐ 「内存这一级」卸掉多少键 / 其中多少是 int8 常驻层 ✓（2026-11-07 ✓）——
             #: 少了这两格，回执里只看得到 `loadedKeys` 变小 ✓✗，读不出「是策略卸的还是真缺」✓✗。
             "skipped": self.skipped, "int8Skipped": self.int8Skipped,
@@ -529,11 +534,16 @@ class _Restorer:
         del raw                      # 张量仍持着这块缓冲 ✓ ⇒ 这里删掉的只是本地名 ✓
         if logical in self.resident:
             # ⚠️ **原样写入** ✓：既**不**反量化 ✗（反量化就是把 17.94 GiB 变成 35.9 GiB ✗），
-            #    也**不** cast ✗（`copy_` 会把 bf16 cast 进 int8 参数 ⇒ 静默截断成 0 ✓✗）。
-            if tensor.dtype != torch.int8:
+            #    也**不** cast ✗（`copy_` 会把 bf16 cast 进 int8/uint8 参数 ⇒ 静默截断成 0 ✓✗）。
+            #: ⚠️ 判据是「文件里的 dtype **等于**目标参数的 dtype」✓✗，不是写死 int8 ✗：
+            #: ``int8`` 常驻（convrot 主 DiT ✓）与 ``uint8`` 常驻（nvfp4 打包 ✓）都要原样过 ✓，
+            #: 而「目标 int8 ／ 文件 uint8」这种**真会截断**的配错必须照样拒 ✓✗（`nv_problems`
+            #: 那边也会拦一次 ✓，两处都拦是故意 ✓ —— 一处管"装载前就拒"、一处管"重读时拒"✓）。
+            want_dtype = self.own[logical].dtype
+            if tensor.dtype != want_dtype:
                 raise RestoreError(
-                    f"`{logical}` 的参数是 int8 常驻 ✓，但文件里是 {tensor.dtype} ✗"
-                    f" ⇒ 拒绝写入（cast 进 int8 会被静默截断 ✓✗）")
+                    f"`{logical}` 的参数是 {want_dtype} 常驻 ✓，但文件里是 {tensor.dtype} ✗"
+                    f" ⇒ 拒绝写入（cast 进 {want_dtype} 会被静默截断 ✓✗）")
             return tensor, None
         if logical in self.nv_layers:
             # ⚠️ nvfp4：**必须**按打包形状还原 ✗ —— 文件里的 `weight` 是 U8，两个 4 bit 挤一个字节 ✓，
@@ -733,7 +743,13 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     #:    本来是不是 int8 常驻」✓，而那段代码在旧的 `resident = …` 之前 ✓。
     #:    ⚠️ 这里取 ``_torch()`` 而不是下面那个局部名 ✓：下面 ``torch = _torch()`` 在**本行之后**
     #:    ⇒ 直接用局部名会 ``UnboundLocalError`` ✓✗（实测 2026-11-07 ✓）。
-    resident = {logical for logical in own if own[logical].dtype == _torch().int8}
+    #: ⭐ **nvfp4 也走这条**（2026-11-09 ✓）：参数 dtype 是 ``uint8`` ＝ 打包的 4 bit ✓
+    #:    （``NvFp4Linear.weight`` 就是 ``[out, in/2] uint8`` ✓）⇒ 与 int8 一样**原样写入** ✓✗、
+    #:    反量化挪到前向 ✓。判据仍是**参数 dtype** ✓（不多一个调用方开关 ✓）。
+    #:    ⚠️ 这两档必须分开数 ✗✗：`_int8_residency_problems` 拿 ``int8Resident`` 跟 int8 层数对账 ✓，
+    #:    而 nvfp4 层的层数来自另一本账 ✓ ⇒ 混在一个格子里会让两边都算错 ✓（各留子计数 ✓）。
+    resident = {logical for logical in own
+                if own[logical].dtype in (_torch().int8, _torch().uint8)}
 
     # ② 差集：**只看头部** ✓ —— 形状不符时一个字节都不读 ✓（旧实现已经把 20 GiB 拉进内存了 ✗）
     meta: dict[str, tuple[Any, tuple[int, ...]]] = {}
@@ -839,8 +855,16 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
     #: ⚠️ 滤的**不是**键本身而是**模块** ✓✗：`quant.precheck_dequant` 要靠 `meta` 的键去找
     #: `weight_scale` / `.qweight` 这些**同模块**的伙伴 ✓ —— 只留 `own` 里的键会把伙伴也滤掉 ⇒
     #: 报成「找不到配套 scale」✓✗（本次实测：`engine_weights_streaming_test` ⑥/⑧ 当场变红 ✓）。
+    #: ④ nvfp4 的**打包常驻**层要整层挡在外面 ✓✗（2026-11-09 ✓）：它的 ``.weight`` 是 ``U8``、
+    #:    列数是逻辑值的一半 ✓ ⇒ 与壳里的参数**形状完全一致** ✓ ⇒ 不会进 :data:`packed` ✗
+    #:    （那支只服务"壳还是逻辑形状"的情形 ✓）⇒ 只按 ``key not in packed`` 挡不住 ✓✗，
+    #:    预检会拿 ``weight (5120, 12800)`` 去对 ``block scale (5120, 1600)``、判成"块量化、本仓不猜"✗
+    #:    （2026-11-09 实测：14.61 GiB 那份就这么被整份拒掉 ✓，且 ``missing``/``shapeMismatch`` 都是 0 ✓
+    #:    ⇒ 报错信息只说"与结构不符"、真正原因在 ``dequant.problems`` 里 ✓）。
+    nv_resident_stems = {key[: -len(".weight")] for key in nv_logical if key in resident}
     pre_meta = {key: value for key, value in meta.items()
-                if key not in packed and key.rsplit(".", 1)[0] in own_stems}
+                if key not in packed and key.rsplit(".", 1)[0] not in nv_resident_stems
+                and key.rsplit(".", 1)[0] in own_stems}
     pre = quant_mod.precheck_dequant(pre_meta, scales, convrot=convrot, int4=int4)
     report.dequant = pre.to_dict()
     if convrot is not None:
@@ -864,12 +888,9 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
             missing = "weight_scale" if scale_entry is None else "weight_scale_2"
             nv_problems.append(f"`{stem}` 是 nvfp4 打包权重（U8 ✓）但**缺** `{missing}` ✗")
             continue
-        if logical in resident:
-            #: 目标参数本身就是 int8 ✓ ⇒ 打包 U8 一 `copy_` 就是**静默截断** ✓✗（`int8 常驻` 那条路
-            #: 只服务「文件里就是 int8 权重」的 convrot 主 DiT ✓，不是 nvfp4 ✓）
-            nv_problems.append(f"`{stem}` 的目标参数是 int8 常驻 ✗，而文件里是 nvfp4 打包权重 ✓ "
-                               f"⇒ 不能原样写入（会被静默截断 ✗）")
-            continue
+        #: ⚠️ **布局等式先验**，与"写进去还是常驻"无关 ✓✗（2026-11-09 ✓）：常驻层**不**走
+        #: ``dequantize`` ✓，但不验就等于「这 350 层的块 scale 少一截也照样写进 uint8 壳」✓✗
+        #: —— 前向那一刻才炸（指向采样，不指向权重 ✓✗）。两条路共用这一份判据 ✓。
         item, issues = nvfp4_mod.layer_plan(
             stem,
             weight_shape=meta[logical][1], weight_dtype="U8",
@@ -878,6 +899,19 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
             scale_2_dtype=scale_2_entry.dtype,
             pre_quant_shape=None if pre_entry is None else tuple(int(dim) for dim in pre_entry.shape))
         nv_problems.extend(issues)
+        if logical in resident:
+            #: ⭐ 目标参数是 **uint8** ⇒ 那正是 nvfp4 的**打包壳** ✓✗（`NvFp4Linear.weight` 就是
+            #: ``[out, in/2] uint8`` ✓）⇒ 与 int8 常驻同一段**原样写入** ✓、反量化挪到前向 ✓
+            #: （2026-11-09 ✓）。这时**不许**再进 `nv_layers` ✗ —— 那是「装载时就还原」的名册 ✓，
+            #: 进了就会按 ``rows × inFeatures`` 反量化成 bf16 ✓✗（一装就 62 GiB，且打包壳白留 ✓）。
+            target_dtype = own[logical].dtype
+            if target_dtype == _torch().uint8:
+                continue
+            #: 其余（典型是 int8 ✓）⇒ 打包 U8 一 `copy_` 就是**静默截断** ✓✗（`int8 常驻`
+            #: 那条路只服务「文件里就是 int8 权重」的 convrot 主 DiT ✓，不是 nvfp4 ✓）
+            nv_problems.append(f"`{stem}` 的目标参数是 {target_dtype} 常驻 ✗，"
+                               f"而文件里是 nvfp4 打包权重 ✓ ⇒ 不能原样写入（会被静默截断 ✗）")
+            continue
         if item is not None:
             item["stem"] = stem
             item["logical"] = logical
@@ -944,6 +978,11 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
                 report.int8Resident += 1
                 if orig.endswith(".weight") and orig[: -len(".weight")] in int4:
                     report.int4Resident += 1
+                #: ⭐ nvfp4 常驻（目标 ``uint8`` ✓，2026-11-09 ✓）：也是参数 dtype 决定 ✓、
+                #: 也走同一段原样写入 ✓ —— 这里只把「按 4 bit 打包常驻的」单独数出来 ✓✗，
+                #: 否则回执只说得清「常驻了 350 层」✓、说不清「其中 350 层是 nvfp4」✓✗。
+                if orig.endswith(".weight") and orig[: -len(".weight")] in nv_stems:
+                    report.nvfp4Resident += 1
             elif cast_from:
                 casts[cast_from] = casts.get(cast_from, 0) + 1
             del tensor
@@ -964,6 +1003,13 @@ def _load_streaming(reader: Any, own: dict[str, Any], report: WeightLoadReport, 
         report.dequant["int4ResidentNote"] = (
             f"{report.int4Resident} 层走 4bit **常驻壳** ✓（打包字节原样留在卡上 ✓，"
             f"解包挪到前向 ✓）⇒ 不算进 int4PackCount ✓")
+    if report.nvfp4Resident:
+        #: ⚠️ 同 int4 的理由 ✓：这 N 层**没**经过 `dequantize` ✓ ⇒ `dequant.nvfp4`（装载时还原的层数）
+        #: 会是 0 ✓✗，而文件里明明有 N 层 nvfp4 ✓ ⇒ 不写明就会被读成「nvfp4 一层都没认出来」✓✗。
+        report.dequant["nvfp4Resident"] = report.nvfp4Resident
+        report.dequant["nvfp4ResidentNote"] = (
+            f"{report.nvfp4Resident} 层走 nvfp4 **常驻壳** ✓（4 bit 打包字节原样留在卡上 ✓，"
+            f"反量化挪到前向 ✓）⇒ 不算进 `dequant.nvfp4`（那是装载时还原的层数 ✓）")
     return report
 
 

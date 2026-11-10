@@ -34,6 +34,8 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+
+from . import sdpa
 from torch import Tensor, nn
 
 #: RMSNorm 的 eps —— 照参考实现写死 ``1e-5``（不是 torch 默认的 ``None``/``1e-6``）。
@@ -181,7 +183,7 @@ class Attention(nn.Module):
         q, k = self.qknorm(q, k)
         if freqs is not None:
             q, k = apply_rope(q, freqs), apply_rope(k, freqs)
-        out = F.scaled_dot_product_attention(q, k, v, enable_gqa=self.heads != self.kvheads)
+        out = sdpa.attention(q, k, v, enable_gqa=self.heads != self.kvheads)
         out = out.transpose(1, 2).reshape(b, n, self.heads * self.head_dim)
         #: ⚠️ 闸门在 ``wo`` **之前** ✓（见类 docstring：两式不等价 ✗）。
         return self.wo(out * torch.sigmoid(self.gate(x)))

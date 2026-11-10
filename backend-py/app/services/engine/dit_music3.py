@@ -29,6 +29,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
+
+from . import sdpa
 from torch import nn
 
 __all__ = [
@@ -321,7 +323,7 @@ class Music3Attention(nn.Module):
         rotary = rotation_matrix.shape[-3] * 2
         q = torch.cat((_apply_rope(q[..., :rotary], rotation_matrix), q[..., rotary:]), dim=-1)
         k = torch.cat((_apply_rope(k[..., :rotary], rotation_matrix), k[..., rotary:]), dim=-1)
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = sdpa.attention(q, k, v)
         return self.to_out(out.transpose(1, 2).reshape(batch, length, dim))
 
 

@@ -24,6 +24,7 @@ from typing import Any
 #: ⚠️ 别名不能叫 `sampler` ✗：`sample_dual_stream(..., sampler="euler")` 的**参数名就是** `sampler` ✓，
 #:    同名会把模块遮掉 ⇒ `'str' object has no attribute 'multistep_step'` ✓✗（真踩过 ✓）。
 from . import sampler as sampler_mod
+from . import sdpa
 
 __all__ = [
     "DUAL_SAMPLERS", "H3_FORM_PARTS", "H3_FORM_SIGNATURE_KEYS", "H3_FORM_TODO", "H3_SIGMA_SHIFTS",
@@ -39,7 +40,7 @@ __all__ = [
     "audio_grid", "packed_layout", "ref_time_span", "video_grid", "video_t_spans",
     "assemble_blocks", "cond_noise_augment", "pdd_head", "curve_t_emb",
     "H3_VIDEO_OUT_KEY", "video_patch_dim", "head_banks_from_shape",
-    "Int8Linear",
+    "Int8Linear", "NvFp4Linear",
 ]
 
 #: ✅ 本文件**已经有**的东西（每条都**能独立自检** ✓）
@@ -194,6 +195,8 @@ def head_banks_from_shape(shape: Any, single_dim: int) -> int:
 _PARTS_CACHE: dict[str, Any] | None = None
 #: :mod:`quant` 的延迟缓存 ✓（本模块要能「没有 torch 也导入」✓）
 _QUANT_CACHE: Any = None
+#: :mod:`quant_nvfp4` 的延迟缓存 ✓（同理由 ✓ —— nvfp4 只有 `NvFp4Linear` 用得到 ✓）
+_NVFP4_CACHE: Any = None
 
 
 def _build_torch_parts() -> dict[str, Any]:
@@ -320,7 +323,7 @@ def _build_torch_parts() -> dict[str, Any]:
                 q = self.apply_rope(q, rope_angles, rot_dim)
                 k = self.apply_rope(k, rope_angles, rot_dim)
             # [S, heads, head_dim] → [heads, S, head_dim] ⇒ 注意力在 S 上（**无 mask** ✓）
-            out = nn.functional.scaled_dot_product_attention(
+            out = sdpa.attention(
                 q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1))
             return self.out_proj(out.transpose(0, 1).reshape(count, inner))
 
@@ -1904,6 +1907,97 @@ def _build_torch_parts() -> dict[str, Any]:
                     else self.bias.to(device=x.device, dtype=x.dtype))
             return nn.functional.linear(x, weight, bias)
 
+    class NvFp4Linear(nn.Module):  # noqa: D101 —— 公开名见 __all__ ✓
+        """**nvfp4 打包权重常驻**的线性层 ✓ —— **前向时**才反量化 ✓（2026-11-09 加 ✓）。
+
+        ## 为什么不能「先整份反量化再装」✗✗
+
+        nvfp4 → 浮点是 **4 倍膨胀** ✓（32B 文本塔 14.61 GiB ⇒ ≈64 GiB ✗）⇒ 22.49 GiB 的卡
+        连**装**都装不进去 ✗（`quant_nvfp4` 抬头那条纪律 ✓）。唯一排法是「打包字节原样常驻 ✓
+        ＋ 逐层反量化 ✓」，瞬时 ≈ 单层浮点（最大 ~250 MiB ✓）。
+
+        ## 与 :class:`Int8Linear` 的三处不同 ✗（每处都对不上就是"能跑但数值偏"✓✗）
+
+        1. 权重是 **U8 打包** ✓（``[out, in/2]`` ✓ 一字节两个 E2M1 ✓，**元素 0 在高半字节** ✓✗）；
+        2. 尺度是**两级** ✓：``weight_scale``（F8_E4M3 ✓ 每 16 个元素一个 ✓ **cuBLAS 128×4
+           swizzled** ✓）＋ ``weight_scale_2``（f32 per-tensor ✓，文件里是 **0 维标量** ✓）——
+           少一级**不报错** ✓✗、只是整层整体偏 ✓；
+        3. 部分层带 **AWQ** ``pre_quant_scale``（``[in]`` ✓，**BF16** ✓ 不是 f32 ✓）⇒ 折进权重
+           **列** ✓（与"乘在输入上"逐位同义 ✓，见 :func:`quant_nvfp4.fold_pre_quant_scale` ✓）。
+
+        ⚠️ ``weight_scale`` 必须**原样**喂 :func:`quant_nvfp4.dequantize` ✓ —— 它自己解 swizzle ✓；
+        先自己解一遍再喂就是「扭两次」✓✗（形状仍合法 ⇒ **不报错的错** ✓✗）。
+        """
+
+        def __init__(self, in_features: int, out_features: int, *, bias: bool = True,
+                     scale_shape: Any = (1,), awq: bool = False,
+                     dtype: Any = None, device: Any = None) -> None:
+            super().__init__()
+            self.in_features = int(in_features)
+            self.out_features = int(out_features)
+            if self.in_features % 2:
+                raise ValueError(
+                    f"nvfp4 打包的线性层要求 in_features 是**偶数** ✗（收到 {self.in_features} ✓）"
+                    "—— 每字节塞两个 E2M1 ✓，奇数没法均分 ✓（不补齐、不猜 ✗）")
+            if self.in_features % 16:
+                raise ValueError(
+                    f"nvfp4 的块 scale 是每 16 个元素一个 ✗ ⇒ in_features 必须是 16 的倍数 ✓"
+                    f"（收到 {self.in_features} ✓）")
+            self.weight = nn.Parameter(
+                torch.empty((self.out_features, self.in_features // 2),
+                            dtype=torch.uint8, device=device), requires_grad=False)
+            #: ⚠️ 形状**照文件**建 ✓（`[rows, cols/16]` ✓，且 tiled padding 已经体现在里面 ✓）——
+            #: 自己按"真实形状"算出来的元素数会**小于**文件里的 ✓ ⇒ 装载闸口按形状不符拦下 ✓。
+            self.register_buffer(
+                "weight_scale",
+                torch.ones(tuple(int(d) for d in scale_shape),
+                           dtype=torch.float8_e4m3fn, device=device))
+            #: 0 维标量 ✓（文件里 `weight_scale_2` 的 shape 是 `[]` ✓ —— 建成 `[1]` 会被形状闸口拦 ✓）。
+            self.register_buffer("weight_scale_2",
+                                 torch.ones((), dtype=torch.float32, device=device))
+            if awq:
+                #: ⚠️ 长度 = **in_features** ✓（不是 out ✗）：它乘在**输入**上 ✓，等价折进权重的列 ✓。
+                self.register_buffer("pre_quant_scale",
+                                     torch.ones((self.in_features,), dtype=torch.bfloat16,
+                                                device=device))
+            else:
+                self.register_buffer("pre_quant_scale", None)
+            if bias:
+                self.bias = nn.Parameter(torch.empty(self.out_features,
+                                                     dtype=dtype or torch.float32, device=device),
+                                         requires_grad=False)
+            else:
+                self.register_parameter("bias", None)
+
+        def extra_repr(self) -> str:
+            awq = ", awq" if self.pre_quant_scale is not None else ""
+            return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                    f"bias={self.bias is not None}, nvfp4{awq}")
+
+        def forward(self, x: Any) -> Any:
+            nv = _nvfp4_mod()
+            packed = self.weight
+            scale = self.weight_scale
+            scale2 = self.weight_scale_2
+            # ⚠️ 权重**驻 CPU** 那条路（`place_module(..., park_int8_on=...)` ✓）与 Int8Linear 同：
+            #    本层**现搬** ✓ ⇒ 峰值是「单层打包 + 单层浮点」✓，不是整份 14.61 GiB 的浮点副本 ✗。
+            if packed.device != x.device:
+                packed = packed.to(x.device, non_blocking=packed.is_pinned())
+            if scale.device != x.device:
+                scale = scale.to(x.device, non_blocking=scale.is_pinned())
+            if scale2.device != x.device:
+                scale2 = scale2.to(x.device, non_blocking=scale2.is_pinned())
+            weight = nv.dequantize(packed, scale, scale2,
+                                   (self.out_features, self.in_features), dtype=x.dtype)
+            if self.pre_quant_scale is not None:
+                pq = self.pre_quant_scale
+                if pq.device != x.device:
+                    pq = pq.to(x.device, non_blocking=pq.is_pinned())
+                weight = nv.fold_pre_quant_scale(weight, pq)
+            bias = (None if self.bias is None
+                    else self.bias.to(device=x.device, dtype=x.dtype))
+            return nn.functional.linear(x, weight, bias)
+
     return {
         "torch": torch, "nn": nn, "RMSNorm": RMSNorm, "TimeEmbedder": TimeEmbedder,
         "SwiGLU": SwiGLU, "Attention": Attention, "AdalnProj": AdalnProj,
@@ -1927,7 +2021,7 @@ def _build_torch_parts() -> dict[str, Any]:
         "curve_t_emb": curve_t_emb,
         "patchify_video": patchify_video, "unpack_audio": unpack_audio,
         "unpatchify_video": unpatchify_video, "pad_to_patch_size": pad_to_patch_size,
-        "Int8Linear": Int8Linear,
+        "Int8Linear": Int8Linear, "NvFp4Linear": NvFp4Linear,
     }
 
 
@@ -1938,6 +2032,15 @@ def _quant_mod() -> Any:
         from app.services.engine import quant as module  # noqa: PLC0415
         _QUANT_CACHE = module
     return _QUANT_CACHE
+
+
+def _nvfp4_mod() -> Any:
+    """延迟拿到 :mod:`quant_nvfp4` ✓（同 :func:`_quant_mod` 的理由 ✓）。"""
+    global _NVFP4_CACHE
+    if _NVFP4_CACHE is None:
+        from app.services.engine import quant_nvfp4 as module  # noqa: PLC0415
+        _NVFP4_CACHE = module
+    return _NVFP4_CACHE
 
 
 def _parts() -> dict[str, Any]:
@@ -2029,6 +2132,43 @@ def _upgrade_linear(module: Any, scales: dict[str, Any], *, convrot: Any, packed
     return swapped
 
 
+def upgrade_linear_to_nvfp4(module: Any, layers: dict[str, Any]) -> list[str]:
+    """把 ``nn.Linear`` 换成 :class:`NvFp4Linear` ✓（nvfp4 打包常驻 ✓，2026-11-09 ✓）。
+
+    ``layers``：``{层名: (块scale形状, 是否有 AWQ)}`` ✓ —— **两样都照文件** ✓✗：
+
+    * 块 scale 形状（``[rows, cols/16]`` 的 **swizzled** 版 ✓）—— 自己按"真实形状"算出来的
+      元素数会**小于**文件里的 ✓（tiled padding ✓）⇒ 装载闸口按「形状不符」直接拦 ✓；
+    * AWQ 有无 —— 文件里**只有一部分层**带 ``pre_quant_scale`` ✓（本机那份 32B 是
+      ``mlp.down_proj`` 有、``gate/up/k/o_proj`` 没有 ✓）⇒ 一律建成"有"会让缺张量的层装载报错 ✓✗，
+      一律建成"没有"则会让有的那几层**静默丢掉 AWQ 折列** ✓✗（数值偏、不报错 ✓）。
+
+    ⚠️ 不复用 :func:`_upgrade_linear` ✗：那两条路只差 ``packed4`` 一格 ✓，而这里换的是**另一个类**
+    （两级尺度 ＋ 可选 AWQ ＋ U8 打包 ✓），参数集合都不一样 ✓ —— 硬塞进同一个构造函数只会长出
+    一堆"对 int8 无意义"的开关 ✓✗。
+    """
+    import torch  # noqa: PLC0415,F401
+    from torch import nn  # noqa: PLC0415
+
+    cls = _parts()["NvFp4Linear"]
+    swapped: list[str] = []
+    for name, spec in layers.items():
+        scale_shape, awq = spec
+        parent_path, _, leaf = str(name).rpartition(".")
+        parent = module.get_submodule(parent_path) if parent_path else module
+        old = getattr(parent, leaf, None)
+        if not isinstance(old, nn.Linear):
+            raise TypeError(f"`{name}` 不是 nn.Linear（收到 {type(old).__name__} ✗）"
+                            f"⇒ 不能换成 nvfp4 常驻层 ✗")
+        new = cls(old.in_features, old.out_features, bias=old.bias is not None,
+                  scale_shape=tuple(int(d) for d in scale_shape), awq=bool(awq),
+                  dtype=old.weight.dtype, device=old.weight.device)
+        new.train(old.training)
+        setattr(parent, leaf, new)
+        swapped.append(str(name))
+    return swapped
+
+
 def place_module(module: Any, device: Any, *, park_int8_on: Any = None) -> dict[str, Any]:
     """把模块状态搬到 ``device`` ✓ —— 但 **int8 常驻权重可以留在别处** ✓（``park_int8_on`` ✓）。
 
@@ -2049,6 +2189,11 @@ def place_module(module: Any, device: Any, *, park_int8_on: Any = None) -> dict[
 
     返回的字典是**报告**（不猜 ✗）：``parked`` 层数 ✓、``parkedBytes`` 字节 ✓（17.94 GiB 那件事
     要能对上号 ✓）、``pinned`` 是否真的锁页 ✓（异步 H2D 的前提 ✓；锁不上**不算错** ✓，只是慢 ✓）。
+
+    ⚠️ ``int8`` 与 **``uint8``** 都算"常驻权重" ✓✗（2026-11-09 ✓）：nvfp4 的打包壳
+    （:class:`NvFp4Linear` ✓）权重就是 ``uint8 [out, in/2]`` ✓ —— 只认 ``int8`` 时它会跟着
+    ``module.to(device)`` 整份搬上卡 ✓✗（14.61 GiB 那份 ⇒ 前向里"现搬"那一步永远不触发 ✓，
+    显存被整份占住、激活没地方放 ✓）。``parkedNvfp4`` 单独记一格 ✓（两类混住时要分得清 ✓）。
     """
     import torch  # noqa: PLC0415
 
@@ -2057,18 +2202,23 @@ def place_module(module: Any, device: Any, *, park_int8_on: Any = None) -> dict[
         torch.device(park_int8_on) if not isinstance(park_int8_on, torch.device)
         else park_int8_on)
     moved = parked = 0
+    parked_nvfp4 = 0
     parked_bytes = 0
     pinned = True
     for tensor in [*module.parameters(), *module.buffers()]:
         if tensor is None:  # pragma: no cover - 参数表里不会有 None ✓（`register_parameter(None)` 不会进表 ✓）
             continue
-        keep = park is not None and tensor.dtype == torch.int8
+        #: ⚠️ **uint8 一起算** ✓✗（2026-11-09 ✓）：nvfp4 打包壳的权重是 ``uint8`` ✓ —— 漏掉它
+        #: 就等于"名义上驻 CPU、实际整份在卡上" ✓✗（能跑 ✓，但激活一到就没地方 ✓）。
+        keep = park is not None and tensor.dtype in (torch.int8, torch.uint8)
         want = park if keep else target
         current = tensor.data if tensor.data.device != want else None
         if current is not None:
             tensor.data = current.to(want, non_blocking=True)
         if keep:
             parked += 1
+            if tensor.dtype == torch.uint8:
+                parked_nvfp4 += 1
             parked_bytes += tensor.numel() * tensor.element_size()
             # ⚠️ 锁页**只对 CPU 有意义** ✓：异步 H2D 要它才真异步 ✓（不锁也行 ✓，只是退化成同步 ✓）
             if want.type == "cpu" and not tensor.data.is_pinned():
@@ -2080,6 +2230,7 @@ def place_module(module: Any, device: Any, *, park_int8_on: Any = None) -> dict[
             moved += 1
     return {"device": str(target), "parkedOn": None if park is None else str(park),
             "applied": park is not None, "moved": moved, "parked": parked,
+            "parkedNvfp4": parked_nvfp4,
             "parkedBytes": parked_bytes, "pinned": pinned}
 
 

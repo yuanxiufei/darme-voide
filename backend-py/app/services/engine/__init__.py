@@ -165,6 +165,15 @@ GROUP_MODEL: tuple[str, ...] = (
     #: 它不是装配行 ✗（`dit_build` 里有没有登记成族是另一件事 ✓），也不做编排 ✗。
     "dit_seedvr2",
     "dit_flux", "dit_generic",
+    #: ⚠️ ``sdpa``（2026-11-10 新增 ✓）挂这里的理由：它**不是**网络本体 ✗，但它是网络本体
+    #: **每一次前向都必走的一格** ✓（`dit` / `dit_flux` / `dit_generic` / `dit_lumina` /
+    #: `dit_music3` / `dit_qwen21` / `dit_qwen_image` / `dit_wan22` / `h3_form` 九处的 SDPA
+    #: 全从这里出去 ✓）。它只做**核选择**：判 cuDNN fused attention 能不能用 ✓、能就套
+    #: `sdpa_kernel([CUDNN])` ✓，判不过走原路 ✓ —— 不写模型数学 ✗（一行 softmax 都没有 ✓）、
+    #: 不编排阶段 ✗（谁在什么时候调它是各族 forward 的事 ✓）、不碰显存 ✗（不 has 权重 ✓）。
+    #: 放 `orch` 组会让人以为它在决定「跑哪一步」 ✗✗（那正是 `pipeline` / `runtime` 的活 ✓）；
+    #: 放 `numeric` 组更不行 —— 它 import torch ✓（那一组硬约束是「不装 torch 也能测」✓✗）。
+    "sdpa",
     #: ⚠️ ``dit_music3``（2026-11-02 补登记 ✓）与 `dit_flux` / `dit_generic` 同层 ✓：都是**网络本体** ✓
     #: （Music3 的音乐主干 ✓，`dit_build.BUILDERS` 里登记成 `music3` 行、契约 ``latent_dims=3`` ✓）。
     #: 它**不是**编排 ✗（谁调它、怎么排阶段是 `pipeline` / `runtime` 的事 ✓），也不做量化 ✗。

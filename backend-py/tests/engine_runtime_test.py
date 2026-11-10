@@ -264,6 +264,26 @@ def case_queue(out_dir: Path) -> None:
     check("取消裁决: 未知任务 ⇒ ``None``（路由那边才是 400 ✓）",
           engine_runtime.cancel("nope") is None, engine_runtime.cancel("nope"))
 
+    # ⭐⭐ **``elapsedMs`` 由哪几段拼成** ✗✗（2026-11-08 补 ✗）：``elapsedMs`` 是真墙钟 ✓（含装载 ✓），
+    #    而 ``result.totalMs`` 只是管线各阶段之和 ✓（**不含装载** ✗）—— 两个数躺在**同一份**回执里 ✓✗，
+    #    差的那一截原先**没有任何一格解释** ✓（实测 H3：94.7 s vs 73.3 s，差的是装载 20 s ✓）。
+    #    现在 ``timing`` 一次给出三格 ✓，``unaccountedMs`` 是剩下的排队与收尾 ✓。
+    timing_task = runtime_mod.EngineTask(
+        id="t-timing", stage="h3", request=_request(out_dir), status="done",
+        createdAt=1_000, startedAt=1_000, finishedAt=6_000,
+        loadMs=2_000, result={"totalMs": 2_800, "wallMs": 3_000})
+    timing_block = timing_task.to_summary().get("timing") or {}
+    check("⓪¹ ⭐⭐ ``timing`` 逐格给 ``elapsedMs``／``loadMs``／``pipelineMs``／``pipelineWallMs``／"
+          "``unaccountedMs`` ✓（5 s 墙钟 ＝ 装载 2 s ＋ 管线墙钟 3 s ✓，未入账 0 ✓）"
+          "—— 一个叫 ``totalMs`` 的数**不含装载** ✗✗，不点明就只能在回执里互相矛盾 ✓",
+          timing_block.get("elapsedMs") == 5_000 and timing_block.get("loadMs") == 2_000
+          and timing_block.get("pipelineMs") == 2_800
+          and timing_block.get("pipelineWallMs") == 3_000
+          and timing_block.get("unaccountedMs") == 0, timing_block)
+    check("⓪² 干跑（**没装载**）⇒ ``loadMs=None`` ✓ 而不是编个 0 ✗（0 会被读成「装载瞬时完成」✓✗）",
+          runtime_mod.EngineTask(id="t-dry", stage="h3", request=_request(out_dir))
+          .to_summary().get("loadMs") is None, None)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ②b 收尾顺序：**终结态可见 ⇒ "还了多少"已经在事件里** ✓（踩过一次的坑 ✗）
@@ -526,6 +546,23 @@ def case_half_load() -> None:
               report.get("reused") is False and loaded.get("loaded") == {
                   "dit": True, "textEncoder": True, "vae": True, "audioVae": True},
               {"reused": report.get("reused"), "loaded": loaded.get("loaded")})
+
+        # ④ `force=True` ＋ **同键** ⇒ 真的再装一遍 ✓✗（2026-11-09 兑现 ✓）。
+        #    ⚠️ 这一半只能用假装配验（「装配函数被真调了一次」✓）；量的那两条账归量计那组 ✓ ——
+        #    两组各验一半，谁也别替对方作证 ✓。
+        made.clear()
+        forced = engine_runtime.ensure_loaded(dit_path="假主干.safetensors", force=True)
+        check("force: 同键 ＋ force=True ⇒ 后端被**重新构造一次**（reused=false、forced=true ✓✗）",
+              len(made) == 1 and forced.get("reused") is False and forced.get("forced") is True,
+              (len(made), forced.get("reused"), forced.get("forced")))
+        check("force: 重装后装载账指向**新的那一份** ✓（旧的已丢、不是两份并存 ✓✗）",
+              bool(made) and engine_runtime._backend is made[0],  # noqa: SLF001
+              (len(made), engine_runtime._backend))  # noqa: SLF001
+        again = engine_runtime.ensure_loaded(dit_path="假主干.safetensors")
+        check("force: 紧接着**不传** force ⇒ 回到复用 ✓（reused=true、不再构造 ✗），"
+              "且**不带** forced ✗✗（它只属那一次回执，写进缓存报告就会被读成「正在重装」✓✗）",
+              again.get("reused") is True and len(made) == 1 and again.get("forced") is None,
+              (again.get("reused"), len(made), again.get("forced")))
     finally:
         setattr(runtime_mod, "TorchBackend", real_backend_cls)
         setattr(runtime_mod, "_attach_video_vae", real_video_vae)          # noqa: SLF001
@@ -800,15 +837,33 @@ def case_cache_meter() -> None:
               last.get("kind") == "hit" and len(str(last.get("key") or "")) == 12
               and bool(last.get("reason")), last)
 
-        # ② `force=True` 但键**相同** ⇒ 内部当场复用 ⇒ 账必须记 hit ✗✗（记 miss+eviction 是两条假账 ✓✗）
+        # ② `force=True` ＋ 键**相同** ⇒ **真重装一次** ✓✗（2026-11-09 改判 ✓）。
+        #    旧口径是「内部当场复用 ⇒ 只记 hit」，理由是「记 miss+eviction 会是两条假账」✓ ——
+        #    那个理由在当时成立（当时确实没真装 ✗），但它让 `force` 这个参数名**纯装饰** ✓✗：
+        #    调用方显式要求重装，实际什么都没发生、还回 `reused=True` ✓✗。现在内部那道同键短路
+        #    被 `force_reload` 跳过 ⇒ 旧的**真丢了**、新的**真装了一遍** ⇒ 这两条账**不再是假账** ✓。
         _fresh()
-        forced = engine_runtime.ensure_loaded(dit_path="D:\\m\\dit.safetensors", force=True)
+        engine_runtime._backend = _FakeBackend()                                # noqa: SLF001
+        engine_runtime._loadKeyTuple = _key("D:\\m\\dit.safetensors")           # noqa: SLF001
+        engine_runtime._loadReport = {"components": ["dit"], "device": "cpu"}    # noqa: SLF001
+        try:
+            engine_runtime.ensure_loaded(dit_path="D:\\m\\dit.safetensors", force=True)
+        except TorchBackendUnavailable:
+            pass                      # 真去装了 ⇒ 这台机器上没有真权重 ⇒ 抛才对 ✓（装不上正是证据 ✓）
+        except Exception as err:  # noqa: BLE001
+            check("量计: force＋同键真重装时抛的必须是 TorchBackendUnavailable", False, repr(err))
         forced_facts = engine_runtime.status()["cache"]
-        check("量计: force=True 但键相同 ⇒ 实际是**复用** ⇒ 只涨 hits（misses / evictions 不许涨 ✓✗）",
-              forced.get("reused") is True and forced_facts["hits"] == 1
-              and forced_facts["misses"] == 0 and forced_facts["evictions"] == 0,
-              (forced.get("reused"), forced_facts["hits"], forced_facts["misses"],
-               forced_facts["evictions"]))
+        check("量计: force=True ＋ 键相同 ⇒ **真重装**（miss / eviction 各 1、hits 0 ✓✗）",
+              (forced_facts["hits"], forced_facts["misses"],
+               forced_facts["evictions"]) == (0, 1, 1),
+              (forced_facts["hits"], forced_facts["misses"], forced_facts["evictions"]))
+        forced_recent = forced_facts["recent"] or []
+        check("量计: 那两笔的**理由**点名 force ✓（别让下一个人读成「换装配」✓✗）",
+              [e.get("kind") for e in forced_recent] == ["miss", "eviction"]
+              and all("force" in str(e.get("reason")) for e in forced_recent),
+              [e.get("reason") for e in forced_recent])
+        check("量计: 重装失败后旧后端**已丢**（不半装 ✗、也不留着旧的骗人 ✓）",
+              engine_runtime._backend is None, engine_runtime._backend)  # noqa: SLF001
 
         # ③ 忙到拒装 ⇒ **什么都没发生** ⇒ 一笔都不许记 ✗✗
         _fresh()
@@ -830,6 +885,11 @@ def case_cache_meter() -> None:
 
         # ④ 换装配 ⇒ 真装一次（装不上 ✓，但"决定要装"和"丢旧的"都**真发生了** ✓）
         _fresh()
+        #: ⚠️ 这里必须**自己摆一份旧的** ✗✗：② 改成「force 真重装」后会顺手把 `_backend` 清成 None ✓，
+        #: 不摆的话「evictions +1」这条会红得莫名其妙 ✓（而它本来要验的正是"装新的之前先丢旧的"✓）。
+        engine_runtime._backend = _FakeBackend()                                # noqa: SLF001
+        engine_runtime._loadKeyTuple = _key("D:\\m\\旧的那份.safetensors")      # noqa: SLF001
+        engine_runtime._loadReport = {"components": ["dit"], "device": "cpu"}    # noqa: SLF001
         try:
             engine_runtime.ensure_loaded(dit_path="D:\\m\\没有这个文件.safetensors")
         except TorchBackendUnavailable:

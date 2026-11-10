@@ -37,6 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from . import sdpa
 from .dit_generic import ShapeError, apply_rope, rope_freqs, timestep_embedding
 
 __all__ = [
@@ -336,7 +337,7 @@ class _Attention(nn.Module):
         k = torch.cat((_rms_norm(k_t, self.norm_added_k.weight, self.eps),
                        _rms_norm(k_i, self.norm_k.weight, self.eps)), dim=2)
         q, k = apply_rope(q, freqs), apply_rope(k, freqs)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = sdpa.attention(q, k, v, attn_mask=mask)
         joint = out.transpose(1, 2).reshape(b, st + si, self.heads * self.head_dim)
         img_out = self.to_out[0](joint[:, st:])
         return self.to_out[1](img_out), self.to_add_out(joint[:, :st])

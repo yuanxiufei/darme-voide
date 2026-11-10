@@ -201,6 +201,11 @@ class DryRunBackend:
             "isContainer": split.is_container,
             "videoShapeBefore": list(split.video.shape),
             "videoShapeAfter": list(refined.shape),
+            # ⭐ **实测倍率**（2026-11-08 补 ✗）：管线要拿它填 ``result.refine.scaleActual`` ✓，
+            #    后端不自述这一格 ⇒ 回执只剩计划倍率 ✓（计划层 vs 执行层的老毛病 ✓）。
+            #    按**高/宽**分别给 ✓ —— 非方形下两者可能因整数取整而不等 ✓。
+            "spatialScale": round(list(refined.shape)[-2] / list(split.video.shape)[-2], 6),
+            "spatialScaleW": round(list(refined.shape)[-1] / list(split.video.shape)[-1], 6),
             "containerType": type(merged).__name__,
             # ⭐⭐ 音频流**逐位相同**（换流只动视频那一槽 ✓）—— 重采音频会把音轨弄坏 ✓✗
             "audioIdentical": merged.streams[1] is container.streams[1],

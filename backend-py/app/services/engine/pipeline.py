@@ -331,14 +331,18 @@ def seedvr2_target(facts: dict[str, Any]) -> dict[str, Any]:
         warnings.append("源视频帧率读不出来 ⇒ 按 24fps 记 ✓（修复不改时间轴 ✓，这里只影响时长标注 ✓）")
     raw_frames = facts.get("nbFrames")
     if not raw_frames:
-        duration = facts.get("durationSeconds")
-        if not duration:
+        #: ⚠️ 估法**只有一处** ✓✗：与 ``torch_backend.write``（落盘后核帧数 ✓）共用
+        #:   ``media.frames_from_duration`` ✓ —— 两处各写一遍的下场是一处改了另一处不改 ✓。
+        from . import media as media_mod  # noqa: PLC0415 —— 纯 ffprobe ✓ 不引 torch ✓
+        estimated = media_mod.frames_from_duration(facts, fallback_fps=fps)
+        if estimated is None:
             raise ValueError(
                 "源视频的帧数与时长**都**读不出来 ✗ ⇒ 不知道该修多少帧 ✓"
                 "（`nbFrames` / `durationSeconds` 同时为空 ✓ —— 换一份带完整 index 的封装 ✓，"
                 "或先用 ffmpeg 重封装 ✓）")
-        raw_frames = int(round(float(duration) * max(1, fps)))
-        warnings.append(f"`nbFrames` 缺失 ⇒ 按时长 {float(duration):.3f}s × {fps}fps 估 **{raw_frames} 帧** ✓")
+        raw_frames = int(estimated)
+        warnings.append(f"`nbFrames` 缺失 ⇒ 按时长 {float(facts.get('durationSeconds') or 0):.3f}s"
+                        f" × {fps}fps 估 **{raw_frames} 帧** ✓")
     raw_frames = int(raw_frames)
     if raw_frames < SEEDVR2_MIN_FRAMES:
         raise ValueError(
@@ -615,6 +619,13 @@ class GenerationPlan:
             #    刻意不给"秒" ✗：那需要每步的算力模型（我们还没有 ✓），
             #    硬报一个秒数就是**编** ✗。前端要秒数就等真后端跑一次后按实测标定 ✓。
             "costFactor": round(self.cost_factor, 4),
+            # ⭐⭐ **说清这个系数覆盖了哪几段** ✗✗（2026-11-08 补 ✗）：``costFactor`` 只算
+            #    **采样**（步数 × 采样器 × 引导 ✓ 三者可精确算 ✓），**不含**超清放大器与二采
+            #    （那不是可精确算的 ✓，≈6× 是逆向读数 ✗）。原先回执里只有 ``costFactor`` 一个数 ✓、
+            #    旁边又并排着 ``upscale`` ✓✗ ⇒ 开 2× 超清时「×1.00」读起来像整跑耗时 ✓，
+            #    而实际还有一段 ≈6× 的放大器 ✗（同一份回执里两个口径打架 ✓）。
+            "costCovers": ["sample"],
+            "costExcludes": ["upscale"] if (self.upscale or {}).get("usesUpscaler") else [],
             "upscale": self.upscale,
             "canvas": self.canvas,
             # ⚠️ 图生图四格如实报 ✓（``denoise=1`` 时就是 1.0 / steps / 1.0 / "noise" ✓）——
@@ -1866,14 +1877,30 @@ def _finish_plan(request: GenerationRequest, plan: GenerationPlan,
             f"相对耗时约 ×{plan.cost_factor / max(1.0, float(plan.steps)):.2f}"
             + (f"（{str(request.sampler or 'euler')} 每步 ×{sampler_multiplier:g} 次模型调用 ✗）"
                if sampler_multiplier != 1.0 else "")
-            + (f"（重标定 {config.rescale:g} ✓）" if config.rescale else ""))
+            + (f"（重标定 {config.rescale:g} ✓）" if config.rescale else "")
+            # ⭐ 这个 ×N **只算采样** ✗✗（2026-11-08 补 ✗）：同一份 ``warnings`` 里下面还有一条
+            #    「超清 ≈6×」✓ ⇒ 不点明覆盖范围的话，读者会把 ×1.00 当成整跑代价 ✓✗
+            #    （而此时放大器那一段压根没进这个数 ✓）。
+            + ("（⚠️ 这个系数**只算采样** ✓，不含下面那段超清 ✗）"
+               if (request.upscale is not None and request.upscale.uses_upscaler) else ""))
     # ── 超清计划（**照调用方给的** ✓ 不自己猜倍率/分块 ✗）────────────────────────
     if request.upscale is not None:
         plan.upscale = request.upscale.to_dict()
         if plan.upscale.get("usesUpscaler"):
+            # ⭐⭐ **耗时口径不许在这一层编** ✗✗（2026-11-08 补 ✗）：≈6× 是 ``ai-2x``
+            #    （潜空间放大器**原样 2×** ✓）那一条的逆向读数 ✓，它写在 ``upscale.plan_upscale``
+            #    给该模式的 ``notes`` 里 ✓；而 ``ai-2x-resize``（先 2× 再缩到 1.5× ✓）与
+            #    ``tiled-ai-2x``（分块 ✓）**都没有**这个读数 ✓✗ —— 原先这里对所有 ``usesUpscaler``
+            #    的模式一律印「耗时 ≈6×」✓✗ ⇒ 1.5× 的用户被告知了一个**没有出处的倍率** ✓，
+            #    而它读起来正像实测 ✓（本仓最怕那种"自洽的空口" ✓）。
+            #    ⇒ 只**逐字引用**计划层那句 ✓；没有就明说**没有** ✗（不猜 ✗）。
+            cost_note = next((note for note in (plan.upscale.get("notes") or ())
+                              if "耗时" in str(note)), None)
             plan.warnings.append(
                 f"超清二采：{plan.upscale['mode']} ×{float(plan.upscale.get('scale') or 0):g}"
-                f"（⚠️ 只重采**视频流** ✓ 音频流锁定 ✗；耗时按逆向口径 ≈**6×** ✓）")
+                "（⚠️ 只重采**视频流** ✓ 音频流锁定 ✗）"
+                + (f"；{cost_note}" if cost_note else
+                   "；⚠️ **本模式没有逆向耗时读数** ✗ ⇒ 不猜一个倍率出来 ✗"))
         else:
             # ⭐ **不启用也必须说清为什么** ✗（静默降级 = 用户以为超清开着 ✓✗）
             plan.warnings.append(
@@ -1953,17 +1980,36 @@ class PipelineResult:
     #: 二采精修的实况 ✓（``None`` = 本次没要超清 / 计划说不启用放大器 ✓）
     refine: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    #: ⭐ **真实墙钟**（``run_sync`` 进门 → 返回 ✓，毫秒 ✓）—— ``None`` = 不知道（别处构造的结果 ✓）
+    #: ⚠️ 它与 :attr:`totalMs` **不是一回事** ✗✗：``totalMs`` 只是 ``stageMs`` 那几个键之和 ✓，
+    #:    不含**装载**（在 ``runtime._execute`` 里、``run_sync`` 之外 ✓）、阶段间隙、
+    #:    ``gc`` / ``empty_cache`` 的收尾 ✓✗ —— 2026-11-08 实测 H3 那一跑：墙钟 94.7 s
+    #:    （装载 20 ＋ encode 22.2 ＋ sample 39.6 ＋ decode 11.5 ✓）而 ``totalMs`` 只有 73.3 s ✓✗，
+    #:    两个数就躺在**同一份回执**里（``task.elapsedMs`` 与 ``result.totalMs`` ✓），谁也没说
+    #:    为什么差 21 秒 ✓ —— 而少掉的那段恰好是"要不要常驻"最该看的那个数 ✓。
+    wallMs: int | None = None
+    #: 进门时刻（``perf_counter`` ✓，只给 :meth:`elapsed_ms` 用 ✓，不进回执 ✗）
+    _t0: float = 0.0
 
     @property
     def totalMs(self) -> int:
+        """⚠️ **阶段入账之和** —— **不是**总耗时 ✗✗（见 :attr:`wallMs` 的注释 ✓）。"""
         return sum(self.stageMs.values())
+
+    def elapsed_ms(self) -> int:
+        """跑到**此刻**的墙钟 ✓（事件里的 ``elapsedMs`` 用它 —— 比阶段之和更真 ✓）。"""
+        if self.wallMs is not None:
+            return self.wallMs
+        if not self._t0:
+            return self.totalMs          # 不知道起点 ⇒ 退回阶段之和 ✓（不编一个数 ✗）
+        return int((time.perf_counter() - self._t0) * 1000)
 
     def event(self, stage: str, *, step: int | None = None, total: int | None = None,
               note: str = "") -> dict[str, Any]:
         """给前端的事件载荷（字段名与前端 camelCase 约定一致 ✓）。"""
         payload: dict[str, Any] = {
             "kind": "stage", "stage": stage, "label": STAGE_LABELS.get(stage, stage),
-            "elapsedMs": self.totalMs, "stageMs": self.stageMs.get(stage, 0),
+            "elapsedMs": self.elapsed_ms(), "stageMs": self.stageMs.get(stage, 0),
         }
         if step is not None:
             payload["step"] = step
@@ -1974,15 +2020,65 @@ class PipelineResult:
         return payload
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        # ⭐⭐ **把"这个和覆盖了哪几段"写在数旁边** ✗✗（2026-11-08 补 ✗）：``totalMs`` 与
+        #    ``task.elapsedMs``（真墙钟 ✓、含装载 ✓）并排出现在**同一份** ``/engine/task`` 回执里 ✓，
+        #    差的那 20 多秒是装载与收尾 ✓ —— 而两个字段谁也没说自己不含什么 ✓✗
+        #    ⇒ 读的人只会以为其中一个是错的 ✓（或以为装载不要钱 ✓）。
+        #    ⇒ 现在 ``totalCovers`` 逐字给出实际入账的阶段 ✓（**动态**取 ``stageMs`` 的键 ✗，
+        #    不手抄一份清单 ✓✗），``wallMs`` 给真墙钟，``unaccountedMs`` 给差额 ✓。
+        gap = (None if self.wallMs is None
+               else max(0, int(self.wallMs) - self.totalMs))
+        payload: dict[str, Any] = {
             "ok": self.ok, "cancelled": self.cancelled, "backend": self.backend,
             "synthetic": self.synthetic, "sampleSteps": self.sampleSteps,
             "guidanceSteps": self.guidanceSteps, "conditioning": self.conditioning,
             "totalMs": self.totalMs, "stageMs": dict(self.stageMs),
+            #: ``totalMs`` **只等于这几段之和** ✓（阶段名逐字来自 ``stageMs`` ✓）
+            "totalCovers": list(self.stageMs),
+            "wallMs": self.wallMs,
+            "unaccountedMs": gap,
             "plan": self.plan.to_dict() if self.plan else None,
             "refine": self.refine,
             "outputs": self.outputs, "error": self.error,
         }
+        #: ⭐⭐ ``alerts`` 必须**抬到回执顶层** ✗✗（2026-11-10 补 ✗ —— 这里补的是**通路**，
+        #:   不是又一个结论）：
+        #:   各后端把「跑完才知道的结论」写进 ``backend.write()`` 的**返回**里 ✓（``alerts`` ✓），
+        #:   而那个返回被 :attr:`outputs` 原样收下 ✓ ⇒ 落在 ``result.outputs.alerts`` ✓✗；
+        #:   前端 :file:`useEngineRun.ts` 读的是 ``task.result.alerts``（**顶层** ✓）
+        #:   ⇒ 2026-11-09 起那一整批「音轨几乎是静音 ✗ / mp4 里音轨被截 ✗ / 落盘帧数没核对过 ✗」
+        #:   **一个都没到用户眼前** ✓✗ —— 后端说了、通道断了 ＝ 白说 ✓（比不说更糟：回执里
+        #:   字斟句酌地写着，人以为界面上也写着 ✓）。
+        #:   ⇒ 唯一真源仍留在 ``outputs`` ✓（后端只管往里写 ✓，不另立第二份 ✗），
+        #:   由这里**统一抬一层** ✓ —— 单段路与多段成片路（:func:`chain.run_chain` ✓）同一口径 ✓。
+        _alerts = self.outputs.get("alerts") if isinstance(self.outputs, dict) else None
+        if _alerts:
+            payload["alerts"] = [str(item) for item in _alerts]
+        if gap:
+            payload["timingNote"] = (
+                f"墙钟 {int(self.wallMs)} ms ＝ 阶段之和 {self.totalMs} ms ＋ 未入账 {gap} ms ✓"
+                "；未入账那段是**装载 / 阶段间隙 / 收尾清理** ✓（都不在 ``stageMs`` 里 ✗）"
+                "——``totalMs`` 从来**不是**总耗时 ✗")
+        # ⭐⭐ **中断的采样必须说清"跑了几步"** ✗✗（2026-11-08 补 ✗）：``sampleSteps`` 原先只在
+        #    采样器**正常返回**时赋值 ✓ ⇒ 取消/OOM 一律 0 ✓✗，而同一份回执里 ``stageMs.sample``
+        #    是真实秒数 ✓、``error.step`` 写着「停在第 3 步」✓ —— 三个数互相矛盾且无人解释 ✓。
+        #    （步号＝**已跑完**的步数 ✓：``on_step`` 在每步算完之后才回调 ✓。）
+        stopped = self.error or {}
+        planned = int(getattr(self.plan, "steps", 0) or 0) if self.plan else 0
+        done = int(self.sampleSteps or 0)
+        #: ⚠️ 防御：``error.step`` 与 ``sampleSteps`` 本该一致（:func:`_absorb_steps` 保证 ✓），
+        #:    但**这句人话绝不许自相矛盾** ✓✗ —— 反验时真见过「真跑了 0 步…（取消在第 3 步）」
+        #:    这种句子 ✓（那比不说更糟 ✓）。取两者较大者，口径与 ``on_step`` 一致 ✓。
+        reported = stopped.get("step")
+        if isinstance(reported, int) and reported > done:
+            done = reported
+        if planned and stopped.get("stage") == "sample" and int(self.sampleSteps or 0) < planned:
+            payload["stepsNote"] = (
+                f"采样**真跑了 {done} / {planned} 步**就中断了 ✓"
+                f"（{'取消' if stopped.get('cancelled') else '失败'}在**第 {reported} 步** ✓）；"
+                "``sampleSteps`` 记的是**真跑过的**步数 ✓（``stageMs.sample`` 计的就是它们 ✓）"
+                f"—— 不是「一步没跑」✗，也不是「跑满 {planned} 步」✗")
+        return payload
 
 
 CancelFn = Callable[[], bool]
@@ -2088,9 +2184,30 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
 
     返回 :class:`PipelineResult` ✓（**不抛异常** ✗ —— 失败也体现在结果里 ✓，
     因为「阶段 + 步号 + 文案」比异常栈对用户有用得多 ✓）。
+
+    ⭐ **这一层只做一件别的事：记墙钟** ✗✗（2026-11-08 补 ✗）。理由见 :attr:`PipelineResult.wallMs`
+    —— ``totalMs`` 是阶段入账之和 ✓，与调用方看到的 ``elapsedMs``（真墙钟 ✓、含装载 ✓）天然不等 ✓✗；
+    不把真墙钟一起交出去，那两个数就只能在回执里互相矛盾 ✓（差额那段是装载与收尾 ✓，
+    正是"要不要常驻"最该看的东西 ✓）。
     """
+    started = time.perf_counter()
+    result = _run_stages(request, backend, on_event=on_event, cancel=cancel,
+                         on_decoded=on_decoded)
+    #: ⚠️ 写在**返回之后**（而不是每个 ``return`` 前面 ✓✗）：``_run_stages`` 有十几处早退 ✓，
+    #:    逐处补一行必然漏一处 ✓（漏的那条恰好是失败路径 ✓✗ —— 而失败路径**最需要**看耗时 ✓）。
+    result.wallMs = int((time.perf_counter() - started) * 1000)
+    return result
+
+
+def _run_stages(request: GenerationRequest, backend: GenerationBackend, *,
+                on_event: Callable[[dict[str, Any]], None] | None = None,
+                cancel: CancelFn | None = None,
+                on_decoded: Callable[[dict[str, Any]], None] | None = None) -> PipelineResult:
+    """真正的阶段执行体 ✓（**只由** :func:`run_sync` 调 ✓ —— 它负责计时与封口 ✓）。"""
     result = PipelineResult(backend=getattr(backend, "name", type(backend).__name__),
                             synthetic=bool(getattr(backend, "synthetic", False)))
+    #: 事件里的 ``elapsedMs`` 用它算"到此刻多久" ✓（见 :meth:`PipelineResult.elapsed_ms` ✓）
+    result._t0 = time.perf_counter()
     condition: Any = None
     latents: Any = None
     #: ⭐ 本次是否走**双流**（视频 + 音频 ✓ H3 形态）—— 由**后端自述**决定 ✓（管线不猜 ✗）
@@ -2443,14 +2560,75 @@ def run_sync(request: GenerationRequest, backend: GenerationBackend, *,
                               "（重采音频会把音轨弄坏 ✓ 而画面上看不出来 ✓）；"
                               "请让后端声明 refineNote={'locksAudio': True, ...} ✓")
             # ⚠️ 二采要**重跑主干** ⇒ 必须把条件递下去 ✗（不然后端只能拒绝 ✓ —— 见 refine 的注释 ✓）
-            latents = hook(latents, plan, request, condition=condition)
-            result.refine = {"applied": True, "mode": request.upscale.mode,
-                             "scale": request.upscale.scale,
-                             "tiles": len(request.upscale.tiles or ()),
-                             "backendNote": dict(note)}
+            # ⚠️⚠️ 传的是 `request.upscale`（**超清计划**）而**不是** `plan`（GenerationPlan）✗✗：
+            #    `refine_steps` / `refine_denoise` / `mode` / `scale` **全都只在超清计划上** ✓，
+            #    `GenerationPlan` 一个字段都没有 ✓✗ ⇒ 传它 ⇒ 后端 `getattr(plan,'refine_steps',0)`
+            #    **恒为 0** ⇒ 二采从未跑过 ✓✗，回执还会写"⚠️ 二采未跑：plan.refine_steps = 0"✓
+            #    而用户明明给了 refineSteps ✓✗（2026-11-08 实测确认；测试一直传 UpscalePlan ⇒ 绿 ✓✗
+            #    典型的"测试与生产不同构"）。
+            latents = hook(latents, request.upscale, request, condition=condition)
+            # ⭐ **必须自述「实际做了什么」** ✗✗（2026-11-08 补 ✗）：上面 ``locksAudio`` 那条已经立了
+            #    「后端不自述 ⇒ 不认超清」的纪律 ✓，但**实际倍率/尺寸**这一半原先随便 ✓✗ ——
+            #    读不到 details 就只写计划值 ✓，于是回执里「``scale`` = 1.5」孤零零站着、
+            #    没有任何东西能证明画面真是 1.5× ✓（本仓最怕那类"自洽的空口"✓）。
             details = getattr(backend, "refineDetails", None)
-            if isinstance(details, dict):
-                result.refine["details"] = dict(details)
+            if not isinstance(details, dict) or not details:
+                raise StageError(
+                    "refine", "后端跑完二采却**没有自述实际做了什么** ✗✗ ⇒ 不认这次超清 ✗"
+                              "（回执只剩计划倍率，没有任何东西能证明画面真是那个倍率 ✓）。"
+                              "请让 ``refine_latents`` 收尾写 "
+                              "``self.refineDetails={'videoShapeBefore':…, 'videoShapeScaled':…, "
+                              "'spatialScale':…}`` ✓")
+            actual = details.get("spatialScale")
+            if actual is None:
+                # 后端没单列倍率 ⇒ **只从它自述的尺寸**算 ✓（不是猜 ✓）：高度比＝``[-2]`` ✓
+                # （4 维 ``[C,T,H,W]`` 与 5 维 ``[1,C,T,H,W]`` 都落在倒数第二位 ✓）。
+                try:
+                    before = details.get("videoShapeBefore") or []
+                    after = details.get("videoShapeAfter") or []
+                    actual = round(int(after[-2]) / int(before[-2]), 6)
+                except (IndexError, TypeError, ValueError, ZeroDivisionError):
+                    actual = None
+            result.refine = {"applied": True, "mode": request.upscale.mode,
+                             #: ⚠️ ``scale`` **仍是计划倍率** ✓（它属于计划层口径 ✓）——
+                             #:    「实跑出来几倍」看 ``scaleActual`` ✓，两者**不许混用** ✗✗
+                             "scale": request.upscale.scale,
+                             "scaleActual": actual,
+                             "tiles": len(request.upscale.tiles or ()),
+                             "backendNote": dict(note),
+                             "details": dict(details)}
+            #: 计划说 1.5×、实跑给 2×（或反过来）⇒ 单独一格点名 ✓，别让两个数并排放着让人猜 ✓
+            if actual is not None:
+                try:
+                    drift = float(actual) - float(request.upscale.scale)
+                except (TypeError, ValueError):
+                    drift = None
+                if drift is not None and abs(drift) > 1e-6:
+                    result.refine["scaleMismatch"] = {
+                        "planned": request.upscale.scale, "actual": actual,
+                        "why": "计划倍率与实测空间倍率不一致 ✓ —— 以 ``scaleActual`` 为准 ✗"}
+            # ⭐⭐ **计划说要二采、实况说没跑** ⇒ 必须在**回执顶层**点名 ✗✗（2026-11-08 补 ✗）：
+            #    张量层对「二采失败」的口径是**回退到上采样结果**（不炸 ✓ —— 见 ``_second_pass``），
+            #    于是这一跑 ``applied=true`` 照样成立 ✓、``details`` 里静静躺着 ``secondPass: false`` ✓✗，
+            #    而**计划层**那份 ``upscale.secondPass`` 写的是 true ✓ ⇒ 谁拿「applied ✓ + 计划 ✓」
+            #    来读都会以为二采跑了 ✓；只有翻 ``details`` 里的一行才看得见 ✓✗。
+            #    ⚠️ 这里**不判失败** ✗（回退是上游口径 ✓），只把事实挪到顶层来 ✗✗。
+            planned_second = bool(getattr(request.upscale, "does_second_pass", False))
+            actual_second = details.get("secondPass")
+            result.refine["secondPass"] = actual_second is True
+            if planned_second and actual_second is not True:
+                result.refine["secondPassSkipped"] = {
+                    "planned": {"steps": int(getattr(request.upscale, "refine_steps", 0) or 0),
+                                "denoise": float(getattr(request.upscale, "refine_denoise", 0.0) or 0.0),
+                                "tailSteps": int(getattr(request.upscale, "refine_tail_steps", 0) or 0)},
+                    "why": str(details.get("denoiseError")
+                               or "后端没自述 ``secondPass`` ⇒ 视为**没跑** ✗"),
+                    "note": "画面是**上采样结果** ✓，没有做「带掩码的低噪声重去噪」✗ —— "
+                            "别按二采的期待看细节 ✓",
+                }
+            elif actual_second is True and not planned_second:
+                result.refine["secondPassUnplanned"] = {
+                    "why": "计划**没要**二采、后端**真跑了** ✓ ⇒ 多花的时间与改变的细节都不在计划里 ✗"}
         except BaseException as err:  # noqa: BLE001
             result.stageMs["refine"] = int((time.perf_counter() - started) * 1000)
             return _fail(result, "refine", err)
@@ -2524,6 +2702,7 @@ def _fail(result: PipelineResult, stage: str, err: BaseException,
         # ⚠️ 步号必须**进结构化字段**（不能只写在文案里 ✓）：自检 ㉗ 抓到初版只把「第 3 步」
         #    放进了 message ⇒ 前端想画「停在第 3/20 步」还得去**解析中文** ✗。
         result.error = {"stage": stage, "step": step, "message": str(err), "cancelled": True}
+        _absorb_steps(result, stage, step)
         return result
     stage_error = err if isinstance(err, StageError) else StageError(
         stage, f"{type(err).__name__}: {err}"[:300], step=step, cause=err)
@@ -2549,4 +2728,35 @@ def _fail(result: PipelineResult, stage: str, err: BaseException,
                     "type": type(err).__name__}
     if vram:
         result.error["vramExhausted"] = True
+    _absorb_steps(result, stage_error.stage, stage_error.step)
     return result
+
+
+def _absorb_steps(result: PipelineResult, stage: str, step: int | None) -> None:
+    """⭐⭐ **中断时把「真跑过几步」记进 ``sampleSteps``** ✗✗（2026-11-08 补 ✗）。
+
+    病根：``result.sampleSteps`` 只有**采样器正常返回**那一处赋值 ✓（``sampler_mod.sample`` 的
+    第二个返回值 ✓）⇒ 中途取消 / 中途 OOM 一律**停在 0** ✓✗ —— 而同一份回执里：
+
+    * ``stageMs.sample`` 老老实实记着那几秒（真跑过 ✓）；
+    * ``error.step`` 写着「停在第 3 步」✓（``on_step`` 在**每步算完之后**才回调 ✓ ⇒ 步号＝**已跑完**
+      的步数 ✓，见 ``sampler.py`` 里 ``callback(index + 1, ...)`` 在 ``x`` 更新之后 ✓）。
+
+    ⇒ 一个说「采样跑了 8 秒」✓、一个说「0 步」✗、一个说「第 3 步」✓，三个数在同一份回执里
+    **互相矛盾**，而**没有任何一格解释** ✓✗。消费方照 ``sampleSteps`` 走：``chain.py`` 逐段累加
+    （被取消那段的步数**记 0** ✓✗）、``bridge.log_task_progress`` 把 0 写进日志 ✓ ——
+    于是「跑了 3 步被取消」在留下的记录里与「一步都没开始」**完全同形** ✓。
+
+    ⚠️ 只在 ``stage == "sample"`` 时认这个步号 ✗：别的阶段（``encode`` / ``load`` ✓）的 ``step``
+    含义不同、也可能是 ``None`` ✓，混进来就是把一个数按到另一件事上 ✓✗（本仓最忌讳那种）。
+    ⚠️ 取 ``max`` ✓ 而不是赋值 ✗：双流那条路先把 ``sampled["steps"]`` 写进去了 ✓，真跑完再抛
+    （例如 refine 阶段才失败 ✓）不该把已入账的步数**改小** ✓✗。
+    """
+    if stage != "sample":
+        return
+    try:
+        done = int(step) if step is not None else 0
+    except (TypeError, ValueError):
+        return
+    if done > int(result.sampleSteps or 0):
+        result.sampleSteps = done

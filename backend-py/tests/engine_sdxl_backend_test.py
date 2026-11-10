@@ -202,11 +202,20 @@ def case_protocol() -> None:
         written = backend.write(outputs, plan, request)
         produced = Path(written["primaryPath"])
         blob = produced.read_bytes() if produced.exists() else b""
+        #: ⚠️ 旧断言写的是「报告的尺寸与 plan 一致 ✓」✓✗ —— 那句话本身就把缺陷当成了期望 ✓：
+        #: 缩小版 VAE 是 **2 倍** ✓、潜变量 1×1 ⇒ 产物其实是 **2×2** ✓，而 ``plan`` 是 8×8 ✓。
+        #: 回执原先抄 ``plan.width`` ⇒ 报 8×8 ✓✗，与盘上那张 2×2 的 PNG 不符 ✓。
         check("④⁗ `write` 真的写出**一张 PNG** ✓（验文件头 ``\\x89PNG`` ✓ 不是空文件 ✓）、"
-              "且 ``frames == 1`` ✓ —— ⚠️ **不是**视频取首帧那套 ✗；报告的尺寸与 plan 一致 ✓",
+              "且 ``frames == 1`` ✓ —— ⚠️ **不是**视频取首帧那套 ✗；报告的尺寸是**产物实测** ✓"
+              "（2×2 ✓ 来自帧张量 shape ✓，不是 plan 的 8×8 ✗）",
               produced.exists() and blob[:4] == b"\x89PNG" and written["frames"] == 1
-              and (written["width"], written["height"]) == (8, 8),
-              (str(produced), len(blob)))
+              and (written["width"], written["height"]) == (2, 2),
+              (str(produced), len(blob), (written["width"], written["height"])))
+        check("④⁵′ ⭐⭐ 实测与计划**不同就点名** ✗✗（``sizeMismatch`` 给两侧数并写明以哪个为准 ✓）"
+              "—— 只报一个数、而它与盘上 PNG 不符 ⇒ 读回执的人拿到的是**计划值冒充产物尺寸** ✓",
+              (written.get("plannedWidth"), written.get("plannedHeight")) == (8, 8)
+              and (written.get("sizeMismatch") or {}).get("actual") == [2, 2],
+              written.get("sizeMismatch"))
         check("④⁵ 路径**确定性** ✓（同 seed + 同尺寸 ⇒ 同名 ✓ 便于复现/自检 ✓）",
               backend.output_path(plan, request).name == "sdxl-7-8x8.png")
 

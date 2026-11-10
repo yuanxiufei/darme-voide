@@ -778,16 +778,33 @@ class SdxlBackend:
         target = self.output_path(plan, request)
         target.parent.mkdir(parents=True, exist_ok=True)
         written = media.write_image(frames, str(target), index=0, value_range="0..1")
-        return {
+        # ⭐⭐ **回执报产物的行宽高，不抄计划** ✗✗（2026-11-08 补 ✗）：``written`` 的 width/height
+        #    是 `media.write_image` **从帧张量 shape 实测**的 ✓，而这里原先写 ``plan.width`` ✓✗
+        #    ⇒ 回执里的尺寸是**计划值冒充产物尺寸** ✓：VAE 解码尺寸一旦与计划不同（分块 padding ✓、
+        #    潜变量不是干净 /8 ✓、上游改了 ``snap_image_size`` ✓）回执照样报计划那个数 ✓、
+        #    而盘上的 PNG 是另一个尺寸 ✓✗ —— 且**同一份回执的另一个后端**（``torch_backend.write``
+        #    的图分支 ✓）报的正是 ``report['width']``（实测 ✓）⇒ 两条装配线给出两种口径 ✓✗。
+        width = int(written.get("width") or plan.width)
+        height = int(written.get("height") or plan.height)
+        planned = (int(plan.width), int(plan.height))
+        payload: dict[str, Any] = {
             "backend": self.name,
             "synthetic": self.synthetic,
             "primaryPath": str(target),
             "images": [str(target)],
-            "width": int(plan.width),
-            "height": int(plan.height),
+            "width": width,
+            "height": height,
             "frames": 1,
             "bytes": int(written.get("bytes") or 0),
         }
+        if (width, height) != planned:
+            payload["plannedWidth"], payload["plannedHeight"] = planned
+            payload["sizeMismatch"] = {
+                "planned": list(planned), "actual": [width, height],
+                "why": "产物实测尺寸与计划不同 ✓ —— **以 ``width``/``height`` 为准** ✗"
+                       "（盘上那张就是这两个数 ✓）",
+            }
+        return payload
 
     def output_path(self, plan: Any, request: Any) -> Path:
         """输出路径 ✓（**确定性** ✓：同 seed + 同尺寸 ⇒ 同文件名 ✓，便于复现与自检 ✓）。"""

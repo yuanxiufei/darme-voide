@@ -75,10 +75,13 @@ def write_upscaler(path: Path, *, drop_keys: int = 0, contract: dict | None = No
     return path
 
 
-def dual_latents(temporal: int = 2, side: int = 2):
+def dual_latents(temporal: int = 2, side: int = 2, width: int | None = None):
     import torch  # noqa: PLC0415
 
-    return {"video": torch.zeros(24, temporal, side, side),
+    # ⚠️ `width` 是给**非方形**用的 ✓：缩放那段最容易出的静默错是**宽高传反** ✓✗
+    #    （`common_upscale(x, width, height, ...)` 显式长名，传反了形状依然合法 ✓ ——
+    #    只有非方形才照得出 ✓，方形怎么传都对 ✓）。
+    return {"video": torch.zeros(24, temporal, side, width or side),
             "audio": torch.zeros(2, temporal, 3)}
 
 
@@ -273,6 +276,177 @@ def case_keyframes(root: Path) -> None:
         os.environ.pop("H3_UPSCALER", None)
 
 
+def case_scale_to_target(root: Path) -> None:
+    """⭐⭐ 计划要 1.5× ⇒ 产物必须**真的是 1.5×** ✗✗（2026-11-08 补 ✗）。
+
+    此前 `ai-2x-resize` 的第二步「高质量缩放 2× → 1.5×」**一步都没执行** ✗✗：
+    放大器只做**空间 2×** ✓ ⇒ 要 1.5× 的请求拿到的是 2× ✓✗，而 `result.refine.scale`
+    照写 1.5 ✓✗ —— **尺寸与回执对不上、回执自己却"自洽"** ✓（本项目最怕的那类错 ✓）。
+    """
+    backend = backend_or_skip()
+    if backend is None:
+        return
+    import torch  # noqa: PLC0415
+
+    os.environ["H3_UPSCALER"] = str(write_upscaler(root / "up_scale.safetensors"))
+    try:
+        # 24×2×2×2 ⇒ 放大器 2× 得 4×4 ⇒ 计划 1.5× 应是 **3×3**（4×4 就是没缩 ✗）
+        latents = dual_latents(temporal=2, side=2)
+        audio_before = latents["audio"]
+        plan = upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=1.5)
+        out = backend.refine_latents(latents, plan, GenerationRequest(prompt="x"))
+        details = backend.refineDetails or {}
+        check("⑦ ⭐⭐ `ai-2x-resize` 1.5× ⇒ 潜变量**缩到 3×3** ✓（此前一律是 4×4 ✓✗）",
+              tuple(out["video"].shape)[2:] == (3, 3)
+              and details.get("videoShapeScaled") == [24, 2, 3, 3],
+              (tuple(out["video"].shape), details.get("videoShapeScaled")))
+        check("⑦′ ⭐⭐ 时间维**一点没动** ✗✗（只走空间 ✓ —— 时间插值会让动作速率变错 ✓）",
+              tuple(out["video"].shape)[1] == 2 and details.get("temporalUnchanged") is True,
+              tuple(out["video"].shape))
+        check("⑦″ 回执**写实际值与方法** ✓（不是照抄计划 ✓✗；换过方法也看得见 ✓）",
+              details.get("targetScale") == 1.5
+              and abs(float(details.get("spatialScale") or 0.0) - 1.5) <= 1e-6
+              and details.get("resizeMethod") == backend.SCALE_RESIZE_METHOD, details)
+        check("⑦‴ 音频流仍是**原对象** ✓（缩放不该碰它 ✗）",
+              out["audio"] is audio_before and details.get("audioTouched") is False,
+              details.get("audioTouched"))
+
+        # ⭐ 关键帧必须**同一尺寸** ✗✗：主视频 1.5× 而关键帧 2× 是"擦边能跑"的静默错 ✓✗
+        with_kf = {**latents, "keyframes": [{"latent": torch.randn(1, 24, 2, 2, 2),
+                                            "frame_index": 0}]}
+        out_kf = backend.refine_latents(with_kf, plan, GenerationRequest(prompt="x"))
+        check("⑦⁴ ⭐⭐ 关键帧**跟着缩到 3×3** ✓（不同步就是静默错 ✓✗）",
+              tuple(out_kf["keyframes"][0]["latent"].shape)[-2:] == (3, 3),
+              tuple(out_kf["keyframes"][0]["latent"].shape))
+
+        # ⭐⭐ **非方形**必须单独判 ✗✗（2026-11-08 补 ✗）：`common_upscale(x, width, height, ...)`
+        #    是**显式长名** ✓，宽高传反了**形状依然合法** ✓✗ ⇒ 方形（上面 ⑦ 那几条全用它 ✓）
+        #    怎么传都对 ✓、照不出这个错 ✗。非方形下「传反」= 把 2×4 缩成 4×3 ✓
+        #    ⇒ 画面被各向异性拉斜 ✓ 而任何一步都不会报错 ✓。
+        #    2×4（H=2 W=4）计划 1.5× ⇒ 应得 **H=3、W=6** ✓（传反则是 4×3 ✓）。
+        rect = dual_latents(temporal=2, side=2, width=4)
+        out_rect = backend.refine_latents(rect, plan, GenerationRequest(prompt="x"))
+        rect_details = backend.refineDetails or {}
+        check("⑦¹³ ⭐⭐ **非方形** 2×4 缩到 **3×6**（H=3/W=6 ✓）—— 宽高传反会得 4×3 且"
+              "**不报任何错** ✓✗（方形用例照不出来 ✓）",
+              tuple(out_rect["video"].shape)[2:] == (3, 6)
+              and rect_details.get("videoShapeScaled") == [24, 2, 3, 6],
+              (tuple(out_rect["video"].shape), rect_details.get("videoShapeScaled")))
+        with_kf_rect = {**rect, "keyframes": [{"latent": torch.randn(1, 24, 2, 2, 4),
+                                              "frame_index": 0}]}
+        out_kf_rect = backend.refine_latents(with_kf_rect, plan, GenerationRequest(prompt="x"))
+        check("⑦¹⁴ 关键帧在非方形下也是 **3×6** ✓（宽高同样不许传反 ✓）",
+              tuple(out_kf_rect["keyframes"][0]["latent"].shape)[-2:] == (3, 6),
+              tuple(out_kf_rect["keyframes"][0]["latent"].shape))
+    finally:
+        backend._upscaler = None
+        os.environ.pop("H3_UPSCALER", None)
+
+    # ⭐⭐ `tiled-ai-2x`（>2×）要**多次分块放大 + 缝合** ✓ —— 执行层没做 ⇒ 必须**响亮拒绝** ✗✗
+    #     （静默出 2× 会让人以为 4× 开着 ✓✗ —— 比直接失败更坏 ✓）
+    os.environ["H3_UPSCALER"] = str(write_upscaler(root / "up_4x.safetensors"))
+    try:
+        plan4 = upscale_mod.UpscalePlan(mode="tiled-ai-2x", scale=4.0)
+        refused = refusal(backend, dual_latents(), plan=plan4)
+        check("⑦⁵ ⭐⭐ `tiled-ai-2x`（4×）执行层没实现 ⇒ **拒** ✗ 且点明「没实现」✗✗",
+              bool(refused) and "没实现" in str(refused), refused)
+        unknown = upscale_mod.UpscalePlan(mode="ai-8x-magic", scale=8.0)
+        refused_unknown = refusal(backend, dual_latents(), plan=unknown)
+        check("⑦⁶ 不认识的模式 ⇒ **拒** ✓（不猜它要几倍 ✓✗）",
+              bool(refused_unknown) and "不认识的超清模式" in str(refused_unknown), refused_unknown)
+
+        # ⭐⭐ `ai-2x-resize` 的**区间**也必须核 ✗✗（2026-11-08 补 ✗）：
+        #    计划层只在 ``1 < scale < 2`` 才产这个模式 ✓，而请求体是**手写 dict** ⇒ 能配出计划层
+        #    永远不产的组合 ✓✗。两种都会**静默出假超清**（尺寸/回执双双自洽 ✓）。
+        shrink = refusal(backend, dual_latents(),
+                        plan=upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=1.0))
+        check("⑦¹⁰ ⭐⭐ `ai-2x-resize` + ``scale=1.0`` ⇒ **拒** ✗✗（= 先放大 2× 再缩回原尺寸："
+              "**尺寸一模一样、耗时 ≈6×** ✓✗ —— 回执 applied/scale 全自洽，最像「成功」✓）",
+              bool(shrink) and "不需要放大器" in str(shrink), shrink)
+        fake_up = refusal(backend, dual_latents(),
+                          plan=upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=3.0))
+        check("⑦¹¹ ⭐⭐ `ai-2x-resize` + ``scale=3.0`` ⇒ **拒** ✗✗（放大器只给 2× ⇒ 2→3 是"
+              "**插值**放大、不长细节 ✓✗ —— 会被当成「AI 3×」交付 ✓）且指向 ``tiled-ai-2x`` ✓",
+              bool(fake_up) and "tiled-ai-2x" in str(fake_up), fake_up)
+        two = refusal(backend, dual_latents(),
+                      plan=upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=2.0))
+        check("⑦¹² ``scale=2.0`` 配这个模式 ⇒ **拒** ✓ 并指向 ``ai-2x`` ✗（同名 2× 但走的是"
+              "「缩到同尺寸」= 白多一次 bicubic 重采样 ✓✗）",
+              bool(two) and "恰好 2× 请用" in str(two), two)
+    finally:
+        backend._upscaler = None
+        os.environ.pop("H3_UPSCALER", None)
+
+
+def case_scale_with_second_pass(root: Path) -> None:
+    """⭐⭐ 缩放与二采**同一轮**：二采必须在**目标域**跑 ✓✗（2026-11-08 补）。
+
+    两条路各自对、拼起来错的情况最容易漏 ✓✗：只测 1.5×（不带二采）看不出二采在哪个域跑 ✓。
+    """
+    backend = backend_or_skip()
+    if backend is None:
+        return
+    import torch  # noqa: PLC0415
+
+    from app.services.engine import h3_form  # noqa: PLC0415
+
+    tiny = dict(hidden=8, layers=1, heads=2, head_dim=12, ffn=12, text_dim=5, latents_dim=2,
+                audio_latents_dim=3, patch_size=(1, 2, 2), time_input_dim=4, time_hidden=8,
+                time_dim=6, inv_freq_len=2, refiner_layers=1)
+    backend._model = h3_form.H3FormTrunk(**tiny).eval()
+    backend._config = {**tiny}
+    tiny_contract = dict(CONTRACT)
+    tiny_contract["base_config"] = {**CONTRACT["base_config"], "in_channels": 2}
+    os.environ["H3_UPSCALER"] = str(
+        write_upscaler(root / "up_mix.safetensors", contract=tiny_contract))
+    try:
+        plan = upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=1.5,
+                                       refine_steps=2, refine_denoise=0.5)
+        latents = {"video": torch.randn(2, 3, 4, 4), "audio": torch.randn(3, 2, 5)}
+        out = backend.refine_latents(latents, plan, GenerationRequest(prompt="x", seed=7),
+                                     condition=torch.randn(7, 5))
+        details = backend.refineDetails or {}
+        check("⑦⁷ ⭐⭐ 1.5× 与二采**同一轮** ⇒ 最终 6×6 ✓（拿到 8×8 就是「没缩」✗✗）",
+              tuple(out["video"].shape) == (2, 3, 6, 6), tuple(out["video"].shape))
+        check("⑦⁸ ⭐⭐ 二采真跑了 ✓（secondPass=True、尾 σ 数 = 步数+1 ✓）",
+              details.get("secondPass") is True and details.get("tailSigmas") == 3, details)
+        check("⑦⁹ 音频**逐位不变** ✓（缩放与二采都不该碰它 ✗✗）",
+              torch.equal(out["audio"], latents["audio"]), details.get("audioIdentical"))
+        # ⭐⭐ **两段须知都要在** ✗✗（2026-11-08 补 ✗）：``denoise_report`` 自己带 ``notes`` ✓ ⇒
+        #    用 ``details.update(...)`` 会把上面那段缩放假话**整段冲掉** ✓✗，而**只要二采真跑了
+        #    就必然冲掉** ✓（成功/失败两条路径都带 notes ✓）⇒ 回执只剩「二采：尾部 N 步」✓，
+        #    读者**根本不知道画面被缩过** ✓（倍率/尺寸那两格还在 ✓ 所以不报错 ✓）。
+        check("⑦¹⁵ ⭐⭐ 二采跑过之后，**缩放假话还在** ✓（``notes`` 要并、不能 ``update`` 覆盖 ✗✗）；"
+              "两段（缩放＋二采）都在才叫如实 ✗",
+              any("缩放" in note for note in (details.get("notes") or ()))
+              and any("二采" in note for note in (details.get("notes") or ())),
+              details.get("notes"))
+    finally:
+        backend._model = None
+        backend._config = None
+        backend._upscaler = None
+        os.environ.pop("H3_UPSCALER", None)
+
+
+def case_wiring() -> None:
+    """⭐⭐ **生产链路**必须把「超清计划」交给后端 ✗✗（2026-11-08 补 ✗）。
+
+    这是一处**测试与生产不同构**的真错 ✓✗：本套一直传 ``UpscalePlan`` ⇒ 绿 ✓，
+    而 `pipeline` 传的是 ``GenerationPlan`` ✓✗ ⇒ 后端
+    ``getattr(plan, 'refine_steps', 0)`` **恒为 0** ⇒ 二采从未跑过 ✓✗
+    （回执还写"⚠️ 二采未跑：plan.refine_steps = 0"✓ 而用户明明给了 refineSteps ✓✗）。
+    """
+    repo = Path(__file__).resolve().parents[1]
+    source = (repo / "app/services/engine/pipeline.py").read_text(encoding="utf-8")
+    check("⑧ ⭐⭐ 管线传的是 `request.upscale`（超清计划）而**不是** `plan` ✗✗"
+          "（后者没有 refine_steps/mode/scale ⇒ 二采与缩放双双失效 ✓✗）",
+          "hook(latents, request.upscale, request" in source
+          and "hook(latents, plan, request" not in source)
+    backend_src = (repo / "app/services/engine/torch_backend.py").read_text(encoding="utf-8")
+    check("⑧′ ⭐ `image_ops` 真被接上了 ✓（欠账表已删 ⇒ 生产代码必须找得到引用 ✗）",
+          "image_ops.common_upscale" in backend_src)
+
+
 def case_gate() -> None:
     """⚠️ 没装 torch ⇒ ``refine_latents`` 必须**响亮** ✗（不是静默当没这回事 ✓）。"""
     backend = tb.TorchBackend()
@@ -301,6 +475,53 @@ class _TemporalDoubler:
         return self
 
 
+def case_details_truthful(root: Path) -> None:
+    """⭐⭐ 实测值必须**每次都算、每次都有**（2026-11-08 补 ✗）。
+
+    两处此前都缺 ✓✗：
+    ① ``spatialScale`` 只在「有第二步缩放」时写 ⇒ ``ai-2x`` 那条（放大器原样 2×）的回执里
+       根本没有实测倍率 ⇒ 管线只好拿**计划值**顶 ✓（计划层 vs 执行层的老毛病 ✓）；
+    ② ``refineDetails`` 是**实例属性** ⇒ 上一次二采的值会活到这一次 ✓：本次若在设值**之前**
+       失败 ✓，回执写的就是**上一次**的倍率与尺寸 ✓ —— 数字自洽、只与画面不符 ✓。
+    """
+    backend = backend_or_skip()
+    if backend is None:
+        return
+
+    os.environ["H3_UPSCALER"] = str(write_upscaler(root / "up_truth.safetensors"))
+    try:
+        # ① 放大器原样 2×（target 为 None）也必须报实测倍率 ✓
+        plan2 = upscale_mod.UpscalePlan(mode="ai-2x", scale=2.0)
+        out2 = backend.refine_latents(dual_latents(temporal=2, side=2), plan2,
+                                      GenerationRequest(prompt="x"))
+        d2 = backend.refineDetails or {}
+        check("⑨ ⭐⭐ ``ai-2x``（放大器原样 2×、没有第二步缩放）也报**实测倍率 2×** ✓"
+              "（此前这一格整天缺席 ⇒ 管线只能拿计划值顶 ✓✗）",
+              d2.get("spatialScale") == 2.0 and d2.get("spatialScaleW") == 2.0
+              and "videoShapeScaled" not in d2, d2)
+        check("⑨′ 倍率的凭据是**尺寸比** ✓（2×2 → 4×4 ⇒ 4/2 ✓，不是照抄计划 ✓）",
+              tuple(out2["video"].shape)[2:] == (4, 4)
+              and d2.get("spatialScale") == round(4 / 2, 6), tuple(out2["video"].shape))
+
+        # ② 先跑一次 1.5× 留下 details ⇒ 再让它**在设值之前**失败 ⇒ 旧值不许残留 ✗✗
+        backend.refine_latents(dual_latents(temporal=2, side=2),
+                               upscale_mod.UpscalePlan(mode="ai-2x-resize", scale=1.5),
+                               GenerationRequest(prompt="x"))
+        stale = backend.refineDetails or {}
+        plan_ref = upscale_mod.UpscalePlan(mode="ai-2x", scale=2.0,
+                                          refine_steps=4, refine_denoise=0.4)
+        # 缺 ``condition`` ⇒ 二采前就被拒 ✓（拒绝点在 ``self.refineDetails = details`` 之前 ✓）
+        err = refusal(backend, dual_latents(), plan=plan_ref)
+        check("⑨″ ⭐⭐ 失败那次**不留上一次的实测值** ✗✗（残留 ⇒ 回执写 1.5× 与 3×3 尺寸 ✓，"
+              "而这一跑一张画面都没有 ✓）",
+              stale.get("spatialScale") == 1.5 and "condition" in str(err)
+              and backend.refineDetails is None,
+              (stale.get("spatialScale"), err, backend.refineDetails))
+    finally:
+        backend._upscaler = None
+        os.environ.pop("H3_UPSCALER", None)
+
+
 def refusal(backend: tb.TorchBackend, latents: object, *,
             plan: object | None = None, condition: object = None) -> str | None:
     try:
@@ -319,6 +540,10 @@ def main() -> int:
     case_refusals(root)
     case_second_pass(root)
     case_keyframes(root)
+    case_scale_to_target(root)
+    case_details_truthful(root)
+    case_scale_with_second_pass(root)
+    case_wiring()
     case_gate()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

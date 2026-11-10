@@ -16,10 +16,12 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 BACKEND_PY = Path(__file__).resolve().parents[1]
 os.environ.setdefault("PROXY_TO_NODE", "0")
@@ -186,7 +188,7 @@ def _fake_runner(size: int = 48, decode_ms: int = 7) -> dict:
     from app.services.engine import media as media_mod
 
     state: dict = {"calls": [], "requests": [], "fail_at": None, "cancel_at": None,
-                   "no_frames": False}
+                   "no_frames": False, "steps": 12}
 
     def runner(request, backend, *, on_event=None, cancel=None, on_decoded=None):  # noqa: ANN001
         index = len(state["calls"])
@@ -203,7 +205,9 @@ def _fake_runner(size: int = 48, decode_ms: int = 7) -> dict:
             target = Path(request.outputs_dir or tempfile.mkdtemp()) / f"video_seed{request.seed}.mp4"
             outputs = {"videoPath": str(target),
                        "video": media_mod.write_video(frames, target, fps=int(request.fps or 24))}
-        result = pipe.PipelineResult(ok=True, backend="fake", outputs=outputs)
+        #: 每段**真跑过的步数** ✓（假后端也给一个非零值 ✓ —— 否则「累加漏传」这条判据永远看不见 ✓✗）
+        result = pipe.PipelineResult(ok=True, backend="fake", outputs=outputs,
+                                     sampleSteps=int(state["steps"]))
         result.stageMs["decode"] = decode_ms
         if on_event:
             on_event({"kind": "stage", "stage": "decode"})
@@ -270,8 +274,35 @@ def case_run_chain(root: Path) -> None:
     stopped = chain.run_chain(request, _FakeBackend(), run_segment=gone["runner"],
                               normalize=False)
     check("② 段间被叫停 ⇒ **取消**（不是失败 ✗ —— 前端要分开显示 ✓）且已完成段留住 ✓",
-          stopped.cancelled is True and stopped.outputs["chain"]["stoppedBefore"] == 1,
-          stopped.outputs["chain"])
+           stopped.cancelled is True and stopped.outputs["chain"]["stoppedBefore"] == 1,
+           stopped.outputs["chain"])
+    #: ⭐⭐ **``stageMs`` 累加了、步数却没带上** ✗✗（2026-11-08 补 ✗）：``_stopped`` / ``_segment_failed``
+    #:    都是**新建**一个 ``PipelineResult`` ✓（早退 ✓），``stageMs`` 有人逐项累加着交过去 ✓，
+    #:    而 ``sampleSteps`` 没人传 ⇒ 用**默认 0** ✓✗ —— 于是「跑完 3 段（每段 12 步、真花了钱 ✓）
+    #:    后在第 4 段被取消」在回执里写成 ``sampleSteps: 0`` ✓，与**同一份**回执的 ``stageMs``
+    #:    互相矛盾 ✓；而成功路径上**同名**字段是真步数之和 ✓（同名字段两种含义 ✓）。
+    check("②¹ ⭐⭐ 段间取消 ⇒ 已完成那些段的步数**必须跟着出来** ✓ 不是 0 ✗"
+          "（1 段 × 12 步 ⇒ ``sampleSteps`` 12 ✓）—— 「跑完 1 段后取消」与「一步没跑」不该同形 ✓",
+          int(stopped.sampleSteps) == 12, int(stopped.sampleSteps))
+    #: ⚠️ 期望值是 **24** 不是 12（第一版写成 12 被这条判据抓出来 ✓）：失败那一段**自己**也跑了
+    #:    12 步才失败 ✓（假后端在置 ``ok=False`` **之前**就报了 ``sampleSteps`` ✓，与真实采样
+    #:    「跑到第 5 步炸、前 5 步是真花掉」同理 ✓）⇒ 累计 24 步 ✓。这个数恰好说明「失败段
+    #:    的成本也要算进去」✓ —— 只报成功段的 12 步会把失败段的算力悄悄抹掉 ✓。
+    check("①¹ ⭐⭐ 某段失败 ⇒ 前面跑完那些段的步数**同样要交出来** ✓ 不是 0 ✗"
+          "（2 段 × 12 步 ＝ 24 ✓：**失败那段也跑了 12 步** ✓ —— 已花掉的算力记 0 会让人以为"
+          "「没跑起来、所以不贵」✗）",
+          int(failed.sampleSteps) == 24, int(failed.sampleSteps))
+    loop_top = _fake_runner()
+    loop_stopped = chain.run_chain(
+        request, _FakeBackend(), run_segment=loop_top["runner"], normalize=False,
+        cancel=lambda: len(loop_top["calls"]) >= 1)
+    check("②² ⭐ 取消发生在**循环顶上**（上一段刚跑完、下一段还没开 ✓）⇒ 步数照样带出来 ✓"
+          "（``stoppedBefore == 1`` ✓、``sampleSteps`` 12 ✓ —— 这一支和 ② 是**两个**早退口 ✓）",
+          loop_stopped.cancelled is True
+          and loop_stopped.outputs["chain"]["stoppedBefore"] == 1
+          and int(loop_stopped.sampleSteps) == 12,
+          {"stoppedBefore": loop_stopped.outputs["chain"].get("stoppedBefore"),
+           "sampleSteps": int(loop_stopped.sampleSteps)})
     mute = _fake_runner()
     mute["no_frames"] = True
     err = _error(lambda: chain.run_chain(request, _FakeBackend(), run_segment=mute["runner"],
@@ -292,6 +323,170 @@ def case_run_chain(root: Path) -> None:
     check("⑤ 带**链式规范化**的整链也跑通 ✓ 且报告有基线/参考帧/分段修正 ✓",
           bool(res2.ok) and norms["applied"] is True and norms["baseline"] > 0
           and len(norms["correctionsBySegment"]) == len(state2["calls"]), norms)
+
+
+def case_chain_frames(root: Path) -> None:
+    """⭐⭐ **成片也要核帧数** ✗✗（2026-11-08 补 ✗）。
+
+    :func:`chain.stitch_frames` 核的是**张量层**守恒 ✓（拼出来的帧数 == 各段 keep 之和 ==
+    总帧数 ✓），但它**管不到编码器** ✓✗ —— libx264 会不会丢/补帧 ✓、封装有没有写 index ✓、
+    重封装中间态读不读得到 ``nb_frames`` ✓。而 ``torch_backend.write`` 那条单段路**早就在核** ✓
+    ⇒ 同一件事实两条路一半核一半不核 ✓。这里把 ``probe`` 包一层做**读数缺失**的模拟
+    （真 ffprobe 仍在底下跑 ✓，只把某一格涂掉 ✓），与 ``engine_artifact_test`` 同一手法 ✓。
+    """
+    try:
+        import torch  # noqa: PLC0415,F401
+    except ImportError:
+        return
+    from app.services.engine import media as media_mod
+
+    real_probe = media_mod.probe
+
+    def probe_patch(drop: tuple[str, ...] = (), **overrides: object):
+        def patched(path):
+            facts = dict(real_probe(path))
+            for key in drop:
+                facts[key] = None
+            facts.update(overrides)
+            return facts
+
+        return patched
+
+    def run(tag: str, request: Any, drop: tuple[str, ...] = (), **overrides: object):
+        out = root / f"chain_frames_{tag}"
+        out.mkdir(parents=True, exist_ok=True)
+        #: ⚠️ ``GenerationRequest`` 是 **frozen** 的 ✓ ⇒ 落点只能另造一份 ✓（直接赋值会抛 ✓）。
+        request = dataclasses.replace(request, outputs_dir=str(out))
+        state = _fake_runner()
+        media_mod.probe = probe_patch(drop, **overrides)
+        try:
+            return chain.run_chain(request, _FakeBackend(), run_segment=state["runner"],
+                                   normalize=False), out, state
+        finally:
+            media_mod.probe = real_probe
+
+    ok_request = pipe.GenerationRequest(prompt="链", seed=7, seconds=16.0)
+    ok_plan = chain.plan_chain(ok_request)
+    ok_card, _ok_dir, _ok_state = run("ok", ok_request)
+    check("⑤¹ ⭐ 成片回执**带着**帧数核对结论 ✓（此前这三格一个都没有 ✗ ⇒ 只能从「真 mp4 ✓」"
+          "推断「大概也核过了」✗）：``framesVerified == 'nb_frames'`` ✓ "
+          "``encodedFrames == plan.totalFrames`` ✓ ``framesMatch is True`` ✓",
+          ok_card.ok is True and ok_card.outputs.get("framesVerified") == "nb_frames"
+          and int(ok_card.outputs.get("encodedFrames") or -1) == int(ok_plan.totalFrames)
+          and ok_card.outputs.get("framesMatch") is True,
+          {"framesVerified": ok_card.outputs.get("framesVerified"),
+           "encodedFrames": ok_card.outputs.get("encodedFrames"),
+           "totalFrames": None if ok_plan is None else int(ok_plan.totalFrames)})
+
+    guessed_request = pipe.GenerationRequest(prompt="链", seed=8, seconds=16.0)
+    guessed_plan = chain.plan_chain(guessed_request)
+    guessed_card, _g_dir, _g_state = run("guessed", guessed_request, ("nbFrames",))
+    check("⑤² ⭐ ``nbFrames`` 读不到但读得到时长/帧率 ⇒ 按**时长×帧率估** ✓ 并**标明是估的** ✓"
+          "（``framesVerified == 'duration×fps'`` ✓、``framesMatch is True`` ✓、note 里有「估」✓）"
+          "—— 与单段路（``torch_backend.write``）逐字同口径 ✓",
+          guessed_card.outputs.get("framesVerified") == "duration×fps"
+          and guessed_card.outputs.get("framesMatch") is True
+          and int(guessed_card.outputs.get("encodedFrames") or -1) == int(guessed_plan.totalFrames)
+          and "估" in str(guessed_card.outputs.get("note") or ""),
+          {"framesVerified": guessed_card.outputs.get("framesVerified"),
+           "note": guessed_card.outputs.get("note")})
+
+    blind_request = pipe.GenerationRequest(prompt="链", seed=9, seconds=16.0)
+    blind_card, blind_dir, _ = run("blind", blind_request, ("nbFrames", "durationSeconds"))
+    video_left = list(blind_dir.glob("video_chain_*.mp4"))
+    check("⑤³ ⭐⭐ 两格都读不到 ⇒ 如实写 ``framesVerified: None`` ＋ ``framesMatch: None`` ＋ note "
+          "**点名没核过** ✗（**不许**把 ``None`` 读成「通过」✗）；成片仍落盘 ✓"
+          "（没读数既不该拦 ✗，也不许装作核过 ✓✗）",
+          blind_card.ok is True and blind_card.outputs.get("framesVerified") is None
+          and blind_card.outputs.get("framesMatch") is None
+          and "没核对过" in str(blind_card.outputs.get("note") or "")
+          and len(video_left) == 1,
+          {"framesVerified": blind_card.outputs.get("framesVerified"),
+           "framesMatch": blind_card.outputs.get("framesMatch"),
+           "note": blind_card.outputs.get("note")})
+
+    short_request = pipe.GenerationRequest(prompt="链", seed=10, seconds=16.0)
+    short_plan = chain.plan_chain(short_request)
+    short_seconds = (int(short_plan.totalFrames) - 10) / float(short_plan.fps or 24)
+    short_err = None
+    short_dir = root / "chain_frames_short"
+    short_dir.mkdir(parents=True, exist_ok=True)
+    short_request = dataclasses.replace(short_request, outputs_dir=str(short_dir))
+    short_state = _fake_runner()
+    media_mod.probe = probe_patch(("nbFrames",), durationSeconds=short_seconds)
+    try:
+        chain.run_chain(short_request, _FakeBackend(), run_segment=short_state["runner"],
+                        normalize=False)
+    except Exception as err:  # noqa: BLE001
+        short_err = err
+    finally:
+        media_mod.probe = real_probe
+    leftovers = sorted(item.name for item in short_dir.glob("video_chain_*.mp4"))
+    check("⑤⁴ ⭐⭐ 估出来的帧数**差得多**（不是舍入）⇒ 照样当场失败 ✓ 且那条**废片不留在盘上** ✓"
+          "（㉕ 同一口径：失败路径一个文件都没写 ✓）"
+          f"（时长写着 {round(short_seconds, 3)} 秒 ⇒ ≈ "
+          f"{int(round(short_seconds * float(short_plan.fps or 24)))} 帧 vs "
+          f"plan {int(short_plan.totalFrames)} ✓）",
+          isinstance(short_err, chain.ChainError) and not leftovers,
+          {"error": str(short_err)[:110], "leftovers": leftovers})
+
+    #: ⭐⭐ 成片路的**帧率三档** ✓✗（2026-11-10 补 ✗）：单段路（``torch_backend.write``）早就有
+    #:   ``fpsVerified`` ✓，成片这条**另一条**路此前只有 ``framesVerified`` ✓✗ —— 「帧率被改了
+    #:   （音画不同步 ✓）」与「帧率没读到（不知道 ✓）」在这条路上**一声不响** ✓，而两格读数
+    #:   （``durationSeconds`` ✓ / ``videoSeconds`` ✓）都"有值、ffprobe 可复核" ✓。
+    #:   ⚠️ 三条与 ``engine_artifact_test`` ㊱¹³/㊱¹⁵ **同口径** ✓ —— 这组判据存在的理由就是
+    #:   「一处改了另一处不改」那个老病根 ✓：链层不补，帧率这件事在成片路上仍然半核半不核 ✓。
+    ok_payload = ok_card.to_dict()
+    check("⑤⁵ ⭐ 成片路也交**帧率第一档** ✓：``fpsVerified == 'exact'`` ✓ ＋ ``fpsRequested`` ＝"
+          "计划帧率 ✓ ＋ ``fpsOnDisk`` 读得上 ✓；而**没有问题**时顶层**不出现** ``alerts`` 键 ✓"
+          "（缺键 ＝「一条都没有」✓ —— 不拿空数组去混淆「没说」✗）",
+          ok_card.outputs.get("fpsVerified") == "exact"
+          and int(ok_card.outputs.get("fpsRequested") or -1) == int(ok_plan.fps)
+          and ok_card.outputs.get("fpsOnDisk") is not None
+          and "alerts" not in ok_card.outputs
+          and "alerts" not in ok_payload,
+          {"fpsVerified": ok_card.outputs.get("fpsVerified"),
+           "fpsRequested": ok_card.outputs.get("fpsRequested"),
+           "fpsOnDisk": ok_card.outputs.get("fpsOnDisk"),
+           "payloadAlerts": ok_payload.get("alerts", "<缺键>")})
+
+    drift_request = pipe.GenerationRequest(prompt="链", seed=11, seconds=16.0)
+    drift_plan = chain.plan_chain(drift_request)
+    drift_fps = float(drift_plan.fps) / 2.0
+    drift_card, _dr_dir, _dr_state = run("fps_drift", drift_request, fps=drift_fps)
+    drift_payload = drift_card.to_dict()
+    drift_alerts = drift_payload.get("alerts")
+    check("⑤⁶ ⭐⭐ 盘上帧率**真被改了** ⇒ ``fpsVerified == 'drift'`` ✓ ＋ 一句人话进 ``alerts`` ✓"
+          "**并且抬到回执顶层** ✓（前端只读 ``result.alerts`` ✓ —— 只写 ``note`` 等于没写 ✗）："
+          f"顶层那句与 ``outputs['alerts']`` **逐字一致** ✓（请求 {int(drift_plan.fps)} fps vs "
+          f"盘上 {drift_fps:g} fps ✓）",
+          drift_card.outputs.get("fpsVerified") == "drift"
+          and drift_card.outputs.get("fpsOnDisk") is not None
+          and float(drift_card.outputs.get("fpsOnDisk") or 0) == drift_fps
+          and isinstance(drift_alerts, list) and len(drift_alerts) == 1
+          and "不一致" in drift_alerts[0]
+          and list(drift_alerts) == list(drift_card.outputs.get("alerts") or [])
+          and "不一致" in str(drift_card.outputs.get("note") or ""),
+          {"fpsVerified": drift_card.outputs.get("fpsVerified"),
+           "fpsOnDisk": drift_card.outputs.get("fpsOnDisk"),
+           "payloadAlerts": drift_alerts,
+           "outputsAlerts": drift_card.outputs.get("alerts")})
+
+    blind_fps_request = pipe.GenerationRequest(prompt="链", seed=12, seconds=16.0)
+    blind_fps_card, _bf_dir, _bf_state = run("fps_blind", blind_fps_request, fps=None)
+    blind_fps_payload = blind_fps_card.to_dict()
+    blind_fps_alerts = blind_fps_payload.get("alerts")
+    check("⑤⁷ ⭐⭐ 帧率**读不到** ⇒ ``fpsVerified`` 是 ``None``（**不是** ``'exact'`` ✗）＋ 顶层一句"
+          "「没读到 ⇒ 不知道」✓ —— 「没核过」与「一致」**不许同形** ✗（同一族：读数缺失被当成"
+          "读数说没问题 ✓✗）",
+          blind_fps_card.outputs.get("fpsVerified") is None
+          and blind_fps_card.outputs.get("fpsOnDisk") is None
+          and isinstance(blind_fps_alerts, list) and bool(blind_fps_alerts)
+          and any("没读到" in item for item in blind_fps_alerts)
+          and list(blind_fps_alerts) == list(blind_fps_card.outputs.get("alerts") or []),
+          {"fpsVerified": blind_fps_card.outputs.get("fpsVerified"),
+           "fpsOnDisk": blind_fps_card.outputs.get("fpsOnDisk"),
+           "payloadAlerts": blind_fps_alerts})
 
 
 def case_wiring() -> None:
@@ -322,6 +517,7 @@ def main() -> int:
     case_stitch()
     case_normalize()
     case_run_chain(root)
+    case_chain_frames(root)
     case_wiring()
 
     failures = [item for item in _RESULTS if not item[1]]

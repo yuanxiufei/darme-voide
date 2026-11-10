@@ -264,6 +264,8 @@ def from_blocked(blocked: Any, num_rows: int, num_cols: int) -> Any:
 
 #: 字节 → (高半字节的值, 低半字节的值) ✓ 按 (device, dtype) 缓存 ✓（50 层重建 50 次纯属浪费 ✗）
 _BYTE_LUT_CACHE: dict[tuple[str, str], Any] = {}
+#: **两个字节** → 4 个值 ✓（65536×4 ✓ 表 512 KiB ✓ 仍在 L2 里 ✓）—— 索引流量直接砍半 ✓
+_QUAD_LUT_CACHE: dict[tuple[str, str], Any] = {}
 
 
 def _byte_pair_lut(device: Any, dtype: Any) -> Any:
@@ -278,17 +280,59 @@ def _byte_pair_lut(device: Any, dtype: Any) -> Any:
     return lut
 
 
+def _byte_quad_lut(device: Any, dtype: Any) -> Any:
+    """``uint16`` → 该两字节解出的 4 个值 ✓（列序 ＝ 低字节的高/低半字节、再高字节的高/低半字节 ✓）。"""
+    torch = _torch()
+    key = (str(device), str(dtype))
+    lut = _QUAD_LUT_CACHE.get(key)
+    if lut is None:
+        values = torch.tensor(E2M1_VALUES, dtype=torch.float32)
+        codes = torch.arange(65536, dtype=torch.int64)
+        low = codes & 0xFF
+        high = codes >> 8
+        lut = torch.stack([values[low >> 4], values[low & 0x0F],
+                           values[high >> 4], values[high & 0x0F]], dim=1).to(device=device, dtype=dtype)
+        _QUAD_LUT_CACHE[key] = lut
+    return lut
+
+
 def unpack_e2m1(packed: Any, *, dtype: Any = None) -> Any:
-    """``U8 [N, K/2]`` → 浮点 ``[N, K]`` ✓（**一次查表解一个字节的两个半字节** ✓ 高半字节在前 ✓）。"""
+    """``U8 [N, K/2]`` → 浮点 ``[N, K]`` ✓（**一次查表解两个字节的四个半字节** ✓ 高半字节在前 ✓）。
+
+    ⚠️ 这是**逐层现反量化**的热路径 ✓：单层 5120×12800 实测 **0.73 ms**（占整层反量化 56% ✓），
+    而它的钱几乎全花在**索引流量与 gather 的写侧**上 ✓ —— 索引位宽、符号扩展、"一次解几个字节"都直接决定速度 ✓✗：
+    int64 索引 ⇒ 每层多搬 200+ MB ✓（+0.4 ms）；`int16` 而非 `uint16` ⇒ 多一趟 `& 0xFFFF`（+0.24 ms）。
+    纯 torch 下的天花板：索引构造 0.18 ＋ gather 0.53（gather 已是 ~377 GB/s）⇒ 0.71 ms ✓
+    —— 再要快只能把「查表 → 乘 scale」融成一个 kernel（那需要 triton／CUDA，本机无 triton ✓✗）。
+    """
     torch = _torch()
     out_dtype = dtype or torch.float32
     if packed.dtype != torch.uint8:
         raise ValueError(f"nvfp4 打包权重必须是 uint8 ✗，拿到 {packed.dtype} ✓")
     if packed.ndim != 2:
         raise ValueError(f"nvfp4 打包权重必须是 2 维 ✗，拿到 {packed.ndim} 维 ✓")
-    lut = _byte_pair_lut(packed.device, out_dtype)
+    #: 两两成对要走「重解释成 uint16」✓ ⇒ 打包列数必须是**偶**数 ✓（奇数退回逐字节 ✓，语义不变 ✓）
+    if packed.shape[1] % 2 == 0:
+        flat = packed.reshape(-1)
+        #: ⚠️ 小端前提 ✓✗：`view(torch.int16)` 把相邻两字节重解释成 `b0 + b1·256` ✓（x86／CUDA 都小端 ✓）。
+        #: 大端机上会**字节序反**⇒ 解出来的两个值对调 ✓ —— 那台机器上这条会由对拍判据抓出来 ✓✗。
+        #: ⚠️ 优先 **uint16** ✓✗：它是**零扩展** ⇒ `.to(torch.int32)` 一趟就够 ✓；
+        #: `int16` 带符号 ⇒ 必须先转 int32 再 `& 0xFFFF`，那是**多一趟 65 MB 读写** ✓
+        #: （实测单层 unpack 0.97 → 0.73 ms ✓，350 层 × 每次前向 0.34 → 0.26 秒 ✓）。
+        if hasattr(torch, "uint16"):
+            pairs = flat.view(torch.uint16).to(torch.int32)
+        else:
+            pairs = flat.view(torch.int16).to(torch.int32) & 0xFFFF
+        return torch.nn.functional.embedding(
+            pairs, _byte_quad_lut(packed.device, out_dtype)).reshape(packed.shape[0], packed.shape[1] * 2)
+    #: ⚠️ 索引**用 int32 不用 int64** ✓✗：每层 33 MB 打包字节，扩成 int64 就是 262 MB 的读写 ✓
+    #: （实测单层多花 ~0.4 ms ✓）；值域本来就是 0–255 ✓。
+    #: `F.embedding`/`index_select` 的 int32 变体 CUDA 与 CPU 都有 ✓。
+    index = packed.reshape(-1)
+    if index.dtype != torch.int32:
+        index = index.to(torch.int32)
     return torch.nn.functional.embedding(
-        packed.reshape(-1).to(torch.int64), lut).reshape(packed.shape[0], packed.shape[1] * 2)
+        index, _byte_pair_lut(packed.device, out_dtype)).reshape(packed.shape[0], packed.shape[1] * 2)
 
 
 def dequantize(packed: Any, block_scale: Any, per_tensor_scale: Any, orig_shape: Any,

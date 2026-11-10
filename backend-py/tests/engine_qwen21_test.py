@@ -354,10 +354,19 @@ def case_phased() -> None:
     #: 就是「装不下」照样 OOM ✓✗（这条断言专防"删掉调用/写错顺序"✓）。
     import inspect  # noqa: PLC0415
 
-    source = inspect.getsource(pipeline.run_sync)
+    #: ⚠️ 2026-11-10：`run_sync` 已拆成**薄壳** ✓✗（它只剩墙钟，阶段执行体是 `_run_stages` ✓）⇒
+    #: 只扫 `run_sync` 会拿到三个 ``-1`` ✓，报出来是「三处换装都没了」✓ —— 与真缺陷同形 ✓。
+    #: 扫描面 ＝ `run_sync` ＋ 它委托的执行体 ✓（与 `engine_krea2_test` ⑥″ 同一解法 ✓：
+    #: 同一个病根在几个文件里有副本时，改法要一致 ✓✗，否则下次重构又只修一处 ✓）。
+    sources = [inspect.getsource(pipeline.run_sync)]
+    executor = getattr(pipeline, "_run_stages", None)
+    if callable(executor):
+        sources.append(inspect.getsource(executor))
+    source = "\n".join(sources)
     positions = [source.find(f'_backend_phase(backend, "{phase}")')
                  for phase in ("encode", "sample", "decode")]
-    check("⑥⁹ `run_sync` 里三处换装**都在** ✓、顺序是 encode → sample → decode ✓✗",
+    check("⑥⁹ 阶段执行体里三处换装**都在** ✓、顺序是 encode → sample → decode ✓✗"
+          "（扫描面含 `run_sync` 委托的执行体 ✓ —— 它 2026-11-10 起已是薄壳 ✓✗）",
           all(position > 0 for position in positions)
           and positions == sorted(positions), positions)
 

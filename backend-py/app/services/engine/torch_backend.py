@@ -60,6 +60,7 @@ from . import loader
 from . import media as media_mod
 from . import output_paths
 from . import quant as quant_mod
+from . import quant_nvfp4 as nvfp4_mod
 from . import residency as residency_mod
 from . import scheduler as scheduler_mod
 from . import safetensors as st
@@ -467,6 +468,45 @@ def int4_scale_plan(info: Any, *, strip_prefix: str | None = None,
     return plan
 
 
+def nvfp4_scale_plan(info: Any, *, strip_prefix: str | None = None,
+                     packed_stems: Any = None) -> dict[str, tuple[tuple[int, ...], bool]]:
+    """从权重头部挑出「该走 **nvfp4 打包常驻**」的线性层 ✓ ⇒ ``{子模块名: (块 scale 形状, 有没有 AWQ)}`` ✓。
+
+    判据只认**文件自述 ＋ 三个配套张量齐全** ✓（缺一条就不点名 ✓，装载闸口会当场拒 ✓）：
+
+    1. ``.weight`` 是 ``U8`` ✓ 且文件自述**每字节两个元素** ✓ ——
+       ``packed_stems`` 递 :func:`quant.packed_weight_stems_of` ✓（⚠️ 不能只看 dtype ✗：同一份文件里
+       ``embed_tokens`` 是 ``I8`` ✓、int4 文件也可能存成 ``U8`` ✓，只看 dtype 会误认 ✓✗）；
+    2. ``weight_scale``（``F8_E4M3`` 块尺度 ✓，每 16 元素一个 ✓）在 ✓；
+    3. ``weight_scale_2``（f32 **0 维**标量 ✓）在 ✓ —— ⭐ 这一条同时把 int4/w4a8 排除掉 ✓
+       （它们只有 per-row/per-group scale、**没有**二级标量 ✓）；
+    4. 可选 ``pre_quant_scale``（AWQ ✓，乘在**输入**上 ⇒ 前向里折 ✓，见 :func:`quant_nvfp4.fold_pre_quant_scale` ✓）。
+
+    ⭐ 为什么单独一支、不塞进 :func:`int8_scale_plan` ✗✗（2026-11-09 ✓）：nvfp4 的**块尺度是一张
+    带 padding 的二维表** ✓（``[rows, ceil4(in/16)]`` ✓，cuBLAS 128×4 swizzle 布局 ✓），而 int8 是
+    **每行一个标量** ✓ —— 同一个 ``weight_scale`` 名字、两种形状、两种语义 ✓✗。混着认会把块尺度当成
+    per-row 乘下去：形状全对、数值全错、一声不响 ✓✗。
+
+    ⚠️ ``strip_prefix`` 同 :func:`int8_scale_plan` ✓（按**模块名**查表 ✓，前缀不对一个都点不上 ✓）。
+    """
+    plan: dict[str, tuple[tuple[int, ...], bool]] = {}
+    stems = None if packed_stems is None else frozenset(str(item) for item in packed_stems)
+    for logical, tensor in info.tensors.items():
+        if not logical.endswith(".weight") or str(tensor.dtype) != "U8":
+            continue
+        stem = logical[: -len(".weight")]
+        if stems is not None and stem not in stems:
+            continue                       # 文件没自述是打包权重 ⇒ 不猜 ✓（装载侧会拒 ✓）
+        scale = info.tensors.get(f"{stem}{nvfp4_mod.COMFY_SCALE_SUFFIX}")
+        scale_2 = info.tensors.get(f"{stem}{nvfp4_mod.COMFY_SCALE_2_SUFFIX}")
+        if scale is None or scale_2 is None:
+            continue                       # 配套缺 ⇒ 不点名 ✓（让装载闸口报"缺哪一件" ✓）
+        awq = f"{stem}{nvfp4_mod.PRE_QUANT_SCALE_SUFFIX}" in info.tensors
+        name = stem[len(strip_prefix):] if strip_prefix and stem.startswith(strip_prefix) else stem
+        plan[name] = (tuple(int(dim) for dim in scale.shape), awq)
+    return plan
+
+
 def resident_need_gib(path: str | Path, *, fallback: float,
                       strip_prefix: str | None = None) -> tuple[float, dict[str, Any]]:
     """**这一件权重**装起来会占多少显存 ✓ ⇒ ``(GiB, 凭据)`` ✓。
@@ -526,6 +566,16 @@ _INT8_RESIDENT_ADAPTERS: frozenset[str] = frozenset({"int8", "krea2", "h3"})
 #: 也不许在这里假装能跑 ✓（盘上 H3 没有 4bit 文件 ✓，这条只是不许写成通用假绿 ✗）。
 _INT4_RESIDENT_ADAPTERS: frozenset[str] = frozenset({"int8", "krea2"})
 
+#: 本仓**没有** int8 的**嵌入壳** ✓✗（常驻壳只有 `Int8Linear` / `NvFp4Linear` ✓，都是 ``nn.Linear``
+#: 的替身 ✓；``nn.Embedding`` 没有对应物 ✓）⇒ 名字落在这些尾巴上的 int8 权重**一定**在装载时按
+#: bf16 反量化 ✓（2 B/参 ✓）。
+#: ⭐ 为什么必须单列（2026-11-09 实测 ✓）：nvfp4 那份 H3 文本塔里 ``model.embed_tokens`` 是
+#: ``I8``＋``F32`` per-row scale ✓ ⇒ 被 :func:`int8_scale_plan` 认成"能常驻的 int8 层" ✓✗
+#: ⇒ 账算 **0.72 GiB**、实际物化 **1.45 GiB** ✓ ⇒ 整份报 14.61 而卡上真占 **15.35 GiB** ✓✗
+#: （0.74 GiB 的假余量，正是"判得下、装不上"的那一档 ✓）。
+#: ⚠️ 这是**关于本仓壳集合的事实** ✓，不是按名字猜量化格式 ✗（格式仍只认文件自述 ✓）。
+_INT8_EMBED_STEMS: tuple[str, ...] = ("embed_tokens", "lm_head", "token_embedding")
+
 #: 存储侧**每参 1 字节**的 dtype ✓ ⇒ 物化成 bf16 之后每参数变 2 字节 ✓
 #: ⚠️ 这是**按字面换算**（1 B → 2 B ✓），不是「低精度文件一律乘 2」那种猜 ✗：bf16/f16 文件是 1× ✓。
 _ONE_BYTE_STORAGE: frozenset[str] = frozenset({
@@ -570,8 +620,20 @@ def resident_bytes_of(info: Any, *, adapter: str | None,
        （:func:`quant.logical_weight_shape` 把打包维 ×2 ✓ —— 不能拿打包形状去乘 ✗，那样少一半 ✓）。
     2. **int8 + 配套 scale 的 ``.weight``**：该装配线有常驻壳（``adapter`` ∈
        :data:`_INT8_RESIDENT_ADAPTERS` ✓）⇒ 文件字节（1 B/参 ✓）；没有 ⇒ **×2**（反量化 bf16 ✓）。
+       例外：名字落在 :data:`_INT8_EMBED_STEMS` 上的（``embed_tokens`` / ``lm_head`` ✓）**一律 ×2**
+       ✓✗ —— 本仓没有 int8 嵌入壳 ✓，量再"能常驻"也只能物化 ✓（14.61 ⇒ 15.33 GiB 那 0.72 GiB ✓）。
     3. **其余张量**（norm/embedding/scale/bias ✓）：按 dtype 的**物化**字节 ✓
        （见 :func:`_materialized_bytes` ✓）。
+
+    4. **nvfp4 打包层**（``U8`` ＋ ``F8_E4M3`` 块尺度 ＋ f32 标量 ✓，2026-11-09 ✓）：
+      **打包原样常驻** ✓（1 B/2参 ✓）—— 反量化挪到**前向逐层** ✓（见
+      :class:`h3_form.NvFp4Linear` ✓），所以这里**不 ×2** ✓；它的三个配套张量
+      （块尺度 / 标量 / AWQ ✓）也按文件字节算 ✓（块尺度是 ``F8`` ⇒ 走通用口径会被 ×2 ✗✗，
+      14.61 GiB 那份会白多报 1.42 GiB ✓）。
+      ⚠️ 这一条**不按 adapter 门控** ✗：能接住 ``uint8`` 常驻壳的只有 H3 文本塔那条路
+      （:func:`attach_h3_text` ✓，按文件换壳 ✓）；别的装配线拿到这种文件会被装载闸口
+      **当场拒**（目标参数是 bf16 ✓ ⇒ "不能原样写入" ✓），不会静默按 2 倍装 ✓ ⇒ 按 1 倍记账
+      不会把哪次真跑算成"装得下" ✓。
 
     ⚠️ 与 :func:`resident_need_gib` 的分工 ✗：那个函数只认 int8（历史口径 ✓、Qwen-Image 那条线
     在用 ✓）；这个是**逐层分类**的精算 ✓，服务「同一族不同量化档」的其余五条线 ✓。
@@ -582,16 +644,32 @@ def resident_bytes_of(info: Any, *, adapter: str | None,
     #: 只问「文件自称 4bit 吗」⇒ 自称了却缺 scale / 存成 2D 以外的层会被当成能常驻 ✓✗
     #: （那种层换不了壳 ⇒ 装载时按 bf16 反量化 ⇒ 实际是 2 倍 ✓，账却按 1 B/2参 报 ⇒ 装到一半 OOM ✓）。
     int4_plan = int4_scale_plan(info, int4_stems=int4_stems)
+    nv_stems = quant_mod.packed_weight_stems_of(specs) if specs else frozenset()
+    nv_plan = nvfp4_scale_plan(info, packed_stems=nv_stems)
+    #: 打包层的**配套张量**（块尺度 F8 ✓ / 标量 f32 ✓ / AWQ bf16 ✓）—— 它们跟着壳原样留着 ✓，
+    #: 不能按"物化"算 ✓✗（块尺度是 ``F8`` ⇒ 通用口径会 ×2 ✓，那 1.42 GiB 是凭空多出来的 ✓）。
+    nv_aux = {f"{stem}{suffix}" for stem in nv_plan
+              for suffix in (nvfp4_mod.COMFY_SCALE_SUFFIX, nvfp4_mod.COMFY_SCALE_2_SUFFIX,
+                             nvfp4_mod.PRE_QUANT_SCALE_SUFFIX)}
     keep_int8 = adapter in _INT8_RESIDENT_ADAPTERS
     keep_int4 = adapter in _INT4_RESIDENT_ADAPTERS
     total = 0
     int8_hit = 0
+    int8_embed = 0
     int4_hit = 0
+    nv_hit = 0
     for name, entry in info.tensors.items():
         if name.endswith(quant_mod.QUANT_META_SUFFIX):
             continue                       # 量化说明本身不是模型参数 ✓
         stem = name[: -len(".weight")] if name.endswith(".weight") else None
         dtype = str(getattr(entry, "dtype", "") or "").upper()
+        if name in nv_aux:
+            total += int(entry.nbytes)     # 打包层的配套张量原样常留 ✓
+            continue
+        if stem is not None and stem in nv_plan:
+            nv_hit += 1
+            total += int(entry.nbytes)     # 1 B/2参（打包维已经是半宽 ✓）—— 原样常驻 ✓
+            continue
         if stem is not None and stem in int4_stems and quant_mod.is_int4_storage(dtype):
             #: ``packed_ok`` ＝ 这一层**真能**换成 4bit 常驻壳（有 scale ✓ 头部自洽 ✓）——
             #: 换不了 ⇒ 只能按 bf16 反量化 ⇒ **逻辑**参数 × 2 B ✓（拿打包形状乘会少一半 ✓✗）
@@ -604,12 +682,25 @@ def resident_bytes_of(info: Any, *, adapter: str | None,
             total += int(entry.nbytes) if packed_ok else count * 2
             continue
         if stem is not None and keep_int8 and stem in plan:
+            #: ⚠️ 嵌入/输出头**没有 int8 壳** ✓✗（2026-11-09 ✓）⇒ 必按 bf16 物化 ✓（见
+            #: :data:`_INT8_EMBED_STEMS` ✓ 与 :func:`_materialized_bytes` 的 2 B/参 ✓）。
+            if any(stem.endswith(token) for token in _INT8_EMBED_STEMS):
+                int8_embed += 1
+                total += _materialized_bytes(entry)
+                continue
             int8_hit += 1
             total += int(entry.nbytes)     # 1 B/参 原样留 + scale 在别的张量里原样计 ✓
             continue
         total += _materialized_bytes(entry)
     return total, {"int8Layers": len(plan), "int8ResidentLayers": int8_hit,
+                   #: int8 里**没有壳**的那几个（``embed_tokens`` ✓）—— 它们按 bf16 记 ✓，
+                   #: 单列一格是为了让回执能解释「为什么帧数比文件大 0.7 GiB」✓
+                   "int8EmbedLayers": int8_embed,
                    "int4Layers": int4_hit,                    "int4Resident": keep_int4,
+                   #: nvfp4：``Layers`` ＝ 文件里**能接住**的打包层数 ✓（三件配套齐全 ✓）、
+                   #: ``Resident`` ＝ 账上按"原样常驻"算的层数 ✓（当前两者恒等 ✓，分开是为了让
+                   #: 将来"某族没有壳"的情形**算得出 2 倍** ✓✗）
+                   "nvfp4Layers": len(nv_plan), "nvfp4Resident": nv_hit,
                    #: 真正会被换壳的层数 ✓ —— 没给 adapter / 该 adapter 没有 4bit 壳 ⇒ **0** ✓
                    #: （算成 len(int4_plan) 会让回执说「256 层走 4bit 壳」而实际按 bf16 装 ✓✗）
                    "int4ShellLayers": len(int4_plan) if keep_int4 else 0,
@@ -748,7 +839,12 @@ def part_need_gib(path: str | Path | None, *, fallback: float,
     else:
         specs_error = ""
     resident, ledger = resident_bytes_of(info, adapter=adapter, specs=specs)
-    mode = "int4" if ledger["int4Layers"] else ("int8" if ledger["int8Layers"] else "plain")
+    #: ⭐ 档位名必须**先认 nvfp4** ✗✗（2026-11-09 ✓）：nvfp4 那份文件里 ``embed_tokens`` 是 ``I8`` ✓
+    #: ⇒ ``int8Layers=1`` ✓ ⇒ 老算法会把整份判成 **int8 档** ✓✗，于是"assume=int8 且 mode=int8"
+    #: 成立 ⇒ 返回表值 **25.44 GiB** ✓✗（那份 bf16 口径的账 ✓），而打包常驻真值 ≈15.3 GiB ✓
+    #: ⇒ 凭空多要 10 GiB、把能整份上卡的档判成必须分时换装 ✓（不报错，只是慢与账假 ✓✗）。
+    mode = ("nvfp4" if ledger["nvfp4Layers"]
+            else ("int4" if ledger["int4Layers"] else ("int8" if ledger["int8Layers"] else "plain")))
     if assume is not None and str(assume) == mode:
         return table, {
             "source": "table", "mode": mode, "table": table,
@@ -763,23 +859,38 @@ def part_need_gib(path: str | Path | None, *, fallback: float,
         "fileGiB": round(info.file_bytes / device_policy.GIB, 2),
         "residentGiB": round(est, 2),
         "int8ResidentLayers": ledger["int8ResidentLayers"],
+        "int8EmbedLayers": ledger.get("int8EmbedLayers", 0),
         "int4Layers": ledger["int4Layers"],
         "int4ShellLayers": ledger.get("int4ShellLayers", 0),
+        "nvfp4Layers": ledger.get("nvfp4Layers", 0),
         "why": (f"文件是 **{mode}** 档 ✓，而表里 {table:.2f} GiB 是按 **{assume or '未登记'}** 档量的"
                 f" ⇒ 这次**不能**用表 ✓ ⇒ 按文件精算 {est:.2f} GiB ✓"
                 f"（int8 常驻 {ledger['int8ResidentLayers']} 层 ✓、4bit 打包 {ledger['int4Layers']} 层 ✓"
                 f"，其中 {ledger.get('int4ShellLayers', 0)} 层走 4bit 常驻壳 ✓"
-                f"{'（其余按 bf16 反量化 ✓）' if ledger.get('int4Layers', 0) > ledger.get('int4ShellLayers', 0) else ''}）"
+                f"{'（其余按 bf16 反量化 ✓）' if ledger.get('int4Layers', 0) > ledger.get('int4ShellLayers', 0) else ''}"
+                + (f"；nvfp4 打包常驻 {ledger.get('nvfp4Layers', 0)} 层 ✓"
+                   f"（打包原样 ✓、前向逐层反量化 ✓；块尺度/标量按文件字节算 ✓）"
+                   if ledger.get("nvfp4Layers", 0) else "")
+                #: ⚠️ 嵌入层**没有 int8 壳** ⇒ 它按 bf16 物化 ✓ —— 不写这一句，
+                #: 精算值会比文件数据区大 0.7 GiB 而**看不出原因** ✓✗
+                + (f"；另有 {ledger.get('int8EmbedLayers', 0)} 个 int8 嵌入/输出头 ✓"
+                   f"（本仓没有 int8 嵌入壳 ⇒ 按 bf16 物化 ✓）"
+                   if ledger.get("int8EmbedLayers", 0) else "") + "）"
                 + (f"；⚠️ 量化说明读取失败（{specs_error}）⇒ 4bit 层可能按 int8 算 ✓"
                    if specs_error else "")),
     }
 
 
 def _int8_bytes_of(module: Any, torch_mod: Any) -> int:
-    """模块里 int8 参数总字节 ✓（＝「钉到 CPU 会占多少内存」✓）。"""
+    """模块里 int8 **与 uint8** 参数总字节 ✓（＝「钉到 CPU 会占多少内存」✓）。
+
+    ⚠️ ``uint8`` 必须一起数 ✗✗（2026-11-09 ✓）：nvfp4 打包壳（:class:`~.h3_form.NvFp4Linear` ✓）
+    的权重是 ``uint8`` ✓ —— 只数 ``int8`` 会让「钉 CPU 前先问内存够不够」这一拍**漏掉**
+    11.35 GiB ✓✗，而 :func:`~.h3_form.place_module` 照样把它们钉过去 ✓ ⇒ 内存被悄悄吃掉 ✓。
+    """
     total = 0
     for param in module.parameters():
-        if param.dtype == torch_mod.int8:
+        if param.dtype in (torch_mod.int8, torch_mod.uint8):
             total += int(param.numel())
     return total
 
@@ -4588,6 +4699,11 @@ class TorchBackend:
         ⚠️ **要二采就必须给 ``condition``** ✗（二采要重跑主干 ✓ —— 没条件就**拒** ✓，不猜 ✓✗）。
         """
         self._gate()
+        # ⭐ **每次入口先清空上这次的实况** ✗✗（2026-11-08 补 ✗）：``refineDetails`` 是**实例属性** ✓，
+        #    上一次二采留下的值会活到这一次 ✓✗ —— 本次若走「只上采样」或中途在设值**之前**返回 ✓，
+        #    管线读到的就是**上一次**的实测倍率/尺寸 ✓（比如上次 1.5×、这次 2×，回执写 1.5 而画面是 2 ✓）。
+        #    症状属于本仓最怕那类：**数字自洽、只与画面不符** ✓。清空后读不到 ⇒ 调用方当场知道"没自述" ✓。
+        self.refineDetails = None
         # ⚠️ 放大器在 `self._device` 上 ✓ ⇒ 拿 CPU 潜变量进来必炸 ✗（2026-09-25 真机踩过 ✓）⇒ 先点破 ✓。
         self._require_own_device("refine_latents", latents=latents, condition=condition)
         torch = self._torch()
@@ -4674,12 +4790,54 @@ class TorchBackend:
             "upscalerPath": path,
             "notes": [],
         }
+        # ── ④c 缩到**计划的**倍率 ✓（2026-11-08 补 ✗✗）────────────────────────────────
+        # 放大器只会做**空间 2×** ✓（`upscale.plan_upscale` 的 notes 早就写明这一条 ✓）；
+        # 而 `ai-2x-resize` 的第二步「高质量缩放 2× → 1.5×」此前**一步都没执行** ✗✗：
+        # 计划要 1.5× ⇒ 实际出的是 2× ⇒ 而 `result.refine.scale` 照写 1.5 ✓✗
+        # （**尺寸与回执对不上、回执自己却"自洽"** —— 正是本项目最怕的那类错 ✓）。
+        # ⚠️ 顺序是有意的：**先缩到目标域、再二采** ✓ 与计划层 notes 的
+        #    「带掩码的二次去噪（先 1.5× 的目标域 ✓）」逐字一致 ✓✗（反过来就是在 2× 域精修）。
+        target, scale_notes, method = self._plan_target_size(plan, shape, after)
+        details["notes"].extend(scale_notes)
         out_video = refined
-        keyframes = self._upscale_keyframes(latents, refined, shape)
+        if target is not None:
+            out_video = self._scale_video_latents(refined, target, method)
+            scaled = tuple(int(value) for value in out_video.shape)
+            if scaled[1] != shape[1]:
+                raise TorchBackendUnavailable(
+                    f"缩放**改了时间维** ✗：{shape[1]} → {scaled[1]} ✓"
+                    f"（时间插值会让动作速率变错 ✓✗） ⇒ 拒，不用这个产物 ✓", reason="pending")
+            details["videoShapeScaled"] = list(scaled)
+        # ⭐ **实测倍率对每一次二采都要有** ✗✗（2026-11-08 补 ✗）：原先只在「有第二步缩放」时写 ✓，
+        #    ``ai-2x`` 那条（放大器原样 2×、target 为 None ✓）回执里就没有实测倍率 ✓✗ ——
+        #    管线只能拿**计划值**顶 ✓，正好回到「计划层 vs 执行层」那个老毛病 ✓。
+        scaled_shape = details.get("videoShapeScaled") or list(out_video.shape)
+        scale_h = round(int(scaled_shape[2]) / int(shape[2]), 6)
+        scale_w = round(int(scaled_shape[3]) / int(shape[3]), 6)
+        details["targetScale"] = float(getattr(plan, "scale", 0.0) or 0.0)
+        #: ⚠️ 以**高度**比为准（与 ``videoShapeScaled`` 同一口径 ✓）；宽度比另存 ✓
+        details["spatialScale"] = scale_h
+        details["spatialScaleW"] = scale_w
+        if abs(scale_h - scale_w) > 1e-6:
+            details["notes"].append(
+                f"⚠️ 宽高实际倍率不同（高 {scale_h:g}× / 宽 {scale_w:g}× ✓）—— 目标尺寸按整数取整所致 ✓")
+        if target is not None:
+            details["resizeMethod"] = method
+        keyframes = self._upscale_keyframes(latents, refined, shape, target=target)
         if tail_steps > 0:
+            # ⚠️ 二采吃**缩放后**的 `out_video` ✓✗：传 `refined` 就是在 2× 域精修、
+            #    出来再缩 —— 与计划层的口径相反（细节生成在错误的分辨率上 ✓）。
             out_video, denoise_report = self._second_pass(
-                refined, latents, plan, request, condition=condition, keyframes=keyframes)
+                out_video, latents, plan, request, condition=condition, keyframes=keyframes)
+            # ⚠️⚠️ **notes 要并进去、不能 ``update`` 覆盖** ✗✗（2026-11-08 补 ✗）：
+            #    ``denoise_report`` 自己也带 ``"notes"`` ✓ ⇒ 直接 ``details.update(...)`` 会把
+            #    上面这段攒的**缩放假话**（「放大器 2× → 计划 1.5× ✓」「宽高倍率不同」✓）
+            #    整段冲掉 ✓✗ —— 而**只要二采真跑了就必然冲掉** ✓（成功/失败两条路径都带 notes ✓）。
+            #    症状：回执里只剩「二采：尾部 N 步」✓，读者**根本不知道画面被缩过** ✓✗
+            #    （倍率与尺寸那两格还在 ✓，所以不会有任何一处报错 ✓）。
+            tail_notes = list(denoise_report.pop("notes", ()) or ())
             details.update(denoise_report)
+            details["notes"].extend(tail_notes)
         else:
             details["notes"].append(
                 "⚠️ **二采未跑** ✗：``plan.refine_steps`` = 0 ✓（这两个参数的默认值在**编译层** ✗ ⇒ "
@@ -4694,7 +4852,102 @@ class TorchBackend:
         # ⚠️ 音频流**原对象**放回 ✓（不是 copy ✗ —— copy 也会让「是同一份」这条判据失效 ✓✗）
         return merged
 
-    def _upscale_keyframes(self, latents: Any, refined: Any, shape: tuple[int, ...]) -> Any:
+    #: `ai-2x-resize` 第二步「高质量缩放」用的重采样方法 ✓ ——
+    #: 2× → 1.5× 是**缩小** ✓：`bilinear` 偏糊 ✗、`lanczos` 在潜空间容易振铃 ✗、
+    #: `bicubic` 居中 ✓（可换 ✓；回执里如实报方法名 ✓，不让人去猜用的哪一档 ✓）。
+    SCALE_RESIZE_METHOD = "bicubic"
+
+    @staticmethod
+    def _target_latent(value: float) -> int:
+        """目标潜空间边长：至少 2 ✓ —— 但**不强制偶数** ✗✗。
+
+        潜变量 ×8 就是像素 ✓ ⇒ 只要边长是整数，像素必是 8 的倍数 ⇒ h264 要的"偶数宽高"
+        **天然满足** ✓；反过来硬取偶数会把 2 → 3 顶成 4 ✓✗ ⇒ 1.5× 悄悄变成 2×
+        （正是本函数要防的那个错 ✓；实测踩过 ✓）。
+        """
+        return max(2, int(round(value)))
+
+    def _plan_target_size(self, plan: Any, before: tuple[int, ...], after: tuple[int, ...]
+                          ) -> tuple[tuple[int, int] | None, list[str], str]:
+        """按超清计划算**目标潜空间尺寸** ``(H, W)``；``None`` ⇒ 不缩（保持放大器的 2× ✓）。
+
+        三种模式与 :func:`app.services.engine.upscale.plan_upscale` 逐条对齐 ✓：
+
+        * ``ai-2x`` ⇒ 目标就是 2× ✓（放大器给足了 ⇒ ``None``；给不足 ⇒ 按计划缩回去 ✓）；
+        * ``ai-2x-resize`` ⇒ 2× 再缩到 ``scale`` ✓（**这一步此前完全缺失** ✗✗）；
+          ⚠️ 只接受 ``1 < scale < 2`` ✓（计划层产出这个模式的唯一区间 ✓）—— 区间外**拒** ✗✗，
+          因为 ``≤1`` 是「放大再缩回原尺寸」（尺寸不变、耗时 6× ✓✗）、``≥2`` 是「靠插值冒充分块放大」
+          （2× 以上不会长细节 ✓✗），两者都会交付一张**自洽的假超清** ✓；
+        * ``tiled-ai-2x`` ⇒ ``scale > 2`` 要**多次分块放大 + 缝合** ✓ —— 执行层没做 ✗
+          ⇒ **拒** ✗（静默出 2× 会让人以为 4× 开了 ✓✗）。
+
+        ⚠️ ``mode`` 为空（``GenerationPlan`` 直传 / 老调用）⇒ ``None``：行为**零变化** ✓。
+        """
+        mode = str(getattr(plan, "mode", "") or "")
+        if not mode:
+            return None, [], self.SCALE_RESIZE_METHOD
+        scale = float(getattr(plan, "scale", 0.0) or 0.0)
+        if mode == "ai-2x":
+            want = (before[2] * 2, before[3] * 2)
+            if (after[2], after[3]) == want:
+                return None, [f"倍率 2× 由放大器直接给出 ✓（{after[2]}×{after[3]} 潜变量 ✓）"], \
+                    self.SCALE_RESIZE_METHOD
+            return want, [f"⚠️ 放大器给出 {after[2]}×{after[3]} ✗，而计划是 2×"
+                          f"（{want[0]}×{want[1]} ✓）⇒ 按计划缩回去 ✓"], self.SCALE_RESIZE_METHOD
+        if mode == "ai-2x-resize":
+            # ⚠️⚠️ 区间必须核 ✗✗（2026-11-08 补 ✗）：计划层 ``plan_upscale`` 只在 ``1 < scale < 2``
+            #    才产这个模式 ✓（``scale ≤ 1`` ⇒ normal ✓、``scale > 2`` ⇒ tiled ✓）；而请求体是
+            #    **人/前端手写的 dict** ✓ ⇒ ``mode`` 与 ``scale`` 可以配出计划层永远不会产出的组合 ✓✗。
+            #    两种组合都会**静默出一张"假超清"** ✓：
+            #      · ``scale ≤ 1`` ⇒ 先放大 2× 再缩回原尺寸 ✓ ⇒ 尺寸与普通模式**一模一样**、
+            #        耗时却是 ≈6× ✓✗，回执 ``applied=true / scale=1.0`` 自洽得没有任何破绽 ✓；
+            #      · ``scale ≥ 2`` ⇒ 放大器只给 2× ✓ ⇒ 再从 2× **插值**放大到 3×/4× ✓✗
+            #        （bicubic 放大不会长出细节 ✓，却会被当成"AI 4×"交付 ✓）。
+            if scale <= 1.0:
+                raise TorchBackendUnavailable(
+                    f"``ai-2x-resize`` 要 {scale:g}× ✗：**≤1× 不需要放大器** ✓ ⇒ 这次等同普通模式"
+                    f"（先 2× 再缩回原尺寸 = 尺寸不变、耗时 ≈6× ✓✗）⇒ **拒** ✗ "
+                    f"—— 真的要原尺寸请把超清关掉（``mode=normal``）✓，要放大请给 >1× ✓",
+                    reason="pending")
+            if scale >= 2.0:
+                raise TorchBackendUnavailable(
+                    f"``ai-2x-resize`` 要 {scale:g}× ✗✗：这个模式的名字就写着**缩到 2× 以下** ✓"
+                    f"（放大器只会做**空间 2×** ✓）；再往上**只能靠插值** ✓✗（不会长出新细节 ✓）"
+                    f"⇒ **拒** ✗ —— {scale:g}× 若真要 AI 放大得走 ``tiled-ai-2x``（多次分块放大 + 缝合 ✓，"
+                    f"本后端**没实现** ✗ ⇒ 也会拒 ✓）；恰好 2× 请用 ``ai-2x`` ✓（放大器直接给 ✓）",
+                    reason="pending")
+            height = self._target_latent(before[2] * scale)
+            width = self._target_latent(before[3] * scale)
+            note = (f"缩放：放大器 2× → 计划 {scale:g}× ✓（潜变量 {height}×{width} ✓、"
+                    f"方法 {self.SCALE_RESIZE_METHOD} ✓）")
+            actual = height / before[2]
+            if abs(actual - scale) > 0.005:
+                note += f"；⚠️ 取整后实际 {actual:.4g}×"
+            return (height, width), [note], self.SCALE_RESIZE_METHOD
+        if mode == "tiled-ai-2x":
+            raise TorchBackendUnavailable(
+                f"``tiled-ai-2x``（{scale:g}× 分块）**执行层没实现** ✗✗：本后端只做一次整张 2× ✓，"
+                f"而 {scale:g}× 要**多次分块放大 + 缝合** ✓（大块解码会出 NaN/Inf ✓✗）⇒ **拒** ✗ "
+                f"—— 静默出 2× 会让你以为 {scale:g}× 开着 ✓✗；只要 1.5× 请用 ``ai-2x-resize`` ✓",
+                reason="pending")
+        raise TorchBackendUnavailable(
+            f"不认识的超清模式 {mode!r} ✗ ⇒ **不猜**（已知：ai-2x / ai-2x-resize / tiled-ai-2x ✓）",
+            reason="pending")
+
+    def _scale_video_latents(self, video: Any, target: tuple[int, int], method: str) -> Any:
+        """把 ``[C,T,H,W]`` 缩到目标 ``(H, W)`` ✓ —— **只动空间维**（逐帧 ✓、时间不插值 ✗✗）。
+
+        ⭐ 这里就是 :mod:`image_ops` 的真接线点 ✓：它吃 5 维 ``(B,C,T,H,W)`` 并把 ``T`` 折进
+        batch **逐帧**缩 ✓ —— 不该自己再写一份双线性 ✗（两份口径迟早对不上 ✓✗）。
+        """
+        from app.services.engine import image_ops  # noqa: PLC0415
+
+        scaled = image_ops.common_upscale(video.unsqueeze(0), int(target[1]), int(target[0]),
+                                          method, "disabled")
+        return scaled.squeeze(0).to(video.dtype)
+
+    def _upscale_keyframes(self, latents: Any, refined: Any, shape: tuple[int, ...], *,
+                           target: tuple[int, int] | None = None) -> Any:
         """⭐ 关键帧/参考行的潜变量**也要 2×** ✗✗（口径来自上游 ``_h3_scale_cond_refs`` ✓）。
 
         ⚠️ 不同步就会「目标域 2× 而关键帧还是 1×」✓✗ —— 形状对不上一般会**报错** ✓，
@@ -4721,7 +4974,15 @@ class TorchBackend:
                     f"关键帧潜变量应当是 5 维（收到 {tuple(int(v) for v in latent.shape)} ✓）✗",
                     reason="pending")
             # ⚠️ 用**同一个** 2× 口径 ✓（`upscale_net.spatial_bilinear_2x` ✓ —— 与放大器内部一致 ✓✗）
-            upscaled = upscale_net.spatial_bilinear_2x(latent.float())
+            if target is None:
+                upscaled = upscale_net.spatial_bilinear_2x(latent.float())
+            else:
+                # 主视频要缩到**目标域** ✓ ⇒ 关键帧必须同尺寸 ✓✗（两边不同分辨率擦边对上时
+                # 是**静默**错 ✓✗）。直接一次缩到位 ✓ 不必"先 2× 再缩"✓（多插一次反而更糊 ✓）。
+                from app.services.engine import image_ops  # noqa: PLC0415
+                upscaled = image_ops.common_upscale(
+                    latent.float(), int(target[1]), int(target[0]),
+                    self.SCALE_RESIZE_METHOD, "disabled")
             scaled.append({**item, "latent": upscaled.to(latent.dtype)})
         return scaled
 
@@ -6016,6 +6277,11 @@ class TorchBackend:
                 reason="pending")
         info = st.inspect(path)                       # ⚠️ 只读头部 ✓（25 GiB 不落内存 ✓）
         shapes = {name: tuple(record.shape) for name, record in info.tensors.items()}
+        #: ⭐ 先读**逐层量化说明** ✓✗（2026-11-09 ✓）：① ``packed`` 决定**反推尺子**时列数要不要 ×2 ✓
+        #: （nvfp4 的 ``q_proj`` 是 ``[8192, 2560]`` ✓，按形状直读会把 hidden 读成 2560 ✓✗ ⇒
+        #: heads 变 32、40 层前向全错、**一声不响** ✓）；② ``convrot`` 给 int8 那一支换壳用 ✓。
+        specs = loader.quant_specs_of(path, info)
+        packed = quant_mod.packed_weight_stems_of(specs)
         #: ⚠️ **先看两半在不在** ✗（依据是**键名**，不是文件名 ✓）：只有一半 ⇒ 形状照样全对 ✓、
         #: 装完 `complete=True` ✓、前向里视觉块拿不到特征 ✓✗ —— 这会一路静默到出片才发现 ✓。
         halves = {"model.embed_tokens.weight": "语言塔（model.* ✓）",
@@ -6028,8 +6294,8 @@ class TorchBackend:
                 f"缺视觉塔时形状照样全对 ✓、前向里参考图块**静静地**没有特征 ✓✗）",
                 reason="pending")
         try:
-            text_shape = vl_te_mod.infer_shape(shapes)
-            vision_shape = vl_vision_mod.infer_shape(shapes)
+            text_shape = vl_te_mod.infer_shape(shapes, packed_stems=packed)
+            vision_shape = vl_vision_mod.infer_shape(shapes, packed_stems=packed)
         except Exception as error:  # noqa: BLE001 —— 两族的 ShapeError 都不是同一类 ✓
             raise TorchBackendUnavailable(
                 f"这份权重推不出 Qwen3-VL-32B 的 H3 文本塔 ✗：{error} ✓",
@@ -6055,18 +6321,40 @@ class TorchBackend:
         #: ⚠️⚠️ **换壳必须排在物化之前** ✗✗：那 350 个 ``nn.Linear`` 一旦被物化成 bf16 实存
         #: （62 GiB ✓），换掉它们**不会**把内存还给系统 ✓（实测 WS 停在 74 GiB、系统只剩 6 GiB ✓✗）。
         #: 反过来先在 meta 上换壳 ⇒ 物化时只按 **int8 22.7 GiB ＋ 其余 3 GiB** 分配 ✓。
-        convrot, convrot_gap = quant_mod.convrot_group_of(loader.quant_specs_of(path, info))
+        convrot, convrot_gap = quant_mod.convrot_group_of(specs)
         if convrot_gap:
             raise TorchBackendUnavailable(
                 f"convrot 说明自相矛盾 ✗ ⇒ 不装载（不按猜的 group 算 ✗）：{convrot_gap}",
                 reason="pending")
+        #: ⭐ **两支常驻壳，按文件自述分派** ✓✗（2026-11-09 ✓）：
+        #: ``int8_convrot`` 那份 ⇒ :func:`h3_form.upgrade_linear_to_int8` ✓（``Int8Linear`` ✓）；
+        #: ``nvfp4`` 那份 ⇒ :func:`h3_form.upgrade_linear_to_nvfp4` ✓（``NvFp4Linear`` ✓，权重
+        #: ``uint8 [out, in/2]`` ✓ 打包原样上卡 ✓、反量化在前向里逐层 ✓）。
+        #: ⚠️ 两支**互斥但都要在物化之前** ✗✗：同一份文件里 350 个 ``nn.Linear`` 若先被物化成 bf16
+        #: 实存（62 GiB ✓），换壳**不会**把内存还给系统 ✓（实测 WS 停在 74 GiB ✓✗）。
+        nv_plan = nvfp4_scale_plan(info, packed_stems=packed)
         plan = int8_scale_plan(info)
-        if not plan:
+        if nv_plan:
+            replaced = h3_form.upgrade_linear_to_nvfp4(module, nv_plan)
+            quant_kind = "nvfp4"
+            #: ⚠️ 同一份文件里若**还有** int8 线性层（混合量化 ✓，盘上目前没有 ✓）：它们会被
+            #: `load_module_weights` 按 bf16 反量化 ✓（数值对 ✓、只是占 2 倍 ✓）⇒ 如实记账，
+            #: 不假装"都常驻了" ✗（``nvfp4LeftoverInt8`` 一并进回执 ✓）。
+            linear_names = {name for name, holder in module.named_modules()
+                            if isinstance(holder, self._torch().nn.Linear)}
+            leftover_int8 = sorted(set(plan) & linear_names)
+        elif plan:
+            replaced = h3_form.upgrade_linear_to_int8(module, plan, convrot=convrot)
+            quant_kind = "int8"
+            leftover_int8 = []
+            #: ⚠️ nvfp4 那一支里 ``embed_tokens`` 也是 ``I8`` ＋ per-row scale ✓ —— 它不是
+            #: ``nn.Linear`` 而是 ``nn.Embedding`` ✓ ⇒ **不换壳**（没有 int8 嵌入壳 ✓）、装载时
+            #: 按 bf16 反量化 ✓（151936×5120 ⇒ 1.45 GiB ✓，这份账已算在"其余张量"里 ✓）。
+        else:
             raise TorchBackendUnavailable(
-                f"这份 H3 文本塔里**一个 int8 权重都没有** ✗（{len(info.tensors)} 键 ✓）⇒ "
-                f"不像 `int8_convrot` 那份 ✓；按 bf16 整份装会要 50 GiB ✗ ⇒ **拒装** ✓"
-                f"（真要用 bf16 版请显式换成 `nvfp4`/bf16 的那条路 ✓）", reason="pending")
-        replaced = h3_form.upgrade_linear_to_int8(module, plan, convrot=convrot)
+                f"这份 H3 文本塔里**一个 int8/nvfp4 权重都没有** ✗（{len(info.tensors)} 键 ✓）⇒ "
+                f"不像 `int8_convrot` / `nvfp4_awq` 那两份 ✓；按 bf16 整份装会要 50 GiB ✗ ⇒ **拒装** ✓"
+                f"（真要用 bf16 版请显式换成 nvfp4/bf16 的那条路 ✓）", reason="pending")
         #: ⚠️ 先钉**文件里是 F32** 的键 ✓（与 `_prepare_h3_module` 的同一条口径与顺序 ✓）：
         #: 这份文件里 F32 只有 ``*.weight_scale`` ✓（int8 常驻层自己就按 float32 建 ✓）——
         #: 但**不写死名单** ✗：将来的重导出可能带别的 fp32 岛 ✓。
@@ -6111,13 +6399,25 @@ class TorchBackend:
             extra={"int8Residency": parked, "int8Ledger": int8_ledger,
                    #: meta 建壳那条路的账 ✓：实际被物化的参数/缓冲区个数 ✓（0 ⇒ 一个 meta 都没剩 ✓）
                    "int8Upgraded": len(replaced), "materializedParams": filled,
+                   #: ⭐ 量化档位**如实报** ✓（2026-11-09 ✓）：``int8`` / ``nvfp4`` 两条路的
+                   #: 常驻形态、反量化时机、AWQ 层数都不一样 ✓ ⇒ 回执只写 ``int8Upgraded`` 会让
+                   #: 人把 nvfp4 那份当成 int8 ✓✗（``nvfp4Resident`` 与 ``weightLoad`` 的
+                   #: ``dequant.nvfp4Resident`` 是**同一件事的两个观测点** ✓）。
+                   "quantKind": quant_kind, "nvfp4Upgraded": len(replaced) if nv_plan else 0,
+                   "nvfp4AwqLayers": sum(1 for _, awq in nv_plan.values() if awq),
+                   "nvfp4PackedGiB": round(sum(int(info.tensors[f"{stem}.weight"].nbytes)
+                                               for stem in nv_plan) / device_policy.GIB, 2),
+                   "leftoverInt8Layers": list(leftover_int8),
                    "textDim": runtime.output_dim,
                    "visionShape": dict(vision_shape),
                    "unexpectedCount": len(report_weights.unexpected)},
-            note=("**真** Qwen3-VL-32B 双塔 ✓（语言塔 `model.*` ＋ 视觉塔 `visual.*` ✓，"
-                  "一个文件一次装 ✓）；int8 常驻层 "
-                  f"{int8_ledger['layers']} 个 ✓；`tags` 由 "
-                  "`h3_encode.encode_condition` 按 `<|image_pad|>` 位置算 ✓"))
+            note=(("**真** Qwen3-VL-32B 双塔 ✓（语言塔 `model.*` ＋ 视觉塔 `visual.*` ✓，"
+                   "一个文件一次装 ✓）；" + ("nvfp4 打包常驻层 " + f"{len(replaced)} 个 ✓"
+                                             "（打包原样上卡 ✓、反量化在**前向逐层** ✓，"
+                                             f"其中 AWQ {sum(1 for _, awq in nv_plan.values() if awq)} 层 ✓）"
+                                             if nv_plan else
+                                             f"int8 常驻层 {int8_ledger['layers']} 个 ✓")
+                   + "；`tags` 由 `h3_encode.encode_condition` 按 `<|image_pad|>` 位置算 ✓")))
 
     def attach_vae(self, config: Any = None) -> dict[str, Any]:
         """挂视频 VAE ✓ ⇒ :meth:`decode` 能出**真帧** ✓ —— **两族都认** ✓（2026-10-29 扩 ✓）。
@@ -7894,6 +8194,27 @@ class TorchBackend:
         result["manifestPath"] = str(target)
         return str(target)
 
+    @staticmethod
+    def _clip_alert(report: dict[str, Any]) -> str | None:
+        """「波形被削顶」那一句 ✓（**唯一句源** ✓ —— 5 维那支与纯音频那支都调它 ✓）。
+
+        ⚠️ 为什么必须喊 ✗✗（2026-11-10 补 ✗）：:func:`media.write_wav` 早就把 ``clipped``
+        （**越界样本数** ✓）算出来交出去了 ✓ —— 可它只躺在 ``audio`` 子字典里 ✓✗，
+        ``note`` / ``alerts`` 一个字不提 ✓。于是「整段削顶、听着一片爆音 ✗」与
+        「增益刚好 ✓」在回执里**同形** ✓（都是"真 wav ✓"），而削顶**绝不抛异常** ✓、
+        也不会被判成 ``silent`` ✓（峰值恒为 1.0 ✓ 甚至更"响" ✓）⇒
+        这是本族里最隐蔽的一格：**测量到了，但没人说** ✓✗。
+        ⚠️ 人话要**先排除**解码/混流 ✗：削顶的锅在**波形生成那一段的增益/归一化** ✓。
+        """
+        count = int(report.get("clipped") or 0)
+        if count <= 0:
+            return None
+        total = int(report.get("samples") or 0) * int(report.get("channels") or 0)
+        share = f"，占 {count / total * 100:.2f}%" if total else ""
+        return ("；⚠️ 波形有 %d 个样本**超出 [-1, 1] 被削顶** ✗%s —— "
+                "这一段会听成**爆音/失真** ✓，**不是**解码或混流的锅 ✓"
+                "（该查的是波形生成那一段的增益/归一化 ✓）" % (count, share))
+
     def write(self, outputs: dict[str, Any], plan: Any, request: Any) -> dict[str, Any]:
         """有**真帧张量**就落**真 mp4** ✓（ffmpeg ✓）；否则落张量清单 JSON ✓ —— 两种情况都如实标 ✓。"""
         self._gate()
@@ -7946,6 +8267,32 @@ class TorchBackend:
                     f"画面几乎是纯色（像素标准差 {report.get('std')} < 阈值 ✓）"
                     f"—— 检查值域口径（-1..1 / 0..1 ✓）与 VAE 是否真解出了内容 ✓")
                 result["note"] = str(result["note"]) + "；⚠️ 但画面**几乎是纯色** ✗（见 `degradedReason` ✓）"
+                #: ⭐⭐ 同一句还得进 ``alerts`` ✓✗（2026-11-10 补 ✗）—— 与音频那条**对称** ✓：
+                #:   纯色图**不抛异常** ✓、画布上就是"一张图" ✓，而前端只显示 ``warnings`` ✓✗
+                #:   （``result.note`` 与 ``degraded`` 它一个都不读 ✗）⇒ 用户看到一张灰片、
+                #:   回执里没一个字到他眼前 ✓✗。上一轮只给音轨补了这一步、图这一支漏了 ✗
+                #:   （同一个病根在同一个函数里换分支再犯一次 ✓）。
+                #:   ⚠️ ``_alert`` 定义在 5 维那支里面 ✓（闭包绑那个 ``result`` ✓）⇒ 这里不能复用 ✗，
+                #:   但这句与 ``note`` 里那句**逐字相同** ✓（不许各写一版 ✗）。
+                result.setdefault("alerts", []).append(
+                    "；⚠️ 但画面**几乎是纯色** ✗（见 `degradedReason` ✓）")
+            #: ⭐⭐ 「PNG 里**真有**那份元数据吗」也要单独表态 ✓✗（2026-11-10 补 ✗）：
+            #:   :func:`media.write_image` 现在写完后**从盘上读回来**逐键核过 ✓（``metadataKeys``
+            #:   只列真读到的 ✓、``metadataMissing`` 列送了却没进去的 ✓、``metadataReadback`` 三档 ✓）。
+            #:   这里只负责把「送了却没写进去」喊出来 ✓ —— 图一旦离开作业单，**元数据就是它唯一的出处** ✓，
+            #:   静默丢掉 = 这张图**永久说不清是哪个模型/多少步/什么提示词** ✗。
+            #:   ⚠️ 与 mp4 那侧 ``metadataDropped`` 同口径 ✓（2026-11-07 就为 mp4 补过 ✓，
+            #:   图这支当时只核了键名在不在**送出清单**里 ✓✗ —— "打算写"被当成"写成了" ✓）。
+            if report.get("metadataMissing"):
+                result["metadataMissing"] = list(report["metadataMissing"])
+                _missing_sentence = (
+                    "；⚠️ 元数据有 %d 个键**没写进 PNG** ✗（%s ✓）—— "
+                    "这张图脱离作业单后就说不清出处了 ✗"
+                    % (len(report["metadataMissing"]),
+                       "、".join(str(k) for k in report["metadataMissing"])))
+                result["note"] = str(result["note"]) + _missing_sentence
+                result.setdefault("alerts", []).append(_missing_sentence)
+            result["metadataReadback"] = report.get("metadataReadback")
             self._write_manifest(where, request, plan, result, outputs)
             return result
         if hasattr(frames, "shape") and len(tuple(frames.shape)) == 5:
@@ -7973,12 +8320,53 @@ class TorchBackend:
             report = media_mod.write_video(frames, target, fps=int(plan.fps or 24),
                                            value_range="-1..1", audio=audio_target,
                                            metadata=self._artifact_metadata(request, plan, "video"))
-            encoded_frames = report.get("nbFrames")
-            if expected_frames and encoded_frames is not None and int(encoded_frames) != expected_frames:
+            #: ⚠️ 这两道闸门在 ``write_video`` **之后**才判 ✓ ⇒ 一旦失败，盘上已经留了一条**帧数不对**
+            #:   的 mp4（＋可能还有 wav ✓）。而清单还没写 ✓、上游拿到的是异常 ✓ ⇒ 若把文件留在
+            #:   渲染目录里，它就成了一件"看着正常、其实作废"的产物 ✓✗（㉕ 那条不变量：「失败路径
+            #:   一个文件都没写」✓）。所以先把这次刚落的文件删掉再抛 ✓。
+            def _discard_written() -> None:
+                for item in (target, audio_target):
+                    try:
+                        if item is not None and Path(item).exists():
+                            Path(item).unlink()
+                    except OSError:
+                        pass              # 删不掉也不能把真正的错误信息盖掉 ✓
+            #: ⭐⭐ **「读数缺失」不许被读成「核对通过」** ✗✗（2026-11-08 补 ✗）：
+            #:   ``nb_frames`` 只在封装**写了 index** 时才有 ✓（分片 mp4 / 某些编码器 / 重封装中间态
+            #:   全都没有 ✓），``probe`` 如实给 ``None`` ✓。而旧的闸门写的是
+            #:   ``encoded_frames is not None`` ✓✗ —— 读不到就**整条跳过** ✓，回执里却照样写着
+            #:   「**真 mp4** ✓（ffprobe 可复核 ✓）」✓✗ ⇒ 「帧数逐帧核过了」与「根本没核」**同形** ✓。
+            #:   三层表态：``nb_frames`` 直读 ✓ → ``时长 × fps`` 估（±1 帧容差 ✓）→ 都没有则
+            #:   **明说没核过** ✓（``framesVerified: None`` ＋ note 里点名 ✗）。
+            #: ⭐⭐ **判定只许写一处** ✗✗（2026-11-08 收口 ✗）：上面那三层原本在**这里**又实现了一遍 ✓，
+            #:   而 ``chain.run_chain`` 落成片走的是 ``media.write_video`` ✓ ⇒ 那条路**一次都没核过
+            #:   帧数** ✓✗（它只在张量层守恒 ✓、不问编码器有没有丢帧 ✓）。同一件事两个地方各写一半 ⇒
+            #:   最典型的下场是一处改了另一处不改 ✓。现在唯一真源是 :func:`media.frame_verdict` ✓
+            #:   （``write_video`` 内已 ``report.update(...)`` ✓），这里**只读字段、不重算** ✓：
+            #:   ``framesVerified``（``"nb_frames"`` 直读 ✓ / ``"duration×fps"`` **估的** ✓ /
+            #:   ``None`` **没核过** ✗）、``framesMatch``（``False`` 才拦 ✓；``None`` ＝**没有可比读数**
+            #:   ✗ ⇒ 既不拦 ✗、也**不许读成通过** ✗ ⇒ 只写 note ✓）、``framesTolerance``（直读 0 / 估 ±1 ✓）。
+            probed_verified = report.get("framesVerified")
+            probed_encoded = report.get("encodedFrames")
+            encoded_frames = probed_encoded
+            #: ⚠️ ``expected_frames`` 为 0 时（plan 没声明帧数 ✓）``framesMatch`` 仍可能是 True/False ✓，
+            #:   但那条不是"与计划不符"（没有计划 ✓）⇒ 只在有计划时才表态 ✓。
+            frames_checked: str | None = probed_verified if expected_frames else None
+            if expected_frames and report.get("framesMatch") is False:
+                guessed = probed_verified == "duration×fps"
+                _discard_written()
+                if guessed:
+                    #: ⚠️ 估出来的值**只容 ±1 帧** ✓（容器时长是 float 秒 ✓，round 会上下抖一帧 ✓）：
+                    #:   超出就不是"读数抖了"，是**真丢/真补了帧** ✗ ⇒ 照样不许静默落盘 ✓（容差在
+                    #:   ``frame_verdict`` 里判 ✓，这里只报 ✓）。
+                    raise media_mod.MediaError(
+                        f"落盘后的帧数**估出来**与计划不符 ✗：时长×帧率 ≈ {int(probed_encoded)} 帧 ✓，"
+                        f"plan.frames = {expected_frames} ✓（{target} ✗；已删掉这条废片 ✓；"
+                        f"ffprobe 没给 nb_frames ✓ 才用时长效估 ✓ —— 差这么多不是舍入 ✓）")
                 # ffprobe 读得到 nb_frames 时必须与 plan 一致 ✓（编码器丢/补帧同样是静默错 ✓✗）
                 raise media_mod.MediaError(
-                    f"落盘后的帧数与计划不符 ✗：mp4 里 {int(encoded_frames)} 帧 ✓，"
-                    f"plan.frames = {expected_frames} ✓（{target} ✗）")
+                    f"落盘后的帧数与计划不符 ✗：mp4 里 {int(probed_encoded)} 帧 ✓，"
+                    f"plan.frames = {expected_frames} ✓（{target} ✗；已删掉这条废片 ✓）")
             # ⚠️ 2026-11-01 修 ✗✗（接 SEEDVR2 修复线时踩到 ✓）：这里原先把 ``synthetic=True``
             #    与「画面来自**未训练**的参考 VAE ✗」**写死** ✓ —— 5 维帧此前只可能来自参考 VAE ✓，
             #    接上真视频 VAE（SEEDVR2 ``seedvr2-real`` ✓）之后这句话就成了假证 ✓✗：
@@ -8012,14 +8400,72 @@ class TorchBackend:
                 "synthetic": synthetic, "realTensors": True, "realFile": True,
                 "videoPath": str(target), "primaryPath": str(target),
                 "video": report,
+                #: ⭐ "**核过帧数**"与"**读不到所以没核**"必须分开 ✓✗（见上面 ``frames_checked`` 那段 ✓）：
+                #:   ``nb_frames``（直读 ✓）/ ``duration×fps``（估的 ✓）/ ``None``（**没核过** ✗）。
+                #:   原先这里什么都没有 ⇒ 回执只有「真 mp4 ✓（ffprobe 可复核 ✓）」✓✗ —— 读者会把它
+                #:   读成"帧数也核过了" ✓，而真相是"ffprobe 没给 nb_frames、闸门整条跳过" ✓。
+                "framesVerified": frames_checked,
+                "encodedFrames": (int(encoded_frames) if encoded_frames is not None else None),
+                #: ⭐⭐ 帧率同样三档 ✓✗（2026-11-10 补 ✗，判据在 :func:`media.compare_fps` ✓）：
+                #:   ``"exact"`` ✓ / ``"drift"`` ✗（帧率被改了 ✓）/ ``None`` ✗（**盘上没读到** ⇒
+                #:   「有没有被改」**不知道** ✓，不是"一致" ✗）。缺了这两格 ⇒ 「24 fps 封好 ✓」
+                #:   与「按 12 fps 封了 ✗」在同一条回执里同形 ✓（每格都"有值"、都 ffprobe 可复核 ✓）。
+                "fpsVerified": report.get("fpsVerified"),
+                "fpsRequested": report.get("fpsRequested"),
                 "artifacts": [{"kind": "video", "path": str(target), "bytes": report["bytes"]}],
                 "note": "**真 mp4** ✓（ffprobe 可复核 ✓）" + picture_note + sound_note,
             }
+            #: ⭐⭐ 「跑完才知道的结论」还要能**被看见** ✗✗（2026-11-09 补 ✗）：``note`` 是一整段
+            #:   中文长文 ✓（用户很少读完 ✓），而画布上真正显示的是 ``warnings`` ✓ —— 那是
+            #:   ``result.plan.warnings`` ✓（**提交前**的计划警告 ✓），跑完才知道的话此前**只**进
+            #:   ``note`` ✓✗ ⇒ 「音轨几乎是静音 ✗」「mp4 里音轨被截掉 0.6 秒 ✗」这些在界面上
+            #:   **一句都看不到** ✓✗（后端说了、没人看见 ＝ 白说 ✓）。
+            #:   ⇒ 凡是要人**拔腿去查**的结论，同时 append 进 ``result.alerts`` ✓（前端把它并进
+            #:   warnings ✓；REST 用户也能直接读 ✓）。返回原句，好让 ``note`` 那句与它**同源** ✓
+            #:   （两处各写一遍必然哪天漂移 ✗）。
+            def _alert(sentence: str) -> str:
+                result.setdefault("alerts", []).append(sentence)
+                return sentence
+
+            if expected_frames and frames_checked == "duration×fps":
+                result["note"] = (str(result["note"])
+                                  + f"；帧数按时长×帧率**估**得 {int(encoded_frames)} 帧 ✓"
+                                    f"（ffprobe 没给 ``nbFrames`` ✓ ⇒ 与计划的 ±1 帧内算对上 ✓；"
+                                    "要逐帧实证得重封装修 index ✓）")
+            elif expected_frames and frames_checked is None:
+                result["note"] = (str(result["note"])
+                                  + _alert("；⚠️ 落盘帧数**没核对过** ✗（ffprobe 既没给 ``nbFrames`` ✓、"
+                                           "也读不出可用的时长/帧率 ✓）—— 「真 mp4 ✓」不等于"
+                                           "「帧数对得上」✗"))
+            if report.get("fpsVerified") == "drift":
+                #: ⚠️ 这一句要人**拔腿去查**（不是"多看一眼"✓）⇒ 同时进 ``alerts`` ✓：
+                #:   帧率被改 ⇒ **音画不同步** ✗、成片时长也不对 ✗，而画面上完全看不出来 ✓
+                #:   （它就是"正常播" ✓），回执里此前每格都"有值" ✓。
+                result["fpsOnDisk"] = report.get("fps")
+                result["fpsDrift"] = report.get("fpsDrift")
+                result["note"] = (str(result["note"])
+                                  + _alert(str(report.get("fpsNote")
+                                               or "；⚠️ 盘上帧率与请求的**不一致** ✗")))
+            elif report.get("fpsVerified") is None:
+                #: ⚠️ 「**没读到**帧率」同样不许安静放过 ✗✗（2026-11-10 补 ✗，与上面那条
+                #:   「落盘帧数没核对过」**同一规矩** ✓）：``None`` 不是"一致" ✗ —— 它是
+                #:   「这次**没核**」✓。不喊的话，回执里 ``fps`` 那格是 ``None`` ✓、
+                #:   而 ``durationSeconds`` / ``videoSeconds`` 都"有值" ✓ ⇒ 读起来像一切正常 ✓✗。
+                result["note"] = (str(result["note"])
+                                  + _alert("；⚠️ 盘上帧率**没读到** ✗（``r_frame_rate`` 缺失 ✓）"
+                                           "⇒「帧率是不是请求的那个」**不知道** ✗"
+                                           "（这不是「帧率一致」✓✗）"))
             if report.get("metadataDropped"):
                 # ⚠️ "写了元数据"与"元数据在文件里"是两件事 ✓✗（mp4 muxer 会静默丢掉不认识的键 ✓）
+                #: ⭐⭐ 这句也**必须进 ``alerts``** ✗✗（2026-11-10 补 ✗，与图像那侧 ``metadataMissing``
+                #:   同口径 ✓）：2026-11-07 为 mp4 补了 ``metadataDropped`` ✓，可只写进 ``note`` ✓✗
+                #:   ⇒ 前端一个 ``note`` 字都不读 ✓、画布上照样播得正常 ✓，用户永远不知道
+                #:   "这条片子说不清出处" ✓。元数据是产物离开作业单后**唯一的自证** ✓。
                 result["metadataDropped"] = list(report["metadataDropped"])
-                result["note"] = (str(result["note"]) + "；⚠️ 容器元数据有键**没写进去** ✗（"
-                                  + ", ".join(str(k) for k in report["metadataDropped"]) + "）")
+                result["note"] = (str(result["note"])
+                                  + _alert("；⚠️ 容器元数据有键**没写进去** ✗（"
+                                           + ", ".join(str(k) for k in report["metadataDropped"])
+                                           + "）—— 这条片子脱离作业单后说不清出处 ✗"))
             if waveform is not None and audio_target is not None and audio_report is not None:
                 # ⚠️ 2026-11-07 改 ✓：音轨**同时**进 mp4 ✓（``-af apad`` ＋ ``-shortest`` 以画面收尾 ✓）
                 #    —— 此前只有"静音 mp4 ＋ 单独 wav" ✓✗：播放器里没声音、成片还得再合一次 ✓。
@@ -8033,12 +8479,116 @@ class TorchBackend:
                 result["dualStream"] = True
                 #: 回执里写明"mp4 自带音轨" ✓ —— 只剩一条 wav 时前端会**只看画面** ✓✗
                 result["videoHasAudio"] = bool(report.get("hasAudio"))
+                #: ⭐⭐ **「源音轨多长」读没读到，也是三档** ✗✗（2026-11-08 补 ✗，与帧数那条
+                #:   同一个病根 ✓）：「音轨被截掉 1 秒」与「音轨有没有被截**不知道**」此前在回执里
+                #:   **完全同形** ✓✗ —— ``write_video`` 里 ``if audio_seconds is not None:`` 之后没有
+                #:   else ✓，读不到就整段跳过 ✓，而下面这句人话照旧写着「音轨补静音到画面长度 ✓」
+                #:   ⇒ 一句**肯定**的话盖住了「这次没核」✓。现在 ``audioLengthVerified`` 四档
+                #:   ＝ ``"wave"``（wav 头直读 ✓）/ ``"ffprobe"``（流时长兜底 ✓）/ ``"decoded"``
+                #:   （全解码量到 ✓）/ ``None``（**三路都没读到** ✗）⇒ ``None`` 时**不许**复用那句
+                #:   「补静音到画面长度」✓✗。
+                #: ⭐⭐ 且 ``None`` 内部还分两档 ✓✗（2026-11-09 补 ✗）：``audioLengthMiss``
+                #:   ＝ ``"too_long"``（源超过全解码上限 ⇒ **这次没量** ✓）/ ``"unreadable"``
+                #:   （三路都失败 ✓）。这句人话此前**写死**成「读不出来」✗ ⇒ ``media.write_video``
+                #:   刚分好的两档到这里被**拍平** ✓✗（下游把上游的表态吃掉，正是这条线的老病根 ✓）；
+                #:   现在按那个机器码分两句 ✓ —— 不靠中文长句做字符串匹配 ✗。
+                audio_how = report.get("audioLengthVerified")
+                audio_miss = report.get("audioLengthMiss")
+                result["audioLengthVerified"] = audio_how
+                #: ⭐ 原因也**原样上去** ✓（``too_long`` / ``unreadable`` / ``None`` ✓）：回执外面
+                #:   那句中文人话有两处（``audio_tail`` 与 ``audioTrimUnverified`` ✓），只靠中文
+                #:   分不开"哪一句写了什么" ✗ —— 判据与前端都该读机器码 ✓（与 media 同一口径 ✓）。
+                result["audioLengthMiss"] = audio_miss
+                if not result["videoHasAudio"]:
+                    audio_tail = "但**没混进 mp4** ✗（见 `videoHasAudio` ✓）"
+                elif audio_how is None and audio_miss == "too_long":
+                    audio_tail = ("并已混进 mp4 ✓ —— 音轨按 ``-t`` 收尾到**画面长度** ✓，"
+                                  "但源音轨**没有量到底** ✗（超过全解码上限 ⇒ 这次**没量** ✓，"
+                                  "不是读不出来 ✓）⇒ 有没有被截**不知道** ✗（这不是「没截断」✓✗）")
+                elif audio_how is None:
+                    audio_tail = ("并已混进 mp4 ✓ —— 音轨按 ``-t`` 收尾到**画面长度** ✓，"
+                                  "但源音轨到底多长**读不出来** ✗ ⇒ 有没有被截**不知道** ✗"
+                                  "（这不是「没截断」✓✗）")
+                else:
+                    audio_tail = "并已混进 mp4 ✓ —— 音轨补静音到画面长度、以画面收尾 ✓"
                 result["note"] = (str(result["note"])
                                   + "＋ **真 wav** ✓（16-bit PCM 原样另存 ✓；"
-                                  + ("并已混进 mp4 ✓ —— 音轨补静音到画面长度、以画面收尾 ✓"
-                                     if result["videoHasAudio"] else
-                                     "但**没混进 mp4** ✗（见 `videoHasAudio` ✓）")
+                                  + audio_tail
                                   + "）")
+                #: ⭐⭐ 音轨**在** ≠ 音轨**有声音** ✗✗（2026-11-09 补 ✗）：上面每一格（``videoHasAudio``
+                #:   ✓、``audioLengthVerified`` ✓、``audioTruncated`` ✓）都只回答"这条流**存在**吗"✓，
+                #:   没有一格回答"这段波形**有没有振幅**"✗ —— 于是**全零波形**与正常音频在回执里
+                #:   同形 ✓✗：wav 照写 ✓、混进 mp4 照成 ✓、回执照说「真 wav ✓ 已混进 mp4 ✓」✓，
+                #:   用户点开是一段**无声片**，而回执里一个提示都没有 ✗。
+                #:   ⚠️ 人话必须把两件事**分开说** ✓：不是"音频没混进去"✗（那会让人去查 ffmpeg 参数 ✗），
+                #:   而是"音轨在、但内容是静的"✓ —— 该查的是波形生成那一段 ✓。
+                if audio_report.get("silent"):
+                    _dbfs = audio_report.get("peakDbfs")
+                    result["note"] = (str(result["note"])
+                                      + _alert("；⚠️ 这条音轨**几乎是静音** ✗（"
+                                               + (f"峰值 {_dbfs:g} dBFS" if _dbfs is not None
+                                                  else "峰值就是 0：**每个样本都是零**")
+                                               + " ⇒ 波形很可能**没生成出来** ✓；**不是**"
+                                                 "「音频没混进去」✗ —— 音轨确实在 mp4 里 ✓，"
+                                                 "只是内容是静的 ✓✗）"))
+                #: ⭐⭐ **削顶**也得喊 ✓✗（2026-11-10 补 ✗，句源 :meth:`_clip_alert` ✓）：
+                #:   ``clipped`` 早就算出来了 ✓ 但只躺在 ``audio`` 子字典里 ✓✗ ⇒ 整段爆音与
+                #:   增益刚好在回执里同形 ✓；而且削顶**不会被判成 silent** ✗（峰值恒 1.0 ✓ 更"响" ✓）
+                #:   ⇒ 这是最容易被当成"正常"的那一格 ✓。
+                _clip_sentence = self._clip_alert(audio_report)
+                if _clip_sentence:
+                    result["note"] = str(result["note"]) + _alert(_clip_sentence)
+                #: ⭐⭐ **音轨被截这件事必须喊出来** ✗✗（2026-11-08 补 ✗）：``write_video`` 的 ``-t``
+                #:   是单向的 ✓ —— 音轨比画面**短**是补静音（无损 ✓），比画面**长**是**截掉**（内容真丢 ✗）。
+                #:   此前只有 ``audioMuxed: True`` ✓✗ ⇒ 「用户那段音频被剪掉 1 秒」与「音频本来就这么长」
+                #:   在回执里**完全同形** ✓；而 ``probe`` 读的又是混完之后那条（被收过尾 ✓ ⇒ 永远自洽 ✓✗）。
+                #:   现在单列一格 ✓：给两侧真实秒数 ✓、指明 wav 未动 ✓、并写明"mp4 里听不到后半段" ✗。
+                if report.get("audioTruncated"):
+                    result["audioTruncated"] = {
+                        "videoSeconds": report.get("videoSeconds"),
+                        "sourceSeconds": report.get("audioSourceSeconds"),
+                        "trimmedSeconds": report.get("audioTrimSeconds"),
+                        "wavPath": result.get("audioPath"),
+                        "why": "音轨比画面长 ⇒ 混流用 ``-t``（画面长度）收尾 ✓，"
+                               "**多出来的那截没进 mp4** ✗（内容丢失 ✗ 不是口径问题 ✓）；"
+                               "源 wav 原样未动 ✓ —— 要全长读 ``wavPath`` ✓",
+                    }
+                    result["note"] = (str(result["note"])
+                                      + _alert(f"；⚠️ 音轨比画面长 {report.get('audioTrimSeconds')} 秒 ⇒ "
+                                               "**mp4 里被截掉** ✗（wav 是全长 ✓，见 `audioPath` ✓）"))
+                elif result["videoHasAudio"] and audio_how is None:
+                    #: ⚠️ 反过来那一半 ✗✗：**读不到**就单列一格 ＋ 一句人话 ✓ —— 不许安静放过 ✓
+                    #:   （安静放过等于替用户担保「你的音频整段都在」✗，而这次根本没量 ✓）。
+                    #: ⭐ ``why`` 也得分两档 ✓✗（2026-11-09 补 ✗）：原先写死「**两路**都没读到
+                    #:   ＋ ``wave`` 只认 PCM、ffprobe 的流时长也缺」✓✗ —— 那句话在今天的实现上
+                    #:   有**两处**是假话 ✓：① 早就有**第四级全解码** ✓（不是两路 ✓）；② 源过长
+                    #:   那次是**没量** ✗（不是"读不出来" ✓）。机器码单列 ``reason`` ✓，人和前端
+                    #:   都能直接读 ✓，不必猜中文 ✓。
+                    result["audioTrimUnverified"] = {
+                        "videoSeconds": report.get("videoSeconds"),
+                        "wavPath": result.get("audioPath"),
+                        "reason": audio_miss or "unreadable",
+                        "why": (
+                            "源音轨**超过全解码上限** ⇒ 这次**没量** ✗（不是读不出来 ✓）："
+                            "标准库 ``wave`` 只认 PCM ✓、ffprobe 的音频流时长也缺 ✓、"
+                            "容器时长又不能当音轨长度用 ✗，而全解码被成本闸门拦下 ✓ "
+                            "⇒ 「有没有被 ``-t`` 截掉」**不知道** ✗；这不是「没截断」✓✗ —— "
+                            "源 wav 在 ``wavPath`` ✓，要确认就单独量它 ✓"
+                            if audio_miss == "too_long" else
+                            "源音轨时长**三路都没读到** ✗（标准库 ``wave`` 只认 PCM ✓；"
+                            "ffprobe 的音频流时长也缺 ✓；连全解码都没给出可用时长 ✓）"
+                            "⇒ 「有没有被 ``-t`` 截掉」**不知道** ✗；"
+                            "这不是「没截断」✓✗ —— 源 wav 在 ``wavPath`` ✓，要确认就单独量它 ✓"),
+                        "note": report.get("audioLengthNote"),
+                    }
+                    result["note"] = (str(result["note"])
+                                      + _alert("；⚠️ 源音轨**没有量到底**（超过全解码上限 ⇒ 这次没量 ✓）"
+                                               "⇒ mp4 里那截**有没有被截不知道** ✗"
+                                               "（要确认就单独量 `audioPath` 那条 wav ✓）"
+                                               if audio_miss == "too_long" else
+                                               "；⚠️ 源音轨时长**读不出来** ⇒ mp4 里那截"
+                                               "**有没有被截不知道** ✗"
+                                               "（要确认就单独量 `audioPath` 那条 wav ✓）"))
             self._write_manifest(where, request, plan, result, outputs)
             return result
         if waveform is not None and hasattr(waveform, "shape"):
@@ -8060,6 +8610,26 @@ class TorchBackend:
                          + f"；{int(outputs.get('audioSamples') or 0)} 样本 @ {rate} Hz ✓"
                          + "；这一族**没有画面** ✓ —— 不要拿 ``primaryUrl`` 当视频用 ✗✗）"),
             }
+            #: ⭐⭐ 出歌这条分支**更需要**这一格 ✓✗（2026-11-09 补 ✗）：纯音频**没有画面可佐证** ✓
+            #:   ⇒ 一段全静音的 wav 若回执照说「真 wav ✓ 这就是成品音频 ✓」✓✗，用户只会怀疑
+            #:   "我哪设错了"（歌词？步数？）✓，而真相是波形那一段没出东西 ✓。
+            #:   ⚠️ 所以进 ``alerts`` ✓（会被前端显示 ✓），不只写在 ``note`` 长文里 ✓。
+            if report.get("silent"):
+                _dbfs = report.get("peakDbfs")
+                _sentence = ("；⚠️ 这条音频**几乎是静音** ✗（"
+                             + (f"峰值 {_dbfs:g} dBFS" if _dbfs is not None
+                                else "峰值就是 0：**每个样本都是零**")
+                             + " ⇒ 波形很可能**没生成出来** ✓；**不是**「文件没写成」✗ —— "
+                               "wav 在 ``audioPath`` ✓，只是内容是静的 ✓✗）")
+                result["note"] = str(result["note"]) + _sentence
+                result.setdefault("alerts", []).append(_sentence)
+            #: ⭐⭐ 出歌这条同样要报**削顶** ✓✗（2026-11-10 补 ✗）：音乐一整段超 [-1,1] ⇒
+            #:   成品是一段破音 ✓，而它比"静音"更**像正常产物** ✗（``silent`` 恒假 ✓、
+            #:   ``peakDbfs`` 还写着 0.0 dBFS ✓ 或更好看 ✓）⇒ 不喊就永远没人查 ✓。
+            _clip_sentence = self._clip_alert(report)
+            if _clip_sentence:
+                result["note"] = str(result["note"]) + _clip_sentence
+                result.setdefault("alerts", []).append(_clip_sentence)
             self._write_manifest(where, request, plan, result, outputs)
             return result
         target = where / f"torch_stub_seed{int(request.seed)}.json"

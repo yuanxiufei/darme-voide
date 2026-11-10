@@ -434,6 +434,11 @@ class EngineTask:
     events: list[dict[str, Any]] = field(default_factory=list)
     result: dict[str, Any] | None = None
     error: str | None = None
+    #: ⭐ 装载这一段花了多少毫秒 ✓（``None`` = **没装载**（干跑 ✓）或还没装 ✓ —— 与 ``loadReport``
+    #: 同一口径 ✓）。⚠️ 为什么要单独记 ✗✗（2026-11-08 补 ✗）：``elapsedMs`` 是墙钟（含装载 ✓）、
+    #: ``result.totalMs`` 只是管线各阶段之和（**不含**装载 ✗）⇒ 两个数在同一份回执里差一截 ✓✗，
+    #: 而**差额就是这一格** ✓。不记它，读的人只能猜"是装载贵、还是有个阶段没入账" ✓。
+    loadMs: int | None = None
     #: 装载报告 ✓（``None`` = 干跑 / 还没装 ✓ —— 别默认 ``{}`` ✗：分不清"没装"与"装了没报告" ✓✗）
     loadReport: dict[str, Any] | None = None
     #: 取消旗标 ✓ —— 管线每步查一次 ✓（``pipeline.run_sync(cancel=…)`` ✓）
@@ -449,10 +454,26 @@ class EngineTask:
     def to_summary(self) -> dict[str, Any]:
         """列表用的瘦身版 ✓（**不带事件** ✗ —— 否则 30 步的任务会把列表撑爆 ✓✗）。"""
         outputs = (self.result or {}).get("outputs") or {}
+        #: ⭐ ``timing`` 一格回答「这个 ``elapsedMs`` 由哪几段拼成」✗✗（2026-11-08 补 ✗）：
+        #: ``elapsedMs`` = 装载（:attr:`loadMs` ✓）＋ 管线墙钟（``result.wallMs`` ✓）＋
+        #: 排队与收尾（:attr:`unaccountedMs` 那一格 ✓）。三个数都给了，读者才不用猜 ✓。
+        result = self.result if isinstance(self.result, dict) else {}
+        elapsed = self.elapsed_ms()
+        load = self.loadMs
+        pipeline_wall = result.get("wallMs")
+        unaccounted = (None if (load is None and pipeline_wall is None)
+                       else max(0, elapsed - int(load or 0) - int(pipeline_wall or 0)))
         return {
             "id": self.id, "status": self.status, "stage": self.stage,
             "createdAt": self.createdAt, "startedAt": self.startedAt,
-            "finishedAt": self.finishedAt, "elapsedMs": self.elapsed_ms(),
+            "finishedAt": self.finishedAt, "elapsedMs": elapsed,
+            "loadMs": load,
+            "timing": {"elapsedMs": elapsed, "loadMs": load,
+                       "pipelineMs": result.get("totalMs"),
+                       "pipelineWallMs": pipeline_wall,
+                       "unaccountedMs": unaccounted,
+                       "note": "``elapsedMs`` 是墙钟 ✓；``pipelineMs`` 只是管线各阶段之和 ✓"
+                               "（**不含装载** ✗）—— 别把两个数当成同一个 ✗"},
             "eventCount": len(self.events), "terminal": self.terminal,
             "videoPath": outputs.get("videoPath"), "audioPath": outputs.get("audioPath"),
             "primaryPath": outputs.get("primaryPath"), "error": self.error,
@@ -1081,6 +1102,9 @@ class EngineRuntime:
         assembly = {key: value for key, value in task.assembly.items() if key != "dryRun"}
         backend: Any = DryRunBackend() if dry else None
         if not dry:
+            #: ⭐ 装载这段单独计时 ✓（``finally`` ⇒ **成功/失败都记** ✗✗ —— 失败那条更该知道
+            #: 卡了多久才报错 ✓，而逐条 ``return`` 前补一行必然会漏 ✓）
+            load_started = _now_ms()
             try:
                 report = self._ensure_loaded_internal(**assembly)
                 task.loadReport = report
@@ -1088,11 +1112,15 @@ class EngineRuntime:
                     "kind": "load", "loaded": True, "reused": bool(report.get("reused")),
                     "device": report.get("device"),
                     "components": sorted((report.get("components") or {}).keys()),
+                    "elapsedMs": _now_ms() - load_started,
                 })
             except TorchBackendUnavailable as err:
                 task.events.append({"kind": "load", "loaded": False,
-                                    "reason": getattr(err, "reason", ""), "error": str(err)})
+                                    "reason": getattr(err, "reason", ""), "error": str(err),
+                                    "elapsedMs": _now_ms() - load_started})
                 return ("failed", f"装载失败：{err}")
+            finally:
+                task.loadMs = _now_ms() - load_started
             backend = self._backend
             if backend is None:             # 报告成功却没后端 = 内部矛盾 ⇒ 响亮报 ✗
                 return ("failed", "装载报告成功但运行时没有后端 ✗（内部状态不一致 ✓）")
@@ -1387,6 +1415,13 @@ class EngineRuntime:
                       force: bool = False) -> dict[str, Any]:
         """把引擎**装齐** ✓（同名参数 ⇒ **复用**已装的 ✓）⇒ 返回装载报告 ✓。
 
+        ``force=True`` ⇒ **同键也真重装一次** ✓✗（2026-11-09 兑现 ✓）：否则这个参数名承诺的
+        「强制」实际什么都没做 ✗（旧口径：同键照样命中复用、回执 ``reused=True`` ✓✗）。
+        真重装的代价是白花一次装配（H3 主干 17.94 GiB ≈ 20 秒 ✓）、且**装失败时旧的也没了** ✓
+        —— 这是 ``force`` 本来就该付的账 ✓（调用方显式要的 ✓），不是降级 ✗。
+        回执在这一次带 ``forced=true`` ＋ ``reused=false`` ✓（**不写进缓存的那份报告** ✗，
+        免得下一次 hit 复用也带 ``forced`` 把「重装过」读成「正在重装」✓✗）。
+
         ⚠️ 有任务在跑时**不许换装配** ✗（那是把在跑的模型从底下抽走 ✓✗）⇒ :class:`EngineBusy` ✓。
         ⚠️ 装不上 ⇒ ``TorchBackendUnavailable``（``reason`` 见模块头 ✓），且**不半装** ✗。
         ⚠️ ``loras`` **必须进装载键** ✗✗：它是**模型的一部分** ✓ —— 不进键就会出现
@@ -1502,22 +1537,27 @@ class EngineRuntime:
                 # ⚠️ **不记账** ✗：忙到拒装 ⇒ 什么都没发生 ✓（记成 miss 会把"排队等"和"真装一遍"混一起 ✓✗）
                 raise EngineBusy(f"引擎正在跑任务 {self._current} ✗ ⇒ 此刻不换装配 ✓"
                                  f"（先等它结束，或卸载后再装 ✓）")
-            if same:
-                # ⚠️ ``force=True`` 但装配键**完全相同** ⇒ :meth:`_ensure_loaded_internal` 一进门就
-                #    **当场复用**（那里也有一道同键短路 ✓）⇒ 实际发生的是「复用一次」✓✗。
-                #    这里若按 ``miss`` + ``eviction`` 记 ✗✗ 就是**两条假账**：既没真装、旧的也没丢 ✓✗
-                #    —— 量与事实不一致比"没有量"更坏 ✓（调参时会去追一个不存在的重装 ✓✗）。
-                self._note_cache("hit", key=key,
-                                 reason=("force=True 但装配键相同 ⇒ 内部**当场复用**已装的 ✓"
-                                         "（没有真装 ✗ —— force 对同键不生效 ✓✗，要重装请改装配键或先 unload ✓）"))
-                return {**dict(self._loadReport or {}), "reused": True}
-            self._note_cache("miss", key=key, reason="装配键不同 / 还没装 ⇒ 真装一次 ✓")
+            #: ⚠️⭐ ``force=True`` ＋ 同键 ⇒ **真重装一次** ✓✗（2026-11-09 改判 ✓）。
+            #: 旧口径是「force 对同键不生效 ⇒ 记 hit 复用」✓，理由是「记 miss+eviction 会是两条假账」✓ ——
+            #: 那个理由在当时成立 ✓（当时内部确实当场复用 ✗），但它把 ``force`` 这个参数名
+            #: 变成了**纯装饰** ✓✗：调用方显式要求重装，实际什么都没发生，还回 ``reused=True`` ✓✗。
+            #: 现在改成让 ``force`` 跳过内部那道同键短路 ✓（见 ``_ensure_loaded_internal`` 的
+            #: ``force_reload`` ✓）⇒ 装配线进门先 ``_reset_loaded()`` ✓、旧的**确实**被丢了、
+            #: 新的**确实**装了一遍 ✓ ⇒ ``miss`` ＋ ``eviction`` 这两条账**不再是假账** ✓✗。
+            forced_same = bool(same and force)
+            if forced_same:
+                self._note_cache("miss", key=key,
+                                 reason="force=True ⇒ 同键也**真重装**一次 ✓（不是复用 ✗）")
+            else:
+                self._note_cache("miss", key=key, reason="装配键不同 / 还没装 ⇒ 真装一次 ✓")
             if self._backend is not None:
                 # ⚠️ 这条要记在**动手之前** ✗✗：`_ensure_loaded_internal` 会**先把旧的放掉**再装 ✓
                 #    （两套大模型同时在内存里 = 峰值翻倍 = OOM ✓）⇒ 哪怕随后装失败，旧的也确实没了 ✓
                 #    —— 记在成功之后就会漏掉"装失败、旧的也丢了"这种最该看见的情形 ✓✗。
                 self._note_cache("eviction", key=self._loadKeyTuple,
-                                 reason="换装配 ⇒ 先把旧的放掉 ✓（两套同时在内存里会 OOM ✓✗）")
+                                 reason=("force=True ⇒ 同键那份也先放掉 ✓（两套同时在内存里会 OOM ✓✗）"
+                                         if forced_same else
+                                         "换装配 ⇒ 先把旧的放掉 ✓（两套同时在内存里会 OOM ✓✗）"))
         report = self._ensure_loaded_internal(stage=stage, dit_path=dit_path,
                                              tokenizer_path=tokenizer_path, device=device,
                                              audio_latent_mode=audio_latent_mode,
@@ -1539,12 +1579,20 @@ class EngineRuntime:
                                              vae_tiling=vae_tiling,
                                              profile_name=profile_name,
                                              profile_applied=applied,
-                                             loras=loras)
+                                             loras=loras,
+                                             #: ⚠️ 只在「force ＋ 同键」时打开 ✓✗：其余情形传 False ⇒
+                                             #: 内部那道短路的条件与改动前**逐字等价** ✓（默认路径零变化 ✓）。
+                                             force_reload=forced_same)
         #: ⭐ 档位**如实进回执** ✓✗：包括 ``ignored``（被 policy/vaeTiling 顶掉的项 ✓）与
         #: ``notWired``（看着像旋钮、其实没接线的那几项 ✓）—— 少了这两栏，用户只能凭
         #: "我选了 l1" 猜实际改了什么 ✓✗。⚠️ ``report`` 与 ``self._loadReport`` 是**同一个 dict** ✓
         #: （``_commit_load`` 存的引用 ✓）⇒ 这里加一格，``/engine/runtime`` 也一起有了 ✓。
         report["profile"] = resolved
+        if forced_same:
+            #: ⚠️ ``forced`` 只挂在**本次回执**上 ✓✗，绝不写进 ``_loadReport`` —— 两者是**同一个 dict** ✓，
+            #: 写进去会让下一次同键复用（``hit``）也带着 ``forced: True`` ✓✗ ⇒ 把「重装过一次」
+            #: 读成「这次也在重装」✓。返回副本即可 ✓（``_loadReport`` 本体不动 ✓）。
+            return {**report, "reused": False, "forced": True}
         return report
 
     def _reset_loaded(self) -> bool:
@@ -1648,7 +1696,8 @@ class EngineRuntime:
                                vae_tiling: Any = None,
                                gpu_layers: Any = None,
                                profile_name: str = "auto",
-                               profile_applied: dict[str, Any] | None = None) -> dict[str, Any]:
+                               profile_applied: dict[str, Any] | None = None,
+                               force_reload: bool = False) -> dict[str, Any]:
         """真正装配 ✓（**不带排队守卫** ✗ —— worker 自己持有当前任务，见 :meth:`_execute` ✓）。
 
         顺序**按依赖来** ✓（⚠️ 不是随便排的 ✗）：主 DiT 先装 ✓ ⇒ ``attach_text_encoder`` 才能
@@ -1691,7 +1740,11 @@ class EngineRuntime:
                         #: ⚠️ 与 :meth:`ensure_loaded` 那条**逐字同键** ✓✗（两处都算键 ⇒ 不一致就永远不复用 ✓✗）
                         profile=profile_name)
         with self._lock:
-            if self._backend is not None and key == self._loadKeyTuple:
+            #: ⚠️⭐ ``force_reload`` 是**唯一**能跳过这道短路的入口 ✓✗（2026-11-09）：
+            #: 调用方显式 ``force=True`` ⇒ 同键也真重装一次 ✓ —— 否则 ``force`` 这个名字
+            #: 承诺的就是它实际什么都没做 ✗（各装配线进门都会 ``_reset_loaded()`` ✓，
+            #: 所以跳过短路即天然「先丢旧的再装」✓，不需要在这里额外释放 ✓）。
+            if self._backend is not None and key == self._loadKeyTuple and not force_reload:
                 return {**dict(self._loadReport or {}), "reused": True}
 
         #: ⭐ 2026-10-31：出图（SDXL）侧**已接** LoRA ✓✗（此前这里直接拒 ✓）——

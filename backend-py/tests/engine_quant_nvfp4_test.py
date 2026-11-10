@@ -202,6 +202,64 @@ def case_layout() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ③′ 查表解半字节的**索引位宽**（逐层现反量化的热路径 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+def case_unpack_index() -> None:
+    torch = _torch()
+    table = torch.tensor(nv.E2M1_VALUES, dtype=torch.float32)
+    #: **256 个字节全枚举** ⇒ 每一对半字节都被看到一次 ✓（抽样容易漏掉「只在高半字节错」这种 ✓✗）
+    codes = torch.arange(256, dtype=torch.int64)
+    #: ⚠️ `unpack_e2m1` **保持 2 维行形状** ✓（[16, 16] 字节 → [16, 32] ✓，不是拉平成 [256, 2] ✓✗）
+    want = torch.stack([table[codes >> 4], table[codes & 0x0F]], dim=1).to(torch.float32).reshape(16, 32)
+    packed = codes.to(torch.uint8).reshape(16, 16)
+    got = nv.unpack_e2m1(packed)
+    check("③′¹ 256 个字节**全枚举**逐值对拍 ✓（高半字节在前 ✓；`-0` 与 `0` 按 `==` 同值判 ✓）",
+          torch.equal(got, want), float((got - want).abs().max()))
+
+    #: 大形状随机对拍：索引一旦被截窄（int16/int8）就会溢到别的表项 ✓ ⇒ 不报错、只错值 ✓✗
+    generator = torch.Generator().manual_seed(11)
+    big = torch.randint(0, 256, (512, 2048), dtype=torch.uint8, generator=generator)
+    flat = big.reshape(-1).to(torch.int64)
+    want_big = torch.stack([table[flat >> 4], table[flat & 0x0F]], dim=1).reshape(512, 4096)
+    check("③′² 1 MiB 打包字节对拍 ✓（值域 0–255 全用到 ✓；位宽不够时越界/错项都不报错 ✓✗）",
+          torch.equal(nv.unpack_e2m1(big), want_big))
+
+    #: ⚠️ 源码判据：这条路**每层每次前向**都跑 ✓ ⇒ 单层 33 MB 打包字节扩成 int64 就是 262 MB 搬运 ✓
+    #: （实测单层 1.89 → 1.52 ms ✓、350 层 × 每次前向 0.66 → 0.53 秒 ✓）。
+    #: 反向验证：把 `to(torch.int32)` 改回 `to(torch.int64)` ⇒ **只有这条红** ✓✗（上面两条仍绿 ✓ ——
+    #: 这就是为什么必须留一条盯实现的判据 ✓：位宽错了数值照样对 ✓、只有速度变慢 ✓）。
+    import inspect  # noqa: PLC0415
+
+    source = inspect.getsource(nv.unpack_e2m1)
+    check("③′³ 索引**只用 int32** ✓✗（值域本来就 0–255 ✓ ⇒ 位宽再窄是溢出不是节省 ✓）",
+          "to(torch.int32)" in source and "to(torch.int64)" not in source,
+          [line.strip() for line in source.splitlines() if "int" in line])
+
+    #: ⚠️ 双字节那段再往里还有一层：`int16` 带符号 ⇒ 转 int32 后必须 `& 0xFFFF` 才归到 0–65535，
+    #: 而 `uint16` 是**零扩展** ⇒ 一趟转换就够 ✓。两者数值全同、只差一次 65 MB 读写
+    #: （实测单层 0.97 → 0.73 ms ✓，350 层 × 每次前向 0.34 → 0.26 秒 ✓）⇒ 只有源码判据盯得住 ✓✗。
+    check("③′⁴ 双字节索引用 **uint16 零扩展** ✓✗（`int16` + `& 0xFFFF` 多一趟 65 MB 读写：单层 +0.24 ms）",
+          "view(torch.uint16)" in source,
+          [line.strip() for line in source.splitlines() if "uint16" in line or "0xFFFF" in line])
+
+    #: 奇数列退回逐字节 —— 生产里列数都是偶数 ⇒ 这条路**只在别的调用方**上跑到 ✓；
+    #: 但它一旦形状错位就是静默错值 ✓✗ ⇒ 给它一条真跑的对拍 ✓
+    odd = torch.randint(0, 256, (16, 15), dtype=torch.uint8, generator=torch.Generator().manual_seed(12))
+    flat_odd = odd.reshape(-1).to(torch.int64)
+    want_odd = torch.stack([table[flat_odd >> 4], table[flat_odd & 0x0F]], dim=1).reshape(16, 30)
+    check("③′⁵ 打包列数为**奇**数 ⇒ 退回逐字节路径，结果与逐值展开逐位相同 ✓（偶数列那条走 uint16 双字节 ✓）",
+          torch.equal(nv.unpack_e2m1(odd), want_odd),
+          [int(odd.shape[1]), list(nv.unpack_e2m1(odd).shape)])
+
+    #: 「一次解几个字节」是**纯性能选择** ✓ —— 逐字节与两字节数值全同 ⇒ 上面几条判据一条都不会红 ✓✗，
+    #: 但退回逐字节要每层多花 0.24 ms（350 层 ⇒ 84 ms/次 encode ✓）⇒ 只能拿源码钉住 ✓。
+    quad_src = inspect.getsource(nv._byte_quad_lut)
+    check("③′⁶ 默认走**两字节一次查表**（quad 表 65536×4）✓✗ —— 退回逐字节数值照样对，只是每层 +0.24 ms",
+          "_byte_quad_lut" in source and "65536" in quad_src,
+          [line.strip() for line in source.splitlines() if "lut" in line])
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ④ 公式与 AWQ
 # ══════════════════════════════════════════════════════════════════════════
 def case_formula() -> None:
@@ -500,6 +558,7 @@ def main() -> int:
     case_spec()
     case_reference()
     case_layout()
+    case_unpack_index()
     case_formula()
     case_plan()
     case_loader()

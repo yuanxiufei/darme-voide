@@ -332,13 +332,26 @@ def case_phased() -> None:
     #: 那种写法钉的是**源码排版** ✓ —— 把 `backend` 换个形参名、换单引号、或拆成两行写 ✓，
     #: 换装一次都没少 ✓、判据却当场红 ✓✗（提示的是"少了一处换装"✗，读起来像真缺陷 ✓）。
     #: 判据该盯的是**没少、顺序对** ✓：AST 里取调用点的**常量实参** ＋ `lineno` ✓。
+    #: ⚠️ 2026-11-10：`run_sync` 已被拆成**薄壳** ✓✗（它只剩墙钟计时，阶段执行体是 `_run_stages` ✓）
+    #: ⇒ 只扫 `run_sync` 会得到 **0 处**换装 ✓✗，报出来是「三处换装都没了」✓ ——
+    #: 而这正是**真缺陷**的样子 ✓，两条完全分不开 ✓✗。判据改成盯「`run_sync` ＋ 它**直接委托**的
+    #: 同模块函数」✓：委托关系从 AST 现算 ✓，将来再拆/改名一层不用再动这条 ✓。
     tree = ast.parse((Path(__file__).resolve().parents[1] / "app" / "services" / "engine"
                       / "pipeline.py").read_text(encoding="utf-8"), filename="pipeline.py")
+    #: ⚠️ 只取**模块顶层**函数当候选 ✓✗：`ast.walk` 会把内嵌函数（`emit` 之类 ✓）也算进来 ✓，
+    #: 而内嵌函数本就在父函数体里被 walk 到 ⇒ 一并入扫描面会让**同一处换装被数两遍** ✓✗。
+    funcs = {node.name: node for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    entry = funcs.get("run_sync")
+    delegated = ({call.func.id for call in ast.walk(entry)
+                  if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                  and call.func.id in funcs} if entry is not None else set())
+    scan_names = sorted({*delegated, "run_sync"} & set(funcs))
     sites: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "run_sync":
-            continue
-        for inner in ast.walk(node):
+    #: 哪几个函数体里**真**有换装点 ✓ —— ⑥‴ 用它证明扫描面没落空 ✓。
+    owners: set[str] = set()
+    for name in scan_names:
+        for inner in ast.walk(funcs[name]):
             if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Name):
                 continue
             if inner.func.id != "_backend_phase":
@@ -348,6 +361,7 @@ def case_phased() -> None:
                 (kw.value for kw in inner.keywords if kw.arg == "phase"), None)
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 sites.append((inner.lineno, arg.value))
+                owners.add(name)
     #: ⚠️ `ast.walk` 是**广度优先**、不是源码顺序 ✓✗ ⇒ 按 `lineno` 排 ✓（拿遍历下标比大小会随机绿红 ✗）
     sites.sort()
     phases = [phase for _, phase in sites]
@@ -380,10 +394,18 @@ def case_phased() -> None:
     ok_init = True
     if "init" in phases and "encode" in phases:
         ok_init = phases.index("init") == phases.index("encode") + 1
-    check("⑥″ `run_sync` 三处换装都在 ✓、顺序是 encode → sample → decode ✓✗"
+    check("⑥″ 阶段执行体里三处换装都在 ✓、顺序是 encode → sample → decode ✓✗"
           "（按调用点的阶段实参 ＋ 行号判，不按源码排版 ✗；`init` 是可选拍、只许紧跟 encode ✓；"
           "`encode` 允许重复一次且必须在 sample 之前 ✓，`sample`/`decode` 不许重复 ✗）",
           deduped == required and not unknown and ok_repeat and ok_place and ok_init, sites)
+    #: ⚠️ 这条是给上面那两条**兜底**的 ✓✗：扫描面算错（盯了空壳／盯错函数）时，
+    #: `sites` 会是空的 ✓ ⇒ ⑥″ 报「三处都没了」✓，与真缺陷一字不差 ✓✗。
+    #: 这里独立证明「扫描面里**确实**有个函数体装着换装点」✓ —— 它红了就说明该改**判据**，
+    #: 而不是去 pipeline.py 里找那三处换装 ✓。
+    check("⑥‴ 判据**没盯空壳** ✓✗：扫描面（`run_sync` ＋ 它直接委托的执行体 ✓）里必须至少有一个"
+          "函数体真装着 `_backend_phase` 调用 ✓ —— 2026-11-10 `run_sync` 拆成薄壳后，"
+          "盯单个函数就是拿 0 处换装去报「三处都没了」✓，而真缺陷跟这条假红长得一样 ✓",
+          bool(owners) and bool(sites), (scan_names, sorted(owners)))
 
 
 # ------------------------------------------- ⑦ 装得下就**不分时**（2026-11-07 ✓）

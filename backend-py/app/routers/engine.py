@@ -44,6 +44,7 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from ..core.config import get_storage_root
+from ..core.db import engine as db_engine
 from ..core.response import bad_request, success
 from ..core.request_utils import read_json
 from ..services.engine import bridge
@@ -68,7 +69,8 @@ from ..services.engine import safetensors as st
 from ..services.engine.dryrun import DryRunBackend
 from ..services.engine.runtime import engine_runtime
 #: ⚠️ 项目侧服务 ✓（只有它许读业务库 ✓）：``fromLedger=true`` 时要取跑次样本 ✓
-from ..services import engine_readiness
+from ..services import engine_readiness, text_generation
+from ..services.ai_providers import get_text_config
 from ..services.engine.torch_backend import (
     TorchBackend,
     TorchBackendUnavailable,
@@ -164,6 +166,20 @@ def _upscale_from(body: dict[str, Any]) -> Any:
         scale = float(raw.get("scale") or 1.0)
     except (TypeError, ValueError) as err:
         raise pipe.StageError("plan", f"超清倍率不是数字 ✗（收到 {raw.get('scale')!r} ✓）") from err
+    # ⚠️⚠️ `mode` 与 `scale` 的**相容性**要在这里就核 ✗✗（2026-11-08 补）：
+    #    计划层 ``plan_upscale`` 只会在 ``1 < scale < 2`` 产出 ``ai-2x-resize`` ✓（``≤1`` ⇒ normal、
+    #    ``>2`` ⇒ tiled ✓）；而请求体是**手写的 dict** ✓ ⇒ 能配出计划层永不产的组合 ✓，
+    #    执行层会**静默交付一张"假超清"**（``scale=1.0`` ⇒ 放大再缩回原尺寸，尺寸不变耗时 ≈6× ✓✗；
+    #    ``>2`` ⇒ 2× 之后靠 bicubic 插值冒充分块放大 ✓✗）。于是这里先拒 ✓ ——
+    #    ⚠️ 与 ``torch_backend._plan_target_size`` 是**同一个判据的有意双保险** ✗✗（那边是兜底：
+    #    非 HTTP 调用方会绕过这里 ✓）；两处边界必须一致（``1 < scale < 2`` ✓，别一处 ``>2``
+    #    一处 ``≥2`` ✓✗ —— 那样 2.0 会在一边合法、一边非法）。
+    if mode == "ai-2x-resize" and not (1.0 < scale < 2.0):
+        raise pipe.StageError(
+            "plan", f"超清计划自相矛盾 ✗✗：``ai-2x-resize`` 配 {scale:g}× —— 这个模式是"
+                    f"「放大器 2× 之后**缩到 2× 以下**」✓ ⇒ 只在 ``1 < scale < 2`` 有意义 ✓✗。"
+                    f"要 1× 请关掉超清（``mode=normal``）✓、要 2× 请用 ``ai-2x`` ✓、"
+                    f"要 >2× 请用 ``tiled-ai-2x`` ✓（重新调一次 ``/engine/upscale-plan`` 即可 ✓）")
     # ⚠️ 二采的两个数**照收** ✓（管线**只执行计划** ✗ —— 缺了就等于「不做二采」✓ 并在 notes 里说清 ✓）
     try:
         refine_steps = int(raw.get("refineSteps") or 0)
@@ -172,11 +188,52 @@ def _upscale_from(body: dict[str, Any]) -> Any:
         raise pipe.StageError(
             "plan", f"超清二采参数不是数字 ✗（refineSteps/refineDenoise 收到 "
                     f"{raw.get('refineSteps')!r}/{raw.get('refineDenoise')!r} ✓）") from err
+    # ⚠️⚠️ 派生量 ``refineTailSteps`` **必须跟着搬** ✗✗（2026-11-08 补 ✗）：
+    #    它由计划层用 :func:`upscale.refine_tail_steps` 算出并**单列** ✓（不许写回 ``refine_steps`` ✓），
+    #    而这里是「HTTP 的 dict → 计划对象」的**重建口** ✓ —— 早先只搬了 refineSteps/refineDenoise ✓✗
+    #    ⇒ 重建出来的计划 ``refineTailSteps`` 恒为 0 ✓，回执 ``plan.upscale`` 于是写着
+    #    「尾部 0 步」而张量层真跑了 10 步（它自己重算）✓✗ —— **回执与实跑自相矛盾** ✓。
+    #    三档处理（口径仍由计划层唯一公式定 ✓，这里只是**照它核** ✗ 不另立一套 ✗）：
+    #      · 给了 ``refineTailSteps`` 但与公式不符 ⇒ **拒** ✗（两处口径必然有一处错 ✓）；
+    #      · 没给（只给 steps/denoise）⇒ 用同一个公式**现算** ✓（不是猜 ✓）；
+    #      · 一个二采参数都没给 ⇒ 0 ✓。
+    #    ⚠️ 顺带把**坏值拦在采样之前** ✗✗：公式对 ``denoise ∉ (0,1]`` / ``steps < 1`` 是抛 ValueError ✓，
+    #    而这条异常早先要等**采完最贵的那几步 + 放大器**、进到二采才冒出来 ✓✗
+    #    （计划层 ``plan_upscale`` 明明在装模型前就 400 拦住了 ✓ —— 执行入口没执行同一条纪律 ✗）。
+    refine_tail = 0
+    if refine_steps > 0:
+        if raw.get("refineDenoise") in (None, ""):
+            raise pipe.StageError(
+                "plan", "给了 ``refineSteps`` 却没有 ``refineDenoise`` ✗✗ —— 尾部 σ 的取法要两个数"
+                        "（``total = max(steps+1, round(steps/clamp(denoise,0.15,1)))`` ✓）；"
+                        "它的**默认值在编译层** ✗ ⇒ 本仓**不猜** ✓（要么两个都给 ✓，要么都不给 "
+                        "⇒ 这次不做二采 ✓）")
+        try:
+            refine_tail = upscaler.refine_tail_steps(refine_steps, refine_denoise)
+        except (TypeError, ValueError) as err:
+            raise pipe.StageError(
+                "plan", f"超清二采参数不合法 ✗（refineSteps={refine_steps} / "
+                        f"refineDenoise={refine_denoise!r} ✓）：{err} ✓ —— 在**装模型/采样之前**就拒 ✗"
+                        f"（等二采阶段才炸 = 采样那几步全白烧 ✓✗）") from err
+        claimed = raw.get("refineTailSteps")
+        if claimed not in (None, ""):
+            try:
+                claimed_tail = int(claimed)
+            except (TypeError, ValueError) as err:
+                raise pipe.StageError(
+                    "plan", f"``refineTailSteps`` 不是整数 ✗（收到 {claimed!r} ✓）") from err
+            if claimed_tail != refine_tail:
+                raise pipe.StageError(
+                    "plan", f"``refineTailSteps={claimed_tail}`` 与计划层的公式**对不上** ✗✗："
+                            f"refineSteps={refine_steps} / refineDenoise={refine_denoise!r} ⇒ 应为 "
+                            f"**{refine_tail}** ✓。本仓只认公式算出来的那一个 ✓ —— 两个数并存就会出现"
+                            f"「回执写 A、实跑 B」✓✗（重启一次计划重新生成即可 ✓）")
     return upscaler.UpscalePlan(
         mode=mode, scale=scale, steps=tuple(str(item) for item in raw.get("steps") or ()),
         notes=tuple(str(item) for item in raw.get("notes") or ()), tiles=tuple(tiles),
         fallback_reason=raw.get("fallbackReason"),
-        refine_steps=refine_steps, refine_denoise=refine_denoise)
+        refine_steps=refine_steps, refine_denoise=refine_denoise,
+        refine_tail_steps=refine_tail)
 
 
 def _canvas_from(body: dict[str, Any]) -> Any:
@@ -722,6 +779,36 @@ def backends() -> Any:
     })
 
 
+@router.get("/llm")
+def engine_llm_status() -> Any:
+    """**自研文本（LLM）后端的档位回执** ✓（2026-11-08 补 ✗✗ 此前一条 HTTP 口都没有）。
+
+    ⚠️ 这条路由的**唯一理由是「配了没生效看不出来」** ✓✗：``kvMode``/``kvWindow``/``gpuLayers``/
+    ``fastPath``/``cudaGraph`` 这些键只活在文本服务的 ``settings`` JSON 里 ✓，而「已装的那个后端」是按**装载那一刻**
+    的档位建的 ✓ —— 改完配置，正在跑的后端**不会**跟着变 ✓（缓存键按档位分格 ⇒ 下次生成另装一份 ✓）。
+    没有这条口，人只能说「我配了呀」✗，而显存/速度一动不动 ✓✗。
+
+    ⚠️ **GET 不装载** ✗✗：探活把 8 GiB 权重推进卡、占 20 秒 —— 是 GET 能造成的最坏副作用 ✓。
+    这里只读进程内已有的后端 ✓ ＋ 读库里的**请求档位** ✓。
+    """
+    settings: dict[str, Any] = {}
+    config_note = ""
+    try:
+        with db_engine.connect() as conn:
+            config = get_text_config(conn)
+        if (config.get("provider") or "").lower() == "engine":
+            settings = config.get("settings") or {}
+        else:
+            config_note = (f"生效的文本服务是 provider={config.get('provider')!r}（不是自研 engine ✓）"
+                           f"⇒ 不判「请求 vs 生效」✓")
+    except Exception as err:  # noqa: BLE001 —— 读不到配置只少一栏 ✗ 不该 500 ✗
+        config_note = f"读文本服务配置失败 ✗（{err}）—— 只报已装后端 ✓"
+    status = text_generation.engine_llm_status(settings or None)
+    if config_note:
+        status["note"] = f"{config_note}；{status.get('note')}"
+    return success(status)
+
+
 @router.get("/load-plan")
 def load_plan(
     stage: str = "h3",
@@ -1174,6 +1261,14 @@ def runtime_status(profile: str | None = Query(default=None)) -> Any:
 @router.post("/load")
 async def load_runtime(request: Request) -> Any:
     """**装齐引擎** ✓（主 DiT ⇒ TE ⇒ VAE ✓ 幂等 ✓）。
+
+    ## 强制重装 ``force`` ✓（2026-11-09 兑现 ✓，默认不写 = 幂等复用 ✓）
+
+    ``force=true`` ⇒ **参数完全相同也真重装一次** ✓✗：幂等是默认行为 ✓，force 是调用方显式
+    要的「把这份权重重新读一遍」✓（盘上的文件换了 ✓、或想清掉装载时的脏状态 ✓）。
+    ⚠️ 代价照收 ✓：白花一次装配（H3 主干 17.94 GiB ≈ 20 秒 ✓），且**装失败时旧的也没了** ✓
+    —— 回执这一次带 ``forced=true`` ＋ ``reused=false`` ✓；此后回到常态复用 ✓，并且 ``forced``
+    **不会**留在缓存的那份报告里 ✗（否则下一次复用也带着它，会被读成「正在重装」✓✗）。
 
     ⚠️ 装载是**阻塞**的 ✗（19.53 GiB 光读盘就很久 ✓）⇒ 用 ``to_thread`` 扔出事件循环 ✓✗
     （**不**在事件循环里直接调 ✓：那会把整个后端卡死 ✓✗ —— 本模块第一条纪律 ✓）。

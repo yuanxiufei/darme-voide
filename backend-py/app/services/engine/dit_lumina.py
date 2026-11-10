@@ -41,6 +41,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from . import sdpa
 from .dit_generic import (COMPANION_SUFFIXES, ShapeError, apply_rope, rope_freqs,
                           timestep_embedding)
 
@@ -110,7 +111,7 @@ class JointAttention(nn.Module):
         k = self.k_norm(k.view(b, n, self.kvheads, self.head_dim)).transpose(1, 2)
         v = v.view(b, n, self.kvheads, self.head_dim).transpose(1, 2)
         q, k = apply_rope(q, freqs), apply_rope(k, freqs)
-        out = F.scaled_dot_product_attention(
+        out = sdpa.attention(
             q, k, v, enable_gqa=self.heads != self.kvheads)
         return self.out(out.transpose(1, 2).reshape(b, n, q_size))
 

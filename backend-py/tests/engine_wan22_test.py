@@ -259,11 +259,17 @@ def case_assembly() -> None:
 
     #: ⚠️ 首帧条件那一拍**不在任何阶段里** ✓（管线里它夹在 init 与 sample 之间 ✓）——
     #: 所以必须**显式**要一次 encode 那一拍 ✓，否则 VAE 在不在场全靠「上一拍恰好是谁」✓✗。
-    run_src = inspect.getsource(pl.run_sync)
-    phase_at = run_src.find('_backend_phase(backend, "encode")', run_src.find("── ③b condition"))
+    #: ⚠️ 2026-11-10：`run_sync` 已是**薄壳** ✓✗（阶段执行体是 `_run_stages` ✓）⇒ 扫它得 ``(-1, -1)`` ✓，
+    #: 与「压根没要那一拍」的读数一模一样 ✓。改扫**整份 pipeline.py** ＋ `── ③b condition` 当锚点 ✓
+    #: （那句锚在模块内唯一 ✓；`_backend_phase(backend, "encode")` 模块里有两处 ✓ —— encode 段开头
+    #: 与 ③b 之前 ✓，所以必须从锚点之后开始找 ✓✗，从文件头找会拿到 encode 段那处、判据永远绿 ✓）。
+    pipeline_src = (Path(__file__).resolve().parents[1] / "app" / "services" / "engine"
+                    / "pipeline.py").read_text(encoding="utf-8")
+    anchor = pipeline_src.find("── ③b condition")
+    phase_at = pipeline_src.find('_backend_phase(backend, "encode")', anchor)
     #: ⚠️ 别拿 `condition_first_frame` 当锚点 ✗✗ —— ③b 那段**注释里**先提到过一次这个名字 ✓
     #: （说的是"双流首帧不走这条路"✓），`find()` 会命中那句注释 ✓ ⇒ 判出一条**假红** ✓✗。
-    hook_at = run_src.find('hook = getattr(backend, "condition_first_frame"')
+    hook_at = pipeline_src.find('hook = getattr(backend, "condition_first_frame"', anchor)
     check("⭐ 首帧条件**之前显式要 encode 那一拍** ✓✗（wan22 的条件要 VAE ✓；不显式 ⇒ "
           "VAE 在不在场取决于上一拍 ✓，报错会指成「没挂 VAE」✓✗）",
           phase_at > 0 and hook_at > 0 and phase_at < hook_at, (phase_at, hook_at))
@@ -445,12 +451,25 @@ def case_real_run_truth() -> None:
     #: ⭐ **第六处**：管线首帧条件的潜帧数原先**只**问请求的 ``temporalCompression`` ✓ ⇒
     #: Wan 2.2 的请求不带它 ✓（4 是族常量 ✓，`_fill_wan22_plan` 早算好了 `plan.latent_frames`
     #: ＝5 ✓）⇒ 当场报「首帧条件需要 temporalCompression ✗」，读起来像**用户少填了字段** ✓✗。
-    run_src = inspect.getsource(pl.run_sync)
-    at_plan = run_src.find('getattr(plan, "latent_frames"')
-    at_req = run_src.find("latent_frames_for(plan.frames")
+    #: ⚠️ 2026-11-10：`run_sync` 已拆成**薄壳** ✓✗（阶段执行体搬进 `_run_stages` ✓）⇒
+    #: `inspect.getsource(pl.run_sync)` 里这两句都找不到 ✓✗，得到 ``(-1, -1)`` ✓ ——
+    #: 与「顺序真写反了」的读数**一模一样** ✓（假红长得像真缺陷 ✓）。
+    #: 改扫**整份 pipeline.py** ✓：这两句全模块各只有一处 ✓（下面那条「各只出现一次」钉住它 ✓✗，
+    #: 将来别的族也写同样的句子时，`find` 会取错 → 那条先红、提示来精化扫描面 ✓）。
+    pipeline_src = (Path(__file__).resolve().parents[1] / "app" / "services" / "engine"
+                    / "pipeline.py").read_text(encoding="utf-8")
+    at_plan = pipeline_src.find('getattr(plan, "latent_frames"')
+    at_req = pipeline_src.find("latent_frames_for(plan.frames")
     check("⭐ 首帧条件的潜帧数**先问 plan**（`getattr(plan, \"latent_frames\"` ✓）、plan 上没有才按"
-          "请求压缩比现算 ✓✗（顺序反了 ⇒ wan22 报「需要 temporalCompression」✓，指不到真因 ✓）",
+          "请求压缩比现算 ✓✗（顺序反了 ⇒ wan22 报「需要 temporalCompression」✓，指不到真因 ✓；"
+          "扫的是整个模块而不只是 `run_sync` ✓ —— 后者 2026-11-10 起已是薄壳 ✓✗）",
           at_plan > 0 and at_req > at_plan, (at_plan, at_req))
+    check("反向：这两句在 `pipeline.py` 里**各只出现一次** ✓✗（多于一处 ⇒ 上面那条的 `find` "
+          "可能取到别的族的同文句、判成「顺序对」而实际没看 wan22 那段 ✓✗）",
+          pipeline_src.count('getattr(plan, "latent_frames"') == 1
+          and pipeline_src.count("latent_frames_for(plan.frames") == 1,
+          (pipeline_src.count('getattr(plan, "latent_frames"'),
+           pipeline_src.count("latent_frames_for(plan.frames")))
 
     #: ⭐ **第七处**（不在本文件、但它是 wan22 的前提 ✓）：Wan 2.1 VAE 的 **4 倍时间压缩** ✓。
     #: 旧 ``Resample`` 从不真跑 ``time_conv`` ✓ ⇒ 17 帧原样 17 潜帧 ✓、且**不报错** ✓✗。

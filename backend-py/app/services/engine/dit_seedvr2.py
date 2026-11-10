@@ -47,6 +47,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from . import sdpa
+
 SEEDVR2_LATENT_CHANNELS = 16
 SEEDVR2_CONDITION_CHANNELS = 17
 SEEDVR2_IN_CHANNELS = SEEDVR2_LATENT_CHANNELS + SEEDVR2_CONDITION_CHANNELS  # 33
@@ -622,7 +624,7 @@ def _var_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *,
         q_i = q_i.permute(1, 0, 2).unsqueeze(0)
         k_i = k_i.permute(1, 0, 2).unsqueeze(0)
         v_i = v_i.permute(1, 0, 2).unsqueeze(0)
-        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i)
+        out_i = sdpa.attention(q_i, k_i, v_i)
         outs.append(out_i.squeeze(0).permute(1, 0, 2))
     return torch.cat(outs, dim=0)
 

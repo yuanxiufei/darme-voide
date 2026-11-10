@@ -115,13 +115,16 @@ def case_bitwise_equal(root: Path) -> None:
           "「被吃掉的配套张量」✗ 不是权重 ✓；2026-11-02 再增 `int4Resident` ✓"
           "（4bit 打包常驻层的子计数 ✓ —— 它的参数也是 int8 ✓，合计数里看不出「说好 4bit、实际按 int8 乘」✓✗）；"
           "2026-11-07 再增 `skipped` / `int8Skipped` ✓（内存这一级卸掉多少键、其中多少本来是 int8 常驻层 ✓"
-          "—— 少了这两格，回执里只看得到 `loadedKeys` 变小 ✓✗，读不出「是策略卸的还是真缺」✓✗）",
+          "—— 少了这两格，回执里只看得到 `loadedKeys` 变小 ✓✗，读不出「是策略卸的还是真缺」✓✗）；"
+          "2026-11-09 再增 `nvfp4Resident` ✓（其中 **nvfp4 打包**的子计数 ✓ —— nvfp4 与 int8 的目标参数"
+          "在报告里同样只体现为「常驻了 N 层」✓，不单列就答不出「那 14.61 GiB 的件按哪条路装的」✓✗；"
+          "它与 `dequant.nvfp4`（装载时真还原的层数 ✓）是**两个数** ✓，常驻壳那条路上后者恒 0 ✓）",
           set(report.to_dict()) == {
               "path", "complete", "loadedKeys", "sourceKeys", "targetKeys", "missing",
               "missingCount", "unexpected", "unexpectedCount", "shapeMismatch",
               "shapeMismatchCount", "renamed", "dtypeCasts", "dequant", "error",
-              "consumedQuantMeta", "int8Resident", "int4Resident", "consumedNvfp4",
-              "consumedScales", "skipped", "int8Skipped"},
+              "consumedQuantMeta", "int8Resident", "int4Resident", "nvfp4Resident",
+              "consumedNvfp4", "consumedScales", "skipped", "int8Skipped"},
           sorted(report.to_dict()))
 
 

@@ -100,6 +100,7 @@ from typing import Any, Mapping, Sequence
 import torch
 from torch import Tensor, nn
 
+from . import sdpa
 from .dit_generic import ShapeError, apply_rope, rope_freqs as _rope_freqs_nd
 
 __all__ = [
@@ -358,8 +359,7 @@ class _Attention(nn.Module):
         q = q.transpose(1, 2)                       # [b, heads, s, d]
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+        out = sdpa.attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
         return out.transpose(1, 2).reshape(b, length, heads * head_dim)
 
     def forward(self, x: Tensor, freqs: Tensor | None = None,

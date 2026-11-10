@@ -557,6 +557,26 @@ def case_cancel() -> None:
           mid.stageMs)
     check("㉙ 取消后**没有** decode / write 耗时（真停了，不是只标记 ✗）",
           "decode" not in mid.stageMs and "write" not in mid.stageMs, mid.stageMs)
+    #: ⭐⭐ **取消时「真跑过几步」必须进 ``sampleSteps``** ✗✗（2026-11-08 补 ✗）：原先它只在
+    #:    采样器**正常返回**那一处赋值 ✓ ⇒ 中断一律停在 **0** ✓✗ —— 而同一份回执里
+    #:    ``stageMs.sample`` 是真实秒数 ✓、㉗ 又刚断言 ``error.step == 3`` ✓（``on_step`` 在每步
+    #:    **算完之后**才回调 ✓ ⇒ 步号＝已跑完步数 ✓）⇒ 「跑了 3 步」与「0 步」并存且无人解释 ✓。
+    #:    消费方照 0 走：``chain`` 逐段累加（被取消那段记 0 ✓✗）、``bridge`` 把 0 写进日志 ✓。
+    cancel_card = mid.to_dict()
+    check("㉙¹ ⭐⭐ 采样中取消 ⇒ ``sampleSteps`` 记**真跑过的 3 步** ✓ 不是 0 ✗"
+          "（与 ``error.step`` 同一个数 ✓、``stepsNote`` 写明 3/20 ✓）"
+          "—— 「跑了 3 步被取消」和「一步没跑」在记录里不该同形 ✓",
+          mid.sampleSteps == 3
+          and (mid.error or {}).get("step") == 3
+          and "3 / 20" in str(cancel_card.get("stepsNote") or "")
+          and "取消" in str(cancel_card.get("stepsNote") or ""),
+          {"sampleSteps": mid.sampleSteps,
+           "stepsNote": cancel_card.get("stepsNote"), "error": mid.error})
+    check("㉙² 一开始就取消（`error.stage == encode`）⇒ **不**伪造步数 ✓"
+          "（``sampleSteps`` 仍 0 ✓、没有 ``stepsNote`` ✓ —— 采样真的一步都没开始 ✓）",
+          immediate.sampleSteps == 0 and not immediate.to_dict().get("stepsNote"),
+          {"sampleSteps": immediate.sampleSteps,
+           "stepsNote": immediate.to_dict().get("stepsNote")})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -605,6 +625,17 @@ def case_error_attribution() -> None:
           mid.error)
     check("㉝ 采样失败的文案带「去噪采样」字样（人话，不是异常类名 ✓）",
           "去噪采样" in str((mid.error or {}).get("message")), mid.error)
+    #: ⭐⭐ 失败那条**同样是**「读数缺失被当成读数说没有」✗✗（2026-11-08 补 ✗）：OOM/模型报错
+    #:    多半发生在跑到一半 ✓ —— 而 ``sampleSteps`` 原先只在采样器正常返回时赋值 ✓ ⇒ 记 0 ✓✗，
+    #:    于是「第 5 步炸的（前面 5 步的白工是真花了钱 ✓）」在回执里与「采样没开始」同形 ✓。
+    broken_card = mid.to_dict()
+    check("㉜¹ ⭐⭐ 采样第 5 步失败 ⇒ ``sampleSteps`` 记**真跑过的 5 步** ✓ 不是 0 ✗"
+          "（``stepsNote`` 写明 5/10 ✓ 且带「失败」字样 ✓）"
+          "—— 前面那 5 步是**真花掉的算力** ✓，记 0 会让人以为白跑的是 0 步 ✓",
+          mid.sampleSteps == 5
+          and "5 / 10" in str(broken_card.get("stepsNote") or "")
+          and "失败" in str(broken_card.get("stepsNote") or ""),
+          {"sampleSteps": mid.sampleSteps, "stepsNote": broken_card.get("stepsNote")})
 
     bad_plan = pipe.run_sync(req(prompt=""), DryRunBackend())
     check("㉞ plan 阶段就失败 ⇒ **没有**后续阶段耗时（根本没开始跑 ✓）",
@@ -788,6 +819,48 @@ def case_api() -> None:
           and any("音频流锁定" in note or "6×" in note for note in refine_warn),
           (planned_refine.status_code, refine_warn))
 
+    # ── 派生量跟着搬（2026-11-08 补 ✗）─────────────────────────────────────────
+    # ⚠️ `plan.upscale` 是**重建出来的**（HTTP dict → UpscalePlan → to_dict ✓）。早先只搬
+    #    refineSteps/refineDenoise ⇒ 派生量 `refineTailSteps` 掉成 0 ⇒ 回执写「尾部 0 步」
+    #    而张量层真跑了 10 步（它自己重算 ✓）—— **回执与实跑自相矛盾** ✓✗。
+    planned_upscale = (planned_refine.json().get("data") or {}).get("upscale") or {}
+    check("⑤¹⁸ ⭐⭐ 派生量 ``refineTailSteps`` 经 HTTP 重建**仍在**（=10 ✓；掉成 0 就是"
+          "「回执写 0 步、实跑 10 步」✓✗）",
+          planned_upscale.get("refineTailSteps") == 10
+          and planned_upscale.get("refineSteps") == 4, planned_upscale)
+    mismatch = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4, "upscale": {**rp, "refineTailSteps": 3}})
+    check("⑤¹⁹ 手改的 ``refineTailSteps`` 与公式**不符** ⇒ **400** ✗✗（两处口径必有一处错 ✓；"
+          "不静默采纳 ✓、也不静默改成公式值 ✓）",
+          mismatch.status_code == 400
+          and "对不上" in json.dumps(mismatch.json(), ensure_ascii=False),
+          (mismatch.status_code, mismatch.json()))
+    half_refine = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4,
+        "upscale": {"mode": "ai-2x", "scale": 2.0, "refineSteps": 4}})
+    check("⑤²⁰ ⭐ 只给 ``refineSteps`` 不给 ``refineDenoise`` ⇒ **在 plan 阶段就 400** ✗✗"
+          "（早先要等**采样+放大器全跑完**、进二采才 ValueError ✓✗ —— 计划层明明早就拦 ✓）",
+          half_refine.status_code == 400
+          and "refineDenoise" in json.dumps(half_refine.json(), ensure_ascii=False),
+          (half_refine.status_code, half_refine.json()))
+    # ⭐⭐ `mode` 与 `scale` 的相容性也在**装模型之前**核 ✗✗（同判据的双保险在
+    #    `torch_backend._plan_target_size` ✓ —— 这里只是让它早一步、并挡住手写的计划 ✓）。
+    for bad_scale in (1.0, 3.0):
+        bad = client.post("/api/v1/engine/plan", json={
+            "prompt": "x", "steps": 4,
+            "upscale": {"mode": "ai-2x-resize", "scale": bad_scale}})
+        check(f"⑤²¹ `ai-2x-resize` + {bad_scale:g}× ⇒ **plan 阶段 400** ✗✗"
+              f"（1× = 放大再缩回原尺寸：尺寸不变、耗时 ≈6× ✓✗；>2× = 插值冒充分块放大 ✓✗）",
+              bad.status_code == 400
+              and "自相矛盾" in json.dumps(bad.json(), ensure_ascii=False),
+              (bad_scale, bad.status_code, bad.json()))
+    ok_half = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4, "upscale": {**half}})
+    check("⑤²² 1.5×（计划层真会产出的那档）⇒ **不误拦** ✓（判据不许见谁都喊 ✗）",
+          ok_half.status_code == 200
+          and ((ok_half.json().get("data") or {}).get("upscale") or {}).get("mode") == "ai-2x-resize",
+          (ok_half.status_code, ok_half.json().get("data")))
+
     ghost = client.post("/api/v1/engine/upscale-plan", json={
         "targetScale": 2, "filePath": str(weights.with_name("nope.safetensors"))})
     check("㊿⁗ 权重文件不存在 ⇒ **200 + 回退 + 带理由** ✓（不是 500 ✗、也不是静默当没配 ✗）",
@@ -805,6 +878,48 @@ def case_api() -> None:
           and any("6×" in item or "音频流锁定" in item
                   for item in ((planned_up.json().get("data") or {}).get("warnings") or [])),
           (planned_up.status_code, up_plan))
+
+    # ⭐⭐ **耗时口径不许抄到别的模式上** ✗✗（2026-11-08 补 ✗）：≈6× 是 ``ai-2x``
+    #    （放大器**原样 2×**）的逆向读数 ✓，只写在 ``upscale.plan_upscale`` 给该模式的
+    #    ``notes`` 里 ✓；``ai-2x-resize``（先 2× 再缩）与 ``tiled-ai-2x`` **都没有**这个读数 ✓✗。
+    #    原先 ``_finish_plan`` 对所有 ``usesUpscaler`` 一律印「≈6×」✓✗ ⇒ 1.5× 的用户被告知
+    #    一个没有出处的倍率 ✓，而它读起来正像实测 ✓。
+    up_warn = ((planned_up.json().get("data") or {}).get("warnings") or [])
+    check("⑤²⁷ 倍率与耗时**逐字来自计划层** ✓（``ai-2x`` 那句 ≈6× 原样引用，不在这层另编 ✗）",
+          any("≈6×" in item and "输出分辨率翻倍" in item for item in up_warn), up_warn)
+    resize_up = client.post("/api/v1/engine/plan", json={
+        "prompt": "x", "steps": 4,
+        "upscale": {"mode": "ai-2x-resize", "scale": 1.5,
+                    "steps": ["AI 2×（合法的放大器倍率 ✓）", "高质量缩放 2× → 1.5× ✓"],
+                    "notes": ["⚠️ 放大器只会做**空间 2×** ✗ ⇒ 所以是「先 2× 再缩」✓"],
+                    "tiles": [], "fallbackReason": None}})
+    resize_warn = ((resize_up.json().get("data") or {}).get("warnings") or [])
+    check("⑤²⁸ ⭐⭐ ``ai-2x-resize``（1.5×）**不许**被印上 ≈6× ✗✗（那是 2× 那条的读数 ✓）"
+          "—— 而要说清**本模式没有耗时读数** ✗（不猜一个像实测的数 ✓）",
+          resize_up.status_code == 200
+          and not any("6×" in item for item in resize_warn)
+          and any("没有逆向耗时读数" in item for item in resize_warn), resize_warn)
+
+    # ⭐⭐ **``costFactor`` 只算采样** ✗✗（2026-11-08 补 ✗）：它与 ``upscale`` 并排躺在同一份
+    #    回执里 ✓ —— 开 2× 超清时「×1.00」读起来像整跑耗时 ✓✗，而放大器那一段 ≈6× 压根没进这个数 ✓。
+    #    现在用两格说清覆盖范围 ✓（不编一个"总耗时"✗：放大器没有可精确算的系数 ✓）。
+    up_cost = (planned_up.json().get("data") or {})
+    check("⑤²⁹ ⭐⭐ ``costFactor`` 点明**只算采样** ✓ 且开超清时列进 ``costExcludes`` ✗✗"
+          "（否则「×1.00」与「≈6×」并排、读的人不知道哪个是整跑代价 ✓）",
+          up_cost.get("costCovers") == ["sample"]
+          and up_cost.get("costExcludes") == ["upscale"],
+          (up_cost.get("costCovers"), up_cost.get("costExcludes")))
+    plain_plan = client.post("/api/v1/engine/plan", json={"prompt": "x", "steps": 4})
+    check("⑤²⁹′ 没有超清 ⇒ ``costExcludes`` 为空 ✓（判据不许见谁都喊 ✗）",
+          (plain_plan.json().get("data") or {}).get("costExcludes") == [],
+          (plain_plan.json().get("data") or {}).get("costExcludes"))
+    guided_up = client.post("/api/v1/engine/plan",
+                            json={"prompt": "x", "steps": 4, "cfg": 5, "upscale": ai2x})
+    guided_warn = ((guided_up.json().get("data") or {}).get("warnings") or [])
+    check("⑤³⁰ 引导那条「相对耗时 ×N」必须点明**只算采样** ✗✗"
+          "（同一份 ``warnings`` 里下面还有超清 ≈6× ✓ —— 不点明就是把两个口径并排放 ✓）",
+          any("只算采样" in item and "不含下面那段超清" in item for item in guided_warn),
+          guided_warn)
 
     normal = client.post("/api/v1/engine/plan", json={
         "prompt": "x", "steps": 4,
@@ -838,6 +953,15 @@ def case_api() -> None:
     check("⑤¹¹ 容器类型**保住了** ✓（不许退化成裸 list ✗✗ —— 那会让下游炸得莫名其妙 ✓）",
           details.get("containerType") == "TinyAVLatents", details.get("containerType"))
 
+    # ⭐⭐ **实测倍率必须进回执** ✗✗（2026-11-08 补 ✗）：``scale`` 一直是**计划值** ✓，
+    #    而没有任何一格写「实跑出来几倍」✓✗ ⇒ 又回到「计划层有真源、执行结果不自证」✓。
+    #    现在两数并排：``scale``（计划）+ ``scaleActual``（实测，取自后端自述的尺寸 ✓）。
+    refine_block = refined.get("refine") or {}
+    check("⑤²³ ⭐⭐ 回执**并排**给计划倍率与实测倍率 ✓（实测是尺寸比算出来的 ✓，不是照抄计划 ✓）；"
+          "两者一致时**不**报 ``scaleMismatch`` ✓",
+          refine_block.get("scale") == 2.0 and refine_block.get("scaleActual") == 2.0
+          and "scaleMismatch" not in refine_block, refine_block)
+
     plain = client.post("/api/v1/engine/dry-run",
                         json={"prompt": "普通模式", "steps": 2}).json().get("data") or {}
     check("⑤¹² 没要超清 ⇒ **不跑二采阶段** ✓（可选阶段的正面情形要保住 ✓✗）",
@@ -863,11 +987,107 @@ def case_api() -> None:
                                                    upscale=upscale_mod.UpscalePlan(
                                                        mode="ai-2x", scale=2.0)),
                             _NoRefine())
+    class _NoDetails(DryRunBackend):
+        """⚠️ 跑得完、也自述「锁定音频流」✓，唯独**不报实况** ✗ —— 正是要被拦的那种。"""
+
+        refineDetails = None
+
+        def refine_latents(self, latents: Any, plan: Any, request: Any, *,
+                           condition: Any = None) -> Any:
+            return latents      # 不写 refineDetails ⇒ 回执只剩计划倍率
+
+    no_details = pipe.run_sync(pipe.GenerationRequest(prompt="x", steps=2,
+                                                     upscale=upscale_mod.UpscalePlan(
+                                                         mode="ai-2x", scale=2.0)),
+                               _NoDetails())
+    check("⑤¹⁴′ ⭐⭐ 后端跑完二采却**不自述实况** ⇒ 明确失败 ✗✗（不许只写计划倍率就当成超清 ✓ —— "
+          "那又是「回执自洽、与画面无关」✓）",
+          no_details.ok is False and (no_details.error or {}).get("stage") == "refine"
+          and "自述" in str((no_details.error or {}).get("message")),
+          no_details.error)
+
     check("⑤¹⁴ 后端**没实现** ``refine_latents`` ⇒ 明确拒绝 ✗（**不静默按普通模式出片** ✗✗ —— "
           "那会让用户以为超清开着 ✓）",
           no_hook.ok is False and (no_hook.error or {}).get("stage") == "refine"
           and "refine_latents" in str((no_hook.error or {}).get("message")),
           no_hook.error)
+
+    # ⭐⭐ **``totalMs`` 不是总耗时** ✗✗（2026-11-08 补 ✗）：它只是 ``stageMs`` 那几个键之和 ✓，
+    #    不含装载（在 ``runtime._execute`` 里、``run_sync`` 之外 ✓）、阶段间隙与收尾清理 ✓✗；
+    #    而 ``task.elapsedMs`` 是真墙钟 ✓ —— 两个数就躺在**同一份**回执里 ✓，谁也没说差在哪 ✓。
+    #    现在 ``totalCovers`` 逐字给出实际入账的阶段 ✓（动态取键 ✗，不手抄清单 ✓），
+    #    ``wallMs`` 给 ``run_sync`` 的真墙钟 ✓，``unaccountedMs`` 给差额 ✓。
+    timing = pipe.run_sync(pipe.GenerationRequest(prompt="x", steps=2),
+                           DryRunBackend()).to_dict()
+    check("⑤³¹ ⭐⭐ ``totalMs`` 旁边必须写清**它覆盖哪几段** ✗✗"
+          "（``totalCovers`` 逐字等于 ``stageMs`` 的键 ✓ 不是手抄清单 ✓），"
+          "且 ``wallMs`` ≥ ``totalMs``、``unaccountedMs`` ＝ 两者之差 ✓ —— "
+          "一个叫 total 的数**不含装载** ✗✗",
+          timing.get("totalCovers") == list(timing.get("stageMs") or {})
+          and "plan" in (timing.get("totalCovers") or [])      # 不许空表蒙过去 ✓
+          and isinstance(timing.get("wallMs"), int)
+          and timing["wallMs"] >= timing["totalMs"]
+          and timing.get("unaccountedMs") == max(0, timing["wallMs"] - timing["totalMs"]),
+          {key: timing.get(key)
+           for key in ("totalMs", "totalCovers", "wallMs", "unaccountedMs")})
+
+    # ⭐⭐ **计划说要二采、实况说没跑** ✗✗（2026-11-08 补 ✗）：张量层对「二采失败」的口径是
+    #    **回退到上采样结果**（不炸 ✓），于是 ``applied=true`` 照样成立 ✓、``secondPass: false``
+    #    只在 ``details`` 里 ✓✗ —— 而计划层那份 ``upscale.secondPass`` 写的是 true ✓ ⇒
+    #    拿「applied + 计划」来读会以为二采跑了 ✓。现在顶层单列 ``secondPass`` 与跳过理由 ✓。
+    class _SecondPassFails(DryRunBackend):
+        """⚠️ 二采**失败** ⇒ 回退到上采样结果（不炸 ✓）—— 正是要在回执顶层说清的那种。"""
+
+        def refine_latents(self, latents: Any, plan: Any, request: Any, *,
+                           condition: Any = None) -> Any:
+            super().refine_latents(latents, plan, request, condition=condition)
+            self.refineDetails = {**self.refineDetails, "secondPass": False,
+                                  "denoiseError": "RuntimeError: 假的二采故障 ✓",
+                                  "notes": ["⚠️ 二采失败 ⇒ 回退到上采样结果 ✓"]}
+            return latents
+
+    failed_second = pipe.run_sync(
+        pipe.GenerationRequest(prompt="x", steps=2,
+                               upscale=upscale_mod.UpscalePlan(
+                                   mode="ai-2x", scale=2.0, refine_steps=4, refine_denoise=0.4)),
+        _SecondPassFails())
+    failed_refine = failed_second.refine or {}
+    check("⑤²⁴ ⭐⭐ 二采失败（回退）⇒ 回执**顶层** ``secondPass=False`` ✓ 且单列"
+          "``secondPassSkipped``（带计划参数与原因 ✓）—— 不许让人拿「applied+计划」误以为跑过 ✗✗",
+          failed_second.ok is True
+          and failed_refine.get("secondPass") is False
+          and "假的二采故障" in str((failed_refine.get("secondPassSkipped") or {}).get("why")),
+          failed_refine.get("secondPassSkipped"))
+
+    class _SecondPassOk(DryRunBackend):
+        def refine_latents(self, latents: Any, plan: Any, request: Any, *,
+                           condition: Any = None) -> Any:
+            super().refine_latents(latents, plan, request, condition=condition)
+            self.refineDetails = {**self.refineDetails, "secondPass": True,
+                                  "denoiseSteps": 2, "tailSigmas": 3,
+                                  "notes": ["二采：尾部 2 步 ✓"]}
+            return latents
+
+    ok_second = pipe.run_sync(
+        pipe.GenerationRequest(prompt="x", steps=2,
+                               upscale=upscale_mod.UpscalePlan(
+                                   mode="ai-2x", scale=2.0, refine_steps=4, refine_denoise=0.4)),
+        _SecondPassOk())
+    ok_refine = ok_second.refine or {}
+    check("⑤²⁵ 二采**真跑了** ⇒ ``secondPass=True`` ✓ 且**不**报跳过 ✓（判据不许见谁都喊 ✗）",
+          ok_refine.get("secondPass") is True and "secondPassSkipped" not in ok_refine,
+          ok_refine.get("secondPass"))
+
+    unplanned = pipe.run_sync(
+        pipe.GenerationRequest(prompt="x", steps=2,
+                               upscale=upscale_mod.UpscalePlan(mode="ai-2x", scale=2.0)),
+        _SecondPassOk())
+    unplanned_refine = unplanned.refine or {}
+    check("⑤²⁶ 计划**没要**二采、后端**真跑了** ⇒ 单独点名 ``secondPassUnplanned`` ✗"
+          "（多花的耗时与改掉的细节都不在计划里 ✓）",
+          unplanned_refine.get("secondPass") is True
+          and "secondPassUnplanned" in unplanned_refine,
+          unplanned_refine.get("secondPassUnplanned"))
 
     # 后端现状接口 ✓：分得清「缺依赖」与「实现待写」✓
     backends = client.get("/api/v1/engine/backends").json().get("data") or {}
@@ -1236,6 +1456,33 @@ def _err(fn: Any) -> Exception | None:
     return None
 
 
+def case_alerts_channel() -> None:
+    """``alerts`` 必须**抬到回执顶层** ✓✗（2026-11-10 补 ✗）。
+
+    ⚠️ 这不是"再加一个结论" ✗ —— 这是**通路** ✓：各后端把跑完才知道的结论写进
+    ``backend.write()`` 的返回 ✓，被 :attr:`PipelineResult.outputs` 原样收下 ✓
+    ⇒ 落在 ``result.outputs.alerts`` ✓✗；而前端读的是 ``task.result.alerts``（**顶层** ✓）
+    ⇒ 2026-11-09 起那一整批「音轨几乎是静音 ✗ / 音轨被截 ✗ / 落盘帧数没核对过 ✗」
+    **一个都没到用户眼前** ✓（后端说得再清楚，通道断了就是白说 ✓）。
+    """
+    loud = pipe.PipelineResult(ok=True, outputs={"videoPath": "a.mp4",
+                                                 "alerts": ["⚠️ 音轨几乎是静音 ✗",
+                                                            "⚠️ 落盘帧数没核对过 ✗"]})
+    quiet = pipe.PipelineResult(ok=True, outputs={"videoPath": "b.mp4"})
+    topless = pipe.PipelineResult(ok=True, outputs=None)
+    loud_d, quiet_d, topless_d = loud.to_dict(), quiet.to_dict(), topless.to_dict()
+    check("㊱¹² ⭐⭐ ``alerts`` 从 ``outputs`` **抬到回执顶层** ✓✗（前端只读 ``result.alerts`` ✓）："
+          "有 alerts ⇒ 顶层**逐字**等于 ``outputs.alerts`` ✓（抬层不篡改 ✓）、"
+          "``outputs`` 里**仍保留** ✓（唯一真源还在后端 ✓）；"
+          "没有 alerts ⇒ 顶层**根本没有这个键** ✓（不是空列表 ✗ —— 「一条都没有」与「没说」"
+          "要分得开 ✓）；``outputs=None`` 也不许崩 ✓",
+          loud_d.get("alerts") == ["⚠️ 音轨几乎是静音 ✗", "⚠️ 落盘帧数没核对过 ✗"]
+          and loud_d["outputs"].get("alerts") == loud_d["alerts"]
+          and "alerts" not in quiet_d and "alerts" not in topless_d,
+          {"loud": loud_d.get("alerts"), "quietHas": "alerts" in quiet_d,
+           "noneHas": "alerts" in topless_d})
+
+
 def main() -> int:
     case_plan()
     case_schedule_names()
@@ -1252,6 +1499,7 @@ def main() -> int:
     case_unused_references()
     case_off_official_canvas()
     case_api()
+    case_alerts_channel()
 
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:

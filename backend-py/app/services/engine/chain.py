@@ -481,7 +481,11 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
 
     for index, segment in enumerate(plan.segments):
         if stopped():
-            return _stopped(pipeline_mod, backend, stage_ms, runs, segment.index)
+            # ⚠️ 这一支**同样**要把已跑完那些段的步数带出去 ✓✗（它在循环**顶上** ✓ ⇒ 触发时
+            #    前面至少有一段是跑完的 ✓）：不传就退回默认 0 ✓，而 ``stageMs`` 却是累加的 ✓
+            #    ⇒ 同一份回执里「采样 0 步」与「采样 40 秒」并存 ✓。
+            return _stopped(pipeline_mod, backend, stage_ms, runs, segment.index,
+                            sample_steps=steps, guidance_steps=guided)
         seg_dir = root / "segments" / f"seg{segment.index:03d}"
         base = replace(request, outputs_dir=str(seg_dir))
         # ⚠️ 续拍模式**不交**单帧锚 ✗（只交尾部潜变量 ✓）：两套锚语义重叠 ✓
@@ -513,10 +517,12 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
                      "videoPath": (result.outputs or {}).get("videoPath"),
                      "error": result.error})
         if result.cancelled:
-            return _stopped(pipeline_mod, backend, stage_ms, runs, segment.index)
+            return _stopped(pipeline_mod, backend, stage_ms, runs, segment.index,
+                            sample_steps=steps, guidance_steps=guided)
         if not result.ok:
             # ⚠️ 一段失败 ⇒ **整条失败** ✓（绝不交一条"少一段"的片子 ✗✗ —— 用户看不出来 ✓）
-            return _segment_failed(pipeline_mod, backend, result, stage_ms, runs, segment.index)
+            return _segment_failed(pipeline_mod, backend, result, stage_ms, runs, segment.index,
+                                   sample_steps=steps, guidance_steps=guided)
         decoded = holder[0] if holder else {}
         frames = (decoded or {}).get(frame_key)
         if not hasattr(frames, "shape") or len(tuple(frames.shape)) != 5:
@@ -554,12 +560,50 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
     target = root / f"video_chain_seed{int(getattr(request, 'seed', 0) or 0)}.mp4"
     video_report = media_mod.write_video(stitched, target, fps=fps, value_range="-1..1")
     stage_ms["chain"] = int((time.perf_counter() - chain_started) * 1000)
+    #: ⭐⭐ **成片也要核帧数** ✗✗（2026-11-08 补 ✗）：:func:`stitch_frames` 核的是**张量层**
+    #:   守恒 ✓（拼出来的帧数 == 各段 keep 之和 == 总帧数 ✓），但它**管不到编码器** ✓✗
+    #:   （libx264 会不会丢/补帧 ✓、封装有没有写 index ✓、重封装中间态读不读得到 ``nb_frames`` ✓）。
+    #:   此前这里一句都没有 ✓✗ —— 而 ``torch_backend.write`` 那条单段路**早就在核** ✓
+    #:   ⇒ 同一件事实两条路一半核一半不核 ✓（最典型的下场是一处改了另一处不改 ✓）。
+    #:   判定**不在这里重算** ✓✗：唯一真源是 :func:`media.frame_verdict` ✓
+    #:   （``write_video`` 内已 ``report.update(...)`` ✓），这里只读它交出的三个字段 ✓：
+    #:   ``framesVerified``（``nb_frames`` 直读 ✓ / ``duration×fps`` **估的** ✓ / ``None`` **没核过** ✗）、
+    #:   ``framesMatch``（``False`` 才拦 ✓；``None`` ＝**没有可比读数** ✗ ⇒ 既不拦 ✗、也不许读成通过 ✗）、
+    #:   ``encodedFrames``（盘上实际几帧 ✓）。
+    frames_verified = video_report.get("framesVerified")
+    frames_match = video_report.get("framesMatch")
+    if frames_match is False:
+        #: ⚠️ 与 ``torch_backend.write`` **同口径** ✓：先删废片再抛 ✓（㉕「失败路径一个文件都没写」✓）
+        #:    —— 段 mp4 都是有效的 ✓ 留着 ✓，只删这条**帧数不对的成片** ✗。
+        try:
+            Path(target).unlink()
+        except OSError:
+            pass                  # 删不掉也不能把真正的错误信息盖掉 ✓
+        how = ("直读 nb_frames" if frames_verified == "nb_frames" else "按 时长×帧率 估")
+        raise ChainError(
+            f"成片落盘后的帧数与计划不符 ✗：mp4 里 {video_report.get('encodedFrames')} 帧"
+            f"（{how} ✓），plan.totalFrames = {int(plan.totalFrames)} ✓"
+            f"（{target} ✗；已删掉这条废片 ✓ —— 张量层守恒过、编码器这层没守恒 ✓）")
 
     outputs: dict[str, Any] = {
         "synthetic": bool(getattr(backend, "synthetic", False)),
         "realTensors": True, "realFile": True,
         "videoPath": str(target), "primaryPath": str(target),
         "video": video_report,
+        #: ⭐ 「**核过帧数**」与「**读不到所以没核**」必须分开交出去 ✓✗（与 ``torch_backend.write``
+        #:   逐字同口径 ✓）：``nb_frames``（直读 ✓）/ ``duration×fps``（估的 ✓）/ ``None``（**没核过** ✗）。
+        #:   原先成片回执里这三格**一个都没有** ✓✗ ⇒ 读者只能从「真 mp4 ✓」推断"大概也核过了" ✗。
+        "framesVerified": frames_verified,
+        "framesMatch": frames_match,
+        "encodedFrames": video_report.get("encodedFrames"),
+        #: ⭐⭐ 成片路的**帧率三档** ✓✗（2026-11-10 补 ✗，判据在 :func:`media.compare_fps` ✓）：
+        #:   单段路（``torch_backend.write`` ✓）已抬到回执顶层 ✓，这条**另一条**路此前只有
+        #:   ``framesVerified`` ✓✗ ⇒ 「帧率被改了 ✗」「帧率没读到 ✗」在这条路上**一声不响** ✓
+        #:   （成片照样播 ✓、``durationSeconds`` 与 ``videoSeconds`` 都"有值" ✓）。
+        #:   同一个病根：**一处改了另一处不改** ✓（2026-11-08 帧数那次就是这个形状 ✓）。
+        "fpsVerified": video_report.get("fpsVerified"),
+        "fpsRequested": video_report.get("fpsRequested"),
+        "fpsOnDisk": video_report.get("fps"),
         "artifacts": ([{"kind": "video", "path": str(target),
                         "bytes": video_report.get("bytes")}]
                       + [{"kind": "segment", "index": row["index"], "path": row["videoPath"]}
@@ -574,6 +618,39 @@ def run_chain(request: Any, backend: Any, *, run_segment: Callable[..., Any],
         },
         "note": "**多段成片**：真 mp4 ✓（ffprobe 可复核 ✓）；各段产物**同时保留** ✓ 便于逐段核对 ✓",
     }
+    #: ⚠️ 「真 mp4 ✓」**不等于**「帧数对得上」✗✗（与 ``torch_backend.write`` 那两句同口径 ✓）：
+    #:   估的要写明**是估的** ✓、没读数的要**点名没核过** ✗ —— 少这两句 ⇒ 三种情况在回执里同形 ✓。
+    #: ⭐⭐ 要人**拔腿去查**的结论一律进 ``outputs["alerts"]`` ✓✗（2026-11-10 补 ✗）：
+    #:   ``PipelineResult.to_dict()`` 把它**统一抬到回执顶层** ✓（前端只读 ``result.alerts`` ✓）；
+    #:   只写 ``note`` 等于没写 ✓✗（前端一个 ``note`` 字都不取 ✓ —— 上一批结论就是这样被吞掉的 ✓）。
+    alerts: list[str] = []
+
+    def _alert(sentence: str) -> str:
+        alerts.append(sentence)
+        return sentence
+
+    if frames_verified == "duration×fps":
+        outputs["note"] = (str(outputs["note"])
+                           + f"；成片帧数按时长×帧率**估**得 {video_report.get('encodedFrames')} 帧 ✓"
+                             "（ffprobe 没给 ``nbFrames`` ✓ ⇒ 与计划的 ±1 帧内算对上 ✓；"
+                             "要逐帧实证得重封装修 index ✓）")
+    elif frames_verified is None:
+        outputs["note"] = (str(outputs["note"])
+                           + _alert("；⚠️ 成片帧数**没核对过** ✗（ffprobe 既没给 ``nbFrames`` ✓、"
+                                    "也读不出可用的时长/帧率 ✓）—— 「真 mp4 ✓」不等于"
+                                    "「帧数对得上」✗"))
+    #: ⭐ 帧率**被改了** ⇒ 音画不同步 ✗，画面上完全看不出来 ✓ ⇒ 必须喊 ✓。
+    if outputs.get("fpsVerified") == "drift":
+        outputs["note"] = (str(outputs["note"])
+                           + _alert(str(video_report.get("fpsNote")
+                                        or "；⚠️ 成片帧率与请求的**不一致** ✗（音画会不同步 ✗）")))
+    elif outputs.get("fpsVerified") is None:
+        #: ⚠️ 「**没读到**帧率」也不许安静放过 ✗（``None`` ＝ 没核 ✓，不是"一致" ✗）
+        outputs["note"] = (str(outputs["note"])
+                           + _alert("；⚠️ 成片帧率**没读到** ✗（``r_frame_rate`` 缺失 ✓）"
+                                    "⇒「帧率是不是请求的那个」**不知道** ✗"))
+    if alerts:
+        outputs["alerts"] = alerts
     emit({"kind": "stage", "stage": "chain",
           "note": f"多段成片 ✓：{plan.segmentCount} 段 ⇒ {plan.totalFrames} 帧"
                   f"（{plan.seconds:.2f}s ✓）"})
@@ -588,25 +665,41 @@ def _backend_name(backend: Any) -> str:
 
 
 def _stopped(pipeline_mod: Any, backend: Any, stage_ms: dict[str, int],
-             runs: list[dict[str, Any]], index: int) -> Any:
-    """段间被叫停 ✓ ⇒ **取消**（不是失败 ✗ —— 前端要分开显示 ✓）；已跑完的段产物**留着** ✓。"""
+             runs: list[dict[str, Any]], index: int, *,
+             sample_steps: int = 0, guidance_steps: int = 0) -> Any:
+    """段间被叫停 ✓ ⇒ **取消**（不是失败 ✗ —— 前端要分开显示 ✓）；已跑完的段产物**留着** ✓。
+
+    ⚠️ ``sample_steps`` / ``guidance_steps`` 必须**带过去** ✗✗（2026-11-08 补 ✗）：
+    ``stageMs`` 一直是累加着交出去的 ✓（见上面逐项累加 ✓），但步数原先**没传** ⇒ 早退时新建的
+    结果对象用**默认 0** ✓✗ —— 于是一条跑了 3 段（每段 25 步 ✓、真花掉几分钟 ✓）后在第 4 段被
+    取消的成片，回执里写着 ``sampleSteps: 0`` ✓✗，与**同一份**回执里的 ``stageMs`` 互相矛盾 ✓，
+    而成功路径的同一个字段是真步数之和 ✓（两种路径同名字段两种含义 ✓）。消费方
+    （``bridge.log_task_progress`` ✓）照 0 记录 ⇒ 「跑完 3 段后取消」与「一步都没跑」同形 ✓。
+    """
     return pipeline_mod.PipelineResult(
         ok=False, cancelled=True, backend=_backend_name(backend),
         synthetic=bool(getattr(backend, "synthetic", False)), stageMs=dict(stage_ms),
+        sampleSteps=int(sample_steps), guidanceSteps=int(guidance_steps),
         outputs={"chain": {"segmentRuns": runs, "stoppedBefore": int(index)}},
         error={"stage": "chain", "cancelled": True,
                "message": f"已取消：停在第 {index} 段之前 ✓（前面几段的产物保留 ✓）"})
 
 
 def _segment_failed(pipeline_mod: Any, backend: Any, result: Any, stage_ms: dict[str, int],
-                    runs: list[dict[str, Any]], index: int) -> Any:
-    """第 ``index`` 段失败 ⇒ 整条失败 ✓（阶段名带上段号 ✓ 不然只看到一个 decode 失败 ✓）。"""
+                    runs: list[dict[str, Any]], index: int, *,
+                    sample_steps: int = 0, guidance_steps: int = 0) -> Any:
+    """第 ``index`` 段失败 ⇒ 整条失败 ✓（阶段名带上段号 ✓ 不然只看到一个 decode 失败 ✓）。
+
+    步数同样要带过去 ✓（理由见 :func:`_stopped` ✓）—— 失败那条**更**需要：前面几段的算力是
+    真花掉的 ✓，回执记 0 会让人误判「根本没跑起来、所以不贵」✗。
+    """
     error = dict(result.error or {})
     error["stage"] = f"segment[{index}]/{error.get('stage', '?')}"
     error["segment"] = int(index)
     return pipeline_mod.PipelineResult(
         ok=False, cancelled=False, backend=_backend_name(backend),
         synthetic=bool(getattr(backend, "synthetic", False)), stageMs=dict(stage_ms),
+        sampleSteps=int(sample_steps), guidanceSteps=int(guidance_steps),
         outputs={"chain": {"segmentRuns": runs, "failedSegment": int(index)}},
         error=error)
 
