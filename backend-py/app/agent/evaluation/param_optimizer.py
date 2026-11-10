@@ -55,8 +55,12 @@ __all__ = [
     "TEMPERATURE_GRID",
     "TuneCancelled",
     "current_temperature",
+    "effective_instructions",
+    "next_version",
     "normalize_options",
+    "notify",
     "optimize_agent_temperature",
+    "sha16",
     "temperature_candidates",
 ]
 
@@ -132,9 +136,13 @@ def _sha16(text: str) -> str:
 def _next_version(conn: Connection, agent_type: str, case_id: str) -> int:
     """下一个 ``version``：取该 (agent, case) 已存在的**最大 version + 1**。
 
-    为什么跨目标取 max（而不是按 ``target`` 各自从 1 数）：``mark_persisted`` 是按
-    (agent_type, version, case_id) 定位行的，两套编号撞上就会把「参数采纳」标到「提示词那行」
-    头上 —— 判决与生效错位，正是这张表最不能出的错。
+    为什么跨目标取 max（而不是按 ``target`` 各自从 1 数）：``version`` 在这张表里读作
+    **这一对 (agent, case) 上的轮次序号** —— 优化史按 id 倒序列出时，「v7 是第 7 轮」比
+    「提示词 v3 / 温度 v1 / 技能 v2 各一套号」好读，三格也因此共用一个递增器。
+
+    ⚠️ 它**不是**防串标的护栏（2026-11-09 更正这句旧理由）：``optimizer.py`` 那一格的版本号
+    来自 history 的 best、不经过这里 ⇒ 提示词 v2 与温度 v2 并存本来就躲不开；「判决与生效
+    不标错人」由 ``optimization_log.mark_persisted`` 的 WHERE 带 ``target`` 兜住。
     """
     current = conn.execute(
         select(func.max(agent_optimizations.c.version)).where(
@@ -415,6 +423,7 @@ async def optimize_agent_temperature(
     if written:
         optimization_log.mark_persisted(
             conn, agent_type=agent_type, version=best["version"], case_id=case_id,
+            target="params",
         )
         receipt["accepted"]["persisted"] = True
         print(f"[PERSIST] 温度 {best['temperature']} 已写入 agent_configs"
@@ -431,3 +440,13 @@ async def optimize_agent_temperature(
     _notify(progress, type="done", reason="accepted" if written else "accepted_not_persisted",
             doneRuns=done_runs, totalRuns=total_runs)
     return receipt
+
+
+# ── 与技能优化器共用的四件小工具（``skill_optimizer.py`` 用公开名导入）─────────────────────
+# 定义留在本模块：这里是「按次覆盖设置、拿同一份提示词比分数」这套语义的出生地，实现放在一处。
+# 各写一遍迟早一边改了另一边不知道 —— 其中 ``sha16`` 尤其不能分叉：那是「这两轮比的确实是同一份
+# 提示词」的唯一凭据，两个算法并存等于这条凭据作废。
+sha16 = _sha16
+next_version = _next_version
+effective_instructions = _effective_instructions
+notify = _notify

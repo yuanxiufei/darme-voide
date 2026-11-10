@@ -42,6 +42,7 @@ from app.core.response import now
 from app.services.grid_payload import find_grid_payload
 from app.services.storyboard_helpers import delete_storyboard_children
 from app.agent.runtime import run_agent_with_instructions
+from app.agent.evaluation.judge import judge_output
 from app.agent.evaluation.scorer import (
     score_extraction,
     score_grid_prompts,
@@ -109,6 +110,93 @@ def grid_prompt_message(
 def norm_tool_name(name: Any) -> str:
     """工具名归一：小写 + 去掉所有非字母数字（驼峰与下划线因此等价）。"""
     return "".join(ch for ch in str(name or "").lower() if ch.isascii() and ch.isalnum())
+
+
+#: 工具不存在时运行时回灌的正文前缀（``runtime._run_tool`` 里那一句）。
+_UNKNOWN_TOOL_PREFIX = "Unknown tool"
+
+
+def _tool_error(rendered: Any) -> str | None:
+    """从一条工具结果里取错误正文（没有错误 ⇒ ``None``）。
+
+    工具输出是 ``normalize_tool_output`` 渲染的字符串，**未必是 JSON**（纯文本结果也合法）
+    ⇒ 解析失败就当「没有结构化错误」，不臆造。
+    """
+    if isinstance(rendered, dict):
+        payload = rendered
+    elif isinstance(rendered, str):
+        try:
+            payload = json.loads(rendered)
+        except ValueError:
+            return None
+    else:
+        return None
+    if isinstance(payload, dict) and payload.get("error"):
+        return str(payload.get("error"))
+    return None
+
+
+def step_trace(
+    tool_calls: list[dict[str, Any]] | None,
+    tool_results: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """**单步对照**：把一整轮的轨迹拆成逐步的账（``(steps, stats)``）。
+
+    为什么需要（2026-11-08，缺口 4 第三格的前置）：现有 case 是**整轮**打分，摘掉一个工具
+    之后「第 3 步没工具可用」与「最后一句写得不好」扣的是同一个分 ⇒ 工具集换了也读不出
+    是哪一处变了，leave-one-out 在这种粒度上判不准。
+
+    这里只判**可机器判的三件事**（不猜语义）：
+
+    * ``ok`` —— 该步有对应结果且结果里没有 ``error``（工具抛错、参数不合法都落在这一栏）；
+    * ``unknownTool`` —— 该步撞上 ``Unknown tool``（**这就是「摘掉工具」的直接证据**：
+      模型仍然想调它，而它不在本跑的暴露集里）；
+    * ``ok=None`` —— 没有对应的工具结果（驱动没回灌）。**不判成失败**：没证据 ≠ 失败。
+
+    ⚠️ 别把 ``ok`` 当「这一步有没有用」：工具成功返回 ``available:false``（语料/知识库
+    目录缺失时的既定降级）也算 ok，那是「跑了但没料」，与「跑失败」是两件事。
+
+    ⚠️ 输入**必须**是内存里那一跑的 `tool_calls`/`tool_results`（驱动回灌的数组），
+    **不是**盘上的 `<dataRoot>/traces/*.jsonl`：2026-11-08 实测 61/61 条真实轨迹里
+    `meta.toolCalls` 是**整数计数**，逐步明细根本没有落盘（`task_logger` 只记数量）。
+    传进来一个计数也不炸（``stats["unavailable"]`` 如实说明"没有逐步明细"），
+    但别指望从轨迹文件重建候选——候选只能从**基线那一跑的内存结果**取。
+    """
+    calls = tool_calls if isinstance(tool_calls, (list, tuple)) else []
+    results = tool_results if isinstance(tool_results, (list, tuple)) else []
+    unavailable = None
+    if tool_calls is not None and not isinstance(tool_calls, (list, tuple)):
+        unavailable = "toolCallsNotList"
+        calls = []
+    steps: list[dict[str, Any]] = []
+    for index, raw in enumerate(calls):
+        call = raw if isinstance(raw, dict) else {}
+        name = str(call.get("toolName") or "")
+        item = results[index] if index < len(results) else None
+        if not isinstance(item, dict):
+            item = None
+        error = _tool_error(item.get("result")) if item is not None else None
+        steps.append({
+            "index": index,
+            "tool": name,
+            "ok": (error is None) if item is not None else None,
+            "unknownTool": bool(error and error.startswith(_UNKNOWN_TOOL_PREFIX)),
+            "error": error,
+        })
+    order: list[str] = []
+    for step in steps:
+        if step["tool"] and step["tool"] not in order:
+            order.append(step["tool"])
+    stats = {
+        "total": len(steps),
+        "ok": sum(1 for step in steps if step["ok"] is True),
+        "failed": sum(1 for step in steps if step["ok"] is False),
+        "unjudged": sum(1 for step in steps if step["ok"] is None),
+        "unknownTool": sum(1 for step in steps if step["unknownTool"]),
+        "tools": order,
+        "unavailable": unavailable,
+    }
+    return steps, stats
 
 
 def seed_case(
@@ -288,13 +376,107 @@ def extract_grid_payload(result: Any) -> dict[str, Any] | None:
             or find_grid_payload(getattr(result, "text", None)))
 
 
+def _report_steps(report: dict[str, Any], result: Any) -> dict[str, Any]:
+    """把「单步对照」的账挂进报告（五个 ``kind`` 的**唯一**收口）。"""
+    report["steps"], report["stepStats"] = step_trace(
+        getattr(result, "tool_calls", None), getattr(result, "tool_results", None),
+    )
+    #: 模型的**最终正文**（2026-11-10 补）：语义判分的 ``[Output]`` 段只能取它 ——
+    #: 确定性打分只看得见"产物里有什么"，看不见"模型怎么交代自己做了什么"。
+    report["answer"] = str(getattr(result, "text", "") or "")
+    return report
+
+
 async def evaluate_case(
     conn: Connection,
     case_def: dict[str, Any],
     instructions: str,
     settings: dict[str, Any] | None = None,
+    *,
+    skills: str | None = None,
+    tools: str | None = None,
 ) -> dict[str, Any] | None:
-    """用指定 ``instructions`` 评测一个 case，返回确定性评分报告（``caseId`` / ``runtimeModel`` 已填）。
+    """用指定 ``instructions`` 评测一个 case（确定性分 ＋ 可选语义分）。
+
+    语义判分（P0-3）**只在 case 显式写了 ``judge`` 时**才跑：那五把规则尺子能判
+    「有没有 12 个镜头」，判不了「这场戏的冲突够不够」—— 而提示词优化器的目标函数
+    恰恰是后者。两者**并排**（``report["judge"]``），不互相替换：规则分回答
+    "格式合不合规"，语义分回答"内容好不好"，混成一个数就再也拆不开。
+
+    ⚠️ 开关是 ``judge`` 而**不是** ``criteria``：现存 case 的 ``criteria`` 是
+    **规则词表**（``["保留人物关系", ...]``，给 ``scorer`` 做包含判定），拿它当判分标准
+    会让每个 case 突然真跑一次 LLM 判分 —— 判分标准必须有人写（见 ``cases.py``）。
+    """
+    report = await _score_case(conn, case_def, instructions, settings,
+                               skills=skills, tools=tools)
+    if report is None:
+        return None
+    spec = _judge_spec(case_def)
+    if spec is None:
+        return report
+    report["judge"] = (await judge_output(
+        conn,
+        criteria=spec["criteria"],
+        output=str(report.get("answer") or ""),
+        input_text=_judge_input(case_def),
+        evidence=report.get("steps"),
+        expected=spec.get("expected"),
+        threshold=float(spec.get("threshold") or 0.6),
+        # ⚠️ **不**透传被测那套 model_settings：判分的温度必须固定 0（``judge_output``
+        # 的默认值），否则"同一份输出重复判分"会抖成两三个不同的分。
+        options={},
+    )).as_dict()
+    return report
+
+
+def _judge_spec(case_def: dict[str, Any]) -> dict[str, Any] | None:
+    """``case_def["judge"]`` ⇒ 归一成 ``{"criteria", "expected", "threshold"}``。
+
+    写成字符串是简写（它就是 ``criteria``）；写成 dict 时必须带非空 ``criteria``，
+    否则**不判**（宁可明说"没标准"也不拿一个通用标准去评创作者的戏）。
+    """
+    raw = case_def.get("judge")
+    if isinstance(raw, str):
+        criteria = raw.strip()
+        return {"criteria": criteria} if criteria else None
+    if not isinstance(raw, dict):
+        return None
+    criteria = str(raw.get("criteria") or "").strip()
+    if not criteria:
+        return None
+    return {
+        "criteria": criteria,
+        "expected": raw.get("expected"),
+        "threshold": raw.get("threshold"),
+    }
+
+
+def _judge_input(case_def: dict[str, Any]) -> str:
+    """``[Input]`` 段：case 给模型的任务输入（剧本/原始台词/角色表）。"""
+    statement = case_def.get("statement") or {}
+    parts: list[str] = []
+    for key, label in (("script", "剧本"), ("content", "原始内容"),
+                       ("prompt", "任务提示"), ("mode", "模式")):
+        value = statement.get(key)
+        if value:
+            parts.append(f"{label}：{value}")
+    for key in ("characters", "scenes"):
+        value = statement.get(key)
+        if value:
+            parts.append(f"{key}：{value}")
+    return "\n".join(parts)
+
+
+async def _score_case(
+    conn: Connection,
+    case_def: dict[str, Any],
+    instructions: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    skills: str | None = None,
+    tools: str | None = None,
+) -> dict[str, Any] | None:
+    """确定性打分（五把规则尺子；``evaluate_case`` 的内核）。
 
     **不依赖、也不修改 DB 里的 ``agent_configs``**（候选提示词直接传入）。
 
@@ -302,9 +484,28 @@ async def evaluate_case(
     不落库 —— 参数调优（``param_optimizer``）靠它做到「同一份提示词、只换温度」；
     不传就是 DB 里那套（老调用方行为零变化）。未知 ``kind`` 返回 ``None``（TS 的 switch
     没有 default ⇒ 落到 undefined）。
+
+    ``skills``（2026-11-08 新增）：本次 run 的**技能绑定覆盖**（JSON 原文，形状同
+    ``agent_configs.skills``）。与 ``settings`` 同一口径 —— 只影响这一跑、不落库，
+    且**不写** ``skill_usage``（假设性绑定不许污染真实使用统计）。
+    用途唯一：技能绑定优化（``skill_optimizer``）拿它做到「同一份提示词、只换注入的 skill 集」。
+    不传（``None``）就是 DB 里那套；传 ``"[]"`` 是「一个都不注入」。
+
+    ``tools``（2026-11-08 新增）：本次 run 的**工具集覆盖**（JSON 数组原文，元素是工具名）。
+    与 ``settings`` / ``skills`` 同一口径 —— 只影响这一跑、不落库。用途唯一：
+    工具集优化（``tool_optimizer``）做到「同一份提示词、只换暴露哪几个工具」。
+    不传就是该 Agent 的全部工具；传 ``"[]"`` 是「一个工具都不给」（会退化成纯问答跑次）。
+
+    **报告里的 ``steps`` / ``stepStats``** 是这一跑轨迹的逐步账（见 :func:`step_trace`），
+    五个 ``kind`` 一律都带 —— 工具集那种「一步没用上」的差别只能在这个粒度上读出来。
     """
     # 空 dict 视同没传：``{"modelSettings": {}}`` 与不传在 runtime 里等价，但少一层误导
     run_options: dict[str, Any] = {"modelSettings": settings} if settings else {}
+    # ⚠️ 用 ``is not None`` 判而不是真值判：``"[]"`` 是「全关」，它与「没传」是两件事
+    if skills is not None:
+        run_options["skillsRaw"] = skills
+    if tools is not None:
+        run_options["toolsRaw"] = tools
 
     kind = case_def.get("kind")
     statement = case_def.get("statement") or {}
@@ -325,7 +526,7 @@ async def evaluate_case(
             report = score_storyboards(shots, rubric, seed["legal"])
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
-            return report
+            return _report_steps(report, result)
         finally:
             cleanup_case(seed)
 
@@ -341,7 +542,7 @@ async def evaluate_case(
             )
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
-            return report
+            return _report_steps(report, result)
         finally:
             cleanup_case(seed)
 
@@ -355,7 +556,7 @@ async def evaluate_case(
             report = score_script_rewrite(extract_script(result.tool_calls), rubric)
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
-            return report
+            return _report_steps(report, result)
         finally:
             cleanup_case(seed)
 
@@ -378,7 +579,7 @@ async def evaluate_case(
             )
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
-            return report
+            return _report_steps(report, result)
         finally:
             cleanup_case(seed)
 
@@ -396,7 +597,7 @@ async def evaluate_case(
             report = score_grid_prompts(extract_grid_payload(result), rubric)
             report["caseId"] = case_id
             report["runtimeModel"] = result.model
-            return report
+            return _report_steps(report, result)
         finally:
             cleanup_case(seed)
 

@@ -13,7 +13,9 @@
 ③ 判采纳用的是**均值涨幅 > 基线抖动带**，涨幅没超过抖动带记 ``below_noise`` 而不是 ``accepted``；
 ④ 采纳才落库、落库只动 ``temperature`` 一列；**没有配置行就不写**（照实 ``persisted=False``，
    绝不为了"看起来生效了"插一行只带温度的配置，那会把 ``system_prompt`` 留空）；
-⑤ 版本号跨目标取 max+1（``mark_persisted`` 按 version 定位行，两套编号撞上就把采纳标错行）；
+⑤ 版本号跨目标取 max+1（``version`` 是 (agent, case) 上的**轮次序号**，三格共用一个递增器；
+   防串标**不靠它** —— 提示词那格的号来自 history、不经过它，撞号本来就躲不开，靠
+   ``optimization_log.mark_persisted`` 的 WHERE 带 ``target`` 兜住）；
 ⑥ 同提示词：一轮内所有行的 ``prompt_sha`` 必须一致（不一样就说明"固定提示词"这个前提破了）；
 ⑦ 接线：``runtime`` 的覆盖按 nullish（``temperature=0.0`` 不许被默认值顶掉）、
    ``evaluator`` 把 settings 传给 runtime、路由 ``POST /evaluation/tune/{case}`` 存在且

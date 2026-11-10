@@ -14,11 +14,15 @@
 ② 落库：``delta`` 由服务端算；``score_before`` 为空 ⇒ ``delta=None``（**不是 0**）；
 ③ 追加不覆盖：同版本重写一行是**两行事实**，不是一次修改；
 ④ ``accepted`` 与 ``persisted`` **是两个布尔**（"分数更高"与"真变成默认值"不同）；
+   ④′ ``mark_persisted`` 的 ``target`` 必须进 WHERE —— 四格的 ``version`` 各自从 1 数，
+   同 agent 同版本的跨格行不许互相串标（串了不抛错，只把生效标错人）；
 ⑤ ``target`` / ``reason`` 闭集：未知值不许静默变成 ``system_prompt``；
 ⑥ 汇总：``rounds/accepted/persisted/bestDelta`` 分开给，空表不是 ``available=false``；
 ⑦ 读口读不出来 ⇒ ``available=false``（不返空表，空表会被读成"从没优化过"）；
 ⑧ 写口失败 ⇒ 只吞不抛（长跑优化不许被日志拖废）；
 ⑨ 接线：优化器**两个分支**都写、``mark_persisted`` 在 ``persist_agent_config`` 之后；
+   ⑨′ 全仓每处 ``mark_persisted`` 都**显式**给 ``target`` 且与所在文件身份一致（WHERE 带
+   ``target`` 只是半条护栏：调用方漏给会静默落进 ``system_prompt`` 那格）；
 ⑩ HTTP：``GET /knowledge-loop/optimizations`` 信封与过滤。
 
 运行::
@@ -85,11 +89,16 @@ def case_schema() -> None:
           "prompt" not in cols and "prompt_text" not in cols, cols)
     check("① 登记进 `PYTHON_ONLY_TABLES` ✓（Node 侧 schema.ts 没有这张表，不登记会被结构断言误报 ✗）",
           "agent_optimizations" in models.PYTHON_ONLY_TABLES, models.PYTHON_ONLY_TABLES)
-    check("① 优化目标闭集＝system_prompt + params（温度，缺口 4 第一格）✓"
-          "（留列不留假数据：没实现的目标不许出现 ✗）",
-          sorted(optimization_log.TARGETS) == ["params", "system_prompt"], optimization_log.TARGETS)
-    check("① 判决理由五值闭集 ✓", sorted(optimization_log.REASONS)
-          == ["accepted", "below_noise", "eval_failed", "no_gain", "runtime_mismatch"],
+    check("① 优化目标闭集＝system_prompt + params（温度，第一格）+ skills（绑定，第二格）"
+          "+ tools（工具集，第三格）✓（留列不留假数据：没实现的目标不许出现 ✗）",
+          sorted(optimization_log.TARGETS) == ["params", "skills", "system_prompt", "tools"],
+          optimization_log.TARGETS)
+    check("① 判决理由十值闭集 ✓（pruned/skill_needed/tool_needed/tool_wanted/tool_unjudged 是后两格的"
+          "**反向**判据：采纳方向与 accepted 相反，Δ 为 0 或负数也可能采纳 ✗；"
+          "tool_unjudged 记的是「逐步账没明细、判不了」，与 tool_wanted（判得了且说模型仍在调）必须分两档 ✗）",
+          sorted(optimization_log.REASONS)
+          == ["accepted", "below_noise", "eval_failed", "no_gain", "pruned", "runtime_mismatch",
+              "skill_needed", "tool_needed", "tool_unjudged", "tool_wanted"],
           optimization_log.REASONS)
 
 
@@ -159,6 +168,46 @@ def case_persisted_separate() -> None:
     listing = optimization_log.list_records(limit=5)["summary"]
     check("④ 汇总里 `accepted` 与 `persisted` 分开数 ✓",
           listing["accepted"] == 1 and listing["persisted"] == 1, listing)
+
+
+# ===================================================================== ④′
+def case_persisted_cross_target() -> None:
+    """同一 agent、同一 `version`、**不同 `target`** 的两行不许互相串标。
+
+    四格的 ``version`` 各自从 1 数：提示词格与温度格同时存在 ``version=1`` 是常态 ✓。
+    若 ``mark_persisted`` 的 WHERE 不带 ``target``，一条「提示词落库」会把温度那行也标成
+    已生效 —— 页面显示「温度调优也生效了」，而真正被写进 ``agent_configs`` 的提示词版本
+    反而在优化史里查不到生效痕迹。这种错**不抛异常、也不改任何数值**，只把生效标错人 ✗。
+    """
+    _reset()
+    _record(version=1, score_before=70.0, score_after=76.0, accepted=True, reason="accepted",
+            target="params", case_id="triage-basic")
+    _record(version=1, score_before=70.0, score_after=74.0, accepted=True, reason="accepted",
+            target="system_prompt", case_id="triage-basic")
+
+    with db.engine.begin() as conn:
+        marked = optimization_log.mark_persisted(conn, agent_type="script", version=1,
+                                                 case_id="triage-basic")
+    rows = {i["target"]: i["persisted"] for i in optimization_log.list_records(limit=5)["items"]}
+    check("④′ 不传 `target` ⇒ 默认只标 `system_prompt` 那一行 ✓"
+          "（默认值是 `system_prompt`，不是\"随便哪一行\" ✓✗）",
+          marked == 1 and rows.get("system_prompt") is True, (marked, rows))
+    check("④′ 跨目标不串标: 同 agent 同 version 的温度行仍是 `persisted=false` ✓"
+          "（少了 `target` 这一格就会把它一起标成已生效，且不抛错 ✗）",
+          rows.get("params") is False, rows)
+
+    with db.engine.begin() as conn:
+        marked = optimization_log.mark_persisted(conn, agent_type="script", version=1, target="params")
+    rows = {i["target"]: i["persisted"] for i in optimization_log.list_records(limit=5)["items"]}
+    check("④′ 显式给 `target='params'` ⇒ 改到 1 行、两格各自独立为真 ✓"
+          "（`case_id` 省略时只按 agent+version+target 定位 ✓）",
+          marked == 1 and rows.get("params") is True and rows.get("system_prompt") is True,
+          (marked, rows))
+
+    with db.engine.begin() as conn:
+        nothing = optimization_log.mark_persisted(conn, agent_type="script", version=1, target="tools")
+    check("④′ 目标格没有那一版 ⇒ 0 行 ✓（不许跨目标近似匹配到别的格 ✗）",
+          nothing == 0, nothing)
 
 
 # ===================================================================== ⑤
@@ -283,9 +332,9 @@ def case_wiring() -> None:
             elif attr == "mark_persisted":
                 marks.append(node)
 
-    check("⑨ 每轮都写优化史: `optimization_log.record` 出现 **2 次** ✓"
-          "（正常轮 + 换模型不可比轮，少一处就会漏掉一整类事实 ✗）",
-          len(records) == 2, len(records))
+    check("⑨ 每轮都写优化史: `optimization_log.record` 出现 **3 次** ✓"
+          "（正常轮 + 换模型不可比轮 + 单轮跑崩的 `eval_failed` 轮，少一处就会漏掉一整类事实 ✗）",
+          len(records) == 3, len(records))
 
     kwargs = [kw.arg for node in records for kw in node.keywords]
     for need in ("score_before", "score_after", "accepted", "reason", "case_id"):
@@ -311,6 +360,32 @@ def case_wiring() -> None:
     check("⑨ 优化史写口**不许**出现在路由里 ✓（HTTP 手写\"提升了多少\"没法核 ✗）",
           "optimization_log.record" not in
           (BP / "app" / "routers" / "knowledge_loop.py").read_text(encoding="utf-8"))
+
+    # ⑨′ WHERE 带 `target` 只是半条护栏：调用方漏给会落进默认值 `system_prompt`，
+    # 于是「参数/技能落库」被标到提示词那行 —— 与 ④′ 是同一个错的另一半入口 ✓✗。
+    calls: list[tuple[str, str | None]] = []
+    for path in (BP / "app").rglob("*.py"):
+        try:
+            tree_x = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree_x):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(getattr(node.func, "value", None), "id", "") != "optimization_log":
+                continue
+            if getattr(node.func, "attr", "") != "mark_persisted":
+                continue
+            kw = next((k.value for k in node.keywords if k.arg == "target"), None)
+            calls.append((path.relative_to(BP).as_posix(),
+                          getattr(kw, "value", None) if kw is not None else None))
+
+    check("⑨′ 每处 `mark_persisted` 都**显式**给 `target` ✓（漏给 = 静默落到 `system_prompt` 那格 ✗）",
+          bool(calls) and all(seen for _, seen in calls), calls)
+    check("⑨′ 每处 `target` 与所在文件身份一致 ✓（提示词/参数/技能各一格，抄错一个就是标错人 ✗）",
+          {Path(name).name: seen for name, seen in calls}
+          == {"optimizer.py": "system_prompt", "param_optimizer.py": "params",
+              "skill_optimizer.py": "skills"}, calls)
 
 
 # ===================================================================== ⑩
@@ -348,6 +423,7 @@ def main() -> int:
     case_record()
     case_append_only()
     case_persisted_separate()
+    case_persisted_cross_target()
     case_closed_sets()
     case_summary()
     case_unavailable()

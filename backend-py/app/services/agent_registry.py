@@ -218,6 +218,7 @@ SUBAGENT_REGISTRY: tuple[dict[str, str], ...] = tuple(
 HOST_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "assign_voice",
+        "edit_script",
         "generate_grid_prompt",
         "get_characters",
         "list_available_agents",

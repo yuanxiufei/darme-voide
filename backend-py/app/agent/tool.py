@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 __all__ = [
     "Tool",
@@ -129,6 +129,43 @@ class ToolRegistry:
 
     def ids(self) -> list[str]:
         return list(self.tools)
+
+    def names(self) -> list[str]:
+        """LLM 侧看到的函数名（``tool.id``，蛇形）。
+
+        ⚠️ 与 :meth:`ids` **不是同一件事**：``ids`` 是注册表的**键**，``names`` 是
+        下发给模型的 ``function.name``。评测与优化要判「模型能调哪些工具」，问的是后者。
+        """
+        return [tool.id for tool in self.tools.values()]
+
+    def only(self, wanted: Iterable[str]) -> tuple["ToolRegistry", list[str]]:
+        """按名册裁剪出一个子集（**评测「假设性工具集」的唯一入口**）。
+
+        返回 ``(子集, 名册里有但本注册表没有的名字)`` —— 后者必须往上报，不能吞：
+        「想摘掉一个本来就不存在的工具」与「摘掉成功」是两件事，静默当成功会让
+        优化结论看着有依据、实际什么都没变。
+
+        名字既可以写 ``tool.id``（蛇形，模型侧看到的名字）也可以写注册表键：先按键查、
+        再按 id 兜底 —— 与 :meth:`get` 同一个两套匹配口径，否则评测里「按键能摘、按 id
+        摘不掉」那种偏差会直接变成假结论。
+
+        ⚠️ 顺序跟着**本注册表**走（不是跟着名册）：工具声明顺序就是提示词里 tool 列表的
+        顺序，评测跑次必须与线上同一序，否则 A/B 之间多了一个不相关的变量。
+        """
+        # 名字 → 键：先按键（工厂返回的键），再按 ``tool.id``（蛇形）兜底 ——
+        # 与 :meth:`get` 的两套匹配口径一致，否则评测里会「按键能摘、按 id 摘不掉」。
+        by_id = {tool.id: key for key, tool in self.tools.items()}
+        keep_keys: set[str] = set()
+        missing: list[str] = []
+        for item in wanted:
+            name = str(item)
+            key = name if name in self.tools else by_id.get(name)
+            if key is None:
+                missing.append(name)
+                continue
+            keep_keys.add(key)
+        kept = {key: tool for key, tool in self.tools.items() if key in keep_keys}
+        return ToolRegistry(kept), missing
 
     def as_openai_tools(self) -> list[dict[str, Any]]:
         """OpenAI / OpenAI 兼容（``/chat/completions``）的 ``tools`` 参数。"""

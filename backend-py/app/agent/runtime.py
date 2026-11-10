@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -64,7 +65,14 @@ from app.services.visual_graph import build_visual_graph_guidance
 from app.services import knowledge_feed, rhythm_phase, skill_usage
 from app.mcp.client import discover_mcp_tools
 from app.agent import context_budget
+from app.agent.intervention import (
+    InterventionGate,
+    gate_from_options,
+    pending_message,
+    rejected_message,
+)
 from app.agent.protocol import build_protocol_contract, parse_agent_protocol
+from app.agent.repeat_guard import GuardHit, RepeatGuard, guard_from_options
 from app.agent.skills import load_agent_skills, resolve_default_skills
 from app.agent.tool import ToolRegistry
 from app.agent.tools.corpus_tools import create_corpus_tools
@@ -809,6 +817,23 @@ def _called_tools(tool_calls_out: list[dict[str, Any]]) -> list[str]:
     return [str(call.get("toolName") or "") for call in tool_calls_out if call.get("toolName")]
 
 
+def _parse_tool_names(raw: Any) -> list[str]:
+    """把 ``toolsRaw`` 解析成工具名册（**JSON 字符串或 list**，两套写法都收）。
+
+    ⚠️ 解析失败**当场抛**，不回落成「全开」：调用方本意是「只暴露这几个」，
+    悄悄全开等于让它拿一份假结论（工具集优化会读这一跑的分来做判决）。
+    """
+    value = raw
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError as err:
+            raise ValueError(f"toolsRaw 不是合法 JSON: {err}") from err
+    if not isinstance(value, list):
+        raise ValueError(f"toolsRaw 必须是数组，实际是 {type(value).__name__}")
+    return [str(item) for item in value]
+
+
 def _need_write_nudge(
     tool_calls_out: list[dict[str, Any]],
     text: str,
@@ -839,29 +864,123 @@ async def _run_tool(
     args: dict[str, Any],
     tool_calls_out: list[dict[str, Any]],
     tool_results_out: list[dict[str, Any]],
+    *,
+    blocked: str | None = None,
+    call_id: str = "",
 ) -> str:
-    """跑一个工具并把结果序列化（工具报错**回灌给模型**，不中断 run）。"""
+    """跑一个工具并把结果序列化（工具报错**回灌给模型**，不中断 run）。
+
+    ``blocked``：批级守卫已经叫停时，这条**不执行**，只回灌一句"为什么没跑"。
+    两道闸门（P0-1 重复守卫、P0-2 人工介入）都在这里，因为 ``_run_tool`` 是
+    三条驱动循环（OpenAI / Ollama / 自研引擎）**唯一的**工具执行口 —— 挂在任何一条
+    循环里都会漏掉另外两条。
+    """
+    guard = _TOOL_GUARD.get()
     tool = tools.get(str(name)) if name else None
-    if tool is None:
-        output: Any = {"error": f"Unknown tool: {name}"}
+    if blocked is not None:
+        output: Any = {"skipped": True, "reason": blocked}
+    elif tool is None:
+        output = {"error": f"Unknown tool: {name}"}
     else:
-        try:
-            output = await tool.run(args)
-        except Exception as err:  # noqa: BLE001 —— 工具报错回灌给模型，不中断 run
-            # ⚠️ 2026-10-30：**先落日志再回灌**。只回灌不记录 ⇒ 工具静默失败：
-            # 实测 extract 的 ``save_dedup_characters`` 抛错后，日志里只有
-            # ``save-characters-begin`` 而**没有 complete**，模型以为存好了继续往下走，
-            # 角色从此永远缺失，报告里却只有「已完成」。模型侧行为保持不变（仍回灌
-            # error 让它自己纠正），但失败必须能被人在日志里看见。
-            log_task_error("Agent", "tool-failed", {
-                "tool": str(name),
-                "error": f"{type(err).__name__}: {err}",
-            })
-            output = {"error": str(err)}
+        gated = guard.before_tool(str(name), args, call_id=call_id) if guard is not None else None
+        if gated is not None:
+            output = gated
+        else:
+            try:
+                output = await tool.run(args)
+            except Exception as err:  # noqa: BLE001 —— 工具报错回灌给模型，不中断 run
+                # ⚠️ 2026-10-30：**先落日志再回灌**。只回灌不记录 ⇒ 工具静默失败：
+                # 实测 extract 的 ``save_dedup_characters`` 抛错后，日志里只有
+                # ``save-characters-begin`` 而**没有 complete**，模型以为存好了继续往下走，
+                # 角色从此永远缺失，报告里却只有「已完成」。模型侧行为保持不变（仍回灌
+                # error 让它自己纠正），但失败必须能被人在日志里看见。
+                log_task_error("Agent", "tool-failed", {
+                    "tool": str(name),
+                    "error": f"{type(err).__name__}: {err}",
+                })
+                output = {"error": str(err)}
     rendered = normalize_tool_output(output)
     tool_calls_out.append({"toolName": name, "args": args})
     tool_results_out.append({"toolName": name, "result": rendered})
     return rendered
+
+
+@dataclass
+class _ToolCallGuard:
+    """一次 run 的两道闸门（**按 run 新建**，经 ``ContextVar`` 供三条循环共用）。
+
+    ``stop`` 一旦置位就**粘住**：参考实现里停止是整轮语义（剩下的兄弟调用也不再执行），
+    本仓同口径 —— 打转时把这一批里没跑的每个调用都回灌"已叫停"，保证
+    ``toolCalls`` 与 ``toolResults`` 仍逐条成对（③-23 的结构约束）。
+    """
+
+    guard: RepeatGuard
+    gate: InterventionGate
+    stop: GuardHit | None = None
+
+    def check_burst(self, call_count: int) -> GuardHit | None:
+        hit = self.guard.check_burst(call_count)
+        if hit is not None:
+            self.stop = hit
+        return hit
+
+    def before_tool(self, name: str, args: dict[str, Any], call_id: str = "") -> dict[str, Any] | None:
+        """返回 None ⇒ 照跑；返回 dict ⇒ 这条不跑，把 dict 当工具结果回灌。"""
+        if self.stop is not None:
+            return {"skipped": True, "reason": self.stop.message}
+        hit = self.guard.observe(name, args)
+        if hit is not None:
+            self.stop = hit
+            return {"skipped": True, "reason": hit.message}
+        decision = self.gate.decide(name, args, call_id=call_id)
+        if decision.kind == "pending":
+            return pending_message(self.gate.pending[-1])
+        if decision.kind == "rejected":
+            return rejected_message(self.gate.rejected[-1])
+        return None
+
+    def receipt(self) -> dict[str, Any]:
+        return {
+            "stop": self.stop.as_dict() if self.stop is not None else None,
+            "repeat": self.guard.receipt(),
+            "intervention": self.gate.receipt(),
+        }
+
+
+#: 当前 run 的闸口（``ContextVar`` 而不是参数：三条驱动循环的签名都是固定 kw 集，
+#: 加参数要改三处签名 + 所有注入的假驱动；``ContextVar`` 天然按 task 隔离，
+#: 并发跑两个 agent 也不会串）
+_TOOL_GUARD: ContextVar[_ToolCallGuard | None] = ContextVar("agent_tool_guard", default=None)
+
+
+async def _run_call_batch(
+    tools: ToolRegistry,
+    calls: list[dict[str, Any]],
+    tool_calls_out: list[dict[str, Any]],
+    tool_results_out: list[dict[str, Any]],
+    append_result: Callable[[dict[str, Any], Any, str], None],
+) -> GuardHit | None:
+    """跑**一批**工具调用（三条循环共用；返回非 None ⇒ 被守卫叫停，调用方收工）。
+
+    ``append_result(call, name, rendered)`` 由各循环提供：OpenAI 回 ``tool_call_id``、
+    Ollama 回 ``tool_name``，形状差异只留在回调里。
+    """
+    guard = _TOOL_GUARD.get()
+    burst = guard.check_burst(len(calls)) if guard is not None else None
+    for call in calls:
+        function = call.get("function") or {}
+        name = function.get("name")
+        args = _parse_tool_args(function.get("arguments"))
+        call_id = str(call.get("id") or call.get("tool_call_id") or "")
+        rendered = await _run_tool(
+            tools, name, args, tool_calls_out, tool_results_out,
+            blocked=burst.message if burst is not None else None,
+            call_id=call_id,
+        )
+        append_result(call, name, rendered)
+    if burst is not None:
+        return burst
+    return guard.stop if guard is not None else None
 
 
 def _ollama_usage(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -951,6 +1070,7 @@ async def _run_openai_tool_loop(
     # 思考内容（各家字段名不统一：``reasoning_content`` / ``reasoning`` ✓）—— 与 ollama 原生那条同口径 ✓
     thinking_parts: list[str] = []
     nudged = False
+    stop_hit: GuardHit | None = None
 
     for _ in range(max(1, int(max_steps))):
         # ⚠️ **上下文预算**（移植自 Mini-Agent 的思路 ✓）：
@@ -1015,17 +1135,22 @@ async def _run_openai_tool_loop(
 
         messages.append({"role": "assistant", "content": assistant.get("content"),
                          "tool_calls": calls})
-        for call in calls:
-            function = call.get("function") or {}
-            name = function.get("name")
-            args = _parse_tool_args(function.get("arguments"))
-            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
-            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": rendered})
+        stop_hit = await _run_call_batch(
+            tools, calls, tool_calls_out, tool_results_out,
+            lambda call, _name, rendered: messages.append(
+                {"role": "tool", "tool_call_id": call.get("id"), "content": rendered}),
+        )
+        if stop_hit is not None:
+            # 叫停 = 这一轮就到此为止：正文换成提示句（参考实现同口径），
+            # 让"被打转烧掉的 20 步"变成模型与创作者都看得见的一次显式终止。
+            text = stop_hit.message
+            steps.append({"guardStop": stop_hit.as_dict()})
+            break
 
     # ``thinking`` 是**思考流水**（可能与正文无关 ✓）：不拼进 ``text`` ✗（拼了就污染写回/协议解析 ✗）
     return {"text": text, "thinking": "".join(thinking_parts),
             "tool_calls": tool_calls_out, "tool_results": tool_results_out,
-            "steps": steps}
+            "steps": steps, "stop": stop_hit.as_dict() if stop_hit is not None else None}
 
 
 async def _run_ollama_tool_loop(
@@ -1064,6 +1189,7 @@ async def _run_ollama_tool_loop(
     #    只能看到「模型什么都没说」✓（本仓那条「OpenAI 兼容口 content 恒空」的老坑就是这个形状 ✓）。
     thinking_parts: list[str] = []
     nudged = False
+    stop_hit: GuardHit | None = None
 
     for _ in range(max(1, int(max_steps))):
         # ⚠️ 上下文预算同 OpenAI 兼容那条（每步重发整份 messages，多步工具链会一路撑大）
@@ -1132,17 +1258,20 @@ async def _run_ollama_tool_loop(
         # ⚠️ assistant 这轮的消息（含 tool_calls）必须原样回灌，否则下一轮模型看不到自己调过什么
         messages.append({"role": "assistant", "content": assistant.get("content") or "",
                          "tool_calls": calls})
-        for call in calls:
-            function = call.get("function") or {}
-            name = function.get("name")
-            args = _parse_tool_args(function.get("arguments"))
-            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
-            messages.append({"role": "tool", "tool_name": name, "content": rendered})
+        stop_hit = await _run_call_batch(
+            tools, calls, tool_calls_out, tool_results_out,
+            lambda _call, name, rendered: messages.append(
+                {"role": "tool", "tool_name": name, "content": rendered}),
+        )
+        if stop_hit is not None:
+            text = stop_hit.message
+            steps.append({"guardStop": stop_hit.as_dict()})
+            break
 
     # ``thinking`` 是**思考流水**（可能与正文无关 ✓）：不拼进 ``text`` ✗（拼了就污染写回/协议解析 ✗）
     return {"text": text, "thinking": "".join(thinking_parts),
             "tool_calls": tool_calls_out, "tool_results": tool_results_out,
-            "steps": steps}
+            "steps": steps, "stop": stop_hit.as_dict() if stop_hit is not None else None}
 
 
 #: 工具调用块的**协议** ✓（Qwen3 / Hermes 系骨架要求模型这么写 ✓）。
@@ -1308,8 +1437,8 @@ async def _run_engine_tool_loop(
     保留形参只为三条循环签名一致 ✓。
     """
     from app.services.text_generation import (  # 延迟 import ✓ 防启动期环 ✓
-        get_engine_backend, engine_gpu_layers, engine_kv_cache_bytes, engine_kv_mode,
-        engine_spec_kwargs)
+        get_engine_backend, engine_fast_kwargs, engine_gpu_layers, engine_graph_kwargs,
+        engine_kv_cache_bytes, engine_kv_mode, engine_kv_window_kwargs, engine_spec_kwargs)
 
     settings = config.get("settings") or {}
     gguf_path = settings.get("ggufPath") or settings.get("gguf_path")
@@ -1326,6 +1455,9 @@ async def _run_engine_tool_loop(
         kv_mode=engine_kv_mode(settings),
         kv_cache_bytes=engine_kv_cache_bytes(settings),
         **engine_spec_kwargs(settings),
+        **engine_fast_kwargs(settings),
+        **engine_graph_kwargs(settings),
+        **engine_kv_window_kwargs(settings),
     )
 
     temperature = model_settings.get("temperature")
@@ -1343,6 +1475,7 @@ async def _run_engine_tool_loop(
     steps: list[dict[str, Any]] = []
     text = ""
     nudged = False
+    stop_hit: GuardHit | None = None
 
     for _ in range(max(1, int(max_steps))):
         text = await asyncio.to_thread(
@@ -1367,15 +1500,19 @@ async def _run_engine_tool_loop(
         # assistant 这轮原文（含它自己写的 ``<tool_call>`` 块）**原样回灌** ✓：不重排、不重新序列化 ✗
         # （序列化后再渲染，与模型自己产出的形状可能差一个空白 ⇒ 跟随度掉 ✓✗）。
         messages.append({"role": "assistant", "content": text, "tool_calls": calls})
-        for call in calls:
-            function = call.get("function") or {}
-            name = function.get("name")
-            args = _parse_tool_args(function.get("arguments"))
-            rendered = await _run_tool(tools, name, args, tool_calls_out, tool_results_out)
-            messages.append({"role": "tool", "name": name, "content": rendered})
+        stop_hit = await _run_call_batch(
+            tools, calls, tool_calls_out, tool_results_out,
+            lambda _call, name, rendered: messages.append(
+                {"role": "tool", "name": name, "content": rendered}),
+        )
+        if stop_hit is not None:
+            text = stop_hit.message
+            steps.append({"guardStop": stop_hit.as_dict()})
+            break
 
     return {"text": text, "thinking": "", "tool_calls": tool_calls_out,
-            "tool_results": tool_results_out, "steps": steps}
+            "tool_results": tool_results_out, "steps": steps,
+            "stop": stop_hit.as_dict() if stop_hit is not None else None}
 
 
 @dataclass
@@ -1392,6 +1529,14 @@ class AgentRunResult:
     #: 思考流水（2026-11-01 补 ✓）：qwen3 类模型把推理写在 ``message.thinking`` ✓，
     #: 以前直接丢弃 ⇒ 正文为空时看不出是「模型没答」还是「只有思考没有正文」✗。**不进 ``text``** ✓。
     thinking: str = ""
+    #: 等创作者批准的调用（P0-2）。**非空 ⇒ 这一跑有副作用没发生**，
+    #: 调用方要把清单交给创作者，下一跑用 ``options["approvals"]`` 带批准回来。
+    pending_approvals: list[dict[str, Any]] = field(default_factory=list)
+    #: 被守又叫停的一次（P0-1：``{"kind": "repeat"|"burst", ...}``）；``None`` ⇒ 正常收工。
+    stop: dict[str, Any] | None = None
+    #: 守卫这一跑的账（重复计数 / 审批清单 / 是否用过 ``"*"`` 兜底）。**永不丢**：
+    #: 没有账的守卫与没有守卫没区别 —— 出了事要能回答"它到底算了什么"。
+    guard: dict[str, Any] | None = None
 
 
 Generate = Callable[..., Awaitable[dict[str, Any]]]
@@ -1434,12 +1579,20 @@ async def run_agent_with_instructions(
     #: skill 注入明细（出参）：跑次收口时连同结果一起写 ``skill_usage``
     skill_sizes: dict[str, int] = {}
     skill_dropped: list[str] = []
+    # 「按次覆盖技能绑定」：与 ``modelSettings`` 同一口径 —— 只影响这一跑、**不落库**。
+    # 唯一的用途是评测「同一份提示词、只换注入的 skill 集」（``skill_optimizer`` 靠它比分数）。
+    # ⚠️ 覆盖时 ``_record_skills`` 直接不写 ``skill_usage``：那一格记的是「真实跑次注入了什么」，
+    #    把假设性绑定记进去，会让 ``penalty`` 的裁剪顺序照着评测假数据走 —— 下一轮线上就按假的裁。
+    skills_overridden = options.get("skillsRaw") is not None
+    skills_raw = (options["skillsRaw"] if skills_overridden
+                  else (built.db_config.skills if built.db_config is not None else None))
     skill_instructions = load_agent_skills(
-        type, built.db_config.skills if built.db_config is not None else None,
-        sizes=skill_sizes, dropped=skill_dropped,
+        type, skills_raw, sizes=skill_sizes, dropped=skill_dropped,
     )
 
     def _record_skills(outcome: str) -> None:
+        if skills_overridden:
+            return
         record_skill_usage(skill_sizes, skill_dropped, type, trace, outcome)
     fed_ids: list[str] = []
     full_instructions = assemble_full_instructions(
@@ -1468,6 +1621,19 @@ async def run_agent_with_instructions(
         # 合并到内置工具之上（同名以 MCP 为准，与 TS 的 `{...built, ...mcp}` 一致）
         merged = ToolRegistry({**built.tools.tools, **discovered})
 
+    # 「按次覆盖工具集」：与 ``modelSettings`` / ``skillsRaw`` 同一口径 —— 只影响这一跑、**不落库**。
+    # 用途唯一：工具集优化（``tool_optimizer``）比「同一 case、只换暴露哪几个工具」。
+    # ⚠️ 与技能那格**不同**，这里不需要「覆盖时不记账」的开关：工具调用本身不进任何统计表
+    #    （``tool_calls`` 只随 trace 走），假设性工具集不会污染下一轮的候选排序。
+    # ⚠️ 裁剪排在 MCP 合并**之后**：名册里若写了 MCP 工具名，也要真能摘掉。
+    if options.get("toolsRaw") is not None:
+        merged, tools_missing = merged.only(_parse_tool_names(options["toolsRaw"]))
+        trace.progress("tools-overridden", {
+            "exposed": merged.names(),
+            "count": len(merged.tools),
+            "missing": tools_missing,
+        })
+
     last_error: BaseException | None = None
 
     for attempt, model_name in enumerate(models):
@@ -1477,11 +1643,21 @@ async def run_agent_with_instructions(
 
         for retry in range(MAX_TRANSIENT_RETRIES + 1):
             try:
-                result = await driver(
-                    config=built.text_config, model=model_name,
-                    instructions=full_instructions, tools=merged, message=message,
-                    max_steps=max_steps, model_settings=model_settings,
-                )
+                # 这一次尝试的两道闸门（P0-1/P0-2）：**scope 只包 driver**，
+                # 所以每次 fallback 重试都是新账（上一轮打转的叫停不该拖累换模型）。
+                # 用 ``ContextVar`` 而不是加参数：三条驱动循环的签名是固定 kw 集，
+                # 加参数要改三处签名 + 所有注入的假驱动。
+                guard = _ToolCallGuard(guard=guard_from_options(options.get("toolGuard")),
+                                       gate=gate_from_options(options))
+                token = _TOOL_GUARD.set(guard)
+                try:
+                    result = await driver(
+                        config=built.text_config, model=model_name,
+                        instructions=full_instructions, tools=merged, message=message,
+                        max_steps=max_steps, model_settings=model_settings,
+                    )
+                finally:
+                    _TOOL_GUARD.reset(token)
                 text = result.get("text") or ""
                 usage = extract_token_usage(result)
                 parsed = parse_agent_protocol(text)
@@ -1508,6 +1684,10 @@ async def run_agent_with_instructions(
                     protocol_errors=errors,
                     usage=usage,
                     thinking=str(result.get("thinking") or ""),
+                    pending_approvals=[item.as_dict() for item in guard.gate.pending],
+                    stop=result.get("stop") or (guard.stop.as_dict()
+                                                if guard.stop is not None else None),
+                    guard=guard.receipt(),
                 )
             except Exception as err:  # noqa: BLE001 —— 与 TS 的 catch 等价
                 last_error = err

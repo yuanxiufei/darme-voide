@@ -93,8 +93,9 @@ def main() -> int:  # noqa: C901
 
     st.refresh_episode_script_hash = _fake_refresh  # type: ignore[assignment]
     tools = create_script_tools(episode_id)
-    check("工具: 剧本工具集 3 个，键即 id",
-          set(tools) == {"read_episode_script", "rewrite_to_screenplay", "save_script"}
+    check("工具: 剧本工具集 4 个，键即 id",
+          set(tools) == {"read_episode_script", "rewrite_to_screenplay", "save_script",
+                         "edit_script"}
           and all(k == t.id for k, t in tools.items()), sorted(tools))
 
     missing = create_script_tools(999999)

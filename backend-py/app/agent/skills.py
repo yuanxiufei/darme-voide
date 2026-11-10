@@ -155,35 +155,6 @@ def list_core_skill_ids() -> list[str]:
     ])
 
 
-def list_skill_ids() -> list[str]:
-    """扫描 ``skills/``，返回**全部**可用 skill id（含外部库的嵌套目录）。
-
-    ⚠️ 默认注入请用 :func:`resolve_default_skills`（只含自有 core skill）—— 外部库是
-    「按触发词独立启动」的会话式技能，绑定给常驻 Agent 只会注入半截指令。
-
-    ⚠️ 2026-10-30：本函数原先只存在于 services 侧那份 skills 扫描模块（HTTP 层的第二份实现，已删），
-    而本模块 ``__all__`` 里**早就写着**它 —— 声明有、实现无。现在收回到这里，HTTP 层改为引用本模块
-    （分层：``routers → agent`` 允许，``services → agent`` 禁止，所以去重的方向只能是这一条 ✓）。
-    """
-    directory = skills_dir()
-    if not directory.exists():
-        return []
-
-    out: list[str] = []
-
-    def scan(current: Path, prefix: str = "") -> None:
-        for entry in sorted(current.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            skill_id = f"{prefix}/{entry.name}" if prefix else entry.name
-            if (entry / "SKILL.md").exists():
-                out.append(skill_id)
-            scan(entry, skill_id)
-
-    scan(directory)
-    return out
-
-
 def resolve_default_skills(agent_type: str) -> list[str]:
     """某 Agent 的默认绑定 = 所有 frontmatter 里声明了该 agent 的自有 skill。
 

@@ -435,6 +435,95 @@ def main() -> int:
           "function fail(reason: string): RunVerdict" in card_src
           and "emit('error', reason)" in card_src)
 
+    #: ── 失败理由要**留得住**（源 `metadata.errorDetails` 那条的另一半）──────────────
+    #: 理由已经能回执了，但回执只活在那一轮：闸口拒绝时**一条请求都没发** ⇒ 没有 taskId、
+    #: 没有 `engine.state` 可回读 ⇒ 不落盘就只剩一声 toast，关掉即无痕（刷新更没 ✗），
+    #: 用户过一阵只看到「点了没反应」，而那句理由正是「照做就能跑」的指引 ✓。
+    #: 源的做法是写进节点（`status:error` ＋ `errorDetails`），随卡持久化 ✓。
+    check("对话: 没提交成要写进节点留档（只 emit toast ⇒ 关掉即无痕 ✗）",
+          "emit('update', { lastError: reason })" in card_src
+          and "lastError?: string" in canvas_src,
+          [line.strip() for line in card_src.splitlines() if "lastError" in line][:4])
+    #: 成功后必须清：用户照提示补了首帧、这次跑成功了，卡上却还挂着「先连一张图片卡过来」
+    #: ⇒ 他以为这次又没跑起来 ✗（而产物其实在生成中）。两条通道各有一处成功出口 ✓
+    check("对话: 提交成功要清掉上次的失败留档（留着 ⇒ 用户以为这次也没跑起来 ✗）",
+          len(re.findall(r"clearLastError\(\)\s*\n\s*return \{ ok: true \}", card_src)) >= 2
+          and "function clearLastError()" in card_src,
+          len(re.findall(r"clearLastError\(\)", card_src)))
+    check("对话: 卡上要看得见这条留档（写进节点又不显示 ⇒ 等于没写 ✗）",
+          "上次没跑起来：{{ props.node.lastError }}" in card_src
+          and "currentStatus !== 'failed'" in card_src)
+    #: 闸口之外还有一处「没跑起来」：`start` 的 promise 失败（后端 400 / 网络断 / `E_ENGINE_BUSY`）。
+    #: comfy 通道**没有 taskId 注册表** ⇒ 刷新后 `runState` 回 idle，只弹过一声 toast ⇒ 刷新即无痕 ✗；
+    #: 队满那一支在 `useEngineRun.start` 里还会被 `patch(idleState())` 清成 idle ⇒ 卡上连进度条都没有 ✗
+    check("对话: 提交 promise 失败也要留档（只 emit 的话刷新即无痕 ✗）",
+          len(re.findall(r"\.catch\(\(err: any\) => \{\s*\n\s*fail\(", card_src)) == 2,
+          re.findall(r"\.catch\(\(err: any\) => \{\s*\n\s*(\w+)\(", card_src))
+    #: 边界反向：校验按钮 / 取消失败**不许**写进节点 —— 用户根本没按过生成，
+    #: 挂着「上次没跑起来」是误标 ✗（见 `fail()` 下面那张单子）
+    check("对话: 校验/取消只弹 toast 不留档（否则没按生成也被标「没跑起来」✗）",
+          "emit('error', `校验未通过：${problems || '未知原因'}`)" in card_src
+          and "emit('error', `取消失败：${err?.message || err}`)" in card_src)
+    #: ⚠️ 真中过的一次：信封 `code` 是 **HTTP 状态码**（恒 400），引擎码另在 `engineCode`
+    #:（真源 `core/response.py::bad_request`）⇒ 只读 `err.code` 判 `E_ENGINE_BUSY` 的分支
+    #: **从来没执行过** ✗，队满被标成「这张卡坏了」而真相是另一张卡在跑 ✗。
+    api_ts = (REPO / "frontend" / "app" / "composables" / "useApi.ts").read_text(encoding="utf-8")
+    engine_run_ts = (REPO / "frontend" / "app" / "composables" / "useEngineRun.ts").read_text(encoding="utf-8")
+    check("引擎: 队满要读 engineCode（信封 code 恒 400 ⇒ 读 code 的分支从来没执行过 ✗）",
+          "engineCode = json.engineCode" in api_ts and "err?.engineCode" in engine_run_ts,
+          [line.strip() for line in engine_run_ts.splitlines() if "E_ENGINE_BUSY" in line][:3])
+    #: ⚠️ 写入口也要收紧：`update_node` 的 `patch` 若能带 `lastError`，模型随手就能让卡上冒出
+    #: 一句**没发生过**的「上次没跑起来」，而且会随快照回喂模型 ⇒ 自激 ✗（只有 `fail()` 能写 ✓）
+    ops_ts = (REPO / "frontend" / "app" / "utils" / "canvasOps.ts").read_text(encoding="utf-8")
+    check("对话: 失败留档不能被模型写（`update_node` 要剔 lastError，否则卡上出现假故障 ✗）",
+          "delete patch.lastError" in ops_ts)
+    #: 留档可能带 comfy 的整段报错原文（几百字）⇒ 不截断会把卡片撑出屏幕 ✗（全文走 `title` ✓）
+    check("对话: 长留档要截断两行（整段堆栈撑爆卡片 ✗，全文悬停可见 ✓）",
+          "-webkit-line-clamp: 2" in card_src and ':title="props.node.lastError"' in card_src)
+
+    # ---------------------------------------------------------------- ⑦ comfy 运行号留档
+    #: 引擎通道有 `engine-tasks` 注册表 ✓，comfy 通道原先**没有** ⇒ 跑到一半刷新，
+    #: 进度/失败一声不响地消失 ✓✗（与「提交就失败」是两回事：那时有号、能接回来 ✓）。
+    comfy_ts = (REPO / "frontend" / "app" / "composables" / "useComfyRun.ts").read_text(encoding="utf-8")
+    check("comfy: 运行号要本地留档（无注册表 ⇒ 刷新即丢进度/失败，卡上装作没跑过 ✗）",
+          "STORE_KEY = 'darme:canvas:comfy-runs'" in comfy_ts and "function rememberRun(" in comfy_ts)
+    check("comfy: 卡片挂载时要把运行号接回来（只恢复引擎 ⇒ comfy 那半张卡还是回到未生成 ✗）",
+          "void run.restore(props.node.id)" in card_src)
+    check("comfy: 恢复出来的「已完成」不许再回卡（产物刷新前就进画布了 ⇒ 会多一张一样的卡 ✗）",
+          "if (state.restored) return" in card_src,
+          [line.strip() for line in card_src.splitlines() if "state.restored" in line][:4])
+    check("comfy: 重新点生成要清旧号（否则这次没提交成，刷新后却显示上次的「已完成」✗）",
+          comfy_ts.count("rememberRun(key, null)") >= 2,
+          [line.strip() for line in comfy_ts.splitlines() if "rememberRun(key, null)" in line])
+    check("comfy: 号失效（后端重启/记录被清）要退 idle（留着就是个永远转圈的排队中 ✗）",
+          "outcome === 'missing'" in comfy_ts and "reset(key)" in comfy_ts)
+    #: ⚠️ 时刻陷阱：`restored` 若等"拿到终态再补"，卡片的 watch（异步 flush）可能先跑到回调里
+    #: ⇒ 那时还是 false ⇒ 照常 `emit('generated')` ⇒ 凭空多一张产物卡（实测节点数 1 → 2 ✗）
+    engine_run_ts = (REPO / "frontend" / "app" / "composables" / "useEngineRun.ts").read_text(encoding="utf-8")
+    check("恢复: restored 要在查详情**之前**置上（等着补 ⇒ watch 先跑 ⇒ 多一张产物卡 ✗）",
+          "status: 'queued', restored: true" in comfy_ts
+          and "status: 'queued', restored: true" in engine_run_ts)
+    check("恢复: 还在跑要把标记交还（否则这一轮真跑完也不回卡了 ✗）",
+          "patch(key, { restored: false })" in comfy_ts
+          and "patch(key, { restored: false })" in engine_run_ts)
+    #: ⚠️ 跳过回卡时**别记** `handedOff`：恢复成"还在跑"也会先走这一支，记了就把之后真跑完的那次
+    #: 一起吞掉 ⇒ 产物永远不回卡（实测：恢复中 → 跑完，卡上停"完成"但画布没有新卡 ✗）
+    check("恢复: 跳过回卡时不许记 handedOff（会把之后真跑完的那次一起吞掉 ✗）",
+          card_src.count("if (state.restored) return") == 2
+          and "state.restored) {\n      handedOff.value" not in card_src,
+          [line.strip() for line in card_src.splitlines() if "state.restored" in line][:4])
+    #: 模型侧：`compact_snapshot` 是**显式白名单**，漏一个键就永远不喂给模型 ✗
+    #:（源 `agent-site-tools.ts:97` 显式挑 `error` 是同一个动作）
+    canvas_ops_py = (REPO / "backend-py" / "app" / "services" / "canvas_ops.py").read_text(encoding="utf-8")
+    check("对话: 失败留档要进模型的快照（白名单漏了 ⇒ 模型只会原样重试 ✗）",
+          'item["lastError"] =' in canvas_ops_py
+          and "SNAPSHOT_ERROR_LIMIT" in canvas_ops_py,
+          [line.strip() for line in canvas_ops_py.splitlines() if "lastError" in line][:4])
+    #: 只给字段还不够：模型得知道「看到它先解决条件、别原样重试」，否则同一个错再来一轮 ✗
+    canvas_agent_py = (REPO / "backend-py" / "app" / "services" / "canvas_agent.py").read_text(encoding="utf-8")
+    check("对话: 指令要提示模型先解 lastError（否则它照同样参数再试一遍 ✗）",
+          "lastError" in canvas_agent_py and "**不要**原样重试" in canvas_agent_py)
+
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed_ok, detail in _RESULTS:
         print(("PASS  " if passed_ok else "FAIL  ") + name + ("" if passed_ok else f"   <<< {detail!r}"))

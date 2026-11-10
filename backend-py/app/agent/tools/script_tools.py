@@ -1,11 +1,16 @@
 """剧本改写工具（移植自 ``agents/tools/script-tools.ts``，83 行）。
 
-三个工具组成「读 → 改写 → 存」闭环：
+四个工具组成「读 → 改写 → 存」闭环：
 
 * ``read_episode_script``   读本集原文（**超长自动滑窗截断**，见 ``text_slice``）；
 * ``rewrite_to_screenplay`` 读原文 **+ 注入格式化剧本规范**（``SCREENPLAY_FORMAT_RULES``）
   一并返回给模型 —— 规范只在 ``prompt_blocks`` 定义一次，杜绝副本漂移；
-* ``save_script``           落库并**重算剧本指纹**（指纹门禁：改写后旧指纹必须失效）。
+* ``edit_script``           **增量改动**（P1-2）：只送改了的那几句，``oldText`` 必须在
+  原文里逐字唯一出现，整批原子生效（实现见 :mod:`app.services.markdown_patch`）；
+* ``save_script``           整篇覆盖落库并**重算剧本指纹**（指纹门禁：改写后旧指纹必须失效）。
+
+⚠️ ``edit_script`` 与 ``save_script`` **不是二选一的关系**：改一两句用小改动（省上下文、
+且能发现自己记错原文），真要重写整场才用整篇覆盖。两个都刷新指纹。
 
 ⚠️ 三处保真点：
 
@@ -23,10 +28,11 @@ from sqlalchemy.engine import Connection
 from app.core.db import engine
 from app.core.models import episodes
 from app.core.response import now
+from app.services.markdown_patch import apply_edits, coerce_edits, render_result
 from app.services.prompt_blocks import SCREENPLAY_FORMAT_RULES
 from app.services.script_fingerprint import refresh_episode_script_hash
 from app.services.text_slice import slice_long_text
-from app.agent.tool import Tool, json_string, object_schema
+from app.agent.tool import Tool, array_of, json_string, object_schema
 
 __all__ = ["create_script_tools"]
 
@@ -82,6 +88,42 @@ def create_script_tools(episode_id: int) -> dict[str, Tool]:
             ),
         }
 
+    async def edit_script(arguments: dict[str, Any]) -> dict[str, Any]:
+        """按增量改动改本集剧本（``oldText`` 必须逐字唯一出现，整批原子）。"""
+        edits, problem = coerce_edits(arguments.get("edits"))
+        if problem:
+            return {"error": problem, "appliedCount": 0}
+        if not edits:
+            return {"error": "edits 是空数组，没有要改的内容。", "appliedCount": 0}
+        with engine.begin() as conn:
+            found, content = _episode_source(conn)
+            if not found:
+                return {"error": f"Episode not found (id={episode_id})", "appliedCount": 0}
+            if not content:
+                return {"error": f"Episode has no content (id={episode_id})", "appliedCount": 0}
+            result = apply_edits(content, edits)
+            if not result.ok:
+                # 一条都没落：把"第几条、命中几次、怎么改"原样回灌，模型才有第二次机会
+                return {
+                    "error": result.error,
+                    "failedIndex": result.failed_index,
+                    "appliedCount": 0,
+                    "note": "本次**没有**修改剧本，请按提示改正 oldText 后重送整批。",
+                }
+            conn.execute(
+                update(episodes).where(episodes.c.id == episode_id).values(
+                    script_content=result.text, updated_at=now()
+                )
+            )
+            refresh_episode_script_hash(conn, episode_id)
+        return {
+            "message": render_result(result),
+            "word_count": len(result.text),
+            "appliedCount": len(result.applied),
+            "applied": result.applied,
+            "warnings": result.warnings,
+        }
+
     async def save_script(arguments: dict[str, Any]) -> dict[str, Any]:
         content = arguments.get("content") or ""
         with engine.begin() as conn:
@@ -111,6 +153,33 @@ def create_script_tools(episode_id: int) -> dict[str, Tool]:
                 {"instructions": json_string("Additional rewrite instructions")}, required=[]
             ),
             execute=rewrite_to_screenplay,
+        ),
+        "edit_script": Tool(
+            id="edit_script",
+            description=(
+                "Edit the current episode script with small, targeted changes. Each edit's "
+                "oldText must appear exactly once in the script; the whole batch is applied "
+                "atomically, and nothing is written if any edit fails to match."
+            ),
+            input_schema=object_schema(
+                {
+                    "edits": array_of(
+                        object_schema(
+                            {
+                                "oldText": json_string(
+                                    "Existing text copied verbatim from the script; must occur "
+                                    "exactly once (include enough surrounding context)"
+                                ),
+                                "newText": json_string("Replacement text"),
+                                "reason": json_string("Why this line changes (one sentence)"),
+                            },
+                            required=["oldText", "newText"],
+                        ),
+                        "Edits applied in order",
+                    )
+                }
+            ),
+            execute=edit_script,
         ),
         "save_script": Tool(
             id="save_script",

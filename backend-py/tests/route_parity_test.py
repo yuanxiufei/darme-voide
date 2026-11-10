@@ -120,7 +120,9 @@ _EXTRA_ALLOWLIST = {("GET", "/api/v1/health"), ("GET", "/api/v1/ai-providers"),
                     ("POST", "/api/v1/engine/hybrid-merge"),
                     # 2026-10-28 自研接线 ✓：读权重文件头判真架构（Node 侧从来没有 ✓）
                     ("GET", "/api/v1/local-models/fingerprint"),
-                    ("POST", "/api/v1/local-models/fingerprint")}
+                    ("POST", "/api/v1/local-models/fingerprint"),
+                    # 2026-11-10 自研接线 ✓：验收报告合同（plan/cases/证据覆盖门禁，Node 侧从来没有 ✓）
+                    ("POST", "/api/v1/assets/acceptance/validate")}
 
 
 def _node_path(prefix: str, ts_path: str) -> str:
@@ -978,6 +980,17 @@ _PROMPT_TAIL_ALLOW = {
         "（如「已保存 N 个角色 / N 个场景 / N 个物品」）\n"
         "- 不要反问用户是否继续，也不要等用户确认：读完就接着保存，"
         "直到三个 save_dedup_* 都调用过"
+    ),
+    # 2026-11-10 ✓：`script_rewriter` 补了「保存方式（小改别重写整篇）」那一段 ✓ ——
+    # 起因是 P1-2 新增 `edit_script`：整篇重写在长剧本上是**静默丢改**的最大来源 ✓
+    # （模型只回半篇就当"改完"了 ✓）。TS 快照同样不能改 ✓ ⇒ 逐字登记 158 字 ✓
+    # 等式仍是 `python_value == ts_value + tail` ✓（多一段别的照样红 ✓）。
+    "script_rewriter": (
+        "\n\n保存方式（小改别重写整篇）：\n"
+        "- 只改了几处：调用 edit_script，每条改动给 oldText（从原文逐字复制、唯一出现）"
+        "+ newText + reason；一条对不上就整批不落盘，按报错补上下文重送\n"
+        "- 整场重写：调用 save_script 覆盖全文\n"
+        "- 没有改动就不要调用保存工具，直接说明「无需改写」"
     ),
 }
 

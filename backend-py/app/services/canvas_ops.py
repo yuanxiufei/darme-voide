@@ -104,6 +104,10 @@ MIN_SCALE = 0.2        # 与 useCanvas.MIN_SCALE 一致
 MAX_SCALE = 3.0        # 与 useCanvas.MAX_SCALE 一致
 SNAPSHOT_TEXT_LIMIT = 240   # 快照里正文超过这个长度就截断
 SNAPSHOT_TEXT_KEEP = 120    # 截断时保留的字符数
+#: 卡上「上次没跑起来」的理由，进快照时的截断长度 ✓
+#: —— comfy 的报错原文可能几百字（带堆栈），全量塞进去会把上下文吃光；
+#: 留开头就够模型判断「是缺件、还是类别不符、还是没连首帧」✓
+SNAPSHOT_ERROR_LIMIT = 160
 REFERENCE_PATTERN = re.compile(r"@\[node:([\w-]+)\]")
 #: 插件节点 type 形态 —— **与 ``utils/canvasPlugins.ts::PLUGIN_TYPE_PATTERN`` 同规则** ⚠️
 PLUGIN_TYPE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]+$")
@@ -842,6 +846,15 @@ def compact_snapshot(snapshot: dict | None) -> dict:
             item["text"] = text[:SNAPSHOT_TEXT_KEEP] + "…"
         elif text is not None:
             item["text"] = text
+        #: 「上次没跑起来」的理由 ✓（源 `metadata.errorDetails` ＋ `agent-site-tools` 的 `error`）——
+        #: 必须让模型看到：不然它只会照着同样参数再试一遍，用户白等一轮 ✗。
+        #: 只在**有内容**时给键（空串/None 不出现在快照里，别让模型以为"上次失败了"）✓
+        last_error = node.get("lastError")
+        if isinstance(last_error, str) and last_error.strip():
+            last_error = last_error.strip()
+            item["lastError"] = (last_error[:SNAPSHOT_ERROR_LIMIT] + "…"
+                                 if len(last_error) > SNAPSHOT_ERROR_LIMIT
+                                 else last_error)
         nodes.append(item)
     return {
         "nodes": nodes,

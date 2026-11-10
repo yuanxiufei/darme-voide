@@ -51,6 +51,7 @@ __all__ = [
     "extract_json",
     "generate_agent_config",
     "persist_agent_config",
+    "persist_agent_skills",
     "persist_agent_temperature",
 ]
 
@@ -271,6 +272,96 @@ def _write_temperature(conn: Connection, agent_type: str, temperature: float, ts
     conn.execute(
         agent_configs.update().where(agent_configs.c.id == existing.id).values(
             temperature=float(temperature),
+            updated_at=ts,
+        )
+    )
+    return 1
+
+
+def persist_agent_skills(agent_type: str, skills: str | list[str],
+                         conn: Connection | None = None) -> int:
+    """只改 ``skills`` 一格，返回改了 0/1 行（技能绑定优化「采纳」后的落库口）。
+
+    与 :func:`persist_agent_temperature` 逐条同构（只 update 那一列、没有配置行就返回 0、
+    ``conn`` 可复用调用方连接以避免 WAL 单写者互等），理由见那个函数的 docstring。
+
+    ``skills`` 归一成 ``agent_configs.skills`` 的**落库形状** ``[{"id","enabled","priority"}]``
+    （形状细节见 :func:`_normalize_skills`；这一格是运行时 ``skills.parse_skills_config`` 的输入，
+    形状写错不报错、只会静默回退默认绑定）。空列表 ``[]`` 的语义**不是**「一个都不注入」——
+    运行时会把它读成「没配过 ⇒ 走默认」，所以这里也不做 ``or`` 兜底，两边都别靠猜。
+
+    ⚠️ 只校验形状，不校验 skill id 是否存在：那是 ``routers/agent_configs.py::_validate_skills``
+    的职责（它要扫技能目录，属路由层依赖）。调用方（``skill_optimizer``）给出的 id 全部来自
+    当前绑定，本来就在盘上。
+    """
+    normalized = _normalize_skills(skills)
+
+    ts = now()
+    if conn is None:
+        with engine.begin() as own:
+            return _write_skills(own, agent_type, normalized, ts)
+    return _write_skills(conn, agent_type, normalized, ts)
+
+
+def _normalize_skills(skills: str | list[str] | list[dict[str, Any]]) -> str:
+    """把 ``skills`` 归一成落库形状 ``[{"id": ..., "enabled": ..., "priority": ...}]``。
+
+    ⚠️ **不能归一成 ``["id1","id2"]``** —— 运行时 ``skills.parse_skills_config`` 只认「带 ``id``
+    键的**对象**」，纯字符串数组会被整条 ``continue`` 跳过 ⇒ 解析出空列表 ⇒ ``load_agent_skills``
+    判成「没配过」⇒ 回退 SKILL.md 的默认绑定。于是优化结果**静默失效**：页面写「已采纳」，
+    实际每次跑的还是默认那套，且没有任何报错。形状是本函数唯一会咬人的地方。
+
+    入参宽容（优化器给 ``list[str]``、路由给 JSON 串都行），出参严格；``priority`` 缺省按数组序号
+    +1（与 ``skills.default_bindings`` 同一口径，保序）。
+    """
+    if isinstance(skills, str):
+        try:
+            parsed: Any = json.loads(skills) if skills.strip() else []
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"skills 不是合法 JSON：{exc}") from exc
+    else:
+        parsed = skills
+    if not isinstance(parsed, (list, tuple)):
+        raise ValueError(f"skills 必须是数组，收到 {type(parsed).__name__}")
+
+    cleaned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if isinstance(item, str):
+            skill_id, enabled, priority = item, True, None
+        elif isinstance(item, dict):
+            raw_id = item.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                raise ValueError(f"skills 里的对象必须带字符串 id，收到 {item!r}")
+            skill_id = raw_id
+            enabled = item.get("enabled") is not False
+            priority = item.get("priority")
+        else:
+            raise ValueError(f"skills 每项必须是 id 字符串或带 id 的对象，收到 {item!r}")
+        if not skill_id.strip():
+            raise ValueError("skills 里的 id 不能为空串")
+        if skill_id in seen:      # 去重但保序：同一 skill 绑两次没有意义
+            continue
+        seen.add(skill_id)
+        cleaned.append({
+            "id": skill_id,
+            "enabled": enabled,
+            "priority": int(priority) if isinstance(priority, (int, float))
+            and not isinstance(priority, bool) else len(cleaned) + 1,
+        })
+    return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_skills(conn: Connection, agent_type: str, skills: str, ts: str) -> int:
+    """``persist_agent_skills`` 的实际写入（与 ``_write_temperature`` 同款抽出）。"""
+    existing = conn.execute(
+        select(agent_configs.c.id).where(agent_configs.c.agent_type == agent_type)
+    ).first()
+    if existing is None:
+        return 0
+    conn.execute(
+        agent_configs.update().where(agent_configs.c.id == existing.id).values(
+            skills=skills,
             updated_at=ts,
         )
     )

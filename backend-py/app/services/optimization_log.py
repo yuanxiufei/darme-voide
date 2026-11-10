@@ -19,8 +19,9 @@
    不是「现在是什么」✓✗。
 2. **``accepted`` 与 ``persisted`` 分开** ✓：判决（分数严格更高 ⇔ 采纳）与生效（写成默认值）
    是两件事 ✓。合成一个布尔就会出现「页面说已采纳、实际默认提示词还是旧的」这种最难查的假绿 ✗。
-3. **``target`` 必填，现已有两格**：``system_prompt`` 与 ``params``（温度，缺口 4 第一格）✓；
-   工具集/技能绑定/QC 阈值/引擎参数仍未开 ✗ —— 留列不留假数据：没实现的目标不会出现在表里 ✓。
+3. **``target`` 必填，现已有四格**：``system_prompt``、``params``（温度，缺口 4 第一格）、
+   ``skills``（技能绑定，缺口 4 第二格）、``tools``（工具集，缺口 4 第三格）✓；
+   QC 阈值/引擎参数仍未开 ✗ —— 留列不留假数据：没实现的目标不会出现在表里 ✓。
 
 写口不抛
 ========
@@ -48,6 +49,15 @@ TARGETS: dict[str, str] = {
     # 缺口 4 的第一格：同提示词、只换温度（`agent/evaluation/param_optimizer.py`）。
     # 这一格的「分数」与提示词优化共用同一套 case 判分，所以能放进同一张表比。
     "params": "生成参数（温度）",
+    # 缺口 4 的第二格：同提示词/同温度、只换「注入哪几个 skill」（`skill_optimizer.py`）。
+    # 「分数」与上面两格共用同一套 case 判分，所以能放进同一张表比；但**采纳方向相反** ——
+    # 上面两格是「更高才采纳」，这一格是「摘掉后没掉分就采纳」（见 REASONS 的 pruned）。
+    "skills": "技能绑定",
+    # 缺口 4 的第三格：同提示词/同温度/同绑定、只换「暴露哪几个工具」（`tool_optimizer.py`）。
+    # 这一格的分数与上面三格同一套 case 判分，但**判决要两把尺子**：整轮分 + 逐步账里的
+    # unknownTool 计数（摘掉后模型还在伸手调它 ⇒ 不许判「不需要」）。所以它的理由码比
+    # 技能那格多一档 tool_wanted（见下）。落库恒 False：工具集真源是代码，不是配置列。
+    "tools": "工具集",
 }
 
 #: 一轮优化的判决理由（落库值 → 人话）✓。键是**闭集**：页面按它分组/上色 ✓。
@@ -60,6 +70,28 @@ REASONS: dict[str, str] = {
     "below_noise": "涨了，但没超过抖动带",
     # 候选本身跑崩/没跑完（模型报错、超时）⇒ 这一档没有可比分数，记「不作数」而不是「没涨」。
     "eval_failed": "评测没跑完，不作数",
+    # 技能绑定专用：把某个 skill 从注入里**摘掉**后分数没掉（跌幅不超过抖动带）⇒ 采纳这一摘。
+    # 为什么方向与 accepted 相反：这一格动的是「注入多少」，少注入本身就是收益（省 token、
+    # 少串味）；所以判据不是「必须涨」，而是「**没有证据说明它有用**」—— 与 accepted 是两件事，
+    # 必须两个码，否则页面会显示「分数没涨还采纳」这种自相矛盾的记录。
+    # ⚠️ 别写「分数没掉」：判据是「跌幅没超过抖动带」，实测出现过真掉 11 分（95→84）
+    # 仍落在带内而被采纳的情形 —— 标签要如实说「没测出差别」，不能改写成「没掉」。
+    "pruned": "摘掉后没测出差别（跌幅在抖动带内），已精简绑定",
+    # 技能绑定专用：摘掉后分数**明显**下降 ⇒ 那个 skill 真在起作用，保留（即拒绝这一摘）。
+    "skill_needed": "摘掉后分数明显下降，保留",
+    # 工具集专用：摘掉后分数明显下降 ⇒ 那个工具真在流程里，保留（与 skill_needed 同向）。
+    "tool_needed": "摘掉后分数明显下降，保留",
+    # 工具集专用（**技能那格没有这一档**）：分数没掉，但逐步账里出现了 ``Unknown tool`` ——
+    # 模型还在伸手调它，只是别的工具把活补掉了。这时「分数没掉」不构成「不需要」的证据
+    # （换一套 case 可能就掉），所以**拒绝这一摘**，并如实记下这个理由是轨迹给的、不是分数给的。
+    "tool_wanted": "分数没掉但模型仍在调它，保留",
+    # 工具集专用第二档（与上面同源、原因不同）：**逐步账缺账**，两档都算 ——
+    # ① 整格没明细（``stepStats.unavailable`` 非空，例如驱动回灌的 ``toolCalls`` 只是个数）；
+    # ② 部分缺账（``stepStats.unjudged > 0``：有调用、没回灌结果）。
+    # 两档都让 ``unknownTool`` 读不到真值（它是靠**结果的 error 正文**认的），恒 0 是**读数缺失**，
+    # 不是「模型没再调它」⇒ 第二把尺子哑了就不许判 ``pruned``，记这一档如实说明「判不了」。
+    # ⚠️ 标签别只写「没有明细」：部分缺账时明细是**有的**、只少了某几步，那样写会让人误判成因。
+    "tool_unjudged": "逐步账缺账（没有明细，或有步没回灌结果），判不了它有没有被调",
 }
 
 #: 页面一次最多读多少行（防止老库把端点拖死 ✓）。
@@ -163,16 +195,25 @@ def record(conn: Connection, *, agent_type: str, version: int,
 
 
 def mark_persisted(conn: Connection, *, agent_type: str, version: int,
-                   case_id: str = "") -> int:
+                   case_id: str = "", target: str = "system_prompt") -> int:
     """把某一版标成「真的写成默认值了」✓；返回改到的行数（0＝没这条记录，也算正常 ✓）。
 
     为什么单独一步 ✗：「被采纳」（分数高）与「被落库」（变成默认）是优化器的两个不同出口 ✓——
     ``persist_agent_config`` 可能因为调用方没给 ``persist`` 参数而根本没跑 ✓，合成一个布尔就会
     出现「页面说已采纳、而默认提示词还是旧的」这种最难查的假绿 ✗。
+
+    ⚠️ **``target`` 必须进 WHERE**（2026-11-09 修）：四格的 ``version`` 是**各自**从 1 数的
+    （``optimizer.py`` 按 history 的 best 递增、另三格走 ``_next_version``），所以同一个
+    ``agent_type`` 在提示词格与温度格上**都会有 ``version=1``**。不带 ``target`` 的定位会把
+    「提示词落库」标到温度那行头上 —— 页面显示「温度调优也生效了」，而真正被写的配置根本没
+    出现在优化史里。这种错**不抛异常、不缺口径**，只是把生效标错人。
+    ``param_optimizer._next_version`` 跨目标取 max 是在躲这个坑（撞号就不撞了），但那只管
+    它自己那三格；``optimizer.py`` 不经过它 ⇒ 根治只能在 WHERE 上加 ``target``。
     """
     sql = ("UPDATE agent_optimizations SET persisted = 1 "
-           "WHERE agent_type = :agent_type AND version = :version")
-    params: dict[str, Any] = {"agent_type": str(agent_type or ""), "version": int(version)}
+           "WHERE agent_type = :agent_type AND version = :version AND target = :target")
+    params: dict[str, Any] = {"agent_type": str(agent_type or ""), "version": int(version),
+                              "target": str(target or "system_prompt")}
     if case_id:
         sql += " AND case_id = :case_id"
         params["case_id"] = str(case_id)

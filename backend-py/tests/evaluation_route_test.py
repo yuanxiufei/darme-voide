@@ -61,9 +61,14 @@ FAKE_MODEL = "bench-model-x"
 class FakeRuntime:
     """替身：记录入参 + 在**独立连接**上确认 seed 已提交，再返回预设工具调用。"""
 
-    def __init__(self, tool_calls: list[dict], *, raise_error: Exception | None = None) -> None:
+    def __init__(self, tool_calls: list[dict], *, raise_error: Exception | None = None,
+                 results: list[dict] | None = None) -> None:
         self.tool_calls = tool_calls
         self.raise_error = raise_error
+        # 默认按 args 造一个无害结果（长度与 calls 相等 ⇒ ``unjudged=0``）。
+        # 传 ``results`` 才能造「结果里带 error」这类形状 —— 逐步账的第二把尺子
+        # （``unknownTool``）正是靠结果里的 ``Unknown tool:`` 正文认的。
+        self.results = results
         self.calls: list[dict] = []
         self.seed_visible: bool | None = None
         self.shot_rows: int | None = None
@@ -89,7 +94,7 @@ class FakeRuntime:
         class _Result:
             model = FAKE_MODEL
             text = "{}"
-            tool_results = [
+            tool_results = self.results if self.results is not None else [
                 {"toolName": call["toolName"],
                  "result": json.dumps(call.get("args") or {}, ensure_ascii=False)}
                 for call in self.tool_calls
@@ -342,6 +347,27 @@ def main() -> int:  # noqa: C901
           and set(ok.json()["data"]) >= {"caseId", "kind", "dimensions", "total", "runtimeModel"}
           and ok.json()["data"]["caseId"] == "sb-case-001",
           ok.json().get("data"))
+
+    # ⭐ 工具集调优的**第二把尺子**必须在真实 HTTP 链路上成立：判决 `pruned` 全靠
+    #    `stepStats.unknownTool`，而这个信号一直只在单测里验过（那些 report 是测试自己造的）。
+    #    这里走的是完整端点 ⇒ `evaluate_case` ⇒ `step_trace` ⇒ 真实 `tool_calls` 形状。
+    routed = ok.json()["data"]
+    stats = routed.get("stepStats") or {}
+    check("端点: 报告带逐步账，成对的 calls/results 记 1 步 ok（unjudged=0、unknownTool=0）",
+          stats.get("total") == 1 and stats.get("ok") == 1
+          and stats.get("unjudged") == 0 and stats.get("unknownTool") == 0
+          and stats.get("tools") == ["save_storyboards"],
+          stats)
+
+    ev.run_agent_with_instructions = FakeRuntime(  # type: ignore[assignment]
+        [{"toolName": "ghost_tool", "args": {}}],
+        results=[{"toolName": "ghost_tool",
+                  "result": json.dumps({"error": "Unknown tool: ghost_tool"})}])
+    ghost_stats = client.post("/api/v1/evaluation/evaluate/sb-case-001").json()["data"].get(
+        "stepStats") or {}
+    check("端点: 结果里带 `Unknown tool:` ⇒ unknownTool=1 且 failed=1（判决链全靠这个信号）",
+          ghost_stats.get("unknownTool") == 1 and ghost_stats.get("failed") == 1,
+          ghost_stats)
 
     ev.run_agent_with_instructions = FakeRuntime([], raise_error=ValueError("没有可用模型"))  # type: ignore[assignment]
     failed = client.post("/api/v1/evaluation/evaluate/sb-case-001")
