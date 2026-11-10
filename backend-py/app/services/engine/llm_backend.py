@@ -63,6 +63,19 @@ _DTYPE_BYTES: dict[str, int] = {
     "float16": 2, "half": 2, "bfloat16": 2,
 }
 
+#: prefill 分块的**默认档**（词元）✓ —— 与 :func:`~.llm.generate_llm` 的 ``prefill_chunk`` 默认值
+#: 同源 ✓（两处不同 ⇒ 回执写 1024、实际按别的数跑 ✗✗，谁也发现不了 ✓）。
+PREFILL_CHUNK_DEFAULT = 1024
+
+#: 空闲显存下限（GiB）⇒ prefill 块大小 ✓：**只缩不涨** ✗（``≥ 4 GiB`` 就是默认档 ⇒ 常见环境
+#: 一个字节都不变 ✓；涨没有实测收益却把 ``O(chunk × 总长)`` 的峰值翻倍 ✓✗）。
+PREFILL_CHUNK_TIERS: tuple[tuple[float, int], ...] = (
+    (4.0, PREFILL_CHUNK_DEFAULT),
+    (2.0, 512),
+    (1.0, 256),
+    (0.0, 128),
+)
+
 
 class LlmBackendUnavailable(RuntimeError):
     """后端不可用 ✓（权重/词表没就绪、或没装载 ✓）—— ``reason`` 说明缺什么 ✓。"""
@@ -113,7 +126,9 @@ class LlmBackend:
                  dtype: Any = None, gpu_layers: Any = None, kv_mode: Any = None,
                  kv_cache_bytes: Any = None, enable_thinking: bool | None = None,
                  spec_lookup: Any = None, spec_window: Any = None,
-                 spec_min_match: Any = None) -> None:
+                 spec_min_match: Any = None, fast_path: Any = None,
+                 kv_window: Any = None, kv_sink: Any = None,
+                 cuda_graph: Any = None) -> None:
         self._config = config
         self._gguf_path = gguf_path
         self._tokenizer_path = tokenizer_path
@@ -156,6 +171,46 @@ class LlmBackend:
             self._spec_error = str(err)
         #: 上一次生成的**投机回执** ✓（``None`` = 还没生成过 ✓ —— 与「生成了但没开」不是一回事 ✗✗）
         self._spec_last: dict[str, Any] | None = None
+        #: ⭐ 快路径（2026-11-08 ✓）：``norm``＝融合 RMSNorm ✓、``attn``＝SDPA＋GQA ✓。
+        #: **默认关** ✓ —— 两个都**改数值**（累加顺序不同 ✓）⇒ 不许默认开 ✗✗。归一失败同样
+        #: 不在构造期抛 ✗（describe 要能离线出回执 ✓）⇒ 记错、由 ``load()`` 在装权重前具名拒 ✓。
+        self._fast_request = None if fast_path is None else str(fast_path)
+        self._fast_error: str = ""
+        try:
+            self._fast_path = llm_mod.resolve_fast_path(fast_path)
+        except Exception as err:  # noqa: BLE001 —— 拼错别砸掉 describe ✗
+            self._fast_path = frozenset()
+            self._fast_error = str(err)
+        #: ⭐ KV 滑窗（2026-11-08 补 ✓）：尾窗行数 ＋ 开头 sink 行数 ✓。``0`` = **不滑窗**（老路径 ✓）。
+        #: ⚠️ 这是**有损**档 ✗✗（中间那段历史真的丢掉 ✓）⇒ 默认必须是 0 ✓；且与跨调用前缀复用
+        #: **结构互斥** ✓（复用存的是一整段真实历史 ✓，滑窗后那段已经不存在了 ✗）—— 见 :meth:`_kv_window_call`。
+        #: 归一失败同样不在构造期抛 ✗（describe 要离线能出回执 ✓）⇒ 记错、``load()`` 装权重前具名拒 ✓。
+        self._kv_window_request = None if kv_window is None else str(kv_window)
+        self._kv_sink_request = None if kv_sink is None else str(kv_sink)
+        self._kv_win_error: str = ""
+        try:
+            self._kv_window = llm_mod.resolve_kv_window(kv_window)
+            self._kv_sink = llm_mod.resolve_kv_sink(kv_sink)
+        except Exception as err:  # noqa: BLE001 —— 拼错别砸掉 describe ✗
+            self._kv_window = 0
+            self._kv_sink = llm_mod.KV_SINK_DEFAULT
+            self._kv_win_error = str(err)
+        #: ⭐ CUDA Graph（2026-11-08 补 ✓）：把 **decode 单步**捕成一张图再重放 ✓（省 launch ✓ 不改算力 ✓）。
+        #: **默认关** ✓ —— 掩码把 softmax 归约长度改成桶容量 ✓ ⇒ 与老路**不逐位相同** ✓ 不许默认换 ✗✗。
+        #: 归一失败同样不在构造期抛 ✗（describe 要离线能出回执 ✓）⇒ 记错、``load()`` 装权重前具名拒 ✓。
+        self._graph_request = None if cuda_graph is None else str(cuda_graph)
+        self._graph_error: str = ""
+        #: 三档原文 ✓（2026-11-09 补 ✓）：``off``／``on``／``auto`` ✓ —— ``_cuda_graph`` 只能回答「可能开 ✓」，
+        #: 传下去必须用本字段 ✗✗（否则 ``auto`` 又变成「无条件开」✓，短问答白花 100 ms 捕获 ✓✗）。
+        self._graph_policy = "off"
+        try:
+            self._graph_policy = llm_mod.resolve_cuda_graph_policy(cuda_graph)
+            self._cuda_graph = self._graph_policy != "off"
+        except Exception as err:  # noqa: BLE001 —— 拼错别砸掉 describe ✗
+            self._cuda_graph = False
+            self._graph_error = str(err)
+        #: 上一次生成的**图化回执** ✓（``None`` = 还没生成过 ✓ ≠「生成了但没开」✗✗）
+        self._graph_last: dict[str, Any] | None = None
         #: 装载后的**层放置回执** ✓（``None`` = 没分层／还没装 ✓ —— 与「装了但算出 0 层」不是一回事 ✗✗）
         self._layers: dict[str, Any] | None = None
         self._device = ""          # 装载后**实际**设备 ✓（如 ``cuda:0`` ✓）
@@ -172,6 +227,10 @@ class LlmBackend:
         #: 权重声明的**上下文窗口** ✓（GGUF 元数据的 ``<arch>.context_length`` ✓）——``0`` = 没声明 ✓。
         #: 只用来「超窗当场拒」✗，**不拿它当默认出生成长度** ✗（那是调用方的 ``max_new_tokens`` ✓）。
         self._context_length: int = 0
+        #: ⭐ **显存侧**的 KV 上限 ✓（2026-11-08 补 ✓）：见 :meth:`refresh_kv_budget` ✓。
+        #: ``None`` = 还没算过 ✓（≠「算出来是 0」✗ —— 0 是「一个 token 都放不下」✓）。
+        #: ⚠️ 与 ``_context_length``（**权重的**上限 ✗）是**两本账** ✗✗：低显存下先撞的永远是这一本 ✓。
+        self._kv_budget: dict[str, Any] | None = None
 
     # ── 自述 ✓
     def describe(self) -> dict[str, Any]:
@@ -213,11 +272,26 @@ class LlmBackend:
             #: ⚠️ 只报百分比没用 ✗ —— 上下文长度是变量 ✓，能乘起来的 per-token 字节才是可判读的 ✓。
             "kvModeRequested": self._kv_mode_request or "off",
             "kv": self._kv_report(),
+            #: ⭐ **显存侧**的 KV 上限（2026-11-08 补 ✓）：``None`` = 还没装载／没算过 ✓；
+            #: 装载后是 ``{mode, perToken, maxTokens, effectiveTokens, limitedBy, freeBytes, ...}`` ✓。
+            #: ⚠️ 与 ``kv.contextLength``（**权重**声明 ✓）是两本账 ✗✗ —— ``limitedBy`` 就是「先撞哪一本」✓。
+            "kvBudget": self._kv_budget,
+            #: ⭐ KV 滑窗（2026-11-08 补 ✓）：``0`` = 关（老路径 ✓）；开了就是「cache 恒为
+            #: sink+window 行」✓（**有损** ✗ —— 中间历史真丢 ✓，位置仍按绝对位置 ✓）。
+            "kvWindow": self._kv_window_report(),
             #: ⭐ 跨调用 KV 前缀复用（2026-11-08 ✓）：预算 ＋ 命中/复用 token/当前占用 ✓。
             #: ⚠️ 命中数必须**真的报出来** ✗✗：不报 ⇒ 「配了复用」与「一次没命中（前缀其实不同）」分不清 ✗。
             "kvCache": self._kv_cache_report(),
             #: ⭐ 投机解码（2026-11-08 ✓）：开关 ＋ 参数 ＋ **上一次真实的**轮数/草稿/接受数 ✓。
             "spec": self._spec_report(),
+            #: ⭐ 快路径（2026-11-08 ✓）：``norm``/``attn`` 两个融合档的生效与否 ＋ 代价说明 ✓。
+            "fastPath": self._fast_report(),
+            #: ⭐ 图化 decode 单步（2026-11-08 补 ✓）：开关 ＋ **上一次真实的**捕获/重放账 ✓
+            #: （``enabled=False`` 时 ``reason`` 必写明是没要求、还是被哪条前置挡了 ✗✗）。
+            "cudaGraph": self._graph_report(),
+            #: ⭐ prefill 分块（2026-11-08 ✓）：显存一紧就缩块 ✓（峰值 ``O(chunk × 总长)`` ✓）；
+            #: 默认档＝1024 ⇒ 与老路径逐字相同 ✓。**只缩不涨** ✗（涨没收益、峰值翻倍 ✓✗）。
+            "prefill": self._prefill_report(),
             "dtypeRequested": self._dtype_request or "auto",
             "dtype": self._dtype,
             "devices": devices.get("devices", []) if devices else [],
@@ -265,11 +339,49 @@ class LlmBackend:
             report["contextBytes"] = report["totalBytes"] * report["contextLength"]
             report["fpContextBytes"] = report["fpTotalBytes"] * report["contextLength"]
         bits = f"（精度未定 ⇒ 按 {dtype_bytes} B 估 ✓）" if assumed else ""
-        report["note"] = f"{prefix}{report['note']}{bits}"
+        # ⚠️ **省了字节就必须交出花掉的时间** ✗✗（2026-11-09 探针 ⑦ 实测 ✓，与 cudaGraph 的 ``captureMs``
+        # 同一条纪律 ✓）：``kv_bytes_per_token`` 只会说「省 47% B」✓ ⇒ 人会读成白拿 ✓✗。实测 q8 每步
+        # **+8–10 ms（×1.29–1.38）**，且 256 行与 1024 行**两个点几乎一样** ⇒ 更接近**固定成本** ✓
+        # ⇒ 别按「上下文越长越亏」外推 ✗（这句话本探针没量出来就成了想当然 ✓）。
+        # 关着的档也要带这句 ✓：不打开的人**永远看不到**打开的代价 ✓✗（与 cudaGraph 默认关同一个坑 ✓）。
+        cost = ("· 实测每步 **+8–10 ms（×1.29–1.38）** ✓（4B-Q4_K_M／A5000，256 与 1024 行两个点 ≈ 同量级 "
+                "⇒ 更接近固定成本 ✓ 别按「越长越亏」外推 ✗）"
+                if mode == "q8" else
+                "· ``q8`` 可省约 47% KV 字节，代价是每步 **+8–10 ms（×1.3 左右）** ⇒ 它省**显存**不省时间 ✓")
+        report["note"] = f"{prefix}{report['note']}{bits}{cost}"
         return report
+
+    def _kv_window_report(self) -> dict[str, Any]:
+        """KV 滑窗的回执 ✓（装载前／装载后、开／关都能出 ✓ 不抛 ✗）。
+
+        ⚠️ 必须单列一栏 ✗✗：判 ``kv`` 里的每 token 字节看不出「历史会不会无限涨」✓ ——
+        那是**行数**问题不是每行字节问题 ✓；人问「长对话会不会 OOM」时唯一能回答的就是这一栏 ✓。
+        """
+        if self._kv_win_error:
+            return {"enabled": False, "window": 0, "sink": 0,
+                    "note": f"kvWindow/kvSink 不认 ✗（{self._kv_win_error}）—— 装载时具名拒 ✓"}
+        if not self._kv_window:
+            return {"enabled": False, "window": 0, "sink": 0, "rows": 0,
+                    "note": ("关 ✓（老路径：历史全留 ⇒ KV 随长度线性涨 ✓；"
+                             "低显存下判断「还能放多少 token」看 ``kvBudget`` ✓）")}
+        rows = self._kv_sink + self._kv_window
+        return {"enabled": True, "window": self._kv_window, "sink": self._kv_sink, "rows": rows,
+                "note": (f"滑窗**有损** ✓：留开头 {self._kv_sink} 行（attention sink ✓）"
+                         f"＋最近 {self._kv_window} 行 ⇒ cache 恒定 {rows} 行 ✓"
+                         f"（位置按**绝对**位置走 ✓ 不跳相位 ✓）；"
+                         f"与 kvCache 前缀复用互斥 ⇒ 复用已暂停 ✓")}
 
     def _kv_cache_report(self) -> dict[str, Any]:
         """跨调用前缀复用的回执 ✓（装载前／装载后都能出 ✓ 不抛 ✗）。"""
+        if self._kv_window:
+            # ⚠️ 不许静默：滑窗开着 ⇒ 本次生成的 cache 一定是 ``None`` ✓（见 :meth:`_kv_cache_for_call`）✓
+            # 不报 ⇒ 人按「复用在跑」算时间/显存 ✓ 而实际一拍都没命中 ✓✗。
+            base = dict(self._kv_cache.describe()) if self._kv_cache is not None else {
+                "budgetBytes": int(self._kv_cache_budget)}
+            base.update({"enabled": False, "suspendedBy": "kvWindow",
+                         "note": (f"暂停 ✓（kvWindow={self._kv_window} 与完整历史复用**结构互斥** ✓："
+                                  f"滑窗后中间那段不存在了 ⇒ 复用回来会让模型看见「本不该记得」的行 ✓）")})
+            return base
         budget = int(self._kv_cache_budget)
         if self._kv_cache is not None:
             report = dict(self._kv_cache.describe())
@@ -334,6 +446,216 @@ class LlmBackend:
             report["note"] = (f"上次调用：{report['rounds']} 轮 / 草稿 {drafted} / "
                               f"接受 {report.get('accepted')} ✓")
         return report
+
+    def _fast_report(self) -> dict[str, Any]:
+        """快路径回执 ✓（装载前／装载后、开／关都能出 ✓ 不抛 ✗）。
+
+        ⚠️ **配了 ≠ 生效** ✗✗：``norm`` 要靠 ``F.rms_norm``（torch ≥ 2.4 ✓），缺了会静默退回老写法 ✓
+        ⇒ ``fusedNormAvailable`` 单独报一格 ✓（与 ``spec`` 里「配了 ≠ 真的投机了」同一条纪律 ✓）。
+        """
+        report: dict[str, Any] = {
+            "requested": self._fast_request or "off",
+            "norm": "norm" in self._fast_path,
+            "attn": "attn" in self._fast_path,
+            "kvbuf": "kvbuf" in self._fast_path,
+            "items": sorted(self._fast_path),
+            "enabled": bool(self._fast_path),
+            "fusedNormAvailable": bool(llm_mod.fused_norm_available()),
+        }
+        if self._fast_error:
+            report.update(enabled=False, norm=False, attn=False, kvbuf=False, items=[],
+                          note=f"{self._fast_error} —— 装载时具名拒 ✓")
+            return report
+        if not self._fast_path:
+            report["note"] = ("关闭 ✓（老路径**逐位不变** ✓ —— ``norm``/``attn`` 改数值 ⇒ 默认不开 ✓、"
+                              "``kvbuf`` 只改存储布局 ✓ 但矩阵乘读跨步视图 ⇒ 也默认不开 ✓；"
+                              "要省 launch 配 ``norm`` ✓、要省 GQA 物化配 ``attn`` ✓、"
+                              "要省每步 KV 整段重拷配 ``kvbuf`` ✓、全都要配 ``all`` ✓）")
+            return report
+        parts: list[str] = []
+        if "norm" in self._fast_path:
+            # ⚠️ 次数栏写**实测**的数 ✗ 别写「5 个 kernel × 73 次」那种估算 ✓：真机 4B-Q4_K_M
+            # （36 层、带 QK-norm ⇒ 一步 **145** 次调用 ✓）实测老路一次 **16** 个 kernel ✓
+            # （bf16→fp32 往返 ＋ 两段 reduction ✓）⇒ 2320→290 次 launch ✓（`data/experiments/
+            # llm_attn_cost/fast_path.py` 实测 ✓ 与整步降幅 4449−2030=2419 **逐次对平** ✓）。
+            parts.append("RMSNorm → fused ✓（实测一步 2320→290 次 launch ✓ 墙钟 −15.6% ✓ "
+                         "数值差约 1 个 bf16 ulp ✓）"
+                         if report["fusedNormAvailable"]
+                         else "RMSNorm → 本机**没有** F.rms_norm ✗ ⇒ 如实退回老写法（一步也没省 ✗）")
+        if "attn" in self._fast_path:
+            parts.append("注意力 → SDPA＋enable_gqa ✓（不吃 repeat_kv 物化 ✓ 数值与手写式不同 ✓）")
+        if "kvbuf" in self._fast_path:
+            # ⚠️ 别写「省 launch」✗✗：实测 4B/2048 词元一步 kernel 数 **4449→4449 一个不少** ✓
+            # （72 次 ``aten::cat`` 换成 72 次 ``copy_`` ✓ 一比一 ✓）—— 省的是**带宽**：每步拷贝量
+            # 288 MiB → 288 KiB ✓、CUDA 50.86→47.23 ms ✓、墙钟 −5.8% ✓、logit 最大差 0.000e+00 ✓。
+            parts.append("KV → 定长缓冲＋原位写 ✓（decode 每步从「整段重拷 288 MiB」降到「写 1 行 288 KiB」✓ "
+                         "墙钟 −5.8% ✓ **不是**省 launch（kernel 数不变 ✓）＋ 数值逐位相同 ✓ "
+                         "＋ 已分配容量按翻倍涨 ✓）")
+        report["note"] = "；".join(parts)
+        return report
+
+    def _fast_call(self) -> dict[str, Any]:
+        """生成调用要递下去的快路径参数 ✓（**空集 ⇒ 空字典** ✓ ⇒ 调用签名与老路径逐字相同 ✓）。
+
+        ⚠️ 不做成「三处各写一遍 ``fast_path=self._fast_path``」✗✗：三处手抄必漂移 ✓（本仓已栽过
+        同一形状的坑 ✓）—— 判据 ``engine_llm_backend_test`` 的 ⑫⁸ 盯着三处调用都必须展开这一份 ✓。
+        """
+        return {"fast_path": self._fast_path} if self._fast_path else {}
+
+    def _graph_call(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """生成调用要递下去的图化参数 ✓ ⇒ ``(kwargs, sink)``（**关着 ⇒ 空字典 ＋ None** ✓ 老签名不变 ✓）。
+
+        ⚠️ 返回值是**二元组**而不是字典 ✗✗：``cuda_graph_report`` 要的是一块**每轮新建**的账本 ✓
+        （三个生成口各跑各的 ✓ 共用一块会把上一轮的重放数留在这一轮 ✓），所以没法像
+        :meth:`_fast_call` 那样塞进同一个字典里让调用方 ``**`` 展开 ✓ —— 那会把同一个字典对象发给三处 ✓。
+        """
+        if not self._cuda_graph:
+            return {}, None
+        sink: dict[str, Any] = {}
+        # ⚠️ 递的必须是**三档原文** ✗ 不是 ``True`` ✗✗（2026-11-09 补）：``on`` 与 ``auto`` 在
+        # ``generate_llm`` 里行为不同 ✓（后者短生成主动不捕 ✓）。递 ``True`` ⇒ auto 被悄悄升成 on ✓、
+        # 而回执照旧报 ``auto`` ✓✗ —— 同一份回执里「说的」和「做的」不一致，是本仓明令禁止的形状。
+        return {"cuda_graph": self._graph_policy, "cuda_graph_report": sink}, sink
+
+    def _graph_report(self) -> dict[str, Any]:
+        """回执：图化档的请求值 ＋ **上一次真实**的捕获/重放账 ✓（装载前也能出 ✓ 不抛 ✗）。
+
+        ⚠️ 三态必须分清 ✗✗：``requested`` ＝配置想不想开 ✓；``last`` ＝**上一次生成**实际怎样 ✓
+        （``None`` ＝还没生成过 ✓，**不是**「开了但没生效」✗）；``note`` ＝人话说明 ✓。
+        """
+        #: ★ ``policy`` 是**三档原文** ✓（2026-11-09 补）：``enabled=True`` 只说「可能开」✓，
+        #: 光看它分不出 ``on``（每次都捕）与 ``auto``（短生成主动不捕 ✓）——
+        #: 而这两档在用户眼里的含义完全不同 ✓✗（一个「按你要求」，一个「按长度替你决定」）。
+        report: dict[str, Any] = {
+            "requested": self._graph_request or "off",
+            "policy": self._graph_policy,
+            "enabled": self._cuda_graph,
+            "last": self._graph_last,
+        }
+        if self._graph_error:
+            report["note"] = f"{self._graph_error} —— 装载时具名拒 ✓"
+            return report
+        auto = self._graph_policy == "auto"
+        auto_min = llm_mod.CUDA_GRAPH_AUTO_MIN_TOKENS
+        if not self._cuda_graph:
+            # ⚠️ **关着也要交收益** ✗✗（2026-11-09 补）：只写「关 ✓」⇒ 没打开的人**永远看不到**打开值不值 ✓
+            # （enabled 分支里那些实测数只有已经开了才看得到 ✓✗ 这是个自锁 ✓）。代价＋收益在这里一并给，
+            # 由读数的人决定 —— 实测口径来自探针 ⑥（每档都重新捕获＝每次请求的真实账）。
+            report["note"] = ("关 ✓（老路径逐位不变 ✓ —— 掩码把归约长度改成桶容量 ⇒ 只有显式开才换 ✓）"
+                              "· 打开的话：实测 128–512 词元 **×1.24–1.27**（4B-Q4_K_M／A5000），"
+                              "代价是每请求多花 ~100 ms 捕获 ＋ `bitExact=False`（512 词元里 443 个与老路不同）"
+                              "⇒ 要逐字复现就别开 ✓ 长文吞吐要快就值得开 ✓"
+                              f"· 怕短问答吃亏可以写 `auto` ✓：按 maxOutputTokens ≥ {auto_min} 才捕"
+                              f"（实测 8 词元 ×0.91＝净亏 ~28 ms、16 词元才回本 ✓）")
+            return report
+        last = self._graph_last
+        if last is None:
+            report["note"] = ("已开 ✓，还没生成过 ✓（首次生成时捕获一次 ⇒ 之后逐步重放 ✓ "
+                              "隐含 fastPath 的 kvbuf 档 ✓ 回执 last.impliedKvbuf 会写明）"
+                              if not auto else
+                              f"auto ✓，还没生成过 ✓（按长度决定：maxOutputTokens ≥ {auto_min} 才捕获 ✓、"
+                              f"< {auto_min} 直接走老路 ✓ —— 实测 8 词元开图 ×0.91＝净亏 ~28 ms ✓）")
+        elif last.get("enabled"):
+            pad = last.get("padRows")
+            if pad is None:
+                pad_text = ""
+            elif int(pad) <= 16:
+                # 默认预留 = ``1 + specWindow(8) + 1`` ＝ 10 行 ✓ 实测 8/16/32 词元 0 分叉 ✓ ⇒ 这一档报事实
+                # ⚠️ 但**别外推到长生成** ✗✗：同一档 padRows=10 下 64 词元已分叉 11 个、128 词元 72 个 ✓
+                pad_text = f"、多读 {int(pad)} 行 padding（默认预留量级 ✓ 短生成实测一致 ✓ 长生成仍会累积漂移 ✓）"
+            else:
+                # ⚠️ 是 ``kv_reserve_rows`` 被放大才到这里的 ✓ ⇒ 差异会静默变大，必须显式警示 ✗✗
+                pad_text = (f"、多读 {int(pad)} 行 padding"
+                            f" ⚠️ 超出默认预留 —— 实测 96 行时 bf16 |Δlogits| 1.9e-1、32 词元 25 个分叉"
+                            f" ⇒ 输出可能与老路不同 ✓")
+            # ⚠️ 捕获成本必须报 ✗✗：它**真实计在第一次生成里** ✓ ⇒ 只报「重放 N 步很快」而瞒住「捕获花了
+            # 40 ms」，就是拿一次 32 词元的读数冒充「任何长度都 ×1.15」✓✗（生成越短越吃亏 ✓，实测见探针 ⑥）。
+            ms = last.get("captureMs")
+            cap_text = "" if ms is None else f"、捕获另花 {float(ms):.1f} ms（计在第一次生成里 ✓ 短生成先扣它 ✓）"
+            # ⚠️ auto 档要说明「这次为什么捕」✗✗：不写的话人只会看到「auto ✓ 但这次真在重放」，
+            # 读不出它是按长度算出来的 ✓（下一个短请求会自己退回老路 ✓）—— 所以整段拼完再追加，
+            # **不能**插在隐式字符串拼接中间 ✗✗（那会把剩下的 f-string 变成语法错误）。
+            auto_text = f"（auto 档：本次 maxOutputTokens ≥ {auto_min} ⇒ 捕 ✓）" if auto else ""
+            report["note"] = (f"上一次真在重放 ✓：桶容 {last.get('cap')} 行、起步历史 "
+                              f"{last.get('pastLen')} 行{pad_text}{cap_text}、重放 {last.get('replays')} 步 ✓ "
+                              f"{auto_text}"
+                              f"⚠️ bitExact=False（不承诺与老路逐字相同 —— 要逐字比对就别开 ✓）"
+                              # ★ 收益与代价必须**成对**交出去 ✗✗：只写 bitExact=False 人会读成「风险换了个
+                              # 不知值不值的收益」✓；实测口径（4B-Q4_K_M／A5000／truth 见探针 ⑥）：
+                              # 128–512 词元 ×1.24–1.27，而 512 词元里 443 个词元已与老路不同 ✓
+                              f" · 实测 128–512 词元 ×1.24–1.27（512 词元里 443 个已与老路不同 ⇒ "
+                              f"长生成要逐字复现就别开 ✓）")
+        else:
+            reason = str(last.get("reason") or "?")
+            if auto and reason.startswith("autoTooShort"):
+                # ⚠️ auto 的「没捕」**不是故障** ✗✗（2026-11-09 补）：它按长度算出来这一档开图净亏 ✓
+                # ⇒ 若和「让路/前置不满足」并在一句话里，人下次会去查前置、查不到东西 ✓✗
+                report["note"] = (f"上一次**没捕图** ✓：{reason} ⇒ auto 档按长度主动走老路 ✓"
+                                  f"（这一档开图净亏 ~28 ms ✓ 不是故障、也不用调 ✓ "
+                                  f"要强制捕请把档位改 `on` ✓）")
+            else:
+                report["note"] = (f"上一次**没在跑图** ✓：{reason} ✓"
+                                  f"（是让路/前置不满足，不是静默关闭 ✓）")
+        return report
+
+    def _kv_window_call(self) -> dict[str, Any]:
+        """生成调用要递下去的滑窗参数 ✓（**关着 ⇒ 空字典** ✓ ⇒ 调用签名与老路径逐字相同 ✓）。
+
+        ⚠️ 为什么滑窗是**后端口径**而不是每次生成的参数 ✗✗：它会同时改「KV 缓冲该开多大」
+        （:func:`~.llm.generate_llm` 里的 ``kv_rows`` 预算 ✓）⇒ 与 ``kvMode`` 同层 ✓；
+        挂在实例上 ⇒ 三个生成口共用一份 ✓（``engine_llm_backend_test`` 的 ⑫⁸/⑫⁷ 盯着别漏口 ✓）。
+        """
+        if not self._kv_window:
+            return {}
+        return {"kv_window": self._kv_window, "kv_sink": self._kv_sink}
+
+    def _prefill_chunk(self) -> int:
+        """这一次 prefill 切多大块（词元）✓（显存紧 ⇒ 缩小 ✓；探不到／够用 ⇒ 1024 逐字不变 ✓）。
+
+        ⚠️ 为什么块大小归**后端**而不是调用方 ✗✗：块大小只解决一件事 —— **峰值**
+        （:func:`~.llm.generate_llm` 里分数矩阵是 ``O(chunk × 总长)`` ✓，与 KV 容量无关 ✓✗）。
+        显存有多紧只有后端知道（它刚 ``refresh_kv_budget`` 过 ✓）；调用方拿不到这个数 ✓，
+        会被迫猜或写死 ✓（写死 1024 的那天，2 GiB 空闲的卡上 prefill 3240 词元就炸 ✓✗）。
+
+        只缩不涨 ✗（``≥ 4 GiB`` 就是 1024 ⇒ 常见环境**一个字节都不变** ✓）；涨没有实测收益、
+        却把峰值翻倍 ✓✗。显存一紧就缩，代价是前向次数变多（慢一点）✓ 而不是 OOM（跑不了）✓✗。
+        """
+        free = (self._kv_budget or {}).get("freeBytes")
+        if not isinstance(free, int):
+            return PREFILL_CHUNK_DEFAULT
+        gib = free / 2 ** 30
+        for floor_gib, chunk in PREFILL_CHUNK_TIERS:
+            if gib >= floor_gib:
+                return chunk
+        return PREFILL_CHUNK_TIERS[-1][1]
+
+    def _prefill_call(self) -> dict[str, Any]:
+        """生成调用要递下去的分块参数 ✓（**默认档 ⇒ 空字典** ✓ ⇒ 调用签名与老路径逐字相同 ✓）。"""
+        chunk = self._prefill_chunk()
+        return {} if chunk == PREFILL_CHUNK_DEFAULT else {"prefill_chunk": chunk}
+
+    def _prefill_report(self) -> dict[str, Any]:
+        """回执：这次 prefill 切多大块 ＋ **为什么是这一档** ✓（装载前也能出 ✓ 不抛 ✗）。"""
+        chunk = self._prefill_chunk()
+        free = (self._kv_budget or {}).get("freeBytes")
+        if chunk == PREFILL_CHUNK_DEFAULT:
+            note = (f"默认档 {PREFILL_CHUNK_DEFAULT} ✓（空闲 ≥4 GiB、或还没探到显存 ✓）"
+                    f"—— 老路径逐字不变 ✓")
+        else:
+            note = (f"空闲只有 {free / 2 ** 30:.1f} GiB ⇒ 分块收到 {chunk} ✓ "
+                    f"（峰值 O(chunk × 总长) ✓ 慢一点、但不 OOM ✓✗）")
+        return {"chunk": chunk, "default": PREFILL_CHUNK_DEFAULT,
+                "freeBytes": free, "note": note}
+
+    def _kv_cache_for_call(self) -> Any:
+        """这一次生成能用哪个前缀缓存 ✓（滑窗开着 ⇒ ``None`` ✗✗）。
+
+        ⚠️ 两者**结构互斥** ✗：前缀缓存存的是**完整**历史 ✓，滑窗已经把中间那段删了 ✓ ⇒
+        复用回来模型会看见「本不该记得」的行 ✓（数值错、不报错 ✓✗）。本仓选**滑窗优先** ✓：
+        滑窗解决的是「根本装不下」，复用只是「重复前缀省时间」✓ —— 但**必须如实报** ✓
+        （静默把 ``kvCache`` 停掉 ⇒ 人按「复用在跑」算时间会算错 ✓✗）。
+        """
+        return None if self._kv_window else self._kv_cache
 
     def clear_kv_cache(self, note: str = "调用方要求清空 ✓") -> dict[str, Any]:
         """清掉常驻的 KV 前缀 ✓（换提示词模板／要腾显存时调 ✓）⇒ 清完的回执 ✓。"""
@@ -495,6 +817,24 @@ class LlmBackend:
             # ⚠️ 投机旋钮也在这里收口 ✓（构造期归一失败的那三条，同样在**装权重之前**拒 ✗✗）
             if self._spec_error:
                 raise LlmBackendUnavailable(self._spec_error)
+            # ⚠️ 快路径档位同一个理由 ✓：拼错要在**装权重之前**具名拒 ✗✗（装完 8 GiB 才说
+            # ``fastPath="nrom"`` ⇒ 人以为慢是权重问题 ✓✗）。
+            if self._fast_error:
+                raise LlmBackendUnavailable(self._fast_error)
+            # ⚠️ 滑窗两个口同样在**装权重之前**具名拒 ✗✗（``kvWindow="3k"`` 静默当 0 ⇒ 人以为
+            # 开了滑窗、显存却照涨 ✓✗）。
+            if self._kv_win_error:
+                raise LlmBackendUnavailable(self._kv_win_error)
+            # ⚠️ 图化档位同一个理由 ✓：``cudaGraph="grpah"`` 静默当关 ⇒ 人以为在跑图 ✓ 其实每步还在
+            # 发几千次 launch ✗✗ ⇒ **装权重之前**具名拒 ✓。
+            if self._graph_error:
+                raise LlmBackendUnavailable(self._graph_error)
+            # ⚠️ ``kv_sink >= kv_window`` 是**必错**组合 ✗（sink 是窗口之外另留的开头几行 ⇒ 相等就没有
+            # 可滚的窗口 ✓）—— 现在拒 ⇒ 不必等到第一次生成才炸 ✓（那时人已经在看输出 ✓）。
+            if self._kv_window and self._kv_sink >= self._kv_window:
+                raise LlmBackendUnavailable(
+                    f"kvSink={self._kv_sink} 必须小于 kvWindow={self._kv_window} ✗："
+                    f"sink 是窗口**之外**另留的开头几行 ✓，相等就没有可滚的窗口了 ✗")
             if self._model is None:
                 if not self._gguf_path or not Path(self._gguf_path).exists():
                     raise LlmBackendUnavailable("GGUF 权重未就绪 ✗（describe 里已报 ✓）")
@@ -535,6 +875,7 @@ class LlmBackend:
             self._layers = None            # 失败 ⇒ 没有「这次的层放置」✓ 不留上一次的 ✗✗
             self._materialized = None      # 装载失败 ⇒ 没有「这次的缓存结论」✓ 不留上一次的 ✗✗
             self._kv_cache = None          # 装载失败 ⇒ 不留常驻 KV ✗✗（它占的是真显存 ✓）
+            self._kv_budget = None         # 装载失败 ⇒ 没有「这块卡能放多少」✓ 不留上一次的 ✗✗
             self._load_error = str(err)
             raise
         self._read_chat_template()
@@ -542,6 +883,14 @@ class LlmBackend:
         # 模型的 K/V 喂新模型 ✗✗ —— shape 对得上、数值全错，且不报错 ✓✗）。
         self._kv_cache = (llm_mod.KvPrefixCache(self._kv_cache_budget, mode=self._kv_mode)
                           if self._kv_cache_budget > 0 else None)
+        # ⭐ 这时候权重已经真的在卡上了 ⇒ 才是问「KV 还能放多少」的正确时刻 ✓（2026-11-08 补 ✓）。
+        # ⚠️ 不许吞异常 ✗：算不出来要能从回执看出来 ✓（但也不许因此让装载失败 ✗ —— 预算只是守门 ✓）。
+        try:
+            self.refresh_kv_budget()
+        except Exception as err:  # noqa: BLE001 —— 守门算不出 ⇒ 不拦装载 ✓ 但如实留痕 ✓
+            self._kv_budget = {"ok": False, "maxTokens": None, "perToken": None,
+                              "note": f"算不出显存侧 KV 上限 ✗（{type(err).__name__}: {err}）"
+                                      f"⇒ 只按权重窗口守门 ✓"}
         return self
 
     # ── 生成 ✓
@@ -578,12 +927,17 @@ class LlmBackend:
         device = llm_mod.model_device(self._model)          # ⚠️ 张量必须跟模型**同设备** ✗ 否则 cuda 上直接崩 ✗✗
         ids_tensor = torch.tensor([ids], dtype=torch.long, device=device)
         spec_kwargs, spec_sink = self._spec_call()
+        fast_kwargs = self._fast_call()
+        graph_kwargs, graph_sink = self._graph_call()    # 图化 decode 单步 ✓（默认关 ⇒ 空字典 ✓）
         out = llm_mod.generate_llm(
             self._model, ids_tensor, max_new_tokens=max_new_tokens, temperature=temperature,
             top_p=top_p, top_k=top_k, eos_id=self._config.eos_id, seed=seed,
-            kv_mode=self._kv_mode, kv_cache=self._kv_cache, **spec_kwargs,
+            kv_mode=self._kv_mode, kv_cache=self._kv_cache_for_call(),
+            **spec_kwargs, **fast_kwargs, **graph_kwargs,
+            **self._kv_window_call(), **self._prefill_call(),
         )
         self._spec_last = spec_sink
+        self._graph_last = graph_sink
         # ⚠️ 只能解**新生成**的那段 ✗✗（``generate_llm`` 返回的是 prompt＋续写 ✓）：整条解出去
         # ⇒ 调用方会看到自己刚发的那句对话（真机 qwen3:8b 实测：``OUT>>user\\n你好…\\nassistant\\n\\n好的…``✗）。
         # 用 **token 数**裁 ✓（不按文本找 ⇒ 不受空白/特殊 token 解码差异影响 ✓）。
@@ -636,26 +990,99 @@ class LlmBackend:
         self._guard_context(len(ids), max_new_tokens)
         device = llm_mod.model_device(self._model)
         spec_kwargs, spec_sink = self._spec_call()
+        fast_kwargs = self._fast_call()
+        graph_kwargs, graph_sink = self._graph_call()
         out = llm_mod.generate_llm(
             self._model, torch.tensor([ids], dtype=torch.long, device=device),
             max_new_tokens=max_new_tokens, temperature=temperature,
             top_p=top_p, top_k=top_k, eos_id=self._config.eos_id, seed=seed,
-            kv_mode=self._kv_mode, kv_cache=self._kv_cache, **spec_kwargs,
+            kv_mode=self._kv_mode, kv_cache=self._kv_cache_for_call(),
+            **spec_kwargs, **fast_kwargs, **graph_kwargs,
+            **self._kv_window_call(), **self._prefill_call(),
         )
         self._spec_last = spec_sink
+        self._graph_last = graph_sink
         return self._hub.decode(out[0][len(ids):].tolist(), skip_special_tokens=True).strip()
 
+    def refresh_kv_budget(self) -> dict[str, Any]:
+        """按**此刻**剩余显存重算「KV 还放得下多少 token」✓（2026-11-08 补 ✓）。
+
+        为什么必须有这一本账 ✗✗：``_context_length`` 是**权重的**上限 ✓（Qwen3-4B 声明 32K ✓），
+        而卡上真正能放多少由**剩余显存**决定 ✓ —— 8 GiB 卡装完 4B（反量化后 ~8 GiB 权重 ✓）
+        剩不到 1 GiB ⇒ KV 连 8K 都放不下 ✓✗，可 `_guard_context` 老版只看权重窗口 ✓ ⇒
+        **装得进、跑到第三千个 token 才炸** ✓，且报错落在 ``baddbmm`` 上、离真因几十步 ✓✗。
+
+        ⚠️ 这是**快照** ✗（不是活值 ✓）：装载那一刻算一次 ✓；之后别的件上卡/退卡都会让它变 ✓
+        ⇒ 换阶段（``enter_phase``）之后要**再调一次** ✓。本层不自动调 —— 每次生成都探卡要付一次
+        全卡同步 ✓（decode 一步才 20 毫秒级 ✓，那笔开销不能白花 ✗）。
+        """
+        cfg = getattr(self._model, "config", self._config)
+        free = None
+        device = self._device or ""
+        if device.startswith("cuda"):
+            try:
+                import torch  # noqa: PLC0415 —— 只有真装了才需要 ✓（describe 离线不许 import ✗）
+
+                free, _total = torch.cuda.mem_get_info(device)
+                free = int(free)
+            except Exception:  # noqa: BLE001 —— 探不到 ⇒ 不判 ✓ 不编 0 ✗
+                free = None
+        budget = llm_mod.kv_room_tokens(cfg, self._kv_mode, free_bytes=free)
+        budget["device"] = device or "cpu"
+        #: 另一本账（**权重**声明窗口 ✓）也并进来 ✓ —— 调用方一眼能看到「先撞哪一本」✓
+        budget["weightContext"] = int(self._context_length or 0)
+        room = budget.get("maxTokens")
+        if room is not None and budget["weightContext"]:
+            budget["effectiveTokens"] = min(int(room), int(budget["weightContext"]))
+            budget["limitedBy"] = "vram" if int(room) < int(budget["weightContext"]) else "weight"
+        elif room is not None:
+            budget["effectiveTokens"] = int(room)
+            budget["limitedBy"] = "vram"
+        else:
+            budget["effectiveTokens"] = int(budget["weightContext"]) or None
+            budget["limitedBy"] = "weight" if budget["weightContext"] else None
+        self._kv_budget = budget
+        return budget
+
     def _guard_context(self, prompt_tokens: int, max_new_tokens: int) -> None:
-        """``prompt + 新生`` 超权重窗口 ⇒ **拒** ✗（``0`` = 权重没声明窗口 ⇒ 不检查 ✓ 不猜 ✗）。"""
-        limit = int(self._context_length or 0)
-        if not limit:
-            return
+        """``prompt + 新生`` 超**两本账里较小的那本** ⇒ **拒** ✗（``0``/``None`` = 那本没结论 ⇒ 不拿它判 ✓）。
+
+        两本账（2026-11-08 补 ✓）：
+
+        * **权重窗口** ✓（``self._context_length`` ✓）—— 模型的先天上限 ✓，老口径不变 ✓；
+        * **显存上限** ✓（``self._kv_budget["maxTokens"]`` ✓）—— 卡上真放得下的 token 数 ✓。
+
+        ⚠️ 报错必须说清**是哪一本**卡住的 ✗✗：说「超窗」而其实是显存不够 ✓ 会让人去改提示词长度 ✓
+        （改了也没用 ✓，因为权重窗口还有 32K ✓）。两条的处置办法完全不同 ✓（见报错正文 ✓）。
+        """
         total = int(prompt_tokens) + int(max_new_tokens)
-        if total > limit:
+        weight_limit = int(self._context_length or 0)
+        budget = self._kv_budget or {}
+        room = budget.get("maxTokens")
+        room = None if room is None else int(room)
+        limit = weight_limit or 0
+        if room is not None and (not limit or room < limit):
+            limit = room
+            by = "vram"
+        elif limit:
+            by = "weight"
+        else:
+            return
+        if total <= limit:
+            return
+        if by == "vram":
+            per = budget.get("perToken")
             raise llm_mod.LlmError(
-                f"上下文超窗 ✗：提示词 {prompt_tokens} + 预留生成 {max_new_tokens} = {total} 词元，"
-                f"超过权重窗口 {limit} ✗ ⇒ **不静默截断** ✗（减 ``maxOutputTokens`` ✓、"
-                f"或收短历史/工具声明 ✓）")
+                f"显存放不下这么长的上下文 ✗：提示词 {prompt_tokens} + 预留生成 {max_new_tokens} "
+                f"= {total} 词元，而**这块卡**的 KV 只放得下 {limit} 词元 ✓（每 token {per} B、"
+                f"可用 {budget.get('freeBytes')} B − 余量 {budget.get('reserveBytes')} B ✓）"
+                f"⇒ **不静默截断** ✗ ⇒ 四条路：缩上下文 ✓／减 ``maxOutputTokens`` ✓／"
+                f"``kvMode=q8``（每 token 字节减半 ✓）／先让别的件退卡（DiT 等 ✓）再 "
+                f"``refresh_kv_budget()`` 重算 ✓")
+        raise llm_mod.LlmError(
+            f"上下文超窗 ✗：提示词 {prompt_tokens} + 预留生成 {max_new_tokens} = {total} 词元，"
+            f"超过权重窗口 {limit} ✗ ⇒ **不静默截断** ✗（减 ``maxOutputTokens`` ✓、"
+            f"或收短历史/工具声明 ✓）")
 
     # ── 流式生成 ✓（2026-11-01 补）
     def generate_stream(self, prompt: str, *, system: str | None = None,
@@ -719,20 +1146,26 @@ class LlmBackend:
             _emit(text)
 
         spec_kwargs, spec_sink = self._spec_call()
+        fast_kwargs = self._fast_call()
+        graph_kwargs, graph_sink = self._graph_call()
         try:
             llm_mod.generate_llm(
                 self._model, ids_tensor, max_new_tokens=max_new_tokens, temperature=temperature,
                 top_p=top_p, top_k=top_k, eos_id=self._config.eos_id, seed=seed, on_token=_on_token,
-                kv_mode=self._kv_mode, kv_cache=self._kv_cache, **spec_kwargs,
+                kv_mode=self._kv_mode, kv_cache=self._kv_cache_for_call(),
+                **spec_kwargs, **fast_kwargs, **graph_kwargs,
+                **self._kv_window_call(), **self._prefill_call(),
             )
         except _StopHit:
             pass
         except _Aborted:
             self._spec_last = spec_sink      # 中止也要留回执 ✓（否则「跑到一半被掐」看不出投机是否在跑 ✗）
+            self._graph_last = graph_sink    # 图化同理 ✓（被掐在重放途中 ⇒ 重放了几步也该看得见 ✓）
             # 客户端已走 ⇒ **不许**再 ``_emit``（那份 emit 会经 call_soon_threadsafe 落到一个
             # 已经没人读的队列里 ✓）；直接返回已生成的那半段 ✓（调用方那边是取消路径，值会被丢弃 ✓）。
             return self._hub.decode(new_ids, skip_special_tokens=True).strip()
         self._spec_last = spec_sink
+        self._graph_last = graph_sink
         full = self._hub.decode(new_ids, skip_special_tokens=True)
         for mark in stops:
             at = full.find(mark)

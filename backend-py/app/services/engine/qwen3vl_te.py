@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 __all__ = [
     "QWEN3VL_32B", "ROPE_DIMS", "ROPE_THETA", "build_text_tower", "deepstack_layers_of",
@@ -164,7 +164,8 @@ def deepstack_layers_of(count: int = 3) -> tuple[int, ...]:
     return tuple(range(count))
 
 
-def infer_shape(shapes: Mapping[str, Sequence[int]]) -> dict[str, Any]:
+def infer_shape(shapes: Mapping[str, Sequence[int]],
+                packed_stems: Iterable[str] = ()) -> dict[str, Any]:
     """从**真权重形状**反推尺子 ✓（不信常量 ✓ —— 常量和盘上不一样时必须报 ✗）。
 
     ``shapes`` 只要给这几类键即可（缺了就跳过那一项校验 ✓）：
@@ -174,14 +175,24 @@ def infer_shape(shapes: Mapping[str, Sequence[int]]) -> dict[str, Any]:
     * ``model.layers.0.mlp.gate_proj.weight`` ✓
     * ``model.layers.0.self_attn.q_norm.weight``（有 ⇒ 有 QK-norm ✓）
     * ``model.norm.weight``（**没有** ⇒ 截断、无 final norm ✓）
+
+    ``packed_stems``：**每字节两个元素的打包层**（int4 / nvfp4 ✓，名字不带 ``.weight`` ✓）——
+    它们的**列数是逻辑宽度的一半** ✓✗（``q_proj`` 5120 入宽在 nvfp4 文件里是 ``[8192, 2560]`` ✓）。
+    只据头部形状反推会把 hidden 读成 **2560** ✓✗ ⇒ heads 变 32、整条前向跟着错，且**不报错** ✓✗
+    （出图只是语义糊 ✓）。判据必须来自文件自述（:func:`quant.packed_weight_stems_of` ✓），
+    **不按 dtype 猜** ✓（int8 per-row 的列数就是逻辑宽度 ✓，一起 ×2 会翻错 ✓）。
     """
+    packed = {str(name) + ".weight" for name in packed_stems}
     shape = dict(QWEN3VL_32B)
     embed = shapes.get("model.embed_tokens.weight")
     if embed:
         shape["vocab"], shape["hidden"] = int(embed[0]), int(embed[1])
     q_proj = shapes.get("model.layers.0.self_attn.q_proj.weight")
     if q_proj:
-        shape["hidden"] = int(q_proj[1])
+        q_in = int(q_proj[1])
+        if "model.layers.0.self_attn.q_proj.weight" in packed:
+            q_in *= 2
+        shape["hidden"] = q_in
         q_out = int(q_proj[0])
         # ⚠️ heads 与 head_dim 只能靠 q_norm 的宽（= head_dim ✓）才分得开 ✓
         norm = shapes.get("model.layers.0.self_attn.q_norm.weight")

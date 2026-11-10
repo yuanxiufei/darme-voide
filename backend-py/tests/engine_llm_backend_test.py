@@ -406,6 +406,180 @@ def case_kv_wiring() -> None:
           all(wired), wired)
 
 
+def case_kv_window_wiring() -> None:
+    """⭐ KV 滑窗接线 ✓（2026-11-08）—— 与 ④／⑩／⑪ 同四类形状，外加两条滑窗独有的假绿 ✗✗。
+
+    1. 回执必须把「关」与「配错」分开 ✓，且窗口是**行数**不是开关 ✓（``kvSink=0`` 合法 ⇒
+       归一函数别照抄 ``specWindow`` 那条「< 1 即拒」✗）；
+    2. 拼错在 ``load()`` 开头具名拒 ✓；
+    3. 缓存键：关着＝空串 ✓（``None``/``0``/``off`` 同格 ✓ 否则同一份权重装两遍 ✗✗）、
+       **窗口关着时 sink 不进格** ✗（写个 ``kvSink=8`` 就多装一份 8 GiB 权重 ✗✗）；
+    4. 三个调用口都递 ✓ ＋ 后端里**每一处** ``generate_llm`` 都用 ``_kv_window_call()``／
+       ``_kv_cache_for_call()`` ✓（漏一处＝那条路仍按完整历史涨 KV ✗✗，而回执只有一份 ✓）。
+    """
+    import ast  # noqa: PLC0415
+
+    off = llm_backend.LlmBackend(CONFIG).describe()
+    on = llm_backend.LlmBackend(CONFIG, kv_window=1024).describe()
+    zero_sink = llm_backend.LlmBackend(CONFIG, kv_window=64, kv_sink=0).describe()
+    check("⑮ 回执分得开 ✓（默认 ``kvWindow.enabled=False``/``rows=0`` ✓；``kv_window=1024`` ⇒ sink 默认 4、"
+          "``rows = 1028`` ✓；⭐ ``kvSink=0`` **合法** ✓ —— 与 ``specWindow`` 那条「< 1 即拒」口径不同 ✗）",
+          off["kvWindow"]["enabled"] is False and off["kvWindow"]["rows"] == 0
+          and on["kvWindow"]["enabled"] is True and on["kvWindow"]["window"] == 1024
+          and on["kvWindow"]["sink"] == 4 and on["kvWindow"]["rows"] == 1028
+          and zero_sink["kvWindow"]["sink"] == 0 and zero_sink["kvWindow"]["rows"] == 64
+          and "有损" in on["kvWindow"]["note"],
+          (off["kvWindow"], on["kvWindow"], zero_sink["kvWindow"]))
+
+    bad = llm_backend.LlmBackend(CONFIG, kv_window="3k")
+    err_text = ""
+    try:
+        bad.load()
+    except Exception as err:  # noqa: BLE001
+        err_text = f"{type(err).__name__}: {err}"
+    check("⑮′ ⭐ ``kvWindow=\"3k\"`` 拼错 ⇒ ``load()`` **开头**具名拒 ✓（不是装完权重才炸 ✗✗ —— "
+          "静默当 0 的后果是「人以为开了滑窗、显存照涨」✓✗）＋ describe 不抛只写 note ✓",
+          "kvWindow" in err_text and "权重未就绪" not in err_text
+          and "不认" in bad.describe()["kvWindow"]["note"], (err_text, bad.describe()["kvWindow"]))
+
+    equal = llm_backend.LlmBackend(CONFIG, kv_window=8, kv_sink=8)
+    err_equal = ""
+    try:
+        equal.load()
+    except Exception as err:  # noqa: BLE001
+        err_equal = f"{type(err).__name__}: {err}"
+    tight_ok = llm_backend.LlmBackend(CONFIG, kv_window=9, kv_sink=8)
+    tight_err = ""
+    try:
+        tight_ok.load()
+    except Exception as err:  # noqa: BLE001
+        # 走到「权重未就绪」＝过了滑窗校验 ✓（CONFIG 指向不存在的文件 ✓）
+        tight_err = f"{type(err).__name__}: {err}"
+    check("⑮″ ``kvSink >= kvWindow`` ⇒ ``load()`` 具名拒 ✓（sink 是窗口**之外**另留的开头几行 ⇒ "
+          "相等就没有可滚的窗口 ✓✗）；``kvSink=8/kvWindow=9`` 过校验 ✓（拒的理由不能是这句 ✗）",
+          "kvSink" in err_equal and "kvWindow" in err_equal and "kvSink" not in tight_err,
+          (err_equal, tight_err))
+
+    from app.services import text_generation as tg  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    key = tg._engine_backend_key
+    check("⑮‴ 缓存键 ✓：``0``/``None``/``off``/不写**同格** ✓（否则同一份权重装两遍 ✗✗）；"
+          "``1024`` 另起一格 ✓；窗口开着时 ``kvSink`` 另起一格 ✓；**窗口关着时 sink 不进格** ✓"
+          "（写个 ``kvSink=8`` 不该多装一份权重 ✗✗）；拼错原样留一格 ✓ 交给 load 拒 ✓",
+          key("/m.gguf", None, kv_window=0) == key("/m.gguf", None)
+          and key("/m.gguf", None, kv_window="off") == key("/m.gguf", None)
+          and key("/m.gguf", None, kv_window=None) == key("/m.gguf", None)
+          and key("/m.gguf", None, kv_window=1024) != key("/m.gguf", None)
+          and key("/m.gguf", None, kv_window=1024, kv_sink=8)
+          != key("/m.gguf", None, kv_window=1024)
+          and key("/m.gguf", None, kv_sink=8) == key("/m.gguf", None)
+          and key("/m.gguf", None, kv_window="bad") != key("/m.gguf", None))
+
+    check("⑮⁴ 滑窗开着 ⇒ ``kvCache`` **如实暂停** ✓（``enabled=False`` ＋ ``suspendedBy=\"kvWindow\"`` ✓）"
+          "；关着 ⇒ 复用照旧 ✓（静默停掉 ⇒ 人按「复用在跑」算时间会算错 ✗✗）",
+          on["kvCache"]["enabled"] is False and on["kvCache"].get("suspendedBy") == "kvWindow"
+          and off["kvCache"]["enabled"] is True, (on["kvCache"], off["kvCache"]))
+
+    wired = []
+    for rel in ("services/text_generation.py", "services/text_stream.py", "agent/runtime.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id.lstrip("_") == "get_engine_backend"]
+        wired.append(bool(calls) and all(
+            any(kw.arg is None and isinstance(kw.value, ast.Call)
+                and getattr(kw.value.func, "id", "") == "engine_kv_window_kwargs"
+                for kw in call.keywords) for call in calls))
+    check("⑮⁵ ⭐ 三个调用口**都**递 ``**engine_kv_window_kwargs(settings)`` ✓（漏一处 ⇒ 那条路仍按完整"
+          "历史涨 KV ✗✗ 而回执只有一份 ✓）", all(wired), wired)
+
+    tree = ast.parse((root / "services/engine/llm_backend.py").read_text(encoding="utf-8"))
+    gens = [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", "") == "generate_llm"
+            or (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "generate_llm")]
+    seen: list[set[str]] = []
+    for call in gens:
+        names = set()
+        for kw in call.keywords:
+            if kw.arg is None and isinstance(kw.value, ast.Call):
+                names.add(getattr(kw.value.func, "attr", "") or getattr(kw.value.func, "id", ""))
+            elif kw.arg == "kv_cache":
+                # ``kv_cache=_kv_cache_for_call()`` ⇒ 是个 Call ✓ 名字在 ``.func.attr`` 上 ✓
+                target = kw.value.func if isinstance(kw.value, ast.Call) else kw.value
+                names.add(getattr(target, "attr", "") or getattr(target, "id", ""))
+        seen.append(names)
+    check("⑮⁶ ⭐ 后端里**每一处** ``generate_llm`` 都走 ``_kv_window_call()`` ＋ ``_kv_cache_for_call()`` ✓"
+          "（给着一半＝三条路两套行为 ✗✗ —— 分别漏掉时症状是「流式仍留全部历史」／「滑窗下复用还命中」✓✗）",
+          len(seen) >= 3 and all("_kv_window_call" in s and "_kv_cache_for_call" in s for s in seen),
+          (len(seen), seen))
+
+
+def case_prefill_tier() -> None:
+    """⭐ prefill 分块按显存档位 ✓（2026-11-08 补）—— 三条判据，每条盯一个错法 ✗。
+
+    为什么块大小归后端 ✗✗：块只解决**峰值**（分数矩阵 ``O(chunk × 总长)`` ✓，与 KV 容量无关 ✓），
+    而「显存有多紧」只有刚 ``refresh_kv_budget`` 过的后端知道 ✓；调用方拿不到这个数只能写死 1024 ✓✗
+    —— 2 GiB 空闲的卡上 prefill 3240 词元当场炸 ✓。
+
+    ① **常见环境一个字节都不变** ✓（≥4 GiB ⇒ 1024 ⇒ ``_prefill_call()`` 返回空字典 ✓ ⇒ 调用签名
+       与老路径逐字相同 ✓）；**只缩不涨** ✗（8 GiB 也只给 1024 ✓ —— 涨没有实测收益却把峰值翻倍 ✓✗）；
+    ② 探不到显存 ⇒ 默认档 ✓（``None`` 不等于「很紧」✗✗）；
+    ③ 三处 ``generate_llm`` **都**展开 ``_prefill_call()`` ✓（漏一处 ⇒ 那条路仍按写死 1024 跑 ✓✗）。
+    """
+    import ast  # noqa: PLC0415
+
+    backend = llm_backend.LlmBackend(CONFIG)
+    tiers: dict[str, int] = {}
+
+    def chunk_of(free: int | None) -> tuple[int, dict]:
+        backend._kv_budget = None if free is None else {"freeBytes": free}
+        return backend._prefill_chunk(), backend._prefill_call()
+
+    for label, free in (("未探到", None), ("40 GiB", 40 * 2 ** 30), ("8 GiB", 8 * 2 ** 30),
+                        ("4 GiB", 4 * 2 ** 30), ("3 GiB", 3 * 2 ** 30),
+                        ("1.5 GiB", int(1.5 * 2 ** 30)), ("0.5 GiB", 512 * 2 ** 20)):
+        tiers[label] = chunk_of(free)[0]
+    common_call = chunk_of(40 * 2 ** 30)[1]
+    tight_call = chunk_of(3 * 2 ** 30)[1]
+    check("⑯⁰ ⭐ 常见环境**逐字不变** ✓：未探到／≥4 GiB ⇒ 1024 且 ``_prefill_call()`` 是**空字典** ✓"
+          "（⇒ 老调用签名不变 ✓）；**只缩不涨** ✗：8 GiB 也给 1024 不是 2048 ✓；"
+          "3 GiB⇒512 ✓、1.5 GiB⇒256 ✓、0.5 GiB⇒128 ✓",
+          tiers == {"未探到": 1024, "40 GiB": 1024, "8 GiB": 1024, "4 GiB": 1024,
+                    "3 GiB": 512, "1.5 GiB": 256, "0.5 GiB": 128}
+          and common_call == {} and tight_call == {"prefill_chunk": 512}, (tiers, common_call, tight_call))
+
+    backend._kv_budget = {"freeBytes": 3 * 2 ** 30}
+    report = backend.describe()["prefill"]
+    backend._kv_budget = None
+    idle_report = backend.describe()["prefill"]
+    check("⑯¹ 回执同时给出「这一档是多少」和「为什么」✓（``chunk`` ＋ ``note`` ＋ ``freeBytes`` ✓）；"
+          "缩档时说清是空闲显存紧 ✓、默认档时说清「老路径逐字不变」✓"
+          "（只报一个数 ⇒ 人不知道 256 是配置还是让步 ✓✗）",
+          report["chunk"] == 512 and report["default"] == 1024
+          and "空闲只有 3.0 GiB" in report["note"]
+          and idle_report["chunk"] == 1024 and "默认档" in idle_report["note"],
+          (idle_report, report))
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    tree = ast.parse((root / "services/engine/llm_backend.py").read_text(encoding="utf-8"))
+    gens = [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (getattr(node.func, "attr", "") == "generate_llm"
+                 or getattr(node.func, "id", "") == "generate_llm")]
+    wired = []
+    for call in gens:
+        wired.append(any(
+            kw.arg is None and isinstance(kw.value, ast.Call)
+            and getattr(kw.value.func, "attr", "") == "_prefill_call"
+            for kw in call.keywords))
+    check("⑯² ⭐ 后端里**每一处** ``generate_llm`` 都展开 ``**self._prefill_call()`` ✓"
+          "（漏一处 ⇒ 那条路写死 1024 ✓✗：低显存下正是「流式那条」最容易漏 ✓）",
+          len(gens) >= 3 and all(wired), (len(gens), wired))
+
+
 def case_spec_wiring() -> None:
     """⭐ 投机解码接线 ✓（2026-11-08）—— 与 ④／⑩ 同四类形状，但每个都有「投机特有」的假绿 ✗✗。
 
@@ -559,6 +733,359 @@ def case_spec_wiring() -> None:
           and "退回" in warm_last["note"], (warm, warm_spec, warm_last))
 
 
+def case_fast_wiring() -> None:
+    """快路径接线 ✓（2026-11-08）—— 与 ④／⑩／⑪ 同一批形状，但它有一处**独有的假绿** ✗✗：
+
+    本档改的是**数值**（``F.rms_norm`` 融合核与老五连差 1 个 bf16 ulp ✓、SDPA 与手写三式差 1e-7 级 ✓）
+    ⇒ 只要开关传错了，**输出照样出得来、看不出来** ✓✗。所以判据全压在「开关有没有真的到核里」：
+    ``describe`` 三态分得开 ✓、拼错在 ``load()`` 开头拒 ✓、缓存键含 ``fastPath`` ✓（否则拿到的是**关着的
+    旧后端**、回执照报「开」✗✗）、三处调用口都递 ✓、后端每处 ``generate_llm`` 都带 ✓。
+    """
+    import ast  # noqa: PLC0415
+
+    off = llm_backend.LlmBackend(CONFIG).describe()["fastPath"]
+    norm = llm_backend.LlmBackend(CONFIG, fast_path="norm").describe()["fastPath"]
+    both = llm_backend.LlmBackend(CONFIG, fast_path="all").describe()["fastPath"]
+    check("⑫ 回执把 ``norm``／``attn``／``kvbuf`` **分开报** ✓（合成一个布尔 ⇒ 人问「到底省了哪一刀」"
+          "答不出来 ✗✗）＋ 关着时也说清「默认关、数值逐位不变」✓（别把「关」读成「没实现」✗）",
+          off["enabled"] is False and off["items"] == [] and "逐位" in off["note"]
+          and norm["norm"] is True and norm["attn"] is False and norm["kvbuf"] is False
+          and norm["items"] == ["norm"]
+          and both["norm"] is True and both["attn"] is True and both["kvbuf"] is True
+          and sorted(both["items"]) == ["attn", "kvbuf", "norm"], (off, norm, both))
+    avail = bool(norm["fusedNormAvailable"])
+    check("⑫′ ⭐ 回执单列 ``fusedNormAvailable`` ✓（缺 ``F.rms_norm`` 时 ``norm`` **静默退回**老写法 ✓ "
+          "⇒ 只报「已开」就是假的 ✗✗；本机实测 " + ("有" if avail else "没有") + " ✓）",
+          isinstance(avail, bool)
+          and (("退回" in both["note"]) if not avail else ("退回" not in both["note"])),
+          (avail, both["note"]))
+
+    bad = llm_backend.LlmBackend(CONFIG, fast_path="nrom")
+    err_text = ""
+    try:
+        bad.load()
+    except Exception as err:  # noqa: BLE001
+        err_text = f"{type(err).__name__}: {err}"
+    check("⑫″ ``fastPath`` 拼错 ⇒ ``load()`` **开头**具名拒 ✓（不是装完 8 GiB 权重才炸 ✗✗）"
+          "＋ describe 不抛、把不认的值写进 note ✓",
+          "fastPath" in err_text and "权重未就绪" not in err_text
+          and "不认" in bad.describe()["fastPath"]["note"],
+          (err_text, bad.describe()["fastPath"]["note"]))
+
+    try:
+        import fastapi  # noqa: F401, PLC0415
+    except ModuleNotFoundError:
+        print("SKIP  ⑫‴～⑫⁷ 需要 fastapi（本解释器未装）⇒ 不判（≠ 通过 ✓）")
+        return
+
+    from app.services import text_generation as tg  # noqa: PLC0415
+
+    key_off = tg._engine_backend_key("/m.gguf", None)
+    key_all = tg._engine_backend_key("/m.gguf", None, fast_path="all")
+    check("⑫‴ ⭐ 缓存键含 ``fastPath`` ✓（不进格 ⇒ 开关一变还是**同一个后端对象** ⇒ 配了等于没配 ✗✗、"
+          "而回执照旧写「已开」✗✗）＋ 关＝与「不写」同格 ✓ ＋ 同义写法归一成**一格** ✓"
+          "（``all``／``norm,attn,kvbuf``／``True`` 各装一份 8 GiB 是白炸 ✗✗）",
+          key_all != key_off
+          and key_off == tg._engine_backend_key("/m.gguf", None, fast_path="off")
+          and key_all == tg._engine_backend_key("/m.gguf", None, fast_path="norm,attn,kvbuf")
+          == tg._engine_backend_key("/m.gguf", None, fast_path="kvbuf,norm,attn")
+          == tg._engine_backend_key("/m.gguf", None, fast_path=True),
+          (key_off, key_all))
+    check("⑫⁴ 拼错的写法**原样留在键里** ✓（归一抛错时不许当成「关」去复用那份关着的后端 ✗✗）",
+          tg._engine_backend_key("/m.gguf", None, fast_path="nrom")
+          != tg._engine_backend_key("/m.gguf", None, fast_path="off"))
+    check("⑫⁵ ``engine_fast_path`` 两种键名都认 ✓、缺省 ``None`` ✓、``engine_fast_kwargs`` 只出这一格 ✓",
+          tg.engine_fast_path({"fastPath": "all"}) == "all"
+          and tg.engine_fast_path({"fast_path": "norm"}) == "norm"
+          and tg.engine_fast_path({}) is None
+          and set(tg.engine_fast_kwargs({"fastPath": "all"})) == {"fast_path"})
+
+    seen: dict[str, object] = {}
+    original = tg._get_engine_backend
+
+    class _Fake:
+        def generate(self, prompt, *, system=None, temperature=1.0, max_new_tokens=256):
+            return "OK"
+
+    def _fake(gguf, tok, **kwargs):
+        seen.update(kwargs)
+        return _Fake()
+
+    tg._get_engine_backend = _fake
+    try:
+        import asyncio  # noqa: PLC0415
+
+        asyncio.run(tg._generate_with_engine(
+            {"settings": {"ggufPath": "/m.gguf", "fastPath": "all"}}, "hi", {}))
+    finally:
+        tg._get_engine_backend = original
+    check("⑫⁶ 普通生成口把 ``fastPath`` 原样递下去 ✓（只进缓存键、不交后端＝配置静默失效 ✗✗；"
+          "这里**不做类型转换** ✓ —— 归一在 ``LlmBackend.__init__`` 里，与 ``kvMode``／``specLookup`` 同口径 ✓）",
+          seen.get("fast_path") == "all", seen)
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    missing_port: list[str] = []
+    for rel in ("services/text_generation.py", "services/text_stream.py", "agent/runtime.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id.lstrip("_") == "get_engine_backend"]
+        if not calls:
+            missing_port.append(f"{rel}: 找不到 get_engine_backend 调用 ✗")
+        for call in calls:
+            spread = [kw for kw in call.keywords if kw.arg is None
+                      and isinstance(kw.value, ast.Call)
+                      and getattr(kw.value.func, "id", "") == "engine_fast_kwargs"]
+            if not spread:
+                missing_port.append(f"{rel}: 没展开 engine_fast_kwargs")
+    check("⑫⁷ ⭐ 三个调用口**都**递快路径 ✓（漏一处＝那条路永远老写法 ⇒ 人按「都开了」算账会算错 ✗✗）",
+          not missing_port, missing_port)
+
+    tree = ast.parse((root / "services/engine/llm_backend.py").read_text(encoding="utf-8"))
+    gens = [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "generate_llm"]
+
+    def _has_fast(node: ast.Call) -> bool:
+        spread = any(kw.arg is None and isinstance(kw.value, ast.Name)
+                     and kw.value.id == "fast_kwargs" for kw in node.keywords)
+        return spread or "fast_path" in {kw.arg for kw in node.keywords}
+
+    missing_kw = [node.lineno for node in gens if not _has_fast(node)]
+    # ⚠️ 判据要盯「谁去取了这一份」✗ 别盯变量名长得像 ✓：三处都是 ``fast_kwargs = self._fast_call()`` ✓
+    callers = [node.lineno for node in ast.walk(tree)
+               if isinstance(node, ast.Assign)
+               and isinstance(node.value, ast.Call)
+               and getattr(node.value.func, "attr", "") == "_fast_call"
+               and any(isinstance(t, ast.Name) and t.id == "fast_kwargs" for t in node.targets)]
+    check("⑫⁸ ⭐ 后端里**每一处** ``generate_llm`` 都带 ``fast_path`` ✓（普通／流式／agent 工具循环"
+          "三条路漏一条 ⇒ 那条路每步还是 2506 次 launch ✗✗）",
+          len(gens) == 3 and not missing_kw and len(callers) >= 3,
+          (len(gens), missing_kw, len(callers)))
+    check("⑫⁹ ``_fast_call()`` 空集 ⇒ **空字典** ✓（不传关键字 ⇒ 默认关时调用签名逐字不变 ✓ "
+          "本仓一堆桩模型测试靠这条活着 ✓；写成 ``{\"fast_path\": frozenset()}`` 会把它们全打炸 ✗✗）",
+          llm_backend.LlmBackend(CONFIG)._fast_call() == {}
+          and llm_backend.LlmBackend(CONFIG, fast_path="all")._fast_call()
+          == {"fast_path": frozenset(llm_mod.FAST_PATH_ITEMS)},
+          (llm_backend.LlmBackend(CONFIG)._fast_call(),
+           llm_backend.LlmBackend(CONFIG, fast_path="all")._fast_call()))
+
+    if not _torch_available():
+        print("SKIP  ⑫¹⁰ 真跑：需要 torch（本机未装）⇒ 不判（≠ 通过 ✓）")
+        return
+    # 端到端：归一后的 ``frozenset`` 真的落到了 ``generate_llm`` 的形参上 ✓（spy 代跑真函数 ✓）
+    from app.services.engine import llm as llm_mod_rt  # noqa: PLC0415
+
+    model = llm_mod_rt.build_llm(CONFIG)
+    hub = _StubHub()
+    backend = llm_backend.LlmBackend(CONFIG, fast_path="all")
+    backend._model, backend._hub = model, hub
+    got: list[object] = []
+    real_gen = llm_mod_rt.generate_llm
+
+    def _spy(*args, **kwargs):
+        got.append(kwargs.get("fast_path", "<缺>"))
+        return real_gen(*args, **kwargs)
+
+    llm_mod_rt.generate_llm = _spy
+    try:
+        text = backend.generate("abcabcabc", max_new_tokens=4, temperature=0)
+    finally:
+        llm_mod_rt.generate_llm = real_gen
+    check("⑫¹⁰ ⭐ 真跑：``fastPath=all`` 一路走到 ``generate_llm`` 的形参上 ✓（``**fast_kwargs`` 真展开 ✓）"
+          "且生成照常回文本 ✓（配了 ≠ 生效：这一条就是「生效」的证据 ✓）",
+          got == [frozenset(llm_mod.FAST_PATH_ITEMS)] and bool(text), (got, text))
+
+    plain = llm_backend.LlmBackend(CONFIG)
+    plain._model, plain._hub = model, _StubHub()
+    got.clear()
+    llm_mod_rt.generate_llm = _spy
+    try:
+        plain_text = plain.generate("abcabcabc", max_new_tokens=4, temperature=0)
+    finally:
+        llm_mod_rt.generate_llm = real_gen
+    check("⑫¹¹ ⭐ 反证：默认关时 spy 收到 ``<缺>`` ✓（真的**没传**那个关键字 ✓ ⇒ ⑫¹⁰ 不是「反正都传了」✓）"
+          "；⚠️ 两次文本**不必相同** ✗（融合核差 1 个 bf16 ulp ⇒ 贪心可能在某个岔口分开 ✓ 那不是错 ✓）",
+          got == ["<缺>"] and bool(plain_text), (got, plain_text, text))
+
+
+def case_cuda_graph_wiring() -> None:
+    """图化 decode 单步的**接线** ✓（2026-11-08）—— 与 ⑫ 快路径同一批形状，但它的假绿更贵 ✗✗：
+
+    开关没到位时**输出一模一样** ✓（掩码版只改归约长度 ✓；而本档在 CPU 上更是原样退回 plain ✓）
+    ⇒「跑得出来」一点信息量都没有 ✗。所以判据全压在「开关到底去哪了」：回执三态分得开 ✓、
+    拼错在 ``load()`` **开头**具名拒 ✓（不是装完 8 GiB 才炸 ✗✗）、缓存键含 ``cudaGraph`` ✓（否则拿到
+    **关着的旧后端**、回执照报「开」✗✗）、三处调用口都递 ✓、后端每处 ``generate_llm`` 都带 ✓、
+    关着时 ``_graph_call()`` 是**空字典** ✓（默认路径调用签名逐字不变 ✓）。
+    """
+    import ast  # noqa: PLC0415
+
+    off = llm_backend.LlmBackend(CONFIG).describe()["cudaGraph"]
+    on = llm_backend.LlmBackend(CONFIG, cuda_graph="on").describe()["cudaGraph"]
+    check("⑬ 回执三态分得开 ✓：``requested``（配置想不想开）／``enabled``（这后端开没开）／"
+          "``last``（**上一次真实生成**捕没捕到 ✗ ``None`` ＝还没生成过 ≠ 没开 ✗✗）"
+          "＋ 关着时明写「逐位不变」✓（别把「关」读成「没实现」✗）",
+          off["requested"] == "off" and off["enabled"] is False and off["last"] is None
+          and "逐位" in off["note"]
+          and on["requested"] == "on" and on["enabled"] is True and on["last"] is None
+          and "还没生成过" in on["note"], (off, on))
+
+    bad = llm_backend.LlmBackend(CONFIG, cuda_graph="grpah")
+    err_text = ""
+    try:
+        bad.load()
+    except Exception as err:  # noqa: BLE001
+        err_text = f"{type(err).__name__}: {err}"
+    check("⑬′ ``cudaGraph`` 拼错 ⇒ ``load()`` **开头**具名拒 ✓（静默当关＝人以为在跑图、其实每步还在发"
+          "几千次 launch ✗✗）＋ describe 不抛、把错写进 note ✓",
+          "cudaGraph" in err_text and "权重未就绪" not in err_text
+          and "grpah" in bad.describe()["cudaGraph"]["note"]
+          and bad.describe()["cudaGraph"]["enabled"] is False,
+          (err_text, bad.describe()["cudaGraph"]))
+
+    try:
+        import fastapi  # noqa: F401, PLC0415
+    except ModuleNotFoundError:
+        print("SKIP  ⑬″～⑬⁷ 需要 fastapi（本解释器未装）⇒ 不判（≠ 通过 ✓）")
+        return
+
+    from app.services import text_generation as tg  # noqa: PLC0415
+
+    key_off = tg._engine_backend_key("/m.gguf", None)
+    key_on = tg._engine_backend_key("/m.gguf", None, cuda_graph="on")
+    check("⑬″ ⭐ 缓存键含 ``cudaGraph`` ✓（不进格 ⇒ 从 off 改成 on 还是**同一个后端对象** ⇒ 图根本没捕 ✗✗"
+          "而回执照旧报「关」✗✗、人却以为在省 launch ✓）＋ 关＝与「不写」同格 ✓ ＋ 同义写法归一 ✓",
+          key_on != key_off
+          and key_off == tg._engine_backend_key("/m.gguf", None, cuda_graph="off")
+          and key_on == tg._engine_backend_key("/m.gguf", None, cuda_graph=True)
+          == tg._engine_backend_key("/m.gguf", None, cuda_graph="graph"),
+          (key_off, key_on))
+    check("⑬‴ 拼错的写法**原样留在键里** ✓（归一抛错时不许当成「关」去复用那份关着的后端 ✗✗）",
+          tg._engine_backend_key("/m.gguf", None, cuda_graph="grpah")
+          != tg._engine_backend_key("/m.gguf", None, cuda_graph="off"))
+    check("⑬⁴ ``engine_cuda_graph`` 两种键名都认 ✓、缺省 ``None`` ✓、``engine_graph_kwargs`` 只出这一格 ✓",
+          tg.engine_cuda_graph({"cudaGraph": "on"}) == "on"
+          and tg.engine_cuda_graph({"cuda_graph": True}) is True
+          and tg.engine_cuda_graph({}) is None
+          and set(tg.engine_graph_kwargs({"cudaGraph": "on"})) == {"cuda_graph"})
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    missing_port: list[str] = []
+    for rel in ("services/text_generation.py", "services/text_stream.py", "agent/runtime.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id.lstrip("_") == "get_engine_backend"]
+        if not calls:
+            missing_port.append(f"{rel}: 找不到 get_engine_backend 调用 ✗")
+        for call in calls:
+            spread = [kw for kw in call.keywords if kw.arg is None
+                      and isinstance(kw.value, ast.Call)
+                      and getattr(kw.value.func, "id", "") == "engine_graph_kwargs"]
+            if not spread:
+                missing_port.append(f"{rel}: 没展开 engine_graph_kwargs")
+    check("⑬⁵ ⭐ 三个调用口**都**递图化开关 ✓（漏一条 ⇒ 那条路拿的是关着的后端 ⇒ 人按「都开了」算账"
+          "会算错 ✗✗）", not missing_port, missing_port)
+
+    tree = ast.parse((root / "services/engine/llm_backend.py").read_text(encoding="utf-8"))
+    gens = [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "generate_llm"]
+
+    def _has_graph(node: ast.Call) -> bool:
+        spread = any(kw.arg is None and isinstance(kw.value, ast.Name)
+                     and kw.value.id == "graph_kwargs" for kw in node.keywords)
+        return spread or "cuda_graph" in {kw.arg for kw in node.keywords}
+
+    missing_kw = [node.lineno for node in gens if not _has_graph(node)]
+    # ⚠️ 判据要盯「谁去取了这一份」✗ 别盯变量名长得像 ✓；而且这里的左值是**元组**（``kw, sink = ...`` ✓）
+    # ⇒ 必须 ``ast.walk`` 进 targets 找名字 ✓（只看 ``node.targets`` 的顶层会是 ``Tuple`` ⇒ 永远 0 个 ✓✗）。
+    callers = [node.lineno for node in ast.walk(tree)
+               if isinstance(node, ast.Assign)
+               and isinstance(node.value, ast.Call)
+               and getattr(node.value.func, "attr", "") == "_graph_call"
+               and any(isinstance(inner, ast.Name) and inner.id == "graph_kwargs"
+                       for target in node.targets for inner in ast.walk(target))]
+    check("⑬⁶ ⭐ 后端里**每一处** ``generate_llm`` 都带图化参数 ✓（普通／流式／agent 工具循环三条路"
+          "漏一条 ⇒ 那条路仍逐步 launch ✗✗）＋ 每处都取了一份**新的**账 ✓（共用一块会把上一轮的重放数"
+          "留在这一轮 ✗✗）",
+          len(gens) == 3 and not missing_kw and len(callers) >= 3,
+          (len(gens), missing_kw, len(callers)))
+    off_call = llm_backend.LlmBackend(CONFIG)._graph_call()
+    on_call = llm_backend.LlmBackend(CONFIG, cuda_graph="on")._graph_call()
+    auto_call = llm_backend.LlmBackend(CONFIG, cuda_graph="auto")._graph_call()
+    check("⑬⁷ 关着时 ``_graph_call()`` ⇒ ``({}, None)`` ✓（不传关键字 ⇒ **默认路径调用签名逐字不变** ✓ "
+          "本仓一堆桩模型测试靠这条活着 ✓）＋ 开着时带一块**空账** ✓（回执由它填 ✓ 不是共用对象 ✓）"
+          "＋ ⭐ 递下去的必须是**三档原文** ✗ 不是 ``True`` ✗✗（2026-11-09 补）：``auto`` 若被压成 "
+          "``True`` ⇒ 短生成照样花 100 ms 捕一张净亏的图 ✓、回执却报 ``auto`` ✓ 说的和做的不一致 ✗",
+          off_call == ({}, None)
+          and on_call[0].get("cuda_graph") == "on"
+          and isinstance(on_call[1], dict) and on_call[1] == {}
+          and on_call[0]["cuda_graph_report"] is on_call[1]
+          and auto_call[0].get("cuda_graph") == "auto",
+          (off_call, on_call, auto_call))
+    # ⭐ 2026-11-08 补：**收益与代价必须成对交出去** ✗✗ —— 只写 ``bitExact=False``（代价）而把实测收益
+    # 藏起来，人会读成「用确定性换了个不知值不值的速度」；反过来只写收益就是在骗人。这一段不需要 CUDA
+    # （直接喂一份假的 ``_graph_last``），所以能在 CPU 上判。
+    tight = llm_backend.LlmBackend(CONFIG, cuda_graph="on")
+    tight._graph_last = {"enabled": True, "reason": "", "cap": 298, "pastLen": 256,
+                         "padRows": 10, "replays": 32, "captureMs": 97.4}
+    tight_note = tight.describe()["cudaGraph"]["note"]
+    check("⑬⁷′ ⭐ 开销回执成对 ✓：真在重放时 note 必须同时写**收益**（实测 128–512 词元 ×1.24–1.27）与"
+          "**代价**（``bitExact=False``）＋默认档说清「短生成一致、长生成会漂移」＋``captureMs`` 原样交出 ✓"
+          "（捕获是真的花掉的时间 ⇒ 不许隐去 ✓）",
+          "×1.24" in tight_note and "bitExact=False" in tight_note
+          and "漂移" in tight_note and "97.4" in tight_note and "10 行" in tight_note,
+          tight_note)
+    loose = llm_backend.LlmBackend(CONFIG, cuda_graph="on")
+    loose._graph_last = {"enabled": True, "reason": "", "cap": 352, "pastLen": 256,
+                         "padRows": 54, "replays": 32, "captureMs": 97.4}
+    loose_note = loose.describe()["cudaGraph"]["note"]
+    check("⑬⁷″ ⭐ ``padRows`` 超出默认预留 ⇒ 必须**显式警示**（实测 96 行时 |Δlogits| 1.9e-1、25 个分叉）✓ "
+          "—— 默认档那套「一致」的话到这里就是假话 ✗✗（``kv_reserve_rows`` 被放大时没人会去看 ✗）",
+          "54 行" in loose_note and "1.9e-1" in loose_note and "漂移" not in loose_note,
+          loose_note)
+
+    # ⭐⭐ 2026-11-09 补：``auto`` 档的回执**三态**必须分得开 ✗✗ —— ``enabled=True`` 只答「可能开」，
+    # 光看它分不出「按你要求每次都捕」与「按长度替你决定」✓；而「这一次没捕」若理由是 ``autoTooShort``，
+    # 绝不能和「让路／前置不满足」并成一句话 ✓（一个该改 maxOutputTokens，一个该关投机或查驱动 ✓✗）。
+    auto_b = llm_backend.LlmBackend(CONFIG, cuda_graph="auto")
+    auto_rep = auto_b.describe()["cudaGraph"]
+    auto_idle = auto_rep["note"]
+    auto_b._graph_last = {"enabled": False, "reason": "autoTooShort(8<16)"}
+    auto_skip = auto_b.describe()["cudaGraph"]["note"]
+    auto_b._graph_last = {"enabled": True, "reason": "", "cap": 40, "pastLen": 32,
+                          "padRows": 10, "replays": 8, "captureMs": 97.4}
+    auto_run = auto_b.describe()["cudaGraph"]["note"]
+    check("⑬⁷‴ ⭐⭐ ``auto`` 档回执三态分得开 ✓（2026-11-09 补）：``policy`` 原样交出 ✓（只有它能分开 "
+          "``on`` 与 ``auto`` ✗✗）＋ 还没跑过时先说「maxOutputTokens ≥ 16 才捕」✓ ＋ 因短跳过时写"
+          "「**不是故障**、要强制捕请改 ``on``」✓ 且**不混**「让路」那句 ✓ ＋ 真捕到时说明「本次 ≥ 16 才捕」✓",
+          auto_rep["policy"] == "auto" and auto_rep["enabled"] is True
+          and "≥ 16" in auto_idle and "净亏" in auto_idle
+          and "autoTooShort(8<16)" in auto_skip and "不是故障" in auto_skip
+          and "让路" not in auto_skip
+          and "auto 档" in auto_run and "×1.24" in auto_run,
+          (auto_rep, auto_idle, auto_skip, auto_run))
+
+    if not _torch_available():
+        print("SKIP  ⑬⁸ 真跑：需要 torch（本机未装）⇒ 不判（≠ 通过 ✓）")
+        return
+    # 端到端：CPU 上开图 ⇒ **不许崩** ✓、输出照常 ✓、而 ``last.reason`` 必须如实写 ``device=cpu`` ✗✗
+    #（这一条正是「要求了但静默没开」的反例：账本里看得见「为什么没跑图」✓）。
+    from app.services.engine import llm as llm_mod_rt  # noqa: PLC0415
+
+    model = llm_mod_rt.build_llm(CONFIG)
+    backend = llm_backend.LlmBackend(CONFIG, cuda_graph="on")
+    backend._model, backend._hub = model, _StubHub()
+    text = backend.generate("abcabcabc", max_new_tokens=4, temperature=0)
+    last = backend.describe()["cudaGraph"]["last"] or {}
+    check("⑬⁸ ⭐ 真跑（CPU）：开图不崩 ✓、照常出文本 ✓、而 ``last.reason == device=cpu`` ✓ —— "
+          "「要求了却没跑图」必须在账本里看得见 ✗✗（静默回退＝禁令 ✓）",
+          bool(text) and last.get("requested") is True and last.get("enabled") is False
+          and last.get("reason") == "device=cpu" and last.get("bitExact") is False,
+          (text[:20], last))
+
+
 def main() -> int:
     case_describe()
     case_unavailable()
@@ -567,7 +1094,11 @@ def main() -> int:
     case_chat_template_vars()
     case_wiring()
     case_kv_wiring()
+    case_kv_window_wiring()
+    case_prefill_tier()
     case_spec_wiring()
+    case_fast_wiring()
+    case_cuda_graph_wiring()
     failures = [item for item in _RESULTS if not item[1]]
     for name, passed, detail in _RESULTS:
         print(("PASS  " if passed else "FAIL  ") + name + ("" if passed else f"   <<< {detail!r}"))

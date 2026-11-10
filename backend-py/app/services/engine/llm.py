@@ -41,12 +41,20 @@ RoPE + SwiGLU + **因果掩码** + **KV cache** ✓ —— Qwen3 / Llama 这类 
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
+    "FAST_PATH_ITEMS",
+    "KV_ACTIVATION_RESERVE_BYTES",
+    "KV_SINK_DEFAULT",
     "KV_GROUP",
     "KV_MODES",
+    "compact_kv",
+    "kv_room_tokens",
+    "resolve_kv_sink",
+    "resolve_kv_window",
     "LlmConfig",
     "LookupDrafter",
     "Q8Kv",
@@ -54,12 +62,17 @@ __all__ = [
     "SPEC_WINDOW",
     "apply_layer_plan",
     "apply_rope",
+    "apply_rope_wide",
     "available_devices",
     "build_llm",
+    "fold_rope",
+    "fused_norm_available",
     "dequantize_kv",
     "device_facts",
     "generate_llm",
+    "KvBuf",
     "KvPrefixCache",
+    "KV_BUFFER_MIN_ROWS",
     "kv_bytes_per_token",
     "kv_cache_bytes",
     "layer_weights_bytes",
@@ -70,13 +83,16 @@ __all__ = [
     "quantize_kv",
     "repeat_kv",
     "resolve_device",
+    "rollback_kv",
     "resolve_dtype",
+    "resolve_fast_path",
     "resolve_kv_cache_bytes",
     "resolve_kv_mode",
     "resolve_spec_lookup",
     "resolve_spec_min_match",
     "resolve_spec_window",
     "rope_freqs",
+    "sdpa_attention",
     "truncate_kv",
     "update_kv_cache",
 ]
@@ -370,6 +386,61 @@ def kv_bytes_per_token(config: LlmConfig, mode: Any = "fp", *,
 #: 上下文一路涨到卡满 ✓，而卡满的报错会落在**下一张图**上（离真因十几分钟 ✓✗）。
 KV_CACHE_DEFAULT_BYTES = 512 * 2 ** 20
 
+#: 算「KV 还放得下多少 token」时，除 KV 之外要留的余量 ✓（2026-11-08 补 ✓）。
+#: ⚠️ 这不是猜张量，是**必须留**的三笔：prefill 的激活（``O(chunk × L)`` 的注意力分数 ✓）、
+#: 采样时的 ``softmax/topk`` 临时量 ✓、以及分配器碎片 ✓。给 512 MiB 是「4B 档 chunk=1024 实测
+#: 峰值 ≤ 300 MiB」上留一档 ✓ —— **宁可早拒，不许 OOM** ✓✗（OOM 的报错会落在毫不相干的算子上 ✗）。
+KV_ACTIVATION_RESERVE_BYTES: int = 512 * 2 ** 20
+
+#: KV 滑窗的 **attention sink** 默认行数 ✓（``kv_window>0`` 时才生效 ✓）。
+#: ⚠️ 为什么不是 0 ✗✗：窗口一滚动，开头那几个 token（系统提示／格式壳／首个角色名）就**永远看不见**了 ✓
+#: ⇒ 输出开始复读最近片段、格式壳丢字 ✓（StreamingLLM 那篇的核心读数：留 4 个 sink 就能把困惑度压回来 ✓）。
+#: 4 是那篇给的下限 ✓，给到 8 更稳 ✓但会多吃 8 行的 KV（可忽略 ✓）。
+KV_SINK_DEFAULT: int = 4
+
+
+def kv_room_tokens(config: LlmConfig, mode: Any = "fp", *, free_bytes: int | None,
+                   dtype_bytes: int = 2, group: int = KV_GROUP,
+                   reserve_bytes: int = KV_ACTIVATION_RESERVE_BYTES) -> dict[str, Any]:
+    """**这块显存还放得下多少 token 的 KV** ✓（纯算术 ✓ 不碰 torch ✓ —— 装载前也能问 ✓）。
+
+    这是「低显存下能加载、但跑到一半 OOM」那类事故的唯一事前判据 ✗✗：``_guard_context`` 原先只按
+    权重声明的 ``context_length`` 判 ✓（那是**模型的**上限 ✓），而卡上真正能放多少由**剩余显存**决定 ✓ ——
+    两者差一个数量级时（8 GiB 卡装 4B、窗口声明 32K ⇒ 光 KV 就要 4.5 GiB ✗）就会「装得进、第三千个
+    token 炸」✓✗，且报错落在 ``baddbmm`` 上、离真因几十分钟 ✓。
+
+    口径三条：
+
+    1. ``free_bytes=None``（没卡 / 探不到 ✓）⇒ ``ok=False`` 且 ``maxTokens=None`` ✓ —— **不编 0** ✗✗
+       （报 0 ＝「一个 token 都放不下」✓，那是另一个结论 ✗）；
+    2. ``reserve_bytes`` 是**除 KV 外**必须留的（见 :data:`KV_ACTIVATION_RESERVE_BYTES` ✓），
+       从可用字节里先扣掉 ✓ —— 不扣就会「算着正好装下、跑起来差几百 MiB」✗；
+    3. 返回的是**上限**（⩽ 权重窗口才有意义 ✓ 两者的 ``min`` 由调用方取 ✓ 见 ``LlmBackend`` ✓）。
+    """
+    per = kv_bytes_per_token(config, mode, dtype_bytes=dtype_bytes, group=group)
+    per_token = int(per["totalBytes"])
+    if free_bytes is None:
+        return {"mode": per["mode"], "perToken": per_token, "maxTokens": None, "ok": False,
+                "freeBytes": None, "reserveBytes": int(reserve_bytes), "roomBytes": None,
+                "note": "探不到可用显存 ✗ ⇒ 不判（**不编 0** ✓：0 是「一个 token 都放不下」✓）"}
+    free = int(free_bytes)
+    room = free - int(reserve_bytes)
+    if room <= 0 or per_token <= 0:
+        return {"mode": per["mode"], "perToken": per_token, "maxTokens": 0, "ok": False,
+                "freeBytes": free, "reserveBytes": int(reserve_bytes), "roomBytes": max(room, 0),
+                "note": f"可用 {free} B 连余量 {int(reserve_bytes)} B 都不够 ✗ ⇒ KV 一个 token 也放不下 ✓"}
+    tokens = room // per_token
+    return {"mode": per["mode"], "perToken": per_token, "maxTokens": int(tokens), "ok": True,
+            "freeBytes": free, "reserveBytes": int(reserve_bytes), "roomBytes": int(room),
+            "note": (f"可用 {free} B − 余量 {int(reserve_bytes)} B ⇒ {room} B ÷ 每 token "
+                     f"{per_token} B = **{tokens} token** ✓（{per['mode']} 口径 ✓）")}
+
+#: ``fastPath=kvbuf`` 的定长缓冲**最少预留多少行** ✓（2026-11-08 补 ✓）。
+#: ⚠️ 为什么要有个下限 ✗✗：decode 一步只写 1 行 ✓ —— 若「用多少开多少」⇒ 每步都要重新分配 + 搬历史 ✓
+#: （正是要省掉的那件事 ✓✗）；给 64 行 ⇒ 前 63 步零拷贝 ✓，之后按**翻倍**涨 ✓（摊还 O(1) ✓）。
+#: ⚠️ 这个数只影响**已分配**字节（:func:`kv_cache_bytes` 对缓冲报的是 cap ✓），不影响任何数值 ✓。
+KV_BUFFER_MIN_ROWS: int = 64
+
 _BYTES_UNITS = {"": 1, "b": 1, "k": 1024, "kb": 1024, "kib": 1024, "m": 2 ** 20, "mb": 2 ** 20,
                 "mib": 2 ** 20, "g": 2 ** 30, "gb": 2 ** 30, "gib": 2 ** 30}
 
@@ -397,11 +468,15 @@ def kv_cache_bytes(past: Any) -> int:
     ⚠️ 为什么不按「每 token 字节 × 长度」估 ✗✗（:func:`kv_bytes_per_token` 那个数是**预算** ✓）：
     预算算的是「装满会占多少」✓，这里要答「**现在**真占多少」✗ —— quantize 的尾部 pad、拼接过中间态、
     分组数取整都会让两者差一点点 ✓，而回执里报的是后者 ⇒ 必须逐张量数 ✓（实测差 0 ✓ 见 §7.2.1 ✓）。
+    ⚠️ ``fastPath=kvbuf`` 时 :class:`KvBuf` 报的是**已分配**（``cap`` 行 ✓）而不是「已用」✓ ——
+    「真占多少」问的是**显存被拿走多少** ✓（翻倍扩容会留一段没用的尾巴 ✓，那也是在卡上 ✓ 会 OOM ✓）。
     """
     total = 0
     for layer in past or ():
         for item in layer:
-            if hasattr(item, "q"):                  # :class:`Q8Kv` ✓
+            if hasattr(item, "kv_bytes"):            # :class:`KvBuf` ✓（报 cap ✓ 见上 ✓）
+                total += int(item.kv_bytes())
+            elif hasattr(item, "q"):                # :class:`Q8Kv` ✓
                 total += int(item.q.numel() * item.q.element_size())
                 total += int(item.scale.numel() * item.scale.element_size())
             else:
@@ -475,6 +550,58 @@ def resolve_spec_lookup(value: Any) -> bool:
     raise LlmError(f"specLookup 不认 {value!r} ✗（可写 off / on / true / false ✓）")
 
 
+#: ``cudaGraph=auto`` 的**回本线**（词元）✓（2026-11-09 补）：捕获一次 ≈100 ms（2 热身 ＋ 1 捕获 ＋
+#: 硬同步 ≈ 3 次前向 ✓）、重放每步省 10–12 ms ✓ ⇒ 探针 ⑥ 实测 8 词元 **×0.91**（净亏 ~28 ms）、
+#: 16 词元 ×1.09（刚回本）✓。★16 是**不亏线**不是甜点 ✗：×1.17 从 32 起、×1.24–1.27 要到 128–512 ✓。
+CUDA_GRAPH_AUTO_MIN_TOKENS = 16
+
+
+def resolve_cuda_graph_policy(value: Any) -> str:
+    """``cudaGraph`` 归一成**三档** ✓：``"off"`` ／ ``"on"`` ／ ``"auto"`` ✓（2026-11-09 补 ✓）。
+
+    ⚠️ 此前 ``auto`` 被并进 ``on`` ✗✗（:func:`resolve_cuda_graph` 的接受表里有它）⇒ 人写 ``auto``
+    期望「该开则开」✓，实际**无条件捕获** ✓ —— 连 8 词元那种净亏 ~28 ms 的短问答也先花 ~100 ms
+    捕一张图 ✓✗，而回执照旧只报 ``on`` ✓ ⇒「本该跳过的那一档没跳过」在回执里**看不出来** ✓✗
+    （与「安静地没开」同一族禁令 ✓，只是方向反过来：安静地做了亏本的事 ✓）。
+    """
+    if value is None:
+        return "off"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (int, float)):
+        return "on" if int(value) != 0 else "off"
+    raw = str(value).strip().lower()
+    if raw in ("", "off", "false", "no", "none", "disabled", "disable", "0"):
+        return "off"
+    if raw in ("on", "true", "yes", "1", "graph", "cudagraph"):
+        return "on"
+    if raw == "auto":
+        return "auto"
+    raise LlmError(f"cudaGraph 不认 {value!r} ✗（可写 off / on / auto / true / false ✓）")
+
+
+def resolve_cuda_graph(value: Any) -> bool:
+    """CUDA Graph 档位归一 ✓（``None``/空/``off``/``0`` ⇒ **关** ✓ 老路径 ✓；``on``/``true``/``1``/``auto`` ⇒ 开 ✓）。
+
+    ⚠️ ``auto`` 在这里只回答「**可能**开」✓（⇒ ``True``）；「这次到底开不开」要看长度 ✓ ——
+    :func:`resolve_cuda_graph_policy` 保住三档，``generate_llm`` 按 :data:`CUDA_GRAPH_AUTO_MIN_TOKENS`
+    判 ✗ 别拿本函数当决策（那正是 ``auto`` 被静默当 ``on`` 的老坑 ✓）。
+
+    ⚠️ 默认**关** ✗ 不是「忘了开」：图化把 ``-inf`` 掩码加在**桶容量**上 ✓ ⇒ softmax 的归约长度从
+    ``used+1`` 变成 ``cap`` ✓ ⇒ 与老路**不承诺逐位相同** ✓（``exp(-inf)=0`` 精确 ✓ 但求和顺序变了 ✓）。
+    本仓「默认路径逐位不变」是硬口径 ✓ ⇒ 只有显式开才换 ✓，且回执里如实写 ``bitExact=False`` ✓。
+    ⭐ 2026-11-08 真权重实测把这句量出来了 ✓：差异**主要来自多读的那几行 padding** ✓ ——
+    ``cap = used+1``（一列不多读）时与截断读**单步逐位相同** ✓、``cap`` 多 96 行时 bf16 上 |Δlogits| 1.9e-1 ✓；
+    默认预留（``padRows = 2 + specWindow = 10``）8／16／32 词元 **0 分叉** ✓。
+    ⚠️ 但**不是「越紧越等价」** ✗✗：同一档 padRows=10 下 64 词元已分叉 11 个、128 词元 72 个、
+    512 词元 **443** 个 ✓ —— 每步那 1 ulp 的差（bf16 归约分块）会随步数累积 ✓ ⇒ 「不承诺逐字相同」
+    这句老口径照旧成立 ✓，只是「必然不同」也确实是过宽结论 ✗。换来的速度（同档实测）：128–512 词元
+    **×1.24–1.27**、8 词元 ×0.91（捕获 ~100 ms 吃回去）⇒ 收益与代价都随长度变 ✓ 别只引一档 ✓。
+    ⚠️ 拼错**当场拒** ✗✗（``"grpah"`` 静默当关 ⇒ 人以为在跑图 ✓ 其实每步还在发 4000 次 launch ✗）。
+    """
+    return resolve_cuda_graph_policy(value) != "off"
+
+
 def resolve_spec_window(value: Any, *, default: int = SPEC_WINDOW) -> int:
     """草稿窗口归一 ✓（不写 ⇒ ``default`` ✓；``< 1`` **当场拒** ✗）。"""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -499,6 +626,156 @@ def resolve_spec_min_match(value: Any, *, default: int = SPEC_MIN_MATCH) -> int:
     if need < 1:
         raise LlmError(f"specMinMatch 必须 ≥ 1 ✗（收到 {value!r} ⇒ 单 token 匹配＝几乎必中、草稿必错 ✗）")
     return need
+
+
+def resolve_kv_window(value: Any) -> int:
+    """KV 滑窗**窗口长度**归一 ✓（2026-11-08 补 ✓）：``None``/空/``off``/``0`` ⇒ 0＝**不滑窗**（老路径 ✓）。
+
+    ⚠️ 语义是「尾窗行数」✗ 不是「总行数」✓：压缩后 cache 恒为 ``kv_sink + kv_window`` 行 ✓
+    （sink 是**另加**的开头几行 ✓ 见 :data:`KV_SINK_DEFAULT` ✓）。
+    ⚠️ 拼错**当场拒** ✗✗（``"3k"`` 静默当 0 ⇒ 人以为开了滑窗、显存却照涨 ✓✗）；
+    负数同理（负数窗口＝一行都不留 ⇒ 模型看不见任何历史、却仍能出字 ✓✗）。
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        # ⚠️ ``True`` 不是「窗口 1」✗：那等于「只记得最后一个 token」✓ 而人说 true 时想的是「开」✓
+        raise LlmError("kvWindow 不认 True/False ✗（要行数 ✓；关就写 off/0 ✓）")
+    if isinstance(value, (int, float)):
+        rows = int(value)
+    else:
+        raw = str(value).strip().lower()
+        if raw in ("", "off", "false", "no", "none", "disabled", "disable", "0"):
+            return 0
+        try:
+            rows = int(raw)
+        except (TypeError, ValueError) as err:
+            raise LlmError(f"kvWindow 不认 {value!r} ✗（要正整数行数 ✓，关写 off/0 ✓）") from err
+    if rows < 0:
+        raise LlmError(f"kvWindow 必须 ≥ 0 ✗（收到 {value!r} ⇒ 负窗口＝一行历史都不留 ✓✗）")
+    return rows
+
+
+def resolve_kv_sink(value: Any, *, default: int = KV_SINK_DEFAULT) -> int:
+    """滑窗的 **attention sink 行数**归一 ✓（不写 ⇒ ``default`` ✓；负数 **当场拒** ✗）。
+
+    ⚠️ 允许 ``0`` ✓（＝真的不要 sink ✓ 但那是**有损加码**：开头那几个 token 永远看不见 ✓✗），
+    所以与 :func:`resolve_spec_window`（``< 1`` 即拒）口径不同 ✓ —— 别照抄那条 ✗。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return int(default)
+    try:
+        sink = int(value)
+    except (TypeError, ValueError) as err:
+        raise LlmError(f"kvSink 不认 {value!r} ✗（要 ≥ 0 的整数 ✓）") from err
+    if sink < 0:
+        raise LlmError(f"kvSink 必须 ≥ 0 ✗（收到 {value!r}）")
+    return sink
+
+
+#: 快路径的三个档位 ✓（2026-11-08 补 ✓ 真机 profile 的账见
+#: ``docs/reference-audit-llm.md`` §7.5 ✓）—— 两个**融合核** ＋ 一个**内存布局** ✓：
+#:
+#: * ``norm``：``RMSNorm`` 改走 ``F.rms_norm`` ✓ —— 真机 4B-Q4_K_M 实测一步 **145** 次 norm 调用 ✓
+#:   （36 层 × 4 ＋ 末层 1 ✓ 带 QK-norm ✓），老写法一次 **16** 个 kernel ✓（不是文档里曾写过的 5 个 ✗✗：
+#:   bf16→fp32 往返 ＋ 两段 reduction 都在里面 ✓）⇒ 2320→290 次 launch ✓ 墙钟 32.73→27.26 ms ✓；
+#: * ``attn``：注意力改走 ``F.scaled_dot_product_attention`` ＋ ``enable_gqa`` ✓ —— 整段省掉
+#:   :func:`repeat_kv` 的**物化**（实测 2048 词元、36 层每步写 1.15 GiB ✓ 3.48 ms ✓）。
+#: * ``kvbuf``：KV cache 改**定长缓冲 ＋ 原位写** ✓（:class:`KvBuf` ✓）——
+#:   老路每层每步 ``torch.cat([past, fresh], 2)`` 要把**整段历史**重新分配并拷一遍 ✓
+#:   （实测 4B 档 2048 词元、36 层：一步 ``aten::cat`` **146** 次／``copy_`` **366** 次，
+#:   其中 72 次 cat 就是 k/v 的整段重拷 ⇒ 每步 **288 MiB** ✓）；换缓冲后那 72 次 cat 变成
+#:   72 次 ``copy_``（各只拷 **1 行** ✓）⇒ 每步拷贝量 288 MiB → **288 KiB** ✓、墙钟 33.67→31.71 ms ✓。
+#:   ⚠️ 别把这档说成「省 launch」✗✗：实测 kernel 数 **4449→4449 一个不少** ✓（cat 与 copy_ 一比一 ✓）
+#:   —— 它省的是**带宽**（CUDA 侧 50.86→47.23 ms ✓），与 ``norm``（省 launch 2030 次 ✓）是两种收益 ✓。
+#:
+#: ⚠️ 前两个**改数值** ✗✗（累加顺序不同 ✓）：``norm`` 的 fused 核在 fp32 里连 weight 一起乘 ✓，
+#: 老写法是「先降回 bf16 再乘 bf16 的 weight」✓（实测 4B 档最大绝对差 0.03125 ≈ 1 个 bf16 ulp ✓）；
+#: ``attn`` 的 SDPA 走 flash/mem-efficient 核 ✓ 分块累加与手写三条式不同 ✓。
+#: ⚠️ ``kvbuf`` **目标是逐位相同** ✓（只是把同一批数搬到另一块内存 ✓ 值一个字节都不动 ✓）——
+#: 但矩阵乘读到的是**带跨步的视图**（``[:len]`` 而非 ``contiguous()`` 的整块 ✓）⇒ 内核选择可能变 ✓，
+#: 故仍**默认关** ✓ 并用 ``engine_llm_test`` 的逐位对拍盯着 ✓（实测 4B 档 logit 最大差 **0.000e+00** ✓）。
+#: ⚠️ 代价是**已分配**容量按翻倍涨 ✓（2048 行那一步正好翻到 4096 ⇒ 常驻 288.7→576.3 MiB ✓ 见
+#: :func:`kv_cache_bytes` 与 :class:`KvBuf` 说明 ✓）—— 这一栏会随长度阶梯跳 ✓ 不是稳态 2× ✓。
+#: 三者关着都＝老路径逐位不变 ✓。
+FAST_PATH_ITEMS: tuple[str, ...] = ("norm", "attn", "kvbuf")
+
+#: 档位的同义写法 ✓（**归一成同一个档** ✗ 不许一个写法一个档 ✓ —— 否则缓存键里会多出空档 ✗）
+_FAST_PATH_ALIASES: dict[str, tuple[str, ...]] = {
+    "norm": ("norm", "fused_norm", "fusednorm", "rmsnorm", "rms_norm"),
+    "attn": ("attn", "attention", "sdpa", "gqa", "fused_attn"),
+    "kvbuf": ("kvbuf", "kv_buf", "kvbuffer", "kv_buffer", "prealloc", "buffer"),
+}
+
+
+def resolve_fast_path(value: Any) -> frozenset[str]:
+    """快路径档位归一 ✓（``None``/空/``off``/``0`` ⇒ **空集＝老路径** ✓；``norm``/``attn``/``all`` ✓）。
+
+    接受的写法（大小写、``-``/``_``/空格都不计较 ✓；可组合 ``"norm,attn"`` ✓）：
+
+    * ``off``/``false``/``no``/``none``/``disabled``/``0``/空 ⇒ ``frozenset()`` ✓（老路径 ✓）；
+    * ``norm``（别名 ``fused_norm``/``rms_norm``）⇒ ``{"norm"}`` ✓；
+    * ``attn``（别名 ``sdpa``/``gqa``）⇒ ``{"attn"}`` ✓；
+    * ``kvbuf``（别名 ``kv_buffer``/``prealloc``/``buffer``）⇒ ``{"kvbuf"}`` ✓；
+    * ``all``/``both``/``on``/``true``/``yes``/``1``/``auto`` ⇒ ``FAST_PATH_ITEMS`` 全集 ✓。
+
+    ⚠️ 拼错**当场拒** ✗✗（``"nrom"`` 静默当关 ⇒ 人以为开了快路径 ✓ 每步还是 2506 次 launch ✗，
+    与 ``specLookup`` 同一个坑 ✓）。⚠️ 返回 ``frozenset`` 而**不是**字符串 ✗：``"all"`` 里不含
+    ``"norm"`` 子串 ✓ ⇒ 字符串包含判断会把 ``all`` 判成「只开 attn」✓✗（不报错、只慢 ✓）。
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, bool):
+        return frozenset(FAST_PATH_ITEMS) if value else frozenset()
+    if isinstance(value, (set, frozenset, list, tuple)):
+        merged: set[str] = set()
+        for item in value:
+            merged |= resolve_fast_path(item)
+        return frozenset(merged)
+    raw = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if not raw:
+        return frozenset()
+    if raw in ("off", "false", "no", "none", "disabled", "disable", "0"):
+        return frozenset()
+    if raw in ("all", "both", "on", "true", "yes", "1", "auto"):
+        return frozenset(FAST_PATH_ITEMS)
+    picked: set[str] = set()
+    unknown: list[str] = []
+    for part in raw.replace("+", ",").replace("/", ",").replace("_and_", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        hit = [item for item, names in _FAST_PATH_ALIASES.items() if part in names]
+        if hit:
+            picked.add(hit[0])
+        else:
+            unknown.append(part)
+    if unknown:
+        raise LlmError(f"fastPath 不认 {value!r} 里的 {unknown[0]!r} ✗"
+                       f"（可写 off / norm / attn / kvbuf / all ✓ 也可组合 ``norm,attn`` ✓）")
+    return frozenset(picked)
+
+
+def fused_norm_available() -> bool:
+    """``F.rms_norm`` 在不在 ✓（torch ≥ 2.4 才有 ✓）。
+
+    ⚠️ 回执必须问这一句 ✗✗：``fastPath=norm`` 在缺这个原语的机器上是**静默退回**老写法 ✓
+    （:meth:`RMSNorm.forward` 里 ``getattr`` 兜底 ✓）—— 不报 ⇒ 人以为开着快路径、其实一次没省 ✗。
+
+    ⚠️ ``F`` 在**本模块顶层并不存在** ✗✗（它是 :func:`_build` 里的局部名 ✓ —— 模块级定义会强制
+    import torch ⇒ 全部塞进工厂 ✓）⇒ 这里必须走 ``_build()["F"]`` ✓。写 ``getattr(F, ...)`` 会在
+    **每次出回执时** ``NameError`` ✓（``describe()`` 直接崩 ⇒ 连"没装 torch"都报不出来 ✗）。
+    """
+    try:
+        func = _build()["F"]
+    except ImportError:                    # 没装 torch ⇒ 快路径当然也没有 ✓（装载那步会报得更清楚）
+        return False
+    return getattr(func, "rms_norm", None) is not None
+
+
+def _fast_of(value: Any) -> frozenset[str]:
+    """空集已经是归一结果 ⇒ 原样收 ✓（避免热路径上每层重复解析一遍字符串 ✓）。"""
+    return value if isinstance(value, frozenset) else resolve_fast_path(value)
 
 
 def plan_layer_devices(config: LlmConfig, *, gpu_bytes: int, dtype_bytes: int = 2,
@@ -678,10 +955,21 @@ def _build() -> dict[str, Any]:
             self.weight = nn.Parameter(torch.ones(dim))
             self.eps = eps
 
-        def forward(self, x: Any) -> Any:
+        def forward(self, x: Any, *, fast: bool = False) -> Any:
             # ⚠️ 低精度（bf16/fp16）下**先升 fp32 再降回** ✓ —— 与 HF 的 ``LlamaRMSNorm`` 同一口径 ✓：
             # bf16 直接 ``mean`` 只有 8 位尾数 ✓，8B 深 36 层的残差会把这点误差放大 ✗✗。
             # ⚠️ fp32 输入时 ``x.float()`` / ``.to(fp32)`` **都是零拷贝** ✓ ⇒ 老路径结果一字不变 ✓。
+            #
+            # ``fast=True``（2026-11-08 ✓ ``fastPath=norm`` ✓）：改走 ``F.rms_norm`` 的**融合核** ✓
+            # —— 老写法实测**一次 16 个 kernel** ✗✗（``pow``/``mean``/``add``/``rsqrt``/``mul`` 五连
+            # 只是纸面 ✓，bf16→fp32 往返与两段 reduction 让它在真机上翻了三倍 ✓）⇒ 4B 档一步
+            # 145 次调用 ⇒ 2320 次 launch 变 290 次 ✓（与整步降幅逐次对平 ✓）。
+            # ⚠️ 两者**数值不同** ✗✗（fused 核在 fp32 里连 weight 一起乘 ✓，老写法先降回 bf16 再乘
+            # bf16 的 weight ✓ 实测最大绝对差 1 个 bf16 ulp ✓）⇒ 只在开关打开时走，默认关 ✓。
+            if fast:
+                fused = getattr(F, "rms_norm", None)
+                if fused is not None:      # torch < 2.4 没有 ⇒ 如实退回老写法 ✓ 不假装开了 ✗
+                    return fused(x, (x.shape[-1],), self.weight, self.eps)
             source = x.dtype
             wide = x.float()
             normalized = wide * torch.rsqrt(wide.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -706,6 +994,82 @@ def _build() -> dict[str, Any]:
         half = x.shape[-1] // 2
         x1, x2 = x[..., :half], x[..., half:]
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+
+    def fold_rope(cos: Any, sin: Any, *, dtype: Any = None) -> tuple[Any, Any]:
+        """``(seq, head_dim//2)`` 的 cos/sin → **``(seq, head_dim)`` 的前后半版** ✓（2026-11-08 ✓）。
+
+        口径（**前半吃 ``cos``、后半也吃同一个 ``cos``** ✓ —— 配对是 ``(x[i], x[i+half])`` ✓）：
+
+        * ``cos_wide = cat([cos, cos], -1)`` ✓；
+        * ``sin_wide = cat([−sin, +sin], -1)`` ✓ —— 前半的旋转是 ``x1*cos − x2*sin`` ✓，把负号折进
+          ``sin_wide`` 就省掉一次减法 ✓。
+
+        ⚠️⚠️ **不是**「相邻交错」（``stack((cos, cos), -1).flatten(-2)`` ✗✗）：那对应的是
+        ``(x[2i], x[2i+1])`` 配对的 RoPE（GPT-J 那种），而 :func:`apply_rope` 以及全部 Qwen/Llama
+        权重都是 ``(x[i], x[i+half])`` 前后半配对 ✓。折错**不报错**、形状一模一样 ✓ —— 只是模型输出
+        变成噪声 ✓✗（``engine_llm_test`` 的 ⑫⁴ 逐位对拍就是为这条设的 ✓，当时真抓到过一次 ✓）。
+
+        为什么值得折 ✗✗：折完之后一次 RoPE 只要 ``cat`` ＋ 2 次 ``mul`` ＋ 1 次 ``add``＝4 个 kernel ✓，
+        老写法是 ``x1*cos``/``x2*sin``/``sub``/``x1*sin``/``x2*cos``/``add``/``cat``＝7 个 ✓
+        （4B 档一步 72 次 RoPE ⇒ 216 次多余 launch ✓）。
+
+        ⚠️ 与 :func:`apply_rope` **逐位相同** ✓（不是「近似」✗）：``x·(−s)`` 与 ``−(x·s)`` 在 IEEE 下
+        精确等价 ✓（只翻符号位 ✓），``a + (−b)`` 与 ``a − b`` 亦同 ✓，且这些 ``mul``/``add`` 是**分开的
+        kernel** ⇒ 不会合成 FMA ✓。``engine_llm_test`` 有逐位对拍的判据 ✓。
+
+        ⚠️ ``dtype`` 给出来就在**这里**降一次 ✓（每步 2 次 cast ✓）而不是每层每次降 ✗
+        （老路上 :func:`apply_rope` 内部每层都 ``.to(x.dtype)`` ✓ 4B 档一步 72 次 ✓）。
+        """
+        if dtype is not None:
+            cos = cos.to(dtype)
+            sin = sin.to(dtype)
+        return torch.cat((cos, cos), dim=-1), torch.cat((-sin, sin), dim=-1)
+
+    def apply_rope_wide(x: Any, cos_wide: Any, sin_wide: Any) -> Any:
+        """折叠版 RoPE ✓（吃 :func:`fold_rope` 的输出 ✓ 与 :func:`apply_rope` 逐位相同 ✓）。
+
+        ``out = x * cos_wide + cat([x2, x1]) * sin_wide`` ✓ —— 前半 ``x1*cos + x2*(−sin)`` ✓、
+        后半 ``x2*cos + x1*(+sin)`` ✓，与老写法逐位一致 ✓（都是 ``(x[i], x[i+half])`` 配对 ✓）。
+        """
+        if cos_wide.dtype != x.dtype:
+            cos_wide = cos_wide.to(x.dtype)
+            sin_wide = sin_wide.to(x.dtype)
+        half = x.shape[-1] // 2
+        x1, x2 = x[..., :half], x[..., half:]
+        return x * cos_wide + torch.cat([x2, x1], dim=-1) * sin_wide
+
+    def sdpa_attention(q: Any, k: Any, v: Any, *, past_len: int,
+                       n_rep: int) -> Any:
+        """``F.scaled_dot_product_attention`` ＋ ``enable_gqa`` ✓（2026-11-08 ✓ ``fastPath=attn`` ✓）。
+
+        ⚠️ **不吃** ``repeat_kv`` 的物化 ✓：把未展开的 ``k``/``v``（``kv_heads`` 个头 ✓）直接交给
+        SDPA ✓，由 ``enable_gqa=True`` 在核内做分组广播 ✓ —— 4B 档 2048 词元每步省 1.15 GiB 写 ✓
+        （实测 3.48 ms ✓）。
+
+        ⚠️ 掩码口径与手写式**完全一致** ✓：``s == 1``（解码步）不造 mask ✓（唯一的查询能看见全部 ✓
+        加零 ≠ 变数 ✓）；``s > 1`` 造 ``(s, past_len+s)`` 的 ``-inf`` 上三角 ✓、对角偏移 ``past_len+1`` ✓
+        （第 0 行是 ``past_len`` 处 ✓ 不对齐就整段错位 ✗✗）。
+
+        ⚠️ ``enable_gqa`` 要 torch ≥ 2.5 ✓：老版本收这个关键字会 ``TypeError`` ⇒ 退回「先 ``repeat_kv``
+        再调 SDPA」✓（仍省掉手写 mask/softmax 三式的 launch ✓ 只不省那份物化 ✓）—— **如实退回**，
+        不抛错也不假装 ✓。
+        """
+        if q.shape[2] == 1:
+            mask = None
+        else:
+            mask = torch.triu(torch.full((int(q.shape[2]), int(past_len) + int(q.shape[2])),
+                                         float("-inf"), device=q.device, dtype=q.dtype),
+                              diagonal=int(past_len) + 1)
+        want_gqa = bool(n_rep != 1 and k.shape[1] == q.shape[1] // max(n_rep, 1))
+        if want_gqa:
+            try:
+                return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
+            except TypeError:                   # torch < 2.5 ✓ 没有 enable_gqa ⇒ 退回展开 ✓
+                pass
+        if n_rep != 1:
+            k = repeat_kv(k, n_rep)
+            v = repeat_kv(v, n_rep)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
     def repeat_kv(kv: Any, n_rep: int) -> Any:
         """GQA：``(b, kv_heads, s, d)`` → ``(b, kv_heads*n_rep, s, d)`` ✓（query 头对齐 KV 头 ✓）。"""
@@ -747,14 +1111,19 @@ def _build() -> dict[str, Any]:
 
     def dequantize_kv(q: Any, scale: Any, group: int = KV_GROUP,
                       *, dtype: Any = None, head_dim: int | None = None) -> Any:
-        """``(int8, scale)`` → 浮点 ✓（``head_dim`` 给了就裁掉量化时的尾部补零 ✓）。"""
+        """``(int8, scale)`` → 浮点 ✓（``head_dim`` 给了就裁掉量化时的尾部补零 ✓）。
+
+        ⚠️ 这里用 ``reshape`` 而**不是** ``view`` ✗（2026-11-08 补 ✓）：``fastPath=kvbuf`` 传进来的是
+        定长缓冲的 ``[:, :, :len]`` 切片 ✓ —— **带跨步** ✓，``view`` 会当场 ``RuntimeError``
+        （而 ``.to(float32)`` 不保证把跨步洗掉 ✓）。``reshape`` 在需要时自己复制一份 ✓ 数值一字不变 ✓。
+        """
         g = int(group)
         b, h, s, groups = (int(v) for v in scale.shape)
         if q.shape[-1] != groups * g:
             raise LlmError(f"q 的最后一维（{q.shape[-1]}）≠ 组数×组宽（{groups}×{g}）✗"
                            "（这两样必须来自同一次 quantize_kv ✓）")
-        out = q.to(torch.float32).view(b, h, s, groups, g) * scale.to(torch.float32).unsqueeze(-1)
-        out = out.view(b, h, s, groups * g)
+        out = q.to(torch.float32).reshape(b, h, s, groups, g) * scale.to(torch.float32).unsqueeze(-1)
+        out = out.reshape(b, h, s, groups * g)
         if head_dim is not None and int(head_dim) != groups * g:
             out = out[..., : int(head_dim)]
         return out if dtype is None else out.to(dtype)
@@ -817,9 +1186,226 @@ def _build() -> dict[str, Any]:
             return Q8Kv(torch.cat([self.q, other.q], dim=2), torch.cat([self.scale, other.scale], dim=2),
                         group=self.group, head_dim=self.headDim)
 
+    class KvBuf:
+        """**预分配定长缓冲**的一段 KV ✓（沿序列维先留 ``cap`` 行、新段**原位写** ✓）。
+
+        老路（:func:`update_kv_cache` 的 ``torch.cat`` ✓）每一步都把**整段历史**重新分配 + 拷一遍 ✓：
+        4B 档 2048 词元一步 ＝ 36 层 × 2 段 ＝ 72 次 ``aten::cat`` ✓（``q8`` 还要连 scale 一起 ⇒ 144 次 ✓）
+        ＋ 每步 288 MiB 的分配/拷贝 ✓。换成定长缓冲后 decode 每步只写 **1 行**（288 KiB ✓）、
+        一次 ``aten::cat`` 都不发 ✓ —— 这是 CUDA Graph 的前置 ✓（图里的指针必须每步相同 ✓）。
+
+        口径四条（每条都是「不做就静默错」的 ✓✗）：
+
+        1. **``shape[2]`` 仍然是「已用长度」** ✓✗：全仓十几处拿 ``past_kv[0][0].shape[2]`` 当序列长
+           ✓（位置、掩码偏移、前缀复用、投机回滚 ✓）—— 这里绝不能暴露 ``cap`` ✗（暴露了＝位置
+           直接错位 ✓ 而且错得「形状自洽」✓✗）。
+        2. **``q8`` 段的「值 ＋ scale」必须一起预分配、一起原位写** ✓✗（只搬一半 ＝ 长度对、数值错位 ✗）。
+        3. **只写新算出来的那一段** ✓✗：:meth:`write` 只碰 ``[length, length+s)`` 这几行 ✓，历史一个字节
+           都不动 ✓（老路 ``cat`` 也不重量化 ✓ 见 :meth:`Q8Kv.append` ✓ —— 重量化会随步累积误差 ✗✗）。
+        4. **容量不够就翻倍** ✓（摊还 O(1) ✓）：翻倍时**只**搬已用的那几行 ✓（``cap`` 尾部是垃圾 ✓）。
+
+        ⚠️ 与 :class:`Q8Kv` 的关系：``fp`` 段就是「一个张量 ＋ 一个长度」✓；``q8`` 段是「int8 ＋ scale
+        ＋ 组宽 ＋ ``headDim``」—— 与 :class:`Q8Kv` 逐字段同构 ✓，所以 :meth:`as_q8` / :meth:`_take`
+        能**字节原样**互换 ✓（不重新量化 ✗）。区别只在存储是**定长**的、读的时候要 ``[:length]`` ✓。
+        """
+
+        __slots__ = ("store", "scale", "length", "cap", "group", "headDim", "_quant")
+
+        def __init__(self, store: Any, *, length: int = 0, scale: Any = None,
+                     group: int = KV_GROUP, head_dim: int = 0, quant: bool = False) -> None:
+            self.store = store
+            self.scale = scale
+            self.length = int(length)
+            self.cap = int(store.shape[2])
+            self.group = int(group)
+            self.headDim = int(head_dim)
+            self._quant = bool(quant)
+
+        @classmethod
+        def empty(cls, b: int, h: int, rows: int, *, quant: bool, dtype: Any, device: Any,
+                  group: int, head_dim: int) -> "KvBuf":
+            """开一块 ``rows`` 行的空缓冲 ✓（**内容未初始化** ✓ —— 只读 ``[:length]`` ✓ 见口径 1 ✓）。"""
+            g = kv_group_for(head_dim, group)
+            width = -(-int(head_dim) // g) * g          # 向上取整到整组 ✓（与 quantize_kv 的 pad 同口径 ✓）
+            rows = max(int(rows), 1)
+            if quant:
+                store = torch.empty((b, h, rows, width), dtype=torch.int8, device=device)
+                scale = torch.empty((b, h, rows, width // g), dtype=torch.float32, device=device)
+                return cls(store, scale=scale, group=g, head_dim=head_dim, quant=True)
+            return cls(torch.empty((b, h, rows, int(head_dim)), dtype=dtype, device=device),
+                       group=g, head_dim=head_dim, quant=False)
+
+        @property
+        def shape(self) -> tuple[int, int, int, int]:
+            """与**老路**逐字同义 ✓（见口径 1：``[2]`` 是已用长度 ✓ 不是 ``cap`` ✗）。"""
+            return (int(self.store.shape[0]), int(self.store.shape[1]), self.length, self.headDim)
+
+        @property
+        def device(self) -> Any:
+            return self.store.device
+
+        @property
+        def dtype(self) -> Any:
+            return self.store.dtype
+
+        def kv_bytes(self) -> int:
+            """**已分配**字节 ✓（``cap`` 行 ✓ 不是已用 ✓ —— 「真占多少显存」问的是这个 ✓）。"""
+            total = int(self.store.numel() * self.store.element_size())
+            if self.scale is not None:
+                total += int(self.scale.numel() * self.scale.element_size())
+            return total
+
+        def dequant(self, dtype: Any = None) -> Any:
+            """已用的那 ``length`` 行 → 能直接做矩阵乘的浮点张量 ✓（``fp`` 段是**视图** ✓ 不是拷贝 ✓）。"""
+            n = self.length
+            if self._quant:
+                return dequantize_kv(self.store[:, :, :n], self.scale[:, :, :n], self.group,
+                                     dtype=dtype, head_dim=self.headDim)
+            out = self.store[:, :, :n]
+            return out if dtype is None or out.dtype == dtype else out.to(dtype)
+
+        def _reserve(self, rows: int, *, ceiling: int = 0) -> None:
+            """把容量撑到至少 ``rows`` 行 ✓（**翻倍** ✓ 只搬已用的那几行 ✓）。
+
+            ``ceiling``（2026-11-08 补 ✓）：本次生成**允许**的最大行数 ✓ —— 超了就**具名拒** ✗✗，
+            绝不让分配器去撞 OOM ✓（OOM 报在下一个算子、离真因几十步 ✗）。``0`` ＝ 不设上限 ✓
+            （老行为 ✓ 逐字节不变 ✓）。
+            """
+            need = int(rows)
+            if ceiling and need > int(ceiling):
+                raise LlmError(
+                    f"KV 缓冲超预算 ✗：本次生成要 {need} 行，而允许的上限是 {int(ceiling)} 行 ✓ "
+                    f"⇒ **不静默扩容** ✗（缩上下文 ✓、开 ``kvMode=q8`` ✓、或调小 ``maxOutputTokens`` ✓）")
+            if need <= self.cap:
+                return
+            cap = max(need, self.cap * 2, KV_BUFFER_MIN_ROWS)
+            if ceiling:
+                cap = min(cap, int(ceiling))       # ``need ≤ ceiling`` 已保证 ⇒ 这里不会切到装不下 ✓
+            b, h = int(self.store.shape[0]), int(self.store.shape[1])
+            fresh = KvBuf.empty(b, h, cap, quant=self._quant, dtype=self.store.dtype,
+                                device=self.store.device, group=self.group, head_dim=self.headDim)
+            if self.length:
+                fresh.store[:, :, :self.length].copy_(self.store[:, :, :self.length])
+                if self.scale is not None and fresh.scale is not None:
+                    fresh.scale[:, :, :self.length].copy_(self.scale[:, :, :self.length])
+            fresh.length = self.length
+            self.store, self.scale, self.cap = fresh.store, fresh.scale, fresh.cap
+
+        def write(self, fresh: Any, *, ceiling: int = 0) -> "KvBuf":
+            """把**新算出来的**那 ``s`` 行原位写进缓冲 ✓（历史一行都不碰 ✓ 见口径 3 ✓）。"""
+            s = int(fresh.shape[2])
+            if (int(fresh.shape[0]), int(fresh.shape[1])) != (int(self.store.shape[0]),
+                                                             int(self.store.shape[1])):
+                raise LlmError(f"KV 缓冲的批/头数对不上 ✗（缓冲 {tuple(self.store.shape[:2])} "
+                               f"vs 新段 {tuple(fresh.shape[:2])}）")
+            if self._quant:
+                q, scale = quantize_kv(fresh, group=self.group)
+                if int(q.shape[-1]) != int(self.store.shape[-1]):
+                    raise LlmError(f"q8 段的量化宽度对不上 ✗（缓冲 {int(self.store.shape[-1])} "
+                                   f"vs 新段 {int(q.shape[-1])}）")
+            self._reserve(self.length + s, ceiling=ceiling)
+            pos = self.length
+            if self._quant:
+                self.store[:, :, pos:pos + s].copy_(q)
+                self.scale[:, :, pos:pos + s].copy_(scale)
+            else:
+                self.store[:, :, pos:pos + s].copy_(fresh)
+            self.length = pos + s
+            return self
+
+        def write_at(self, fresh: Any, at: Any) -> "KvBuf":
+            """把新算出的 ``s`` 行写到**设备张量下标** ``at`` 处 ✓（只服务图化单步 ✓）。
+
+            ⚠️ 与 :meth:`write` 的三点差别，每一点都是「图的硬要求」✓✗：
+
+            1. **不改 ``length``** ✗✗：图里的一切 Python 标量都被**烘成常量** ✓ ⇒「长度自增」在
+               Python 侧根本做不到 ✓。长度改由设备张量承载 ✓（每次重放前 ``fill_`` ✓），
+               本方法只负责「写到哪」✓。
+            2. **不 ``_reserve``** ✗✗：容量必须在**捕获之前**就定好 ✓ —— 捕获中换存储指针的话，
+               图里记的仍是旧指针 ✓⇒ 重放会往已经没人读的块里写 ✓（数值错、不报错 ✗）。
+            3. **只支持 ``fp``** ✗：``q8`` 那条链（:func:`quantize_kv`）没做过「图内是否 host 同步」
+               的验证 ✓ ⇒ 图档一律走 ``fp`` ✓，不赌 ✓。
+
+            ⚠️ 下标越界检查只能放在**捕获前**（图内 ``int(at)`` 就是一次 host 同步 ✗✗）；
+            运行期由 :class:`KvSpan` 的长度约束保证 ✓（``used < cap`` 由调用方守门 ✓）。
+            """
+            if self._quant:
+                raise LlmError("图化单步只支持 ``kvMode=fp`` ✗（q8 的量化链没有图内验证 ✓ 不赌 ✓）")
+            s = int(fresh.shape[2])
+            if (int(fresh.shape[0]), int(fresh.shape[1])) != (int(self.store.shape[0]),
+                                                             int(self.store.shape[1])):
+                raise LlmError(f"KV 缓冲的批/头数对不上 ✗（缓冲 {tuple(self.store.shape[:2])} "
+                               f"vs 新段 {tuple(fresh.shape[:2])}）")
+            if int(at.numel()) != s:
+                raise LlmError(f"写入下标个数对不上 ✗（at {int(at.numel())} 个 vs 新段 {s} 行）")
+            self.store.index_copy_(2, at.reshape(-1).to(torch.long), fresh)
+            return self
+
+        def _take(self, past: Any) -> None:
+            """把**别的形态**的旧 cache 搬进来 ✓（``Q8Kv``／``KvBuf`` 走**字节原样** ✓ 不重新量化 ✗✗）。"""
+            if isinstance(past, KvBuf):
+                if self._quant != past._quant or self.group != past.group \
+                        or self.headDim != past.headDim:
+                    raise LlmError(f"混用两套 KV 口径 ✗（缓冲 quant={self._quant}/{past._quant}、"
+                                   f"group {self.group}/{past.group}、"
+                                   f"headDim {self.headDim}/{past.headDim}）")
+                n = past.length
+                self._reserve(n)
+                if n:
+                    self.store[:, :, :n].copy_(past.store[:, :, :n])
+                    if self.scale is not None and past.scale is not None:
+                        self.scale[:, :, :n].copy_(past.scale[:, :, :n])
+                self.length = n
+                return
+            if isinstance(past, Q8Kv):
+                n = int(past.q.shape[2])
+                if self._quant:
+                    if self.group != past.group or self.headDim != past.headDim \
+                            or int(past.q.shape[-1]) != int(self.store.shape[-1]):
+                        raise LlmError("混用两套 KV 量化口径 ✗（组宽/headDim/宽度必须一致 ✓）")
+                    self._reserve(n)
+                    self.store[:, :, :n].copy_(past.q)
+                    self.scale[:, :, :n].copy_(past.scale)
+                    self.length = n
+                    return
+                self.write(past.dequant(self.store.dtype))
+                return
+            self.write(past)
+
+        def as_q8(self) -> "Q8Kv":
+            """已用的那几行 → :class:`Q8Kv` ✓（**字节原样** ✓ 给「上次开着缓冲、这次关着」那条路 ✓）。"""
+            if not self._quant:
+                raise LlmError("这不是 q8 段 ✗（fp 段请走 dequant ✓）")
+            n = self.length
+            return Q8Kv(self.store[:, :, :n].contiguous(), self.scale[:, :, :n].contiguous(),
+                        group=self.group, head_dim=self.headDim)
+
+        def frozen(self, length: int) -> "KvBuf":
+            """裁到 ``length`` 的**独立副本** ✓（前缀复用处用它 ✓ —— 见 :func:`truncate_kv` ✓）。"""
+            n = max(0, min(int(length), self.length))
+            b, h = int(self.store.shape[0]), int(self.store.shape[1])
+            out = KvBuf.empty(b, h, max(n, KV_BUFFER_MIN_ROWS), quant=self._quant,
+                              dtype=self.store.dtype, device=self.store.device,
+                              group=self.group, head_dim=self.headDim)
+            if n:
+                out.store[:, :, :n].copy_(self.store[:, :, :n])
+                if self.scale is not None and out.scale is not None:
+                    out.scale[:, :, :n].copy_(self.scale[:, :, :n])
+            out.length = n
+            return out
+
+        def rollback(self, length: int) -> "KvBuf":
+            """**就地**退回 ``length`` 行 ✓（只改长度、一个字节都不搬 ✓）—— 见 :func:`rollback_kv` ✓。"""
+            self.length = max(0, min(int(length), self.length))
+            return self
+
     def materialize_kv(x: Any, *, dtype: Any = None, device: Any = None) -> Any:
-        """cache 里的一段 → **能直接做矩阵乘的浮点张量** ✓（``fp`` 段原样 ✓）。"""
-        out = x.dequant(dtype) if isinstance(x, Q8Kv) else x
+        """cache 里的一段 → **能直接做矩阵乘的浮点张量** ✓（``fp`` 段原样 ✓）。
+
+        ⚠️ :class:`KvBuf` 必须过这一道 ✗✗：它以**已用长度**冒充 ``shape`` ✓（口径 1 ✓），但底下那块
+        存储是 ``cap`` 行 ✓ —— 直接拿去做矩阵乘会把 ``cap`` 行垃圾一起算进注意力 ✓（数值全烂、不报错 ✗）。
+        """
+        out = x.dequant(dtype) if isinstance(x, (Q8Kv, KvBuf)) else x
         if dtype is not None and out.dtype != dtype:
             out = out.to(dtype)
         if device is not None and out.device != device:
@@ -827,18 +1413,56 @@ def _build() -> dict[str, Any]:
         return out
 
     def update_kv_cache(past: Any, fresh: Any, mode: Any = "fp", *,
-                        group: int = KV_GROUP) -> Any:
+                        group: int = KV_GROUP, buffer: bool = False,
+                        reserve_rows: int = 0, ceiling_rows: int = 0) -> Any:
         """把**这一拍新算出来**的 k/v 接进 cache ✓（返回新 cache 段 ✓ 不改入参 ✗）。
 
         ⚠️ ``mode="fp"`` 是老路径**逐字节相同**的写法 ✓（``torch.cat`` ✓ 老测试靠它当基准 ✓）。
+
+        ``buffer=True``（``fastPath=kvbuf`` ✓）：``past`` 当 :class:`KvBuf` 用 ✓ —— 是就**原位写** ✓、
+        不是（``None`` / 普通张量 / ``Q8Kv`` / 上次关着留下的）就现建一份并把旧段**字节原样**搬进去 ✓。
+        ⚠️ 默认 ``False`` ⇒ 老路 ``torch.cat``／``Q8Kv.append`` **逐字节不变** ✓（不许为了少写一个
+        ``if`` 让老路多走一次 ``contiguous()`` 或 ``materialize`` ✗✗ —— 那会让「关着」也不逐位相同 ✗）。
+
+        ``reserve_rows``／``ceiling_rows``（2026-11-08 补 ✓，只有 ``buffer=True`` 才有意义 ✓）：
+
+        * ``reserve_rows`` ＝ **首建时就按这么多行开** ✓（``0`` ＝ 老行为：只开 ``max(s, 64)`` 然后翻倍 ✓）。
+          用途：生成本来就知道本轮到多少 token ✓ —— 一次开够比「翻倍再翻倍」**更省** ✓
+          （2048 词元那一步翻到 4096 行 ＝ 白占一倍 ✓ 见 §7.5.5 的「代价」✓），且**零扩容拷贝** ✓；
+        * ``ceiling_rows`` ＝ 允许的最大行数 ✓ —— 超了 :meth:`KvBuf.write` 会**具名拒** ✗✗，不撞 OOM ✓。
+          ⚠️ 两者都给时 ``reserve_rows`` 会被钳到 ``ceiling_rows`` ✓（否则首建就超预算 ✓ 自己判自己 ✗）。
         """
-        if resolve_kv_mode(mode) == "fp":
-            return fresh if past is None else torch.cat([past, fresh], dim=2)
-        quantized = Q8Kv.from_tensor(fresh, group=group)
-        return quantized if past is None else past.append(quantized)
+        quant = resolve_kv_mode(mode) == "q8"
+        if not buffer:
+            if isinstance(past, KvBuf):
+                # 上一次开着缓冲、这一次关着 ⇒ 先退回「真实张量/量化段」再走老路 ✓（不重量化 ✓）
+                past = past.as_q8() if quant else past.dequant()
+            if not quant:
+                return fresh if past is None else torch.cat([past, fresh], dim=2)
+            quantized = Q8Kv.from_tensor(fresh, group=group)
+            return quantized if past is None else past.append(quantized)
+        if isinstance(past, KvBuf):
+            if past._quant != quant:
+                raise LlmError(f"KV 缓冲口径与本次 kvMode 不符 ✗（缓冲 quant={past._quant}、"
+                               f"本次 {resolve_kv_mode(mode)!r}）—— 换口径要整份废掉重算 ✓")
+            return past.write(fresh, ceiling=ceiling_rows)
+        b, h, s, d = (int(v) for v in fresh.shape)
+        rows = 0 if past is None else int(past.shape[2])
+        want = max(rows + s, KV_BUFFER_MIN_ROWS)
+        if reserve_rows:
+            want = max(int(reserve_rows), rows + s)     # 一次开够 ✓ 但至少装得下这一拍 ✓
+        if ceiling_rows:
+            want = min(want, int(ceiling_rows))
+        buf = KvBuf.empty(b, h, want, quant=quant,
+                          dtype=fresh.dtype, device=fresh.device, group=group, head_dim=d)
+        if past is not None:
+            buf._take(past)
+        return buf.write(fresh, ceiling=ceiling_rows)
 
     def _slice_kv(x: Any, length: int) -> Any:
         """沿序列维裁一段 ✓（``Q8Kv`` 要**值和 scale 一起裁** ✗ 只裁一半＝长度对不上、静默错位 ✗✗）。"""
+        if isinstance(x, KvBuf):
+            return x.frozen(length)     # ⚠️ **独立副本** ✗ 不许返回共享存储的视图 ✗✗ 见 truncate_kv ✓
         if isinstance(x, Q8Kv):
             return Q8Kv(x.q[:, :, :length].contiguous(), x.scale[:, :, :length].contiguous(),
                         group=x.group, head_dim=x.headDim)
@@ -848,6 +1472,11 @@ def _build() -> dict[str, Any]:
         """把整份 cache 按序列维裁到 ``length`` ✓（前缀复用「同一条提示词」时留一个 token 给前向 ✓）。
 
         ⚠️ 裁完要 ``contiguous()`` ✓：切片是**视图** ⇒ 底层那份长张量会一直被吊着 ✓（「裁了但没省」✗）。
+
+        ⚠️ ``KvBuf`` 这里必须是**独立副本** ✗✗（:meth:`KvBuf.frozen` ✓）：``past`` 十有八九是
+        :class:`KvPrefixCache` 里那份**常驻** cache ✓ —— 就地改长度会让后续写入覆盖别人的历史 ✓
+        （下一次命中前缀更长的提示词时读到的就是被改过的行 ✓ 数值错、不报错 ✓✗）。
+        「就地退回」是另一件事 ✓ 见 :func:`rollback_kv` ✓。
         """
         if not past:
             return past
@@ -855,6 +1484,83 @@ def _build() -> dict[str, Any]:
         if length >= int(past[0][0].shape[2]):
             return past
         return [(_slice_kv(key, length), _slice_kv(value, length)) for key, value in past]
+
+    def rollback_kv(past: Any, length: int) -> Any:
+        """把 cache **就地**退回 ``length`` ✓（投机解码每轮被拒的草稿行 ✓）。
+
+        ⚠️ **只许用在「本次调用自己刚算出来的那份」** ✗✗（``generate_llm`` 的投机窗口 ✓）：
+        :class:`KvBuf` 是零拷贝的「长度回拨」✓（被拒的行下次 ``write`` 直接覆盖 ✓ 与参考实现
+        「被拒的行从未写入」等价 ✓）；拿它替代前缀复用处的 :func:`truncate_kv` 会**改坏别人存的
+        cache** ✓✗ —— 两处的差别是「这块存储归谁」✓，不是调用风格 ✓。
+        浮点/量化段（没开缓冲）退回 :func:`truncate_kv` ✓（那两种只能真裁 ✓）。
+        """
+        if not past:
+            return past
+        length = max(0, int(length))
+        if length >= int(past[0][0].shape[2]):
+            return past
+        out = []
+        for key, value in past:
+            if isinstance(key, KvBuf) and isinstance(value, KvBuf):
+                out.append((key.rollback(length), value.rollback(length)))
+            else:
+                out.append((_slice_kv(key, length), _slice_kv(value, length)))
+        return out
+
+    def compact_kv(past: Any, keep_head: int, keep_tail: int) -> Any:
+        """把**一段** KV 压成「头 ``keep_head`` 行 ＋ 尾 ``keep_tail`` 行」✓（滑窗用 ✓）。
+
+        ⚠️ 这是**有损**的 ✗✗：中间那些行被**丢掉**了 ✓ ⇒ 模型从此看不见它们 ✓（不是近似、是真忘 ✓）。
+        所以只在 ``generate_llm(kv_window=…)`` 显式开启时才走这里 ✓，默认关 ⇒ 老路径逐位不变 ✓。
+        头保留的用途是 **attention sink** ✓（开头几个 token 承载格式壳/系统提示 ✓，
+        StreamingLLM 的读法 ✓）—— 一个都不留时模型会开始复读最近片段 ✓✗。
+
+        ⚠️ 压缩**不改绝对位置** ✗✗：RoPE 的 ``position`` 必须继续按「历史总长」递增 ✓
+        （滑窗后 KV 只有 ``keep_head+keep_tail`` 行 ✓，若位置跟着退回 ⇒ 每窗口一轮就整体相位跳一次 ✓
+        且**不报错** ✓✗）。位置由调用方单独维护并传 ``position_offset`` ✓（见 ``LlmModel.forward`` ✓）。
+        """
+        head, tail = max(0, int(keep_head)), max(0, int(keep_tail))
+        if isinstance(past, KvBuf):
+            # ⚠️ 结果是**独立副本** ✓：原缓冲可能还在别处被引用（前缀缓存/回滚路径 ✓）。
+            total = int(past.length)
+            head = min(head, total)
+            tail = min(tail, total - head)
+            rows = head + tail
+            if rows >= total:
+                return past.frozen(total)
+            if rows <= 0:
+                return KvBuf.empty(int(past.store.shape[0]), int(past.store.shape[1]), KV_BUFFER_MIN_ROWS,
+                                   quant=past._quant, dtype=past.store.dtype, device=past.store.device,
+                                   group=past.group, head_dim=past.headDim)
+            out = KvBuf.empty(int(past.store.shape[0]), int(past.store.shape[1]), rows,
+                              quant=past._quant, dtype=past.store.dtype, device=past.store.device,
+                              group=past.group, head_dim=past.headDim)
+            if head:
+                out.store[:, :, :head].copy_(past.store[:, :, :head])
+                if past.scale is not None and out.scale is not None:
+                    out.scale[:, :, :head].copy_(past.scale[:, :, :head])
+            if tail:
+                out.store[:, :, head:rows].copy_(past.store[:, :, total - tail:total])
+                if past.scale is not None and out.scale is not None:
+                    out.scale[:, :, head:rows].copy_(past.scale[:, :, total - tail:total])
+            out.length = rows
+            return out
+        if isinstance(past, Q8Kv):
+            total = int(past.q.shape[2])
+            head = min(head, total)
+            tail = min(tail, total - head)
+            if head + tail >= total:
+                return past
+            q = torch.cat([past.q[:, :, :head], past.q[:, :, total - tail:total]], dim=2).contiguous()
+            sc = torch.cat([past.scale[:, :, :head], past.scale[:, :, total - tail:total]],
+                           dim=2).contiguous()
+            return Q8Kv(q, sc, group=past.group, head_dim=past.headDim)
+        total = int(past.shape[2])
+        head = min(head, total)
+        tail = min(tail, total - head)
+        if head + tail >= total:
+            return past
+        return torch.cat([past[:, :, :head], past[:, :, total - tail:total]], dim=2).contiguous()
 
     class KvPrefixCache:
         """跨调用 **KV 前缀复用** ✓（单槽 ＋ 字节预算 ＋ 命中回执 ✓）。
@@ -967,6 +1673,104 @@ def _build() -> dict[str, Any]:
                 "note": self._note,
             }
 
+    class KvSpan:
+        """图化单步的**定长读窗口** ✓：读满 ``cap`` 行 ＋ 用**设备侧长度** ``used`` 生成加性掩码 ✓。
+
+        为什么非这样不可 ✗✗：本仓 decode 每步都拿 ``past_kv[0][0].shape[2]`` 当历史长度 ✓（Python int ✓），
+        而图里的一切 Python 标量都被**烘成常量** ✓ ⇒ 一张图只能服务**同一个长度** ✓ —— 按长度捕获
+        就等于每步重捕一张 ✓（比不走图还慢 ✗✗）。
+
+        换成「按桶容量 ``cap`` 读满 ＋ 掩码屏蔽 ``> used`` 的列」之后 ✓，长度只活在设备张量里 ✓，
+        图里就只剩固定的 launch 序列 ✓（这正是要省的那部分 ✓）。
+
+        ⚠️ 代价两条，都记着 ✓：① 掩码把未写的行加 ``-inf`` ⇒ softmax 的归约长度从 ``used+1`` 变成
+        ``cap`` ✓ ⇒ 与截断读法**不逐位相同**（``exp(-inf)=0`` 精确 ✓，但求和长度/顺序变了 ✓）——
+        所以 ``cudaGraph`` 默认关 ✓、开启时回执如实写「非逐位」✓；② 每层一份 ``(1,1,1,cap)`` 掩码
+        （图内捕获一次、重放零成本 ✓）。
+
+        ``used`` 口径：**本步新写的那一行落在下标 ``used``** ✓ ⇒ 有效列是 ``0..used``（含 ✓）。
+        """
+
+        __slots__ = ("cap", "used", "_scalars")
+
+        def __init__(self, cap: int, used: Any) -> None:
+            self.cap = int(cap)
+            self.used = used
+            self._scalars: dict[Any, tuple[Any, Any]] = {}
+
+        def advance(self, rows: int = 1) -> None:
+            """长度前移 ✓（在**设备上**加 ✓ 不 ``.item()`` ✗✗ —— 那是 host 同步 ✓）。"""
+            self.used.add_(int(rows))
+
+        def bias(self, dtype: Any, device: Any) -> Any:
+            """``(1,1,1,cap)`` 的加性掩码 ✓：列 ``≤ used`` 给 0 ✓、其余给 ``-inf`` ✓。"""
+            key = (dtype, str(device))
+            zero, neg = self._scalars.get(key, (None, None))
+            if zero is None:
+                zero = torch.zeros((), dtype=dtype, device=device)
+                neg = torch.full((), float("-inf"), dtype=dtype, device=device)
+                self._scalars[key] = (zero, neg)
+            cols = torch.arange(self.cap, device=device)
+            keep = (cols <= self.used.reshape(-1)[0]).view(1, 1, 1, self.cap)
+            return torch.where(keep, zero, neg)
+
+    class RopeTable:
+        """图化单步的 **RoPE 查表** ✓：``(cap, head_dim)`` 折宽表 ＋ 按**设备下标**取一行 ✓。
+
+        为什么非查表不可 ✗✗：老路每步都现算 ``rope_freqs(arange(pos0, pos0 + 1))`` ✓，而其中的 ``pos0``
+        是 **Python int** ✓ —— 图上的一切 Python 标量都被烘成常量 ✓ ⇒ 那张图只算得出**捕获时那一个位置**
+        的相位 ✓，第 2 步起相位就错 ✓，而且**形状对、不报错** ✗✗（症状只是「越往后越胡言乱语」✓）。
+
+        表按桶容量 ``cap`` 一次算好（``cos``/``sin`` 已折成交错宽形 ✓ 已降到计算精度 ✓），图里只留一次
+        ``index_select`` ✓ —— 位置只活在设备张量里 ✓。
+        """
+
+        __slots__ = ("cos", "sin")
+
+        def __init__(self, cap: int, head_dim: int, theta: float, *,
+                     dtype: Any, device: Any) -> None:
+            positions = torch.arange(int(cap), device=device)
+            cos, sin = rope_freqs(positions, int(head_dim), float(theta))
+            self.cos, self.sin = fold_rope(cos, sin, dtype=dtype)
+
+        def at(self, index: Any) -> tuple[Any, Any]:
+            """取第 ``index``（设备张量 ✓）行的折宽 ``cos``/``sin`` ✓ ⇒ 形状 ``(n, head_dim)`` ✓。"""
+            flat = index.reshape(-1).to(torch.long)
+            return self.cos.index_select(0, flat), self.sin.index_select(0, flat)
+
+    #: ``F.scaled_dot_product_attention`` 是否吃得下「``enable_gqa`` ＋ 加性掩码」这一组 ✓（torch ≥ 2.5 ✓）。
+    #: ``None`` ＝ 还没探过 ✓；探一次记住 ✓ —— 图化分支**不许**在捕获途中撞 ``TypeError`` ✗✗
+    #: （捕获半途抛错那张图就废了 ✓，白花一次捕获 ✓）。
+    _SDPA_MASK_GQA: list[bool] = []
+
+    def sdpa_mask_gqa_ok() -> bool:
+        """探一次「SDPA 能不能同时吃 ``enable_gqa`` 与加性掩码」✓（老 torch ⇒ False ⇒ 走展开 ✓）。"""
+        if not _SDPA_MASK_GQA:
+            try:
+                probe_q = torch.zeros(1, 2, 1, 4)
+                probe_k = torch.zeros(1, 1, 5, 4)
+                probe_m = torch.zeros(1, 1, 1, 5)
+                F.scaled_dot_product_attention(probe_q, probe_k, probe_k,
+                                               attn_mask=probe_m, enable_gqa=True)
+                _SDPA_MASK_GQA.append(True)
+            except Exception:                    # noqa: BLE001 —— 老 torch / 后端不吃这组关键字 ✓
+                _SDPA_MASK_GQA.append(False)
+        return _SDPA_MASK_GQA[-1]
+
+    def span_attention(q: Any, k: Any, v: Any, bias: Any, n_rep: int) -> Any:
+        """图化单步的注意力 ✓：读满 ``cap`` 列 ＋ **加性掩码** ``bias`` ✓（``fastPath=attn`` 档走 ✓）。
+
+        ⚠️ 与 :func:`sdpa_attention` 的差别只有掩码来源 ✓：那边 ``s == 1`` 一律不造掩码 ✓（截断读法下
+        唯一的查询确实能看见全部 ✓）；这边读的是**桶容量 ``cap``** ✓ ⇒ 未写的行必须靠掩码挡掉 ✓，
+        所以掩码**每步都在**（由 :meth:`KvSpan.bias` 按设备侧长度现生 ✓）。
+        """
+        if sdpa_mask_gqa_ok():
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, enable_gqa=True)
+        if n_rep != 1:
+            k = repeat_kv(k, n_rep)
+            v = repeat_kv(v, n_rep)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+
     class GQAAttention(nn.Module):
         """分组查询注意力 ✓（GQA ✓ + RoPE ✓ + **因果掩码** ✓ + KV cache ✓）。"""
 
@@ -991,58 +1795,124 @@ def _build() -> dict[str, Any]:
 
         def forward(self, x: Any, cos: Any, sin: Any,
                     past_kv: tuple[Any, Any] | None = None,
-                    kv_mode: Any = "fp") -> tuple[Any, tuple[Any, Any]]:
+                    kv_mode: Any = "fp",
+                    fast: Any = frozenset(),
+                    kv_rows: tuple[int, int] | None = None,
+                    span: Any = None) -> tuple[Any, tuple[Any, Any]]:
             b, s, _ = x.shape
+            fuse = _fast_of(fast)
+            # ``kv_rows``（2026-11-08 补 ✓）：``(reserve, ceiling)`` 两格 ✓ —— 由
+            # :func:`generate_llm` 按「本轮到多少 token」一次给足 ✓，``None`` ⇒ 老行为（只开 64 行再翻倍 ✓）。
+            reserve_rows, ceiling_rows = (0, 0) if kv_rows is None else kv_rows
             q = self.q_proj(x).view(b, s, self.heads, self.head_dim).transpose(1, 2)
             k = self.k_proj(x).view(b, s, self.kv_heads, self.head_dim).transpose(1, 2)
             v = self.v_proj(x).view(b, s, self.kv_heads, self.head_dim).transpose(1, 2)
             # ⚠️ 顺序是**硬事实**（llama.cpp 的 ``build_qwen3`` ✓）：proj → reshape → **QK-norm** → RoPE ✗✗。
             # 先 RoPE 后 norm 也对得上 shape ✓ ⇒ 错了**不会报错**、只会让效果变差 ✗（所以按参考顺序写死 ✓）。
+            fast_norm = "norm" in fuse
             if self.qk_norm:
-                q = self.q_norm(q)
-                k = self.k_norm(k)
-            q = apply_rope(q, cos, sin)
-            k = apply_rope(k, cos, sin)
+                q = self.q_norm(q, fast=fast_norm)
+                k = self.k_norm(k, fast=fast_norm)
+            # ⚠️ 宽形（``(seq, head_dim)`` 的交错版 ✓ 见 :func:`fold_rope`）走 :func:`apply_rope_wide` ✓，
+            # 窄形（``(seq, head_dim//2)`` ✓ 外部直接调本类/本原语时给的 ✓）走老 :func:`apply_rope` ✓
+            # —— 两条**逐位相同** ✓ ⇒ 这里不设开关 ✓（判据见 ``engine_llm_test`` 的逐位对拍 ✓）。
+            if int(cos.shape[-1]) == int(self.head_dim):
+                q = apply_rope_wide(q, cos, sin)
+                k = apply_rope_wide(k, cos, sin)
+            else:
+                q = apply_rope(q, cos, sin)
+                k = apply_rope(k, cos, sin)
             mode = resolve_kv_mode(kv_mode)
             past_k = past_v = None
             past_len = 0
             if past_kv is not None:
                 past_k, past_v = past_kv
                 past_len = int(past_k.shape[2])
+            # 缓冲档 ✓（``fastPath=kvbuf`` ✓）：**只影响「怎么存」** ✓ —— 写进去的数与时间序完全一样 ✓，
+            # 差别只是「一整段重拷」换成「原位写新来的那几行」✓（见 :class:`KvBuf` ✓）。
+            buffered = "kvbuf" in fuse
+            if span is not None:
+                # ── 图化单步 ✓（2026-11-08 ✓ ``cudaGraph`` ✓）────────────────────────────────────
+                # 与下面两条老路的**唯一**结构差别：历史行不是「追加到长度的末尾」✓ 而是**原位写到
+                # 下标 ``span.used``** ✓，读的时候不看长度 ✓ 直接读满桶 ``cap`` ✓、未写的列靠加性掩码挡 ✓。
+                # 这样图里就没有任何「随步数变化的 Python 标量」✓ —— 一张图重放到底 ✓。
+                if not isinstance(past_k, KvBuf) or not isinstance(past_v, KvBuf):
+                    raise LlmError("cudaGraph 需要 kvbuf 档的 KV 存储 ✓（原位写走 index_copy_ ✓）"
+                                   f"：实际 {type(past_k).__name__}")
+                if mode != "fp":
+                    raise LlmError(f"cudaGraph 只支持 kvMode=fp ✗（q8 的量化链未做图内验证 ✓ 收到 {mode!r}）")
+                if int(s) != 1:
+                    raise LlmError(f"cudaGraph 只服务单 token 解码步 ✗（收到 s={int(s)} ✓ prefill 走老路 ✓）")
+                if int(past_k.cap) != int(span.cap):
+                    raise LlmError(f"读窗口对不上 ✗：缓冲容 {int(past_k.cap)} ≠ 窗口 {int(span.cap)} ✓")
+                new_kv = (past_k.write_at(k, span.used), past_v.write_at(v, span.used))
+                k_all, v_all = past_k.store, past_v.store          # (b, h, cap, d) ✓ 整块 ✓
+                if k_all.dtype != q.dtype:                        # 捕获期定死的一次分支 ✓ 不是每步 ✓
+                    k_all = k_all.to(q.dtype)
+                    v_all = v_all.to(q.dtype)
+                bias = span.bias(q.dtype, q.device)                # (1,1,1,cap) ✓ 列 ≤ used 给 0 ✓
+                if "attn" in fuse:
+                    out = span_attention(q, k_all, v_all, bias, self.n_rep)
+                else:
+                    k_rep = repeat_kv(k_all, self.n_rep)
+                    v_rep = repeat_kv(v_all, self.n_rep)
+                    scores = q @ k_rep.transpose(-2, -1) / math.sqrt(self.head_dim) + bias
+                    if scores.dtype == torch.float16:
+                        attn = torch.softmax(scores.float(), dim=-1).to(scores.dtype)
+                    else:
+                        attn = torch.softmax(scores, dim=-1)
+                    out = attn @ v_rep
+                out = out.transpose(1, 2).reshape(b, s, self.heads * self.head_dim)
+                return self.o_proj(out), new_kv
             if mode == "q8":
                 # ⚠️ 注意力**必须读量化后的值** ✓✗：写入时用的是原 k ✓、读回时是 dequant(k) ✓ ——
                 # 两者不同就会「同一个 token 在 prefill 与 decode 看到两套历史」✗（数值上表现为
                 # 首 token 正常、越往后越飘 ✓）。所以这里先量化、再**反量化回来**算注意力 ✓。
-                new_kv = (update_kv_cache(past_k, k, "q8"),
-                          update_kv_cache(past_v, v, "q8"))
+                new_kv = (update_kv_cache(past_k, k, "q8", buffer=buffered,
+                                          reserve_rows=reserve_rows, ceiling_rows=ceiling_rows),
+                          update_kv_cache(past_v, v, "q8", buffer=buffered,
+                                          reserve_rows=reserve_rows, ceiling_rows=ceiling_rows))
                 k = materialize_kv(new_kv[0], dtype=q.dtype, device=q.device)
                 v = materialize_kv(new_kv[1], dtype=q.dtype, device=q.device)
             else:
-                k = update_kv_cache(past_k, k, "fp")
-                v = update_kv_cache(past_v, v, "fp")
+                k = update_kv_cache(past_k, k, "fp", buffer=buffered,
+                                    reserve_rows=reserve_rows, ceiling_rows=ceiling_rows)
+                v = update_kv_cache(past_v, v, "fp", buffer=buffered,
+                                    reserve_rows=reserve_rows, ceiling_rows=ceiling_rows)
                 new_kv = (k, v)
-            k_rep = repeat_kv(k, self.n_rep)
-            v_rep = repeat_kv(v, self.n_rep)
-            scores = q @ k_rep.transpose(-2, -1) / math.sqrt(self.head_dim)
-            # ⭐ 因果掩码 ✓：当前位置（past_len+i）只许看 ≤ 它自己的位置 ✓✗
-            # ⚠️ mask 的 dtype 必须跟 scores 一致 ✗：fp32 的 mask 加到 bf16 的 scores 上会**广播成 fp32**
-            # ⇒ 后面 ``attn @ v`` 撞 `expected scalar type BFloat16 but found Float` ✗✗（低精度专炸 ✓）。
-            # ⚠️ 单 token（解码步 ``s == 1``）**不造 mask** ✓：唯一的查询就是最后一位 ⇒ 它能看见
-            # ``past_len + 1`` 个位置里的全部 ✓，掩码全零 ⇒ 造出来只是白占一份 ``(1, past+1)`` 的显存 ✗
-            # （每生成一个 token 白造一次、每层一次 ✓✗）。数值上与原路径**逐位相同** ✓（加零 ≠ 变数 ✓）。
-            if s == 1:
-                masked = scores
+                if buffered:
+                    # ⚠️ 缓冲的 ``shape`` 是「已用长度」但**存储**是 ``cap`` 行 ✗✗（见 :class:`KvBuf` 口径 1）
+                    # ⇒ 算注意力前必须换成 ``[:length]`` ✓（不换＝把 ``cap`` 行的未初始化值一起算进去 ✓）。
+                    k = materialize_kv(k)
+                    v = materialize_kv(v)
+            if "attn" in fuse:
+                # 快路径 ✓（``fastPath=attn`` ✓）：SDPA ＋ ``enable_gqa`` ✓ 整段不吃 :func:`repeat_kv`
+                # 的物化 ✓、也不手写 mask/softmax ✓ ⇒ 4B 档 2048 词元每步省 1.15 GiB 写 ✓（3.48 ms ✓）。
+                # ⚠️ **数值与下面那条不同** ✗✗（分块累加顺序不同 ✓）⇒ 只在开关打开时走 ✓。
+                out = sdpa_attention(q, k, v, past_len=past_len, n_rep=self.n_rep)
             else:
-                mask = torch.triu(torch.full((s, past_len + s), float("-inf"),
-                                             device=x.device, dtype=scores.dtype),
-                                  diagonal=past_len + 1)
-                masked = scores + mask
-            # fp16 的 softmax 升 fp32 再降回 ✓（溢出 + 精度两个理由 ✓）；fp32/bf16 原样 ✓。
-            if masked.dtype == torch.float16:
-                attn = torch.softmax(masked.float(), dim=-1).to(masked.dtype)
-            else:
-                attn = torch.softmax(masked, dim=-1)
-            out = attn @ v_rep
+                k_rep = repeat_kv(k, self.n_rep)
+                v_rep = repeat_kv(v, self.n_rep)
+                scores = q @ k_rep.transpose(-2, -1) / math.sqrt(self.head_dim)
+                # ⭐ 因果掩码 ✓：当前位置（past_len+i）只许看 ≤ 它自己的位置 ✓✗
+                # ⚠️ mask 的 dtype 必须跟 scores 一致 ✗：fp32 的 mask 加到 bf16 的 scores 上会**广播成 fp32**
+                # ⇒ 后面 ``attn @ v`` 撞 `expected scalar type BFloat16 but found Float` ✗✗（低精度专炸 ✓）。
+                # ⚠️ 单 token（解码步 ``s == 1``）**不造 mask** ✓：唯一的查询就是最后一位 ⇒ 它能看见
+                # ``past_len + 1`` 个位置里的全部 ✓，掩码全零 ⇒ 造出来只是白占一份 ``(1, past+1)`` 的显存 ✗
+                # （每生成一个 token 白造一次、每层一次 ✓✗）。数值上与原路径**逐位相同** ✓（加零 ≠ 变数 ✓）。
+                if s == 1:
+                    masked = scores
+                else:
+                    mask = torch.triu(torch.full((s, past_len + s), float("-inf"),
+                                                 device=x.device, dtype=scores.dtype),
+                                      diagonal=past_len + 1)
+                    masked = scores + mask
+                # fp16 的 softmax 升 fp32 再降回 ✓（溢出 + 精度两个理由 ✓）；fp32/bf16 原样 ✓。
+                if masked.dtype == torch.float16:
+                    attn = torch.softmax(masked.float(), dim=-1).to(masked.dtype)
+                else:
+                    attn = torch.softmax(masked, dim=-1)
+                out = attn @ v_rep
             out = out.transpose(1, 2).reshape(b, s, self.heads * self.head_dim)
             return self.o_proj(out), new_kv
 
@@ -1070,10 +1940,15 @@ def _build() -> dict[str, Any]:
 
         def forward(self, x: Any, cos: Any, sin: Any,
                     past_kv: tuple[Any, Any] | None = None,
-                    kv_mode: Any = "fp") -> tuple[Any, tuple[Any, Any]]:
-            attended, new_kv = self.attn(self.norm1(x), cos, sin, past_kv, kv_mode)
+                    kv_mode: Any = "fp",
+                    fast: Any = frozenset(),
+                    kv_rows: tuple[int, int] | None = None,
+                    span: Any = None) -> tuple[Any, tuple[Any, Any]]:
+            fuse = _fast_of(fast)
+            attended, new_kv = self.attn(self.norm1(x, fast="norm" in fuse), cos, sin,
+                                         past_kv, kv_mode, fuse, kv_rows, span)
             x = x + attended
-            x = x + self.ffn(self.norm2(x))
+            x = x + self.ffn(self.norm2(x, fast="norm" in fuse))
             return x, new_kv
 
     class LlmModel(nn.Module):
@@ -1096,19 +1971,47 @@ def _build() -> dict[str, Any]:
             #: KV 存储口径 ✓（``fp`` 老路径 ✓；``q8`` 分组量化 ✓）—— 可由
             #: :func:`generate_llm` 的 ``kv_mode`` 逐步覆盖 ✓，也可在外部按住不动 ✓。
             self.kv_mode: str = "fp"
+            #: 快路径档位（归一后的 ``frozenset``）✓ **默认空集＝老路径** ✓ —— 与 ``kv_mode``
+            #: 同一套用法（实例属性兜底 ✓ :func:`generate_llm` 的 ``fast_path`` 逐步覆盖 ✓）。
+            self.fast_path: frozenset[str] = frozenset()
 
         def forward(self, ids: Any, past_kv: Any = None,
-                    kv_mode: Any = None) -> tuple[Any, Any]:
+                    kv_mode: Any = None,
+                    fast_path: Any = None,
+                    position_offset: Any = None,
+                    kv_rows: tuple[int, int] | None = None,
+                    span: Any = None,
+                    rope_table: Any = None) -> tuple[Any, Any]:
             batch, seq = ids.shape
             mode = resolve_kv_mode(self.kv_mode if kv_mode is None else kv_mode)
+            fuse = _fast_of(self.fast_path if fast_path is None else fast_path)
             past_len = 0 if past_kv is None else int(past_kv[0][0].shape[2])
+            # ⚠️ ``position_offset``（2026-11-08 补 ✓，``None`` ＝ 老路径**逐位不变** ✓）：
+            # KV 被**滑窗压缩**过之后「cache 有多少行」≠「历史上真实走过多少 token」✗✗ ——
+            # RoPE 要的是后者（绝对位置 ✓），所以由调用方显式给 ✓（见 :func:`compact_kv` ✓）。
+            # ⚠️ 注意**掩码/偏移**仍按 ``past_len``（＝压缩后的行数 ✓）：那些行就是现在的历史 ✓
+            # 两者只在滑窗压缩之后才不等 ✓。
+            pos0 = past_len if position_offset is None else int(position_offset)
             plan = getattr(self, "_layer_devices", None)
             embed_device = self.embed.weight.device
             if plan is not None and ids.device != embed_device:
                 ids = ids.to(embed_device)          # 采样在末层设备 ⇒ 每步把 token 送回 embed ✓
-            positions = torch.arange(past_len, past_len + seq, device=embed_device)
-            cos, sin = rope_freqs(positions, self.head_dim, self.rope_theta)
             x = self.embed(ids)
+            if span is None:
+                positions = torch.arange(pos0, pos0 + seq, device=embed_device)
+                cos, sin = rope_freqs(positions, self.head_dim, self.rope_theta)
+                # ⚠️ cos/sin 在这里**折成交错宽形并降一次精度** ✓（2026-11-08 ✓）：老路上
+                # :func:`apply_rope` 每层都 ``.to(x.dtype)`` ✓ 4B 档一步 72 次 ✓；折一次之后
+                # :func:`apply_rope_wide` 里那次 dtype 检查退化成 no-op ✓。两条**逐位相同** ✓。
+                cos, sin = fold_rope(cos, sin, dtype=x.dtype)
+            else:
+                # 图化单步 ✓（2026-11-08 ✓）：位置**不能**来自 ``pos0`` ✓ 那是 Python int ⇒ 会被烘成
+                # 常量 ✓（见 :class:`RopeTable` ✓）。改成查表 ＋ 设备下标 ✓，图里就只剩 index_select ✓。
+                if rope_table is None:
+                    raise LlmError("给了 span 却没给 rope_table ✗（图化单步必须查表取 cos/sin ✓）")
+                if int(seq) != 1:
+                    raise LlmError(f"图化单步只服务单 token ✗（收到 seq={int(seq)} ✓）")
+                cos, sin = rope_table.at(span.used)
             rope_by_device: dict[Any, tuple[Any, Any]] = {}
             new_kv: list[tuple[Any, Any]] = []
             for index, block in enumerate(self.blocks):
@@ -1124,9 +2027,9 @@ def _build() -> dict[str, Any]:
                         rope = (cos.to(target), sin.to(target))   # 每个设备只搬一次 ✓ 不是每层 ✓
                         rope_by_device[target] = rope
                     layer_cos, layer_sin = rope
-                x, kv = block(x, layer_cos, layer_sin, layer_kv, mode)
+                x, kv = block(x, layer_cos, layer_sin, layer_kv, mode, fuse, kv_rows, span)
                 new_kv.append(kv)
-            x = self.norm(x)
+            x = self.norm(x, fast="norm" in fuse)
             return self.lm_head(x), new_kv
 
     class LookupDrafter:
@@ -1215,7 +2118,11 @@ def _build() -> dict[str, Any]:
                      prefill_chunk: int = 1024, kv_mode: Any = "fp",
                      kv_cache: Any = None, spec_lookup: bool = False,
                      spec_window: int = 8, spec_min_match: int = 3,
-                     spec_report: Any = None) -> Any:
+                     spec_report: Any = None,
+                     fast_path: Any = None,
+                     kv_window: int = 0, kv_sink: int = KV_SINK_DEFAULT,
+                     kv_reserve_rows: int = 0,
+                     cuda_graph: Any = False, cuda_graph_report: Any = None) -> Any:
         """逐 token 生成 ✓（greedy / temperature / top-p / top-k ✓ + 早停 ✓）。
 
         ⚠️ ``temperature=0`` ⇒ greedy ✓（直接 argmax ✓ —— 保证可复现 ✓，也是**跨设备一致**的判据 ✓）。
@@ -1285,6 +2192,44 @@ def _build() -> dict[str, Any]:
         ⚠️ 收益要如实说 ✓：真实产物形状上 A/B 两场景实测**每轮平均接受 0.01~0.02 个词元** ⇒
         同尺度加速 **1.02~1.03×**（§7.4 的账 ✓）。这套框架的价值在**「接草稿头的前置设施」** ✓，
         不在 lookup 本身 ✓。
+
+        ``cuda_graph``（2026-11-08 补 ✓ **默认 False ⇒ 老路径逐位不变** ✓）：把 **decode 单步捕成一张
+        CUDA Graph** ✓ 再逐步重放 ✓ —— 省的是**每步几千次 launch 的提交开销** ✓（不是算力 ✓）。
+        探针 ``data/experiments/llm_graph_probe/probe.py`` 量的是「纯提交时间 vs 重放墙钟」✓。
+
+        ⭐ ``cuda_graph="auto"``（2026-11-09 补 ✓）：把探针 ⑥ 的长度全表变成**行为** ✓ —— 捕获那 ~100 ms 是
+        **固定成本** ✓、收益按词元数线性涨 ✓ ⇒ ``max_new_tokens < CUDA_GRAPH_AUTO_MIN_TOKENS(16)`` 时
+        **主动不捕** ✓ 并在回执写 ``reason="autoTooShort(n<16)"`` ✓（8 词元实测 ×0.91＝净亏 ~28 ms ✓，
+        这一档开图纯亏 ✗）。``on`` 仍是无条件开 ✓、``off`` 仍是老路径 ✓ —— 三档都要能分辨 ✓。
+
+        为什么必须动三处结构 ✗✗（否则「捕获成功、重放出来是错的」✓ 且**不报错** ✓✗）：
+
+        1. **历史长度不能是 Python int** ✓：老路每步读 ``past_kv[0][0].shape[2]`` ✓ 那是 int ⇒ 被烘成
+           常量 ✓ ⇒ 一张图只服务同一个长度 ✓。换成 :class:`KvSpan`「读满桶 ``cap`` ＋ 加性掩码」✓；
+        2. **位置不能是 Python int** ✓：RoPE 的 ``pos0`` 同理 ⇒ 换成 :class:`RopeTable` 查表 ＋ 设备下标 ✓；
+        3. **KV 缓冲不许换指针** ✓：老路 ``torch.cat`` 每步重新分配 ✓（图里指针是常量 ✗✗）⇒ 必须
+           ``fastPath=kvbuf`` ＋ :meth:`KvBuf.write_at` 原位写一行 ✓（**因此本档隐含 kvbuf** ✓，
+           回执里 ``impliedKvbuf`` 会写明这一档是不是**替你加的** ✓，不静默 ✓）。
+
+        九条前置（任何一条不满足 ⇒ **退回 plain 并在回执写理由** ✓ 不假装 ✓）：设备不是 cuda ✓／
+        ``kvMode=fp`` ✓（q8 的量化链未做图内验证 ✓）／``kvWindow=0`` ✓（压缩会换缓冲 ✓）／
+        ``specLookup`` 没开 ✓（两套加速器不叠加 ✓）／KV 存储是 ``KvBuf`` ✓／没有分层放置 ✓（图跨不出
+        设备边界 ✓）／``pastLen + max_new_tokens ≤ cap`` ✓／捕获本身不抛 ✓／采样在**图外** ✓。
+
+        ⚠️ 回执里 ``bitExact=False`` 是**真话** ✓：掩码把归约长度改成 ``cap`` ⇒ softmax 的求和顺序变了 ✓
+        （``exp(-inf)=0`` 精确 ✓，但浮点加法不结合 ✓）。要与老路**逐字**比对就别开 ✓（与 ``kvbuf`` 的
+        「目标逐位相同」是两回事 ✗，别混 ✓）。
+        ⭐ 2026-11-08 真权重把差异**量**出来了 ✓：分叉**主要来自多读的 padding 行** ✓ —— 同一份 KV、同一步、
+        同入口，``cap = used+1`` 时与截断读**逐位相同**（|Δlogits| = 0e0 ✓）；``cap`` 多 96 行时 bf16 上
+        |Δlogits| **1.9e-1**、32 词元 **25 个**分叉 ✓✗。成因是 bf16 下 SDPA 的归约分块随列数变 ✓。
+        ⇒ 回执交出 ``padRows = cap − (pastLen + max_new_tokens)`` ✓ 让人直接读「这一轮凭空多读了几行」✓；
+        默认预留（``room`` 只多给 ``1+specWindow+1`` 行 ⇒ **padRows 默认 10**）实测 8／16／32 词元 0 分叉 ✓
+        ⇒ 别为「省事」把 ``kv_reserve_rows`` 放大 ✗（那会把 ``padRows`` 抬到几十行 ⇒ 静默改输出 ✓✗）。
+        ⚠️ 但**「越紧越等价」也是错的** ✗✗：同一档 padRows=10 下 64 词元已分叉 11 个、128 词元 72 个、
+        512 词元 **443/512** ✓ —— 每步残留的那 1 ulp 差会随步数累积 ✓ ⇒ 长生成仍应与老路比对 ✓，
+        别拿 32 词元的 0 分叉外推 ✗（而本仓真实负载正好落在这段 ✓）。
+        速度侧同档实测：128–512 词元 **×1.24–1.27**、16 词元 ×1.09、8 词元 ×0.91（捕获 ~100 ms）✓
+        ⇒ 是否开取决于「要不要逐字复现」，不是「快不快」✓。
         """
         if max_new_tokens < 1:
             raise LlmError(f"max_new_tokens 必须 ≥1（收到 {max_new_tokens} ✗）")
@@ -1345,6 +2290,202 @@ def _build() -> dict[str, Any]:
                 return True
             return False
 
+        # ⚠️ 快路径只在**开着**时才把参数递下去 ✓（空集 ⇒ ``fast_kw`` 为空 ⇒ 调用签名与老路径
+        # 逐字相同 ✓）：本仓不少测试拿**桩模型**跑主循环 ✓，桩只认 ``(ids, past_kv, kv_mode)`` ✓
+        # ⇒ 无条件传 ``fast_path`` 会让默认关的那条路也炸 ✗✗（默认关必须字节不变 ✓）。
+        fuse = _fast_of(fast_path)
+        # ⚠️ ``cudaGraph=auto`` **在这里就定档** ✓（2026-11-09 补 ✓）：长度全表说明捕获是固定成本、
+        # 收益按词元线性涨 ⇒ 短生成开图是净亏 ✓✗。决策只做一次、结果进 ``graph_info["policy"]`` ✓，
+        # 后面所有分支都读 ``want_graph`` ✗ 别再读原始 ``cuda_graph``（那会绕开 auto 的跳过 ✓✗）。
+        graph_policy = resolve_cuda_graph_policy(cuda_graph)
+        auto_short = graph_policy == "auto" and int(max_new_tokens) < CUDA_GRAPH_AUTO_MIN_TOKENS
+        want_graph = graph_policy != "off" and not auto_short
+        # ⚠️ ``cudaGraph`` **隐含 kvbuf** ✓（图里 KV 指针不许换 ✓ 见 docstring 第 3 条）——
+        # 这一格是「替你加的」就记进回执 ``impliedKvbuf`` ✓ 不静默 ✓（数值上 kvbuf 目标逐位相同 ✓）。
+        # ⚠️ 用 ``want_graph`` 而不是 ``cuda_graph`` ✗✗：auto 被跳过时连 kvbuf 也不该替你加 ✓
+        # （否则「auto 短请求＝完全老路径」这句就不成立 ✓✗）。
+        implied_kvbuf = bool(want_graph) and "kvbuf" not in fuse
+        if implied_kvbuf:
+            fuse = frozenset(set(fuse) | {"kvbuf"})
+        fast_kw: dict[str, Any] = {"fast_path": fuse} if fuse else {}
+
+        # ---- 低显存两件（2026-11-08 补 ✓，**默认关 ⇒ 老路径逐位不变** ✓）----
+        # ① ``kv_window``：历史超过 ``kv_sink + kv_window`` 就把中间那段**真丢掉**（有损 ✓ 见 :func:`compact_kv`）
+        # ② ``kv_rows``：把「本轮到多少 token」一次算给 KV 缓冲 ⇒ 省掉翻倍的尾巴（2048→4096 那步白占一倍 ✓）
+        #    并让「超预算」变成**具名拒** ✗✗ 而不是撞 OOM ✓（§7.5.5 的两笔尾账 ✓）。
+        kvwin = max(0, int(kv_window))
+        kvsink = max(0, int(kv_sink)) if kvwin else 0
+        if kvwin:
+            if kv_cache is not None:
+                raise LlmError(
+                    f"``kv_window={kvwin}`` 与 ``kv_cache`` 不能同时开 ✗✗：前缀缓存存的是**完整**历史 ✓，"
+                    f"而滑窗已经把中间那段删了 ✓ ⇒ 复用回来模型会看见「本不该记得」的行 ✓（数值错、不报错 ✗）")
+            if kvsink >= kvwin:
+                raise LlmError(f"``kv_sink={kvsink}`` 必须小于 ``kv_window={kvwin}`` ✗："
+                               f"sink 是窗口**之外**另留的开头几行 ✓，相等就没有可滚的窗口了 ✗")
+        kv_rows: tuple[int, int] | None = None
+        if "kvbuf" in fuse:
+            # ⚠️⭐ **滑窗管不了 prefill** ✗✗（2026-11-09 修）：压缩只发生在**两个生成词元之间** ✓
+            # （见生成循环里的 ``_compact`` ✓）⇒ 提示词那一段是**整段一次性写进缓冲**的 ✓
+            # ⇒ 只按 ``sink+window`` 留 ⇒ 提示词一长，第 2 个 prefill 块就撞「KV 缓冲超预算」✓✗，
+            # 而回执给的补救是「缩上下文／开 q8／调小 maxOutputTokens」✓ —— **三条都不是真因** ✓✗
+            # （真因是窗口不参与 prefill ✓）。实测：``kv_window=3, kv_sink=2`` ＋ 20 行提示词
+            # ⇒ 报「要 20 行、上限 15 行」✓ 而同一请求在 ``kv_rows`` 预分配接上之前是能跑的 ✓。
+            # ⇒ 峰值取**两者的大** ✓：prefill 峰值 ``total`` ✓ ＋ 生成期峰值 ``sink+window`` ✓。
+            room = max(total, kvsink + kvwin) if kvwin else (total + max_new_tokens)
+            # ⚠️ 上限要多留「投机那一拍多写的行」✓：窗口一次前向写 ``1 + len(draft)`` 行 ✓，
+            # 末尾几轮若正好贴着上限 ⇒ 会被自己的预算拒掉 ✓✗（那不是显存不够、是算漏了 ✓）。
+            room += 1 + max(0, int(spec_window)) + 1
+            if kv_reserve_rows:
+                room = max(int(kv_reserve_rows), room)
+            # ⚠️ ``ceiling`` 的口径（2026-11-09 定论 ✓）：这里 ``kv_rows = (room, room)`` ⇒ 上限**就是**
+            # 上面算出的 ``room`` ✓ ⇒ 它挡的是「写端多写一行」这类**算漏**（投机那一拍、以后改循环 ✓），
+            # **不挡 ``room`` 本身太大** ✗ —— 直调本函数塞个 1e9 的 ``max_new_tokens`` 就是真去分配、
+            # 撞 OOM ✓（真正的预算闸门是 ``LlmBackend._guard_context`` 的显存/权重两本账 ✓，生产路径
+            # 先过那道 ✓；直调路径没有它，所以别把这里的 ``ceiling`` 读成「有预算保护」✗）。
+            kv_rows = (room, room)
+        abs_pos = 0
+
+        def _call(x: Any, past: Any, pos: int) -> tuple[Any, Any]:
+            """一次前向 ✓ —— ``kv_rows``/``position_offset`` **只在需要时**才传 ✓✗。
+
+            ⚠️ 本仓不少测试拿**桩模型**跑主循环 ✓（只认 ``(ids, past_kv, kv_mode)`` ✓）⇒ 无条件多传
+            一个关键字就会让**默认关**的那条路也炸 ✗✗（默认必须字节不变 ✓ 与 ``fast_kw`` 同一条纪律 ✓）。
+            """
+            kw = dict(fast_kw)
+            if kv_rows is not None:
+                kw["kv_rows"] = kv_rows
+            if kvwin:
+                kw["position_offset"] = pos
+            return model(x, past, kv_mode=mode, **kw)
+
+        def _compact(past: Any) -> Any:
+            """滑窗：把 KV 压成「头 ``kvsink`` ＋ 尾 ``kvwin``」✓（**位置不动** ✓ 见 :func:`compact_kv` ✓）。"""
+            if not kvwin or past is None:
+                return past
+            length = int(past[0][0].shape[2])
+            if length <= kvsink + kvwin:
+                return past
+            head = min(kvsink, length)
+            tail = min(kvwin, length - head)
+            # ⚠️ ``past`` 是「每层一个 ``(k, v)`` 元组」的**列表** ✗✗ —— 别把整元组当张量传
+            # （:func:`compact_kv` 只认单段 ⇒ 传元组当场 ``AttributeError: 'tuple' has no 'shape'`` ✓）
+            return [(compact_kv(key, head, tail), compact_kv(val, head, tail))
+                    for key, val in past]
+
+        # ── 图化单步 ✓（2026-11-08 ✓ ``cudaGraph`` ✓）───────────────────────────────────────────
+        # 回执账本 ✓：**无论开没开**都交一份 ✓ —— 「没开」要说清是没要求、还是要求了但被前置挡住 ✓
+        # （后者才是真正需要人看的信息 ✓；“安静地没开”是本仓明令禁止的形状 ✗✗）。
+        graph_info: dict[str, Any] = {
+            # ``requested`` 仍是 bool ✓（老判据照旧读它 ✓）；三档原文另放 ``policy`` ✓ —— 只有它能把
+            # 「auto 被长度跳过」与「压根没要求」分开 ✓✗（前者是本仓唯一会**主动放弃**收益的档位 ✓）。
+            "requested": graph_policy != "off",
+            "policy": graph_policy,
+            "enabled": False,
+            "reason": ("" if want_graph else
+                       (f"autoTooShort({int(max_new_tokens)}<{CUDA_GRAPH_AUTO_MIN_TOKENS})"
+                        if auto_short else "notRequested")),
+            "cap": None,
+            "pastLen": None,
+            #: ⭐ **多余 padding 行数** ✓（``cap − (pastLen + max_new_tokens)`` ✓ 2026-11-08 真权重实测补）：
+            #: 差异**全在这里** ✗✗ —— 同一份 KV、同一步、同入口，``cap = used+1``（一列不多读）时与截断读
+            #: **逐位相同**（|Δlogits| = 0e0 ✓）；``cap`` 多 96 行时 4B/bf16 上 |Δlogits| **1.9e-1** ✓、
+            #: 32 词元里 **25 个**分叉 ✓✗。成因是 bf16 下 SDPA 的归约分块随列数变 ✓（``-inf`` 掩码本身是
+            #: 精确 0 ✓ 不是掩码算错 ✓）。⚠️ **默认值不是 0**：``room`` 会多留 ``1 + specWindow + 1``
+            #: 行（``specWindow`` 默认 8 ⇒ **padRows = 10** ✓ 与投机开不开无关 ✓）—— 该量级实测
+            #: 8／16／32 词元 **0 分叉** ✓，但 **64 词元 11/64、128 词元 72/128、512 词元 443/512** ✓✗
+            #: ⇒ padding 是**主因、不是唯一原因** ✓：不 padding 时每步也留 1 ulp 级差 ✓，步子多了就累积 ✓。
+            #: 本仓真实负载（写剧本/对白）就在 128–512 这一段 ⇒ **长生成必然改输出** ✓（`bitExact=False`
+            #: 不是保险话 ✓）；短生成那 0 分叉只说明「起步没差」✗ 别当等价证明 ✓。
+            #: 把 ``kv_reserve_rows`` 放大只会让这个数更大 ✓（96 行时 32 词元就分叉 25 个 ✓）。
+            "padRows": None,
+            #: ⭐ **捕获本身花了多少毫秒** ✓（热身 2 次前向 ＋ 捕获 1 次 ＋ 一次硬同步 ✓ 2026-11-08 补）：
+            #: 这一段**真实发生**在第一次生成里 ✓，所以「图化省了多少」必须减掉它才是净收益 ✓✗ ——
+            #: 32 词元时它只占零头 ✓，但**生成越短越吃亏** ✓；短提示短输出（比如 8 词元）可能**净亏** ✓。
+            #: 回执必须交出这个数 ✗ 否则「×1.15」会被读成「任何长度都 ×1.15」✓✗（实测口径见探针 ⑥）✓。
+            "captureMs": None,
+            "replays": 0,
+            "bitExact": False,
+            "impliedKvbuf": bool(implied_kvbuf),
+        }
+
+        def _graph_of(past: Any) -> tuple[Any, Any, Any, Any]:
+            """捕获 decode 单步 ✓ ⇒ ``(重放器, 静态输入, 静态输出, 长度游标)`` ✓；不满足 ⇒ 四个 ``None`` ＋理由 ✓。
+
+            捕获本身会**真跑一次前向** ✓ ⇒ 会往 ``past`` 的 ``baseLen`` 行写一格垃圾 token 的 KV ✓。
+            这格**正好是第一个重放要写的那格** ✓（:class:`KvSpan` 的 ``used`` 一直是 ``baseLen`` ✓ 没人前移它 ✓）
+            ⇒ 被真实首词元原地覆盖 ✓ 不需要回滚 ✓。捕获半途抛错也只脏这一格 ✓ 且 ``length`` 没动 ✓
+            ⇒ 退回 plain 时老路从同一格开始写 ✓ 一样覆盖 ✓（所以失败路径**不用**清缓冲 ✓）。
+            """
+            # ⚠️ 顺序有讲究 ✓：**配置类**的闸门（q8／滑窗／存储档）排在设备之前 ✓ —— 它们与设备无关 ✓，
+            # 而 ``device=cpu`` 会掩盖它们 ✓（症状＝在有卡的机器上报 q8、在没卡的机器上报 cpu ✓ 排查要多跳一次 ✓）。
+            if mode != "fp":
+                graph_info["reason"] = f"kvMode={mode}"          # q8 的量化链未做图内验证 ✓ 不赌 ✓
+                return None, None, None, None
+            if kvwin:
+                graph_info["reason"] = f"kvWindow={int(kvwin)}"   # 压缩会换缓冲指针 ⇒ 图废 ✓
+                return None, None, None, None
+            if past is None or not isinstance(past[0][0], KvBuf):
+                graph_info["reason"] = "kvStorage=cpu-cat"       # 没开 kvbuf ⇒ 每步 torch.cat 换指针 ✗
+                return None, None, None, None
+            if not ids.is_cuda:
+                graph_info["reason"] = "device=cpu"
+                return None, None, None, None
+            if getattr(model, "_layer_devices", None) is not None:
+                graph_info["reason"] = "layerSplit"              # 图跨不出设备边界 ✓✗
+                return None, None, None, None
+            cap = int(past[0][0].cap)
+            base_len = int(past[0][0].length)
+            if cap != int(past[0][1].cap):
+                graph_info["reason"] = f"capMismatch({cap}≠{int(past[0][1].cap)})"
+                return None, None, None, None
+            if base_len + int(max_new_tokens) > cap:
+                # 桶不够重放满全程 ✓ 不是显存不够、是 ``kv_reserve_rows`` 没留够 ✓ 如实说 ✓
+                graph_info["reason"] = f"capTooSmall({base_len}+{int(max_new_tokens)}>{cap})"
+                return None, None, None, None
+            device = ids.device
+            cursor = KvSpan(cap, torch.full((1,), base_len, dtype=torch.long, device=device))
+            table = RopeTable(cap, int(model.head_dim), float(model.rope_theta),
+                              dtype=model.embed.weight.dtype, device=device)
+            # ⚠️ 尾部清零 ✓（捕获前一次 ✓）：未写的行可能是 ``torch.empty`` 的残留 ✓ 里面若有 NaN ✗✗
+            # ⇒ ``q@kᵀ`` 出 NaN ⇒ ``NaN + (-inf)`` 还是 **NaN** ✓ ⇒ 整条 softmax 全 NaN ✓ 而**不报错** ✗✗
+            #（``exp(-inf)=0`` 只救得了有限值 ✓ 救不了 NaN ✓）。清成 0 ⇒ 行乘出 0 ⇒ 加 -inf ⇒ 0 权重 ✓。
+            for key, val in past:
+                if int(key.length) < int(key.cap):
+                    key.store[:, :, int(key.length):].zero_()
+                if int(val.length) < int(val.cap):
+                    val.store[:, :, int(val.length):].zero_()
+            ids_static = torch.zeros((1, 1), dtype=ids.dtype, device=device)
+            graph_kw: dict[str, Any] = dict(fast_kw)
+            graph_kw.update(span=cursor, rope_table=table)
+            sdpa_mask_gqa_ok()                                   # 探一次（**捕获外** ✓ 见 :func:`sdpa_mask_gqa_ok` ✓）
+            holder = torch.cuda.CUDAGraph()
+            side = torch.cuda.Stream(device=device)
+            static_out: Any = None
+            # ⚠️ 计时从**建流之前**起 ✓：``torch.cuda.Stream`` 建流 ＋ 热身 2 次 ＋ 捕获 1 次 ＋ 硬同步
+            # 全部要吃进第一次生成 ✓（少算建流会把这一段漏出账 ✗）
+            tick = time.perf_counter()
+            try:
+                side.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(side):                    # 捕获前在**侧流**上热身 ✓（cuBLAS / 分配器就位 ✓）
+                    for _ in range(2):
+                        model(ids_static, past, kv_mode=mode, **graph_kw)
+                torch.cuda.current_stream(device).wait_stream(side)
+                torch.cuda.synchronize(device)
+                with torch.cuda.graph(holder):
+                    static_out, _ = model(ids_static, past, kv_mode=mode, **graph_kw)
+            except Exception as err:                             # noqa: BLE001 —— 捕获不成 ⇒ 回退 ✓ 不假装 ✓
+                graph_info["reason"] = f"captureFailed:{type(err).__name__}:{err}"
+                return None, None, None, None
+            # ⚠️ ``padRows`` 是**这一轮真实的要多读几行** ✓，不是配置意图 ✓：
+            # ``cap`` 里除了「已写的 ``base_len``」和「这一轮还要写的 ``max_new_tokens``」，
+            # 剩下的每一行都是**凭空多读的 padding** ✓（:class:`KvSpan` 读满 ``cap`` 不读到 ``used`` ✓）。
+            # 它 ≡ 数值分歧的全部来源 ✓ ⇒ 回执直接把它交出来 ✓（0 或 2 ⇒ 32 词元实测 0 分叉 ✓）。
+            graph_info.update(enabled=True, reason="", cap=cap, pastLen=base_len,
+                              padRows=max(0, int(cap) - (base_len + int(max_new_tokens))),
+                              captureMs=round((time.perf_counter() - tick) * 1e3, 1))
+            return holder, ids_static, static_out, cursor
+
         with torch.inference_mode():           # ⚠️ 见 docstring：不关梯度 = 每层中间量全部被吊住 ✗✗
             past_kv = None
             logits = None
@@ -1356,9 +2497,11 @@ def _build() -> dict[str, Any]:
                     # 位置按 ``past_len`` 接 ✓，cache 长一格而位置不动 ⇒ 注意力看见一个"幽灵位置" ✓✗）。
                     past_kv = truncate_kv(cached, reuse)
                     offset = int(reuse)
+            abs_pos = offset
             while offset < total:
                 end = min(offset + prefill_chunk, total)
-                logits, past_kv = model(ids[:, offset:end], past_kv, kv_mode=mode)
+                logits, past_kv = _call(ids[:, offset:end], past_kv, abs_pos)
+                abs_pos += end - offset
                 offset = end
             if logits is None:                     # 全段命中时 lookup 应保 ``reuse ≤ len-1`` ✓
                 raise LlmError("KV 复用命中了整段 ids ⇒ 没有可采样的 logits ✗"
@@ -1375,16 +2518,56 @@ def _build() -> dict[str, Any]:
                     # 随机序列上 ✗ 本仓没有那套 ⇒ 不开（不假装开了 ✓）。
                     spec_report.update(enabled=False, reason="temperature>0", window=0,
                                        rounds=0, drafted=0, accepted=0)
+            if want_graph and drafter is not None:
+                # ⚠️ 两套加速器**不叠加** ✓：投机一轮最多吐 ``1+窗口`` 个词元 ✓（收益比省 launch 大得多 ✓）
+                # ⇒ 让投机跑、图让路 ✓；但**必须**在回执里写清「是让路、不是没要求」✓✗（安静地没开是禁令 ✓）。
+                # ⚠️ 只在 ``want_graph`` 时才写 ✓：auto 已因长度跳过时理由是 ``autoTooShort`` ✓✗，
+                # 不能被「让路」顶掉（两个理由的**处理者视角完全不同** ✓：一个该改配置长度、一个该关投机 ✓）。
+                graph_info["reason"] = "specLookup"
             if drafter is None:
-                for _ in range(max_new_tokens):
-                    token = _sample_token(logits[:, -1, :])
-                    if _emit(token):
-                        break
-                    logits, past_kv = model(token, past_kv, kv_mode=mode)
+                runner = ids_static = replay_logits = cursor = None
+                if want_graph:
+                    runner, ids_static, replay_logits, cursor = _graph_of(past_kv)
+                if runner is None:
+                    for _ in range(max_new_tokens):
+                        token = _sample_token(logits[:, -1, :])
+                        if _emit(token):
+                            break
+                        past_kv = _compact(past_kv)          # 滑窗（默认关 ⇒ 原样返回 ✓）
+                        logits, past_kv = _call(token, past_kv, abs_pos)
+                        abs_pos += 1
+                else:
+                    # —— 重放循环 ✓：与上面逐 token 版**同一步序** ✓（采样 → 落盘 → 前向 ✓），
+                    # 只是「前向」换成了 `把 token 抄进静态输入 + replay` ✓（launch 开销摊成一批 ✓）。
+                    # ⚠️ 第一拍采样只能吃 **prefill 的输出** ✗✗：``replay_logits`` 里那份是**捕获时那次
+                    # 前向**的产物 ✓ 而捕获用的 ``ids_static`` 是占位 0 ✓ ⇒ 拿它采样会吐一个**凭空来的**
+                    # 首词 ✓ 后面又自己「回到正轨」✓（本仓实测：真跑出来的词元流只错第 1 个 ✓ 不报错 ✗✗
+                    # 形状全对 ✓ —— 这类错连「跑得出来」都检验不到 ✓ 只有逐词元对拍才露头 ✓）。
+                    cur = logits
+                    wrote = 0
+                    for _ in range(max_new_tokens):
+                        token = _sample_token(cur[:, -1, :])
+                        if _emit(token):
+                            break
+                        ids_static.copy_(token.reshape(1, 1).to(ids_static.dtype))
+                        runner.replay()
+                        cur = replay_logits                 # 这一拍起才是图里那张静态输出 ✓
+                        wrote += 1
+                        cursor.advance(1)                   # 设备侧 ``+=1`` ✓ 不是 Python int ✓
+                    # ⚠️ 图里写的是**行**、没有动 ``length`` ✓（:meth:`KvBuf.write_at` 明写不改 ✓）⇒
+                    # 收尾必须补上 ✓✗ 否则 ``store()`` 只存进去 prefill 那一段 ✓ 前缀缓存少了一整段生成 ✓
+                    # 而**不报错** ✗✗（下次命中就接错位置 ✓）。
+                    if wrote:
+                        for key, val in past_kv:
+                            key.length = int(key.length) + wrote
+                            val.length = int(val.length) + wrote
+                    graph_info["replays"] = wrote
+                    abs_pos += wrote
             else:
                 # —— 投机主循环 ✓（``T == 1`` 时窗口就是 ``[t]`` ⇒ 与上面逐 token 版**逐位等价** ✓）——
                 past_len = int(past_kv[0][0].shape[2])
                 rounds = drafted = accepted = 0
+                draft_rounds = 0          # ⚠️ 「有草稿的轮」✓ 见回执 ``draftRounds`` 的注释 ✓
                 token = _sample_token(logits[:, -1, :])
                 while len(generated) < max_new_tokens:
                     if _emit(token):
@@ -1397,15 +2580,22 @@ def _build() -> dict[str, Any]:
                     draft = drafter.propose(spec_window)[:remain]
                     window = [tid] + draft
                     win = torch.tensor([window], device=ids.device, dtype=ids.dtype)
-                    win_logits, win_kv = model(win, past_kv, kv_mode=mode)
+                    past_kv = _compact(past_kv)          # 滑窗（默认关 ⇒ 原样返回 ✓）
+                    win_logits, win_kv = _call(win, past_kv, abs_pos)
                     rounds += 1
                     drafted += len(draft)
+                    if draft:
+                        draft_rounds += 1
                     # 接受判据：第 i 行的 argmax 就是「窗口第 i 行**之后**那个 token」✓ ⇒ 与 window[i+1] 比 ✓
+                    # ⚠️ 一次算**整排** argmax ＋ 一次 ``tolist()`` ✓（2026-11-08 ✓）：老写法每比一行就来一次
+                    # ``int(<0 维张量>)`` ✓ 而每次都是一个**全卡同步** ✓（窗口 8 个草稿＝最多 8 次同步 ✓，
+                    # 每轮都付 ✓）。⚠️ 逐行 argmax 与老写法**逐位相同** ✓（每行独立比大小、互不影响 ✓）。
                     a = 0
-                    while a < len(draft):
-                        if int(torch.argmax(win_logits[:, a, :], dim=-1)) != draft[a]:
-                            break
-                        a += 1
+                    if draft:
+                        picks = torch.argmax(win_logits[:, :len(draft), :], dim=-1)
+                        picks = picks.reshape(-1).tolist()
+                        while a < len(draft) and picks[a] == draft[a]:
+                            a += 1
                     accepted += a
                     stopped = False
                     for i in range(a):
@@ -1416,15 +2606,33 @@ def _build() -> dict[str, Any]:
                     # 回滚：窗口算了 ``1 + len(draft)`` 行 ✓ 只有 ``1 + a`` 行是真接受的 ✓。
                     # ⚠️ 上限压到「已产出总数」✓：stop 打断时 cache 不许比 ids 长 ✗（否则 store 存错配 ✗✗）。
                     keep = min(past_len + 1 + a, total + len(generated))
-                    past_kv = truncate_kv(win_kv, keep)
+                    # ⚠️ 用 :func:`rollback_kv` 而**不是** ``truncate_kv`` ✗✗：``win_kv`` 是本轮自己刚算出来
+                    # 的那份 ✓，缓冲档就地回拨长度即可 ✓（被拒的行下次原位覆盖 ✓ 与参考实现的
+                    # 「被拒的行从未写入」等价 ✓）；走 ``truncate_kv`` 会每轮**整段拷一遍** ✓✗（正是要省的）。
+                    # 前缀复用那处的 ``truncate_kv`` 不能换 ✗ —— 那里动的是别人存的 cache ✓（见函数说明 ✓）。
+                    past_kv = rollback_kv(win_kv, keep)
                     past_len = keep
+                    # 绝对位置跟着「真接受的行数」走 ✓（滑窗压缩后 ``past_len`` 不再等于它 ✓）
+                    abs_pos += 1 + a
                     if stopped:
                         break
                     # bonus / 被拒处的修正 ✓：第 a 行 logits 就是下一个 token 的依据 ✓（a == len(draft) 即 bonus ✓）
                     token = _sample_token(win_logits[:, a, :])
                 if spec_report is not None:
-                    spec_report.update(enabled=True, reason="greedy", window=spec_window,
-                                       rounds=rounds, drafted=drafted, accepted=accepted)
+                    # ⚠️ ``rounds`` 里含**草稿为空的轮** ✓（``propose`` 返回空列表时窗口就只有 1 个
+                    # token ✓ 这一拍等于白跟一次前向 ✓）—— 拿它当分母算「每轮接受数」会把命中率说低 ✓✗。
+                    # 所以另给 ``draftRounds``（有草稿的轮 ✓）与 ``acceptPerDraftRound`` ✓，
+                    # ``rounds`` 的语义**不动** ✓（老报表照旧可读 ✓）。
+                    spec_report.update(
+                        enabled=True, reason="greedy", window=spec_window,
+                        rounds=rounds, draftRounds=draft_rounds,
+                        drafted=drafted, accepted=accepted,
+                        acceptPerDraftRound=(round(accepted / draft_rounds, 4)
+                                             if draft_rounds else None))
+            # 图化回执 ✓：无论开/没开/被挡都交账 ✓（见 ``graph_info`` 抬头 ✓）；``replays=0`` 而
+            # ``enabled=True`` 意味着「捕了但一个词元都没重放」✓（首词就撞 stop ✓ 白捕一次 ✓ 别读成没开 ✓）。
+            if cuda_graph_report is not None:
+                cuda_graph_report.update(graph_info)
             out = torch.cat([ids] + generated, dim=1)
             if kv_cache is not None and getattr(kv_cache, "mode", mode) == mode:
                 # 存**整段**（提示词＋续写 ✓）而不是只存提示词：下一轮 agent 循环带回来的历史里
@@ -1440,17 +2648,43 @@ def _build() -> dict[str, Any]:
         # KV cache 量化（2026-11-08 ✓）：值 + scale 绑在 :class:`Q8Kv` 里 ✓ 不许只拿走一半 ✗
         "Q8Kv": Q8Kv, "quantize_kv": quantize_kv, "dequantize_kv": dequantize_kv,
         "materialize_kv": materialize_kv, "update_kv_cache": update_kv_cache,
+        # KV 定长缓冲（2026-11-08 ✓ ``fastPath=kvbuf`` ✓）：一块 ``KvBuf`` 就是「cap 行存储 + 已用长度」✓
+        # —— ⚠️ ``rollback_kv``（就地回拨 ✓ 投机用 ✓）与 ``truncate_kv``（独立副本 ✓ 前缀复用用 ✓）**不许互换** ✗✗
+        "KvBuf": KvBuf, "rollback_kv": rollback_kv, "KV_BUFFER_MIN_ROWS": KV_BUFFER_MIN_ROWS,
+        # 图化单步（2026-11-08 ✓ ``cudaGraph`` ✓）：**KvSpan**（读满桶 ＋ 设备侧长度 ✓ 加性掩码 ✓）与
+        # **RopeTable**（按设备下标查相位 ✓）是一对 ✗ —— 只给其中一个 ⇒ 图里还剩一个 Python 标量 ✗✗
+        # （长度或位置被烘成常量 ⇒ 重放出来「形状对、内容错」✓ 且不报错 ✗）。``span_attention`` 与
+        # ``sdpa_mask_gqa_ok`` 同理成对（前者靠后者决定展开还是走 SDPA ✓，捕获途中撞 TypeError 会毁图 ✗）。
+        "KvSpan": KvSpan, "RopeTable": RopeTable, "span_attention": span_attention,
+        "sdpa_mask_gqa_ok": sdpa_mask_gqa_ok, "resolve_cuda_graph": resolve_cuda_graph,
+        # ⚠️ ``auto`` 档的三档归一与回本线要**成对**给 ✗✗：只给 ``resolve_cuda_graph``（bool）⇒ 又把
+        # 「该开则开」压回「开」✓，回执也就分不出「被 auto 跳过」与「压根没要求」✓✗
+        "resolve_cuda_graph_policy": resolve_cuda_graph_policy,
+        "CUDA_GRAPH_AUTO_MIN_TOKENS": CUDA_GRAPH_AUTO_MIN_TOKENS,
         # 跨调用前缀复用（2026-11-08 ✓）：裁段与常驻 cache 是**一对** ✓（只给 cache 不给 truncate ⇒
         # 「多留一个 token」的错位会静默发生 ✗✗）
         "truncate_kv": truncate_kv, "KvPrefixCache": KvPrefixCache,
+        # 低显存两件（2026-11-08 ✓）：``compact_kv`` ＝ 滑窗压缩（头 sink ＋ 尾窗口 ✓ **有损** ✓）、
+        # ``kv_room_tokens`` ＝ 「这块卡还放得下多少 token」（纯算术 ✓ 装载前也能问 ✓）。
+        # ⚠️ 压缩后 ``cache 行数 ≠ 历史长度`` ⇒ 位置必须走 ``position_offset`` ✗✗（跟着行数走会整体相位跳 ✓✗）
+        "compact_kv": compact_kv, "kv_room_tokens": kv_room_tokens,
+        "KV_SINK_DEFAULT": KV_SINK_DEFAULT,
+        "KV_ACTIVATION_RESERVE_BYTES": KV_ACTIVATION_RESERVE_BYTES,
         # 投机解码草稿源（2026-11-08 ✓）：零权重后缀查表 ✓ 与 ``truncate_kv`` 成对用 ✓
         # （草稿器单独拿出来没意义 ✗ —— 窗口前向 ＋ 接受前缀 ＋ 回滚三件缺一不可 ✓）
         "LookupDrafter": LookupDrafter,
         # 旋钮归一（2026-11-08 ✓）：三个口子（普通／流式／agent）必须共用 ✗ 各抄一遍必漂移 ✗
+        "resolve_kv_window": resolve_kv_window, "resolve_kv_sink": resolve_kv_sink,
         "resolve_spec_lookup": resolve_spec_lookup,
         "resolve_spec_window": resolve_spec_window,
         "resolve_spec_min_match": resolve_spec_min_match,
         "SPEC_WINDOW": SPEC_WINDOW, "SPEC_MIN_MATCH": SPEC_MIN_MATCH,
+        # 快路径（2026-11-08 ✓）：折叠 RoPE ＋ 三个档位 ✓。⚠️ ``fold_rope``/``apply_rope_wide``
+        # 与老 ``apply_rope`` **逐位相同** ✓（无开关 ✓）；``norm``/``attn`` **改数值** ✓、
+        # ``kvbuf`` 只改存储布局（目标逐位相同 ✓ 但仍默认关 ✓）⇒ 三者都默认关 ✓。
+        "fold_rope": fold_rope, "apply_rope_wide": apply_rope_wide,
+        "sdpa_attention": sdpa_attention, "resolve_fast_path": resolve_fast_path,
+        "FAST_PATH_ITEMS": FAST_PATH_ITEMS, "fused_norm_available": fused_norm_available,
     }
     return _PRIMITIVES
 

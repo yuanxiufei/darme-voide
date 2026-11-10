@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.engine import Connection
@@ -161,7 +163,7 @@ async def generate_text(
 #: ⚠️ ``kv_mode`` 同一类坑 ✗✗（2026-11-08）：它不改权重落点、但改**每 token 的 KV 字节** ✓ ⇒ 不进 key
 #: 时把 ``kvMode`` 从 ``off`` 改成 ``q8`` 仍拿到老后端 ✓，显存数字与速度**一动不动**、回执还报 ``fp`` ✓✗
 #: （这属于「配了没生效看不出来」✗）。
-_engine_backends: dict[tuple[str, str | None, str, str, str, str], Any] = {}
+_engine_backends: dict[tuple[str, str | None, str, str, str, str, str, str, str, str, str], Any] = {}
 
 
 def _engine_backend_key(gguf_path: str, tokenizer_path: str | None, *,
@@ -169,7 +171,11 @@ def _engine_backend_key(gguf_path: str, tokenizer_path: str | None, *,
                         gpu_layers: Any = None, kv_mode: Any = None,
                         kv_cache_bytes: Any = None, spec_lookup: Any = None,
                         spec_window: Any = None, spec_min_match: Any = None,
-                        ) -> tuple[str, str | None, str, str, str, str, str, str, str, str]:
+                        fast_path: Any = None,
+                        kv_window: Any = None, kv_sink: Any = None,
+                        cuda_graph: Any = None,
+                        ) -> tuple[str, str | None, str, str, str, str, str, str, str, str, str,
+                                 str, str, str]:
     """缓存键口径 ✓（**单一真源** ✗：键在哪拼、就等于哪些参数参与复用 ✓）。
 
     ⚠️ 单列成函数是为了「能被判据直接读」✗✗：键拼在 ``_get_engine_backend`` 体内时，
@@ -208,15 +214,49 @@ def _engine_backend_key(gguf_path: str, tokenizer_path: str | None, *,
         match_slot = str(llm_mod.resolve_spec_min_match(spec_min_match)) if spec_slot else ""
     except Exception:  # noqa: BLE001
         match_slot = "" if spec_min_match is None else str(spec_min_match).strip().lower()
+    # ⚠️ ``fastPath`` 同样进 key ✗✗（2026-11-08 补）：它存在**后端实例**上 ✓ ⇒ 不进 key 时把
+    # ``fastPath`` 从 off 改成 all 仍拿到老后端 ✓，回执报「关」✓ 而配置写着 all ✓✗（同一个坑的第四例）。
+    # 关着＝**空串** ✓（与「没写」同格 ✓ 不额外装一份权重 ✓）；拼错原样留一格 ✓ 交由 load() 具名拒 ✓。
+    try:
+        fast_slot = "+".join(sorted(llm_mod.resolve_fast_path(fast_path)))
+    except Exception:  # noqa: BLE001 —— 拼错原样留一格 ✓ 拒绝交给 load() ✗
+        fast_slot = "" if fast_path is None else str(fast_path).strip().lower()
+    # ⚠️ KV 滑窗也进 key ✗✗（2026-11-08 补）：它挂在**后端实例**上 ✓（改 KV 缓冲的预算口径 ✓）⇒
+    # 不进 key 时把 ``kvWindow`` 从 off 改成 1024 仍拿到老后端 ✓，回执照旧报「关」✓ 而配置写着 1024 ✓✗
+    # （与本文件里 ``kvMode``/``kvCacheBytes``/``specLookup``/``fastPath`` 同一个坑的第五例 ✓）。
+    # 关着＝**空串** ✓（``None`` 与 ``0``/``off`` 同格 ✓ 不额外装一份权重 ✓）；拼错原样留一格 ✓。
+    try:
+        win_slot = str(llm_mod.resolve_kv_window(kv_window))
+    except Exception:  # noqa: BLE001
+        win_slot = "" if kv_window is None else str(kv_window).strip().lower()
+    if win_slot == "0":        # 关＝与「没写」同格 ✓（否则同一份权重会装两遍 ✗✗）
+        win_slot = ""
+    try:
+        sink_slot = str(llm_mod.resolve_kv_sink(kv_sink)) if win_slot else ""
+    except Exception:  # noqa: BLE001
+        sink_slot = "" if kv_sink is None else str(kv_sink).strip().lower()
+    # ⚠️ 图化开关也进 key ✗✗（2026-11-08 补，同一个坑的第六例 ✓）：它挂在**后端实例**上 ✓ ⇒ 不进 key
+    # 时把 ``cudaGraph`` 从 off 改成 on 仍拿到老后端 ✓ 回执照旧报「关」✓ 而配置写着 on ✓✗（那次还更贵：
+    # 图根本没捕 ✓ 但人以为在省 launch ✓ 会去查权重/驱动 ✓ 方向全错 ✗）。关着＝**空串** ✓ 拼错原样留一格 ✓。
+    # ⚠️ 用**三档原文**（2026-11-09 补）✗ 别压成 bool ✗✗：``on`` 与 ``auto`` 是**两个后端实例** ✓
+    # （后者短生成主动不捕 ✓）⇒ 压成同一个格子会让 off→auto→on 之间来回切时永远拿到第一个后端 ✓，
+    # 回执跟着报旧档 ✓ 而配置写着新档 ✓✗（与本函数注释里那五例同一个病根：挂在实例上的东西不进 key）。
+    try:
+        graph_slot = llm_mod.resolve_cuda_graph_policy(cuda_graph)
+        graph_slot = "" if graph_slot == "off" else graph_slot
+    except Exception:  # noqa: BLE001 —— 拼错原样留一格 ✓ 拒绝交给 load() ✗
+        graph_slot = "" if cuda_graph is None else str(cuda_graph).strip().lower()
     return (gguf_path, tokenizer_path, device or "auto", dtype or "", gpu_slot, kv_slot, cache_slot,
-            spec_slot, window_slot, match_slot)
+            spec_slot, window_slot, match_slot, fast_slot, win_slot, sink_slot, graph_slot)
 
 
 def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
                         device: str = "auto", dtype: str | None = None,
                         gpu_layers: Any = None, kv_mode: Any = None,
                         kv_cache_bytes: Any = None, spec_lookup: Any = None,
-                        spec_window: Any = None, spec_min_match: Any = None) -> Any:
+                        spec_window: Any = None, spec_min_match: Any = None,
+                        fast_path: Any = None, kv_window: Any = None,
+                        kv_sink: Any = None, cuda_graph: Any = None) -> Any:
     """自研文本后端（缓存 + 幂等 load ✓）。
 
     ``gpu_layers`` ✓（2026-11-08）：``None``/``"off"`` = 不分层（老路径 ✓）；``0`` = 全 CPU；
@@ -233,7 +273,9 @@ def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
     key = _engine_backend_key(gguf_path, tokenizer_path, device=device, dtype=dtype,
                               gpu_layers=gpu_layers, kv_mode=kv_mode,
                               kv_cache_bytes=kv_cache_bytes, spec_lookup=spec_lookup,
-                              spec_window=spec_window, spec_min_match=spec_min_match)
+                              spec_window=spec_window, spec_min_match=spec_min_match,
+                              fast_path=fast_path, kv_window=kv_window, kv_sink=kv_sink,
+                              cuda_graph=cuda_graph)
     backend = _engine_backends.get(key)
     if backend is not None:
         return backend
@@ -245,7 +287,9 @@ def _get_engine_backend(gguf_path: str, tokenizer_path: str | None, *,
                                      device=device, dtype=dtype, gpu_layers=gpu_layers,
                                      kv_mode=kv_mode, kv_cache_bytes=kv_cache_bytes,
                                      spec_lookup=spec_lookup, spec_window=spec_window,
-                                     spec_min_match=spec_min_match)
+                                     spec_min_match=spec_min_match, fast_path=fast_path,
+                                     kv_window=kv_window, kv_sink=kv_sink,
+                                     cuda_graph=cuda_graph)
     backend.load()
     _engine_backends[key] = backend
     return backend
@@ -332,6 +376,75 @@ def engine_spec_kwargs(settings: dict[str, Any] | None) -> dict[str, Any]:
             "spec_min_match": engine_spec_min_match(settings)}
 
 
+def engine_fast_path(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**快路径档位** ✓（2026-11-08 补）。
+
+    键：``fastPath``／``fast_path`` ✓ —— ``off``（默认 ✓）/ ``norm`` / ``attn`` / ``kvbuf`` / ``all`` ✓，
+    可组合写 ``norm,attn`` ✓。不写 ⇒ 返回 ``None`` ⇒ 由 ``llm.resolve_fast_path`` 当**关** ✓
+    （默认关＝老路径**逐位不变** ✓：``norm``/``attn`` 改数值 ✗✗、``kvbuf`` 改 KV 存储布局 ✓ ——
+    见 ``llm.FAST_PATH_ITEMS`` 的注释 ✓）。
+
+    ⚠️ 这里**只搬值** ✗ 不判合法 ✗：归一与拼错拒绝都在后端 ``load()``（**装权重之前** ✓）。
+    在这里悄悄当 off ⇒ 「配了没生效看不出来」✓✗（本仓这条坑已栽过四回 ✓：``kvMode``／
+    ``kvCacheBytes``／``specLookup``／本条 ✓）。
+    """
+    if not settings:
+        return None
+    value = settings.get("fastPath")
+    if value is None:
+        value = settings.get("fast_path")
+    return value
+
+
+def engine_fast_kwargs(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """快路径的生成参数**一把**给 ✓（与 :func:`engine_spec_kwargs` 同一条纪律 ✓ 免得漏抄 ✗）。
+
+    ⚠️ 三个调用口（普通生成／流式／agent 工具循环）**都要**展开这一份 ✗✗ —— 只给一条路开 ⇒
+    同一后端被两条路用着、一条走融合核一条走老式 ✓ 而回执只有一份 ✓（看不出是哪条在跑 ✗）。
+    """
+    return {"fast_path": engine_fast_path(settings)}
+
+
+def engine_kv_window(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读 **KV 滑窗窗口** ✓（``kvWindow``／``kv_window`` ✓ 2026-11-08 补）。
+
+    ⚠️ 这是**低显存最后一道闸** ✗✗：``kvMode=q8`` 只把每行字节砍半 ✓（2048 行仍需 144 MiB ✓），
+    而滑窗把**行数**钉死 ✓ —— 32K 上下文在 8 GiB 卡上唯一跑得通的组合是
+    ``kvMode=q8 ＋ kvWindow=1024`` ✓（有损 ✓ 见 :func:`engine_kv_window_kwargs` 的说明）。
+    ⚠️ 这里**只搬值** ✗ 不判合法 ✗：归一见 ``llm.resolve_kv_window`` ✓、拒绝在 ``load()`` 装权重之前 ✓。
+    """
+    if not settings:
+        return None
+    value = settings.get("kvWindow")
+    if value is None:
+        value = settings.get("kv_window")
+    return value
+
+
+def engine_kv_sink(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读**滑窗 sink 行数** ✓（``kvSink``／``kv_sink`` ✓）。
+
+    不写 ⇒ ``None`` ⇒ ``llm.resolve_kv_sink`` 用默认 ``KV_SINK_DEFAULT=4`` ✓
+    （StreamingLLM 的读数：留 4 行就能把困惑度压回来 ✓ 给 8 更稳 ✓）。
+    """
+    if not settings:
+        return None
+    value = settings.get("kvSink")
+    if value is None:
+        value = settings.get("kv_sink")
+    return value
+
+
+def engine_kv_window_kwargs(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """滑窗两个口**一把**给 ✓（三个调用口 ``**engine_kv_window_kwargs(settings)`` ✓ 免得漏抄 ✗）。
+
+    ⚠️ 两个都写出来（哪怕是 ``None`` ✓）不算多余 ✗：``None`` 交给归一当默认值 ✓，
+    而漏抄一个键会让那条路拿到**默认窗口 0** ✓✗（同一后端被三条路用着、只有两条开了滑窗 ✓
+    —— 症状是「流式还是 32K 全留 ⇒ 第三条路照样 OOM」✓ 而回执只有一份 ✓✗）。
+    """
+    return {"kv_window": engine_kv_window(settings), "kv_sink": engine_kv_sink(settings)}
+
+
 def engine_kv_cache_bytes(settings: dict[str, Any] | None) -> Any:
     """从文本服务 ``settings`` 读**跨调用 KV 前缀复用**的预算 ✓（2026-11-08 补）。
 
@@ -359,6 +472,190 @@ def engine_kv_cache_bytes(settings: dict[str, Any] | None) -> Any:
     return value
 
 
+def engine_cuda_graph(settings: dict[str, Any] | None) -> Any:
+    """从文本服务 ``settings`` 读 **CUDA Graph 开关** ✓（``cudaGraph``／``cuda_graph`` ✓ 2026-11-08 补）。
+
+    写 ``on`` 才开 ✓ —— **默认关** ✗✗，而且不是「忘了开」：图化把 ``-inf`` 掩码加在**桶容量**上 ✓
+    ⇒ softmax 的归约长度从 ``used+1`` 变成 ``cap`` ✓ ⇒ 与老路**不逐位相同** ✓（``exp(-inf)=0`` 精确 ✓
+    但浮点加法不结合 ✓）。本仓「默认路径逐位不变」是硬口径 ⇒ 只有显式开才换 ✓。
+
+    ⚠️ 这里**只搬值** ✗ 不判合法 ✗：归一见 ``llm.resolve_cuda_graph`` ✓、拼错（``grpah``）在
+    ``load()`` 装权重之前具名拒 ✓ —— 静默当关就是「人以为在跑图、其实每步还在发几千次 launch」✗✗
+    （同一族的坑本仓已栽过五回 ✓：``kvMode``／``kvCacheBytes``／``specLookup``／``fastPath``／``kvWindow`` ✓）。
+    """
+    if not settings:
+        return None
+    value = settings.get("cudaGraph")
+    if value is None:
+        value = settings.get("cuda_graph")
+    return value
+
+
+def engine_graph_kwargs(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """图化开关**一把**给 ✓（三个调用口 ＋ 后端装载都从这里取值 ✓ 免得漏抄 ✗）。
+
+    ⚠️ 三个生成口（普通生成／流式／agent 工具循环）**都要**展开这一份 ✗✗ —— 只给一条路开 ⇒
+    同一后端被两条路用着、一条重放一条逐步 launch ✓ 而回执只有一份 ✓（看不出是哪条在跑 ✗）。
+    """
+    return {"cuda_graph": engine_cuda_graph(settings)}
+
+
+def _norm_weight_path(value: Any) -> str:
+    """权重路径归一（只用于**比较** ✓）—— Windows 大小写不敏感、正/反斜杠混写 ✓ ⇒ 一律
+    ``normcase(abspath)`` ✓；拿不到就原样返回 ✓（宁可判「不一致」✗ 也不许假判「一致」✓✗）。"""
+    try:
+        return os.path.normcase(os.path.abspath(str(value)))
+    except Exception:  # noqa: BLE001 —— 归一只为比较 ✗ 不该抛 ✗
+        return str(value)
+
+
+def engine_llm_status(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """自研文本后端的**只读回执面** ✓（2026-11-08 补：配了档位的人靠它判断「生效了没」✓）。
+
+    三条纪律，每条都对着一个已发生过的坑：
+
+    1. **只读不装** ✗✗：一个 HTTP 探活把 8 GiB 权重装进卡、还占 20 秒 —— 那是 GET 能造成的
+       最坏副作用 ✓。本函数只读 ``_engine_backends`` 现值 ✓（装载只由生成路径触发 ✓）。
+    2. **请求 ≠ 生效** ✗✗：``kvWindow``/``kvMode``/``gpuLayers`` 写进 settings 只是**请求** ✓；
+       缓存键按档位分格 ⇒ 下次调用装的是**另一个**后端 ✓，已装的那个 ``kvWindow.enabled``
+       仍是旧值 ✓。回执把两侧并排（``requested`` / ``backends``）并给出 ``matches`` ✓✗ ——
+       否则「改完配置看着没变」只能靠猜 ✓。
+    3. **同权重多档位各占一份显存** ✗✗：4B Q4_K_M 物化成 bf16 ≈ 8 GiB ✓，切一次档就多装一份，
+       旧后端不会自己退 ✓。``duplicates`` 如实报出来 ✓（**不主动 release** ✗：可能还有调用在
+       用它，退了就是当场炸 ✓）。
+
+    ``matches`` 只判 ``kvMode``／``kvWindow``／``cudaGraph`` 三格 ✓——它们是**纯函数归一**、可判读 ✓；
+    ``gpuLayers`` 的实际层数依赖装载那一刻的显存（``auto`` ✓），只报不判 ✗（判了就是假绿 ✓✗）。
+    ``cudaGraph`` 那格 2026-11-08 补入 ✓：它和 ``fastPath`` 一样挂在**后端实例**上 ✓，不判就会
+    「配置写着 on、已装后端报 off」✓ 而症状是「速度一点没变」✓✗（人会去查驱动/权重 ✓ 方向全错 ✗）。
+    """
+    from .engine import llm as llm_mod  # noqa: PLC0415 —— 延迟 import ✓（与 _engine_backend_key 同口径 ✓）
+
+    loaded: list[dict[str, Any]] = []
+    for key, backend in list(_engine_backends.items()):
+        try:
+            desc = backend.describe()
+        except Exception as err:  # noqa: BLE001 —— 一个后端报错不该砸掉整张表 ✗
+            loaded.append({"path": str(key[0]), "error": f"{type(err).__name__}: {err}"})
+            continue
+        layers = desc.get("layers") or {}
+        kv_win = desc.get("kvWindow") or {}
+        loaded.append({
+            "path": desc.get("ggufPath") or str(key[0]),
+            "device": desc.get("device") or "",
+            "dtype": desc.get("dtype") or "",
+            "gpuLayersRequested": desc.get("gpuLayersRequested"),
+            "gpuLayers": layers.get("gpuLayers"),
+            "cpuLayers": layers.get("cpuLayers"),
+            "layerBytes": layers.get("layerBytes"),
+            "layerNote": layers.get("why"),
+            "kvMode": (desc.get("kv") or {}).get("mode"),
+            "kvModeRequested": desc.get("kvModeRequested"),
+            "kvWindow": kv_win,
+            "kvBudget": desc.get("kvBudget"),
+            "kvCache": desc.get("kvCache"),
+            "fastPath": desc.get("fastPath"),
+            #: ⭐ 图化 decode 单步 ✓（2026-11-08 补）：``enabled`` ＝这后端**开没开** ✓，
+            #: ``last`` ＝**上一次真实生成**捕没捕到、重放了几步 ✓（``None`` ＝还没生成过 ✗ ≠ 没开 ✓）。
+            "cudaGraph": desc.get("cudaGraph"),
+            "spec": desc.get("spec"),
+            "loadError": desc.get("loadError") or "",
+            "_slot": f"{desc.get('device') or '?'}·{desc.get('kvModeRequested') or 'off'}"
+                     f"·win{int(kv_win.get('window') or 0)}·gpu{desc.get('gpuLayersRequested')}",
+        })
+
+    requested: dict[str, Any] | None = None
+    matches: bool | None = None
+    mismatch: list[str] = []
+    errors: dict[str, str] = {}
+    path = None
+    if settings:
+        path = settings.get("ggufPath") or settings.get("gguf_path")
+    if path:
+        requested = {
+            "ggufPath": str(path),
+            "device": str(settings.get("device") or "auto") if settings else "auto",
+            "dtype": (settings or {}).get("dtype"),
+            "gpuLayers": engine_gpu_layers(settings),
+            "kvMode": engine_kv_mode(settings),
+            "kvWindow": engine_kv_window(settings),
+            "kvSink": engine_kv_sink(settings),
+            "kvCacheBytes": engine_kv_cache_bytes(settings),
+            "fastPath": engine_fast_path(settings),
+            "specLookup": engine_spec_lookup(settings),
+            "cudaGraph": engine_cuda_graph(settings),
+        }
+        want_mode = "fp"
+        try:
+            want_mode = llm_mod.resolve_kv_mode(requested["kvMode"])
+        except Exception as err:  # noqa: BLE001 —— 拼错只标注 ✗ 不抛 ✗（装载时才具名拒 ✓）
+            errors["kvMode"] = str(err)
+        want_window = 0
+        try:
+            want_window = llm_mod.resolve_kv_window(requested["kvWindow"])
+        except Exception as err:  # noqa: BLE001
+            errors["kvWindow"] = str(err)
+        target = _norm_weight_path(path)
+        hit = next((item for item in loaded
+                    if "error" not in item
+                    and _norm_weight_path(item.get("path")) == target), None)
+        if hit is None:
+            matches, mismatch = False, ["loaded"]
+        else:
+            if "kvMode" not in errors and hit.get("kvMode") != want_mode:
+                mismatch.append("kvMode")
+            got_window = int((hit.get("kvWindow") or {}).get("window") or 0)
+            if "kvWindow" not in errors and got_window != want_window:
+                mismatch.append("kvWindow")
+            # 图化档也判 ✓（与 kvMode/kvWindow 同为**纯函数归一** ✓ 可判读 ✗ 不像 gpuLayers 依赖装载那刻的显存 ✓）：
+            # 这一格尤其不能不判 ✗✗ —— 「配置写着 on、已装后端报 off」的症状是**速度一点没变** ✓
+            # 人会去查驱动/权重 ✓ 方向全错 ✓（本仓栽过五次的那类坑 ✓ 这是第六格 ✓）。
+            want_graph = False
+            try:
+                want_graph = llm_mod.resolve_cuda_graph(requested["cudaGraph"])
+            except Exception as err:  # noqa: BLE001 —— 拼错只标注 ✗ 不抛 ✗（装载时才具名拒 ✓）
+                errors["cudaGraph"] = str(err)
+            got_graph = bool((hit.get("cudaGraph") or {}).get("enabled"))
+            if "cudaGraph" not in errors and got_graph != want_graph:
+                mismatch.append("cudaGraph")
+            matches = not mismatch
+
+    groups: dict[str, list[str]] = {}
+    for item in loaded:
+        groups.setdefault(_norm_weight_path(item.get("path")), []).append(
+            str(item.get("_slot") or "?"))
+    duplicates = {Path(p).name if p else "?": slots
+                  for p, slots in groups.items() if len(slots) > 1}
+    for item in loaded:
+        item.pop("_slot", None)
+
+    if not loaded:
+        note = ("还没装载 ✓（装载只由生成路径触发 ✓ 本接口**不装** ✗）；"
+                "配好的档位在 ``requested`` 里 ✓")
+    elif duplicates:
+        note = (f"卡上已有 {sum(len(s) for s in duplicates.values())} 份同权重后端 ✗✗ "
+                f"（{duplicates}）—— 切档不会自己退旧的 ✓，重启进程才回收 ✓")
+    elif matches is False and mismatch == ["loaded"]:
+        note = "请求的档位还没装载 ✓ ⇒ 下次生成会按它装一个新后端 ✓（不是静默沿用旧的 ✓）"
+    elif matches is False:
+        note = (f"已装后端与当前 settings 不一致 ✗（{'、'.join(mismatch)}）"
+                f"⇒ 生成时按新档位另装一份 ✓（旧的留在卡上 ✓ 见 duplicates ✗）")
+    elif matches is True:
+        note = "已装后端与当前 settings 一致 ✓"
+    else:
+        note = "没有配置 ggufPath ⇒ 不判「请求 vs 生效」✓"
+    return {
+        "loadedCount": len(loaded),
+        "backends": loaded,
+        "requested": requested,
+        "matches": matches,
+        "mismatch": mismatch,
+        "errors": errors,
+        "duplicates": duplicates,
+        "note": note,
+    }
+
+
 async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
                                options: dict[str, Any]) -> str:
     """provider=engine ⇒ 走**自研文本后端**（进程内推理 ✓ 不 HTTP 调 ollama ✗）。
@@ -378,7 +675,10 @@ async def _generate_with_engine(config: dict[str, Any], user_prompt: str,
                                   gpu_layers=engine_gpu_layers(settings),
                                   kv_mode=engine_kv_mode(settings),
                                   kv_cache_bytes=engine_kv_cache_bytes(settings),
-                                  **engine_spec_kwargs(settings))
+                                  **engine_spec_kwargs(settings),
+                                  **engine_fast_kwargs(settings),
+                                  **engine_graph_kwargs(settings),
+                                  **engine_kv_window_kwargs(settings))
     return await asyncio.to_thread(
         backend.generate, user_prompt,
         system=options.get("system"),
@@ -414,8 +714,14 @@ def validate_json_schema(value: Any, schema: Any, path: str = "$") -> list[str]:
     """按**子集** schema 校验 ✓ → 问题列表（空 = 通过 ✓）。
 
     支持：``type`` / ``required`` / ``properties`` / ``items`` / ``enum`` /
-    ``minItems`` / ``maxItems`` / ``minLength`` / ``maxLength`` ✓。
+    ``minItems`` / ``maxItems`` / ``minLength`` / ``maxLength`` /
+    ``minimum`` / ``maximum`` ✓。
     **不支持的关键字安静放过** ✓（不假装校验过 ✗ 也不因此判错 ✗）。
+
+    ``minimum`` / ``maximum``（2026-11-10 补）：LLM 判分的 schema 里 ``score`` 有
+    ``0..1`` 的界 ✓，不校验界就等于「5 分也收」✗ —— 而 5 分与 0 分在优化器里是
+    完全相反的结论。只对 ``number``/``integer`` 生效，且**排除 ``bool``**
+    （``True`` 是 ``int`` 的子类，不排除会让 ``minimum: 1`` 把 ``True`` 当 1 ✓✗）。
     """
     if not isinstance(schema, dict) or not schema:
         return []
@@ -452,6 +758,13 @@ def validate_json_schema(value: Any, schema: Any, path: str = "$") -> list[str]:
         max_items = schema.get("maxItems")
         if isinstance(max_items, int) and len(value) > max_items:
             problems.append(f"{path} 最多 {max_items} 项，实际 {len(value)}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            problems.append(f"{path} 应 >= {minimum}，实际 {value}")
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            problems.append(f"{path} 应 <= {maximum}，实际 {value}")
     if isinstance(value, str):
         min_len = schema.get("minLength")
         if isinstance(min_len, int) and len(value) < min_len:

@@ -43,7 +43,7 @@ visual.deepstack_merger_list.{0,1,2}.norm.weight [4608] BF16 ⇒ **post**-shuffl
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 __all__ = ["VISION_32B", "infer_shape", "pixel_mean_std", "rotation_kind", "build_vision_tower"]
 
@@ -77,8 +77,15 @@ def rotation_kind() -> str:
     return "2d-rotary"
 
 
-def infer_shape(shapes: dict[str, tuple[int, ...]]) -> dict[str, Any]:
-    """从**权重形状**反推尺子 ✓（不信常量、只信盘上 ✓）。只认 ``visual.`` 前缀 ✓。"""
+def infer_shape(shapes: dict[str, tuple[int, ...]],
+                packed_stems: Iterable[str] = ()) -> dict[str, Any]:
+    """从**权重形状**反推尺子 ✓（不信常量、只信盘上 ✓）。只认 ``visual.`` 前缀 ✓。
+
+    ``packed_stems``：每字节两个元素的打包层（名字不带 ``.weight`` ✓）—— 只有 ``merger.linear_fc1``
+    的**列数**参与反推 ✓（``unit = 列宽 / hidden`` ✓ 打包时列宽是逻辑宽度的一半 ✓✗ ⇒ 不 ×2 会把
+    ``spatial_merge_size`` 从 2 算成"取整数平方根失败"、静默退回常量 ✓✗）。
+    """
+    packed = {str(name) + ".weight" for name in packed_stems}
     shape = dict(VISION_32B)
     proj = shapes.get("visual.patch_embed.proj.weight")
     if proj is not None and len(proj) == 5:
@@ -96,7 +103,10 @@ def infer_shape(shapes: dict[str, tuple[int, ...]]) -> dict[str, Any]:
     merge = shapes.get("visual.merger.linear_fc1.weight")
     if merge is not None and len(merge) == 2:
         # ⚠️ merge 尺寸只能**除回来** ✓（写死 4 换个档就静默错 ✗）
-        unit = int(merge[1]) // max(int(shape["hidden_size"]), 1)
+        merge_in = int(merge[1])
+        if "visual.merger.linear_fc1.weight" in packed:
+            merge_in *= 2
+        unit = merge_in // max(int(shape["hidden_size"]), 1)
         root = int(round(max(unit, 0) ** 0.5))
         if root > 0 and root * root == unit:
             shape["spatial_merge_size"] = root

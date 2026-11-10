@@ -334,6 +334,134 @@ def main() -> int:  # noqa: C901
         )),
     )
 
+    # ================= ⑯ engine_llm_status（只读回执面 ✓）=================
+    # 为什么值得单独测：这条口的**全部价值**在「请求 ≠ 生效」的判读 ✓✗ ——
+    # 判据写松（比如只断言「有 backends 字段」）会全绿而缺陷照旧 ✗；
+    # 下面每条都盯一个具体的错判方向 ✓。
+
+    class _FakeBackend:  # noqa: D401 —— 只给 describe() ✓ 不碰张量 ✓
+        def __init__(self, path: str, *, device: str = "cuda:0", kv_mode: str = "fp",
+                     window: int = 0, sink: int = 4, graph: bool = False) -> None:
+            self.path, self.device, self.kv_mode = path, device, kv_mode
+            self.window, self.sink, self.graph = window, sink, graph
+
+        def describe(self) -> dict:
+            return {
+                "ggufPath": self.path, "device": self.device, "dtype": "bfloat16",
+                "gpuLayersRequested": "off", "layers": None,
+                "kv": {"mode": self.kv_mode}, "kvModeRequested": self.kv_mode,
+                "kvWindow": {"enabled": bool(self.window), "window": self.window,
+                             "sink": self.sink},
+                "kvBudget": None, "kvCache": {"enabled": False},
+                "fastPath": {"norm": True}, "spec": {"enabled": False}, "loadError": "",
+                "cudaGraph": {"requested": "on" if self.graph else "off",
+                              "enabled": self.graph, "last": None},
+            }
+
+    _saved = dict(tg._engine_backends)
+    try:
+        tg._engine_backends.clear()
+        idle = tg.engine_llm_status({"ggufPath": "/m.gguf"})
+        check("⑯¹ 空缓存 ⇒ loadedCount=0 ✓ 且**不装**（backends 空 ✓ 不抛 ✓）；"
+              "请求了 ggufPath 但没装载 ⇒ matches=False 且 mismatch=['loaded'] ✓"
+              "（报成 True 就会让人以为「已按新档位在跑」✗✗）",
+              idle["loadedCount"] == 0 and idle["backends"] == []
+              and idle["matches"] is False and idle["mismatch"] == ["loaded"]
+              and "不装" in idle["note"], idle)
+
+        tg._engine_backends[("/m.gguf", None, "auto")] = _FakeBackend("/m.gguf")
+        same = tg.engine_llm_status({"ggufPath": "/m.gguf"})
+        check("⑯² 请求档位与已装一致 ⇒ matches=True ✓（窗口都没开 ✓ 口径 fp ✓）",
+              same["loadedCount"] == 1 and same["matches"] is True
+              and same["mismatch"] == [] and same["duplicates"] == {}, same)
+
+        drift = tg.engine_llm_status({"ggufPath": "/m.gguf", "kvWindow": 1024})
+        check("⑯³ ⭐ 请求 kvWindow=1024、已装是 0 ⇒ matches=False 且 mismatch 精确点名 "
+              "``kvWindow`` ✓（这正是「改完配置显存一动不动」的那一格 ✗✗：判据不能只说 "
+              "「不一致」，要指出**哪个键**不一致 ✓）",
+              drift["matches"] is False and drift["mismatch"] == ["kvWindow"]
+              and "生成时按新档位另装一份" in drift["note"], drift)
+
+        bad = tg.engine_llm_status({"ggufPath": "/m.gguf", "kvMode": "q9"})
+        check("⑯⁴ 请求 kvMode 拼错 ⇒ 记进 errors ✓ 且**不**把它算进 mismatch ✗"
+              "（拼错时「已装 fp」并不构成「不一致」✓ —— 算进去就是拿错误本身当理由 ✓✗）",
+              "kvMode" in bad["errors"] and "kvMode" not in bad["mismatch"], bad)
+
+        tg._engine_backends[("/m.gguf", None, "auto", "bfloat16", "off", "q8")] = \
+            _FakeBackend("/m.gguf", kv_mode="q8", window=1024)
+        dup = tg.engine_llm_status({"ggufPath": "/m.gguf"})
+        check("⑯⁵ ⭐⭐ 同权重两份后端（切过档 ✓）⇒ duplicates 报出该文件 ✓ 且 note 点明"
+              "「重启进程才回收」✓ —— 4B Q4_K_M 物化 bf16 ≈ 8 GiB，切一次档就多占一份 ✗✗；"
+              "此项**只报不动手** ✓（还有调用在用旧后端，release 就是当场炸 ✗）",
+              dup["loadedCount"] == 2 and "m.gguf" in dup["duplicates"]
+              and "重启" in dup["note"], dup)
+
+        before = set(tg._engine_backends)
+        tg.engine_llm_status({"ggufPath": "/m.gguf"})
+        check("⑯⁶ 只读不装 ✓：调三次（含未装载路径）后缓存键集合逐项不变 ✓"
+              "（GET 触发装载 = 一个探活把 8 GiB 推进卡 ✗✗）",
+              set(tg._engine_backends) == before and len(tg._engine_backends) == 2,
+              (before, set(tg._engine_backends)))
+
+        class _Broken:
+            def describe(self) -> dict:
+                raise RuntimeError("坏后端")
+
+        tg._engine_backends[("/broken.gguf", None)] = _Broken()
+        broke = tg.engine_llm_status(None)
+        check("⑯⁷ 某个后端 describe 抛错 ⇒ 只在那一行留 error ✓ 不砸掉整张表 ✗"
+              "（一条坏账让整口 500 ⇒ 别的后端也看不见 ✓✗）；且没请求时不判 matches ✓",
+              broke["loadedCount"] == 3 and any("broken.gguf" in (b.get("path") or "")
+                                               and b.get("error") for b in broke["backends"])
+              and broke["matches"] is None, broke)
+
+        # ── ⑰ 图化 decode 单步（CUDA Graph）也进回执面 ✓（2026-11-08）──────────────
+        # ⚠️ 这一格**必须判** ✗✗：它挂在后端实例上 ✓ ⇒ 「配置写着 on、已装后端报 off」的症状是
+        # **速度一点没变** ✓（不是报错 ✗）⇒ 人会去查驱动/权重/量化档 ✓ 方向全错 ✗✗。
+        tg._engine_backends.clear()
+        tg._engine_backends[("/g.gguf", None)] = _FakeBackend("/g.gguf", graph=False)
+        want_off = tg.engine_llm_status({"ggufPath": "/g.gguf"})
+        want_on = tg.engine_llm_status({"ggufPath": "/g.gguf", "cudaGraph": "on"})
+        check("⑰¹ 请求面带上 ``cudaGraph`` ✓（缺省原样报 ``None`` ✗ 不编成 ``off`` ✗ —— 那会把"
+              "「没写」和「写了 off」混成一件事 ✓✗）", want_off["requested"]["cudaGraph"] is None
+              and want_on["requested"]["cudaGraph"] == "on", want_off["requested"])
+        check("⑰² ⭐ 请求 on、已装后端 off ⇒ ``matches=False`` 且**点名** cudaGraph ✓"
+              "（这就是「以为在跑图、其实每步还在发几千次 launch」✗✗）",
+              want_on["matches"] is False and "cudaGraph" in (want_on["mismatch"] or [])
+              and want_off["matches"] is True, (want_on["matches"], want_on["mismatch"]))
+        tg._engine_backends[("/g.gguf", None)] = _FakeBackend("/g.gguf", graph=True)
+        both_on = tg.engine_llm_status({"ggufPath": "/g.gguf", "cudaGraph": "true"})
+        back_off = tg.engine_llm_status({"ggufPath": "/g.gguf", "cudaGraph": "off"})
+        check("⑰³ 同义写法（``true``）与已装后端一致 ⇒ ``matches=True`` ✓；"
+              "反方向（请求 off、后端 on）也判 ✓ ✗ 单向判会漏掉「配置说关了、其实还在重放」"
+              "（那条更贵：排查时会去怀疑别处 ✓）",
+              both_on["matches"] is True and back_off["matches"] is False
+              and "cudaGraph" in (back_off["mismatch"] or []),
+              (both_on["matches"], back_off["matches"], back_off["mismatch"]))
+        typo = tg.engine_llm_status({"ggufPath": "/g.gguf", "cudaGraph": "grpah"})
+        check("⑰⁴ ``cudaGraph`` 拼错 ⇒ 只记进 ``errors`` ✓、**不进** mismatch ✗"
+              "（拼错时没有「应当值」可比 ⇒ 判 mismatch 就是假绿 ✓✗；真拒绝在 ``load()`` 里 ✓）",
+              "cudaGraph" in (typo["errors"] or {})
+              and "cudaGraph" not in (typo["mismatch"] or []), (typo["errors"], typo["mismatch"]))
+
+        # ⭐ 2026-11-09 补：``on`` 与 ``auto`` 必须占**两个缓存格** ✗✗ —— 它们背后是两个不同的后端实例
+        # （auto 在短生成时主动不捕 ✓）。压成同一格 ⇒ off→auto→on 来回切时**永远拿到第一个后端** ✓、
+        # 回执报旧档、配置写着新档 ✓✗（与本函数抬头那五例同一个病根：挂在实例上的东西不进 key）。
+        def _k(**kw) -> tuple:  # noqa: ANN003 —— 只换图化那一格 ✓
+            return tg._engine_backend_key("/g.gguf", None, **kw)
+
+        k_off = _k()
+        k_on = _k(cuda_graph="on")
+        k_auto = _k(cuda_graph="auto")
+        k_true = _k(cuda_graph=True)
+        check("⑰⁵ ⭐ ``auto`` 与 ``on`` 各占一格 ✓（2026-11-09 补）：三档 key 互不相同 ✓ ＋ "
+              "同义写法（``on``／``true``）仍合并 ✓（防「auto 被并回 on」✗✗ —— 那会让切档**静默无效**）",
+              k_off != k_on != k_auto and k_auto != k_off and k_on == k_true,
+              (k_off, k_on, k_auto))
+    finally:
+        tg._engine_backends.clear()
+        tg._engine_backends.update(_saved)
+
     # ================= 汇总 =================
     failed = [item for item in _RESULTS if not item[1]]
     for name, ok, detail in _RESULTS:

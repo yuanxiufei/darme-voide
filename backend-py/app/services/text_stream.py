@@ -145,8 +145,8 @@ async def _stream_engine(config: dict[str, Any], prompt: str, options: dict[str,
                          ) -> tuple[str, dict[str, Any] | None]:
     # 同包私有函数是有意的 ✓：后端**缓存与装载只有那一处** ✓（自己再建一份 ⇒ 显存里两份权重 ✗✗）
     from .text_generation import (  # noqa: PLC0415
-        _get_engine_backend, engine_gpu_layers, engine_kv_cache_bytes, engine_kv_mode,
-        engine_spec_kwargs,
+        _get_engine_backend, engine_fast_kwargs, engine_gpu_layers, engine_graph_kwargs,
+        engine_kv_cache_bytes, engine_kv_mode, engine_kv_window_kwargs, engine_spec_kwargs,
     )
 
     settings = config.get("settings") or {}
@@ -161,7 +161,10 @@ async def _stream_engine(config: dict[str, Any], prompt: str, options: dict[str,
                                   gpu_layers=engine_gpu_layers(settings),
                                   kv_mode=engine_kv_mode(settings),
                                   kv_cache_bytes=engine_kv_cache_bytes(settings),
-                                  **engine_spec_kwargs(settings))
+                                  **engine_spec_kwargs(settings),
+                                  **engine_fast_kwargs(settings),
+                                  **engine_graph_kwargs(settings),
+                                  **engine_kv_window_kwargs(settings))
 
     def _on_event(name: str, data: dict[str, Any]) -> None:
         # ⚠️ 这里在工作线程里 ✓（``generate_stream`` 是同步的 ✗）⇒ ``push`` 由调用方保证线程安全 ✓
