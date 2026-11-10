@@ -238,9 +238,21 @@ async function syncDetail(key: string, taskId: string): Promise<'ok' | 'missing'
       // ⚠️ 路径是 `result.plan.warnings` ✓（`RunResult.to_dict()` 把整个 plan 带上 ✓）——
       //    不是 `result.warnings` ✗、也不是 `task.warnings` ✗（都没有那一层 ✓）。
       //    只在**有内容**时覆盖 ✓：中途一次拿不到不该把已经显示的说明擦掉 ✗。
-      ...(Array.isArray(task?.result?.plan?.warnings)
-        ? { warnings: task.result.plan.warnings.map((item: unknown) => String(item)) }
-        : {}),
+      //: ⭐⭐ 再并上 `result.alerts` ✓✗（2026-11-09 补 ✗）：那是**跑完才知道**的结论 ✓
+      //:   （「音轨几乎是静音 ✗」「mp4 里音轨被截掉 0.6 秒 ✗」「落盘帧数没核对过 ✗」…）✓ ——
+      //:   后端同时把它写进 `result.note` ✓，而本文件此前**一个字都不取** ✗ ⇒ 界面上
+      //:   一句都看不到 ✓✗（后端说了、用户没看见 ＝ 白说 ✓）。
+      //:   两路合成同一个列表 ✓：`warnings` 的渲染已有「⚠️ 前缀 ＋ 只显示前两条 ＋ 悬停看全量」✓。
+      ...(() => {
+        const plan = Array.isArray(task?.result?.plan?.warnings)
+          ? task.result.plan.warnings.map((item: unknown) => String(item))
+          : null
+        const alerts = Array.isArray(task?.result?.alerts)
+          ? task.result.alerts.map((item: unknown) => String(item))
+          : []
+        if (!plan && !alerts.length) return {}
+        return { warnings: [...(plan ?? []), ...alerts] }
+      })(),
       eventCount: Number(task?.eventCount) || events.length,
     })
     return 'ok'
@@ -327,7 +339,13 @@ export function useEngineRun() {
     } catch (err: any) {
       // ⚠️ **队满不是失败** ✗✗（`E_ENGINE_BUSY` ✓）：引擎正跑着画布上**另一张卡**的任务 ✓ ——
       //    标成 `failed` 会让人以为这张卡坏了 ✓✗，其实是"等一会儿就好" ✓（后者才是真相 ✓）。
-      if (String(err?.code || '') === 'E_ENGINE_BUSY') {
+      /*
+       * ⚠️ 必须读 `engineCode` ✗✗ —— 信封里的 `code` 是 **HTTP 状态码**（恒 400，
+       * 见 `core/response.py::bad_request`），引擎码另在 `engineCode` ✓。
+       * 旧写法只读 `code` ⇒ 这一支**从来没执行过** ✓✗ ⇒ 队满被标成 `failed`
+       * （用户以为这张卡坏了，而真相是另一张卡在跑、等会儿再点 ✓）。
+       */
+      if (String(err?.engineCode || err?.code || '') === 'E_ENGINE_BUSY') {
         patch(key, idleState())
         throw new Error('引擎正忙（另一个任务在跑）⇒ 等它跑完再点，或先取消它')
       }
@@ -369,7 +387,13 @@ export function useEngineRun() {
     if (states.value[key]?.taskId) return
     const taskId = readRegistry()[key]
     if (!taskId) return
-    patch(key, { ...idleState(), taskId, status: 'queued' })
+    /*
+     * ⚠️ `restored` 必须在**查详情之前**就置上 ✗✗（不能等拿到终态再补）：
+     * `syncDetail` 会把 `status` 直接写成 `succeeded`，而卡片的 watch 是**异步** flush 的 ——
+     * 可能赶在"补写 restored"之前进回调 ⇒ 那时还是 false ⇒ 照常 `emit('generated')`
+     * ⇒ 凭空多一张一样的产物卡 ✓✗（comfy 通道实测过：节点数 1 → 2）。
+     */
+    patch(key, { ...idleState(), taskId, status: 'queued', restored: true })
     const outcome = await syncDetail(key, taskId)
     const after = states.value[key]
     if (!after || after.taskId !== taskId) return
@@ -379,10 +403,9 @@ export function useEngineRun() {
       reset(key)
       return
     }
-    if (isTerminal(after.status)) {
-      patch(key, { restored: true })
-      return
-    }
+    if (isTerminal(after.status)) return  // 号已收尾 ⇒ restored 保持 true ✓（产物刷新前就回卡了）
+    // 还在跑 ⇒ 标记交还给正常流程 ✓（这一轮真跑完时产物**要**照常回卡 ✓）
+    patch(key, { restored: false })
     poll(key, taskId)
   }
 

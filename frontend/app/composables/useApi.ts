@@ -32,6 +32,13 @@ async function req<T = any>(method: string, path: string, body?: any, signal?: A
       const error = new Error(json.message || json.msg || `请求失败 (${resp.status})`)
       ;(error as any).status = resp.status
       ;(error as any).code = json.code
+      /*
+       * ⚠️ 信封里的 `code` 是 **HTTP 状态码**（400 ✓），引擎错误码另在 `engineCode` 那一格 ✓
+       * （真源 `core/response.py::bad_request` ✓ —— 它明写「两者不是一回事」✓）。
+       * 不转发这一格 ⇒ 调用方只能拿到 400 ⇒ 所有按引擎码分流的地方都**静默失效** ✓✗
+       * （已中招一次：`useEngineRun` 的队满分支恒不成立，队满被标成「这张卡坏了」✓✗）。
+       */
+      ;(error as any).engineCode = json.engineCode
       ;(error as any).path = path
       throw error
     }
@@ -62,6 +69,7 @@ async function reqForm<T = any>(path: string, formData: FormData): Promise<T> {
     const error = new Error(json.message || `请求失败 (${resp.status})`)
     ;(error as any).status = resp.status
     ;(error as any).code = json.code
+    ;(error as any).engineCode = json.engineCode
     throw error
   }
   return json.data ?? json
@@ -308,6 +316,15 @@ export const aiConfigAPI = {
   ollamaStart: () => api.post('/ai-configs/ollama/start'),
   /** 统一探测本地四大运行时（文本/图像/视频/语音）健康状态 */
   runtimeHealth: () => api.get('/ai-configs/runtime/health'),
+  /**
+   * 自研文本（LLM）后端的档位回执。
+   *
+   * ⚠️ 这条是 **GET 且不装载**：`kvMode`/`kvWindow`/`gpuLayers` 只活在文本服务的 settings 里，
+   * 而「已装的那个后端」是按**装载那一刻**的档位建的 ⇒ 改完配置它不会跟着变（缓存键按档位
+   * 分格 ⇒ 下次生成另装一份）。回执把 `requested` 与 `backends` 并排 + `matches`/`mismatch`，
+   * 否则「我配了呀，怎么显存一动不动」只能靠猜。`duplicates` 报**同权重多档位各占一份显存**。
+   */
+  engineLlmStatus: () => api.get('/engine/llm'),
   /** 删除本地 Ollama 模型 */
   ollamaDelete: (name: string, baseUrl?: string) => api.post('/ai-configs/ollama/delete', { name, base_url: baseUrl }),
   /** 下载 Ollama 模型，NDJSON 流式返回进度事件 { status, completed, total, error } */

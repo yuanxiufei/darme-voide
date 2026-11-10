@@ -288,6 +288,14 @@ function fail(reason: string): RunVerdict {
   emit('update', { lastError: reason })
   return { ok: false, reason }
 }
+/*
+ * 「没跑起来」的**边界**（照这张单子加，别见错就写 ✓✗）：
+ *  ✅ 算 —— 闸口拒绝（档位/缺件/首帧/空提示词）、`start` 的 promise 失败（后端 400、网络断、
+ *     `E_ENGINE_BUSY`）⇒ 一律 `fail()`，因为它们都意味着**这次什么都没开始跑**。
+ *  ✗ 不算 —— 「校验未通过」（用户按的是校验按钮，生成没被点过）、「取消失败」、
+ *     上传/裁剪/文件类型错误 ⇒ 这些走 `emit('error')` 只弹 toast 就够 ✓。
+ *     写进节点会让卡片挂着「上次没跑起来」，而用户根本没按过生成 ⇒ 误标 ✗。
+ */
 
 /**
  * 提交成功 ⇒ 清掉「上次没跑起来」的留档 ✓。
@@ -308,8 +316,13 @@ function runWorkflow(override?: RunOverride): RunAnswer {
     return fail('还没有提示词：先在卡片上写一句要生成什么')
   }
   try {
+    /*
+     * ⚠️ 这条 `.catch` 也是「没跑起来」✓ —— 提交真没成（后端 400 / 网络断 / 队列拒）。
+     * 这时**根本没有 runId** ⇒ 注册表那条恢复通道救不了它（没号可恢复）⇒ 只弹一声 toast
+     * 就是刷新即无痕 ✓✗。走 `fail()` 才留档。
+     */
     void run.start(props.node.id, buildPayload(prompt)).catch((err: any) => {
-      emit('error', `提交失败：${err?.message || err}`)
+      fail(`提交失败：${err?.message || err}`)
     })
   } catch (err: any) {
     return fail(`提交失败：${err?.message || err}`)
@@ -595,8 +608,14 @@ function runEngine(override?: RunOverride): RunAnswer | Promise<RunAnswer> {
     return fail(`起点图 denoise=${startDenoise} 需要一张起点图：先连一张图片卡过来（或把 denoise 清空）`)
   }
   try {
+    /*
+     * 同一条口径 ✓：`start` 的 promise 失败＝这次没跑起来。
+     * ⭐ `E_ENGINE_BUSY`（队满）那一支在 `useEngineRun.start` 里会被 `patch(idleState())`
+     * **清成 idle**（队满是"等会儿再点"不是失败 ✗）⇒ 卡上进度条什么都不显示，
+     * 只剩一声 toast ⇒ 更得留档 ✓（否则用户过一会儿只看到「点了没反应」✗）。
+     */
     void engine.start(props.node.id, buildEnginePayload(override?.prompt)).catch((err: any) => {
-      emit('error', `提交失败：${err?.message || err}`)
+      fail(`提交失败：${err?.message || err}`)
     })
   } catch (err: any) {
     // `start` 同步抛（参数没拼好之类）⇒ 也算没提交 ✓
@@ -623,10 +642,9 @@ watch(
     if (!state.taskId) return
     // ⚠️ 刷新后恢复出来的"已完成"**不许再回卡** ✗✗：产物在刷新前就加进画布并持久化了 ✓，
     //    再 emit 一次会凭空多一张一样的卡 ✓✗（视频档尤其容易，因为中途刷新最可能 ✓）
-    if (state.restored) {
-      engineHandedOff.value = state.taskId
-      return
-    }
+    //    ⚠️ 这里**不许**顺手记 `engineHandedOff` ✗✗：恢复成"还在跑"时这一支也会先跑一次
+    //    （`restored` 在查详情前置上 ✓），记了就会把**之后真跑完**的那次也吞掉 ⇒ 产物永远不回卡 ✗
+    if (state.restored) return
     if (status !== 'succeeded' || engineHandedOff.value === state.taskId) return
     if (!state.primaryUrl) {
       engineHandedOff.value = state.taskId
@@ -648,6 +666,12 @@ watch(
   () => runState.value.status,
   (status) => {
     const state = runState.value
+    // ⚠️ 刷新后恢复出来的"已完成"**不许再回卡** ✗✗（同引擎通道的 `state.restored`）：
+    //    产物在刷新前就进画布并持久化了 ✓，`handedOff` 这个内存标记却随刷新归零 ⇒
+    //    不拦就会凭空多出一张一模一样的卡 ✗（视频档最容易撞 —— 跑的正是最久的那种 ✓）
+    //    ⚠️ 同样**不许**在这里记 `handedOff` ✗✗：恢复成"还在跑"时这支也会先跑一次，
+    //    记了就把之后真跑完的那次也吞掉 ⇒ 产物永远不回卡 ✗（实测：恢复中→完成，卡不出现）
+    if (state.restored) return
     if (status !== 'succeeded' || !state.runId || handedOff.value === state.runId) return
     const url = state.localPath || state.primaryUrl
     if (!url) return
@@ -667,7 +691,9 @@ onMounted(() => {
   if (runMode.value === 'engine') void engine.loadStages()
   else void run.loadWorkflows()
   // 刷新过的画布：把这张卡上一个还没跑完的任务**接回来** ✓（否则引擎在跑、界面却回到"未生成" ✗）
+  // 两条通道各有一套注册表 ✓：引擎存 `taskId` ✓、comfy 存 `runId` ✓ —— 都要接（卡片可能切过通道 ✓）
   void engine.restore(props.node.id)
+  void run.restore(props.node.id)
 })
 
 // 切换运行方式时补拉对应清单 ✓（模块级缓存 ⇒ 只会真拉一次 ✓）
@@ -1525,6 +1551,13 @@ function onMediaLoad(ev: Event) {
 }
 .cn-hint.err {
   color: #f87171;
+  /* 失败留档可能带 comfy 的**整段报错原文**（几百字 ✓）⇒ 不截断会把卡片撑出屏幕 ✗。
+     两行 + 省略号，全文在 `title` 里悬停可见 ✓（同 `warnings` 那格的口径 ✓）。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
 .cn-progress-text.warn {
   color: #fbbf24;

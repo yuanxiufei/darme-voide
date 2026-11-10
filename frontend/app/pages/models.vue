@@ -102,6 +102,54 @@
             </div>
           </div>
         </div>
+
+        <!-- 自研文本后端档位回执（只读 ✓ 这条 GET **不装载**权重 ✓✗） -->
+        <div class="runtime-panel llm-panel">
+          <div class="ollama-head">
+            <div class="ollama-title">
+              <Cpu :size="14" />
+              <span>自研文本后端（本地 GGUF）</span>
+              <span class="ollama-state" :class="{ on: llmStatus?.matches === true, warn: llmStatus?.matches === false }">
+                {{ llmStateText }}
+              </span>
+            </div>
+            <div class="ollama-head-actions">
+              <button class="btn btn-ghost btn-icon" :disabled="llmBusy" title="刷新（不会装载权重）" @click="refreshLlmStatus">
+                <Loader2 v-if="llmBusy" :size="13" class="animate-spin" />
+                <RefreshCw v-else :size="13" />
+              </button>
+            </div>
+          </div>
+          <div v-if="llmStatus" class="llm-body">
+            <div class="llm-note">{{ llmStatus.note }}</div>
+            <div v-if="llmStatus.backends?.length" class="llm-list">
+              <div v-for="(b, i) in llmStatus.backends" :key="i" class="llm-item">
+                <span class="mono llm-path" :title="b.path">{{ shortPath(b.path) }}</span>
+                <span class="mono llm-meta">
+                  {{ b.device || '?' }} · {{ b.dtype || '?' }} · kv={{ b.kvMode || '?' }}
+                  · layers={{ b.gpuLayers ?? '?' }}/{{ (b.gpuLayers ?? 0) + (b.cpuLayers ?? 0) }}
+                  · win={{ b.kvWindow?.window ?? 0 }}
+                  · prefill={{ b.prefill?.chunk ?? '?' }} · graph={{ graphLabel(b) }}
+                  <template v-if="b.kvBudget"> · KV {{ b.kvBudget.effectiveTokens ?? '?' }} 词元</template>
+                </span>
+                <span v-if="b.loadError" class="llm-err">{{ b.loadError }}</span>
+              </div>
+            </div>
+            <div v-else class="llm-empty">还没装载 —— 装载只由生成触发，这张卡片不会把权重推进显存</div>
+            <div v-if="llmStatus.requested" class="llm-req mono">
+              当前设置：device={{ llmStatus.requested.device }} · dtype={{ llmStatus.requested.dtype || 'auto' }}
+              · gpuLayers={{ llmStatus.requested.gpuLayers }} · kvMode={{ llmStatus.requested.kvMode }}
+              · kvWindow={{ llmStatus.requested.kvWindow }} · fastPath={{ llmStatus.requested.fastPath }}
+              · cudaGraph={{ llmStatus.requested.cudaGraph ?? 'off' }}
+            </div>
+            <div v-if="llmStatus.mismatch?.length" class="llm-warn">
+              已装后端与设置不一致：{{ llmStatus.mismatch.join('、') }} —— 下次生成会按新档位另装一份
+            </div>
+            <div v-if="llmDuplicates.length" class="llm-warn">
+              同一份权重占了多份显存（切档不会自己退旧后端，重启进程才回收）：{{ llmDuplicates.join('、') }}
+            </div>
+          </div>
+        </div>
       </section>
 
       <section v-show="activeTab === 'ollama'" class="setup-panel card">
@@ -816,7 +864,7 @@
 
 <script setup lang="ts">
 import { guardEnter } from '~/utils/keyboardEvent'
-import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2, CircleDollarSign, Calculator } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, Loader2, Bot, Sparkles, Monitor, RefreshCw, Server, Play, Download, ScanSearch, X, HardDrive, FolderOpen, Check, Info, Activity, SlidersHorizontal, BarChart2, CircleDollarSign, Calculator, Cpu } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, aiProvidersAPI, traceAPI, localModelsAPI, usageAPI, dramaAPI } from '~/composables/useApi'
@@ -1173,6 +1221,62 @@ const runtimeBusy = ref(false)
 async function refreshRuntimeHealth() {
   runtimeBusy.value = true
   try { runtimeHealth.value = await aiConfigAPI.runtimeHealth() } catch (e: any) { toast.error(e.message) } finally { runtimeBusy.value = false }
+}
+
+// ===== 自研文本后端档位回执（`GET /engine/llm`，**不装载**权重）=====
+// 为什么要有这块：`kvMode`/`kvWindow`/`gpuLayers` 只活在文本服务的 settings 里，而「已装的那个
+// 后端」是按**装载那一刻**的档位建的 —— 改完配置它不会跟着变（缓存键按档位分格 ⇒ 下次生成另
+// 装一份）。没有回执，「我配了呀，怎么显存/速度一动不动」只能靠猜。
+const llmStatus = ref<any>(null)
+const llmBusy = ref(false)
+
+async function refreshLlmStatus() {
+  llmBusy.value = true
+  try { llmStatus.value = await aiConfigAPI.engineLlmStatus() }
+  catch { /* 没启用自研引擎不是错误（后端会 500/空）⇒ 不弹 toast 打扰 ✓ */ }
+  finally { llmBusy.value = false }
+}
+
+const llmStateText = computed(() => {
+  if (!llmStatus.value) return '检测中…'
+  const n = llmStatus.value.loadedCount ?? 0
+  if (!n) return '未装载'
+  if (llmStatus.value.matches === true) return `${n} 份 · 与设置一致`
+  if (llmStatus.value.matches === false) return `${n} 份 · 与设置不一致`
+  return `${n} 份`
+})
+
+/** 同一份权重装了多份（切过档、旧后端没退）—— 4B Q4_K_M 物化 bf16 ≈ 8 GiB 一份 ✓✗ */
+const llmDuplicates = computed(() => {
+  const dup = llmStatus.value?.duplicates || {}
+  return Object.entries(dup).map(([name, slots]) => `${name} ×${(slots as unknown[]).length}`)
+})
+
+/** 图化 decode 单步（CUDA Graph）：**三态必须分清** ✗✗ —— 没要求 / 要求了但没跑成（要给理由）/ 真在重放 */
+function graphLabel(b: any) {
+  const g = b?.cudaGraph
+  if (!g) return '?'
+  if (!g.enabled) return 'off'
+  // ⭐ `on` 与 `auto` 都是 enabled=true，必须靠 policy 分开（2026-11-09 补）—— auto 的「没捕」是
+  // **按长度算出来的**（短生成开图净亏 ~28 ms），不是故障 ⇒ 别写成一串字母理由让人去查前置
+  const tag = g.policy === 'auto' ? 'auto' : 'on'
+  const last = g.last
+  if (!last) return `${tag}·未跑`
+  if (!last.enabled) {
+    const why = String(last.reason || '?')
+    if (g.policy === 'auto' && why.startsWith('autoTooShort')) return `${tag}·未捕(短)`
+    return `${tag}·未跑(${why})`
+  }
+  // ⭐ 多读的 padding 行数＝数值差异的**唯一来源**（实测 96 行时 bf16 |Δlogits| 1.9e-1）⇒ 只在超出
+  // 默认预留（2+specWindow=10）时才标出来，正常档不占地方
+  const pad = last.padRows
+  const tail = typeof pad === 'number' && pad > 16 ? `·pad ${pad}` : ''
+  return `${tag}·重放 ${last.replays ?? 0} 步${tail}`
+}
+
+function shortPath(p: string) {
+  if (!p) return '?'
+  return p.split(/[\\/]/).filter(Boolean).pop() || p
 }
 
 const vramPercent = computed(() => {
@@ -1682,7 +1786,7 @@ function jumpToSection(serviceType: string) {
   })
 }
 
-onMounted(() => { loadCfgs(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); refreshRuntimeHealth(); loadDrives(); loadLocalRoots(); refreshUsage() })
+onMounted(() => { loadCfgs(); loadLocalConfigs(); loadGpuStatus(); refreshOllama(); loadProviders(); loadTokenStats(); refreshRuntimeHealth(); refreshLlmStatus(); loadDrives(); loadLocalRoots(); refreshUsage() })
 onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sectionFlashTimer) clearTimeout(sectionFlashTimer) })
 </script>
 
@@ -2085,6 +2189,29 @@ onUnmounted(() => { if (scanTimer.value) clearInterval(scanTimer.value); if (sec
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ===== 自研文本后端档位回执（只读；GET 不装载权重）===== */
+.llm-panel { margin-top: 12px; }
+.ollama-state.warn { background: rgba(255, 176, 82, 0.14); color: #ffb052; }
+.llm-body { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.llm-note { font-size: 12px; color: var(--text-2); line-height: 1.55; }
+.llm-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.llm-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--bg-0);
+}
+.llm-path { font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.llm-meta { font-size: 11px; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+.llm-err { font-size: 11px; color: #ff7a7a; }
+.llm-empty { font-size: 12px; color: var(--text-3); }
+.llm-req { font-size: 11px; color: var(--text-3); line-height: 1.6; overflow-wrap: anywhere; }
+.llm-warn { font-size: 11px; color: #ffb052; line-height: 1.6; }
 
 /* ===== 本地模型扫描与注册 ===== */
 .scan-panel {

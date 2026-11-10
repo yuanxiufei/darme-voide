@@ -89,6 +89,21 @@ export interface CanvasNode {
   runMode?: 'engine' | 'comfyui'
   /** 引擎档位（`GET /engine/stages` 的 `stage` ✓；空 = 用清单里的第一个可用档 ✓） */
   engineStage?: string
+  /**
+   * **上一次没跑起来的原因** ✓ —— 随卡持久化（对应源 `metadata.errorDetails` ✓）。
+   *
+   * 为什么非要写进节点：闸口拒绝（档位类别不符 / 缺首帧 / 缺件 / 空提示词）时
+   * **一条请求都没发** ⇒ 没有 taskId 可回读、没有 `engine.state` 可显示 ✓✗。
+   * 只弹 toast 的话，toast 一消失就彻底无痕（刷新更没 ✗），用户过一会儿只见
+   * 「点了没反应」；而那句理由恰好是「照做就能跑」的指引（「先连一张图片卡过来」）✓。
+   *
+   * 落盘后还有两个免费好处：① 卡上看得见（`CanvasNodeCard` 的「上次没跑起来」）；
+   * ② 进 `canvasSnapshot()` ⇒ `compact_snapshot` 带进模型视野，下一轮模型自己知道
+   * 上一次为什么没成（源 `agent-site-tools.ts` 的 `error` 同义）✓。
+   *
+   * 成功提交即清空 ✓、再失败就覆盖 ✓ —— 留着旧的会让人以为这次又没跑起来 ✗。
+   */
+  lastError?: string
 }
 
 export interface CanvasEdge {
@@ -269,6 +284,7 @@ function normalizeDoc(raw: unknown, strict: boolean): CanvasDoc {
       //   `backend-py/tests/canvas_ops_test.py` 的「白名单覆盖接口字段」那条 ✓）
       runMode: node.runMode === 'comfyui' ? 'comfyui' : node.runMode === 'engine' ? 'engine' : undefined,
       engineStage: typeof node.engineStage === 'string' && node.engineStage ? node.engineStage : undefined,
+      lastError: typeof node.lastError === 'string' && node.lastError ? node.lastError : undefined,
       values: normalizeValues(node.values),
     })
   }

@@ -289,7 +289,15 @@ export async function applyCanvasOps(
           result.skipped.push({ op, reason: `节点不存在：${op.id}` })
           continue
         }
-        canvas.updateNode(op.id, op.patch || {})
+        /*
+         * ⚠️ `lastError` 是**运行期状态**，不是可编辑内容 ⇒ 从 `patch` 里剔掉 ✓✗。
+         * 不剔的话模型随手 `patch: {lastError: "缺模型"}` 就能让卡上出现一句**没发生过**的
+         * 「上次没跑起来」，而且它还会随快照回喂给模型 ⇒ 自激 ✗。
+         * 只有卡片自己的 `fail()` 能写这一格 ✓。
+         */
+        const patch = { ...(op.patch || {}) }
+        delete patch.lastError
+        canvas.updateNode(op.id, patch)
         touch(op.id)
         result.applied += 1
       } else if (op.type === 'delete_nodes') {
