@@ -156,6 +156,8 @@
 | 功能点 | 落点 | 说明 |
 |---|---|---|
 | Agent 主循环 | `app/agent/runtime.py` | 移植 `agents/index.ts`（745 行），S5 ③；**四条驱动**：OpenAI 兼容 / Ollama / Gemini / **自研引擎（`provider="engine"`，2026-11-07 补）** —— 引擎那条不发 HTTP（进程内 `to_thread` 跑前向），工具调用按 `<tool_call>{json}</tool_call>` 协议从**模型原文**里解（`parse_engine_tool_calls`：块坏就抛、只截断不算调用），`assistant.tool_calls` 与 `role=tool` 的 `name` **原样回灌**；缺 `settings.ggufPath` 或缺 chat 模板当场拒。**小模型漏标签的退路**（`_bare_tool_payloads`，极窄）：整段正文就是一串裸 JSON 对象（对象间只许空白、可套 ```` ```json ```` 围栏）、键 ⊆ `{name,tool,arguments,parameters}`、名字**全都**真注册过、个数 ≤ 32 ⇒ 认；混着编造的名字**整串不认**（不许"认得几个跑几个"）；夹在散文里的对象一律不认（那是举例/回显，认了就是凭空造副作用）。⚠️ 必须认「一串」：extractor 真跑模型一口气吐了 4 个读工具，只认单对象的写法会把它整串丢光 ⇒ 一个读工具都不执行 ⇒ 模型永远走不到 `save_*` ⇒ `/tune` 四跑恒 0 分（看起来像"模型不行"，其实是解析层吃掉了合法调用） |
+| 重复调用守卫 | `app/agent/repeat_guard.py` | 同一工具同一参数连着调到 `REPEAT_LIMIT` 就**不再执行**（第 limit 次即拦，不是第 limit+1 次），回灌一句"你已经调过 N 次、结果在上下文里"给模型；同批（一条 `assistant` 消息里的多调用）超 `BURST_LIMIT` 只跑前几条。守卫靠 `ContextVar` 包住 `driver(...)`（三条驱动签名一个字不改，`runtime._ToolCallGuard` 是唯一主人），`fallback` 重试开的是**新账**（上一轮撞墙不该把重试也堵死）；`receipt()` 记账（拦了几次、各是哪条工具、省下多少次执行） |
+| 两段式人工介入 | `app/agent/intervention.py` | 政策（`INTERVENTION_MODES`）＋规则表＋安全黑名单＋记忆：命中后**先记账后批准** —— 本轮只入 `pending_approvals` 并把"等你点头"回给模型，调用方再以 `options["approvals"]` 回传才真执行（`"*"` 是兜底通配）。⚠️ `pending_approvals` 非空**不等于失败**（没跑是设计，不是崩了）；`match_pattern` 除 `前缀:*`／`*` 外还认 `前缀 + 空格`（参考实现的注释例子 `git add:*` 对真实命令 `git add foo.md` 永不命中，照抄等于规则表全是哑的） |
 | 工具基座 | `app/agent/tool.py` | 工具的注册、参数校验、结果封装 |
 | 上下文预算与压缩 | `app/agent/context_budget.py` | 零依赖；超预算时的裁剪策略 |
 | 输出协议 | `app/agent/protocol.py` | 移植 `agents/protocol.ts`（79 行）——**唯一权威**（services 侧那份分叉副本已于 2026-10-30 删除） |
@@ -187,7 +189,7 @@
 | 全自动管线 | `app/agent/auto_pipeline.py` | 移植 `services/auto-pipeline.ts`（814 行） |
 | 审片重跑闭环 | `app/agent/qc_retry.py` | 移植 `services/qc-retry.ts`（175 行） |
 
-### L2-4 评测闭环（9，`app/agent/evaluation/`）
+### L2-4 评测闭环（10，`app/agent/evaluation/`）
 
 一条独立的「测 → 评 → 改」小流水线，与运行时解耦。
 
@@ -195,12 +197,15 @@
 |---|---|---|
 | 数据契约 | `app/agent/evaluation/types.py` | 五类 kind（`storyboard`/`extractor`/`script_rewriter`/`voice_assigner`/**`grid_prompt`**）；`grid_prompt` 是 2026-11-07 补的第 5 类，卡在「产出层」与「成片层」之间：提示词写砸了，账最后会记在成片维度上，而那时视频生成的钱已经花掉了 |
 | 基准 case 目录 | `app/agent/evaluation/catalog.py` | 单一来源 |
-| 执行器 | `app/agent/evaluation/evaluator.py` | 五个 kind 一个入口；`grid_prompt` 分支要把基准镜**真落成 `storyboards` 行**（宫格 Agent 的工具 `read_shots_for_grid` 只按 id 查库），产出解析走 `services.grid_payload`，与线上同源 |
+| 执行器 | `app/agent/evaluation/evaluator.py` | 五个 kind 一个入口；`grid_prompt` 分支要把基准镜**真落成 `storyboards` 行**（宫格 Agent 的工具 `read_shots_for_grid` 只按 id 查库），产出解析走 `services.grid_payload`，与线上同源。另含**单步对照** `step_trace(tool_calls, tool_results)`：把逐步账与 `stats(total/ok/failed/unjudged/unknownTool/tools)` 记进报告，五个分支的 return 全经 `_report_steps()` 收口（不收口 = 某类 case 悄悄没有 steps，而测试正好只测了另一类）；`evaluate_case(..., skills=, tools=)` 的按次覆盖只走 `options["skillsRaw"]/["toolsRaw"]`，不碰库 |
 | 确定性评分 | `app/agent/evaluation/scorer.py` | 五个评分器，**纯函数，不依赖 LLM/DB** |
+| 语义判分器 | `app/agent/evaluation/judge.py` | 规则评分器判不了的（"这段改写保住了人物动机吗"）交给 LLM 判官：五段 prompt（`[Criteria]/[Input]/[Output]/[Evidence]/[Expected]` 顺序固定）＋ `JUDGE_SCHEMA`（`score` 0..1、`reason` 必填）。三条口径：**`score=0` 是合法判决**（不是"没判"，别把它当翻车重试）、**只在判官翻车时重试**（解析不出／越界／NaN ⇒ `inconclusive`，默认 3 次、温度固定 0）、**`inconclusive` ≠ 0 分**（没判成不许折成最差）。开关是 case 定义里的 `judge` 字段 —— 现存 case 的 `criteria` 是规则词表，误拿它当开关会让所有 case 真跑 LLM |
 | 成片评测 | `app/agent/evaluation/film_check.py` | 缺口 8 的成片半边：只读 `storyboards`/`video_generations`/`video_quality_checks`/`qc_reviews`，**不重跑 ffmpeg、不调模型**。四维等权（覆盖/规格/缺陷/复核），**判不了的维度不进总分**（`judged=false` 绝不折成 0 或满分），`missing` 点名；`review` 分母只含 `hit+false_alarm`，漏报单列进 notes；跑次 `run_id=film:<集>` 幂等覆盖（点五次评测不等于五条样本），`kind="eval"` |
-| 提示词优化器 | `app/agent/evaluation/optimizer.py` | 216 行，状态机闭环 |
+| 提示词优化器 | `app/agent/evaluation/optimizer.py` | 状态机闭环：Reference → 候选 → 再评 → 严格更高才落库。三条口径 2026-11-09 补齐：① **v0 基线＝现网**（`effective_prompt()`：`agent_configs.system_prompt` 优先，无行/空串才回退出厂默认，回执 `baselineSource`），否则重跑会把已落库的更优版本静默覆盖；② **`version` 跨运行连续**（共用 `param_optimizer.next_version`，`run` 是本轮第几次、`version` 是轮次序号，两个数不许混用），否则 `mark_persisted` 一次标中多行；③ **单轮跑崩只作废那一轮**（`generate_candidate_prompt` 的「输出太短」是设计内失败 ⇒ 记 `eval_failed`、占版本号与分母、继续下一轮；`TuneCancelled` 原样抛出；失败轮按 `stage` 决定留不留候选 —— 生成失败没候选、评测失败留住已生成的那份全文），`benchmarks/history/<agent>/<case>.json` **逐轮落盘**且每条带 `reason`，落库结论（`persisted`）之后再补落一次（逐轮 flush 在落库之前，不补就永远读不到「这版生效没有」）。④ **抖动带可选**（2026-11-10）：`repeat`＝**Reference 复测次数**，默认 1 ⇒ 抖动带 0、零容差、与历史逐字一致（回执 `jumpKind="none"` 并印「没测抖动带」，不印「抖动带 0」）；传 2–5 取样本极差 `max−min` 当抖动带（`within`），采纳判据变 `candidate > best + jump`。`iterations` / `repeat` 有上限（`MAX_ITERATIONS=20` / `MAX_PROMPT_REPEAT=5`）且**越界即拒、不夹逼**（`normalize_prompt_options` 是入队口与执行口共用的唯一校验点，`/tune-prompt` 入队前就 400）；进度分母是 `repeat + iterations`（`repeat` 全在 Reference 上，候选每轮只评一次）
 | 参数（温度）调优 | `app/agent/evaluation/param_optimizer.py` | 缺口 4 第一格：同一份提示词只换 `temperature`，候选是**一批平级**（`TEMPERATURE_GRID` 只往低扫）而非父子演化链 ⇒ 单开模块，混进 `optimizer.py` 会让 version/parent 语义失真。三条硬约束：`repeat>=2`（单次评测定不了输赢）、`delta > 抖动带`（基线各轮 max−min，涨了但没超过抖动带记 `below_noise`）、换模型记 `runtime_mismatch`。落库走 `creator.persist_agent_temperature`（只 update 那一列，无配置行返 0 不插空壳）。见 `docs/knowledge-loop.md` §1 缺口 4 |
-| 调优的后台任务表 | `app/agent/evaluation/tune_runtime.py` | 把 `POST /api/v1/evaluation/tune/{case_id}` 从「一次 7 分钟的同步请求」改成「入队立刻返 `taskId` + `GET /tune/{taskId}` 查进度」（真机实测 `repeat=2` 单跑才 85–165 秒，四跑 423.9 秒，挂在同步返回链上必然是**网关先超时、后台还在烧卡**）。三条口径都不可选：**单工作线程 + 队列**（只有一张卡，并发调优只互相抢显存 ⇒ 串行是唯一诚实的并发度，排队就明说 `queuePosition`）、**取消只在两次评测之间生效**（一次评测内部那 85–165 秒的采样循环掐不断 ⇒ `cancel` 是「不再开下一跑」，不假装秒停）、**工作线程自己 `engine.connect()`**（`get_conn` 的连接生命周期跟着 HTTP 请求走，拿它跑后台任务症状是 `connection is closed`）。任务表是**进程内存** ⇒ 重启后 `GET /tune/{taskId}` 给 404 属刻意设计（判决与落库已在 `agent_optimizations`/`agent_configs`）。四个入口：`POST /tune/{caseId}`（默认入队；`wait=true` 才等回执，超时回快照标 `timedOut` 而**任务不停**）、`GET /tune/{taskId}`（`status`/`stage`/`doneRuns`/`totalRuns`/`receipt`）、`GET /tune`（列表）、`POST /tune/{taskId}/cancel`；同一 (agent, case) 已在跑 ⇒ `deduped=true` 不重复入队 |
+| 技能绑定调优 | `app/agent/evaluation/skill_optimizer.py` | 缺口 4 第二格（2026-11-08 开）：同一份提示词、同一个温度，只换**注入哪几个 skill**（候选是 leave-one-out）。⚠️ 判据与温度**方向相反**——温度是「涨过抖动带才采纳」，这一格是「**摘掉后跌幅不超过抖动带 ⇒ 没有证据说明它有用 ⇒ 采纳这一摘**」（`delta >= -jump` 即采纳，`pruned` / `skill_needed` 两个理由码，所以这类行 Δ 为 0 或负数也可能是「采纳」，不是账记错）。四条硬约束：**一次只摘一个**（摘掉后基线就变了，同轮连摘是拿旧基线判新绑定）、**不许摘成空**（剩 1 个时有 0 候选，不是「摘掉最后一个」）、**覆盖走 `options["skillsRaw"]` 且不写 `skill_usage`**（假设性绑定若计入使用统计，会污染下一轮的裁剪顺序，把真在用的 skill 排在可疑位）、**`autoPersist` 默认 False**（温度最坏是更死板，删 skill 最坏是「该知道的规范不知道了」⇒ 只出结论、由人点头）。落库走 `creator.persist_agent_skills`，无配置行返 0 不插空壳。绑定形状必须是 `[{"id","enabled","priority"}]` —— 纯字符串数组会被 `parse_skills_config` **静默跳过**并回退默认绑定（症状：页面写已采纳、线上还是旧绑定，两边都不报错）。见 `docs/knowledge-loop.md` §1 缺口 4 |
+| 工具集调优 | `app/agent/evaluation/tool_optimizer.py` | 缺口 4 第三格（2026-11-08 开）：同一份提示词、同一个温度、同一套 skill，只换**给模型看哪些工具**（候选是 leave-one-out）。这一格的前置是 `evaluator.step_trace` 的**单步对照**——整轮一个分数颗粒太粗（摘掉 `search_script_library` 后模型可能改调别的工具、总分几乎不动，也可能整轮崩掉却只掉 2 分），所以判据是**两把尺子**：整轮分 + `unknownTool` 计数（模型照着被摘掉的工具名去调 = 它真需要这个工具）。四个理由码：`pruned`（分数没掉 **且** 不再调它）、`tool_wanted`（分数没掉但模型仍在调 ⇒ 不摘，技能格没有这一档）、`tool_unjudged`（分数没掉但**逐步账没明细**，`stats.unavailable` 非空 ⇒ `unknownTool` 恒 0 是读数缺失、不是"没再调" ⇒ 同样不摘，与 `tool_wanted` 必须分成两码；**部分**缺账 `stats.unjudged>0`「有调用没回灌结果」同属这码，因为 `unknownTool` 正是靠结果里的 error 正文认的）、`tool_needed`（跌幅超抖动带）。基线那一跑就缺明细时**在基线处收工**（第二把尺子整格哑掉，候选跑再多也只能得 `tool_unjudged`），且理由如实写「没有明细」而**不是**「空工具集」（缺明细时暴露集同样是空的，照空分支走等于把"没记账"说成"模型没调过工具"）。端到端也钉在 HTTP 面（`evaluation_route_test` 两条）：`POST /evaluate/{case_id}` 返回的报告带 `steps`/`stepStats`，成对 calls/results 记 1 步 `ok`（`unjudged=0`）、结果含 `Unknown tool:` 记 `unknownTool=1, failed=1`；且 `evaluator._UNKNOWN_TOOL_PREFIX` 与 `runtime._run_tool` 抛出的字面量必须一致（改任何一半 ⇒ `unknownTool` 恒 0 而 `failed` 照常计数 ⇒ 判决链错摘）。三条硬约束：**覆盖走 `options["toolsRaw"]` 且顺序跟注册表**（`ToolRegistry.only()` 按键或按 `tool.id` 两套口径匹配，`missing` 如实上报，不静默全开）、**候选源是基线那一跑的「内存逐步账」**（`stepStats.tools`，不是盘上轨迹文件——`meta.toolCalls` 实测只存了个数，没有逐步明细；模型没用过的工具摘掉本来就测不出东西）、**恒 `autoPersist=false` 且 `persistSkip` 明写理由**——工具集真源是代码里的装配语句，`agent_configs` 没有 tools 列，所以这格**只落优化史结论**（`target="tools"`）、不写库。见 `docs/knowledge-loop.md` §1 缺口 4 |
+| 调优的后台任务表 | `app/agent/evaluation/tune_runtime.py` | 把 `POST /api/v1/evaluation/tune/{case_id}` 从「一次 7 分钟的同步请求」改成「入队立刻返 `taskId` + `GET /tune/{taskId}` 查进度」（真机实测 `repeat=2` 单跑才 85–165 秒，四跑 423.9 秒，挂在同步返回链上必然是**网关先超时、后台还在烧卡**）。**四个目标共用这一张表**（`target=params` 温度 / `target=skills` 技能绑定 / `target=tools` 工具集 / `target=system_prompt` 提示词改写 —— 任务形状一样，runner 按 target 选；复制一张表会让「取消只在两跑之间」「工作线程自己开连接」这些口径迟早一边改一边没改），去重键是 **(agent, case, target)**（漏掉 target 会把刚提交的技能调优当成温度任务的重复而静默丢弃，还回一个别人的 taskId）。三条口径都不可选：**单工作线程 + 队列**（只有一张卡，并发调优只互相抢显存 ⇒ 串行是唯一诚实的并发度，排队就明说 `queuePosition`）、**取消只在两次评测之间生效**（一次评测内部那 85–165 秒的采样循环掐不断 ⇒ `cancel` 是「不再开下一跑」，不假装秒停）、**工作线程自己 `engine.begin()`**（`get_conn` 的连接生命周期跟着 HTTP 请求走，拿它跑后台任务症状是 `connection is closed`；⚠️ 且必须是 `begin()` 不是 `connect()` —— SQLAlchemy 2.0 下 `connect()` 里的写入在 `close()` 时**一律回滚**，用 `connect()` 等于回执写 `persisted=true`、库里一个字没有，全程无报错。2026-11-08 实测改掉）。任务表是**进程内存** ⇒ 重启后 `GET /tune/{taskId}` 给 404 属刻意设计（判决与落库已在 `agent_optimizations`/`agent_configs`）。七个入口：`POST /tune/{caseId}`（温度，默认入队；`wait=true` 才等回执，超时回快照标 `timedOut` 而**任务不停**）、`POST /tune-skills/{caseId}`（技能绑定，同上，多回一份 `preview.current`/`preview.candidates`）、`POST /tune-tools/{caseId}`（工具集，同上，`preview.candidateSource="trace"` 并带 `persistSkip`）、`POST /tune-prompt/{caseId}`（提示词改写入队版，2026-11-09 补：`autoPersist` 默认 **true**（四格里唯一真写 `agent_configs.system_prompt`）、**没有 `repeat`** ⇒ 分母 `1 + iterations`、`jumpKind="none"`；同步那条 `POST /optimize/{caseId}` **一字未动**，它与入队口共用同一个 `optimize_agent_prompt`，区别只在投递方式）、`GET /tune/{taskId}`（`status`/`stage`/`doneRuns`/`totalRuns`/`receipt`；`target` 标明这次动的是哪一格）、`GET /tune`（列表）、`POST /tune/{taskId}/cancel` |
 | 无人值守调度 | `app/agent/evaluation_scheduler.py` | 移植 `evaluation-scheduler.ts`（126 行）；`iso_in`/`next_run_delay` 是**唯一**的「下一轮时间」算法（知识复盘定时器共用，别抄第二份） |
 | 命令行入口 | `app/agent/evaluation/cli.py` | 64 行 |
 
@@ -236,6 +241,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 本仓补录上传 | `app/services/library_ingest.py` | 落 `00-本仓补录/`，`MAX_FILE_SIZE=64MB`／`MAX_FILES=20`／扩展名白名单（2026-11-07 起含 `.pdf`／`.html`／`.htm`／`.pptx`，前端 `accept` 由 `limits()` 下发、改这一处两端同时生效）；解析复用 `lib_index._build/_save`（与脚本同一口径，不另写一套），同名不覆盖改 `-2`；三档回执不许合并成「失败」：`ingested`（已入库可搜）／`quarantined`（**文件已在盘上**、只是抽不出正文 ⇒ 转 OCR；PDF 走 `ocr_index._extra_quarantined_docx`，`SUPPORTED_SUFFIXES` 里的 `.pdf` 是它唯一补救路）／`rejected`（未落盘，理由说清）；`limits()` 是前端校验口径的唯一真源 |
 
 | 知识库目录层 | `app/services/script_catalog.py` | 两份 CSV（主目录 **UTF-8 BOM** / 电影节标签 **GBK**）→ 内存索引；国家·类型·奖项·权限·资料类型过滤，三态分明（没给条件 / 目录不在 / 没人满足），**不建 sidecar DB** |
+| 增量变更集 | `app/services/markdown_patch.py` | 模型改剧本别重写整篇：`apply_edits` 每条 `oldText` 必须**恰好命中一次**（0 次＝抄错或已改过、≥2 次＝定位不到），**整批原子**（任一条不中 ⇒ 一条都不落、返回原文），失败句三段式（事实／原因／怎么改 ＋ `failedIndex`）让模型能照着重送；`coerce_edits` 同时吃 `oldText/newText` 与 `old_text/new_text`；接的是 `edit_script` 工具（与 `save_script` 并存，两条保存路径各自刷新指纹、互不降级） |
 | 剧本指纹门禁 | `app/services/script_fingerprint.py` | 改剧本即失效下游签名 |
 | 台词说话人匹配 | `app/services/character_match.py` | 移植 `shared/character-match.ts` |
 | 场景地点/时段匹配 | `app/services/scene_match.py` | 提取去重与陈旧关联清理共用 |
@@ -307,7 +313,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 图像连续性 QC | `app/services/consistency_qc.py` | 移植 `consistency-qc.ts` |
 | 技术维度 QC | `app/services/technical_qc.py` | 471 行；九个阈值默认值仍是 `TECH_QC_THRESHOLDS`（TS 镜像常量，`route_parity_test` 逐值核），读取统一走 `qc_thresholds()` 过 `tuning` 的 `qc` 伪档（见下方「参数覆盖层」）；`ISSUE_THRESHOLDS` 把 issue `code` 映射到该伪档的主字段（`relax` 说明放宽方向，负值区间乘法方向相反；`spec.unreadable`/`spec.probe_failed` **有意不登记**） |
 | 质检人工复核（阈值命中率的分母） | `app/services/qc_reviews.py` | 表 `qc_reviews` **单开一张**（漏报没有 issue 行可挂／一次质检同 code 可报两段／复核是事实层不该被 QC 重跑覆盖），`(check_id, code)` **覆盖式改判**；三值 `hit/false_alarm/missed`；命中率分母只含 `hit+false_alarm`，漏报率分母＝全部复核，没判过 ⇒ `None`（不是 0）；`MIN_REVIEWS=10` 不足只摆数字不出候选。只统计、不写台账，消费方是 `engine/tuning.suggest()` 的第三条规则与知识闭环页 |
-| 优化史（这次改动提升了多少） | `app/services/optimization_log.py` | 表 `agent_optimizations` 一版一行、**追加不覆盖**（`agent_configs` 是覆盖式的 ⇒ 上一次生效的提示词与分数当场就没了，答不了"提升了多少"）；`accepted`（分数严格更高）与 `persisted`（真写成默认值）**分两个布尔**（合成一个就会出现"页面说已采纳、默认还是旧的"假绿）；`delta` 由服务端算，`score_before` 为空时给 `None` 不写 0；只存候选提示词的 `sha1` 指纹（全文仍在 `benchmarks/history/*.json`）；`target` 必填，现有两格 `system_prompt`（提示词优化器）与 `params`（参数调优），其余仍未开（留列不留假数据）。写口 `record`/`mark_persisted` **失败只 warn 不抛**（长跑任务不许被日志拖废），读口反过来必须报 `available=false`；写点只有两处：`agent/evaluation/optimizer.py::optimize_agent_prompt`（`target=system_prompt`）与 `agent/evaluation/param_optimizer.py::optimize_agent_temperature`（`target=params`，HTTP 口 `POST /api/v1/evaluation/tune/{case_id}`）；两边分数都由评测器算，HTTP 不接受手写"提升了多少"。见 `docs/knowledge-loop.md` §1 缺口 3 |
+| 优化史（这次改动提升了多少） | `app/services/optimization_log.py` | 表 `agent_optimizations` 一版一行、**追加不覆盖**（`agent_configs` 是覆盖式的 ⇒ 上一次生效的提示词与分数当场就没了，答不了"提升了多少"）；`accepted`（分数严格更高）与 `persisted`（真写成默认值）**分两个布尔**（合成一个就会出现"页面说已采纳、默认还是旧的"假绿）；`delta` 由服务端算，`score_before` 为空时给 `None` 不写 0；只存候选提示词的 `sha1` 指纹（全文仍在 `benchmarks/history/*.json`）；`target` 必填，现有四格 `system_prompt`（提示词优化器）、`params`（温度调优）、`skills`（技能绑定调优）与 `tools`（工具集调优），其余仍未开（留列不留假数据）。`mark_persisted` 的定位**必须带 `target`**（四格的 `version` 各自从 1 数 ⇒ 只按 agent+version+case 会把「提示词落库」标到温度那行，**不抛错、只标错人**），三处调用方都显式传且 `optimization_log_test` ④′（真跑跨格）/⑨′（全仓 AST 扫）双管。提示词格的 v0 基线是**现网在用的那份**（`agent_configs.system_prompt` 优先、无配置行才回退出厂默认），不是出厂默认——否则重跑会把更优的现网版本静默覆盖成更差的；`version` 是 (agent, case) 上的**轮次序号**、四格共用 `next_version` 递增（每次运行从 v1 数会让重跑的行撞号，`mark_persisted` 一次标中多行）。写口 `record`/`mark_persisted` **失败只 warn 不抛**（长跑任务不许被日志拖废），读口反过来必须报 `available=false`；写点只有四处：`agent/evaluation/optimizer.py::optimize_agent_prompt`（`target=system_prompt`）、`agent/evaluation/param_optimizer.py::optimize_agent_temperature`（`target=params`，HTTP 口 `POST /api/v1/evaluation/tune/{case_id}`）、`agent/evaluation/skill_optimizer.py::optimize_agent_skills`（`target=skills`，HTTP 口 `POST /api/v1/evaluation/tune-skills/{case_id}`）与 `agent/evaluation/tool_optimizer.py::optimize_agent_tools`（`target=tools`，HTTP 口 `POST /api/v1/evaluation/tune-tools/{case_id}`，**恒 `persisted=false`**——工具集真源是代码装配语句，这格只留结论）；四处分数都由评测器算，HTTP 不接受手写"提升了多少"。读口在 `routers/knowledge_loop.py` 的 `GET /optimizations`（本表本身**没有**读路由，`/api/v1/evaluation/optimizations` 是 501 占位）。见 `docs/knowledge-loop.md` §1 缺口 3 |
 | 镜头级打分 | `app/services/qc_scoring.py` | 272 行 |
 | QC 报告交付物 | `app/services/qc_report.py` | 515 行 |
 
@@ -397,6 +403,7 @@ L3 是本仓库的主体：**领域知识全在这里**。判据是「换个 HTT
 | 文件存储 | `app/services/file_storage.py` | 移植 `utils/storage.ts` |
 | 资源库共享实现 | `app/services/resource_library.py` | 角色/场景/兵器/服装模板 |
 | 资产清单 + 验收门 | `app/services/asset_manifest.py` | 缺件即阻断 |
+| 验收报告合同 | `app/services/acceptance_report.py` | 「这一件产物凭什么算过」：`plan` 先声明 + `cases` 挂证据介质 + **覆盖率门禁改判** + 没验到至多 `partial`（`POST /api/v1/assets/acceptance/validate`；纯校验不碰 DB） |
 | 资产版本 | `app/services/asset_versions.py` | 历史与回滚 |
 
 ### L3-12 可配置内容与执行机制（7）
@@ -479,7 +486,7 @@ Apache/MIT（torch/diffusers/safetensors）；② torch 已装且有 CUDA，但*
 | 功能点 | 落点 |
 |---|---|
 | 反量化（fp8/int8/int4） | `app/services/engine/quant.py` |
-| NVFP4（E2M1 + e4m3 块 scale） | `app/services/engine/quant_nvfp4.py` |
+| NVFP4（E2M1 + e4m3 块 scale；**另有常驻壳** `NvFp4Linear` ＝ 打包字节原样留卡、反量化挪到**前向逐层**、AWQ `pre_quant_scale` 折进权重列 ⇒ 14.61 GiB 的 32B 文本塔装得下；`attach_h3_text` 按**文件自述**换壳，档位判 `nvfp4` ⇒ 驻留 **15.33 GiB** 而不是 int8 那本的 25.44。**逐层反量化的真账与边界**（单层 5120×12800 微基准 **1.42 ms** ＝ 两字节查表 0.73 ＋ 块 scale 还原 0.07 ＋ 乘 0.62；**真机 350 层逐层实测 631 ms/次 encode**、吞吐 **99–115 GB/s 且与张量大小无关**（>64M 元素 150 层 99、16–64M 100 层 98、4–16M 100 层 85）⇒ 病根**不是**小 kernel，而是**四个 kernel 串联的 HBM 往返**（`to(int32)` 98 MB ＋ `embedding` 197 MB ＋ 块 scale 8 MB ＋ 乘 266 MB ≈ 569 MB，而理论最少只要 164 MB）。A−B 实测（29/128/512 token）：反量化 **571/577/625 ms**，占 encode **76%/74%/59%** —— 与 token 数近乎无关（按权重搬运付费 ✓✗）。三处纯性能选择各配一条判据：索引 **int32 不是 int64**（−0.4 ms/层）、**`uint16` 零扩展不是 `int16`+`& 0xFFFF`**（−0.24）、**两字节一次查表不是逐字节**（−0.24 —— 后两条数值全相同 ⇒ 只能源码判据盯 ✓✗）；**纯 torch 已到天花板**：要突破必须把「查表→乘 scale」融成单 kernel ⇒ 本机无 triton（`torch.compile` 用不了）且无 nvcc/cl（写不了 CUDA 扩展）⇒ 如实停在这里；且 H3 真跑一次 318 秒，此处满打满算也只省 0.37 秒 ⇒ 不为它引编译链；实测量法的脚本在 `data/experiments/nvfp4_dequant_bench/`：`bench.py` 单层分项、`bench_index.py` 索引路径对照、`bench_fused.py` 融合可行性、`bench_encode.py` 真权重 A−B、`bench_layers.py` 逐层吞吐分布） | `app/services/engine/quant_nvfp4.py` · `app/services/engine/h3_form.py` |
 | 权重装载进 `nn.Module` | `app/services/engine/weights.py` |
 | 跨族张量名映射 | `app/services/engine/mappings.py` |
 | 混合加载（fl2va 基底 + ref2va adaLN） | `app/services/engine/hybrid_load.py` |
@@ -524,6 +531,7 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | 功能点 | 落点 |
 |---|---|
 | DiT 主干 | `app/services/engine/dit.py` |
+| **注意力核选择**（网络本体每次 SDPA 的唯一出口：默认 dispatch 在本机选 `EFFICIENT`，**cuDNN fused** 同形状快一倍 —— 但它只在**别的都关掉**时才被选中（优先级 flash → efficient → cudnn → math）⇒ 「能不能用」必须自己先判、不能靠回退；真块实测 26.6 → 23.4 ms（−12.1%）、峰值分配不变 1.062 GiB，且屏蔽 padding 位后输出差 1.1e-1 ⇒ 反证掩码真被应用，不是「更快所以更不准」；**十个本体**（`dit`/`dit_flux`/`dit_generic`/`dit_lumina`/`dit_music3`/`dit_qwen21`/`dit_qwen_image`/`dit_seedvr2`/`dit_wan22`/`h3_form`）全走这里，SEEDVR2 的 **256 token 变长窗口段也仍赢**（0.047 → 0.041 ms，短序列没被固定开销反噬）；`can_use_cudnn_attention` 在 24–44 个形状上与「强制 CUDNN 真能不能跑」**0 条不符**（head_dim 256 判 False 且真跑抛）⇒ 先判后用，判不过走原路、绝不抛；**非逐位**（真块 img max|Δ| 3.1e-2 / 均值 6.7e-5）⇒ `DARME_SDPA=off` 可逐位复现旧结果；**文本塔有意不走这里**（`qwen35_te`/`qwen3vl_te`/`umt5_te`/`te_music3` 与 comfy 有 `maxDiff=0` 钉子） | `app/services/engine/sdpa.py` |
 | Z-Image / Lumina 骨架（`NextDiT` 同构，已与 ComfyUI 参考实现逐层对拍；**已接进装载分支**） | `app/services/engine/dit_lumina.py` |
 | Qwen-Image 2.1 骨架（单流 + SwiGLU + 三轴 RoPE，两行调制；键集合与盘上 649 张量对账、与独立参照实现双精度一致；**已接进装载/前向分支**，TE 与 VAE 未做） | `app/services/engine/dit_qwen21.py` |
 | **Qwen-Image 2512 / Edit 2511 骨架**（双流 MMDiT：文本与图像各 6 组调制＋各一套 MLP；时间口径 `1000·σ` **不翻转**；`heads` 由 `attn.norm_q` 宽反推；Edit 侧参考图 token 串联＋`__index_timestep_zero__` 哨兵喂 σ=0 行调制；2512 与 Edit 2511 同一份，差别只在 `ref_latents`；**已接进装载分支**，且这一族的 `qwen_image` 行挂了 `adapter="int8"` ⇒ 盘上的 840 层 int8 文件**原样常驻**（19.09 GiB，不再反量化成 bf16 38.05；bf16 文件自动得到空 plan ⇒ 走老路） | `app/services/engine/dit_qwen_image.py` |
@@ -567,10 +575,16 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 | **Qwen3-VL ViT 视觉塔**（27 层 / `patch_embed.proj` 2 帧时间核 / `merger` 在 **pre-shuffle**、`deepstack_merger_list` 在 **post-shuffle**；与 H3 的 TE 权重同文件、键名逐字一致） | `app/services/engine/qwen3vl_vision.py` |
 | **Qwen2.5-VL ViT 视觉塔**（Edit 2511 参考图的**语义**通路：32 层 / patch **14** / CLIP 均值方差 / 窗口注意力 112 ⇒ 合并域 4 格（块 7·15·23·31 走全图）/ 旋转位置表与 hidden **同一套窗口置换** / 融合后 `argsort(window_index)` 还原；与 `qwen3vl_vision` **并列不合并**（尺子差 patch 16 vs 14、均值 0.5 vs CLIP）；像素侧走 `qwen3vl_pixels.process_image_with` 传本族口径） | `app/services/engine/qwen25vl_vision.py` |
 | **LLM 分层放置（卡上前 N 层 ＋ CPU 尾巴，2026-11-08）**（`llm.plan_layer_devices` 只算**算术**：每层字节＝`_block_param_count × dtype_bytes`（`layer_weights_bytes` 同一出口，不抄配额表）× 连续前缀 ⇒ 一层都放不上就给 `gpuLayers=0` 并写 `why`；`apply_layer_plan` 逐层 `.to()` 后**从参数读回**实际设备，`embed`/`norm`/`lm_head` **钉末层**（`tie_embeddings` 下 `.to()` 到两处会把它拆成两份）；`LlmModel.forward` 只在**层边界**搬激活、RoPE 按设备各缓存一份、KV 各留层设备。对外旋钮 `settings.gpuLayers`：`off`＝不分层（老路径逐字节相同）／`0`＝全 CPU（回执写明"显式要求"）／`N`＝前 N 层上卡（**超过层数**或**没有卡**都具名拒，放不下也拒——不悄悄减配）／`auto`＝按 `device_policy.probe().freeBytes − HEADROOM_BYTES` 铺满；`plan_layer_devices` 的 `want_gpu_layers` 是**下限**，显式 `N` 由后端**截到 N**。回执 `describe()["layers"]` 带 `gpuLayers/cpuLayers/layerBytes/usableBytes/why`，分层时 `device` 报**首层**在哪（报 embed 所在会永远是 cpu） | `app/services/engine/llm.py` / `llm_backend.py` / `gguf_to_llm.py`（`layer_devices=` 转给 `build_llm`，流式装配逐张量 `copy_` 跨设备一次） / `app/services/text_generation.py`（`engine_gpu_layers` 单一真源，三个调用口共用；缓存键含 `gpu_layers`） |
-| **KV cache INT8 分组量化（2026-11-08）**（`llm.quantize_kv` / `dequantize_kv` / `update_kv_cache`：**沿 `head_dim` 每 64 元素共用一个 fp32 scale、零点恒 0**（口径同 Strata `kernels/kv_q8.hpp`）——沿序列分组是错的（语义无关的 token 共用一把尺子）；全零组 `scale=1`（否则 0/0 ⇒ NaN ⇒ softmax 全崩）；旧段 int8 **原样 cat 不重复量化**（32K 上下文反复量化会累积误差）；`head_dim` 除不尽组宽 ⇒ 尾部 pad 到整组、反量化按 `head_dim` 裁回；注意力读的是**量化后再反量化**的值（prefill 用原 k、decode 读 dequant(k) 会是两套历史）。`Q8Kv` 壳把「值＋scale＋组宽＋原始 headDim」绑在一起、`shape` 与量化前逐字相同。对外旋钮 `settings.kvMode`（`off`/`fp`＝原样浮点老路径逐字节相同／`q8`/`int8`/`auto`＝量化，拼错**装载前**具名拒）：`kv_bytes_per_token` 给的就是**每 token 字节**（4B 档 144 KiB ⇒ 76.5 KiB，32K 上下文 4608 MiB ⇒ 2448 MiB），`describe()["kv"]` 带 `mode/group/kBytes/vBytes/totalBytes/fpTotalBytes/ratio/contextBytes`，装载前按**请求值**报数并标 `assumedDtype`（配了 q8 却报 fp 的字节会让人以为配置没吃） | `app/services/engine/llm.py` / `llm_backend.py`（`kvModeRequested` ＋ `kv` 回执） / `app/services/text_generation.py`（`engine_kv_mode` 单一真源；缓存键归一 `None`＝`off`、`auto`＝`q8`，否则同义写法会各装一份 8 GiB） |
+| **KV cache INT8 分组量化（2026-11-08）**（`llm.quantize_kv` / `dequantize_kv` / `update_kv_cache`：**沿 `head_dim` 每 64 元素共用一个 fp32 scale、零点恒 0**（口径同 Strata `kernels/kv_q8.hpp`）——沿序列分组是错的（语义无关的 token 共用一把尺子）；全零组 `scale=1`（否则 0/0 ⇒ NaN ⇒ softmax 全崩）；旧段 int8 **原样 cat 不重复量化**（32K 上下文反复量化会累积误差）；`head_dim` 除不尽组宽 ⇒ 尾部 pad 到整组、反量化按 `head_dim` 裁回；注意力读的是**量化后再反量化**的值（prefill 用原 k、decode 读 dequant(k) 会是两套历史）。`Q8Kv` 壳把「值＋scale＋组宽＋原始 headDim」绑在一起、`shape` 与量化前逐字相同。对外旋钮 `settings.kvMode`（`off`/`fp`＝原样浮点老路径逐字节相同／`q8`/`int8`/`auto`＝量化，拼错**装载前**具名拒）：`kv_bytes_per_token` 给的就是**每 token 字节**（4B 档 144 KiB ⇒ 76.5 KiB，32K 上下文 4608 MiB ⇒ 2448 MiB），`describe()["kv"]` 带 `mode/group/kBytes/vBytes/totalBytes/fpTotalBytes/ratio/contextBytes`，装载前按**请求值**报数并标 `assumedDtype`（配了 q8 却报 fp 的字节会让人以为配置没吃）。★2026-11-09 补**时间代价**（此前只报「省 47% 字节」＝半个账）：探针 ⑦ 实测 q8 比 fp **每步 ×1.29–1.38（+8–10 ms）**，且 256 行与 1024 行**两个点几乎一样** ⇒ 更接近**固定成本**（多出来的那批 kernel），**别按「上下文越长越亏」想当然外推**；口径＝**q8 省显存不省时间**，显存够就别开。`describe()["kv"].note` 现按档成对写：`q8` 写「每步 +8–10 ms」，`fp` 写「`q8` 可省约 47% 字节、代价每步 +8–10 ms」——**关着的档也写**（不打开的人否则永远看不到值不值）。 | `app/services/engine/llm.py` / `llm_backend.py`（`kvModeRequested` ＋ `kv` 回执） / `app/services/text_generation.py`（`engine_kv_mode` 单一真源；缓存键归一 `None`＝`off`、`auto`＝`q8`，否则同义写法会各装一份 8 GiB） |
 | **跨调用 KV 前缀复用（2026-11-08）**（`llm.KvPrefixCache` 单槽 ＋ 字节预算 ＋ 命中回执：**按 token id 比公共前缀**（文本相等不保证 id 相等；模板空白/特殊符/编解码往返都会换一串 id）且**必须 ≤ 序列长 − 1**（复用整段就没有查询可算 ⇒ 拿不到 logits）；`truncate_kv` 裁段时 **`q` 与 `scale` 一起裁**（只裁 q ＝ 长度对数值错位）并 `contiguous()`（切片视图会吊住整段长张量）；`store` 存**整段**（提示词＋续写 ⇒ agent 循环下一轮连上轮输出也不必重算）；**一点共同前缀都没有 ⇒ 当场释放**（留着「万一」＝一段永不命中的 cache 一路占显存，卡满时报在别的件上）；**超预算不存**并写明原因（`conversation_memory.hpp` 的预算准入写法）；口径必须同一套（`fp` 的 cache 喂 `q8` 跑＝长度对数值两套）。⚠️ 「无损」只到 bf16 舍入级：复用的 KV 段与重算**逐位相同**（q8 分组沿 `head_dim` ⇒ 每 token 的 scale 与前后无关），但末位查询块从 `M×N` 变 `1×N` ⇒ 4B 真权重末位 logits 差 0.145（0.56%），**同串整段复用在近似并列处会翻 token**（实测差一个空格）⇒ 要逐字复现就关复用；增量轮（agent 循环真实形状）实测**逐字相同**。对外旋钮 `settings.kvReuse`（`off`/`false`/`0` ＝关）＋ `settings.kvCacheBytes`（`512MiB`/`1GiB`/字节数，不写＝512 MiB，`0`＝关；拼错**装载前**具名拒）；`describe()["kvCache"]` 带 `enabled/mode/group/budgetBytes/storedTokens/bytes/hits/misses/skipped/reusedTokens/stored/note`（**命中数必须真报**：不报 ⇒ 「配了复用」与「一次没命中」分不清） | `app/services/engine/llm.py` / `llm_backend.py`（`kvCache` 回执 ＋ `clear_kv_cache()`） / `app/services/text_generation.py`（`engine_kv_cache_bytes` 单一真源，三个调用口共用；缓存键新增第 7 格 `cache_slot`，`None` ≡ 默认 ≠ `0`＝关，否则改了预算仍拿到老后端） |
 | **投机解码：后缀查表草稿（2026-11-08）**（`llm.LookupDrafter` ＋ `generate_llm(spec_lookup=True)`：三词元后缀 → 历史里出现过的后继（零权重、不训草稿头，与 Strata `spec::SuffixDrafter` 同构）。**只在 `temperature=0` 启用**——随机采样要「概率接受 ＋ Philox 计数空间隔离」才能落在同一条随机序列上，本仓没有那套 ⇒ `spec_report` 如实报 `enabled=False, reason="temperature>0"`，同种子输出与不开**逐位相同**（不假装开了）。主循环口径四条：① `window[0]` 是 **target 自己刚产出但还没喂过前向**的那个 token（参考实现的 `window[0]` 口径），所以「一拍吃 1+T 行」比老路径**少一拍**；② 接受判据是「第 `i` 行 argmax == `window[i+1]`」（第 `i` 行预测的是窗口**之后**那个 token），抄成 `window[i]` 全拒且不报错；③ 回滚 `keep = min(past_len + 1 + a, total + len(generated))`——上限压到「已产出总数」是因为 stop 打断时 cache 不能比 ids 长（否则 `KvPrefixCache.store` 存错配）；④ `a == len(draft)` 时第 `a` 行就是 bonus token，被拒时它就是修正后的 token ⇒ 两条路同一个 `_sample_token(win_logits[:, a, :])`。草稿器口径：**允许与当前后缀重叠**（周期文本唯一能拿到草稿的路径）、等长匹配**保留更近**（`>` 写成 `>=` 结果不同但不报错）、`min_match` 不够就返回**空列表**（不是错）。收益实测 1.02~1.03×（逐字复述时最长匹配贴着当前末尾 ⇒ 匹配越准越不接受，这是 lookup 的结构性盲区，照参考实现保留、不擅自加错位修正）。旋钮 `spec_lookup`/`spec_window`(8)/`spec_min_match`(3)/`spec_report`，`< 1` 具名拒。⚠️ 默认关闭 ⇒ 老调用方逐字节相同 | `app/services/engine/llm.py`（`LookupDrafter` ＋ `spec_*` 参数） / `tests/engine_llm_test.py`（⑩ 系列 12 条：真模型等价、q8 等价、`accepted == drafted > 0`、回滚差值区间（**部分拒绝时严格小于窗口行数**——全接受时不裁也「差 == 行数」⇒ 只看区间会假绿）、输出依赖 `past_len` 的模型下仍等价、温度退回、三条草稿器口径、额度边界、参数校验） |
-| **融合核快路径（`fastPath`，2026-11-08，默认关）**（两个**减 launch** 的开关 ＋ 一处**无开关**的等价改写：`norm`＝`RMSNorm` 走 `F.rms_norm`（老五连在真机上是**一次 16 个 kernel**，不是纸面的 5 个 ⇒ 4B 档一步 145 次调用、2320→290）、`attn`＝`F.scaled_dot_product_attention(enable_gqa=True)`（免掉 `repeat_kv` 物化 1.15 GiB/步、每层 6→1）、RoPE 折叠（`fold_rope`/`apply_rope_wide`：`cat((cos,cos),-1)` ／ `cat((-sin,sin),-1)`，**前后半配对**不是相邻交错，与 `apply_rope` **逐位相同**所以不设开关）。`resolve_fast_path` 收 `off/norm/attn/all/组合/布尔/列表`，返回 **`frozenset`**（`"all"` 里没有 `"norm"` 子串 ⇒ 字符串包含判断会把 all 读成只开 attn），拼错**当场具名拒**。关着时 `fast_kw = {}` ⇒ **不传关键字**、调用签名逐字不变（本仓桩模型测试靠这条）。真机实测（A5000／4B-Q4_K_M／2048 上下文）：`all` 每步 32.7→24.6 ms、launch 4449→2203、整条生成循环 **32.5→45.0 token/s**；收益全在 launch 不在算（CUDA 侧 50.8→44.1 ms），所以**默认关**（融合核差 1 个 bf16 ulp ⇒ 长程贪心可能岔口）。回执 `describe()["fastPath"]` 报 `requested/norm/attn/items/enabled/fusedNormAvailable/note`，缺 `F.rms_norm` 时如实写「退回老写法、一步也没省」；`settings.fastPath` 经 `text_generation.engine_fast_kwargs` 三处生成口共用，缓存键含 `fastSlot` | `app/services/engine/llm.py`（`FAST_PATH_ITEMS`／`resolve_fast_path`／`fold_rope`／`apply_rope_wide`／`sdpa_attention`／`fused_norm_available`） / `llm_backend.py`（`_fast_report`／`_fast_call`） / `app/services/text_generation.py`（`engine_fast_path`／`engine_fast_kwargs`） / `tests/engine_llm_test.py`（⑫ 系列 19 条：逐位对拍＋反证、SDPA 三种 past_len＋掩码偏 1 的反证、**spy 数融合核调用次数**、默认关不传关键字＋反证） / `tests/engine_llm_backend_test.py`（⑫ 系列 12 条：回执三态、`load()` 开头拒、缓存键、**AST 判三个调用口＋后端 3 处 `generate_llm`**、真跑 spy） / `data/experiments/llm_attn_cost/fast_path.py` / `docs/reference-audit-llm.md` §7.5） |
+| **融合核快路径（`fastPath`，2026-11-08，默认关）**（两个**减 launch** 的开关 ＋ 一个**减带宽**的开关 ＋ 一处**无开关**的等价改写：`norm`＝`RMSNorm` 走 `F.rms_norm`（老五连在真机上是**一次 16 个 kernel**，不是纸面的 5 个 ⇒ 4B 档一步 145 次调用、2320→290）、`attn`＝`F.scaled_dot_product_attention(enable_gqa=True)`（免掉 `repeat_kv` 物化 1.15 GiB/步、每层 6→1）、`kvbuf`＝KV 改**定长缓冲 ＋ 原位写**（`KvBuf`：每层每步那 2 次 `cat` 把整段历史重拷一遍，2048 词元＝288 MiB/步 ⇒ 换成往 `[length, length+s)` 写新来的 1 行＝288 KiB；`shape[2]` **仍报已用长度**，暴露 `cap`＝位置/掩码整排错位且形状自洽）、RoPE 折叠（`fold_rope`/`apply_rope_wide`：`cat((cos,cos),-1)` ／ `cat((-sin,sin),-1)`，**前后半配对**不是相邻交错，与 `apply_rope` **逐位相同**所以不设开关）。`resolve_fast_path` 收 `off/norm/attn/kvbuf/all/组合/布尔/列表`，返回 **`frozenset`**（`"all"` 里没有 `"norm"` 子串 ⇒ 字符串包含判断会把 all 读成只开 attn），拼错**当场具名拒**。关着时 `fast_kw = {}` ⇒ **不传关键字**、调用签名逐字不变（本仓桩模型测试靠这条）。真机实测（A5000／4B-Q4_K_M／2048 上下文）：`all` 每步 33.7→23.7 ms、launch 4449→2203、整条生成循环 **32.1→43.7 token/s**；`norm`/`attn` 的收益全在 launch 不在算（CUDA 侧 50.9→47.1 ms），所以**默认关**（融合核差 1 个 bf16 ulp ⇒ 长程贪心可能岔口）。⚠️ `kvbuf` 是另一种账：**kernel 数 4449→4449 一个不少**（72 次 `aten::cat` 一比一换成 72 次 `copy_`），省的是**带宽**（每步 288 MiB→288 KiB、CUDA 50.19→47.32 ms、墙钟 −5.8%），**logits 最大差 0.000e+00**（真权重逐位相同，所以这一档不改数值）；代价是**已分配**容量按翻倍涨（2048 行那步 288.7→576.3 MiB，`kv_cache_bytes` 报 cap）。`truncate_kv`（前缀复用处）必须返**独立副本**、`rollback_kv`（投机窗口处）必须**就地零拷贝**，两者**不许互换**。回执 `describe()["fastPath"]` 报 `requested/norm/attn/kvbuf/items/enabled/fusedNormAvailable/note`，缺 `F.rms_norm` 时如实写「退回老写法、一步也没省」；`settings.fastPath` 经 `text_generation.engine_fast_kwargs` 三处生成口共用，缓存键含 `fastSlot` | `app/services/engine/llm.py`（`FAST_PATH_ITEMS`／`resolve_fast_path`／`KvBuf`／`update_kv_cache(buffer=)`／`rollback_kv`／`fold_rope`／`apply_rope_wide`／`sdpa_attention`／`fused_norm_available`） / `llm_backend.py`（`_fast_report`／`_fast_call`） / `app/services/text_generation.py`（`engine_fast_path`／`engine_fast_kwargs`） / `tests/engine_llm_test.py`（⑫ 系列 19 条：逐位对拍＋反证、SDPA 三种 past_len＋掩码偏 1 的反证、**spy 数融合核调用次数**、默认关不传关键字＋反证；⑬ 系列 12 条：`kvbuf` 的 fp/q8 逐位对拍、`shape[2]` 语义、**spy `aten::cat` 归零**、容量翻倍、`truncate_kv` 独立副本＋`rollback_kv` 就地反证、开→关→开字节原样、写错位置的反证、`generate_llm` 逐 token 相同） / `tests/engine_llm_backend_test.py`（⑫ 系列 12 条：回执三态、`load()` 开头拒、缓存键、**AST 判三个调用口＋后端 3 处 `generate_llm`**、真跑 spy） / `data/experiments/llm_attn_cost/fast_path.py` / `docs/reference-audit-llm.md` §7.5） |
+| **CUDA Graph 图化 decode 单步（`cudaGraph`，2026-11-08，默认关）**（省的是**每步几千次 launch 的提交开销**，不是算力；探针 `data/experiments/llm_graph_probe/probe.py` 量「纯提交时间 vs 重放墙钟」，重置 KV 必须用**零拷贝** `rollback_kv` —— 用 `truncate_kv` 会给 KvBuf 返独立副本、把 256 行×36 层的复制成本算进 plain，图看起来虚快）。⚠️ 图化要改**三处结构**，漏一处就「捕获成功、重放出来是错的」且**不报错**（形状全对、只是从第 2 步起算错，症状＝越往后越胡言乱语）：① 历史长度不能是 Python int（老路每步读 `past_kv[0][0].shape[2]`，图里被烘成常量）⇒ `KvSpan`「读满桶 `cap` ＋ 加性 `-inf` 掩码 + `used` 是**设备张量**、`advance()` 走 `add_`”；② 位置不能是 Python int（RoPE 的 `pos0`）⇒ `RopeTable` 一次算好 `(cap, head_dim)` 折宽 cos/sin、图里只留 `index_select(0, span.used)`；③ KV 缓冲不许换指针（老路 `torch.cat` 每步重分配）⇒ 必须 `fastPath=kvbuf` ＋ `KvBuf.write_at`（`index_copy_(2, at, …)`，**不改 `length`、不 `_reserve`、只收 `fp`**）⇒ 本档**隐含 kvbuf**（回执 `impliedKvbuf` 明写是不是替你加的）。收尾必须补 `length`（图里只写**行**）否则前缀缓存只存 prefill 那一段、下次命中接错位置且不报错。九条前置任一不满足就**退回 plain 并在回执写理由**（`device=cpu` / `kvMode=q8` / `kvWindow=n` / `specLookup` / `kvStorage=cpu-cat` / `layerSplit` / `capTooSmall(base+max>cap)` / `captureFailed`），捕获前把 KV 尾部**清零一次**（`torch.empty` 残留若是 NaN ⇒ `q@kᵀ` 出 NaN ⇒ 加 `-inf` 还是 NaN ⇒ 整条 softmax 全 NaN 而不报错；`exp(-inf)=0` 只救有限值）。⚠️ **默认关**不是忘了开：掩码把 softmax 归约长度从 `used+1` 改成 `cap` ⇒ 与老路**不逐位相同**（`exp(-inf)=0` 精确、但浮点加法不结合），回执如实写 `bitExact=False`（＝不承诺逐位相同；「必然不同」是过宽结论）。⭐ 2026-11-08 真权重把差异**量**出来了：分歧**全来自多读的 padding 行** —— 同一份 KV／同一步／同入口，`cap = used+1` 时与截断读**逐位相同**（|Δlogits| = 0）、`cap` 多 96 行时 bf16 上 |Δlogits| **1.9e-1**、32 词元 **25 个**分叉（成因＝bf16 下 SDPA 归约分块随列数变，**不是掩码算错**）；默认预留 `padRows = 2 + specWindow = 10` 实测 32 词元 **0 分叉** ⇒ 别为省事把 `kv_reserve_rows` 放大（那会把输出静默改掉）。回执直接交 `padRows = cap − pastLen − maxNewTokens`（`None` ＝没捕获成、**不是 0**）＋ `captureMs`（热身 2 次＋捕获 1 次＋硬同步，实测 **≈100 ms**，**计在第一次生成里**），前端只在 `padRows > 16` 时标 `·pad N`。★★ 探针 ⑥「长度扫描」把两句好听话同时推翻，这才是开不开的真正判据：① **32 词元是探针挑的长度** —— 捕获 100 ms 而重放每词元只省 ~12 ms ⇒ **8 词元 ×0.91（净亏 ~28 ms、白干）**、16 词元起才到 ×1.1 档，短问答／agent 的一两句回答正落在这几档 ⇒ **那些请求开图是净亏**；② **「紧桶 ⇒ 逐 token 一致」只在短生成成立** —— 同一档 `padRows=10` 下 8/16/32 词元 0 分叉，**64 词元 11/64、128 词元 72/128、512 词元 443/512 照样分叉**（每步残留 1 ulp 随步数累积）⇒ padding 是**主因不是唯一原因**，长生成仍须与老路比对；★★ 长度全表（同一次跑，每档都新捕获）：8→×0.91、16→×1.09、32→×1.17、64→×1.24、**128/256/512→×1.24–1.27**（35.4→44.2–45.4 tok/s）⇒ **本仓真实负载（写剧本/对白 128–512 词元）稳定 ×1.24 以上**，捕获那 ~100 ms 摊进这段只剩零头；⚠️ 口径更正：短生成那十几毫秒净亏**不足以否掉整档**，但也别拿 32 词元的 ×1.17 当默认收益 —— 收益随长度从 ×0.91 走到 ×1.27，真正的代价是 `bitExact=False`（512 词元里 443 个词元已与老路不同）而不是那十几毫秒；③ 每次请求都**重新捕获**（无缓存、用完即弃不漏），跨请求复用同一张图需 KV 缓冲跨请求常驻＝改内存模型，但长度全表已把捕获摊销算进去 ⇒ **收益只剩 1–2%，不值得为它动内存模型**，明确不做。收益实测（A5000／4B-Q4_K_M／prompt 256／32 词元，**更早一批读数**，与长度全表 32 词元 ×1.17 同量级）：② 单张图重放 28.7→20.2 ms/步（×1.42，乐观值）、③ **产品路径 35.1→40.2 tok/s（×1.14，过 1.1 门槛）**、纯提交时间 915→578 ms；⭐ 2026-11-09 补：**`auto` 从「`on` 的别名」升级成真档**（此前它落在 `resolve_cuda_graph` 的接受表里 ⇒ 无条件捕获、连 8 词元那张净亏的图也照捕，回执还只报 `on` ⇒ 说的和做的不一致）：`resolve_cuda_graph_policy` 出**三档** `off/on/auto`（`resolve_cuda_graph` 仍只答「**可能**开」），`generate_llm` 内 `max_new_tokens < CUDA_GRAPH_AUTO_MIN_TOKENS(16)` ⇒ **主动不捕**并写 `reason="autoTooShort(n<16)"`（16 是 8→×0.91／16→×1.09 量出来的**不亏线** ✗ 不是甜点），auto 跳过时**连 kvbuf 都不替你加**（跳过＝完全老路径）；回执 `describe()["cudaGraph"]` 多一格 `policy`（`enabled=True` 分不出 `on` 与 `auto`，而这两档在用户眼里含义不同），auto 的三态 note 各自成句（还没跑过＝先说阈值／因短跳过＝「**不是故障**、要强制捕请改 `on`」／真捕到＝「本次 ≥16 才捕」），且**不混**「让路/前置不满足」那句（一个该改长度、一个该查驱动）；缓存键第 14 格改用**三档原文**（`on` 与 `auto` 背后是**两个后端实例** ⇒ 压成 bool 会让切档静默无效）。`resolve_cuda_graph` 拼错（`grpah`）**当场拒**，`load()` 在装权重之前具名拒，缓存键含第 14 格 `graph_slot`（不进格 ⇒ 把 off 改成 on 仍拿老后端、回执照报关） | `app/services/engine/llm.py`（`KvSpan`／`RopeTable`／`span_attention`／`sdpa_mask_gqa_ok`／`KvBuf.write_at`／`resolve_cuda_graph`／`generate_llm(cuda_graph=,cuda_graph_report=)`） / `llm_backend.py`（`_graph_call`／`_graph_report`／`describe()["cudaGraph"]` 三态 requested/enabled/last） / `app/services/text_generation.py`（`engine_cuda_graph`／`engine_graph_kwargs` 三处生成口共用；`_engine_backend_key` 第 14 格；`engine_llm_status` 的 `requested.cudaGraph` ＋ **第三格** `matches` 判据） / `models.vue`（`graphLabel`：off／on·未跑(理由)／on·重放 N 步／⭐ auto 档前缀 + `auto·未捕(短)` ＋ `auto·重放`，两端逐字同源） / `tests/engine_llm_test.py`（⑮¹–⑮¹²：归一表、拼错拒、**定长读窗口 ≡ 截断读**（3 步 logits 差 ≤1e-3 ＋ argmax 全同）、反证掩码写反差量级、闸门逐条理由、非 cuda 逐位回退、隐含 kvbuf、真捕获重放词元流一致、长度收尾、`padRows` 真值＝`2+specWindow` ＋ 放大 `kv_reserve_rows` 后必须跟着变、⭐ ⑮⁷′ `kv_reserve_rows` **只抬不压**（给 1 行／给 64 行都产满 6 词元；写成赋值 ⇒ 第 2 个词元就「超预算」，而回执说的是「调小 maxOutputTokens」＝假补救）；⭐ ⑮¹′ 三档归一＋`resolve_cuda_graph('auto')` 仍答「可能开」、⑮⁵′ **阈值两侧**（15 ⇒ `autoTooShort(15<16)` 且不替你加 kvbuf／16 ⇒ 落到 `device=cpu` 说明它试着捕了）） / `tests/engine_llm_backend_test.py`（⑬ 系列 9 条：回执三态、`load()` 开头拒、缓存键、AST 判三调用口＋后端 3 处 `generate_llm`、`_graph_call` 关＝空字典、CPU 真跑 `last.reason=device=cpu`、⭐ ⑬⁷ 递下去必须是**三档原文**不是 `True`、⑬⁷‴ auto 回执三态（阈值／不是故障／本次为啥捕）分得开） / `tests/text_generation_test.py`（⑰¹–⑰⁵：`requested.cudaGraph` 缺省报 `None`、双向 mismatch、拼错只进 `errors` 不进 `mismatch`、⭐ ⑰⁵ **`on` 与 `auto` 各占一格**（压成 bool ⇒ 切档静默无效）） |
+| **KV 显存预算（两本账，2026-11-08）**（`llm.kv_room_tokens` 纯算术：`free − 512 MiB 激活余量` ÷ 每 token 字节 ⇒ 还能放多少行 ⇒ **显存侧**窗口；与权重自带的 `*.context_length`（**权重侧**窗口）是**两本账**：低显存下先撞的一定是前者，而它**不写在文件里**、只能现探）。`LlmBackend.refresh_kv_budget()` 在 `load()` 成功后立刻快照（`torch.cuda.mem_get_info` ⇒ 可用字节），并算 `effectiveTokens = min(weightContext, vramTokens)` ＋ `limitedBy`；`_guard_context` 按两本账的 `min` 判，**报错区分是哪一本**（`by="vram"` ⇒「显存放不下这么长的上下文 ✗…（缩上下文／`kvMode=q8`／退卡后 `refresh_kv_budget()`）」，`by="weight"` ⇒ 原来的「上下文超窗 ✗」）—— 混成一句「超窗」会让人去改 `context_length`（改不动显存）。三态铁律：`free_bytes=None` ⇒ `maxTokens=None, ok=False`＝**探不到**（≠ `0`＝一个 token 都放不下）。回执 `describe()["kvBudget"]` 带 `mode/perToken/maxTokens/ok/freeBytes/reserveBytes/roomBytes/weightContext/effectiveTokens/limitedBy/note`；装载失败时置 `None`（不许拿上一份的旧快照） | `app/services/engine/llm.py`（`kv_room_tokens`／`KV_ACTIVATION_RESERVE_BYTES`） / `llm_backend.py`（`refresh_kv_budget`／`_guard_context` 双账） / `tests/engine_llm_test.py`（⑭¹–⑭³） / `tests/engine_llm_backend_test.py`（④ 系列补双账比对） |
+| **KV 滑窗压缩（`kvWindow`，2026-11-08，默认关，有损）**（`llm.compact_kv` 保留**开头 `kvSink` 行（attention sink）＋最近 `kvWindow` 行**，中间整段丢弃 ⇒ cache 行数**恒定** `sink+window`，长对话不再线性涨 KV（StreamingLLM 的做法；`Q8Kv` 的 `q`/`scale` 两段一起压、`KvBuf` 返**独立副本**不就地改）。⭐ 与它配套的硬约束：压缩后**`cache 行数 ≠ 历史长度`** ⇒ RoPE 必须按**绝对**位置走（`generate_llm` 每拍传 `position_offset=abs_pos`，`LlmModel.forward` 的 `pos0` 用它）—— 位置跟着行数退回 ＝ **每滚一轮整体相位跳一次、且不报错**（只有生成质量悄悄烂）。⚠️⭐ **峰值口径：窗口只压生成期，管不了 prefill**（2026-11-09 修）—— 压缩只在**两个生成词元之间**跑（`_compact`），而 prefill 的提示词段是**整段一次性写进缓冲** ⇒ 缓冲上限必须按 `max(prompt + maxNewTokens, sink + window)` 留：只按窗口留 ⇒ 越长的提示词越在第 2 个 prefill 块就撞「KV 缓冲超预算」，而回执给的补救（缩上下文／`kvMode=q8`／调小 `maxOutputTokens`）**三条都不是真因**（实测 `kv_window=3, kv_sink=2` ＋ 20 行提示词 ⇒ 报「要 20 行、上限 15 行」，同一请求在预分配接上之前是能跑的；修后生成期照样压到 5 行 ⇒ 修的是峰值、不是「干脆不压了」）。闸门三条：与 `KvPrefixCache` **结构互斥**（缓存存的是完整历史、滑窗后那段已不存在 ⇒ 复用回来会让模型看见「本不该记得」的行；后端选择**滑窗优先**并在 `kvCache` 回执写 `suspendedBy="kvWindow"`，不许静默停掉）、`kvSink < kvWindow`（相等＝没有可滚的窗口）、`kv_window` 只接受正整数行数（`"3k"`／`True`／负数**当场具名拒** —— 静默当 0 的后果是「人以为开了滑窗、显存照涨」）。对外旋钮 `settings.kvWindow`（`off`/`0`/不写 ⇒ 0＝不滑窗、老路径逐字不变）＋ `settings.kvSink`（不写＝4；`0` **合法**，与 `specWindow` 那条「< 1 即拒」口径**不同**）；`text_generation.engine_kv_window_kwargs` 三处生成口共用，缓存键第 12/13 格 `win_slot`／`sink_slot`（关＝空串、**窗口关着时 sink 不进格**，否则写个 `kvSink=8` 就多装一份权重）；回执 `describe()["kvWindow"]` 带 `enabled/window/sink/rows/note` | `app/services/engine/llm.py`（`compact_kv`／`resolve_kv_window`／`resolve_kv_sink`／`KV_SINK_DEFAULT`／`generate_llm(kv_window=,kv_sink=)`） / `llm_backend.py`（`_kv_window_report`／`_kv_window_call`／`_kv_cache_for_call`） / `app/services/text_generation.py`（`engine_kv_window`／`engine_kv_sink`／`engine_kv_window_kwargs`） / `tests/engine_llm_test.py`（⑭⁴–⑭¹³：三存法逐位、独立副本、预分配钳制、**pre-hook 数行数＋位置序列**、两条闸门、归一函数边界；⭐ ⑭¹⁰′ **滑窗 ＋ 长提示词必须能跑**（20 行 > `sink+window+2+spec`＝15 ⇒ 峰值按 `max(total, sink+window)` 留，且生成期照样压到 5 行）） / `tests/engine_llm_backend_test.py`（⑮ 系列 7 条：回执、`load()` 开头拒、`kvSink>=kvWindow` 拒、缓存键、`kvCache` 暂停、AST 判三调用口＋后端 3 处 `generate_llm`） |
+| **prefill 分块按显存预算分档（`prefill`，2026-11-08）**（块大小只解决**峰值**：`generate_llm` 里分数矩阵是 `O(chunk × 总长)`，与 KV 容量无关 ⇒ 块大小归**后端**，因为「显存有多紧」只有刚 `refresh_kv_budget()` 过的后端知道；调用方拿不到这个数只能写死 1024，而 2 GiB 空闲的卡上 prefill 3240 词元当场 OOM）。`LlmBackend._prefill_chunk()` 按 `kvBudget.freeBytes` 取档 `PREFILL_CHUNK_TIERS`：`≥4 GiB ⇒ 1024`（默认档 ⇒ `_prefill_call()` 返**空字典** ⇒ 调用签名与老路径逐字相同）、`≥2 ⇒ 512`、`≥1 ⇒ 256`、否则 128；**只缩不涨** ✗（8 GiB 也给 1024 —— 涨没有实测收益却把峰值翻倍）、`freeBytes=None`（没探到）⇒ 默认 1024（**不等于「很紧」**）。三处 `generate_llm` 统一展开 `**self._prefill_call()`；回执 `describe()["prefill"]{chunk,default,freeBytes,note}` | `app/services/engine/llm_backend.py` / `tests/engine_llm_backend_test.py`（⑯⁰–⑯²：分档表逐档、常见环境空字典、回执说「为什么」、AST 判三处都展开） |
+| **LLM 后端档位回执口（`GET /api/v1/engine/llm`，2026-11-08）**（此前自研文本后端**一条 HTTP 口都没有** ⇒ `kvMode`/`kvWindow`/`gpuLayers`/`fastPath` 只活在文本服务的 settings JSON 里，而「配了没生效」看不出来：缓存键按档位分格 ⇒ 改完配置，已装后端仍是旧档位，显存/速度一动不动）。`text_generation.engine_llm_status(settings)` 把两侧并排报：`requested`（当前 settings 的档位，拼错进 `errors`）／`backends`（每份已装后端的 `device/dtype/gpuLayers/kvMode/kvWindow/kvBudget/kvCache/fastPath/spec/layerBytes`）／`matches`＋`mismatch`（只判 `kvMode`、`kvWindow`、`cudaGraph` 三个**纯函数归一**的格；`gpuLayers` 的实际层数依赖装载那一刻的显存 ⇒ 只报不判）／`duplicates`（**同权重多档位各占一份显存**：4B Q4_K_M 物化 bf16 ≈ 8 GiB，切一次档就多一份，只报不 release —— 还有调用在用旧后端）。⚠️ **GET 不装载**：探活把 8 GiB 权重推进卡是 GET 能造成的最坏副作用；路由只读 `_engine_backends` 现值 ＋ 库里的请求档位，`provider` 不是 `engine` 时如实说「不判请求 vs 生效」 | `app/services/text_generation.py`（`engine_llm_status`／`_norm_weight_path`） / `app/routers/engine.py`（`GET /llm`） / `tests/text_generation_test.py`（⑯¹–⑯⁷：空缓存不装、一致/漂移/未装载三态、拼错不假判、duplicates、只读不装、坏后端不砸整表） |
+| **前端「自研文本后端档位回执」卡片（2026-11-08）**（`models.vue` 的「本地服务状态」分栏底部，**只读**，数据来自 `GET /api/v1/engine/llm`）。一屏回答三件事：① 已装的每一份后端 `device · dtype · kvMode · gpuLayers/(gpu+cpu) · kvWindow · prefill 分块 · KV 有效词元`；② **当前设置**（`requested` 全栏）与它的差 —— `mismatch` 点名具体键并明说「下次生成会按新档位另装一份」（改配置后正在跑的后端不会自己变）；③ `duplicates`「同一份权重占了多份显存 ⇒ 切档不会自己退旧后端，重启进程才回收」。⭐ 卡片上写明「装载只由生成触发，这张卡片不会把权重推进显存」—— 探活型 GET 最坏能造成 8 GiB 被推进卡，UI 必须说清。⚠️ **只读不写**：档位仍走文本服务的 settings（`kvMode`/`kvWindow`/`kvSink`/`gpuLayers`/`fastPath`），前端暂无编辑口；先有回执口是因为没有它「改了不知道生效没」，编辑口再快也没用 | `frontend/app/pages/models.vue`（`refreshLlmStatus`／`llmStateText`／`llmDuplicates`／`shortPath` ＋ `.llm-*` 样式；两端逐字同源） / `frontend/app/composables/useApi.ts`（`aiConfigAPI.engineLlmStatus`） |
 | 进程内文本后端 | `app/services/engine/llm_backend.py`（`generate_messages` 走权重自带的 chat 模板；超窗在**进采样前**按 `*.context_length` 拒 ⇒ 不半路越界） |
 | GGUF 反量化 | `app/services/engine/gguf_dequant.py` |
 | GGUF → LlmModel 装载 | `app/services/engine/gguf_to_llm.py`（**tie embeddings 以张量表为准**：文件里没有 `output.weight` ⇒ 只能 tie ⇒ `tie_embeddings_of`，2026-11-07 真机 `Qwen3-4B-Instruct-2507` 两个来源都缺、旧实现按 `False` 判 ⇒ 完好文件被报「缺 `lm_head.weight`」；对账放行的凭据是 `lm_head.weight is embed.weight` 这件**事实**，不是配置位） |
@@ -609,10 +623,11 @@ prompt ⇒ token ⇒ 向量。不做图像数学。
 
 ### L4 的两处已知边界
 
-- **未接线的 2 个模块**（已实现、只有测试在钉口径）：`image_ops`、`mappings`
-  —— 它们该接到谁身上，登记在 `tests/structure_test.py::UNWIRED`，接了线就该删那条登记。
+- **未接线的 1 个模块**（已实现、只有测试在钉口径）：`mappings`
+  —— 它该接到谁身上，登记在 `tests/structure_test.py::UNWIRED`，接了线就该删那条登记。
   （`dit_lumina` 2026-10-31 已接线 ⇒ 登记已删，见下一条；`latent_formats` 2026-11 已被
-  `dit_build` / `vae_wan` / `pipeline` 用上 ⇒ 登记同样已删。）
+  `dit_build` / `vae_wan` / `pipeline` 用上 ⇒ 登记同样已删；`image_ops` 2026-11-08 接在
+  超清二采的「缩到计划倍率」那一步 ⇒ 登记已删，见 §10.1。）
 - **有骨架的族有 10 个**（判族另算：`dit` `dit_family`）：H3（`h3_form` `vae_h3` `audio_vae`）、
   SDXL（`sdxl` `sdxl_vae`）、
   GGUF LLM（`llm` `gguf_to_llm`）、**通用单流 DiT**
@@ -872,15 +887,416 @@ L5 是唯一允许「知道某家厂商的怪癖」的地方。
 四类分别是：**10.1** 实现齐但生产代码零引用、**10.1b–10.1h** 各推理族的真实闭合程度、
 **10.2** 仍缺前向的族、**10.3 / 10.4** 调用链断在哪一层（停用 / 有接口没界面）。
 
-### 10.1 已实现但未接线（2）
+### 10.1 已实现但未接线（1）
 
-`image_ops` / `mappings` —— 实现齐、口径被测试钉死，但生产代码 0 处 import。
+`mappings` —— 实现齐、口径被测试钉死，但生产代码 0 处 import。
 危险不在占地方，在**看起来像已经能用**。登记在 `tests/structure_test.py::UNWIRED`，接了线必须删登记
 （㊅ 判据双向检查：白名单只增不减也会报，见「㊅ 欠账表里的模块已经接上线 ⇒ 必须报该删条目」）。
 
 **总数只认 `UNWIRED`，别照抄本文**：2026-11 起 `latent_formats` 已经接上生产线
 （`dit_build.py` 拿它取 `LatentFormatSpec`、`vae_wan.py` 走 `process_in/process_out`、
-`pipeline.py` 读 `h3_video` 的下采样比），因此从 3 条减到 2 条。
+`pipeline.py` 读 `h3_video` 的下采样比），因此从 3 条减到 2 条；2026-11-08 `image_ops`
+也接上了 —— 落在超清二采的「缩到计划倍率」那一步（`torch_backend._scale_video_latents`
+走 `image_ops.common_upscale`，它是少见的**吃 5 维 `(B,C,T,H,W)` 并逐帧缩**的实现 ⇒ 时间维不动），
+起因是一处真错：`ai-2x-resize` 的第二步「高质量缩放 2× → 1.5×」此前**一步都没执行**
+⇒ 计划要 1.5× 实际出 2×、而 `result.refine.scale` 照写 1.5（尺寸与回执对不上，回执自己却"自洽"）。
+守它的是 `tests/engine_refine_test.py` ⑦ 系列（真装载缩小版放大器真跑，含时间维不变与拒绝 4×）。
+
+⚠️ 那批判据此前**全是方形潜变量**（2×2 → 3×3），照不出「宽高传反」——`common_upscale(x, width, height, ...)`
+的参数是**显式长名**，传反了形状依然合法、任何一步都不报错，只有非方形才把它照成各向异性拉伸。
+⑦¹³/⑦¹⁴ 因此补了非方形（2×4 → 应得 **H=3、W=6**，传反则是 4×3），主视频与关键帧各一条。
+
+⚠️ 「实测值」这一面原先只靠人自觉，三处一起补（2026-11-08）：
+
+- `result.refine` 现在**并排**给计划值与实测值——`scale`（计划倍率，计划层口径不变）+ `scaleActual`
+  （由后端自述的尺寸算出的实测空间倍率）；两者差超过 1e-6 时另写 `scaleMismatch{planned, actual}`，
+  以 `scaleActual` 为准。此前只有 `scale`，画面其实是几倍**没有任何一格能证明**。
+- 后端跑完二采**必须自述实况**（`refineDetails` 非空），否则 refine 阶段直接失败——与此前
+  「不自述 `locksAudio` 就不认超清」同一纪律。只写计划倍率就当超清成功，属于「回执自洽、与画面无关」。
+- `refine_latents` **入口先清空 `refineDetails`**：它是实例属性，上一次的值会活到这一次；本次若在设值
+  之前失败，回执会写**上一次**的倍率与尺寸而这一跑一张画面都没有（实测证据：失败后残留
+  `spatialScale=1.5`、`videoShapeScaled=[24,2,3,3]`）。
+- 实测倍率对**每一次**二采都写（`ai-2x` 那条没有第二步缩放，此前整天缺席 ⇒ 管线只能拿计划值顶），
+  并另存 `spatialScaleW`（非方形下宽高可能因整数取整不等，不等时进 `notes`）。
+
+守它的是 `engine_refine_test` ⑨/⑨′/⑨″ 与 `engine_pipeline_test` ⑤²³/⑤¹⁴′；三条都用
+「短路实现 ⇒ 判据变红」反验过（⑨ 短路后 `spatialScale` 为 None、⑨″ 短路后残留上一次的 1.5×）。
+
+⚠️ 同族两处「实况写进去了、却读不出来」（2026-11-08 续）：
+
+- **`notes` 被覆盖**：`_second_pass()` 返回的 `denoise_report` 自己也带 `notes`，`details.update(...)`
+  把上面攒的缩放假话（「放大器 2× → 计划 1.5×」）整段冲掉——而**只要二采真跑了就必然冲掉**
+  （成功/失败两条路径都带 `notes`）。症状是回执只剩「二采：尾部 N 步」，读的人不知道画面被缩过；
+  倍率/尺寸两格还在，所以不报错。改为 `pop("notes")` 后 `extend` 并进去（⑦¹⁵）。
+- **二采跳过只在 `details` 里**：张量层对「二采失败」的口径是**回退到上采样结果**（不炸），于是
+  `applied=true` 照样成立、`secondPass:false` 静静躺在 `details`；而计划层 `upscale.secondPass`
+  写的是 `true`——拿「applied + 计划」来读会以为二采跑了。现在顶层单列 `secondPass`
+  （实测真值）＋ `secondPassSkipped{planned, why, note}`（不判失败，回退是上游口径）；
+  反向的「计划没要、后端真跑了」写 `secondPassUnplanned`（⑤²⁴/⑤²⁵/⑤²⁶）。
+
+**同一轮的另外两处「计划层有真源、执行入口不照它核」**（2026-11-08）：
+
+- `_upscale_from`（`app/routers/engine.py`，HTTP dict → 计划对象的**重建口**）漏搬派生量
+  `refine_tail_steps` ⇒ 重建出来的计划 `refineTailSteps` 恒为 0，于是回执 `plan.upscale`
+  写着「尾部 0 步」而张量层真跑了 10 步（它自己拿公式重算）—— **同一条回执里
+  `secondPass: true` 与 `refineTailSteps: 0` 并排**。现在三档：给了但与公式不符 ⇒ **400**
+  （两处口径必有一处错）；没给 ⇒ 用计划层**同一个** `upscale.refine_tail_steps()` 现算；
+  都不给 ⇒ 0。顺带把二采坏值（`refineSteps` 有、`refineDenoise` 无）**拦在 plan 阶段**
+  —— 此前要等**采样 + 放大器全跑完**进到二采才 `ValueError`。判据 `engine_pipeline_test`
+  ⑤¹⁸/⑤¹⁹/⑤²⁰。
+- `ai-2x-resize` 的**倍率区间**没人核 ⇒ `scale=1.0` 是「先放大 2× 再缩回原尺寸」
+  （尺寸与普通模式**一模一样**、耗时 ≈6×）、`scale≥2` 是「2× 之后靠 bicubic 插值冒充分块放大」
+  （不会长出新细节）。两者都交付一张**自洽得没有破绽的假超清**（`applied=true`、`scale` 照写、
+  `costFactor` 照算）。计划层只在 `1 < scale < 2` 才产这个模式 ⇒ 现在 `_upscale_from` 与
+  `torch_backend._plan_target_size` **同一判据双保险**（前者早一步 400、后者兜住非 HTTP 调用方，
+  边界必须一致：别一处 `>2` 一处 `≥2`）。判据 `engine_pipeline_test` ⑤²¹/⑤²² 与
+  `engine_refine_test` ⑦¹⁰–⑦¹²（含 ⑦¹²「1.5× 不许误拦」）。
+
+⚠️ 同一模式再犯一次「一条口播抄到所有分支」（2026-11-08 续）：`_finish_plan` 原先对**所有**
+`usesUpscaler` 的模式一律印「耗时按逆向口径 ≈6×」，而 ≈6× 只是 `ai-2x`（放大器**原样 2×**）
+那一条的逆向读数（它本来就写在 `upscale.plan_upscale` 给该模式的 `notes` 里）。
+`ai-2x-resize`（先 2× 再缩到 1.5×）与 `tiled-ai-2x`（分块）**都没有**这个读数，
+1.5× 的用户于是被告知一个没有出处、却读起来像实测的倍率。现在只**逐字引用**计划层那句
+（`notes` 里含「耗时」的那条），找不到就明说「本模式没有逆向耗时读数，不猜」——
+单一真源留在 `upscale.plan_upscale`，`_finish_plan` 不再自己写数。
+判据 `engine_pipeline_test` ⑤²⁷（2× 那句原样引用）/ ⑤²⁸（1.5× 不许出现 6×，且要说明没有读数）；
+反验：改回硬写 ≈6× ⇒ 两条同时变红，失败回执里 1.5× 那条真实印出「耗时按逆向口径 ≈6×」。
+
+⚠️ 紧接着同一个病根的第三种形状——**一个数只覆盖一半、却被并排摆成整体**（2026-11-08 续）：
+`costFactor` 从来只算**采样**（步数 × 采样器 × 引导），**不含**超清放大器与二采（那两段没有可精确算的
+系数，≈6× 是逆向读数）。可它和 `upscale` 并排躺在同一份 `plan` 里，开 2× 超清时读者会把
+「相对耗时约 ×1.00」当成整跑代价——而同一份 `warnings` 的下一条正写着「超清 ≈6×」。
+现在：`plan` 增两格 `costCovers:["sample"]` / `costExcludes:["upscale"]`（不开超清时为空数组，
+不编一个「总耗时」），且引导那条 `×N` 在开超清时补「这个系数只算采样，不含下面那段超清」。
+判据 ⑤²⁹/⑤²⁹′/⑤³⁰；反验（把 `costExcludes` 写死为空、去掉引导那句补语）⇒ 两条同时变红，
+失败回执里可见「相对耗时约 ×2.00」与「超清 ≈6×」直接并排。
+
+⚠️ 同一病根落在**产物尺寸**上（2026-11-08 续，SDXL 装配线）：`sdxl_backend.write` 的
+`width`/`height` 原先直接抄 `plan.width/height`，而 `media.write_image` 手里握着**帧张量实测**
+的宽高却没人用 ⇒ 回执报的是「计划值冒充产物尺寸」。缩小版 VAE（2 倍、潜 1×1）那条用例实测
+产物是 **2×2**、`plan` 是 8×8，而旧断言明文写着「报告的尺寸与 plan 一致 ✓」——**测试本身在给
+缺陷背书**。现在改报 `written` 的实测值，与计划不同时另给
+`plannedWidth/plannedHeight` ＋ `sizeMismatch{planned, actual, why}`（写明以 `width`/`height` 为准）。
+同一份回执的另一个后端（`torch_backend.write` 的图分支）本来就报 `report['width']`（实测），
+两条装配线口径至此一致。判据 `engine_sdxl_backend_test` ④⁗（改为断言实测 2×2）/ ④⁵′（点名
+两侧数）；反验：改回抄 `plan.width` ⇒ 两条同时变红。
+
+⚠️ 同一病根落在**耗时**上，而且两个数就躺在**同一份**回执里（2026-11-08 续）：`task.elapsedMs`
+是真墙钟（含装载），`result.totalMs` 只是 `stageMs` 那几个键之和——**不含装载**（装载在
+`runtime._execute` 里、`run_sync` 之外）、不含阶段间隙、不含 `gc`/`empty_cache` 收尾。实测 H3
+那一跑墙钟 94.7 s（装载 20 ＋ encode 22.2 ＋ sample 39.6 ＋ decode 11.5）而 `totalMs` 只有 73.3 s，
+差额 21 s 没有任何一格解释——而少掉的那段恰恰是「要不要常驻」最该看的数。另外事件里的
+`elapsedMs` 原先也等于 `totalMs`（同名不同义）。
+现在：`PipelineResult` 由 `run_sync` 薄壳记真墙钟（**返回后**统一赋值，不在十几处早退前各补一行——
+漏的那条必然是失败路径）；`to_dict()` 增 `totalCovers`（逐字 `list(stageMs)`，动态取键而非手抄）
+／`wallMs`／`unaccountedMs`／差额 >0 时附 `timingNote`；事件 `elapsedMs` 改真墙钟（`elapsed_ms()`，
+起点未知则退回阶段之和，不编数）；`EngineTask.loadMs` 由 `_execute` 的 `finally` 计（成功/失败都记），
+`to_summary()` 增 `timing{elapsedMs, loadMs, pipelineMs, pipelineWallMs, unaccountedMs, note}`。
+删掉 `run_sync` 的分阶段早退假设：原函数体改名为 `_run_stages`，公开名只做计时与封口。
+判据 `engine_pipeline_test` ⑤³¹（`totalCovers` 等于键且非空含 `plan`）、`engine_runtime_test`
+⓪¹/⓪²（5 s ＝ 装载 2 ＋ 管线墙钟 3，未入账 0；干跑 `loadMs=None` 不编 0）；反验：删 `totalCovers`
+⇒ ⑤³¹ 红，`unaccounted` 漏掉管线墙钟 ⇒ ⓪¹ 红（实测印出 3000 ≠ 0）。
+
+⚠️ 同一病根的最后一处落在**步数**上，而且是「读数缺失被当成读数说没有」：`result.sampleSteps`
+原先只有**采样器正常返回**那一处赋值，取消 / 中途 OOM 一律停在 **0** —— 而同一份回执里
+`stageMs.sample` 是真实秒数、`error.step` 写着「停在第 3 步」（`on_step` 在**每步算完之后**才回调，
+所以步号＝**已跑完**的步数）。三个数互相矛盾且无人解释；消费方照 `sampleSteps` 走：`chain.py`
+逐段累加（被取消那段记 0）、`bridge.log_task_progress` 把 0 写进日志 ⇒「跑了 3 步被取消」与
+「一步没开始」在留下的记录里完全同形。
+现在：新增 `pipeline._absorb_steps(result, stage, step)`（**只在 `stage == "sample"` 时认这个步号**，
+取 `max` 不赋值——双流那条路已先写过 `sampled["steps"]`，真跑完再抛不该把已入账的步数改小），
+`_fail` 的两条路径（取消 / 失败）都调它；`to_dict()` 在「采样中途停住且步数不满」时附 `stepsNote`
+（「真跑了 N / M 步就中断了」），并**防御性地**取 `max(sampleSteps, error.step)` 作句子里的 N——
+反验时真见过「真跑了 0 步…（取消在第 3 步）」这种自相矛盾的句子，比不说更糟。
+`chain.py` 的同形漏洞在上层：`_stopped` / `_segment_failed` 都**新建** `PipelineResult` 早退，
+`stageMs` 有人逐项累加着交过去而 `sampleSteps` 没人传 ⇒ 默认 0（跑完 3 段×12 步真花掉几分钟，
+回执写 0）；三处调用口（循环顶上 / 段内取消 / 段失败）现在都带 `sample_steps=steps,
+guidance_steps=guided`。
+判据：`engine_pipeline_test` ㉙¹（取消 ⇒ `sampleSteps == 3` 且与 `error.step` 同一个数、`stepsNote`
+写 3/20）/ ㉙²（一开始就取消 ⇒ 仍 0 且**没有** `stepsNote`，不伪造）/ ㉜¹（第 5 步失败 ⇒ 5，写 5/10）；
+`engine_chain_test` ②¹/②²/①¹（三个早退口分别 12 / 12 / **24** —— 24 是因为**失败那段自己也跑了
+12 步**，第一版按 12 写被这条判据当场纠正）。反验：`_absorb_steps` 首行 `return` ⇒ ㉙¹/㉜¹ 精确红
+（且 `stepsNote` 变成「0 步…（取消在第 3 步）」）；chain 三个调用口改 `sample_steps=0` ⇒ ②¹/②²/①¹
+精确红。
+
+⚠️ 最重的一处不在耗时、而在**内容**上，且旧判据在给缺陷背书（2026-11-08 续）：`media.write_video`
+混音用 `apad`＋`-t <画面秒数>`，`-t` 是**单向**的——音轨比画面**短**是补静音（无损），比画面**长**
+就是**截掉**（内容真丢）。而 `probe()` 只能读**混完之后**那条音轨（已被收尾 ⇒ 天然等于画面时长），
+于是「音轨被剪掉 0.5 秒」与「音轨本来 0.5 秒」在回执里**完全同形**（`audioMuxed: True` ＋
+`audioDurationSeconds: 0.5`）。`engine_artifact_test` 的 ⑩/⑪ 只断言「成片 0.5 秒 ✓」——1.0 秒
+音轨丢了 0.5 秒这件事，**测试正是那个担保人**。另有一行
+`report["audioDurationSeconds"] = report.get("audioDurationSeconds")`（自己赋给自己，读起来像在
+核对、实际什么都没干）。
+现在：`media._wav_seconds()` 用标准库 `wave` 读**源** wav（读不出返 `None` 不猜 0），`write_video`
+按「源音轨 vs 画面（`count/fps`）」两侧对账，出 `videoSeconds` / `audioSourceSeconds` /
+`audioTrimSeconds`（被截，内容丢失）/ `audioPadSeconds`（被补，无损）；真截过（阈值＝一帧，
+小于它的是帧对齐噪声不喊狼）再给 `audioTruncated` ＋ `audioTruncatedNote`。`torch_backend.write`
+把它转成 `result.audioTruncated{videoSeconds, sourceSeconds, trimmedSeconds, wavPath, why}`
+并在 `note` 里加一句人话（指明 mp4 里没后半段、全长音频在 `audioPath`）。
+判据：`engine_artifact_test` ⑤′（短 ⇒ 补 0.2、零截断）/ ⑩′（长 ⇒ 截 0.5、`audioTruncated` 真）/
+⑩″（mp4 里那条确实只剩画面长度）/ ㉟′–㉟‴（整条装配线：回执单列一格、`note` 点名、产物卡两个数
+能并排读）。两级分开反验过：`media` 里 `if False` ⇒ ⑩′/㉟′/㉟″ 三条同时红（回执里那句仍写着
+「音轨补静音到画面长度、以画面收尾」，正是被截时最误导的一句）；只把 `torch_backend` 那段关掉
+⇒ ⑩′ 绿而 ㉟′/㉟″ 红（证明「读数对了」与「读数交出去了」是两道独立闸门）。
+
+⚠️ 同一病根的下一处落在**帧数**上（2026-11-08 收口）：`nb_frames` 只在封装**写了 index** 时才有
+（分片 mp4 / 某些编码器 / 重封装中间态全都没有），`probe()` 如实给 `None`；而 `torch_backend.write`
+的闸门写的是 `if expected_frames and encoded_frames is not None:` ⇒ **读不到就整条跳过**，`note`
+却照旧写着「真 mp4 ✓（ffprobe 可复核 ✓）」⇒「帧数逐帧核过了」与「根本没核」在回执里**同形**
+（`pipeline.seedvr2_target` 早就立过对的一半规矩：`nbFrames` 缺失 ⇒ 按 `时长 × fps` 估并进 `warnings`）。
+现在三层表态，且**判定只有一处**：`media.frame_verdict(facts, fallback_fps, tolerance=1)` 返
+`framesWritten` / `encodedFrames` / `framesVerified`（`"nb_frames"` 直读 / `"duration×fps"` **估的** /
+`None` **没核过**）/ `framesMatch`（`True` / `False` / **`None` ＝没有可比读数**，谁把它读成「通过」
+就是同一个病根）/ `framesTolerance`（直读 0、估 ±1）；`write_video` 内 `report.update(...)`，两条落盘路
+都只读字段不重算。`torch_backend.write` 保留 `_discard_written()`（不符即删掉这条废片再抛，㉕「失败路径
+一个文件都没写」）与 `note` 两句人话（估的写明「按时长×帧率**估**得 N 帧」、没核过点名「⚠️ 落盘帧数
+**没核对过** ✗」）；`pipeline.seedvr2_target` 改为调 `media.frames_from_duration`（非法/缺失回 `None`，
+**不猜 0**），`None` 才抛「帧数与时长都读不出来」。
+`chain.run_chain` 是同族漏网的那一半：`stitch_frames` 只核**张量层**守恒（== 各段 keep 之和 == 总帧数），
+**管不到编码器**（丢/补帧、index、重封装），成片此前**一次都没核过** ⇒ 现读同一份 `framesMatch` /
+`framesVerified` / `encodedFrames` 交进回执，`framesMatch is False` 与单段路同口径（删成片 + `ChainError`，
+段 mp4 都是有效的、留着），`None` 则在 `note` 里点名没核过。
+判据：`engine_artifact_test` ㉔′（`nbFrames` 缺失 ⇒ `framesVerified == "duration×fps"` 且 `encodedFrames`
+一致）/ ㉔″（`note` 含「估」与 `nbFrames`）/ ㉔‴（两格都缺 ⇒ `framesVerified is None` + `note` 含「没核对过」+
+文件仍在）/ ㉔⁗（时长写着少 10 帧 ⇒ 抛 `MediaError`）/ ㉕′（判失败后渲染目录为空）；
+`engine_chain_test` ⑤¹（直读三格齐）/ ⑤²（估的 + `note` 有「估」）/ ⑤³（`None` 两格 + 点名 + 成片仍落盘）/
+⑤⁴（估出来差 10 帧 ⇒ `ChainError` 且废片不留在盘上）；`engine_io_test` ⑭¹（`write_video` 自带判定）/
+⑭²（直读容差 0 ⇒ 差一帧就 False）/ ⑭³（估 ±1，差 12 帧仍 False）/ ⑭⁴（两格都缺 ⇒ `None`；时长 0 ⇒
+`frames_from_duration` 回 `None` 不猜 0）。反验三处各自精确红：`torch_backend` 闸门退回旧口径
+（`nbFrames is not None and ...`）⇒ ㉔⁗/㉕′ 红；`chain` 闸门 `if False` ⇒ ⑤⁴ 红（废片留在盘上）；
+`media` 里 `return None` 改 `return 0` ⇒ ⑭⁴ 红（印出 `encodedFrames: 0` + `framesMatch: False`，
+正是「猜 0 变成真读数」）。
+
+紧邻的**同一病根第二例**落在**音轨长度**上（2026-11-08）：`media.write_video` 里
+`if audio_seconds is not None:` 之后**没有 else** ⇒ 源音轨时长读不出就整段跳过，回执里既没有
+`audioTruncated`（既不是「没截」也没说没量），而 `torch_backend` 那句人话照旧写着「音轨补静音到
+画面长度 ✓」——**肯定句盖住了「这次没核」**。修法两面，缺一不可：
+① **先修通路，再谈「不知道」**：标准库 `wave` 只认 PCM，`pcm_f32le` / `WAVE_FORMAT_EXTENSIBLE`
+这些**完全合法**的 wav 它会 `wave.Error: unknown format`，而 ffmpeg 照混不误 ⇒ 新增
+`media._audio_length(path) -> (秒数, 来源)`：`wave` 直读 → **`ffprobe` 兜底**（`_probe_audio_seconds`
+只认**音频流**那条，不拿容器时长顶替）→ 两路都没有才 `(None, None)`；
+② **两路都没有时必须明说**：`audioLengthVerified` 三档 `"wave"` / `"ffprobe"` / `None`，
+`None` 时 `audioSourceSeconds`/`audioTrimSeconds`/`audioPadSeconds` **一格都不写**（不编数）×，
+另给 `audioLengthNote` 一句人话；`torch_backend` 在 `audioLengthVerified is None` 时 **换掉**那句
+「补静音到画面长度」（写成「按 `-t` 收尾到画面长度，但源音轨多长**读不出来** ⇒ 有没有被截
+**不知道**」）＋ 单独一格 `video.audioTrimUnverified{videoSeconds,wavPath,why,note}`，并回填
+`result.audioLengthVerified`。
+判据 `engine_artifact_test` ㊱¹（前提：`pcm_f32le` 的 wav 是合法 wav 而 `wave` 读不了它、ffprobe
+读得到）/ ㊱²（`wave` 读不了 ⇒ 走兜底，`audioLengthVerified == "ffprobe"`、源时长 ≈1.0 秒、截断照旧
+对账出 0.5 秒）/ ㊱³（两路都缺 ⇒ `None`、三格全不出现、`audioLengthNote` 点名「不知道」）/
+㊱⁴（整条装配线：`audioTrimUnverified` 出现 ＋ 人话含「不知道」＋ **不含**「补静音到画面长度」）。
+反验三处各自精确红：`_audio_length` 去掉 ffprobe 兜底 ⇒ 仅 ㊱² 红（印出 `audioLengthVerified: None`、
+三个秒数全 `None`，正是「只认 `wave` 就把能读到的说成读不出来」）；删掉 `audioLengthNote` 那段 ⇒
+仅 ㊱³ 红；`torch_backend` 退回无条件那句 ⇒ 仅 ㊱⁴ 红，且失败详情里那句人与人话**同时**出现
+「补静音到画面长度」与「不知道」（自相矛盾一眼可见）。★另记一处判据自身的假绿：`_hiding_probe`
+最初按文件名 `tone_f32.wav` 比，而整条装配线那份源 wav 叫 `audio_seed12.wav`（`write_wav` 起名）
+⇒ **一次都没涂掉**，判据看着绿其实空转；改成按 `.wav` **后缀**判才真的生效 —— 模拟型判据要盯
+「它到底命中了没有」，别只看结论绿不绿。
+
+**同族第三处：容器时长顶替流时长**（2026-11-09）。`media.probe()` 原写 `audio_duration =
+(audio.get("duration") or duration) if audio else None`：**有**音频流、流的 `duration` 却缺时，
+它**静默**回落到容器时长。容器时长是「最长那条流 ＋ 封装余量」，实测 1.0 秒的 mp3 原样封进
+**mkv** ⇒ `format.duration=1.045`、封进 **webm** ⇒ `1.008`，两种封装都**不给**流的 `duration`
+也**不给** `duration_ts`（只有 `tags.DURATION`，同样带余量）；回执里 `audioDurationSeconds`
+于是与「音轨真就那个长度」完全同形。而 `_probe_audio_seconds` 正是拿它当**源音轨长度**去和画面
+做截断对账 ⇒ 端到端会报一个**纯属封装余量**的假截断（反验实测：0.5 秒画面 ＋ mkv 源 ⇒
+`audioTrimSeconds: 0.535`，其中 0.035 秒是假的）。
+修法：`probe()` 新增 `audioDurationSource` 三档（`"stream"` 流自己给的 / `"container"` 容器顶替 /
+`None` 没有音频流），回落本身**保留**（对混流后的 mp4 无害且必要，`-t` 已让两条流同长）；
+`_probe_audio_seconds` **只认 `"stream"`** ⇒ 回落值一律按「没读到」处理，交给上一段的
+`audioLengthVerified: None` ＋ `audioLengthNote` 明说不知道。**宁可说不知道，也不拿容器数当音轨数。**
+判据：`engine_io_test` ⑭⁵（纯 wav ⇒ `stream` / 封进 mkv ⇒ `container` / 无音轨 mp4 ⇒ `None`）/
+⑭⁶（`_probe_audio_seconds(mkv) is None` 而 `_probe_audio_seconds(wav)` 有值）；
+`engine_artifact_test` ㊱⁵。
+
+**同族第四处（同日补完整）：mkv/webm 不该停在「不知道」**。第三处修完只剩「mkv 只能说不知道」，
+但那不是容量问题而是**没试**。实测同一批 1.0 秒内容：
+
+| 源 | 容器声明 | 包级 span | **全解码** |
+|---|---|---|---|
+| mp3 → mkv | 1.045 ✗ | 1.045 ✗ | 1.025 ✓ |
+| mp3 → webm | 1.008 ✗ | 1.008 ✗ | **1.000** ✓ |
+| s16 wav | 1.0 | 1.0 | 1.000 ✓ |
+| mp3 | 1.0449 ✗ | 1.0449 ✗ | **1.000** ✓ |
+
+⇒ **包级 span 就是容器声明**（那不是内容长度，是编码 padding），"数包"这条路也是错的；只有**解码**
+口径对得上内容。新增 `_decode_audio_seconds()`（第四级）：`ffmpeg -f null -` 只量不存，`-progress
+pipe:1` 取 `out_time_us`（微秒，比解析人类可读的 `time=` 稳）；成本闸门 `_MAX_DECODE_SECONDS=600`
+按容器时长预估，超了就**不解码**、如实落到「不知道」档（不静默降级）。`audioLengthVerified` 因此四档：
+`"wave"` / `"ffprobe"` / `"decoded"` / `None`。
+判据：`engine_io_test` ⑭⁷（mkv ⇒ `how == "decoded"`、≈1.0 秒、取解码值不取声明值）＋ ㊱⁵ 改成端到端
+（`audioLengthVerified == "decoded"`、`audioSourceSeconds` 等于解码值、`audioTrimSeconds ≈0.5`）。
+反验两条：`_audio_length` 去掉第四级 ⇒ ⑭⁷ 与 ㊱⁵ 红（`decoded: 1.0` 与 `length: None` 并排）；
+让 `_decode_audio_seconds` 偷懒返回容器声明 ⇒ 两条红，且 ㊱⁵ 印出 `decoded: 1.035` ＝ `declared: 1.035`、
+`audioTrimSeconds: 0.535`（正是那个带封装余量的假截断）。
+★踩坑记一笔：两条判据最初用 `|declared − decoded|` 当「是否需要区分两者」的前提，那是**自洽陷阱** ——
+解码那支偷懒返回 `declared` 时这个差算成 0、条件判直接放行，**判据与被测对象共享同一个错误源**，
+反验二首跑仍然全绿。改成锚在**独立事实**（源内容是造出来的 1.0 秒）后才抓住。
+**同族第五处（同日补）：连「不知道」本身也得分两句说**。第四处把 mkv 从「不知道」里救出来了，但落回
+`None` 还剩两种**性质完全不同**的原因：一是**源太长、闸门不让解**（`_MAX_DECODE_SECONDS=600` 命中，
+这次**没试**），二是三路全失败（文件坏了 / 根本没有音轨，**试过读不出来**）。此前两者都塌成
+`(None, None)`，回执只能说「源音轨时长读不出来」——于是「你丢进来一条 2 小时的播客」在界面上长得像
+「这个文件编码有问题」，用户照着去换封装、重编码，白查一场。
+现在 `_audio_length()` 返三元组 `(seconds, how, miss)`，`miss ∈ {None, "too_long", "unreadable"}`
+（`"too_long"` 由 `_decode_audio_seconds(..., missed=[...])` 在闸门命中时交回，不是在上层重算一遍预估），
+`write_video` 照它分两句：`"too_long"` ⇒「**没有量到底**（不是读不出来）」＋ 点名上限秒数；
+其余 ⇒「三路都没给出可用时长」。两种都不写 `audioSourceSeconds` / `audioTrimSeconds` /
+`audioPadSeconds`（不编数）。
+判据：`engine_io_test` ⑭⁸（`_audio_length(mkv, max_decode_seconds=0.001)` ⇒ `(None, None, "too_long")`，
+同一文件用默认上限仍是 `"decoded"`——差别只来自闸门）＋ `engine_artifact_test` ㊱⁶（端到端：只涂掉流的
+时长、保留容器时长让闸门有预估，再把 `_MAX_DECODE_SECONDS` 压到 0.001 ⇒ `audioLengthNote` 说「没有量到底」
+且**不许**出现另一档的开头，三格假数一个不出现）。
+反验两条：把两档人话合成一档 ⇒ ㊱⁶ 精确红（note 变回「源音轨时长**读不出来**」）；把
+`_decode_audio_seconds` 的上限写成字面量 `600.0`（等价于「默认值在 `def` 时绑死」）⇒ ㊱⁶ 红在
+`verified: 'decoded'`（patch 模块常量对它毫无作用、真解码照样成功）。
+★又踩一个坑记一笔：判据最初写「`"读不出来" not in note`」，而**正确**人话里本来就有一句
+「（不是读不出来 ✓）」⇒ 首跑把对的判红。禁的是**另一档的开头字面形**（`源音轨时长**读不出来**`），
+不是那个词；同理 `max_seconds` 的默认值必须是 `None` 再在函数体内读模块常量，写成
+`= _MAX_DECODE_SECONDS` 会让整个闸门在判据里静默失效（这正是反验二守的那条）。
+
+**同族第五处·续：两档还得一路走到回执**。上面只在 `media.write_video` 当场分好了，往下走一层就散：
+`torch_backend` 那句人话是**写死**的「但源音轨到底多长**读不出来**」，`audioTrimUnverified.why` 也写死
+「**两路**都没读到」，而且那两句今天有**两处**已经过时（早就有第四级全解码，不是两路；源过长那次是
+**没量**不是读不出来）——于是 media 刚分好的两档在装配线被**拍平**，前端看到的还是同一句。这就是这条线
+的老病根换个层犯：**上游分了、下游吃掉 = 白分**。
+落法：`media.write_video` 的 report 增 `audioLengthMiss ∈ {"too_long","unreadable"}`（机器码，别让上游去
+匹配中文长句）；`torch_backend` 按它分三处 —— `audio_tail`、`audioTrimUnverified.reason`（新增，机器可读）、
+`audioTrimUnverified.why`（两句分别写明「超过上限⇒没量」与「三路都没读到」），并把 `audioLengthMiss`
+原样抬到回执顶层。判据 `engine_artifact_test` ㊱⁷ 同时钉两档：源过长那次回执级 `audioLengthMiss` 与
+`reason` 都是 `"too_long"`、人话含「没有量到底」；㊱⁴ 那次两者都是 `"unreadable"`。
+★反验踩坑记一笔：第一版 ㊱⁷ 只钉 `audioTrimUnverified` 那半（note 里含「没有量到底」），把 `audio_tail`
+的 too_long 分支关掉后判据照样 PASS——因为 note 是**两段人话拼起来的**，另一段仍写着「没有量到底」。
+所以判据对**两处人话各钉一句自己的字面形**（`audio_tail` 回退成写死的「读不出来」⇒ note 里出现
+「源音轨到底多长**读不出来**」），并把原因抬成机器码而不是靠中文分。两条反验：关 `audio_tail` 分支 ⇒ 红
+在那一句字面形；把 `reason` 写死回 `"unreadable"` ⇒ 红在 `tooLongReason: 'unreadable'`（62/63）。
+
+**同族第六处（同日再补）：音轨「在」不等于音轨「有声音」**。前面每一格——`videoHasAudio`、`audioLengthVerified`、
+`audioTruncated`、`audioLengthMiss`——都只回答「这条流**存在**吗」，没有一格回答「这段波形**有没有振幅**」。
+于是**全零波形**与一段正常音频在回执里完全同形：wav 照写（一个字节都不差）、混进 mp4 也照成、回执照说
+「真 wav ✓ 已混进 mp4 ✓」，用户点开是一段**无声片**，而回执里**一个提示都没有**。这正是「没量过振幅
+＝宣布音频没问题」——而 `write_image` 那边早就有 `blank_std` 抓纯色图了，音频侧一直没有对应物。
+落法：`write_wav` 增 `peak` / `rms` / `peakDbfs` / `silent`，**从写进文件的 int16 量**而不是从入参张量量
+（要答的是「这条 wav 里有没有声音」，`1e-6` 的 float 在 16-bit 里就是 0）；`silent` 判据用**峰值**而非 rms
+（一声咳嗽 rms 很低但不是静音），门限 `_PEAK_SILENT=1e-4`（≈ −80 dBFS，比 16-bit 量化底噪 3.05e-5 高
+约 3 dB）；`peakDbfs` 在 `peak == 0` 时给 `None` —— **不写 `-inf`**，`-Infinity` 是非法 JSON，前端
+`JSON.parse` 直接炸。报而不拦，与 `blank_std` 同口径。`torch_backend` 补一句人话，且必须把两件事**分开**：
+说的不是「音频没混进去」（那会让人去查 ffmpeg 参数），而是「音轨在、内容是静的」（该查的是波形生成那一段）。
+判据：`engine_io_test` ㉑′（全零 ⇒ `silent`＋`peakDbfs is None`；**0 帧**边界不崩；正常 0.8 正弦不许误判）
+＋ `engine_artifact_test` ㊱⁸（端到端全零波形 ⇒ `audio.silent` 与那句人话都在；对照组直接用 ㊱⁷ 那次真 tone，
+同一段代码路径，差别只在波形有没有振幅）。
+反验两条：`silent` 恒 `False` ⇒ ㉑′ 与 ㊱⁸ **同时**红；只关掉 `torch_backend` 那句人话 ⇒ ㊱⁸ 红而 ㉑′ 仍绿
+（media 层的读数还在，只是没人念出来——两层各被一条判据守着）。
+★踩坑：㊱⁸ 首跑红在字面形上——人话原文是「**不是**「音频没混进去」」，判据写成「不是「音频没混进去」」
+**恒假**。判中文人话时必须连加粗标记一起对（与第五处「只判『不含读不出来』会把对的判红」是同一个坑的两面）。
+
+**同族第六处·续：说清楚了还得让人看见**。上面每一句都写进 `result.note`——而前端**不读** `note`：
+`useEngineRun.ts` 一个 `note` 字段都不取，`CanvasNodeCard.vue` 里那行 `engineState.note` 显示的是**提交时**的
+`autoNote`（装配说明），不是跑完的结论。于是「音轨几乎是静音 ✗」「mp4 里音轨被截掉 0.6 秒 ✗」「落盘帧数
+没核对过 ✗」「源音轨没有量到底 ✗」这四句在界面上**一句都看不到**，只有直接读回执 JSON 的人才看得见。
+这是这条线的老病根换了个方向：之前是「读到了却不说」，这次是「说了却没人看见」——两种都等于没说。
+落法：`torch_backend.write` 里加 `_alert(sentence)`——把结论 append 进 `result["alerts"]` 并**返回原句**，
+`note` 那行写成 `+ _alert("；⚠️ …")` ⇒ 两处是同一个字符串，不会哪天只改一处；纯音频（Music3）分支同办，
+且那里更需要（没有画面可佐证，用户只能听，会先怀疑「我哪设错了」）。前端 `useEngineRun.ts` 的 `syncDetail`
+把 `result.plan.warnings`（提交前的计划警告）与 `result.alerts`（跑完的结论）**合成一个 `warnings` 列表**——
+复用现成渲染（⚠️ 前缀、只显示前两条、悬停看全量），不动 UI 结构。Web 与桌面两端同改（`useEngineRun.ts`
+是 parity 硬约束的同名文件）。
+★两条判据都钉「同源」：㊱⁸ 断言 `alerts` 里每句都**逐字出现在 `note` 里**（`any(str(s) in note_z …)`），
+别处不许各写一遍；对照组（㊱⁷ 那次真 tone）可以有**别的** alerts（它本来就有「没有量到底」那条），只判
+「静音那条不出现」——第一版把整个列表判空，被这条对照拦下来了。
+㊱⁹ 单独守**纯音频**那一支（无帧 ⇒ 落 `.wav`）：`audio.silent` 与 `alerts` 都在、那句与 `note` 逐字同源、
+`primaryPath` 以 `.wav` 结尾（这条分支没有 mp4，不许把 wav 当视频用）。反验：删掉 `result["alerts"] = [_sentence]`
+⇒ ㊱⁹ 精确红在 `alerts: None`（64/65），而 5 维那支仍绿 —— 两条分支各被一条判据守着。
+
+**同族第七处：图那一支漏了同一件事**。上一轮只给音轨补了 `alerts`，`write()` 的 **4 维图像分支**还留在原样：
+`write_image` 早有 `blank_std` ⇒ 纯色/全黑/全白**不抛异常**，`result["degraded"]` 与 `note` 里那句「但画面
+**几乎是纯色**」都写了，可前端只显示 `warnings`（`note` 与 `degraded` 它一个都不读）⇒ 用户拿到一张灰片、
+界面上零提示。同一个病根在**同一个函数**里换个分支再犯一次——正是「一句话手抄多份，修它那一轮再犯」那条
+教训的镜像版：**一个机制补到一半**。落法：图像分支同样 `result["alerts"] = ["；⚠️ 但画面**几乎是纯色** ✗
+（见 `degradedReason` ✓）"]`，与 `note` 那句**逐字相同**（`_alert` 闭包绑的是 5 维那支的 `result`，这里不能
+复用，但也不许各写一版）。判据 `engine_artifact_test` ㊱¹⁰：纯色 4 维 ⇒ `degraded is True` ＋ `alerts` 那句
+逐字出现在 `note` 里；对照组用随机噪声图（同一段代码路径，差别只在像素有没有内容）。
+★踩坑：对照组**不能判 `degraded is False`** —— 正常图那一支**根本不写** `degraded` 这个键（只在真标了才写
+`True`），读到的是 `None`，判 `is False` 会**恒假**（首跑就红在 `controlDegraded: None`，65/66）。
+这条也说明「三态键」与「布尔键」是两种约定：`degraded` 是**只在异常时才存在**的键，缺键即正常。
+
+**同族第八处：帧率读回来了，却没人跟请求对账**。`probe()` 早把盘上的 `r_frame_rate` 读成 `report["fps"]`，
+`write_video(fps=…)` 手里也有请求值——**两格从来没有比过一次**。于是「按 24 fps 封好」与「它按 12 fps
+封了（画面慢一倍）」在回执里完全同形，而且**每一格都有值、都 ffprobe 可复核**，看不出缺了什么。
+更麻烦的是它不止影响一格：`videoSeconds`、`-t`、音轨 `apad` 的截断与补长**全按请求 fps 算**，而
+`durationSeconds` 是**盘上真实**的——帧率一漂，音画就不同步，可这两格都"有值"。
+
+落法：`media.compare_fps(requested, on_disk)` 返回 `(verdict, note)`，三档 `"exact"` / `"drift"` /
+`None`（**盘上没读到 ⇒ 不知道**，不许塌成 exact）；`write_video` 补 `fpsRequested` / `fpsVerified` /
+`fpsDrift` / `fpsNote`，`torch_backend` 把这三格抬到回执顶层，`drift` 时 `_alert` 同一句（音画不同步）；
+`fpsVerified is None`（**没读到**）也要 `_alert` ——「没核」不许安静放过，回执里 `fps` 是 `None` 而
+`durationSeconds`/`videoSeconds` 都有值，读起来像一切正常。`chain.run_chain` 那条成片路同样交出
+`fpsVerified`/`fpsRequested`/`fpsOnDisk`（此前只有 `framesVerified` ⇒ 帧率被改在成片路上一声不响）。
+容差 `_FPS_TOLERANCE = 0.01`（`r_frame_rate` 可能是 `2997/100`）。
+判据：`engine_io_test` ⑭⁹（端到端 exact ＋ 请求值与盘上读数分开）/ ⑭¹⁰（三档分得开，`drift` 人话必须提
+「音画」）；`engine_artifact_test` ㊱¹¹（顶层三档 ＋ **一致时不许喊帧率**——老喊狼，用户第三次就学会无视它）；
+`engine_chain_test` ⑤⁵/⑤⁶/⑤⁷（**成片路**三档：`exact` 时顶层**不出这个键** / `drift` 顶层那句话与
+`outputs["alerts"]` **逐字一致** / 读不到 ⇒ `fpsVerified is None` 且顶层写「没读到」—— 单段路补了、成片路
+不补，就是这一族的老形状）。
+★反验：把 `compare_fps` 的 drift 分支塌成恒 `exact` ⇒ ⑭¹⁰ 精确红在
+`{'same': 'exact', 'drift': 'exact', 'blind': None}`（69/70）；成片路三条各自反验过（见第九处的记录）。
+★踩坑：`compare_fps` 里 `blind`（盘上读不到）只能给 `None`——若给 `"exact"`，那正是这一族的老毛病
+（读数缺失被当成读数说没问题）换个位置再犯一次。
+
+**同族第九处：`alerts` 从来没到过用户眼前（通道断在最后一段）**。这是本轮最重的一处，而且是**上一轮我自己
+留下的假绿**：各后端把跑完才知道的结论写进 `backend.write()` 的**返回**里（`result["alerts"]`），而
+`pipeline.run_sync` 把它原样收进 `PipelineResult.outputs`，`task.result = result.to_dict()` —— 于是 `alerts`
+落在 `result.outputs.alerts`；可前端 `useEngineRun.ts::syncDetail` 读的是 `task.result.alerts`（**顶层**）。
+⇒ 2026-11-09 起那一整批「音轨几乎是静音 / mp4 里音轨被截 / 落盘帧数没核对过」**一条都没显示过**，
+后端回执字斟句酌地写着，人以为界面上也写着。**后端说了、通道断了 ＝ 白说，比不说更糟**（它让人以为已经提示了）。
+落法：唯一真源仍留在 `outputs`（后端只管往里写），由 `PipelineResult.to_dict()` **统一抬一层**：
+`outputs["alerts"]` 非空才写顶层 `"alerts"`（**缺键** ＝ 一条都没有，不用 `[]` 混淆「没说」）；
+`outputs=None` 不许崩。`chain.run_chain` 那条成片路同样把要人查的结论写进 `outputs["alerts"]`（它此前连
+`fpsVerified` 都没有——单段路补了、成片路不补，正是 2026-11-08 帧数那次的同一个形状）。
+判据：`engine_pipeline_test` ㊱¹²（抬层逐字一致 ＋ 无 alerts 时顶层**没有这个键** ＋ `outputs=None` 不崩）、
+`engine_artifact_test` ㊱¹⁵（用**真** result 走 `to_dict()`，判的就是用户拿到的那份对象）、
+`engine_chain_test` ⑤⁵/⑤⁶/⑤⁷（成片路：清白的成片**顶层无** `alerts` 键；帧率被改 / 读不到时顶层那句必须
+与 `outputs["alerts"]` 逐字一致）。
+★反验（四处，逐处精确红）：① `to_dict()` 里那句 `payload["alerts"] = …` 关掉 ⇒ ㊱¹² 精确红在 `{'loud': None}`
+（183/184）；② 成片路 `if outputs["fpsVerified"] == "drift"` 关掉 ⇒ 只有 ⑤⁶ 红在 `{'fpsVerified': 'drift',
+'payloadAlerts': None}`（54/55）；③ `elif … is None` 关掉 ⇒ 只有 ⑤⁷ 红（同上形状）；④ 成片路
+`outputs["alerts"] = alerts` 关掉 ⇒ ⑤⁶＋⑤⁷ 同时红（53/55，证明抬层是唯一通路）。
+★教训：**"我把结论写进回执了" ≠ "用户看到了"** —— 断言 `result["alerts"]` 有值只能证明前半句，
+必须是「`to_dict()` 之后仍读得到」才算到人眼前；而**成片路要单独判**，因为链层的输出根本不经过
+`torch_backend.write`（一处改了另一处不改就是这么来的）。
+★★同时收掉第二层隐患（同一格上的**写法**）：`alerts` 生产侧有**四处**写入点（纯色图 / 元数据丢失 / 静音 /
+削顶），此前是两种写法混用 —— `result["alerts"] = [...]` **覆盖** 与 `list(result.get("alerts") or []) + [...]`
+**追加**。今天恰好覆盖写法都排在追加之前（所以没错），可只要有人以后往上面再加一句，前面那条结论就**静默消失**
+（不报错、行为判据也看不出来）。⇒ 四处统一成 `result.setdefault("alerts", []).append(...)`（单一写法），
+并立**写法判据** `engine_artifact_test` ㊱¹⁶（`app/services/engine/*.py` 里除 `to_dict()` 那一处抬层口
+`payload["alerts"] = [...]` 之外，不许出现任何 `X["alerts"] = [...]` / `= list(…)`）＋ ㊱¹⁶′（抬层口**只有一处**）。
+★反验（续）：⑤ 把静音分支改回覆盖写法 ⇒ ㊱¹⁶ 精确点名 `['torch_backend.py:8625']`（71/72）；
+⑥ 在 `to_dict()` 里多插一处抬层 ⇒ ㊱¹⁶′ 红在 `['pipeline.py:2056', 'pipeline.py:2058']`（71/72）。
+
+**同族第十处：图像元数据只核了「打算写」**。`write_image` 交的 `metadataKeys` 是**送出去的键名**，
+而 `_png_info` 会**跳过** `value is None` 的项、键名 strip 后为空也跳过 ⇒ 「打算写 3 个」被当成
+「写成了 3 个」，甚至交出一个**根本不在 PNG 里**的键名。mp4 那侧 2026-11-07 就有 `metadataDropped` 对账，
+图这侧一直缺。落法：写完 `Image.open(target).info` **读回来**逐键核 ⇒ `metadataKeys` 只列真读到的、
+`metadataMissing` 列送了却没进去的、`metadataReadback` 三档（`True` 核过 / `None` **本次没送**）；
+读不回来（文件都打不开）⇒ **一个都不算数**。`torch_backend` 4 维分支把 `metadataMissing` 写进
+`note` ＋ `alerts`（图离开作业单后元数据就是它唯一的出处），并与 mp4 的 `metadataDropped` **同口径**
+（那句此前只进 `note`，本轮一并补进 `alerts`）。
+判据：`engine_io_test` ⑭¹¹、`engine_artifact_test` ㊱¹³。
+★反验：把「读回来核」退化成「全收」⇒ ⑭¹¹ 精确红，证据 `bad.metadataKeys == ['', 'dropped', 'prompt']`
+且 `metadataMissing == []`（70/71）—— 正是"没写进去被说成写进去了"。
+
+**同族第十一处：削顶测了但没人说**。`write_wav` 早把 `clipped`（越界样本数）算出来交出去了，可它只躺在
+`audio` 子字典里，`note`/`alerts` 一个字不提。削顶**不抛异常**、也**不会**被判成 `silent`（峰值恒 1.0，
+甚至更"响"）⇒ 整段爆音与"增益刚好"在回执里同形，是本族最容易被当成"正常"的一格。落法：唯一句源
+`TorchBackend._clip_alert(report)`（5 维那支与纯音频那支都调它），`clipped > 0` 才喊，人话**点名
+爆音/失真**、给占比，并**先排除**解码/混流（锅在波形生成的增益/归一化）。
+判据：`engine_artifact_test` ㊱¹⁴（三档：0 ⇒ `None`、>0 ⇒ 含「削顶/爆音/占比」、键缺失 ⇒ `None`）。
+★反验：让 `_clip_alert` 恒返回 `None` ⇒ ㊱¹⁴ 精确红在 `{'some': None}`（69/70）。
+★规矩：**"测量到了" 与 "有人知道了" 之间隔着 `alerts` 这一格** —— 一个数字躺在子字典里，等于没测。
+
+至此「读数缺失被当成读数说没有」这条线在**帧数**（三层表态 ＋ 单点判定）、**源音轨长度**（`wave` →
+ffprobe 流时长 → **全解码** → 明说不知道，四档来源；`None` 再分「没量到底」/「读不出来」两档）、
+**音频时长的来源**（stream / container / None）三处都收口了，加上「波形有没有振幅」这一格，
+共计数缺失类四格全部如实表态。
 
 ### 10.1b Z-Image 端到端**已闭合**（2026-10-31 实测，`stage=zimage`）
 
@@ -939,7 +1355,7 @@ VAE 解码同理，反缩放留在原精度、到 `decode` 门口才对齐（`sd
 实测（同 prompt / seed 42）：装配 **40.5 秒**（三份真权重，`reserved 19.39 GiB` / 卡上 22.49
 ⇒ 余 1.77 GiB，比 1024² 那档刚够）、出图 **13.1 秒**、PNG **1096471 字节**——与先前「手动
 `load_weights`+`attach_*`」那条路的产物**逐字节相同**（两条装配路径等价，不是各出一版）；
-二次同参调用 `reused=True`。四格传法同时认驼峰与下划线（`textWeights`/`text_weights`），
+二次同参调用 `reused=True`。⚠️ **`force=true` 是唯一的例外**（2026-11-09 ✓）：同参也**真重装一次**（`_ensure_loaded_internal` 的同键短路由 `force_reload` 跳过 ⇒ 旧的真丢、新的真装 ✓），回执这一次带 `forced=true` ／ `reused=false` 且**不写进缓存报告**（否则下一次复用也带着它 ⇒ 把「重装过」读成「正在重装」✗）；不传 force 的默认路径**逐字不变**。四格传法同时认驼峰与下划线（`textWeights`/`text_weights`），
 `bridge.assembly_from_config` 也转手（**只转手、不补默认**：盘上同名的 `qwen_image_vae` 不是它）。
 
 **清单与就绪档也接上了**（同批收尾）：`configs/models.json` 补 `dit_zimage_turbo` /
@@ -1576,11 +1992,15 @@ patchify 顺序这些"错一个数就对不上"的点）—— 它不是一次�
 判据：`route_parity_test`（224 条端点、0 条未迁移）＋ `storage_change_test` 43 条 ＋ `agent` 各套。
 
 **切根到底搬什么**（`data_storage.change_data_root`）：库三件（`drama.db` ＋ `-wal` ＋ `-shm`）、
-`static/`、`library-overlay.sqlite`，加上 `MIGRATED_TREE_SUBDIRS` 里整目录搬的三个
-（`traces`／`lora-train`／`canvas`）。收录判据只有一条——**「丢了算不算得回来」**：能重下/重算/重跑的
-一律不进（那些进 `app/core/config.py` 的数据根登记表并标 `✗`），画布草案与训练产物没有源可再生，故必须搬
-（`canvas/` 2026-11-08 补进来：`canvas_plan_store.plans_dir()` 读的是 `get_data_root()`，切根后它直接指向
-新根的空目录 ⇒ 症状是「换个目录，画布全空了」）。迁移是**复制**、旧根保留作备份，所以起手先做磁盘预检
+`static/`、`library-overlay.sqlite`，加上 `MIGRATED_TREE_SUBDIRS` 里整目录搬的四个
+（`traces`／`lora-train`／`canvas`／`knowledge`）。收录判据只有一条——**「丢了算不算得回来」**：能重下/重算/重跑的
+一律不进（那些进 `app/core/config.py` 的数据根登记表并标 `✗`），画布草案、训练产物与知识台账没有源可再生，故必须搬
+（`canvas/` 与 `knowledge/` 都是 2026-11-08 补的：两者落点都现算 `get_data_root()`，切根后直接指向新根的
+空目录 ⇒ 症状都是「换个目录，XX 全空了」。`knowledge/` 那格是**改判**不是新认知 —— 它原先整目录被归进
+「能重算」，而里面四个库里 `knowledge-ledger`（条目／版本／审计）与 `training-registry`（promote 依据与凭据）
+是真源，只有 `outcome-index`／`skill-usage` 能重放 ⇒ 教训是**别按目录名判、要按目录里的东西判**；
+`storage_change_test` ⑨′ 因此改成现算 `db_path()` 的父目录名，将来真源挪去白名单外会自己亮）。
+迁移是**复制**、旧根保留作备份，所以起手先做磁盘预检
 （`MIGRATION_HEADROOM_BYTES` 固定余量，`shutil.disk_usage` 取不到可用空间时**不拦**——宁可不预检也不误拒
 合法目录），预检放在 `close_engine()` **之前**，保证拒绝路径「状态一点没动」。参考侧
 （`reference/anything-llm`／`reference/ragflow`）的数据根都只是配置项 + 重启生效、没有运行时迁移，无可搬实现。

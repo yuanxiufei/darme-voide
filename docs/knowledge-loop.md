@@ -44,10 +44,31 @@
 
 ### 缺口（十二个，按阻塞程度排）
 
+> **2026-11-08 复核口径**：十二格已全部闭合（每格下面的【…闭合】就是落点与守卫位置）。
+> 唯一还空着的是缺口 4 里那半句「引擎参数」—— 它是**按设计**不进这张表的：QC 阈值与
+> 采样档走 §4.3 那条「质检反哺引擎参数」的链（`engine/profiles` 覆盖层 + `technical_qc`
+> 伪档），进 `agent_optimizations` 会把「跑次经验」与「档位参数」两套口径混进一张表。
+> 所以往下读这批条目时请把它当**沿革**看，不要当成待办列表 —— 真要开新活，
+> 看 §7 的「已知边界」与各节末的 ⚠️ 段。
+
 1. **没有知识写入口** —— `agent/tools/` 8 组工具全只读（`library_tools.py` 只有一个
    `search_script_library`），全仓 grep `knowledge|write_note` = 0 命中。「知识积累」目前是空环。
+   【2026-11-06 缺口闭合·写侧，2026-11-08 补读侧】`agent/tools/knowledge_tools.py`
+   （`search_knowledge` / `context_knowledge` / `propose_knowledge`），在 `runtime` 三条
+   工具装配线上真接（`_as_registry(create_knowledge_tools(...))`）。写侧**只能写 `proposed`**：
+   状态机 `proposed → accepted → …` 由人审推进，Agent 只提议不拍板；`evidence` 逐条可核
+   （`outcome_index` 的 run_id 或盘上真实路径），核不过整条拒收，不是"先存下来再标可疑"。
 2. **事实层不可查询** —— trace 只有 `scope`+`traceId` 两个维度，`/traces/stats` 只算 token；
    无按 drama/episode/shot、无按 `level=ERROR`、无按 `agentType` 的聚合。
+   【2026-11-06 缺口闭合·事实层，端点是**另一个**】这一条的真问题不是"没数据"而是
+   "问错了地方"：`traces/**.jsonl` 是**原始事件流**（只读、只答 token 与回放），
+   要按剧/集/镜/阶段/状态/agentType 聚合的是**派生索引** `outcome_index`
+   （`data/knowledge/outcome-index.sqlite`，可由 traces 重建）——
+   `GET /runs` 按七维筛（`drama_id`/`episode_id`/`storyboard_id`/`shot_id`/`stage`/`status`/`agent_type`，
+   `total` 与 `items` 分开读）、`GET /runs/stats?groupBy=stage|status|kind|model|agent_type|drama_id…`
+   给条数/失败率/平均分/耗时 P50·P95，`groupBy` 非法**明确 400 不静默回全量**。
+   `/traces/stats` 保持只有 scope ＋ token **是有意的**（两个口径混在一张表里，
+   日后没人分得清"这是原始观测还是归一结果"）。见 §2.1 与 §3.1。
 3. **没有优化记录表** —— 优化史只落 `benchmarks/history/*.json`；`agent_configs`
    无 `version/score/parent_id`，回答不了「这次改动提升了多少」。
    【2026-11-07 缺口闭合】新表 `agent_optimizations` ＋ `services/optimization_log.py`
@@ -55,7 +76,17 @@
 4. **优化只覆盖提示词** —— 参数、工具集、skill 绑定、QC 阈值、引擎参数都不在目标里。
    【2026-11-07 第一格闭合】参数（`temperature`）已进目标：`agent/evaluation/param_optimizer.py`
    ＋ `POST /api/v1/evaluation/tune/{case_id}` ＋ 优化史表新开 `target="params"` —— 见 §4.2「参数调优」。
-   仍缺：工具集、skill 绑定、引擎参数（QC 阈值走 §4.3 那条链，不进这张表）。
+   【2026-11-08 第二格闭合】skill 绑定已进目标：`agent/evaluation/skill_optimizer.py`
+   ＋ `POST /api/v1/evaluation/tune-skills/{case_id}` ＋ 优化史表新开 `target="skills"` —— 见 §4.2「技能绑定调优」。
+   【2026-11-08 第三格闭合】工具集已进目标：`agent/evaluation/tool_optimizer.py`
+   ＋ `POST /api/v1/evaluation/tune-tools/{case_id}` ＋ 优化史表新开 `target="tools"`
+   —— 见 §4.2「工具集调优」。前置的「单步对照」评测形态也同日落地
+   （`evaluator.step_trace()` ＋ 五个评测分支全部经 `_report_steps()` 收口），
+   判据是**两把尺子**：整轮分 ＋ `unknownTool` 计数 —— 分数没掉但模型仍在调那个被摘掉的工具
+   记 `tool_wanted`（不摘），只看分数就会把"真需要的工具"删掉。
+   ⚠️ 这一格**只能留结论、不能落库**：工具集真源是代码里的装配语句，`agent_configs` 没有
+   tools 列 ⇒ 恒 `autoPersist=false` ＋ `persisted=false` ＋ `persistSkip` 说明理由。
+   仍缺：引擎参数（QC 阈值走 §4.3 那条链，不进这张表）。
 5. **引擎无自我完善** —— 无人读 `comfyui_runs`/`video_quality_checks` 反推 `PROFILES` 或阈值；
    `pipeline.py:1262/1524` 的默认值是硬编码字面量。
    【2026-11-06 前半闭合】`tuning.suggest()` 已会读 `outcome_index` 的跑次出候选（失败聚集／步数平台期），
@@ -84,6 +115,17 @@
    §4.3 末「质检反哺引擎参数」与 §7 第 17 条。
 7. **训练链路无数据供给、无产物登记** —— 数据集靠人手填 `pathDir`；产物落
    `<dataRoot>/lora-train/tasks/<taskId>/`，**无 DB 登记、重启即丢**。
+   【2026-11-06 缺口闭合】两半都补上了，落法见 §4.4「L3 的数据集怎么来」：
+   ① **数据供给** `knowledge_feed.export_dataset`（导出集 `items.jsonl`+`manifest.json`，
+   带 `source_ref`/`rights`/去重指纹，负样本**只进评测集不进训练集**）＋
+   `resolve_dataset` 核验（核不过当场 400、任务不入队）＋ `GET /datasets` 列可选值；
+   ⚠️ `datasetRef` **替代不了手填 `pathDir`**（训练器吃 toml、导出集是 jsonl，硬拼 argv 只会
+   造出跑不起来的命令），它只回答"这次拿哪批数据训的"。
+   ② **产物登记** `services/training_registry.py`（`training_jobs` / `trained_models` 两表，
+   `record_job` / `scan_artifacts` / `promote` / `demote`），两表都存 `datasetRef` 的核验结果
+   （血统断了 `problems()` 会点名）；产物状态默认 `candidate`，
+   经一次同批 case 基准对比（提升 >2% 且无回退）才 `active`，
+   且 `models.status=active` **只影响可选清单、不自动替换默认模型**。
 8. **评测面太小** —— 只有 4 份基准（`benchmarks/{extractor,script-rewriter,storyboard-breaker,voice-assigner}.json`），
    不评"成片好坏"。
    【2026-11-07 缺口闭合】两半都补上了：
@@ -363,6 +405,15 @@ skill 侧有同构但**不同库**的一张表 `skill_usage`（`data/knowledge/s
   是两件事：前者只是评测结论，后者才改变后续出图行为。合成一个必然出现
   「页面说已采纳、而默认提示词还是旧的」。`mark_persisted()` 是唯一置真点，且**必须**排在
   `persist_agent_config()` 之后（AST 判据盯顺序）。
+* **`mark_persisted()` 的 WHERE 必须带 `target`（2026-11-09 修）**。四格的 `version` 是**各自**
+  从 1 数的（提示词格按 `history` 的 best 递增，另三格走 `param_optimizer._next_version`），
+  同一 `agent_type` 上「提示词 v1」与「温度 v1」并存是常态。只按 `(agent_type, version, case_id)`
+  定位就会把「提示词落库」标到温度那行头上 —— 页面显示「温度调优也生效了」，而真正被写进
+  `agent_configs` 的那一版在优化史里查不到生效痕迹。**不抛异常、不改任何数值**，只把生效标错人。
+  三处调用方（`optimizer.py` / `param_optimizer.py` / `skill_optimizer.py`）都**显式**传
+  `target`，判据双管：`optimization_log_test.py` ④′ 真跑跨格（同 agent 同 version 两行只标一行、
+  缺那格 ⇒ 0 行）＋ ⑨′ 全仓 AST 扫每处调用都显式给且与所在文件身份一致。
+  注意 `_next_version` 跨目标取 max **不是**这条护栏：提示词那格的号不经过它，撞号躲不开。
 * **`delta` 服务端算，算不了就 `None`**。`score_before` 取的是**当时 best 分数**（不是
   Reference 分数），否则连续晋升会把同一段涨幅重复计入。首版没有对手 ⇒ `score_before`
   为空 ⇒ `delta=None`，**不写 0**（写 0 页面就会显示「提升 0」，那是编数）。
@@ -372,8 +423,95 @@ skill 侧有同构但**不同库**的一张表 `skill_usage`（`data/knowledge/s
   真晋升）；反过来读不出来就 `available=false` ＋ `reason`，页面原样透出那句病因，
   而不是拿一张空表说「没有优化」。
 
-`target` 是闭集，现有两格：`system_prompt`（提示词优化器）与 `params`（参数调优，见下），
+`target` 是闭集，现有四格：`system_prompt`（提示词优化器）、`params`（参数调优，见下）、
+`skills`（技能绑定调优，见下文那一节）与 `tools`（工具集调优，见下文那一节），
 其余仍未开（留列不留假数据）。
+
+**四格判据对照（2026-11-09 横向核过一遍，别只看某一格）**。同一个问题——「分数变了，
+是改动起作用还是模型抖了一下」——四格的答法**不是同一个**，这张表就是答案：
+
+| 格 | 优化器 | 噪声口径 | 判决理由码 | 效力 | 调用面 |
+| --- | --- | --- | --- | --- | --- |
+| `system_prompt` | `optimizer.py` | **可选**：`repeat=1`（默认）零容差、与历史逐字一致；`repeat=2–5` 取 **Reference 重复跑**的极差 `max−min` 作抖动带（`jumpKind="within"`） | `accepted` / `no_gain` / `runtime_mismatch` / `eval_failed`（单轮跑崩只作废那一轮） | 真写 `agent_configs.system_prompt` | `POST /optimize/{case_id}` 同步 ＋ `/tune-prompt` 入队（2026-11-09 补），两条共用同一个 `optimize_agent_prompt` |
+| `params` | `param_optimizer.py` | 基线重复跑的极差 `max−min` | `accepted` / `below_noise` / `eval_failed` / `runtime_mismatch` | 写 `temperature` | `/tune` 入队 |
+| `skills` | `skill_optimizer.py` | 基线重复跑的极差 `max−min` | `pruned`（摘了没掉＝采纳摘除）/ `skill_needed`（摘了真掉＝保留）/ `eval_failed` | 写技能绑定 | `/tune-skills` 入队 |
+| `tools` | `tool_optimizer.py` | **候选**内部 `repeat` 样本的极差 `max−min`（基线只跑 1 次，取不到基线抖动） | `tool_needed` / `tool_wanted` / `tool_unjudged` / `pruned` / `eval_failed` | 只进优化史，**不写配置** | `/tune-tools` 入队 |
+
+三条读这张表时必须知道的事：
+
+* **幅值口径已在 2026-11-09 统一**（都取 `max−min`、不折半；`tool_optimizer_test` ③-26 用
+  AST 守着）。此前工具格折半，同一个词「抖动带」在三格里三种量纲。**来源**仍合法地不同：
+  前三格的抖动取自**基线**重复跑，工具格基线只跑 1 次 ⇒ 取**候选**自己那 `repeat` 个样本。
+* **`tools` 是唯一「判了也不改行为」的一格**：工具集的真源是代码（`ToolRegistry`），
+  摘除要人去删注册行，所以 `accepted` 只落在优化史里。别把它读成「已经不管用了」。
+* **`system_prompt` 的抖动带 2026-11-10 立成可选档，默认仍是零容差**。它 `accepted` 会
+  **真覆盖提示词**，而真跑实测同一配置重复测量的极差是 **8 分**（`[80,88]`）⇒ 在真模型上
+  「碰巧高 0.5 分」也会被判采纳。所以这一格给 `repeat`（**Reference 复测次数**，不是候选复测）：
+  * `repeat=1`（默认）⇒ 与历史逐字一致：`candidate > best` 严格大于、回执 `jumpKind="none"`
+    （「**没测**抖动带」，不是测出 0）。
+  * `repeat=2–5` ⇒ Reference 连跑 `repeat` 次，抖动带 = 样本极差 `max−min`（`jumpKind="within"`），
+    采纳判据变 `candidate > best + jump`、落库判据变 `best > reference + jump`。
+  * 回执与 history JSON 都带 `repeat` / `samples` / `jump` / `jumpKind`，样本数列出来才看得出
+    那 8 分是从哪两个点量出来的。
+  **口径沿革**：源自 `optimizer.ts` 216 行，但**那个文件已随 Node 后端移出本仓**，现在没有可跑的
+  对拍物 ⇒ 判据是本仓自守的，改它不必同步任何外部文件；别再把「破坏 parity」当成不许动的理由。
+  **超时那一半 2026-11-09 已解**：新增入队口 `POST /api/v1/evaluation/tune-prompt/{case_id}`
+  （`tune_runtime` 第四格 `_prompt_runner` → `optimize_agent_prompt(..., progress=, should_stop=)`），
+  提交即返回、进度走 `GET /tune/{taskId}`，不再需要一次请求里同步跑完 3 轮；
+  `POST /optimize/{case_id}` 只同步了同一处基线口径（仍留给 CLI/脚本，它是同步判据的入口）。
+  **零容差那一半仍是默认**：不加 `repeat` 就照旧「碰巧高 0.5 分」被采纳并覆盖提示词，
+  要收紧就显式传 `repeat≥2`，那是调用方每次的取舍、不是全局开关。
+  ⚠️ 这一格的**分母是 `repeat + iterations`**（Reference 那 `repeat` 跑 ＋ 每轮 1 次评测的
+  `iterations` 跑）。照抄姊妹格的 `repeat × (1 + 候选数)` 会让任务 done 了页面还停在半程；
+  反之把这里的 `repeat` 当候选复测次数来算，`repeat=1` 时碰巧对，`repeat≥2` 就错了。
+  分母由**调用方**算好传 `tune_runtime.submit(total_runs=...)`——`submit` 不按 `target` 分叉算术，
+  它手里只有 `options`、看不出这格 `repeat` 是量谁的。
+* **`iterations` 与 `repeat` 都有上限且越界即拒，不夹逼**：`MAX_ITERATIONS=20`、
+  `MAX_PROMPT_REPEAT=5`（`optimizer.normalize_prompt_options` 唯一校验点，入队口与执行口共用）。
+  `iterations=0` 合法（只跑 Reference、不生成候选；`repeat≥2` 时它才真的是「只量抖动带」，
+  `repeat=1` 就只是「验通路跑一次」，两种都合法但别混着说）；`repeat` 必须是 int（拒 `bool`/`float`）。
+  上限按实测算得出来：本格单跑 **47–165 秒** ⇒ 最坏档 `repeat=5 + iterations=20` = **25 跑 ≈
+  20–70 分钟**（改写那几步另计）；后台任务表在进程内、没有超时回收（跑长了只能人工 cancel，
+  进程一重启任务就没了），所以两条上限的依据是可算的时间成本，不是拍脑袋。
+  拒而不是夹的道理：夹逼会让回执里的 `totalRuns` 与调用方要的东西不是一回事，而页面会照那个数
+  显示进度。**校验必须在入队前做完**（`/tune-prompt` 先 `normalize_prompt_options`，400 直接退），
+  否则「入队放行、排到才炸」的那一段，用户只能在后台任务里看到一条 `failed`。
+* **v0 基线＝运行时在用的那份提示词**（`optimizer.effective_prompt()`：`agent_configs.
+  system_prompt` 优先，没有配置行／是空串才回退出厂默认，回执 `baselineSource="config"|"default"`）。
+  2026-11-09 之前一律取出厂默认，那是**唯一一格基线不是现网值**的（另三格早就是「DB 里那个温度／
+  那份绑定／代码里那套工具」）⇒ 手工改过提示词、或上次优化已落库一版 88 分的，重跑时会拿默认那份
+  的分数当靶子，候选只要高过默认就被采纳并**把 88 分顶成 82 分**，而优化史那行还写着
+  `score_before=80`，读起来像「涨了 2 分」。改成现网基线后这条判据自动读作「要赢过正在跑的版本」。
+* **`version` 是 (agent, case) 上的轮次序号，四格共用一个递增器**（`param_optimizer.
+  next_version`）。本格原先每次运行都从 v1 数 ⇒ 同一 case 重跑后优化史里同 target 同 case
+  会出现两个 v1，而 `mark_persisted` 按 `(agent, version, case_id, target)` 定位，**一次标中多行**
+  ——上次并没落库的那几轮被标成「已生效」。序号连续后定位唯一（判据：`optimizer_test.py`
+  「版本号跨运行连续」＋`mark_persisted` 只改 1 行）。
+* **单轮跑崩不许废掉整轮**（2026-11-09 补齐，与另三格同口径）。本格原先
+  `generate_candidate_prompt` / `evaluate_case` 是裸调用 ⇒ 抛错直接冒泡、任务 `failed`；
+  可 `generate_candidate_prompt` 那句 `ValueError`（模型改写出来太短 / 剥完围栏是空串）是
+  **设计内的正常失败**，`iterations=3` 时第 2 轮撞上就把第 1 轮已经花掉的评测钱全丢。
+  现在失败那轮记 `eval_failed`（`score_after=None`，不编 0）、占一个 `version`、占分母，
+  循环继续跑下一轮；`TuneCancelled` **原样抛出**（不许被 `except Exception` 降级成
+  「这一轮评测失败」然后接着跑）。
+* **`benchmarks/history/<agent>/<case>.json` 逐轮落盘**，不是只在循环之后写一次。这份 JSON 是
+  **唯一存着候选提示词全文**的审计物（优化史表只存 `prompt_sha`），而取消只在两次评测之间生效
+  ⇒ 取消那一刻已跑完的轮次必须已经在盘上，否则「取消即丢档」。每条 `iterations` 都带 `reason`
+  （`accepted` / `no_gain` / `runtime_mismatch` / `eval_failed`，与优化史同一套枚举）。
+  **落库结论也要再落一次盘**（`_flush_history()` 在 `persisted` 赋值之后还有一次）：逐轮 flush
+  发生在落库之前，不补这一次，文件里就永远没有 `persisted` 字段 —— 内存里有、文件里没有，
+  读档的人看不出这一版到底生效没有。
+  **失败轮按阶段决定留不留候选**：`stage="generate"` 失败 ⇒ 压根没有候选（`prompt=None`，
+  拿 best 顶上去会让人读成「这一轮试的就是 best」）；`stage="evaluate"` 失败 ⇒ 候选已生成、
+  模型调用已花掉，`history` 存全文、优化史存指纹（另三格的 `eval_failed` 也都带非空
+  `prompt=instructions`，本格原先一律写空串会把那次调用一起丢掉），`evidence` 里带 `stage`
+  以便分辨「模型没产出」与「跑分时炸了」。
+* **两份审计物要逐轮对账**（判据在 `optimizer_test.py`「审计对账」）。本格的审计物有两份：
+  `benchmarks/history/<agent>/<case>.json`（存候选全文）与 `agent_optimizations` 表（存指纹与判决）；
+  另三格只有后者。分别查「JSON 的 reason 列表」与「表里 `eval_failed` 行数」只能证明
+  **两份各自对**，证不了它们**逐轮对得上** —— 某处少调一次 `record`，JSON 有 3 条、表里 2 条，
+  那些判据全绿而页面上整整少一轮。所以还要断言：JSON 每一轮的 `(version, accepted, reason)`
+  都能在表里找到**同版本、同判决**的一行。
 
 **参数调优（缺口 4 第一格，2026-11-07 落地）**：`param_optimizer.optimize_agent_temperature`
 同一份提示词只换 `temperature`，判决落 `agent_optimizations(target="params")`，页面上与提示词
@@ -407,7 +545,7 @@ skill 侧有同构但**不同库**的一张表 `skill_usage`（`data/knowledge/s
 都实测撞过）。两处写口因此都加了可选 `conn` 形参 —— 缺省行为不变，优化器传自己的连接，
 顺带让"判决"与"生效"落进同一个事务。
 
-**验证到什么程度（2026-11-07 如实记录）**：`tests/param_optimizer_test.py` 58 条，其中 ⑬ 是**真发
+**验证到什么程度（参数调优那格，2026-11-07 如实记录）**：`tests/param_optimizer_test.py` 58 条，其中 ⑬ 是**真发
 HTTP** 的 —— 起一个本地 stub，跑 `default_generate` 两次（`temperature=0.0` 与 `0.7`），把请求体
 抓下来逐值核对。这条做过反向验证：把 ollama adapter 的 `js_nullish(...)` 换成 `... or 0.7`，判据
 立刻报 `[0.7, 0.7]`；换回即绿。已确定的是「那一格旋钮真的拧到了」，而不是"只加了个形参"。
@@ -499,9 +637,12 @@ peak 从 94.62 GiB 落到 **9.68 GiB**（4303 词元档，比 `/tune` 的 3205 �
 | `POST /api/v1/evaluation/tune/{taskId}/cancel` | 取消：排队中立刻生效；**运行中只在两次评测之间生效**（一次真模型生成从外面掐不断，见下） |
 
 三条口径写进代码注释也写进测试（`tests/tune_runtime_test.py`，40 条）：① 一张卡 ⇒ **单工作线程 +
-队列**，第二个任务排队而不是并发抢显存；② 同一 (agent, case) 已在跑 ⇒ `deduped=true` 不重复入队；
+队列**，第二个任务排队而不是并发抢显存；② 同一 (agent, case, **target**) 已在跑 ⇒ `deduped=true` 不重复入队（漏掉 target 会把刚提交的技能
+  调优当成温度任务的重复而静默丢弃，还回一个别人的 taskId）；
 ③ 取消**不假装能秒停** —— `TuneCancelled` 在每跑开头抛，排队中被取消的一次都不跑。任务自己
-`engine.connect()`（请求那条连接响应返回就归还了，拿它跑后台的症状是跑到一半 `connection is closed`），
+开连接、且必须是 `engine.begin()`（请求那条连接响应返回就归还了，拿它跑后台的症状是跑到一半
+`connection is closed`；而 `connect()` 里的写入在 `close()` 时**一律回滚** ⇒ 回执照写
+`persisted=true`、库里一个字没有 —— 2026-11-08 实测改掉，见下文「技能绑定调优」末尾那条），
 任务表是进程内存、重启即空（产物早已落 `agent_optimizations`/`agent_configs`）。
 
 **改造后又整轮真跑了一次，这次走的是线上默认那条路（2026-11-07 晚）**：
@@ -520,6 +661,229 @@ peak 从 94.62 GiB 落到 **9.68 GiB**（4303 词元档，比 `/tune` 的 3205 �
 `faulthandler` 堆栈，看不到任何进度行；
 ② 判断"真在跑还是卡死"看 `Get-Process` 的 **CPU 时间是否还在涨**，别拿日志 mtime 判断
 （每次 dump 都会刷新它）。
+
+**技能绑定调优（缺口 4 第二格，2026-11-08 落地）**：
+`skill_optimizer.optimize_agent_skills` —— **同一份提示词、同一个温度**，只换「注入哪几个
+skill」，判决落 `agent_optimizations(target="skills")`，入口 `POST /api/v1/evaluation/tune-skills/{case_id}`。
+和温度那格共用后台任务表（`tune_runtime` 的 `target` 就是这几格的公因子），进度/取消/列表仍是
+`/tune/{taskId}` 那三条 —— 所以下面只写**不一样**的地方。
+
+* **判据方向相反（最容易读错的一处）**：温度是「涨过抖动带才采纳」；这一格是
+  **「摘掉后跌幅不超过抖动带 ⇒ 没有证据说明它有用 ⇒ 采纳这一摘」**（`delta >= -jump`）。
+  动的是注入量，少注入本身就是收益 ⇒ 优化史上这类行 **Δ 为 0 甚至负数也会显示「采纳」**，
+  那是账记对了。两个理由码：`pruned`（摘掉后没测出差别，已精简绑定）、`skill_needed`（摘掉后明显下降，保留）。
+  页面注释同步写了这一条，否则看的人第一反应是「Δ 是负的怎么算采纳」。
+* **候选是 leave-one-out，一遍只摘一个**。摘掉一个之后基线就变了（剩下的 skill 之间会互相补位），
+  同一轮里接着摘第二个 = 拿旧基线去判新绑定。采纳即停，下一轮再看新的可疑对象。
+* **不许摘成空**：`len(current) <= 1` 时**没有候选**（不是「摘掉最后一个」）—— 绑定清空等于
+  让 agent 裸奔，那是「改需求」不是「调优」。
+* **排序按可疑度**：`skill_usage.penalty`（失败/返工惩罚）降序，同分时绑定里**靠后的先摘**
+  （后绑定的通常是补丁）。这一格是「读使用统计」而不是「猜哪些看起来像废话」。
+* **覆盖走 `options["skillsRaw"]`，且覆盖时不写 `skill_usage`**。这是本格唯一必须动 runtime 的地方：
+  假设性绑定若记进使用统计，会**污染下一轮的排序**（把真在用的 skill 排到可疑位，越调越偏）。
+  `runtime` 里用 `skills_overridden` 一个开关同时管「注入用哪份」与「记不记账」，两件事必须同源。
+* **`autoPersist` 默认 False**（温度那格默认 True）。温度调低最坏是「更死板」；删一个 skill 最坏是
+  「该知道的规范不知道了」——这类删减默认只出结论、由人点头，`autoPersist=true` 才落库。
+* **没有配置行就不写**：`persist_agent_skills` 同温度那格，只 update 已有行，返 0 则 `persisted=false`
+  ＋ `persistSkip`。插一行只带 `skills` 的空壳会把 `system_prompt` 留空。
+
+⚠️ **形状是这一格唯一会静默咬人的地方**：落库/覆盖体都必须是
+`[{"id":…,"enabled":true,"priority":n}]`。写成纯字符串数组（`["a","b"]`）时
+`skills.parse_skills_config` 会**整条跳过**、`load_agent_skills` 静默回退默认绑定 ——
+症状是「页面写已采纳、线上还是旧绑定」，两边都不报错。所以 `creator._normalize_skills`
+的输出形状与 `skill_optimizer._skills_json` 的形状都用测试①钉着，且假评测器按 `b["id"]`
+读覆盖体（形状写错当场 `TypeError`，而不是悄悄变成默认绑定）。
+
+**同日修掉一个真 bug（静默丢档，温度那格也中招）**：`tune_runtime._execute` 原本用
+`db_module.engine.connect()` 跑优化器。SQLAlchemy 2.0 下 `connect()` 里的写入在 `close()` 时
+**一律回滚** —— 实测 `with engine.connect() as c: INSERT …` 之后另开连接读回 `rows = 0`。
+于是「优化史写入」与「采纳后的 `agent_configs` UPDATE」**一条都没落盘**，而回执照样写
+`persisted=true`：页面说生效了、线上还是旧值、全程无报错。改成 `engine.begin()` 并加源码判据
+（`tests/skill_optimizer_test.py` ⑧-9：`tune_runtime.py` 里不许再出现 `engine.connect()`）。
+路由那层的 `get_conn` 不能挪用（它的生命周期跟着 HTTP 请求走）——所以「必须自己开连接」是对的，
+错的只是「自己开的这条没有事务」。
+
+**技能绑定的验证到什么程度（2026-11-08 如实记录）**：`tests/skill_optimizer_test.py` 79 条，
+判据分六组 —— ① 绑定形状（`_skills_json` / `_normalize_skills` 两边逐字段钉着）、
+② 候选生成（留一个时零候选、penalty 同分靠后先摘）、③ 判据方向（`delta >= -jump` 即
+`pruned`，跌幅超带即 `skill_needed`，两条都做反向验证）、④ 覆盖体不污染 `skill_usage`、
+⑤ 落库（无配置行返 0、`autoPersist=false` 时不写库）、⑥ 路由与任务表（`/tune-skills` 真发
+HTTP、case 不存在 404、`target` 参与去重）。⑧-9 是源码判据那条：`tune_runtime.py` 里出现
+`engine.connect()` 即红。
+
+**工具集调优（缺口 4 第三格，2026-11-08 落地）**：`tool_optimizer.optimize_agent_tools`
+—— **同一份提示词、同一个温度、同一套 skill**，只换「给模型看哪些工具」（候选是
+leave-one-out，候选源是**基线那一跑的逐步账**，见下第三条：没被调到过的工具摘掉本来就测不出东西）。
+判决落 `agent_optimizations(target="tools")`，入口 `POST /api/v1/evaluation/tune-tools/{case_id}`。
+这一格的前置不是代码量，是**尺子**：原来一个 case 就是一整轮对话打一个分（见 §1 缺口 4
+末尾那段"得先有单步对照"），颗粒太粗 —— 摘掉 `search_script_library` 后模型可能改调别的工具、
+总分几乎不动；也可能整轮崩掉却只掉 2 分。所以先落 `evaluator.step_trace()`：
+
+* **单步对照**：把 `tool_calls` / `tool_results` 按序配成逐步账，每步三态 ——
+  `ok=True`（结果里没有错误标记）/ `ok=False`（工具报错或 `Unknown tool`）/
+  `ok=None`（**这一跑没有对应结果**，驱动没回灌 ⇒ 不判成失败，没证据 ≠ 失败）；
+  `stats` 给 `total/ok/failed/unjudged/unknownTool/tools/unavailable`，五条评测分支
+  （整轮对话、剧本、宫格、成片、提取…）的 return 全经 `_report_steps()` 收口 ——
+  不收口就会出现「某一类 case 悄悄没有 steps，而测试正好只测了另一类」。
+* **两把尺子判据**：整轮分 ＋ `unknownTool` 计数。模型照着被摘掉的工具名去调，
+  等于它**真需要**这个工具（`_UNKNOWN_TOOL_PREFIX = "Unknown tool"` 认这一档。
+  ⚠️ 它让该步记成 **`failed`**（`ok=False`：有结果、结果里有 error），**不是** `unjudged`
+  —— `unjudged` 专指「这一拍根本没有结果」（`ok=None`），两者别混）。四个理由码：
+  `pruned`（跌幅没超抖动带 **且** 不再调它）、`tool_wanted`（分数没掉但模型仍在调
+  ⇒ **不摘**）、`tool_unjudged`（分数没掉，但**逐步账本身没明细** ⇒ **不摘**）、
+  `tool_needed`（跌幅超过抖动带）。后两档都是这一格独有的 —— 技能格既没有
+  「模型仍在用但分数没变」，也没有「第二把尺子哑了」这种情形。
+  ⚠️ `tool_unjudged` 与 `tool_wanted` 必须分成两码：前者是**读数缺失**（没有明细时
+  `unknownTool` 恒 0，与"模型真没再伸手"在数字上一模一样），后者是**读数充分且说
+  模型仍在调**。混成一码 ⇒ 页面会写「模型仍在调它」而事实是"没记账"。
+  落法：`_step_stats()` 原样透传 `unjudged`/`unavailable`（**不许在消费点丢掉**，
+  丢了就是这个 bug），候选样本任一缺明细 ⇒ `stepsUnavailable` 非空 ⇒ 不进 `pruned` 分支。
+  ⚠️ **缺账有两档，只挡一档等于没挡**：整格缺（`unavailable` 非空，整个数组不是列表）之外还有
+  **部分缺**（`unjudged > 0`：有调用、没回灌结果）。`unknownTool` 是靠**结果的 error 正文**认出来的
+  ⇒ 那几步没有结果时，模型真在其中调了被摘的工具也读不到，与整格缺同罪。旧逻辑只看
+  `unavailable`，实测反向验证：造一份 5 步、末步 `ok=None` 的候选报告 ⇒ `reason="pruned"`、
+  `accepted=True`，即**直接错摘并记成「已采纳」**。两档合并挡进 `tool_unjudged`，回执里
+  `stepsUnavailable`/`stepsUnjudged` **分开写**（能分辨是哪一种），理由码不拆（同一件事：判不了）。
+  这条判据的成立前提跟着钉住了三条（`tool_optimizer_test` ③-23/③-24/③-25）：驱动侧
+  `tool_calls_out.append`/`tool_results_out.append` **只在 `_run_tool` 里各出现一次、相邻无条件**
+  （三条驱动循环全走它 ⇒ 真实跑里 `unjudged` 恒 0，那条拦截平时静默）；`AgentRunResult` 必须把
+  `generate()` 的 `tool_results` 带出来（漏一行 ⇒ 每跑都成「有调用没结果」）；以及**触发器的跨模块
+  两半必须一致** —— 产出只有 `runtime._run_tool` 的 `{"error": f"Unknown tool: {name}"}` 一处，
+  识别只有 `evaluator._UNKNOWN_TOOL_PREFIX` 一处，改任何一半都**不报错**，只让 `unknownTool` 恒 0
+  而 `failed` 照常计数（实测：把常量改成 `No such tool` ⇒ 端到端那条立刻红，实得
+  `failed=1, unknownTool=0`，两把尺子当场分家 ⇒ 判决链读成「模型没再调它」⇒ 错摘）。
+  端到端口径也钉在 HTTP 面上（`evaluation_route_test` 两条）：`POST /evaluate/{case_id}` 返回的
+  报告带 `steps`/`stepStats`，成对的 calls/results 记 1 步 `ok`（`unjudged=0`），结果里带
+  `Unknown tool:` ⇒ `unknownTool=1, failed=1` —— 此前这两格只在单测里验过，那些 `report` 是测试
+  自己造的，等于「第二把尺子只在假数据上验过」。
+  ⭐ **真模型实测（2026-11-09，ollama `qwen3:14b` / A5000）**：跑 `sb-case-001` 基线一次，
+  实际过程是 —— `read-context` 工具 **41 秒完成**（日志 `[StoryboardTool] DONE read-context
+  | characters=2 scenes=2 scriptLength=244`）⇒ **真实 provider 下工具确实被调用**，候选源
+  `stepStats.tools` 不会是空的；但**紧接着那次模型响应 180 秒 ReadTimeout**，重试 3 次共
+  **775 秒**后 `all-models-failed`，`evaluate_case` 抛异常。两条结论：
+  ① **安全**：`optimize_agent_tools` 的基线那行 `baseline_report = await run_eval(...)` **没有
+  try** ⇒ 异常一路冒到 `tune_runtime._execute` 的 `except Exception` ⇒ 任务标 `failed` 并带
+  真实错误文本 —— **缺账/超时的最坏结果是「任务失败」，不是「错摘工具」**（这是本格最该守住
+  的那条线）；
+  ② **超时的真因是当时 GPU 被别的负载占着，不是本格配置**：同一份「只回复 OK」的极小请求
+  （`think:false`、`num_ctx` 32768、模型已 100% GPU 常驻）在超时那段时间 **180 秒不回**，
+  排空负载后**同一请求 3.35 秒返回**（`load_duration` 3.17 s 冷加载 ＋ `prompt_eval_count`
+  19 词元 0.11 s ＋ `eval_count` 2 词元 0.05 s）。占卡的是并行那条工作流的
+  `data/experiments/llm_graph_probe/probe.py`（进程内 `llm_backend` 跑 Qwen3-4B，7.49 GiB
+  全 GPU，**不经 ollama 但也吃显存**）；同时 ollama 服务日志里另有一条 **19455 词元** 的 prompt
+  按 180 s 的节奏反复重试（`n_keep=4`、`cached n_tokens=19451`），而 14b 要 14 GB、卡只有
+  22.49 GiB ⇒ 争用下 `tg_3s` 掉到 **0.01 tok/s**（正常是 8–40 tok/s）。
+  ⚠️ 旧记录写的「`OllamaTextAdapter` 只下发 `options.num_ctx`、**没有** `think` 这一格」
+  **是错的**：`think` 一直在下发（`services/adapters/text_adapters.py` 的 `think: bool = False`
+  与 body 里的 `"think": self.think`），这本来就是 ollama 必须走原生 `/api/chat`、
+  不走 OpenAI 兼容口的原因。所以「跑不通」的正确表述是 **「当时卡被别人占着」**：
+  要真跑的前置条件是**排空 GPU 上的其他负载**（`nvidia-smi` 看 `memory.free`，
+  14b 要 14 GB、8b 要 10 GB），而不是换模型或调大超时；只有「卡已空闲仍超时」才该怀疑
+  `_transport_retry` 的本地 180 s。8b 对照实测 16.7 秒返回（含 11.8 秒冷加载）。
+  ⇒ **「只差一次真跑」到此撤掉（同日排空后兑现）**：前置条件就是上面那句「先把卡让出来」。
+  排空后同一 case 单跑基线 **47.1 秒**、得分 **78.3**，`stepStats = {"total": 2, "ok": 2,
+  "failed": 0, "unjudged": 0, "unknownTool": 0, "unavailable": null, "tools":
+  ["read_storyboard_context", "save_storyboards"]}` —— 即**真实 provider 下逐步账是完整的**
+  （`unavailable=None`、`unjudged=0`）、`stepStats.tools` 非空 ⇒ 本轮前面钉的三条前提
+  （驱动 `unjudged` 恒 0、结果真被回灌、候选源非空）在真数据上成立，不再只是「假数据上验过」。
+  完整判决链（`optimize_agent_tools`，`repeat=2 / maxCandidates=2`）随后跑通 **182 秒 5 跑**：
+  基线 **95.00**（3 个工具：`read_storyboard_context` / `save_storyboards` /
+  `save_continuity_states`）、候选 `save_continuity_states` ⇒ `[80, 88]`、
+  候选 `read_storyboard_context` ⇒ `[0, 0]`。另有一次 14 秒的跑（基线只暴露 1 个工具 ⇒
+  走「候选不足」分支，`reason="no_candidate"` 如实收工）—— 模型行为不稳定（同一 case 有时
+  只读不存），但「有候选」与「没候选」两条分支都验到了。
+* ⭐ **抖动带不许拿「候选之间的极差」充噪声**（同日真跑抓到的真缺陷，已修）：
+  上面那次真跑里 `save_continuity_states` 摘掉后 **95 → 84（Δ −11）** 却被判 `pruned` 并采纳
+  —— 旧口径 `jump = (max(候选均值) − min(候选均值)) / 2` 被崩到 0 的那个候选撑成 **42**，
+  −11 落在带内就被读成「没测出差别」。**候选之间的差距本来是信号**（摘关键工具 vs 摘边缘工具
+  就该差很多），噪声只能是**同一配置重复测量**之间的差。改成「各候选自己那 `repeat` 个样本的
+  **极差（`max − min`）**，取最大者」：`[80, 88]` ⇒ 8、`[0, 0]` ⇒ 0 ⇒ `jump = 8` ⇒
+  −11 < −8 ⇒ 正确判 `tool_needed`。**幅值不折半**，与参数格/技能格逐字同口径（它们都写
+  `jump = max(baseline_scores) - min(baseline_scores)`）—— 旧版我曾取半极差，那会让同一个词
+  「抖动带」在三格里有三种量纲，已改齐。⚠️ **来源如实不同、别在文档里说成同源**：参数格与
+  技能格的抖动带取自**基线**重复跑，本格基线只跑 1 次（这一跑只为拿暴露集与基线分）⇒ 只能取自
+  **候选**自己那 `repeat` 个样本；两者都是「同一配置重复测量」，但不是同一批样本。
+  `repeat=1` 时估不出抖动 ⇒ 按 0 计（与参数格「抖动带为 0 时 Δ>0 即算提升」同一口径：
+  没有抖动，就不存在「掉的那点可能是噪声」）。回执 `jumpKind` 如实写 `within` / `none`
+  （旧值 `proxy` 撤销，它本来就在承认「这不是真抖动带」）。
+  `pruned` 的页面标签同步改成「摘掉后**没测出差别**（跌幅在抖动带内），已精简绑定」——
+  原来写「分数没掉」，而这条实测里它明明掉了 11 分，标签会骗人。
+  判据三条：`tool_optimizer_test` ③-9b/③-9c/③-9d 直接用上面那组真实分数做反向验证（把 `jump`
+  改回跨候选极差 ⇒ 精确报 `accepted=True / reason='pruned'`，`jump=42`、`delta=-11`）；
+  ③-26 守**三格口径一致**（AST 判「都取 `max−min`、都不含除法」，反向验证把本格改回 `/ 2`
+  ⇒ 精确报 `tool=False`；★该判据第一版只查了 `jump` 赋值、没查 `spreads`，折半藏在后者里
+  ⇒ 反向验证时它**没红**，是补上 `spreads` 的除法检查后才盯住的）。该套 86 → 90 条。
+* **进度分母别照抄技能那格**：本格基线**只跑 1 次**（它不吃 `repeat`，这一跑只为拿暴露集与
+  基线分），候选数又要等基线跑完才知道（`tool_candidates` 依赖轨迹）⇒ 真值是
+  `1 + repeat × 真候选数`，先按上限 `1 + repeat × maxCandidates` 估、`baseline` 事件起校正。
+  抄成 `repeat × (1 + n)` 是**两处都错**（基线多算 `repeat−1` 跑 ＋ 候选按上限算），
+  症状只是「任务已 done、页面永远停在 5/6」—— 不崩、不报错，因此最容易长期没人修。
+* **基线就没明细 ⇒ 在基线处收工，别烧候选**：`stepStats.unavailable` 在**基线那一跑**就非空
+  ⇒ 第二把尺子整格哑掉，候选跑多少次都只能得 `tool_unjudged`（证据缺失恒不采纳）⇒
+  `repeat × 候选数` 跑（8 分钟量级）纯浪费。同时**理由不许写成「空工具集」**：缺明细时
+  `current_tools` 也是空的，照空分支走会说「只出现了 0 个工具」—— 那是把「没记账」说成
+  「模型没调过任何工具」，两件事实正相反（同一天同一个病根犯了两次：判决链一次、理由文案一次）。
+  落法：`baseline_unavailable` 早退 ＋ `_stage_text()` 的 tools 基线分支读 `steps.unavailable`。
+* **候选源是基线那一跑的「内存结果」，不是盘上的轨迹文件**：候选从基线报告的
+  `stepStats.tools` 取（老报告没有这一格就退回扫 `steps[].tool`），只摘**真被调到过**的工具
+  —— 模型一次没用的工具，摘掉它本来就测不出任何东西，把它算成候选等于拿噪声当证据。
+  ⚠️ 2026-11-08 实测一条硬事实：`<dataRoot>/traces/*.jsonl` 里 `meta.toolCalls` 是**整数计数**
+  （68 个文件、61 条带它的记录，**全部**是 `int`），逐步明细根本没落盘 —— 所以
+  "从盘上轨迹重建候选"这条路**不存在**，别去写它。`step_trace` 也顺势加固：传进来一个计数
+  不炸，`stats["unavailable"]="toolCallsNotList"` 如实说明「没有逐步明细」而不是静默给
+  一个 `total=0` 的空账（空账看起来像"这一跑没调工具"，与"账没落"是两件事）。
+* **覆盖体走 `options["toolsRaw"]`**：`runtime` 在 MCP 合并**之后**裁剪，
+  `ToolRegistry.only(wanted)` 按键或按 `tool.id` 两套口径匹配（模型侧函数名是 `tool.id`，
+  注册表键是另一套 —— 只认一套就会静默漏掉或全开）、顺序跟注册表、`missing` 如实上报；
+  `_parse_tool_names` 收 JSON 字符串或 list，非法当场 `ValueError`，**不回落成"全开"**
+  （回落会把"这次只给 3 个工具"静默变成"这次全都给"，而分数看起来还挺好）。
+* **恒 `autoPersist=false` ＋ `persistSkip`**：工具集的真源是代码里的装配语句
+  （`runtime` 里 `_as_registry(create_*_tools(...))` 那一串），`agent_configs` **没有 tools 列**
+  ⇒ 这一格**只落优化史结论**、不写库，回执里 `persisted=false` 并写明为什么。
+  路由侧 `normalize_tool_options` 把 `autoPersist` 钉死成 `False`，不接受外部打开。
+
+**提示词优化的入队口（缺口 4 第四格的第二半，2026-11-09 落地）**：`system_prompt` 这一格
+原来只有一条同步路 —— `POST /api/v1/evaluation/tune-prompt/{case_id}`
+（`tune_runtime.TARGETS` 第四格 → `_prompt_runner` → `optimize_agent_prompt`）。
+`POST /optimize/{case_id}` 只同步了一处口径（同一天把基线改成「DB 里正在生效的那份」，
+否则重跑会把更优的现网版本覆盖成更差的）：它是同步判据的对照入口（`optimizer_test.py` 守着
+「严格高于」那几条），入队口改的是**投递方式**、不是判决，两条路共用同一个
+`optimize_agent_prompt`；同步这条留给 CLI/脚本。入队这条存在的唯一理由是**超时**：
+一轮 =「一次 LLM 改写 + 一次 85–165 秒评测」× `iterations`，十几分钟起步，走请求面必被代理掐断。
+
+三处**与另三格不同**的口径（照抄任一条都会得到错的读数）：
+
+* **`repeat` 是 Reference 的复测次数，不是候选复测**（2026-11-10 加）：`iterations` 是「改写几轮」，
+  每轮候选只评一次 ⇒ 分母 **`repeat + iterations`**（那 `repeat` 跑全在 Reference 上）。
+  ⚠️ 姊妹三格的分母各不相同（`params`/`skills` = `repeat × (1+候选数)`、`tools` 基线只跑
+  1 次、本格 `repeat + iterations`）—— 四格四种算法，只能逐格读，别写一条通式。分母由调用方
+  算好传 `submit(total_runs=...)`；`submit` 只按 `options["repeat"] × (1 + expected)` 兜底，
+  它看不出这格 `repeat` 量的是谁。
+* **是四格里唯一真写配置的一格**：`auto_persist` 默认 **True**（与 `/optimize` 一致），
+  best 高于 Reference **＋抖动带** 才写进 `agent_configs.system_prompt`；传 `false` 只出结论。
+* **抖动带可选，默认还是零容差**：`repeat=1` ⇒ `jumpKind="none"`，回执的 `baseline` 事件因此
+  **不印「抖动带 None」**（那读起来像漏算），而写「本格没测抖动带」；`repeat≥2` ⇒
+  `jumpKind="within"`，印实测极差与样本数。
+
+`iterations` 的校验：合法区间 `0..MAX_ITERATIONS`（`iterations=0` ＝只评 Reference 就收工，
+用来验通路）；**越界即拒**（`/tune-prompt` 入队前 400、执行口抛 `ValueError`，两处共用
+`normalize_prompt_options`）。负数仍夹到 0 —— 那不是「越界要拒」的场景，而是「只评 Reference」
+的老口径写法。`repeat` 必须是 int 且在 1–`MAX_PROMPT_REPEAT`，同样越界即拒。
+`wait:true` 仍可用（`timeoutSeconds` 默认 900），但那是给测试/脚本用的，不是给页面用的。
+
+判据：`tests/tune_runtime_test.py` `case_prompt_target()` 十项 —— 四目标闭集同名、
+`_runner_for` 指向 `_prompt_runner`、别名 `prompt` 当场拒、`start` 文案写「共 N 跑…共 M 轮」
+（不写「每档」）、`run` 事件区分 Reference 与「第 N 轮候选」（不印 `1/1`）、`baseline` 不印
+「抖动带 None」、`candidate` 印 `v{version}：{why}`、入队分母 = 4、`options` 白名单含
+`iterations`。另加：`repeat≥2` 时 `start` 文案点名「Reference 复测 N 次取抖动带」、
+`baseline` 按 `jumpKind` 分两支（`within` 印极差、`none` 明说「没测抖动带」）、
+显式 `total_runs=5` 时入队分母就是 5（`repeat=1 + iterations=4`）而不是兜底算出的 8。
+`optimizer_test.py` 另守：`normalize_prompt_options` 的六种越界（`iterations>20`、负数
+`repeat`、`repeat=6`、`repeat` 是 `bool`/`float`/`str`）都抛 `ValueError`、`iterations=0` 合法、
+以及 `/tune-prompt` 入队前就 400（stub 掉 `submit` 判「一次都没提交」）。
+⚠️ `tool_optimizer_test` ⑥-10 用源码切块核「`/tune-tools` 那端点不带
+`auto_persist`」，切块上界原本取 `"/tune")` —— 新端点正好插在两者之间会被切进来误判，
+现改取 `@router.post("/tune-prompt/{case_id}")` 作上界。
 
 **Skills 的动态路由**（缺口 10，2026-11-07 已落地半格）：不改 `SKILL.md` 的自述机制，
 只在 `load_agent_skills` 选择"注入哪些"时加排序依据。落地形状与设计稿的差异写在这里，
@@ -904,7 +1268,14 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 * **不做**"向量库"：现有 bm25 + trigram + 维度筛选在本仓的数据量级（万级条目）足够，
   引入 embedding 会多一套部署与一致性负担（`script_library` 已有的 RRF 融合就是为此克制过）；
 * **不做**"跨项目共享经验"：`scope` 已按 `drama:` 隔离，跨项目默认不互见
-  （不同题材/画风的经验互相污染比稀缺更糟）。
+  （不同题材/画风的经验互相污染比稀缺更糟）；
+* **不做**"工具集落库"：`agent_configs` **不开 tools 列** —— 工具集的真源是代码里的装配语句
+  （`_TOOL_FACTORIES` 那几个 `create_*_tools`），再存一份进库就是两份真源：改了代码没改库时
+  "调优结论"与"线上实际"会各说各话，而这种不一致**不报错**。所以工具集调优只落
+  优化史结论（`target="tools"`，`persisted=false` ＋ `persistSkip`），人看完改代码；
+* **不做**"引擎参数进 `agent_optimizations`"：QC 阈值与采样档走 §4.3 那条「质检反哺」链
+  （`profiles` 覆盖层 + `technical_qc` 伪档）。塞进这张表会让"跑次经验"和"档位参数"
+  共用一套 version/parent 语义，而档位参数的回滚粒度是**整个 profile**，不是一次实验。
 
 ---
 
@@ -914,7 +1285,7 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 |---|---|---|
 | `services/task_logger.py` | 落盘后加一次 runs 双写（失败只 warn） | JSONL 格式与字段 |
 | `routers/traces.py` | 新增 `/runs` 聚合查询（转调 `outcome_index`） | 现有 `/traces*` 端点 |
-| `agent/runtime.py` | `_tool_factory` 加一行 `create_knowledge_tools()`；**已接**：跑次收口写 `skill_usage`（`tests/skill_usage_test.py` 37 条） | 主循环与重试 |
+| `agent/runtime.py` | `_tool_factory` 加一行 `create_knowledge_tools()`；**已接**：跑次收口写 `skill_usage`（`tests/skill_usage_test.py` 37 条）；**已接**：`options["toolsRaw"]` 在 MCP 合并**之后**裁剪（`merged.only(...)`，非法名当场 `ValueError`，`missing` 进 trace） | 主循环与重试 |
 | `agent/skills.py` | **已接**：`load_agent_skills` 超预算裁剪（`priority + 降级惩罚`），`sizes`/`dropped` 只做出参 | 预算够时的注入顺序、`priority` 语义、`SKILL.md` 自述机制 |
 | `agent/qc_retry.py` | 重跑结束追加一次"复盘提案"调用（异步、超时即弃） | 只重写失败镜的既有纪律 |
 | `engine/profiles.py` | 不改；`pipeline` 取参处已改走 `tuning.resolve`／`apply_to_request` | `PROFILES` 表本身 |
@@ -927,7 +1298,10 @@ def override(stage: str, target: str, field: str, default: Any) -> tuple[Any, st
 | `routers/knowledge.py` | 挂 `/entries` 子路由（新 router 文件，避免与语料端点混） | `/search` `/documents` `/upload` 等 |
 | `routers/repair.py` | 接 `repair_closure`：`diagnose` 落快照、`propose` 收 `finding`、`apply`/`verify` 复诊、`rollback` 记终态（`tests/repair_closure_test.py` 67 条） | 提案落盘格式、`proposalId` 单参数口、可改前缀白名单、应用前全量备份 |
 | `agent/evaluation/film_check.py` | **已接**：成片四维评测（`tests/film_check_test.py` 37 条）；只读四张事实表、`kind="eval"` 幂等跑次 | 不改 QC 判据、不重跑 ffmpeg/不调模型（评测只读数） |
-| `routers/evaluation.py` | **已接**：`POST /film/{episode_id}`（`record` 默认 true）；坏 id 走 400、无成片走 200 且 `verdict=empty` | 既有 case 评测四个端点、`GET /cases` 无 try（坏 JSON 直接 500，与 TS 同） |
+| `routers/evaluation.py` | **已接**：`POST /film/{episode_id}`（`record` 默认 true）；坏 id 走 400、无成片走 200 且 `verdict=empty`；**已接**：`POST /tune-skills/{case_id}`、`POST /tune-tools/{case_id}`、`POST /tune-prompt/{case_id}`（`tests/tool_optimizer_test.py` 90 条；`tests/tune_runtime_test.py` 76 条含提示词格十项＋HTTP 八项＋**真链路端到端十二项**；`tests/optimizer_test.py` 64 条含基线取现网值＋版本号跨运行连续＋抖动带双侧＋两条上限越界即拒＋`iterations=0` 真跑收尾；`tests/evaluation_route_test.py` 33 条，含两条端到端逐步账） | 既有 case 评测四个端点、`GET /cases` 无 try（坏 JSON 直接 500）、`/tune/{case_id}` 的入队/等待口径、`POST /optimize/{case_id}` 的同步判据（`optimizer.ts` 已移出本仓，现由 `optimizer_test.py` 自守） |
+| `agent/tool.py` | **已接**：`ToolRegistry.only(wanted)`（**按注册表键或按 `tool.id` 两套口径**匹配、顺序跟注册表、`missing` 如实上报）＋ `names()`（模型侧函数名，与 `ids()` 的注册表键分开叫） | 注册/查找/执行本体，`ids()` 的既有语义 |
+| `agent/evaluation/evaluator.py` | **已接**：`step_trace()`（单步对照，`stats.unavailable` 区分"没明细"与"没调工具"）＋ `_report_steps()`（五条分支统一收口）＋ `evaluate_case(..., skills=, tools=)` 的按次覆盖 | 各 kind 的评分函数本身、报告既有字段的语义 |
+| `services/optimization_log.py` | **已接**：`TARGETS` 四格（＋`tools`）、`REASONS` 十值（＋`tool_needed`/`tool_wanted`/`tool_unjudged`） | 写口"失败只 warn"、读口"必须报 available=false"、`mark_persisted` 的语义 |
 | `services/grid_payload.py` | **已接**：宫格载荷解析上收为单一真源，`routers/grid.py` 保留同名别名（调用点零改动），评测同源 | 解析口径本身（camelCase 兼容、空 prompt 丢弃、递归下降、先 `json.loads` 再抠围栏） |
 
 ## 10. 前端呈现（2026-11-07 落地）
