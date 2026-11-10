@@ -124,7 +124,11 @@ def check(name: str, condition: object, detail: object = "") -> None:
 #: 表里的模块＝「已实现、口径已被测试钉死、但生产代码 0 处 import」——
 #: 这类模块最危险的不是占地方，而是**看起来像已经能用** ✗（2026-10-30 三份体检结论）。
 UNWIRED: dict[str, str] = {
-    "image_ops": "图像算子库（重采样/裁剪/贴回）；预期接入 SDXL 与 DiT 的解码后处理 ⇒ 等通用骨架前向落地再接",
+    # ⚠️ 2026-11-08 **已删** `image_ops` 那条欠账 ✓：它接到了超清二采的「缩到计划倍率」那一步
+    #    （`torch_backend._scale_video_latents` ✓，吃 5 维 `(B,C,T,H,W)` ⇒ **逐帧**缩 ✓ 时间维不动 ✓）。
+    #    起因是一处真错 ✗✗：`ai-2x-resize` 的第二步「高质量缩放 2× → 1.5×」**一步都没执行**
+    #    ⇒ 计划要 1.5× 实际出 2×，而回执照写 1.5 ✓（尺寸与回执对不上、回执自己却"自洽" ✓）。
+    #    守它的判据换成 `engine_refine_test` ⑦ 系列（真装载缩小版放大器真跑 ✓）。
     "mappings": "权重键名映射表；预期接入 loader / hybrid_load 的跨族命名转换 ⇒ 等第二族骨架接入时用",
     # ⚠️ 2026-11-06 **已删** Music3 那条欠账（`te_music3` 与 `vae_music3` ✓）：
     #    第十族的装配线（`runtime._ensure_music3_loaded`）、音频 plan（`pipeline._fill_music3_plan`）、
